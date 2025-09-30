@@ -1,0 +1,48 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+coverage.txt
+
+# Go workspace file
+go.work
+
+# Build output
+sql-splitter
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Output directories
+output/
+tables/
+out/
+
+# Test files
+*.sql
+!testdata/*.sql
+*.gz
+
+# Profiling
+*.prof
+cpu.prof
+mem.prof
+
+# OS
+.DS_Store
+Thumbs.db
