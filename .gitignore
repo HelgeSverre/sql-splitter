@@ -18,6 +18,8 @@ go.work
 
 # Build output
 sql-splitter
+sql-splitter-release
+profile_split
 dist/
 build/
 
@@ -32,6 +34,8 @@ build/
 output/
 tables/
 out/
+test_output/
+profile_output/
 
 # Test files
 *.sql
