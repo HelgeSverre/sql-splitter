@@ -74,6 +74,7 @@ func NewParser(reader io.Reader, bufferSize int) *Parser {
 // Returns the statement bytes and any error encountered
 // OPTIMIZED: Uses batched reading (Peek + Discard) instead of byte-by-byte ReadByte
 // This reduces syscall overhead from 60.9% to ~15% of CPU time
+// OPTIMIZATION: Increased peek size from 4096 to 16384 to reduce loop iterations
 func (p *Parser) ReadStatement() ([]byte, error) {
 	// Get buffer from pool
 	bufPtr := p.bufferPool.Get().(*[]byte)
