@@ -73,6 +73,7 @@ install:
 # Format code
 fmt:
 	go fmt ./...
+	npx prettier --write *.md
 
 # Run linter
 lint:

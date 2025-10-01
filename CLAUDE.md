@@ -9,6 +9,7 @@ High-performance CLI tool written in Go for splitting large SQL dump files into 
 ## Available Commands
 
 ### Building and Running
+
 ```bash
 # Build the application
 go build -o sql-splitter .
@@ -27,6 +28,7 @@ make bench
 ```
 
 ### Main Commands
+
 ```bash
 # Split a SQL file into individual table files
 ./sql-splitter split large-dump.sql --output=tables
@@ -40,6 +42,7 @@ make bench
 ```
 
 ### Development Commands
+
 ```bash
 # Run tests with coverage
 make test-cover
@@ -57,6 +60,7 @@ make clean
 ## Architecture
 
 ### High-Level Design
+
 ```
 Reader (bufio) → Parser (Streaming) → Writer Pool (Concurrent) → Table Files
    1-4MB Buffer    Statement Buffer       256KB Buffers per table
@@ -65,6 +69,7 @@ Reader (bufio) → Parser (Streaming) → Writer Pool (Concurrent) → Table Fil
 ### Key Components
 
 #### `internal/parser/` - Streaming SQL Parser
+
 - **Adaptive buffering**: 64KB-4MB based on file size
 - **String-aware parsing**: Tracks escaped quotes and multi-line strings
 - **Zero-allocation**: Works with `[]byte`, uses `sync.Pool` for buffers
@@ -72,26 +77,31 @@ Reader (bufio) → Parser (Streaming) → Writer Pool (Concurrent) → Table Fil
 - **Statement detection**: Finds semicolons outside string literals
 
 Key functions:
+
 - `ReadStatement()`: Reads complete SQL statement (handles strings, escaping)
 - `ParseStatement()`: Identifies statement type and extracts table name
 - `DetermineBufferSize()`: Selects optimal buffer size based on file size
 
 #### `internal/writer/` - Buffered File Writers
+
 - **Writer pool**: Thread-safe map of table writers
 - **Statement buffering**: Default 100 statements before flush
 - **Configurable buffers**: 256KB bufio.Writer per table
 - **Concurrent-safe**: Uses `sync.Mutex` for writes
 
 Key components:
+
 - `TableWriter`: Manages buffered writes to single table file
 - `WriterPool`: Thread-safe pool of table writers
 
 #### `internal/splitter/` - Orchestration
+
 - Coordinates parsing and writing
 - Maintains processing statistics
 - Routes statements to appropriate table writers
 
 #### `internal/analyzer/` - Statistical Analysis
+
 - Counts INSERTs, CREATE TABLEs per table
 - Calculates total bytes per table
 - Optional progress tracking
@@ -100,12 +110,14 @@ Key components:
 ### Parsing Strategy
 
 The parser uses character-by-character streaming with state tracking:
+
 1. Track string boundaries (single/double quotes)
 2. Track escape sequences (backslash)
 3. Detect statement terminators (semicolon outside strings)
 4. Extract table names using precompiled regexes
 
 Performance optimizations:
+
 - Reuse buffers via `sync.Pool`
 - Work with `[]byte` (avoid string conversions)
 - Fast-path byte prefix checks before regex matching
@@ -114,11 +126,13 @@ Performance optimizations:
 ## Performance Characteristics
 
 ### Throughput
+
 - Small files (<100MB): 200-500 MB/s
 - Large files (>1GB): 500-1000 MB/s
 - Memory usage: 50-200MB regardless of file size
 
 ### Benchmark Results (Apple M2 Max)
+
 ```
 BenchmarkParser_ReadStatement        227.61 MB/s    600KB alloc
 BenchmarkParser_ParseStatement       323.5 ns/op    77B alloc
@@ -129,6 +143,7 @@ BenchmarkParser_StringVsBytes
 ```
 
 ### Key Optimizations
+
 1. **Buffered I/O**: 256KB-4MB adaptive buffers reduce syscalls
 2. **Zero-allocation parsing**: Work with `[]byte` throughout
 3. **Buffer pooling**: `sync.Pool` reduces GC pressure
@@ -139,6 +154,7 @@ BenchmarkParser_StringVsBytes
 ## Testing
 
 ### Running Tests
+
 ```bash
 # All tests
 go test ./...
@@ -153,6 +169,7 @@ go test -v ./internal/parser
 ```
 
 ### Benchmarking
+
 ```bash
 # All benchmarks
 go test -bench=. -benchmem ./...
@@ -184,18 +201,21 @@ go tool pprof cpu.prof
 ### Performance Tuning
 
 Buffer sizes are automatically selected:
+
 - File < 10MB: 64KB read buffer
-- File < 100MB: 256KB read buffer
-- File < 1GB: 1MB read buffer
-- File > 1GB: 4MB read buffer
+- File < 100MB: 64KB read buffer
+- File < 1GB: 64KB read buffer
+- File > 1GB: 256KB read buffer
 
 All tables use 256KB write buffers with 100-statement buffering.
 
+Note: Code uses smaller buffers than originally documented because 64KB buffers achieve best performance (411 MB/s) due to CPU cache optimization.
+
 ## Comparison with PHP Version
 
-| Metric           | PHP (Laravel Zero) | Go          | Improvement |
-|------------------|--------------------|-------------|-------------|
-| Throughput (1GB) | ~50 MB/s           | ~500 MB/s   | 10x         |
-| Memory Usage     | ~300MB             | ~100MB      | 3x          |
-| Cold Start       | ~500ms             | ~10ms       | 50x         |
-| Binary Size      | N/A (interpreted)  | ~8MB        | Standalone  |
+| Metric           | PHP (Laravel Zero) | Go        | Improvement |
+| ---------------- | ------------------ | --------- | ----------- |
+| Throughput (1GB) | ~50 MB/s           | ~500 MB/s | 10x         |
+| Memory Usage     | ~300MB             | ~100MB    | 3x          |
+| Cold Start       | ~500ms             | ~10ms     | 50x         |
+| Binary Size      | N/A (interpreted)  | ~8MB      | Standalone  |

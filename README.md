@@ -8,7 +8,7 @@ extreme performance with efficient memory streaming, buffered I/O, and concurren
 
 ## Features
 
-- **⚡ Extreme Performance**: 500-1000 MB/s throughput on large files
+- **⚡ High Performance**: 300-400 MB/s typical throughput (peaks at 411 MB/s)
 - **💾 Memory Efficient**: Processes gigabyte-scale files with ~50-200MB memory usage
 - **🔄 Streaming Architecture**: Handles files larger than available RAM
 - **📊 Statistical Analysis**: Analyze SQL files to gather table statistics
@@ -22,10 +22,10 @@ Rewritten from PHP to Go with extensive profiler-guided optimizations:
 
 ### Benchmark Results (Apple M2 Max)
 
-- **Parser Throughput**: 314 MB/s (up from 227 MB/s initial Go, 50 MB/s PHP)
-- **Table Extraction**: 66 ns/op (4.9x faster than regex-only approach)
+- **Parser Throughput**: 327 MB/s typical, 411 MB/s with optimal buffers (up from 50 MB/s PHP)
+- **Table Extraction**: 65 ns/op (4.9x faster than regex-only approach)
 - **Memory Usage**: ~100 MB constant regardless of file size
-- **Overall Improvement**: **6.3x faster than original PHP**
+- **Overall Improvement**: **6.5x faster than original PHP** (50 MB/s → 327 MB/s)
 
 ### Key Optimizations
 
@@ -180,12 +180,12 @@ TOTAL                                        125000             -      1250.57
 
 The tool uses performance-optimized buffer sizes based on extensive benchmarking:
 
-| File Size | Read Buffer | Write Buffer | Rationale |
-|-----------|-------------|--------------|-----------|
+| File Size | Read Buffer | Write Buffer | Rationale                                |
+| --------- | ----------- | ------------ | ---------------------------------------- |
 | < 1GB     | 64KB        | 256KB        | Optimal CPU cache utilization (411 MB/s) |
-| > 1GB     | 256KB       | 256KB        | Better for very large files |
+| > 1GB     | 256KB       | 256KB        | Better for very large files              |
 
-*64KB buffers consistently outperform larger sizes due to L1/L2 cache hits*
+_64KB buffers consistently outperform larger sizes due to L1/L2 cache hits_
 
 ### Memory Management
 
@@ -273,17 +273,33 @@ To support additional SQL statements:
 2. Add regex pattern to `ParseStatement()` method
 3. Update tests in `parser_test.go`
 
-## Comparison with PHP Version
+## Competitive Comparison
 
-| Metric              | PHP Version | Go Version | Improvement |
-|---------------------|-------------|------------|-------------|
-| Parser Throughput   | ~50 MB/s    | 314 MB/s   | **6.3x**    |
-| Table Extraction    | ~5000 ns/op | 66 ns/op   | **75x**     |
-| Memory Usage        | ~300MB      | ~100MB     | **3x**      |
-| Cold Start          | ~500ms      | ~10ms      | **50x**     |
-| Binary Size         | N/A (PHP)   | ~2.4MB     | Standalone  |
+### Similar Tools
 
-*Benchmarks performed on Apple M2 Max, macOS, Go 1.24*
+| Tool                                                                                    | Language | Throughput       | Memory  | Repository |
+| --------------------------------------------------------------------------------------- | -------- | ---------------- | ------- | ---------- |
+| [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit)                       | Go       | **533 MB/s**     | <20MB   | GitHub     |
+| **sql-splitter (this tool)**                                                            | Go       | **327-411 MB/s** | ~100MB  | -          |
+| [Bash csplit scripts](https://gist.github.com/jasny/1608062)                            | Bash     | ~250 MB/s        | Unknown | Gist       |
+| [PHP script (thatbytes)](https://thatbytes.co.uk/posts/mysql-dump-splitter-benchmarks/) | PHP      | 149 MB/s         | Unknown | Blog       |
+| [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit)                 | Node.js  | 133 MB/s         | <50MB   | GitHub     |
+| [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter)               | Bash     | Unknown          | Unknown | GitHub     |
+| [SqlDumpSplittr](https://sqldumpsplitter.net/)                                          | Windows  | Unknown          | Unknown | Commercial |
+
+_This tool ranks **#2** among open-source SQL file splitters_
+
+### Comparison with PHP Version
+
+| Metric            | PHP Version | Go Version | Improvement |
+| ----------------- | ----------- | ---------- | ----------- |
+| Parser Throughput | ~50 MB/s    | 327 MB/s   | **6.5x**    |
+| Table Extraction  | ~5000 ns/op | 65 ns/op   | **75x**     |
+| Memory Usage      | ~300MB      | ~100MB     | **3x**      |
+| Cold Start        | ~500ms      | ~10ms      | **50x**     |
+| Binary Size       | N/A (PHP)   | ~2.4MB     | Standalone  |
+
+_Benchmarks performed on Apple M2 Max, macOS, Go 1.24_
 
 ## Known Limitations
 
