@@ -149,9 +149,9 @@ func TestDetermineBufferSize(t *testing.T) {
 		name     string
 	}{
 		{1 * 1024 * 1024, SmallBufferSize, "1MB file"},
-		{50 * 1024 * 1024, MediumBufferSize, "50MB file"},
-		{500 * 1024 * 1024, LargeBufferSize, "500MB file"},
-		{2 * 1024 * 1024 * 1024, HugeBufferSize, "2GB file"},
+		{50 * 1024 * 1024, SmallBufferSize, "50MB file"},       // 64KB (optimized)
+		{500 * 1024 * 1024, SmallBufferSize, "500MB file"},     // 64KB (optimized)
+		{2 * 1024 * 1024 * 1024, MediumBufferSize, "2GB file"}, // 256KB for very large files
 	}
 
 	for _, tt := range tests {

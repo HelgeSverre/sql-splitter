@@ -33,10 +33,18 @@ test:
 
 # Run tests with coverage
 test-cover:
-	go test -cover ./...
-	go test -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out -o coverage.html
-	@echo "Coverage report: coverage.html"
+	@echo "Running tests with coverage..."
+	@go test -coverprofile=coverage.out ./...
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "Coverage by function:"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@go tool cover -func=coverage.out | grep -v "total:" | column -t
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@go tool cover -func=coverage.out | grep "total:" | awk '{printf "TOTAL COVERAGE: %s\n", $$3}'
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "HTML report: coverage.html"
 
 # Run benchmarks
 bench:
