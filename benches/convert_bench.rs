@@ -7,7 +7,7 @@
 //! - Identifier quoting conversion
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use sql_splitter::convert::{copy_to_inserts, parse_copy_header, CopyHeader, Converter};
+use sql_splitter::convert::{copy_to_inserts, parse_copy_header, Converter, CopyHeader};
 use sql_splitter::parser::SqlDialect;
 use std::hint::black_box;
 

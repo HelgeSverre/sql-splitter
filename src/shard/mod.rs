@@ -156,12 +156,7 @@ impl UnifiedRow {
         }
     }
 
-    fn fk_values(
-        &self,
-    ) -> &[(
-        crate::parser::mysql_insert::FkRef,
-        PkTuple,
-    )] {
+    fn fk_values(&self) -> &[(crate::parser::mysql_insert::FkRef, PkTuple)] {
         match self {
             UnifiedRow::Insert(r) => &r.fk_values,
             UnifiedRow::Copy(r) => &r.fk_values,
@@ -353,28 +348,24 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
 
         // Handle lookup/system tables
         let include_all = match classification {
-            ShardTableClassification::Lookup => {
-                match config.include_global {
-                    GlobalTableMode::None => {
-                        stats.tables_skipped += 1;
-                        continue;
-                    }
-                    GlobalTableMode::Lookups | GlobalTableMode::All => true,
+            ShardTableClassification::Lookup => match config.include_global {
+                GlobalTableMode::None => {
+                    stats.tables_skipped += 1;
+                    continue;
                 }
-            }
+                GlobalTableMode::Lookups | GlobalTableMode::All => true,
+            },
             ShardTableClassification::System => {
                 stats.tables_skipped += 1;
                 continue;
             }
-            ShardTableClassification::Unknown => {
-                match config.include_global {
-                    GlobalTableMode::All => true,
-                    _ => {
-                        stats.tables_skipped += 1;
-                        continue;
-                    }
+            ShardTableClassification::Unknown => match config.include_global {
+                GlobalTableMode::All => true,
+                _ => {
+                    stats.tables_skipped += 1;
+                    continue;
                 }
-            }
+            },
             _ => false,
         };
 
@@ -1036,15 +1027,11 @@ fn write_output(
                 }
 
                 let values = match row.format {
-                    RowFormat::Insert => {
-                        match config.dialect {
-                            SqlDialect::Postgres => convert_row_to_postgres(&row.raw),
-                            _ => row.raw.clone(),
-                        }
-                    }
-                    RowFormat::Copy => {
-                        convert_copy_to_insert_values(&row.raw, config.dialect)
-                    }
+                    RowFormat::Insert => match config.dialect {
+                        SqlDialect::Postgres => convert_row_to_postgres(&row.raw),
+                        _ => row.raw.clone(),
+                    },
+                    RowFormat::Copy => convert_copy_to_insert_values(&row.raw, config.dialect),
                 };
                 writer.write_all(&values)?;
             }
@@ -1189,14 +1176,12 @@ fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8> {
             result.push(b'\'');
             for &b in *field {
                 match b {
-                    b'\'' => {
-                        match dialect {
-                            SqlDialect::MySql => result.extend_from_slice(b"\\'"),
-                            SqlDialect::Postgres | SqlDialect::Sqlite => {
-                                result.extend_from_slice(b"''")
-                            }
+                    b'\'' => match dialect {
+                        SqlDialect::MySql => result.extend_from_slice(b"\\'"),
+                        SqlDialect::Postgres | SqlDialect::Sqlite => {
+                            result.extend_from_slice(b"''")
                         }
-                    }
+                    },
                     b'\\' if dialect == SqlDialect::MySql => {
                         result.extend_from_slice(b"\\\\");
                     }
@@ -1236,4 +1221,3 @@ fn is_numeric(s: &[u8]) -> bool {
 
     has_digit
 }
-

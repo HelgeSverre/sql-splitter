@@ -71,7 +71,11 @@ pub fn run(
         std::fs::create_dir_all(&output_dir)?;
 
         if progress {
-            eprintln!("Extracting {} tenants to {}/", tenant_list.len(), output_dir.display());
+            eprintln!(
+                "Extracting {} tenants to {}/",
+                tenant_list.len(),
+                output_dir.display()
+            );
         }
 
         let mut total_stats = shard::ShardStats::default();

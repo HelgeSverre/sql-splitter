@@ -1,6 +1,4 @@
-use sql_splitter::parser::{
-    detect_dialect, DialectConfidence, Parser, SqlDialect, StatementType,
-};
+use sql_splitter::parser::{detect_dialect, DialectConfidence, Parser, SqlDialect, StatementType};
 use std::io::Cursor;
 
 mod tests {
@@ -504,7 +502,9 @@ mod mysql_insert_tests {
 
 mod postgres_copy_tests {
     use sql_splitter::parser::mysql_insert::PkValue;
-    use sql_splitter::parser::postgres_copy::{parse_copy_columns, parse_postgres_copy_rows, CopyParser};
+    use sql_splitter::parser::postgres_copy::{
+        parse_copy_columns, parse_postgres_copy_rows, CopyParser,
+    };
     use sql_splitter::schema::{Column, ColumnId, ColumnType, ForeignKey, TableId, TableSchema};
 
     fn create_simple_schema() -> TableSchema {

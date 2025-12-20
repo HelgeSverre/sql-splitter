@@ -12,7 +12,9 @@ mod copy_to_insert;
 mod types;
 mod warnings;
 
-pub use copy_to_insert::{copy_to_inserts, parse_copy_header, parse_copy_data, CopyHeader, CopyValue};
+pub use copy_to_insert::{
+    copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
+};
 
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::splitter::Compression;
@@ -134,9 +136,7 @@ impl Converter {
             StatementType::AlterTable => self.convert_alter_table(stmt),
             StatementType::DropTable => self.convert_drop_table(stmt),
             StatementType::Copy => self.convert_copy(stmt, table),
-            StatementType::Unknown => {
-                self.convert_other(stmt)
-            }
+            StatementType::Unknown => self.convert_other(stmt),
         }
     }
 
@@ -274,7 +274,7 @@ impl Converter {
     }
 
     /// Convert COPY statement (PostgreSQL-specific)
-    /// 
+    ///
     /// This handles the COPY header. The data block is processed separately
     /// via process_copy_data() when called from the run() function.
     fn convert_copy(
@@ -283,7 +283,7 @@ impl Converter {
         _table_name: Option<&str>,
     ) -> Result<Vec<u8>, ConvertWarning> {
         let stmt_str = String::from_utf8_lossy(stmt);
-        
+
         // Check if this contains "FROM stdin" (COPY header) or is data
         let upper = stmt_str.to_uppercase();
         if upper.contains("FROM STDIN") {
@@ -297,7 +297,7 @@ impl Converter {
                 }
             }
         }
-        
+
         // If same dialect or couldn't parse, pass through
         Ok(stmt.to_vec())
     }
@@ -385,7 +385,7 @@ impl Converter {
         // Strip leading comments to find the actual statement
         let stripped = self.strip_leading_sql_comments(stmt);
         let upper = stripped.to_uppercase();
-        
+
         // These PostgreSQL features have no MySQL/SQLite equivalent
         upper.starts_with("CREATE DOMAIN")
             || upper.starts_with("CREATE TYPE")
@@ -616,7 +616,7 @@ impl Converter {
                 if chars.peek() == Some(&'!') {
                     // Skip conditional comment
                     chars.next(); // consume !
-                    // Skip version number
+                                  // Skip version number
                     while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
                         chars.next();
                     }
@@ -677,12 +677,12 @@ impl Converter {
     fn strip_postgres_casts(&self, stmt: &str) -> String {
         use once_cell::sync::Lazy;
         use regex::Regex;
-        
+
         // Match ::regclass, ::text, ::integer, etc. (including complex types like character varying)
         static RE_CAST: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r"::[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)*").unwrap()
         });
-        
+
         RE_CAST.replace_all(stmt, "").to_string()
     }
 
@@ -690,13 +690,12 @@ impl Converter {
     fn convert_nextval(&self, stmt: &str) -> String {
         use once_cell::sync::Lazy;
         use regex::Regex;
-        
+
         // Match nextval('sequence_name'::regclass) or nextval('sequence_name')
         // Remove the DEFAULT nextval(...) entirely - AUTO_INCREMENT is already applied
-        static RE_NEXTVAL: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\s*DEFAULT\s+nextval\s*\([^)]+\)").unwrap()
-        });
-        
+        static RE_NEXTVAL: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*DEFAULT\s+nextval\s*\([^)]+\)").unwrap());
+
         RE_NEXTVAL.replace_all(stmt, "").to_string()
     }
 
@@ -704,25 +703,25 @@ impl Converter {
     fn convert_default_now(&self, stmt: &str) -> String {
         use once_cell::sync::Lazy;
         use regex::Regex;
-        
-        static RE_NOW: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\bDEFAULT\s+now\s*\(\s*\)").unwrap()
-        });
-        
-        RE_NOW.replace_all(stmt, "DEFAULT CURRENT_TIMESTAMP").to_string()
+
+        static RE_NOW: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bDEFAULT\s+now\s*\(\s*\)").unwrap());
+
+        RE_NOW
+            .replace_all(stmt, "DEFAULT CURRENT_TIMESTAMP")
+            .to_string()
     }
 
     /// Strip schema prefix from table names (e.g., public.users -> users)
     fn strip_schema_prefix(&self, stmt: &str) -> String {
         use once_cell::sync::Lazy;
         use regex::Regex;
-        
+
         // Match schema.table patterns (with optional quotes)
         // Handle: public.table, "public"."table", public."table"
-        static RE_SCHEMA: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r#"(?i)\b(public|pg_catalog|pg_temp)\s*\.\s*"#).unwrap()
-        });
-        
+        static RE_SCHEMA: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(?i)\b(public|pg_catalog|pg_temp)\s*\.\s*"#).unwrap());
+
         RE_SCHEMA.replace_all(stmt, "").to_string()
     }
 
@@ -741,9 +740,13 @@ impl Converter {
                 let warning = ConvertWarning::UnsupportedFeature {
                     feature: format!(
                         "ENUM type{}",
-                        table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
+                        table_name
+                            .map(|t| format!(" in table {}", t))
+                            .unwrap_or_default()
                     ),
-                    suggestion: Some("Converted to VARCHAR - consider adding CHECK constraint".to_string()),
+                    suggestion: Some(
+                        "Converted to VARCHAR - consider adding CHECK constraint".to_string(),
+                    ),
                 };
                 self.warnings.add(warning.clone());
                 if self.strict {
@@ -756,9 +759,13 @@ impl Converter {
                 let warning = ConvertWarning::UnsupportedFeature {
                     feature: format!(
                         "SET type{}",
-                        table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
+                        table_name
+                            .map(|t| format!(" in table {}", t))
+                            .unwrap_or_default()
                     ),
-                    suggestion: Some("Converted to VARCHAR - SET semantics not preserved".to_string()),
+                    suggestion: Some(
+                        "Converted to VARCHAR - SET semantics not preserved".to_string(),
+                    ),
                 };
                 self.warnings.add(warning.clone());
                 if self.strict {
@@ -770,7 +777,10 @@ impl Converter {
             if upper.contains("UNSIGNED") {
                 self.warnings.add(ConvertWarning::UnsupportedFeature {
                     feature: "UNSIGNED modifier".to_string(),
-                    suggestion: Some("Removed - consider adding CHECK constraint for non-negative values".to_string()),
+                    suggestion: Some(
+                        "Removed - consider adding CHECK constraint for non-negative values"
+                            .to_string(),
+                    ),
                 });
             }
         }
@@ -782,9 +792,14 @@ impl Converter {
                 let warning = ConvertWarning::UnsupportedFeature {
                     feature: format!(
                         "Array type{}",
-                        table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
+                        table_name
+                            .map(|t| format!(" in table {}", t))
+                            .unwrap_or_default()
                     ),
-                    suggestion: Some("Array types not supported in target dialect - consider using JSON".to_string()),
+                    suggestion: Some(
+                        "Array types not supported in target dialect - consider using JSON"
+                            .to_string(),
+                    ),
                 };
                 self.warnings.add(warning.clone());
                 if self.strict {
@@ -796,7 +811,9 @@ impl Converter {
             if upper.contains("INHERITS") {
                 let warning = ConvertWarning::UnsupportedFeature {
                     feature: "Table inheritance (INHERITS)".to_string(),
-                    suggestion: Some("PostgreSQL table inheritance not supported in target dialect".to_string()),
+                    suggestion: Some(
+                        "PostgreSQL table inheritance not supported in target dialect".to_string(),
+                    ),
                 };
                 self.warnings.add(warning.clone());
                 if self.strict {
@@ -866,8 +883,7 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     };
 
     // Create converter
-    let mut converter = Converter::new(from_dialect, config.to_dialect)
-        .with_strict(config.strict);
+    let mut converter = Converter::new(from_dialect, config.to_dialect).with_strict(config.strict);
 
     // Open input file
     let file = File::open(&config.input)?;
@@ -901,7 +917,10 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
 
         if let Some(ref pb) = progress_bar {
             if stats.statements_processed % 1000 == 0 {
-                pb.set_message(format!("Processed {} statements...", stats.statements_processed));
+                pb.set_message(format!(
+                    "Processed {} statements...",
+                    stats.statements_processed
+                ));
             }
         }
 
@@ -957,14 +976,21 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     stats.warnings.extend(converter.warnings().iter().cloned());
 
     if let Some(pb) = progress_bar {
-        pb.finish_with_message(format!("Converted {} statements", stats.statements_processed));
+        pb.finish_with_message(format!(
+            "Converted {} statements",
+            stats.statements_processed
+        ));
     }
 
     Ok(stats)
 }
 
 /// Write output header
-fn write_header(writer: &mut dyn Write, config: &ConvertConfig, from: SqlDialect) -> std::io::Result<()> {
+fn write_header(
+    writer: &mut dyn Write,
+    config: &ConvertConfig,
+    from: SqlDialect,
+) -> std::io::Result<()> {
     writeln!(writer, "-- Converted by sql-splitter")?;
     writeln!(writer, "-- From: {} → To: {}", from, config.to_dialect)?;
     writeln!(writer, "-- Source: {}", config.input.display())?;
@@ -988,5 +1014,3 @@ fn write_header(writer: &mut dyn Write, config: &ConvertConfig, from: SqlDialect
 
     Ok(())
 }
-
-

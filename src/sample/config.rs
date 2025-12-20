@@ -272,5 +272,3 @@ impl DefaultClassifier {
         TableClassification::Normal
     }
 }
-
-

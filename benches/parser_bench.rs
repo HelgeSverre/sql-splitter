@@ -267,17 +267,17 @@ fn bench_large_statements(c: &mut Criterion) {
 /// Generate PostgreSQL COPY data for benchmarking
 fn generate_postgres_copy_data(tables: usize, rows_per_table: usize) -> Vec<u8> {
     let mut data = String::new();
-    
+
     // pg_dump header
     data.push_str("-- PostgreSQL database dump\n\n");
-    
+
     for t in 0..tables {
         let table_name = format!("table_{}", t);
         data.push_str(&format!(
             "CREATE TABLE public.\"{}\" (id SERIAL PRIMARY KEY, name VARCHAR(255), data TEXT);\n\n",
             table_name
         ));
-        
+
         data.push_str(&format!(
             "COPY public.\"{}\" (id, name, data) FROM stdin;\n",
             table_name
@@ -290,24 +290,25 @@ fn generate_postgres_copy_data(tables: usize, rows_per_table: usize) -> Vec<u8> 
         }
         data.push_str("\\.\n\n");
     }
-    
+
     data.into_bytes()
 }
 
 fn bench_postgres_copy_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("postgres_copy_parsing");
-    
+
     for (tables, rows) in [(5, 500), (10, 1000), (20, 2000)] {
         let data = generate_postgres_copy_data(tables, rows);
         let data_size = data.len();
-        
+
         group.throughput(Throughput::Bytes(data_size as u64));
         group.bench_with_input(
             BenchmarkId::new("parse_copy", format!("{}t_{}r", tables, rows)),
             &data,
             |b, data| {
                 b.iter(|| {
-                    let mut parser = Parser::with_dialect(&data[..], SMALL_BUFFER_SIZE, SqlDialect::Postgres);
+                    let mut parser =
+                        Parser::with_dialect(&data[..], SMALL_BUFFER_SIZE, SqlDialect::Postgres);
                     let mut count = 0;
                     while let Ok(Some(_stmt)) = parser.read_statement() {
                         count += 1;
@@ -317,31 +318,31 @@ fn bench_postgres_copy_parsing(c: &mut Criterion) {
             },
         );
     }
-    
+
     group.finish();
 }
 
 fn bench_dialect_detection(c: &mut Criterion) {
     use sql_splitter::parser::detect_dialect;
-    
+
     let mysql_header = b"-- MySQL dump 10.13  Distrib 8.0.32, for Linux (x86_64)\n--\n-- Host: localhost    Database: mydb\n/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n";
     let postgres_header = b"-- PostgreSQL database dump\n\n-- Dumped from database version 15.2\n-- Dumped by pg_dump version 15.2\n\nSET statement_timeout = 0;\n";
     let sqlite_header = b"PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCREATE TABLE users (id INTEGER PRIMARY KEY);\n";
-    
+
     let mut group = c.benchmark_group("dialect_detection");
-    
+
     group.bench_function("detect_mysql", |b| {
         b.iter(|| black_box(detect_dialect(black_box(mysql_header))))
     });
-    
+
     group.bench_function("detect_postgres", |b| {
         b.iter(|| black_box(detect_dialect(black_box(postgres_header))))
     });
-    
+
     group.bench_function("detect_sqlite", |b| {
         b.iter(|| black_box(detect_dialect(black_box(sqlite_header))))
     });
-    
+
     group.finish();
 }
 

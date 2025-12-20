@@ -345,15 +345,26 @@ tests/
 
 ## Related Documents
 
+### Active
+
 - [Test Data Generator Design](TEST_DATA_GENERATOR.md)
-- [Sample Feature Design](features/SAMPLE_FEATURE.md)
-- [Shard Feature Design](features/SHARD_FEATURE.md)
-- [Merge Feature Design](features/MERGE_FEATURE.md)
-- [Convert Gap Analysis](features/CONVERT_GAP_ANALYSIS.md)
+- [Additional Ideas](features/ADDITIONAL_IDEAS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
 
-### Archived Documents
+### v2.x Feature Designs
 
-Historical planning documents moved to `docs/archived/`:
-- ROADMAP_REVIEW.md — Pre-implementation recommendations
+- [Diff Feature](features/DIFF_FEATURE.md)
+- [Query Feature](features/QUERY_FEATURE.md)
+- [Redact Feature](features/REDACT_FEATURE.md)
+- [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md)
+
+### Archived (Implemented)
+
+Historical documents for completed features in `docs/archived/`:
+- SAMPLE_FEATURE.md — v1.5.0
+- SHARD_FEATURE.md — v1.6.0
+- MERGE_FEATURE.md — v1.4.0
+- CONVERT_GAP_ANALYSIS.md — v1.7.0 post-implementation
 - CONVERT_FEASIBILITY.md — Pre-implementation analysis
+- ROADMAP_REVIEW.md — Pre-implementation recommendations
+- TEST_FILE_EXTRACTION.md — Test reorganization

@@ -79,5 +79,3 @@ impl<T> Reservoir<T> {
         &self.items
     }
 }
-
-

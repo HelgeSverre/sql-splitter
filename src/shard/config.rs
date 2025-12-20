@@ -138,8 +138,7 @@ impl ShardYamlConfig {
 
     /// Get classification override for a table
     pub fn get_classification(&self, table_name: &str) -> Option<ShardTableClassification> {
-        self.get_table_override(table_name)
-            .and_then(|o| o.role)
+        self.get_table_override(table_name).and_then(|o| o.role)
     }
 
     /// Check if a table should be skipped
@@ -235,5 +234,3 @@ impl DefaultShardClassifier {
             || lower.ends_with("_map")
     }
 }
-
-

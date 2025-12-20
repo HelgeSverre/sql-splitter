@@ -1,12 +1,14 @@
 //! Unit tests for the sample module, extracted from inline tests.
 
-use rand::SeedableRng;
 use rand::rngs::StdRng;
-use sql_splitter::sample::{GlobalTableMode, SampleYamlConfig, TableClassification, DefaultClassifier, Reservoir};
+use rand::SeedableRng;
+use sql_splitter::sample::{
+    DefaultClassifier, GlobalTableMode, Reservoir, SampleYamlConfig, TableClassification,
+};
 
 mod sample_tests {
-    use sql_splitter::sample::{SampleConfig, SampleMode, run};
     use sql_splitter::parser::SqlDialect;
+    use sql_splitter::sample::{run, SampleConfig, SampleMode};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -126,7 +128,7 @@ INSERT INTO `users` VALUES (1, 'Alice', 1), (2, 'Bob', 1), (3, 'Carol', 2), (4, 
     #[test]
     fn test_global_table_mode() {
         use super::GlobalTableMode;
-        
+
         assert_eq!(
             "none".parse::<GlobalTableMode>().unwrap(),
             GlobalTableMode::None

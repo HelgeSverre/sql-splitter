@@ -10,10 +10,7 @@ use sql_splitter::parser::SqlDialect;
 fn test_backticks_to_double_quotes() {
     let converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
 
-    assert_eq!(
-        converter.backticks_to_double_quotes("`users`"),
-        "\"users\""
-    );
+    assert_eq!(converter.backticks_to_double_quotes("`users`"), "\"users\"");
     assert_eq!(
         converter.backticks_to_double_quotes("`table_name`"),
         "\"table_name\""
@@ -29,10 +26,7 @@ fn test_backticks_to_double_quotes() {
 fn test_double_quotes_to_backticks() {
     let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
 
-    assert_eq!(
-        converter.double_quotes_to_backticks("\"users\""),
-        "`users`"
-    );
+    assert_eq!(converter.double_quotes_to_backticks("\"users\""), "`users`");
 }
 
 #[test]
@@ -345,4 +339,149 @@ fn test_warning_collector_limit() {
     }
 
     assert_eq!(collector.count(), 5);
+}
+
+// =============================================================================
+// COPY → INSERT conversion tests (from src/convert/copy_to_insert.rs)
+// =============================================================================
+
+mod copy_to_insert_tests {
+    use sql_splitter::convert::{
+        copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
+    };
+    use sql_splitter::parser::SqlDialect;
+
+    #[test]
+    fn test_parse_copy_header_simple() {
+        let header = "COPY users (id, name, email) FROM stdin;";
+        let parsed = parse_copy_header(header).unwrap();
+        assert_eq!(parsed.table, "users");
+        assert_eq!(parsed.columns, vec!["id", "name", "email"]);
+        assert!(parsed.schema.is_none());
+    }
+
+    #[test]
+    fn test_parse_copy_header_with_schema() {
+        let header = "COPY public.users (id, name) FROM stdin;";
+        let parsed = parse_copy_header(header).unwrap();
+        assert_eq!(parsed.schema, Some("public".to_string()));
+        assert_eq!(parsed.table, "users");
+    }
+
+    #[test]
+    fn test_parse_copy_header_quoted() {
+        let header = r#"COPY "public"."my_table" ("id", "name") FROM stdin;"#;
+        let parsed = parse_copy_header(header).unwrap();
+        assert_eq!(parsed.schema, Some("public".to_string()));
+        assert_eq!(parsed.table, "my_table");
+    }
+
+    #[test]
+    fn test_parse_copy_header_with_comments() {
+        let header = "--\n-- Data for table\n--\nCOPY users (id) FROM stdin;";
+        let parsed = parse_copy_header(header).unwrap();
+        assert_eq!(parsed.table, "users");
+    }
+
+    #[test]
+    fn test_parse_copy_data() {
+        let data = b"1\tAlice\talice@example.com\n2\tBob\tbob@example.com\n\\.";
+        let rows = parse_copy_data(data);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].len(), 3);
+    }
+
+    #[test]
+    fn test_null_handling() {
+        let data = b"1\t\\N\ttest\n";
+        let rows = parse_copy_data(data);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0][1], CopyValue::Null));
+    }
+
+    #[test]
+    fn test_escape_sequences() {
+        let data = b"hello\\tworld\\n\n";
+        let rows = parse_copy_data(data);
+        if let CopyValue::Text(s) = &rows[0][0] {
+            assert_eq!(s, "hello\tworld\n");
+        } else {
+            panic!("Expected Text");
+        }
+    }
+
+    #[test]
+    fn test_copy_to_insert_mysql() {
+        let header = CopyHeader {
+            schema: None,
+            table: "users".to_string(),
+            columns: vec!["id".to_string(), "name".to_string()],
+        };
+        let data = b"1\tAlice\n2\tBob\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::MySql);
+        assert_eq!(inserts.len(), 1);
+
+        let sql = String::from_utf8_lossy(&inserts[0]);
+        assert!(sql.contains("INSERT INTO `users`"));
+        assert!(sql.contains("(`id`, `name`)"));
+        assert!(sql.contains("('1', 'Alice')"));
+        assert!(sql.contains("('2', 'Bob')"));
+    }
+
+    #[test]
+    fn test_copy_to_insert_postgres() {
+        let header = CopyHeader {
+            schema: Some("public".to_string()),
+            table: "users".to_string(),
+            columns: vec!["id".to_string(), "name".to_string()],
+        };
+        let data = b"1\tAlice\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::Postgres);
+        let sql = String::from_utf8_lossy(&inserts[0]);
+        assert!(sql.contains("\"public\".\"users\""));
+    }
+
+    #[test]
+    fn test_copy_to_insert_with_null() {
+        let header = CopyHeader {
+            schema: None,
+            table: "t".to_string(),
+            columns: vec!["a".to_string(), "b".to_string()],
+        };
+        let data = b"1\t\\N\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::MySql);
+        let sql = String::from_utf8_lossy(&inserts[0]);
+        assert!(sql.contains("NULL"));
+    }
+
+    #[test]
+    fn test_escape_quotes_mysql() {
+        let header = CopyHeader {
+            schema: None,
+            table: "t".to_string(),
+            columns: vec!["s".to_string()],
+        };
+        let data = b"it's a test\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::MySql);
+        let sql = String::from_utf8_lossy(&inserts[0]);
+        assert!(sql.contains("it\\'s a test"));
+    }
+
+    #[test]
+    fn test_escape_quotes_sqlite() {
+        let header = CopyHeader {
+            schema: None,
+            table: "t".to_string(),
+            columns: vec!["s".to_string()],
+        };
+        let data = b"it's a test\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::Sqlite);
+        let sql = String::from_utf8_lossy(&inserts[0]);
+        assert!(sql.contains("it''s a test"));
+    }
 }

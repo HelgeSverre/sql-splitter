@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.7.0] - 2025-12-20
+## [1.7.0] - 2025-12-21
 
 ### Added
 
@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Test organization overhaul**: Extracted all 235 inline tests from source files to dedicated test files in `tests/` directory
+  - Created 11 new unit test files: `parser_unit_test.rs`, `convert_unit_test.rs`, `sample_unit_test.rs`, `shard_unit_test.rs`, `schema_unit_test.rs`, `splitter_unit_test.rs`, `merger_unit_test.rs`, `analyzer_unit_test.rs`, `writer_unit_test.rs`, `cmd_unit_test.rs`
+  - Moved `parser_edge_cases_test.rs` (83 tests) from src/ to tests/
+  - Source files now contain only production code (zero inline tests)
+- **Convert command enhancements**:
+  - PostgreSQL COPY → INSERT conversion with batched inserts (100 rows per INSERT)
+  - NULL marker handling (`\N` → NULL) and escape sequence conversion
+  - PostgreSQL type cast stripping (::regclass, ::text, ::character varying)
+  - Schema prefix removal (public.table → table)
+  - DEFAULT now() → DEFAULT CURRENT_TIMESTAMP conversion
+  - nextval() sequence removal
+  - PostgreSQL-only feature filtering with warnings (CREATE DOMAIN/TYPE/FUNCTION/SEQUENCE)
+  - TIMESTAMP WITH TIME ZONE → DATETIME conversion
+  - Block comment handling at statement start
 - Test suite expanded from 359 to 429 tests
 
 ## [1.6.0] - 2025-12-20
@@ -233,13 +247,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive README with usage examples
 - AGENTS.md for AI assistant guidance
 - Performance benchmarks and comparison with Go/PHP versions
-
-## [Unreleased]
-
-### Planned
-
-- Compressed file support (gzip, bzip2)
-- Parallel parsing for very large files
 
 ## [1.2.0] - 2025-12-20
 

@@ -1005,5 +1005,3 @@ fn is_numeric(s: &[u8]) -> bool {
 
     has_digit
 }
-
-

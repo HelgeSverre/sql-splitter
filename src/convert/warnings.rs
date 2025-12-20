@@ -24,15 +24,16 @@ pub enum ConvertWarning {
         statement_preview: String,
     },
     /// COPY statement needs conversion (PostgreSQL)
-    CopyNotConverted {
-        table: String,
-    },
+    CopyNotConverted { table: String },
 }
 
 impl std::fmt::Display for ConvertWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConvertWarning::UnsupportedFeature { feature, suggestion } => {
+            ConvertWarning::UnsupportedFeature {
+                feature,
+                suggestion,
+            } => {
                 write!(f, "Unsupported feature: {}", feature)?;
                 if let Some(s) = suggestion {
                     write!(f, " ({})", s)?;

@@ -45,10 +45,7 @@ pub fn run(
 
     // Exit with error if strict mode had warnings
     if strict && !stats.warnings.is_empty() {
-        anyhow::bail!(
-            "Strict mode: {} warnings generated",
-            stats.warnings.len()
-        );
+        anyhow::bail!("Strict mode: {} warnings generated", stats.warnings.len());
     }
 
     Ok(())

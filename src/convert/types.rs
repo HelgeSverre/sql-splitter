@@ -42,7 +42,9 @@ impl TypeMapper {
         result = RE_BIGINT_SIZE.replace_all(&result, "BIGINT").to_string();
 
         // Float types
-        result = RE_DOUBLE.replace_all(&result, "DOUBLE PRECISION").to_string();
+        result = RE_DOUBLE
+            .replace_all(&result, "DOUBLE PRECISION")
+            .to_string();
         result = RE_FLOAT.replace_all(&result, "REAL").to_string();
 
         // Text types
@@ -138,15 +140,23 @@ impl TypeMapper {
         let mut result = stmt.to_string();
 
         // SERIAL → INT AUTO_INCREMENT
-        result = RE_BIGSERIAL.replace_all(&result, "BIGINT AUTO_INCREMENT").to_string();
-        result = RE_SERIAL.replace_all(&result, "INT AUTO_INCREMENT").to_string();
-        result = RE_SMALLSERIAL.replace_all(&result, "SMALLINT AUTO_INCREMENT").to_string();
+        result = RE_BIGSERIAL
+            .replace_all(&result, "BIGINT AUTO_INCREMENT")
+            .to_string();
+        result = RE_SERIAL
+            .replace_all(&result, "INT AUTO_INCREMENT")
+            .to_string();
+        result = RE_SMALLSERIAL
+            .replace_all(&result, "SMALLINT AUTO_INCREMENT")
+            .to_string();
 
         // BYTEA → LONGBLOB
         result = RE_BYTEA.replace_all(&result, "LONGBLOB").to_string();
 
         // DOUBLE PRECISION → DOUBLE
-        result = RE_DOUBLE_PRECISION.replace_all(&result, "DOUBLE").to_string();
+        result = RE_DOUBLE_PRECISION
+            .replace_all(&result, "DOUBLE")
+            .to_string();
 
         // REAL → FLOAT
         result = RE_REAL.replace_all(&result, "FLOAT").to_string();
@@ -158,10 +168,14 @@ impl TypeMapper {
         result = RE_TIMESTAMPTZ.replace_all(&result, "DATETIME").to_string();
 
         // TIMESTAMP WITH TIME ZONE → DATETIME
-        result = RE_TIMESTAMP_WITH_TZ.replace_all(&result, "DATETIME").to_string();
+        result = RE_TIMESTAMP_WITH_TZ
+            .replace_all(&result, "DATETIME")
+            .to_string();
 
         // TIMESTAMP WITHOUT TIME ZONE → DATETIME
-        result = RE_TIMESTAMP_NO_TZ.replace_all(&result, "DATETIME").to_string();
+        result = RE_TIMESTAMP_NO_TZ
+            .replace_all(&result, "DATETIME")
+            .to_string();
 
         // JSONB → JSON
         result = RE_JSONB.replace_all(&result, "JSON").to_string();
@@ -192,7 +206,9 @@ impl TypeMapper {
 
         // Timestamps → TEXT
         result = RE_TIMESTAMPTZ.replace_all(&result, "TEXT").to_string();
-        result = RE_TIMESTAMP_WITH_TZ.replace_all(&result, "TEXT").to_string();
+        result = RE_TIMESTAMP_WITH_TZ
+            .replace_all(&result, "TEXT")
+            .to_string();
         result = RE_TIMESTAMP_NO_TZ.replace_all(&result, "TEXT").to_string();
 
         // JSONB/JSON → TEXT
@@ -249,8 +265,7 @@ static RE_SMALLINT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bSMALLINT\s*(\(\s*\d+\s*\))?").unwrap());
 static RE_MEDIUMINT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bMEDIUMINT\s*(\(\s*\d+\s*\))?").unwrap());
-static RE_INT_SIZE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bINT\s*\(\s*\d+\s*\)").unwrap());
+static RE_INT_SIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bINT\s*\(\s*\d+\s*\)").unwrap());
 static RE_BIGINT_SIZE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bBIGINT\s*\(\s*\d+\s*\)").unwrap());
 
@@ -273,16 +288,14 @@ static RE_TINYBLOB: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTINYBLOB\b").u
 static RE_BLOB: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bBLOB\b").unwrap());
 static RE_VARBINARY: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bVARBINARY\s*\(\s*\d+\s*\)").unwrap());
-static RE_BINARY: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bBINARY\s*\(\s*\d+\s*\)").unwrap());
+static RE_BINARY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bBINARY\s*\(\s*\d+\s*\)").unwrap());
 
 static RE_DATETIME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bDATETIME(\(\s*\d+\s*\))?").unwrap());
 static RE_TIMESTAMP: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMP\s*(\(\s*\d+\s*\))?").unwrap());
 static RE_DATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bDATE\b").unwrap());
-static RE_TIME: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bTIME\s*(\(\s*\d+\s*\))?").unwrap());
+static RE_TIME: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTIME\s*(\(\s*\d+\s*\))?").unwrap());
 
 static RE_JSON: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bJSON\b").unwrap());
 
@@ -301,8 +314,7 @@ static RE_DOUBLE_PRECISION: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bDOUBLE\s+PRECISION\b").unwrap());
 static RE_REAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bREAL\b").unwrap());
 static RE_BOOLEAN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bBOOLEAN\b").unwrap());
-static RE_TIMESTAMPTZ: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMPTZ\b").unwrap());
+static RE_TIMESTAMPTZ: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMPTZ\b").unwrap());
 static RE_TIMESTAMP_WITH_TZ: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMP\s+WITH\s+TIME\s+ZONE\b").unwrap());
 static RE_TIMESTAMP_NO_TZ: Lazy<Regex> =

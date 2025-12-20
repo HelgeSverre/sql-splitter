@@ -97,8 +97,8 @@ fn test_splitter_data_only() {
     )
     .unwrap();
 
-    let splitter = Splitter::new(input_file, output_dir.clone())
-        .with_content_filter(ContentFilter::DataOnly);
+    let splitter =
+        Splitter::new(input_file, output_dir.clone()).with_content_filter(ContentFilter::DataOnly);
     let stats = splitter.split().unwrap();
 
     assert_eq!(stats.tables_found, 1);

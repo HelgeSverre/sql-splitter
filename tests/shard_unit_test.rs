@@ -1,10 +1,9 @@
 //! Unit tests extracted from shard module
 
-use sql_splitter::shard::{
-    DefaultShardClassifier, GlobalTableMode, ShardConfig, ShardTableClassification,
-    ShardYamlConfig,
-};
 use sql_splitter::parser::SqlDialect;
+use sql_splitter::shard::{
+    DefaultShardClassifier, GlobalTableMode, ShardConfig, ShardTableClassification, ShardYamlConfig,
+};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -183,8 +182,12 @@ include_global: lookups
         assert!(DefaultShardClassifier::is_lookup_table("permissions"));
         assert!(!DefaultShardClassifier::is_lookup_table("orders"));
 
-        assert!(DefaultShardClassifier::is_junction_table_by_name("role_user_pivot"));
-        assert!(DefaultShardClassifier::is_junction_table_by_name("user_has_role"));
+        assert!(DefaultShardClassifier::is_junction_table_by_name(
+            "role_user_pivot"
+        ));
+        assert!(DefaultShardClassifier::is_junction_table_by_name(
+            "user_has_role"
+        ));
         assert!(!DefaultShardClassifier::is_junction_table_by_name("users"));
     }
 

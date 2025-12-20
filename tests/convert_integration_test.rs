@@ -43,11 +43,20 @@ INSERT INTO `users` (`id`, `name`, `created_at`) VALUES (1, 'John', '2025-01-01 
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("\"users\""), "Should have double-quoted identifiers");
+    assert!(
+        result.contains("\"users\""),
+        "Should have double-quoted identifiers"
+    );
     assert!(!result.contains("`"), "Should not have backticks");
-    assert!(result.contains("SERIAL") || result.contains("INTEGER"), "Should convert AUTO_INCREMENT");
+    assert!(
+        result.contains("SERIAL") || result.contains("INTEGER"),
+        "Should convert AUTO_INCREMENT"
+    );
     assert!(!result.contains("ENGINE="), "Should strip ENGINE clause");
-    assert!(result.contains("TIMESTAMP") || result.contains("DATETIME"), "Should have timestamp");
+    assert!(
+        result.contains("TIMESTAMP") || result.contains("DATETIME"),
+        "Should have timestamp"
+    );
 }
 
 #[test]
@@ -84,7 +93,10 @@ CREATE TABLE `products` (
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("\"products\""), "Should have double-quoted identifiers");
+    assert!(
+        result.contains("\"products\""),
+        "Should have double-quoted identifiers"
+    );
     assert!(!result.contains("`"), "Should not have backticks");
     assert!(result.contains("INTEGER"), "Should use INTEGER type");
     assert!(result.contains("TEXT"), "Should convert VARCHAR to TEXT");
@@ -192,12 +204,21 @@ CREATE TABLE `t` (
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("BOOLEAN"), "TINYINT(1) should become BOOLEAN");
-    assert!(result.contains("SMALLINT"), "TINYINT(4) should become SMALLINT");
+    assert!(
+        result.contains("BOOLEAN"),
+        "TINYINT(1) should become BOOLEAN"
+    );
+    assert!(
+        result.contains("SMALLINT"),
+        "TINYINT(4) should become SMALLINT"
+    );
     assert!(result.contains("TEXT"), "LONGTEXT should become TEXT");
     assert!(result.contains("BYTEA"), "BLOB should become BYTEA");
     assert!(result.contains("JSONB"), "JSON should become JSONB");
-    assert!(result.contains("TIMESTAMP"), "DATETIME should become TIMESTAMP");
+    assert!(
+        result.contains("TIMESTAMP"),
+        "DATETIME should become TIMESTAMP"
+    );
 }
 
 #[test]
@@ -232,9 +253,15 @@ CREATE TABLE `users` (
     let result = fs::read_to_string(&output_file).unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(result.contains("VARCHAR(255)"), "ENUM should become VARCHAR(255)");
+    assert!(
+        result.contains("VARCHAR(255)"),
+        "ENUM should become VARCHAR(255)"
+    );
     assert!(!result.contains("ENUM("), "Should not have ENUM");
-    assert!(stderr.contains("ENUM") || stderr.contains("Unsupported"), "Should warn about ENUM");
+    assert!(
+        stderr.contains("ENUM") || stderr.contains("Unsupported"),
+        "Should warn about ENUM"
+    );
 }
 
 #[test]
@@ -260,7 +287,10 @@ fn test_convert_dry_run() {
         .unwrap();
 
     assert!(output.status.success(), "Command failed: {:?}", output);
-    assert!(!output_file.exists(), "Output file should not be created in dry-run mode");
+    assert!(
+        !output_file.exists(),
+        "Output file should not be created in dry-run mode"
+    );
 }
 
 #[test]
@@ -282,9 +312,15 @@ fn test_convert_same_dialect_error() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "Should fail when dialects are the same");
+    assert!(
+        !output.status.success(),
+        "Should fail when dialects are the same"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("same"), "Should mention dialects are the same");
+    assert!(
+        stderr.contains("same"),
+        "Should mention dialects are the same"
+    );
 }
 
 #[test]
@@ -364,13 +400,34 @@ VALUES (1, 'John', NULL, TRUE, '2025-01-01 12:00:00');
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("`users`"), "Should have backtick identifiers");
-    assert!(!result.contains("\"users\""), "Should not have double-quoted identifiers");
-    assert!(result.contains("AUTO_INCREMENT"), "Should convert SERIAL to AUTO_INCREMENT");
-    assert!(result.contains("LONGBLOB"), "Should convert BYTEA to LONGBLOB");
-    assert!(result.contains("TINYINT(1)"), "Should convert BOOLEAN to TINYINT(1)");
-    assert!(result.contains("DATETIME"), "Should convert TIMESTAMPTZ to DATETIME");
-    assert!(!result.contains("SET client_encoding"), "Should strip PostgreSQL session commands");
+    assert!(
+        result.contains("`users`"),
+        "Should have backtick identifiers"
+    );
+    assert!(
+        !result.contains("\"users\""),
+        "Should not have double-quoted identifiers"
+    );
+    assert!(
+        result.contains("AUTO_INCREMENT"),
+        "Should convert SERIAL to AUTO_INCREMENT"
+    );
+    assert!(
+        result.contains("LONGBLOB"),
+        "Should convert BYTEA to LONGBLOB"
+    );
+    assert!(
+        result.contains("TINYINT(1)"),
+        "Should convert BOOLEAN to TINYINT(1)"
+    );
+    assert!(
+        result.contains("DATETIME"),
+        "Should convert TIMESTAMPTZ to DATETIME"
+    );
+    assert!(
+        !result.contains("SET client_encoding"),
+        "Should strip PostgreSQL session commands"
+    );
 }
 
 #[test]
@@ -449,9 +506,15 @@ CREATE TABLE "users" (
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("INTEGER"), "Should convert SERIAL to INTEGER");
+    assert!(
+        result.contains("INTEGER"),
+        "Should convert SERIAL to INTEGER"
+    );
     assert!(result.contains("BLOB"), "Should convert BYTEA to BLOB");
-    assert!(result.contains("REAL"), "Should convert DOUBLE PRECISION to REAL");
+    assert!(
+        result.contains("REAL"),
+        "Should convert DOUBLE PRECISION to REAL"
+    );
     assert!(!result.contains("SERIAL"), "Should not have SERIAL");
     assert!(!result.contains("BYTEA"), "Should not have BYTEA");
 }
@@ -496,7 +559,10 @@ INSERT INTO "users" ("id", "name", "score", "data") VALUES (1, 'John', 99.5, NUL
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("`users`"), "Should have backtick identifiers");
+    assert!(
+        result.contains("`users`"),
+        "Should have backtick identifiers"
+    );
     assert!(result.contains("DOUBLE"), "Should convert REAL to DOUBLE");
     assert!(!result.contains("PRAGMA"), "Should strip SQLite pragmas");
 }
@@ -538,8 +604,14 @@ CREATE TABLE "users" (
 
     let result = fs::read_to_string(&output_file).unwrap();
 
-    assert!(result.contains("\"users\""), "Should have double-quoted identifiers");
-    assert!(result.contains("DOUBLE PRECISION"), "Should convert REAL to DOUBLE PRECISION");
+    assert!(
+        result.contains("\"users\""),
+        "Should have double-quoted identifiers"
+    );
+    assert!(
+        result.contains("DOUBLE PRECISION"),
+        "Should convert REAL to DOUBLE PRECISION"
+    );
     assert!(result.contains("BYTEA"), "Should convert BLOB to BYTEA");
     assert!(!result.contains("REAL"), "Should not have REAL");
     assert!(!result.contains(" BLOB"), "Should not have BLOB");

@@ -10,7 +10,6 @@
 /// - Very long statements
 /// - Empty files and truncated input
 /// - NULL bytes and BOM
-
 use sql_splitter::parser::{Parser, SqlDialect, StatementType};
 
 // =========================================================================
@@ -662,8 +661,7 @@ mod postgres_dollar_quoting_tests {
 
     #[test]
     fn test_postgres_dollar_quote_with_semicolon_inside() {
-        let sql =
-            b"CREATE FUNCTION test() RETURNS text AS $$SELECT 1; SELECT 2;$$ LANGUAGE sql;";
+        let sql = b"CREATE FUNCTION test() RETURNS text AS $$SELECT 1; SELECT 2;$$ LANGUAGE sql;";
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
 
         let stmt = parser.read_statement().unwrap();
@@ -811,8 +809,7 @@ mod sqlite_tests {
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Sqlite);
 
         let stmt = parser.read_statement().unwrap().unwrap();
-        let (typ, name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Sqlite);
+        let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Sqlite);
 
         assert_eq!(typ, StatementType::CreateTable);
         assert_eq!(name, "users");
@@ -824,8 +821,7 @@ mod sqlite_tests {
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Sqlite);
 
         let stmt = parser.read_statement().unwrap().unwrap();
-        let (typ, name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Sqlite);
+        let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Sqlite);
 
         assert_eq!(typ, StatementType::CreateTable);
         assert_eq!(name, "my-table");
@@ -871,8 +867,7 @@ mod mysql_tests {
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
 
         let stmt = parser.read_statement().unwrap().unwrap();
-        let (typ, name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
+        let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
 
         assert_eq!(typ, StatementType::CreateTable);
         assert_eq!(name, "my table");
@@ -908,8 +903,7 @@ mod mysql_tests {
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
 
         let stmt = parser.read_statement().unwrap().unwrap();
-        let (typ, _name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
+        let (typ, _name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
 
         assert_eq!(typ, StatementType::CreateTable);
     }
@@ -936,8 +930,7 @@ mod mysql_tests {
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
 
         let stmt = parser.read_statement().unwrap().unwrap();
-        let (typ, name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
+        let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
 
         assert_eq!(typ, StatementType::CreateTable);
         assert_eq!(name, "users");
