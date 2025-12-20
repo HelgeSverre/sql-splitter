@@ -309,10 +309,11 @@ mod edge_case_tests {
 
         #[test]
         fn test_create_table_schema_qualified() {
+            // Schema-qualified names extract just the table name (not the schema)
             let stmt = b"CREATE TABLE db.users (id INT);";
             let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
             assert_eq!(typ, StatementType::CreateTable);
-            assert_eq!(name, "db.users");
+            assert_eq!(name, "users");
         }
 
         #[test]
@@ -360,10 +361,11 @@ mod edge_case_tests {
 
         #[test]
         fn test_insert_schema_qualified() {
+            // Schema-qualified names extract just the table name (not the schema)
             let stmt = b"INSERT INTO db.posts VALUES (1);";
             let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
             assert_eq!(typ, StatementType::Insert);
-            assert_eq!(name, "db.posts");
+            assert_eq!(name, "posts");
         }
 
         #[test]
@@ -424,10 +426,11 @@ mod edge_case_tests {
 
         #[test]
         fn test_alter_table_schema_qualified() {
+            // Schema-qualified names extract just the table name (not the schema)
             let stmt = b"ALTER TABLE db.orders ADD COLUMN status INT;";
             let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
             assert_eq!(typ, StatementType::AlterTable);
-            assert_eq!(name, "db.orders");
+            assert_eq!(name, "orders");
         }
 
         // B.5 DROP TABLE variations
@@ -444,10 +447,11 @@ mod edge_case_tests {
 
         #[test]
         fn test_drop_table_schema_qualified() {
+            // Schema-qualified names extract just the table name (not the schema)
             let stmt = b"DROP TABLE db.temp_data;";
             let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
             assert_eq!(typ, StatementType::DropTable);
-            assert_eq!(name, "db.temp_data");
+            assert_eq!(name, "temp_data");
         }
 
         // B.6 Unknown and malformed statements

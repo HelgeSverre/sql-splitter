@@ -36,8 +36,14 @@ make bench
 ### Main Commands
 
 ```bash
-# Split a SQL file into individual table files
+# Split a MySQL/MariaDB dump file (default)
 ./target/release/sql-splitter split large-dump.sql --output=tables
+
+# Split a PostgreSQL pg_dump file
+./target/release/sql-splitter split pg_dump.sql --output=tables --dialect=postgres
+
+# Split a SQLite .dump file
+./target/release/sql-splitter split sqlite.sql --output=tables --dialect=sqlite
 
 # Analyze a SQL file to gather statistics
 ./target/release/sql-splitter analyze database.sql --progress
@@ -46,6 +52,14 @@ make bench
 ./target/release/sql-splitter --help
 ./target/release/sql-splitter split --help
 ```
+
+### Supported Dialects
+
+| Dialect | Flag | Dump Tool | Key Features |
+|---------|------|-----------|--------------|
+| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump | Backtick quoting, backslash escapes |
+| PostgreSQL | `--dialect=postgres` | pg_dump | Double-quote identifiers, COPY FROM stdin, dollar-quoting |
+| SQLite | `--dialect=sqlite` | sqlite3 .dump | Double-quote identifiers |
 
 ## Architecture
 
@@ -138,4 +152,4 @@ cargo bench -- read_statement
 - **Regex**: `regex` crate with bytes API
 - **HashMap**: `ahash::AHashMap` for performance
 - **Buffer management**: `std::io::{BufReader, BufWriter}`
-- **Statement types**: CREATE TABLE, INSERT INTO, CREATE INDEX, ALTER TABLE, DROP TABLE
+- **Statement types**: CREATE TABLE, INSERT INTO, CREATE INDEX, ALTER TABLE, DROP TABLE, COPY (PostgreSQL)
