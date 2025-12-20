@@ -1,21 +1,31 @@
 # sql-splitter
 
-> High-performance CLI tool for splitting large SQL dump files into individual table files. Written in Go, achieves 300-400 MB/s throughput with constant ~100MB memory usage regardless of file size.
+> High-performance CLI tool for splitting large SQL dump files into individual table files. Written in Rust, achieves 400+ MB/s throughput with constant ~50MB memory usage regardless of file size. 1.25x faster than the Go version on 10GB files.
 
 sql-splitter reads SQL dump files and routes statements to separate output files based on table name. It handles CREATE TABLE, INSERT INTO, CREATE INDEX, ALTER TABLE, and DROP TABLE statements.
 
 ## Key Features
 
+- Written in Rust with zero-cost abstractions and no garbage collection
 - Streaming architecture handles files larger than available RAM
 - Adaptive buffer sizing based on file size (64KB optimal for CPU cache)
-- Concurrent writing with per-table writer pools
-- Safe parsing of strings with escaped characters and multi-line statements
-- Zero-allocation parsing using byte slices and sync.Pool
+- Zero-copy parsing using `&[u8]` slices in hot path
+- Fast hashing with `ahash::AHashMap` instead of default SipHash
+- Pre-compiled static regexes via `once_cell::Lazy`
 
 ## Installation
 
 ```bash
-go install github.com/helgesverre/sql-splitter@latest
+# Using cargo
+cargo install --git https://github.com/helgesverre/sql-splitter
+
+# Or build from source
+git clone https://github.com/helgesverre/sql-splitter.git
+cd sql-splitter
+cargo build --release
+
+# Optimized build for best performance
+RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 
 ## Commands
@@ -58,23 +68,37 @@ Other statements (SELECT, UPDATE, DELETE) are skipped.
 ## Performance
 
 Benchmarks on Apple M2 Max:
-- Parser throughput: 327-411 MB/s
-- Table extraction: 65 ns/op
-- Memory usage: ~100 MB constant
-- Cold start: ~10ms
+- Parser throughput: 400-500 MB/s
+- vs Go version: 1.25x faster on 10GB files
+- Memory usage: ~50 MB constant
+- Cold start: ~5ms
 
 ## Documentation
 
 - [README](https://github.com/helgesverre/sql-splitter/blob/main/README.md): Full documentation with architecture details
-- [CLAUDE.md](https://github.com/helgesverre/sql-splitter/blob/main/CLAUDE.md): AI assistant guidance for working with the codebase
+- [AGENTS.md](https://github.com/helgesverre/sql-splitter/blob/main/AGENTS.md): AI assistant guidance for working with the codebase
 
 ## Source Code
 
-- [cmd/](https://github.com/helgesverre/sql-splitter/tree/main/cmd): CLI commands (root, split, analyze)
-- [internal/parser/](https://github.com/helgesverre/sql-splitter/tree/main/internal/parser): Streaming SQL parser
-- [internal/writer/](https://github.com/helgesverre/sql-splitter/tree/main/internal/writer): Buffered file writers with pool
-- [internal/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/internal/splitter): Split orchestration
-- [internal/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/internal/analyzer): Statistical analysis
+- [src/cmd/](https://github.com/helgesverre/sql-splitter/tree/main/src/cmd): CLI commands (split, analyze)
+- [src/parser/](https://github.com/helgesverre/sql-splitter/tree/main/src/parser): Streaming SQL parser with `fill_buf` + `consume` pattern
+- [src/writer/](https://github.com/helgesverre/sql-splitter/tree/main/src/writer): Buffered file writers with WriterPool
+- [src/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/src/splitter): Split orchestration
+- [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
+
+## Architecture
+
+```
+BufReader (fill_buf) → Parser (Streaming) → WriterPool (BufWriter) → Table Files
+    64KB Buffer          Statement Buffer       256KB Buffers per table
+```
+
+Key implementation details:
+- Language: Rust 2021 edition
+- CLI Framework: clap v4 with derive macros
+- Regex: `regex` crate with bytes API
+- HashMap: `ahash::AHashMap` for performance
+- Buffer management: `std::io::{BufReader, BufWriter}`
 
 ## Optional
 

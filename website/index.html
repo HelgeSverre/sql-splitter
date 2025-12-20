@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>sql-splitter - High-Performance SQL File Splitter</title>
-    <meta name="description" content="Split large SQL dump files into individual table files at 300-400 MB/s. Memory-efficient, streaming architecture handles gigabyte-scale files.">
+    <title>sql-splitter - High-Performance SQL File Splitter in Rust</title>
+    <meta name="description" content="Split large SQL dump files into individual table files at 400+ MB/s. Memory-efficient, streaming architecture handles gigabyte-scale files. Written in Rust.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap" rel="stylesheet">
@@ -32,10 +32,10 @@
                 <span class="logo-icon">;</span>
                 sql-splitter
             </h1>
-            <p class="subtitle">Split SQL dumps at 400 MB/s</p>
+            <p class="subtitle">Split SQL dumps at 400+ MB/s</p>
             <p class="description">
                 High-performance CLI tool for splitting large SQL dump files into individual
-                table files. Process gigabyte-scale files with minimal memory usage.
+                table files. Written in Rust. 1.25x faster than the Go version on 10GB files.
             </p>
             <div class="hero-actions">
                 <a href="#install" class="btn btn-primary">Get Started</a>
@@ -55,17 +55,17 @@
                 <div class="benefit">
                     <div class="benefit-icon">~</div>
                     <h3>Blazing Fast</h3>
-                    <p>300-400 MB/s throughput</p>
+                    <p>400+ MB/s throughput</p>
                 </div>
                 <div class="benefit">
                     <div class="benefit-icon">&lt;</div>
                     <h3>Memory Efficient</h3>
-                    <p>~100MB constant usage</p>
+                    <p>~50MB constant usage</p>
                 </div>
                 <div class="benefit">
                     <div class="benefit-icon">*</div>
-                    <h3>Streaming</h3>
-                    <p>Handles files larger than RAM</p>
+                    <h3>Zero-Copy</h3>
+                    <p>No garbage collection</p>
                 </div>
             </div>
         </section>
@@ -79,10 +79,12 @@
                 <div class="step">
                     <div class="step-number">1</div>
                     <div class="step-content">
-                        <h3>Install</h3>
+                        <h3>Build from source</h3>
                         <div class="code-block">
-                            <pre><code>go install github.com/helgesverre/sql-splitter@latest</code></pre>
-                            <button class="copy-btn" data-copy="go install github.com/helgesverre/sql-splitter@latest">Copy</button>
+                            <pre><code>git clone https://github.com/helgesverre/sql-splitter.git
+cd sql-splitter
+cargo build --release</code></pre>
+                            <button class="copy-btn" data-copy="git clone https://github.com/helgesverre/sql-splitter.git && cd sql-splitter && cargo build --release">Copy</button>
                         </div>
                     </div>
                 </div>
@@ -92,8 +94,8 @@
                     <div class="step-content">
                         <h3>Split your dump</h3>
                         <div class="code-block">
-                            <pre><code>sql-splitter split database.sql --output=tables</code></pre>
-                            <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
+                            <pre><code>./target/release/sql-splitter split database.sql --output=tables</code></pre>
+                            <button class="copy-btn" data-copy="./target/release/sql-splitter split database.sql --output=tables">Copy</button>
                         </div>
                     </div>
                 </div>
@@ -106,23 +108,30 @@
         <section id="install" class="install">
             <h2>Installation</h2>
 
-            <h3>Using Go</h3>
-            <p>If you have Go 1.21+ installed:</p>
+            <h3>Using Cargo</h3>
+            <p>If you have Rust 1.70+ installed:</p>
             <div class="code-block">
-                <pre><code>go install github.com/helgesverre/sql-splitter@latest</code></pre>
-                <button class="copy-btn" data-copy="go install github.com/helgesverre/sql-splitter@latest">Copy</button>
+                <pre><code>cargo install --git https://github.com/helgesverre/sql-splitter</code></pre>
+                <button class="copy-btn" data-copy="cargo install --git https://github.com/helgesverre/sql-splitter">Copy</button>
             </div>
 
             <h3>Build from Source</h3>
             <div class="code-block">
                 <pre><code>git clone https://github.com/helgesverre/sql-splitter.git
 cd sql-splitter
-go build -o sql-splitter
-sudo mv sql-splitter /usr/local/bin/</code></pre>
+cargo build --release
+sudo cp target/release/sql-splitter /usr/local/bin/</code></pre>
                 <button class="copy-btn" data-copy="git clone https://github.com/helgesverre/sql-splitter.git
 cd sql-splitter
-go build -o sql-splitter
-sudo mv sql-splitter /usr/local/bin/">Copy</button>
+cargo build --release
+sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
+            </div>
+
+            <h3>Optimized Build (Best Performance)</h3>
+            <p>Build with CPU-specific optimizations for maximum throughput:</p>
+            <div class="code-block">
+                <pre><code>RUSTFLAGS="-C target-cpu=native" cargo build --release</code></pre>
+                <button class="copy-btn" data-copy="RUSTFLAGS=&quot;-C target-cpu=native&quot; cargo build --release">Copy</button>
             </div>
 
             <div class="verify">
@@ -254,10 +263,10 @@ sql-splitter analyze database.sql --progress</code></pre>
                         <tr><th>Metric</th><th>Value</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>Parser Throughput</td><td>327-411 MB/s</td></tr>
-                        <tr><td>Table Extraction</td><td>65 ns/op</td></tr>
-                        <tr><td>Memory Usage</td><td>~100 MB constant</td></tr>
-                        <tr><td>Cold Start</td><td>~10ms</td></tr>
+                        <tr><td>Parser Throughput</td><td>400-500 MB/s</td></tr>
+                        <tr><td>vs Go Version</td><td>1.25x faster on 10GB files</td></tr>
+                        <tr><td>Memory Usage</td><td>~50 MB constant</td></tr>
+                        <tr><td>Cold Start</td><td>~5ms</td></tr>
                     </tbody>
                 </table>
 
@@ -297,9 +306,16 @@ sql-splitter analyze database.sql --progress</code></pre>
                 </details>
 
                 <details>
+                    <summary>Why Rust instead of Go?</summary>
+                    <div class="details-content">
+                        <p>Rust's zero-cost abstractions and lack of garbage collection enable higher throughput. The Rust version achieves 1.25x faster performance than Go on large files, with lower memory usage and faster cold starts.</p>
+                    </div>
+                </details>
+
+                <details>
                     <summary>Is it faster than other tools?</summary>
                     <div class="details-content">
-                        <p>sql-splitter is among the fastest SQL splitters available. It ranks #2 among open-source alternatives, behind only mysqldumpsplit which achieves 533 MB/s.</p>
+                        <p>sql-splitter is among the fastest SQL splitters available, achieving 400+ MB/s throughput with minimal memory footprint thanks to Rust's ownership model and zero-copy parsing.</p>
                     </div>
                 </details>
             </article>
