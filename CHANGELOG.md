@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2025-12-20
+
+### Added
+
+- **Animated progress bar**: New progress display using `indicatif` crate with:
+  - Animated spinner (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏)
+  - Visual progress bar with gradient characters (█▓▒░)
+  - Elapsed time, bytes processed, and percentage display
+  - Smooth 100ms tick rate animation
+- Benchmark script now supports `--progress` flag to test progress bar performance
+
+### Fixed
+
+- Locale-related formatting issue in benchmark summary output
+
 ## [1.3.0] - 2025-12-20
 
 ### Added

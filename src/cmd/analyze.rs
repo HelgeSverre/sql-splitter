@@ -1,8 +1,10 @@
 use crate::analyzer::Analyzer;
 use crate::parser::{detect_dialect, detect_dialect_from_file, DialectConfidence, SqlDialect};
 use crate::splitter::Compression;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Result<()> {
@@ -32,17 +34,28 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
     let start_time = Instant::now();
 
     let stats = if progress {
-        let last_progress = AtomicI32::new(0);
+        let pb = ProgressBar::new(file_size);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░  ")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        let bytes_read = Arc::new(AtomicU64::new(0));
+        let bytes_read_clone = bytes_read.clone();
+        let pb_clone = pb.clone();
+
         let analyzer = Analyzer::new(file).with_dialect(dialect);
-        let stats = analyzer.analyze_with_progress(move |bytes_read| {
-            let pct = (bytes_read as f64 / file_size as f64 * 100.0) as i32;
-            let last = last_progress.load(Ordering::Relaxed);
-            if pct > last && pct % 5 == 0 {
-                last_progress.store(pct, Ordering::Relaxed);
-                eprint!("\rProgress: {}%", pct);
-            }
+        let stats = analyzer.analyze_with_progress(move |bytes| {
+            bytes_read_clone.store(bytes, Ordering::Relaxed);
+            pb_clone.set_position(bytes);
         })?;
-        eprintln!();
+
+        pb.finish_with_message("done");
         stats
     } else {
         let analyzer = Analyzer::new(file).with_dialect(dialect);
@@ -51,7 +64,7 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
 
     let elapsed = start_time.elapsed();
 
-    println!("✓ Analysis completed in {:.3?}\n", elapsed);
+    println!("\n✓ Analysis completed in {:.3?}\n", elapsed);
 
     if stats.is_empty() {
         println!("No tables found in SQL file.");

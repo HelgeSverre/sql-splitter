@@ -32,6 +32,7 @@ SYNTHETIC_SIZES=(10 100 1000)
 # Benchmark settings
 WARMUP=1
 RUNS=5
+PROGRESS_FLAG=""  # Set to "--progress" to test progress bar
 
 RUST_BIN="$PROJECT_DIR/target/release/sql-splitter"
 
@@ -75,7 +76,7 @@ run_benchmark() {
         --prepare "rm -rf $OUTPUT_DIR/output" \
         --export-markdown "${result_file}.md" \
         --export-json "${result_file}.json" \
-        "$RUST_BIN split '$sql_file' -o '$OUTPUT_DIR/output'" 2>&1
+        "$RUST_BIN split '$sql_file' -o '$OUTPUT_DIR/output' $PROGRESS_FLAG" 2>&1
     
     # Calculate throughput
     local bytes=$(stat -f%z "$sql_file" 2>/dev/null || stat -c%s "$sql_file")
@@ -144,7 +145,9 @@ EOF
     # Read results
     if [ -f "$OUTPUT_DIR/results.txt" ]; then
         while IFS='|' read -r name size time throughput; do
-            printf "| %s | %s | %.3fs | %s MB/s |\n" "$name" "$size" "$time" "$throughput" >> "$summary"
+            # Format time with awk to avoid locale issues (force C locale)
+            formatted_time=$(LC_ALL=C awk -v t="$time" 'BEGIN {printf "%.3f", t}')
+            echo "| $name | $size | ${formatted_time}s | $throughput MB/s |" >> "$summary"
         done < "$OUTPUT_DIR/results.txt"
     fi
 
@@ -169,7 +172,42 @@ EOF
     cat "$summary"
 }
 
+show_usage() {
+    echo "Usage: $0 [OPTIONS] [SQL_FILE]"
+    echo ""
+    echo "Options:"
+    echo "  --progress     Enable progress bar during benchmarks"
+    echo "  --help         Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0                      # Run synthetic benchmarks"
+    echo "  $0 --progress           # Run with progress bar enabled"
+    echo "  $0 path/to/dump.sql     # Benchmark custom file"
+    echo "  $0 --progress dump.sql  # Custom file with progress"
+}
+
 main() {
+    local custom_file=""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --progress|-p)
+                PROGRESS_FLAG="--progress"
+                echo -e "${CYAN}Progress bar enabled${NC}"
+                shift
+                ;;
+            --help|-h)
+                show_usage
+                exit 0
+                ;;
+            *)
+                custom_file="$1"
+                shift
+                ;;
+        esac
+    done
+    
     print_header "SQL Splitter Benchmark"
     
     # Check dependencies
@@ -185,8 +223,8 @@ main() {
     
     setup
     
-    if [ $# -gt 0 ]; then
-        run_custom_benchmark "$1"
+    if [ -n "$custom_file" ]; then
+        run_custom_benchmark "$custom_file"
     else
         run_synthetic_benchmarks
     fi
