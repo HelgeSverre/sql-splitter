@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.6.0] - 2025-12-20
+
+### Added
+
+- **Shard command**: Extract tenant-specific data from multi-tenant SQL dumps
+  - `sql-splitter shard dump.sql -o tenant_5.sql --tenant-value 5`
+  - `--tenant-column` flag to specify tenant column (auto-detected if not specified)
+  - Automatic tenant column detection (looks for company_id, tenant_id, organization_id, etc.)
+  - FK-ordered tenant selection that follows FK chains to include dependent data
+  - Table classification: tenant-root, tenant-dependent, junction, lookup, system
+  - `--root-tables` flag for explicit root table specification
+  - `--include-global` flag to control lookup table handling (none, lookups, all)
+  - `--config` flag for YAML-based table classification overrides
+  - `--max-selected-rows` memory guard (default 10M rows)
+  - `--strict-fk` flag to fail on FK integrity issues
+  - `--no-schema` flag to exclude CREATE TABLE statements
+  - `--dry-run` flag to preview sharding statistics
+  - Supports MySQL, PostgreSQL (COPY format), and SQLite dialects
+- **Shard YAML configuration**: Per-table classification overrides
+  - Tenant column and root table configuration
+  - Table role overrides (tenant-root, junction, lookup, system)
+  - Self-FK column specification for hierarchical tables (future use)
+- 9 new unit tests for shard command
+
+### Changed
+
+- Extended shared infrastructure from v1.5.0 for tenant extraction use case
+- Schema graph reused for FK dependency analysis
+
 ## [1.5.0] - 2025-12-20
 
 ### Added

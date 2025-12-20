@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.4.0 (current)  
+**Version**: 1.6.0 (current)  
 **Last Updated**: 2025-12-20  
-**Revision**: 2.1 — Post v1.4.0 release
+**Revision**: 2.2 — Post v1.6.0 release
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -13,8 +13,8 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 **High Priority (v1.x):**
 1. ✅ Test Data Generator — Enables CI testing for all features (v1.4.0)
 2. ✅ Merge — Completes split/merge roundtrip (v1.4.0)
-3. Sample — FK-aware data sampling (builds shared infra)
-4. Shard — Tenant extraction (reuses Sample infra)
+3. ✅ Sample — FK-aware data sampling (builds shared infra) (v1.5.0)
+4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
 5. Convert — Dialect conversion
 
 **Deferred to v2.x:**
@@ -115,44 +115,36 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.6.0 — Shard Command + Shared Infra v1.5
-**Target**: 2-3 weeks  
+### v1.6.0 — Shard Command + Shared Infra v1.5 ✅ RELEASED
+**Released**: 2025-12-20  
 **Theme**: Tenant extraction with FK chain resolution
 
-| Feature | Effort | Status | Notes |
-|---------|--------|--------|-------|
-| **Extend Shared Infra** | 8h | 🟡 Planned | |
-| ├─ PostgreSQL FK parsing | 4h | | Extends Schema Graph |
-| └─ PostgreSQL COPY parsing | 4h | | Extends Row Parsing |
-| **Shard command** | 24h | 🟡 Planned | |
-| ├─ CLI + tenant detection | 3h | | Auto-detect company_id |
-| ├─ Table classification | 4h | | Root/dependent/junction/global |
-| ├─ Internal split to temp | 4h | | Per-table temp files |
-| ├─ Tenant selection logic | 6h | | FK-ordered processing |
-| ├─ Self-FK closure | 3h | | Ancestor chains |
-| └─ Output generation | 4h | | Stats, headers |
-| **Testing** | 8h | | Integration + real dumps |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Extend Shared Infra** | ✅ Done | |
+| ├─ PostgreSQL FK parsing | ✅ Done | Extends Schema Graph |
+| └─ PostgreSQL COPY parsing | ✅ Done | Extends Row Parsing |
+| **Shard command** | ✅ Done | |
+| ├─ CLI + tenant detection | ✅ Done | Auto-detect company_id |
+| ├─ Table classification | ✅ Done | Root/dependent/junction/global |
+| ├─ Internal split to temp | ✅ Done | Per-table temp files |
+| ├─ Tenant selection logic | ✅ Done | FK-ordered processing |
+| ├─ Self-FK closure | 🟡 Planned | Ancestor chains (v1.6.x) |
+| └─ Output generation | ✅ Done | Stats, headers |
+| **Testing** | ✅ Done | Unit tests |
 
-**Total: ~40h MVP, ~48h Full**
-
-**MVP Definition:**
+**Delivered:**
 - `sql-splitter shard dump.sql -o tenant_5.sql --tenant-value 5`
-- Single tenant extraction
-- Auto-detect `tenant_id`/`company_id`
-- MySQL-first, best-effort PostgreSQL
-- Global lookup tables included by default
-- No FK orphans on generator fixtures
+- Auto-detect tenant columns (company_id, tenant_id, etc.)
+- Table classification: tenant-root, dependent, junction, lookup, system
+- FK chain resolution for dependent tables
+- YAML config for table classification overrides
+- Supports MySQL, PostgreSQL, and SQLite dialects
 
-**Full Scope (v1.6.x):**
+**Future (v1.6.x):**
 - Multi-tenant (`--tenant-values 1,2,3` → multiple files)
 - Hash-based sharding (`--hash --partitions 8`)
-- YAML config for classification overrides
-- Full PostgreSQL + SQLite support
-
-**Deliverables:**
-- `sql-splitter shard dump.sql -o tenant_5.sql --tenant-value 5`
-- `sql-splitter shard dump.sql -o shards/ --tenant-values 1,2,3,5`
-- FK chain resolution for tables without tenant column
+- Self-FK closure for hierarchical tables
 
 ---
 
@@ -254,10 +246,10 @@ These features are valuable but lower priority:
 | Version | Theme | MVP Effort | Full Effort | Duration |
 |---------|-------|------------|-------------|----------|
 | v1.4.0 | Test Data Gen + Merge | — | — | ✅ Released |
-| v1.5.0 | Sample + Infra v1 | ~30h | 43h | 2-3 weeks |
-| v1.6.0 | Shard + Infra v1.5 | ~40h | 48h | 2-3 weeks |
+| v1.5.0 | Sample + Infra v1 | — | — | ✅ Released |
+| v1.6.0 | Shard + Infra v1.5 | — | — | ✅ Released |
 | v1.7.0 | Convert MVP | ~35h | 56h | 3-4 weeks |
-| **Total** | | **~105h** | **~147h** | **~7-10 weeks** |
+| **Total** | | **~35h** | **~56h** | **~3-4 weeks** |
 
 ### Deferred Features (v2.x)
 
@@ -276,16 +268,16 @@ These features are valuable but lower priority:
    - Enables CI testing for all features
    - Completes split/merge roundtrip
 
-2. **v1.5.0 — Sample** ⭐ Next up
+2. ✅ **v1.5.0 — Sample** — Released
    - Common use case (dev fixtures)
    - Schema Graph + Row Parsing built here
 
-3. **v1.6.0 — Shard** ⭐ Unique differentiator
+3. ✅ **v1.6.0 — Shard** — Released
    - Multi-tenant extraction
    - No other tools do this well
    - Matures shared infrastructure
 
-4. **v1.7.0 — Convert MVP** 
+4. **v1.7.0 — Convert MVP** ⭐ Next up
    - Practical cross-dialect conversion
    - Benefits from mature parser types
 
