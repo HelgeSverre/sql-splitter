@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Convert command**: Convert SQL dumps between MySQL, PostgreSQL, and SQLite dialects
-  - `sql-splitter convert mysql.sql -o postgres.sql --to postgres`
-  - `sql-splitter convert mysql.sql -o sqlite.sql --to sqlite`
+  - Supports all 6 conversion pairs:
+    - MySQL → PostgreSQL, MySQL → SQLite
+    - PostgreSQL → MySQL, PostgreSQL → SQLite
+    - SQLite → MySQL, SQLite → PostgreSQL
   - `--from` flag to specify source dialect (auto-detected if not specified)
   - `--to` flag to specify target dialect (required)
   - `--strict` flag to fail on any unsupported feature
@@ -22,23 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Supports compressed input files (.gz, .bz2, .xz, .zst)
 - **Identifier quoting conversion**: Backticks ↔ double quotes between dialects
 - **String escape normalization**: MySQL `\'` → PostgreSQL/SQLite `''`
-- **Data type mapping**: Comprehensive type conversion including:
-  - `TINYINT(1)` → `BOOLEAN` (PostgreSQL)
-  - `INT AUTO_INCREMENT` → `SERIAL` (PostgreSQL) or `INTEGER` (SQLite)
-  - `LONGTEXT/MEDIUMTEXT/TINYTEXT` → `TEXT`
-  - `BLOB/LONGBLOB` → `BYTEA` (PostgreSQL) or `BLOB` (SQLite)
-  - `DATETIME` → `TIMESTAMP` (PostgreSQL) or `TEXT` (SQLite)
-  - `JSON` → `JSONB` (PostgreSQL) or `TEXT` (SQLite)
-  - `ENUM`/`SET` → `VARCHAR(255)` with warning
-  - `UNSIGNED` modifier removed with warning
-- **MySQL-specific cleanup**: Strips ENGINE, CHARSET, COLLATE clauses and conditional comments
-- **Warning system**: Reports unsupported features (ENUM, SET, UNSIGNED, FULLTEXT indexes)
-- 20 new unit tests for converter module
-- 9 new integration tests for convert command
+- **Data type mapping** (bidirectional):
+  - MySQL → PostgreSQL: `TINYINT(1)` → `BOOLEAN`, `AUTO_INCREMENT` → `SERIAL`, `LONGTEXT` → `TEXT`, `BLOB` → `BYTEA`, `DATETIME` → `TIMESTAMP`, `JSON` → `JSONB`
+  - MySQL → SQLite: All types → SQLite's affinity types (INTEGER, REAL, TEXT, BLOB)
+  - PostgreSQL → MySQL: `SERIAL` → `AUTO_INCREMENT`, `BYTEA` → `LONGBLOB`, `BOOLEAN` → `TINYINT(1)`, `JSONB` → `JSON`, `UUID` → `VARCHAR(36)`, `TIMESTAMPTZ` → `DATETIME`
+  - PostgreSQL → SQLite: `SERIAL` → `INTEGER`, `BYTEA` → `BLOB`, `DOUBLE PRECISION` → `REAL`
+  - SQLite → MySQL: `REAL` → `DOUBLE`
+  - SQLite → PostgreSQL: `REAL` → `DOUBLE PRECISION`, `BLOB` → `BYTEA`
+- **Session command handling**: Strips dialect-specific session commands during conversion
+  - MySQL: `SET NAMES`, `SET FOREIGN_KEY_CHECKS`, `LOCK TABLES`, conditional comments
+  - PostgreSQL: `SET client_encoding`, `SET search_path`, etc.
+  - SQLite: `PRAGMA` statements
+- **Warning system**: Reports unsupported features
+  - MySQL: ENUM, SET, UNSIGNED, FULLTEXT indexes
+  - PostgreSQL: Array types, INHERITS, PARTITION BY (to SQLite)
+- 37 new unit tests for converter module
+- 15 new integration tests for convert command
 
 ### Changed
 
-- Test suite expanded from 359 to 406 tests
+- Test suite expanded from 359 to 429 tests
 
 ## [1.6.0] - 2025-12-20
 

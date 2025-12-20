@@ -148,9 +148,9 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.7.0 — Convert Command (MVP) ✅ RELEASED
+### v1.7.0 — Convert Command ✅ RELEASED
 **Released**: 2025-12-20  
-**Theme**: Dialect conversion for common cases
+**Theme**: Full dialect conversion for all 6 pairs
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -158,25 +158,27 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | ├─ Converter architecture | ✅ Done | Streaming, per-statement |
 | ├─ Identifier quoting | ✅ Done | Backticks ↔ double quotes |
 | ├─ String escaping | ✅ Done | `\'` ↔ `''` |
-| ├─ Common type mapping | ✅ Done | 20+ type mappings |
-| ├─ AUTO_INCREMENT → SERIAL | ✅ Done | Per-dialect |
-| ├─ Session headers | ✅ Done | Strip/convert |
+| ├─ Common type mapping | ✅ Done | 30+ type mappings |
+| ├─ AUTO_INCREMENT ↔ SERIAL | ✅ Done | Bidirectional |
+| ├─ Session headers | ✅ Done | Strip MySQL/PostgreSQL/SQLite |
 | └─ Warning system | ✅ Done | Unsupported features |
-| **Conversion pairs (MVP)** | ✅ Done | |
-| ├─ MySQL → PostgreSQL | ✅ Done | INSERT-based |
-| └─ MySQL → SQLite | ✅ Done | All common types |
-| **Testing** | ✅ Done | 29 tests |
+| **All 6 conversion pairs** | ✅ Done | |
+| ├─ MySQL → PostgreSQL | ✅ Done | Full type mapping |
+| ├─ MySQL → SQLite | ✅ Done | Full type mapping |
+| ├─ PostgreSQL → MySQL | ✅ Done | SERIAL→AUTO_INCREMENT, BYTEA→BLOB |
+| ├─ PostgreSQL → SQLite | ✅ Done | Full type mapping |
+| ├─ SQLite → MySQL | ✅ Done | REAL→DOUBLE |
+| └─ SQLite → PostgreSQL | ✅ Done | BLOB→BYTEA, REAL→DOUBLE PRECISION |
+| **Testing** | ✅ Done | 52 tests (37 unit + 15 integration) |
 
 **Delivered:**
-- `sql-splitter convert mysql.sql -o postgres.sql --to postgres`
-- `sql-splitter convert mysql.sql -o sqlite.sql --to sqlite`
+- All 6 conversion pairs (MySQL ↔ PostgreSQL ↔ SQLite)
 - Auto-detect source dialect
-- Comprehensive type mapping (TINYINT→BOOLEAN, DATETIME→TIMESTAMP, JSON→JSONB)
-- Warnings for unsupported features (ENUM, SET, UNSIGNED, FULLTEXT)
-- Strips MySQL-specific clauses (ENGINE, CHARSET, COLLATE, conditional comments)
+- Bidirectional type mapping
+- Session command stripping for all dialects
+- Warnings for unsupported features (ENUM, SET, arrays, INHERITS)
 
 **Future (v2.0.0):**
-- All 6 pairs (MySQL ↔ PostgreSQL ↔ SQLite)
 - PostgreSQL COPY → INSERT conversion
 - Complete type mapping (arrays, GEOMETRY)
 - Full constraint + index conversion

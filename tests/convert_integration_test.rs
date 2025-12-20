@@ -321,3 +321,277 @@ CREATE TABLE `users` (`id` INT AUTO_INCREMENT);
         "Should auto-detect MySQL"
     );
 }
+
+// PostgreSQL → MySQL tests
+
+#[test]
+fn test_convert_postgres_to_mysql_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let postgres_sql = r#"
+SET client_encoding = 'UTF8';
+CREATE TABLE "users" (
+  "id" SERIAL PRIMARY KEY,
+  "name" VARCHAR(255) NOT NULL,
+  "data" BYTEA,
+  "active" BOOLEAN DEFAULT TRUE,
+  "created_at" TIMESTAMPTZ NOT NULL
+);
+
+INSERT INTO "users" ("id", "name", "data", "active", "created_at") 
+VALUES (1, 'John', NULL, TRUE, '2025-01-01 12:00:00');
+"#;
+
+    fs::write(&input_file, postgres_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "postgres",
+            "--to",
+            "mysql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(result.contains("`users`"), "Should have backtick identifiers");
+    assert!(!result.contains("\"users\""), "Should not have double-quoted identifiers");
+    assert!(result.contains("AUTO_INCREMENT"), "Should convert SERIAL to AUTO_INCREMENT");
+    assert!(result.contains("LONGBLOB"), "Should convert BYTEA to LONGBLOB");
+    assert!(result.contains("TINYINT(1)"), "Should convert BOOLEAN to TINYINT(1)");
+    assert!(result.contains("DATETIME"), "Should convert TIMESTAMPTZ to DATETIME");
+    assert!(!result.contains("SET client_encoding"), "Should strip PostgreSQL session commands");
+}
+
+#[test]
+fn test_convert_postgres_to_mysql_jsonb() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let postgres_sql = r#"
+CREATE TABLE "events" (
+  "id" SERIAL PRIMARY KEY,
+  "payload" JSONB NOT NULL,
+  "meta" JSON
+);
+"#;
+
+    fs::write(&input_file, postgres_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "postgres",
+            "--to",
+            "mysql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(result.contains("JSON"), "Should have JSON type");
+    assert!(!result.contains("JSONB"), "Should convert JSONB to JSON");
+}
+
+// PostgreSQL → SQLite tests
+
+#[test]
+fn test_convert_postgres_to_sqlite_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let postgres_sql = r#"
+CREATE TABLE "users" (
+  "id" SERIAL PRIMARY KEY,
+  "name" VARCHAR(255) NOT NULL,
+  "data" BYTEA,
+  "score" DOUBLE PRECISION,
+  "active" BOOLEAN
+);
+"#;
+
+    fs::write(&input_file, postgres_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "postgres",
+            "--to",
+            "sqlite",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(result.contains("INTEGER"), "Should convert SERIAL to INTEGER");
+    assert!(result.contains("BLOB"), "Should convert BYTEA to BLOB");
+    assert!(result.contains("REAL"), "Should convert DOUBLE PRECISION to REAL");
+    assert!(!result.contains("SERIAL"), "Should not have SERIAL");
+    assert!(!result.contains("BYTEA"), "Should not have BYTEA");
+}
+
+// SQLite → MySQL tests
+
+#[test]
+fn test_convert_sqlite_to_mysql_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let sqlite_sql = r#"
+PRAGMA foreign_keys = ON;
+CREATE TABLE "users" (
+  "id" INTEGER PRIMARY KEY,
+  "name" TEXT NOT NULL,
+  "score" REAL,
+  "data" BLOB
+);
+
+INSERT INTO "users" ("id", "name", "score", "data") VALUES (1, 'John', 99.5, NULL);
+"#;
+
+    fs::write(&input_file, sqlite_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "sqlite",
+            "--to",
+            "mysql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(result.contains("`users`"), "Should have backtick identifiers");
+    assert!(result.contains("DOUBLE"), "Should convert REAL to DOUBLE");
+    assert!(!result.contains("PRAGMA"), "Should strip SQLite pragmas");
+}
+
+// SQLite → PostgreSQL tests
+
+#[test]
+fn test_convert_sqlite_to_postgres_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let sqlite_sql = r#"
+CREATE TABLE "users" (
+  "id" INTEGER PRIMARY KEY,
+  "name" TEXT NOT NULL,
+  "score" REAL,
+  "data" BLOB
+);
+"#;
+
+    fs::write(&input_file, sqlite_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "sqlite",
+            "--to",
+            "postgres",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(result.contains("\"users\""), "Should have double-quoted identifiers");
+    assert!(result.contains("DOUBLE PRECISION"), "Should convert REAL to DOUBLE PRECISION");
+    assert!(result.contains("BYTEA"), "Should convert BLOB to BYTEA");
+    assert!(!result.contains("REAL"), "Should not have REAL");
+    assert!(!result.contains(" BLOB"), "Should not have BLOB");
+}
+
+// All 6 pairs roundtrip test (basic)
+
+#[test]
+fn test_convert_all_pairs_execute_successfully() {
+    let test_cases = [
+        ("mysql", "postgres", "CREATE TABLE `t` (`id` INT);"),
+        ("mysql", "sqlite", "CREATE TABLE `t` (`id` INT);"),
+        ("postgres", "mysql", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+        ("postgres", "sqlite", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+        ("sqlite", "mysql", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+        ("sqlite", "postgres", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+    ];
+
+    for (from, to, sql) in test_cases {
+        let temp_dir = TempDir::new().unwrap();
+        let input_file = temp_dir.path().join("input.sql");
+        let output_file = temp_dir.path().join("output.sql");
+
+        fs::write(&input_file, sql).unwrap();
+
+        let output = sql_splitter()
+            .args([
+                "convert",
+                input_file.to_str().unwrap(),
+                "-o",
+                output_file.to_str().unwrap(),
+                "--from",
+                from,
+                "--to",
+                to,
+            ])
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "Conversion {} → {} failed: {:?}",
+            from,
+            to,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(
+            output_file.exists(),
+            "Output file should exist for {} → {}",
+            from,
+            to
+        );
+    }
+}

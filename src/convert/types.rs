@@ -205,16 +205,33 @@ impl TypeMapper {
 
     /// Convert SQLite types to MySQL
     fn sqlite_to_mysql(stmt: &str) -> String {
-        // SQLite is very permissive - most types map directly
-        // INTEGER PRIMARY KEY in SQLite is auto-increment
-        stmt.to_string()
+        let mut result = stmt.to_string();
+
+        // SQLite uses TEXT for everything, but we can preserve some type info
+        // REAL → DOUBLE
+        result = RE_REAL.replace_all(&result, "DOUBLE").to_string();
+
+        // BLOB stays BLOB
+        // TEXT stays TEXT
+        // INTEGER stays INTEGER (MySQL will handle it)
+
+        result
     }
 
     /// Convert SQLite types to PostgreSQL
     fn sqlite_to_postgres(stmt: &str) -> String {
-        // SQLite is very permissive
-        // INTEGER PRIMARY KEY → SERIAL PRIMARY KEY
-        stmt.to_string()
+        let mut result = stmt.to_string();
+
+        // REAL → DOUBLE PRECISION
+        result = RE_REAL.replace_all(&result, "DOUBLE PRECISION").to_string();
+
+        // BLOB → BYTEA
+        result = RE_BLOB.replace_all(&result, "BYTEA").to_string();
+
+        // INTEGER stays INTEGER
+        // TEXT stays TEXT
+
+        result
     }
 }
 
@@ -385,5 +402,97 @@ mod tests {
 
         assert!(output.contains("DOUBLE"));
         assert!(!output.contains("PRECISION"));
+    }
+
+    #[test]
+    fn test_postgres_to_mysql_serial() {
+        let input = "CREATE TABLE t (id SERIAL PRIMARY KEY, big_id BIGSERIAL);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::MySql);
+
+        assert!(output.contains("INT AUTO_INCREMENT"));
+        assert!(output.contains("BIGINT AUTO_INCREMENT"));
+        assert!(!output.contains("SERIAL"));
+    }
+
+    #[test]
+    fn test_postgres_to_mysql_uuid() {
+        let input = "CREATE TABLE t (id UUID);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::MySql);
+
+        assert!(output.contains("VARCHAR(36)"));
+        assert!(!output.contains("UUID"));
+    }
+
+    #[test]
+    fn test_postgres_to_mysql_jsonb() {
+        let input = "CREATE TABLE t (data JSONB);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::MySql);
+
+        assert!(output.contains("JSON"));
+        assert!(!output.contains("JSONB"));
+    }
+
+    #[test]
+    fn test_postgres_to_mysql_timestamptz() {
+        let input = "CREATE TABLE t (created_at TIMESTAMPTZ);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::MySql);
+
+        assert!(output.contains("DATETIME"));
+        assert!(!output.contains("TIMESTAMPTZ"));
+    }
+
+    #[test]
+    fn test_postgres_to_sqlite() {
+        let input = "CREATE TABLE t (id SERIAL, data BYTEA, flag BOOLEAN, val DOUBLE PRECISION);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::Sqlite);
+
+        assert!(output.contains("INTEGER"));
+        assert!(output.contains("BLOB"));
+        assert!(!output.contains("BYTEA"));
+        assert!(!output.contains("SERIAL"));
+        assert!(output.contains("REAL"));
+    }
+
+    #[test]
+    fn test_postgres_to_sqlite_jsonb() {
+        let input = "CREATE TABLE t (data JSONB, extra JSON);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::Sqlite);
+
+        assert!(output.contains("TEXT"));
+        assert!(!output.contains("JSONB"));
+        assert!(!output.contains("JSON") || output.contains("TEXT"));
+    }
+
+    #[test]
+    fn test_postgres_to_sqlite_uuid() {
+        let input = "CREATE TABLE t (id UUID);";
+        let output = TypeMapper::convert(input, SqlDialect::Postgres, SqlDialect::Sqlite);
+
+        assert!(output.contains("TEXT"));
+        assert!(!output.contains("UUID"));
+    }
+
+    #[test]
+    fn test_sqlite_to_mysql() {
+        let input = "CREATE TABLE t (id INTEGER, val REAL, data BLOB);";
+        let output = TypeMapper::convert(input, SqlDialect::Sqlite, SqlDialect::MySql);
+
+        assert!(output.contains("INTEGER"));
+        assert!(output.contains("DOUBLE"));
+        assert!(output.contains("BLOB"));
+        assert!(!output.contains("REAL"));
+    }
+
+    #[test]
+    fn test_sqlite_to_postgres() {
+        let input = "CREATE TABLE t (id INTEGER, val REAL, data BLOB, name TEXT);";
+        let output = TypeMapper::convert(input, SqlDialect::Sqlite, SqlDialect::Postgres);
+
+        assert!(output.contains("INTEGER"));
+        assert!(output.contains("DOUBLE PRECISION"));
+        assert!(output.contains("BYTEA"));
+        assert!(output.contains("TEXT"));
+        assert!(!output.contains("REAL"));
+        assert!(!output.contains("BLOB"));
     }
 }

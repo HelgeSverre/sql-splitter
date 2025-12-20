@@ -250,6 +250,20 @@ impl Converter {
             }
         }
 
+        // Skip PostgreSQL session commands when converting to other dialects
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            if self.is_postgres_session_command(&result) {
+                return Ok(Vec::new()); // Skip
+            }
+        }
+
+        // Skip SQLite pragmas when converting to other dialects
+        if self.from == SqlDialect::Sqlite && self.to != SqlDialect::Sqlite {
+            if self.is_sqlite_pragma(&result) {
+                return Ok(Vec::new()); // Skip
+            }
+        }
+
         // Strip conditional comments
         if result.contains("/*!") {
             let stripped = self.strip_conditional_comments(&result);
@@ -269,6 +283,26 @@ impl Converter {
             || upper.contains("SET FOREIGN_KEY_CHECKS")
             || upper.contains("LOCK TABLES")
             || upper.contains("UNLOCK TABLES")
+    }
+
+    /// Check if statement is a PostgreSQL session command
+    fn is_postgres_session_command(&self, stmt: &str) -> bool {
+        let upper = stmt.to_uppercase();
+        upper.contains("SET CLIENT_ENCODING")
+            || upper.contains("SET STANDARD_CONFORMING_STRINGS")
+            || upper.contains("SET CHECK_FUNCTION_BODIES")
+            || upper.contains("SET SEARCH_PATH")
+            || upper.contains("SET DEFAULT_TABLESPACE")
+            || upper.contains("SET LOCK_TIMEOUT")
+            || upper.contains("SET IDLE_IN_TRANSACTION_SESSION_TIMEOUT")
+            || upper.contains("SET ROW_SECURITY")
+            || upper.contains("SELECT PG_CATALOG")
+    }
+
+    /// Check if statement is a SQLite pragma
+    fn is_sqlite_pragma(&self, stmt: &str) -> bool {
+        let upper = stmt.to_uppercase();
+        upper.contains("PRAGMA")
     }
 
     /// Convert identifier quoting based on dialects
@@ -333,7 +367,7 @@ impl Converter {
         TypeMapper::convert(stmt, self.from, self.to)
     }
 
-    /// Convert AUTO_INCREMENT syntax
+    /// Convert AUTO_INCREMENT/SERIAL syntax
     fn convert_auto_increment(&self, stmt: &str, _table_name: Option<&str>) -> String {
         match (self.from, self.to) {
             (SqlDialect::MySql, SqlDialect::Postgres) => {
@@ -351,6 +385,35 @@ impl Converter {
                 let result = stmt.replace("INT AUTO_INCREMENT", "INTEGER");
                 let result = result.replace("int AUTO_INCREMENT", "INTEGER");
                 result.replace("AUTO_INCREMENT", "")
+            }
+            (SqlDialect::Postgres, SqlDialect::MySql) => {
+                // SERIAL → INT AUTO_INCREMENT
+                // BIGSERIAL → BIGINT AUTO_INCREMENT
+                let result = stmt.replace("BIGSERIAL", "BIGINT AUTO_INCREMENT");
+                let result = result.replace("bigserial", "BIGINT AUTO_INCREMENT");
+                let result = result.replace("SMALLSERIAL", "SMALLINT AUTO_INCREMENT");
+                let result = result.replace("smallserial", "SMALLINT AUTO_INCREMENT");
+                let result = result.replace("SERIAL", "INT AUTO_INCREMENT");
+                result.replace("serial", "INT AUTO_INCREMENT")
+            }
+            (SqlDialect::Postgres, SqlDialect::Sqlite) => {
+                // SERIAL → INTEGER (SQLite auto-increments INTEGER PRIMARY KEY)
+                let result = stmt.replace("BIGSERIAL", "INTEGER");
+                let result = result.replace("bigserial", "INTEGER");
+                let result = result.replace("SMALLSERIAL", "INTEGER");
+                let result = result.replace("smallserial", "INTEGER");
+                let result = result.replace("SERIAL", "INTEGER");
+                result.replace("serial", "INTEGER")
+            }
+            (SqlDialect::Sqlite, SqlDialect::MySql) => {
+                // SQLite uses INTEGER PRIMARY KEY for auto-increment
+                // We can't easily detect this pattern, so just pass through
+                stmt.to_string()
+            }
+            (SqlDialect::Sqlite, SqlDialect::Postgres) => {
+                // SQLite uses INTEGER PRIMARY KEY for auto-increment
+                // We can't easily detect this pattern, so just pass through
+                stmt.to_string()
             }
             _ => stmt.to_string(),
         }
@@ -485,42 +548,87 @@ impl Converter {
     ) -> Result<(), ConvertWarning> {
         let upper = stmt.to_uppercase();
 
-        // ENUM types
-        if upper.contains("ENUM(") {
-            let warning = ConvertWarning::UnsupportedFeature {
-                feature: format!(
-                    "ENUM type{}",
-                    table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
-                ),
-                suggestion: Some("Converted to VARCHAR - consider adding CHECK constraint".to_string()),
-            };
-            self.warnings.add(warning.clone());
-            if self.strict {
-                return Err(warning);
+        // MySQL-specific features
+        if self.from == SqlDialect::MySql {
+            // ENUM types
+            if upper.contains("ENUM(") {
+                let warning = ConvertWarning::UnsupportedFeature {
+                    feature: format!(
+                        "ENUM type{}",
+                        table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
+                    ),
+                    suggestion: Some("Converted to VARCHAR - consider adding CHECK constraint".to_string()),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
+            }
+
+            // SET types (MySQL)
+            if upper.contains("SET(") {
+                let warning = ConvertWarning::UnsupportedFeature {
+                    feature: format!(
+                        "SET type{}",
+                        table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
+                    ),
+                    suggestion: Some("Converted to VARCHAR - SET semantics not preserved".to_string()),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
+            }
+
+            // UNSIGNED
+            if upper.contains("UNSIGNED") {
+                self.warnings.add(ConvertWarning::UnsupportedFeature {
+                    feature: "UNSIGNED modifier".to_string(),
+                    suggestion: Some("Removed - consider adding CHECK constraint for non-negative values".to_string()),
+                });
             }
         }
 
-        // SET types (MySQL)
-        if upper.contains("SET(") {
-            let warning = ConvertWarning::UnsupportedFeature {
-                feature: format!(
-                    "SET type{}",
-                    table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
-                ),
-                suggestion: Some("Converted to VARCHAR - SET semantics not preserved".to_string()),
-            };
-            self.warnings.add(warning.clone());
-            if self.strict {
-                return Err(warning);
+        // PostgreSQL-specific features
+        if self.from == SqlDialect::Postgres {
+            // Array types
+            if upper.contains("[]") || upper.contains("ARRAY[") {
+                let warning = ConvertWarning::UnsupportedFeature {
+                    feature: format!(
+                        "Array type{}",
+                        table_name.map(|t| format!(" in table {}", t)).unwrap_or_default()
+                    ),
+                    suggestion: Some("Array types not supported in target dialect - consider using JSON".to_string()),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
             }
-        }
 
-        // UNSIGNED
-        if upper.contains("UNSIGNED") {
-            self.warnings.add(ConvertWarning::UnsupportedFeature {
-                feature: "UNSIGNED modifier".to_string(),
-                suggestion: Some("Removed - consider adding CHECK constraint for non-negative values".to_string()),
-            });
+            // INHERITS
+            if upper.contains("INHERITS") {
+                let warning = ConvertWarning::UnsupportedFeature {
+                    feature: "Table inheritance (INHERITS)".to_string(),
+                    suggestion: Some("PostgreSQL table inheritance not supported in target dialect".to_string()),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
+            }
+
+            // PARTITION BY
+            if upper.contains("PARTITION BY") && self.to == SqlDialect::Sqlite {
+                let warning = ConvertWarning::UnsupportedFeature {
+                    feature: "Table partitioning".to_string(),
+                    suggestion: Some("Partitioning not supported in SQLite".to_string()),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
+            }
         }
 
         Ok(())
@@ -759,5 +867,97 @@ mod tests {
         assert!(converter.is_mysql_session_command("SET NAMES utf8mb4;"));
         assert!(converter.is_mysql_session_command("LOCK TABLES users WRITE;"));
         assert!(!converter.is_mysql_session_command("CREATE TABLE users (id INT);"));
+    }
+
+    #[test]
+    fn test_skip_postgres_session_commands() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        assert!(converter.is_postgres_session_command("SET client_encoding = 'UTF8';"));
+        assert!(converter.is_postgres_session_command("SET search_path TO public;"));
+        assert!(!converter.is_postgres_session_command("CREATE TABLE users (id INT);"));
+    }
+
+    #[test]
+    fn test_skip_sqlite_pragmas() {
+        let converter = Converter::new(SqlDialect::Sqlite, SqlDialect::MySql);
+        
+        assert!(converter.is_sqlite_pragma("PRAGMA foreign_keys = ON;"));
+        assert!(converter.is_sqlite_pragma("PRAGMA journal_mode = WAL;"));
+        assert!(!converter.is_sqlite_pragma("CREATE TABLE users (id INTEGER);"));
+    }
+
+    #[test]
+    fn test_serial_to_auto_increment() {
+        let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        let input = b"CREATE TABLE users (id SERIAL PRIMARY KEY);";
+        let output = converter.convert_statement(input).unwrap();
+        let output_str = String::from_utf8_lossy(&output);
+        
+        assert!(output_str.contains("AUTO_INCREMENT"));
+        assert!(!output_str.contains("SERIAL"));
+    }
+
+    #[test]
+    fn test_postgres_to_sqlite_types() {
+        let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::Sqlite);
+        
+        let input = b"CREATE TABLE t (id SERIAL, data BYTEA, flag BOOLEAN);";
+        let output = converter.convert_statement(input).unwrap();
+        let output_str = String::from_utf8_lossy(&output);
+        
+        assert!(output_str.contains("INTEGER"));
+        assert!(output_str.contains("BLOB"));
+        assert!(!output_str.contains("BYTEA"));
+        assert!(!output_str.contains("SERIAL"));
+    }
+
+    #[test]
+    fn test_sqlite_to_postgres_types() {
+        let mut converter = Converter::new(SqlDialect::Sqlite, SqlDialect::Postgres);
+        
+        let input = b"CREATE TABLE t (id INTEGER, val REAL, data BLOB);";
+        let output = converter.convert_statement(input).unwrap();
+        let output_str = String::from_utf8_lossy(&output);
+        
+        assert!(output_str.contains("DOUBLE PRECISION"));
+        assert!(output_str.contains("BYTEA"));
+        assert!(!output_str.contains("REAL"));
+        assert!(!output_str.contains("BLOB"));
+    }
+
+    #[test]
+    fn test_sqlite_to_mysql_types() {
+        let mut converter = Converter::new(SqlDialect::Sqlite, SqlDialect::MySql);
+        
+        let input = b"CREATE TABLE t (id INTEGER, val REAL);";
+        let output = converter.convert_statement(input).unwrap();
+        let output_str = String::from_utf8_lossy(&output);
+        
+        assert!(output_str.contains("INTEGER"));
+        assert!(output_str.contains("DOUBLE"));
+        assert!(!output_str.contains("REAL"));
+    }
+
+    #[test]
+    fn test_postgres_identifier_quoting_to_mysql() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        let input = "\"users\"";
+        let output = converter.double_quotes_to_backticks(input);
+        
+        assert_eq!(output, "`users`");
+    }
+
+    #[test]
+    fn test_preserve_strings_in_identifier_conversion() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        let input = "SELECT 'hello \"world\"' FROM \"users\"";
+        let output = converter.double_quotes_to_backticks(input);
+        
+        assert!(output.contains("'hello \"world\"'"));
+        assert!(output.contains("`users`"));
     }
 }
