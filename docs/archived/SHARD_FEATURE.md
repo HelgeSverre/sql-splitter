@@ -1,6 +1,6 @@
 # Shard Command Design
 
-**Status**: Draft  
+**Status**: ✅ Implemented (v1.6.0)  
 **Date**: 2025-12-20  
 **Source**: Oracle feasibility analysis + real-world schema investigation
 

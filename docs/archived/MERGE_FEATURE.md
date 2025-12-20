@@ -1,6 +1,6 @@
 # Merge Feature Design
 
-**Status**: Draft  
+**Status**: ✅ Implemented (v1.4.0)  
 **Author**: Amp  
 **Date**: 2025-12-20
 
