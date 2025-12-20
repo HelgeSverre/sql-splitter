@@ -6,12 +6,20 @@
 
 High-performance CLI tool for splitting large SQL dump files into individual table files.
 
-Supports MySQL, MariaDB, PostgreSQL (including `COPY FROM stdin`), and SQLite. Fastest in benchmarks: 1.2-5x faster than alternatives.
+Supports MySQL, MariaDB, PostgreSQL (including `COPY FROM stdin`), and SQLite. Fastest streaming tool with 1.1-5x speedup over alternatives.
 
 ## Installation
 
+### From crates.io
+
 ```bash
 cargo install sql-splitter
+```
+
+### From source
+
+```bash
+cargo install --git https://github.com/helgesverre/sql-splitter
 ```
 
 Or download pre-built binaries from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases).
