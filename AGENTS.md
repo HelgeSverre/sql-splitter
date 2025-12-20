@@ -265,3 +265,47 @@ Follow [Semantic Versioning](https://semver.org/):
 [ ] gh release create vX.Y.Z (REQUIRED!)
 [ ] Verify release at github.com/HelgeSverre/sql-splitter/releases
 ```
+
+## Website llms.txt Maintenance
+
+The file `website/llms.txt` provides LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification. This file helps AI tools understand how to use and install sql-splitter.
+
+### When to Update llms.txt
+
+Update `website/llms.txt` when:
+- Adding new CLI commands or subcommands
+- Adding/changing command-line flags or options
+- Adding support for new SQL dialects
+- Adding support for new compression formats
+- Changing installation methods
+- Updating performance benchmarks significantly
+- Adding new major features
+
+### llms.txt Format Requirements
+
+The file must follow this structure (in order):
+1. **H1 header**: Project name (`# sql-splitter`)
+2. **Blockquote**: Brief summary with key capabilities
+3. **Body sections**: Detailed info (no H2 headers yet)
+4. **H2 sections**: File lists with URLs to documentation/source
+
+Key guidelines:
+- Keep content concise and actionable for LLMs
+- Include complete CLI examples with common flags
+- Document all supported options in tables
+- Link to GitHub source files and documentation
+- Use the "Optional" H2 section for secondary resources
+
+### Example Update
+
+When adding a new `--format` flag:
+
+```markdown
+## Commands
+
+### split
+...
+Options:
+- `--format <FORMAT>`: Output format: sql, json (default: sql)  # ADD THIS
+...
+```
