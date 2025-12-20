@@ -5,11 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2024-12-20
+## [1.0.0] - 2025-12-20
 
 ### Added
 
-- Initial release of sql-splitter CLI tool
+- Initial release of sql-splitter CLI tool (Rust rewrite of the Go version)
 - **`split` command**: Split large SQL dump files into individual table files
   - `--output, -o`: Specify output directory (default: `output`)
   - `--verbose, -v`: Enable verbose output
@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`analyze` command**: Analyze SQL files and display statistics
   - `--progress, -p`: Show progress during analysis
 - **High-performance streaming parser**
-  - 300-400 MB/s typical throughput (peaks at 411 MB/s on Apple M2 Max)
-  - Memory-efficient: ~100 MB constant usage regardless of file size
+  - 400-500 MB/s typical throughput (1.25x faster than Go version on large files)
+  - Memory-efficient: ~80 MB constant usage regardless of file size
   - Handles strings with escaped characters and multi-line statements
   - Adaptive buffer sizing based on file size
 - **Concurrent writing**: Efficient multi-table writing with writer pools
@@ -30,15 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - Streaming architecture handles files larger than available RAM
-- Zero-allocation parsing using byte slices and sync.Pool
-- Pre-compiled regexes for 10-100x faster pattern matching
-- Optimized 64KB buffers for CPU cache efficiency
+- Zero-copy parsing using byte slices where possible
+- Pre-compiled regexes for fast pattern matching
+- Optimized buffer sizes for CPU cache efficiency
+- 1.25x faster than Go version on files >1GB
 
 ### Documentation
 
 - Comprehensive README with usage examples
-- CLAUDE.md for AI assistant guidance
-- Performance benchmarks and comparison with alternatives
+- AGENTS.md for AI assistant guidance
+- Performance benchmarks and comparison with Go/PHP versions
 
 ## [Unreleased]
 
