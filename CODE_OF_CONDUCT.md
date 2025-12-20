@@ -10,13 +10,14 @@ This is a simple, direct code of conduct. No corporate speak, just common sense.
 
 3. **Be concrete.** Vague complaints waste everyone's time. Provide details, reproduction steps, and examples.
 
-4. **Don't be dismissive.** Labeling work as "AI slop" or similar without substantive critique is not constructive. If something needs improvement, explain what and why.
+4. **Respect tool choices.** Contributors may use any tools they find effective, including AI assistants. Dismissing work as "AI slop" or similar without substantive critique is not constructive. Judge contributions on their quality and correctness, not on how they were created.
 
 5. **Stay focused.** Keep discussions on topic. This is a SQL file splitter, not a platform for unrelated debates.
 
 ## What We Won't Tolerate
 
 - Harassment or discrimination of any kind
+- Harassment or gatekeeping based on tool usage (including AI assistants)
 - Personal attacks or insults
 - Spam or self-promotion
 - Deliberately disruptive behavior
