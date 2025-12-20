@@ -259,11 +259,80 @@ run_test() {
     return 0
 }
 
+# Run convert test for a single source file to all target dialects
+run_convert_test() {
+    local name=$1
+    local source_dialect=$2
+    local sql_file=$3
+    local notes=$4
+    local convert_output_dir="$OUTPUT_DIR/convert/$name"
+    
+    local full_path="$DOWNLOADS_DIR/$sql_file"
+    
+    if [[ ! -f "$full_path" ]]; then
+        return 1
+    fi
+    
+    # Define all target dialects
+    local -a target_dialects=("mysql" "postgres" "sqlite")
+    local convert_passed=0
+    local convert_failed=0
+    
+    mkdir -p "$convert_output_dir"
+    
+    echo "  Convert tests:"
+    
+    for target in "${target_dialects[@]}"; do
+        # Skip same dialect conversion
+        if [[ "$source_dialect" == "$target" ]]; then
+            continue
+        fi
+        
+        # Skip 'any' dialect (can't reliably convert)
+        if [[ "$source_dialect" == "any" ]]; then
+            continue
+        fi
+        
+        local output_file="$convert_output_dir/${name}_to_${target}.sql"
+        local convert_output
+        
+        # Run conversion
+        if convert_output=$("$BINARY" convert "$full_path" --from="$source_dialect" --to="$target" --output="$output_file" 2>&1); then
+            # Parse conversion stats
+            local converted=$(echo "$convert_output" | grep "Statements converted:" | awk '{print $3}' || echo "0")
+            local unchanged=$(echo "$convert_output" | grep "Statements unchanged:" | awk '{print $3}' || echo "0")
+            local skipped=$(echo "$convert_output" | grep "Statements skipped:" | awk '{print $3}' || echo "0")
+            local warnings=$(echo "$convert_output" | grep -c "⚠" || echo "0")
+            
+            # Check output file exists and has content
+            if [[ -f "$output_file" && -s "$output_file" ]]; then
+                local output_size=$(du -h "$output_file" | cut -f1)
+                echo -e "    ${source_dialect} → ${target}: ${GREEN}✓${NC} (conv:$converted, unch:$unchanged, skip:$skipped, warn:$warnings) [$output_size]"
+                ((convert_passed++))
+            else
+                echo -e "    ${source_dialect} → ${target}: ${YELLOW}⚠ empty output${NC}"
+                ((convert_failed++))
+            fi
+        else
+            echo -e "    ${source_dialect} → ${target}: ${RED}✗ FAILED${NC}"
+            echo "      Error: $(echo "$convert_output" | head -1)"
+            ((convert_failed++))
+        fi
+    done
+    
+    if [[ $convert_failed -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
 run_all_tests() {
-    local passed=0
-    local failed=0
-    local skipped=0
-    local warnings=0
+    local split_passed=0
+    local split_failed=0
+    local split_skipped=0
+    local convert_passed=0
+    local convert_failed=0
+    local convert_skipped=0
     
     for test_case in "${TEST_CASES[@]}"; do
         IFS='|' read -r name dialect url unzip_cmd sql_file notes <<< "$test_case"
@@ -274,21 +343,35 @@ run_all_tests() {
         # Download
         local downloaded_file="$DOWNLOADS_DIR/$(basename "$url")"
         if ! download_file "$name" "$url"; then
-            ((skipped++))
+            ((split_skipped++))
+            ((convert_skipped++))
             continue
         fi
         
         # Extract if needed
         if ! extract_file "$unzip_cmd" "$downloaded_file"; then
-            ((skipped++))
+            ((split_skipped++))
+            ((convert_skipped++))
             continue
         fi
         
-        # Run test
+        # Run split test
         if run_test "$name" "$dialect" "$sql_file" "$notes"; then
-            ((passed++))
+            ((split_passed++))
         else
-            ((failed++))
+            ((split_failed++))
+        fi
+        
+        # Run convert tests (all permutations)
+        if [[ "$dialect" != "any" ]]; then
+            if run_convert_test "$name" "$dialect" "$sql_file" "$notes"; then
+                ((convert_passed++))
+            else
+                ((convert_failed++))
+            fi
+        else
+            echo "  Convert tests: ${CYAN}skipped (dialect=any)${NC}"
+            ((convert_skipped++))
         fi
     done
     
@@ -297,17 +380,24 @@ run_all_tests() {
     echo -e "${BLUE}  Results${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "  ${GREEN}Passed:${NC}  $passed"
-    echo -e "  ${RED}Failed:${NC}  $failed"
-    echo -e "  ${YELLOW}Skipped:${NC} $skipped"
+    echo -e "${CYAN}Split Command:${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $split_passed"
+    echo -e "  ${RED}Failed:${NC}  $split_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $split_skipped"
+    echo ""
+    echo -e "${CYAN}Convert Command (all permutations):${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $convert_passed"
+    echo -e "  ${RED}Failed:${NC}  $convert_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $convert_skipped"
     echo ""
     echo "Legend:"
-    echo "  ✓ = Dialect correctly detected"
+    echo "  ✓ = Dialect correctly detected / Conversion successful"
     echo "  ~ = Dialect differs from expected (file may lack dialect markers)"
     echo "  (any) = Generic SQL, detection accuracy not checked"
+    echo "  conv/unch/skip/warn = converted/unchanged/skipped/warnings count"
     echo ""
     
-    if [[ $failed -gt 0 ]]; then
+    if [[ $split_failed -gt 0 || $convert_failed -gt 0 ]]; then
         return 1
     fi
     return 0
