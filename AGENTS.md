@@ -156,7 +156,7 @@ cargo bench -- read_statement
 
 ## Release Process
 
-Follow these steps to create a new release:
+Follow these steps to create a new release. **Both a git tag AND a GitHub release are required.**
 
 ### 1. Pre-release Checks
 
@@ -172,6 +172,9 @@ cargo clippy
 
 # Verify formatting
 cargo fmt --check
+
+# Optional: Run Docker benchmarks to verify performance
+./docker/run-benchmark.sh --generate 50
 ```
 
 ### 2. Update Version
@@ -182,51 +185,61 @@ cargo fmt --check
    ```
 
 2. Update `CHANGELOG.md`:
-   - Move items from `[Unreleased]` to new version section
-   - Add release date
-   - Document all notable changes
+   - Add new version section with today's date: `## [X.Y.Z] - YYYY-MM-DD`
+   - Move items from `[Unreleased]` to the new version section
+   - Document all notable changes under Added/Changed/Fixed/Removed
 
-### 3. Commit and Tag
+### 3. Commit, Tag, and Push
 
 ```bash
-# Commit version bump
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: bump version to X.Y.Z"
+# Stage all release files
+git add Cargo.toml Cargo.lock CHANGELOG.md src/ docs/
+
+# Commit with descriptive message
+git commit -m "feat: <brief description> (vX.Y.Z)"
 
 # Create annotated tag
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git tag -a vX.Y.Z -m "Release vX.Y.Z
 
-# Push with tags
+<Brief summary of changes>"
+
+# Push commit and tag together
 git push origin main --tags
 ```
 
-### 4. Publish to crates.io
+### 4. Create GitHub Release (REQUIRED)
+
+**Always create a GitHub release** - this makes the release visible on the releases page and generates release notes.
+
+```bash
+# Extract release notes for this version from CHANGELOG.md and create release
+gh release create vX.Y.Z \
+  --title "vX.Y.Z" \
+  --notes "$(sed -n '/## \[X.Y.Z\]/,/## \[/p' CHANGELOG.md | head -n -1)" \
+  --latest
+```
+
+Or manually at: https://github.com/HelgeSverre/sql-splitter/releases/new
+- Select the tag `vX.Y.Z`
+- Title: `vX.Y.Z`
+- Description: Copy relevant section from CHANGELOG.md
+
+### 5. Publish to crates.io (Optional)
 
 ```bash
 # Dry run first
 cargo publish --dry-run
 
-# Publish
+# Publish (requires crates.io API token)
 cargo publish
 ```
 
-### 5. Create GitHub Release
+### 6. Post-release Verification
 
-```bash
-# Create release from tag (uses CHANGELOG content)
-gh release create vX.Y.Z \
-  --title "vX.Y.Z" \
-  --notes-file CHANGELOG.md \
-  --latest
-```
-
-Or create via GitHub UI at https://github.com/HelgeSverre/sql-splitter/releases/new
-
-### 6. Post-release
-
-- Verify crates.io listing: https://crates.io/crates/sql-splitter
-- Verify GitHub release: https://github.com/HelgeSverre/sql-splitter/releases
-- Update website if needed (auto-deploys via Vercel)
+- [ ] GitHub release visible: https://github.com/HelgeSverre/sql-splitter/releases
+- [ ] Tag visible: `git tag -l | grep vX.Y.Z`
+- [ ] crates.io updated (if published): https://crates.io/crates/sql-splitter
+- [ ] Website auto-deployed via Vercel (if applicable)
 
 ### Versioning Guidelines
 
@@ -234,3 +247,16 @@ Follow [Semantic Versioning](https://semver.org/):
 - **MAJOR** (X.0.0): Breaking changes to CLI interface or output format
 - **MINOR** (0.X.0): New features, new dialects, new commands
 - **PATCH** (0.0.X): Bug fixes, performance improvements, documentation
+
+### Quick Release Checklist
+
+```
+[ ] cargo test passes
+[ ] cargo clippy clean
+[ ] Version bumped in Cargo.toml
+[ ] CHANGELOG.md updated
+[ ] git commit + tag created
+[ ] git push origin main --tags
+[ ] gh release create vX.Y.Z (REQUIRED!)
+[ ] Verify release at github.com/HelgeSverre/sql-splitter/releases
+```
