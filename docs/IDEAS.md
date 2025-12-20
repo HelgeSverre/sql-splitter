@@ -56,6 +56,8 @@ sql-splitter query dump.sql --table orders --where "total > 1000 AND status = 'c
 
 ## 3. Sample Command — Create Reduced Test Datasets
 
+**Status**: [Detailed design available](./SAMPLE_FEATURE.md)
+
 Generate smaller representative datasets for development and testing.
 
 ```bash
