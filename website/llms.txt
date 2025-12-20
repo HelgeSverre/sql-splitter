@@ -1,107 +1,133 @@
 # sql-splitter
 
-> High-performance CLI tool for splitting large SQL dump files into individual table files. Written in Rust, achieves 400+ MB/s throughput with constant ~50MB memory usage regardless of file size. 1.25x faster than the Go version on 10GB files.
+> High-performance CLI tool for splitting large SQL dump files into individual table files. Written in Rust with 600+ MB/s throughput, streaming architecture that handles files larger than RAM, and multi-dialect support for MySQL, PostgreSQL, and SQLite.
 
-sql-splitter reads SQL dump files and routes statements to separate output files based on table name. It handles CREATE TABLE, INSERT INTO, CREATE INDEX, ALTER TABLE, and DROP TABLE statements.
-
-## Key Features
-
-- Written in Rust with zero-cost abstractions and no garbage collection
-- Streaming architecture handles files larger than available RAM
-- Adaptive buffer sizing based on file size (64KB optimal for CPU cache)
-- Zero-copy parsing using `&[u8]` slices in hot path
-- Fast hashing with `ahash::AHashMap` instead of default SipHash
-- Pre-compiled static regexes via `once_cell::Lazy`
+sql-splitter reads SQL dump files and routes statements to separate output files based on table name. It handles compressed files (gzip, bzip2, xz, zstd) with automatic detection.
 
 ## Installation
 
 ```bash
-# Using cargo
-cargo install --git https://github.com/helgesverre/sql-splitter
+# From crates.io (recommended)
+cargo install sql-splitter
 
-# Or build from source
-git clone https://github.com/helgesverre/sql-splitter.git
+# From source
+git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
 cargo build --release
 
-# Optimized build for best performance
-RUSTFLAGS="-C target-cpu=native" cargo build --release
+# Download pre-built binaries
+# https://github.com/helgesverre/sql-splitter/releases
+```
+
+## Quick Start
+
+```bash
+# Split a MySQL/MariaDB dump (default dialect)
+sql-splitter split dump.sql -o tables/
+
+# Split a PostgreSQL pg_dump file
+sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
+
+# Split a SQLite dump
+sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
+
+# Compressed files are auto-detected
+sql-splitter split backup.sql.gz -o tables/
+sql-splitter split backup.sql.zst -o tables/
 ```
 
 ## Commands
 
 ### split
-Split a SQL file into individual table files.
+
+Split a SQL dump file into individual table files.
 
 ```bash
 sql-splitter split database.sql --output=tables
-sql-splitter split database.sql --tables=users,posts  # filter specific tables
+sql-splitter split database.sql --dialect=postgres    # PostgreSQL mode
+sql-splitter split database.sql --tables=users,posts  # specific tables only
+sql-splitter split database.sql --schema-only         # DDL only
+sql-splitter split database.sql --data-only           # INSERT/COPY only
 sql-splitter split database.sql --dry-run             # preview without writing
-sql-splitter split database.sql --progress            # show progress
+sql-splitter split database.sql --progress            # show progress bar
 ```
 
-Flags:
-- `--output, -o`: Output directory (default: "output")
-- `--tables, -t`: Filter to specific tables (comma-separated)
-- `--dry-run`: Preview what would be split without writing
-- `--progress, -p`: Show progress during processing
-- `--verbose, -v`: Verbose output
+Options:
+- `-o, --output <DIR>`: Output directory (default: "output")
+- `-d, --dialect <DIALECT>`: SQL dialect: mysql, postgres, sqlite (auto-detected)
+- `-t, --tables <TABLES>`: Filter to specific tables (comma-separated)
+- `--schema-only`: Only DDL statements (CREATE, ALTER, DROP)
+- `--data-only`: Only DML statements (INSERT, COPY)
+- `--dry-run`: Preview what would be split without writing files
+- `-p, --progress`: Show progress bar during processing
 
 ### analyze
-Analyze a SQL file and display table statistics.
+
+Analyze a SQL file and display table statistics without splitting.
 
 ```bash
 sql-splitter analyze database.sql
 sql-splitter analyze database.sql --progress
 ```
 
+### completions
+
+Generate shell completions for bash, zsh, or fish.
+
+```bash
+sql-splitter completions bash >> ~/.bashrc
+sql-splitter completions zsh >> ~/.zshrc
+sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
+```
+
+## Supported SQL Dialects
+
+| Dialect | Flag | Dump Tool | Features |
+|---------|------|-----------|----------|
+| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump | Backtick quoting, backslash escapes |
+| PostgreSQL | `--dialect=postgres` | pg_dump | Double-quote identifiers, COPY FROM stdin, dollar-quoting |
+| SQLite | `--dialect=sqlite` | sqlite3 .dump | Double-quote identifiers |
+
 ## Supported Statement Types
 
-- CREATE TABLE
+- CREATE TABLE / DROP TABLE
 - INSERT INTO
 - CREATE INDEX
 - ALTER TABLE
-- DROP TABLE
+- COPY (PostgreSQL)
 
 Other statements (SELECT, UPDATE, DELETE) are skipped.
 
+## Supported Compression Formats
+
+Files are auto-detected by extension:
+- `.gz` - gzip
+- `.bz2` - bzip2
+- `.xz` - xz/lzma
+- `.zst` - zstd
+
 ## Performance
 
-Benchmarks on Apple M2 Max:
-- Parser throughput: 400-500 MB/s
-- vs Go version: 1.25x faster on 10GB files
-- Memory usage: ~50 MB constant
-- Cold start: ~5ms
+- **600+ MB/s** throughput on modern hardware
+- **Constant ~50MB memory** regardless of file size
+- **5x faster** than shell-based alternatives
+- Streaming architecture handles files larger than RAM
 
 ## Documentation
 
-- [README](https://github.com/helgesverre/sql-splitter/blob/main/README.md): Full documentation with architecture details
-- [AGENTS.md](https://github.com/helgesverre/sql-splitter/blob/main/AGENTS.md): AI assistant guidance for working with the codebase
+- [README](https://github.com/helgesverre/sql-splitter/blob/main/README.md): Full documentation
+- [BENCHMARKS.md](https://github.com/helgesverre/sql-splitter/blob/main/BENCHMARKS.md): Performance benchmarks
+- [CHANGELOG.md](https://github.com/helgesverre/sql-splitter/blob/main/CHANGELOG.md): Version history
 
 ## Source Code
 
-- [src/cmd/](https://github.com/helgesverre/sql-splitter/tree/main/src/cmd): CLI commands (split, analyze)
-- [src/parser/](https://github.com/helgesverre/sql-splitter/tree/main/src/parser): Streaming SQL parser with `fill_buf` + `consume` pattern
-- [src/writer/](https://github.com/helgesverre/sql-splitter/tree/main/src/writer): Buffered file writers with WriterPool
+- [src/cmd/](https://github.com/helgesverre/sql-splitter/tree/main/src/cmd): CLI commands
+- [src/parser/](https://github.com/helgesverre/sql-splitter/tree/main/src/parser): Streaming SQL parser
+- [src/writer/](https://github.com/helgesverre/sql-splitter/tree/main/src/writer): Buffered file writers
 - [src/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/src/splitter): Split orchestration
 - [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
 
-## Architecture
-
-```
-BufReader (fill_buf) → Parser (Streaming) → WriterPool (BufWriter) → Table Files
-    64KB Buffer          Statement Buffer       256KB Buffers per table
-```
-
-Key implementation details:
-- Language: Rust 2021 edition
-- CLI Framework: clap v4 with derive macros
-- Regex: `regex` crate with bytes API
-- HashMap: `ahash::AHashMap` for performance
-- Buffer management: `std::io::{BufReader, BufWriter}`
-
 ## Optional
 
-- [CHANGELOG.md](https://github.com/helgesverre/sql-splitter/blob/main/CHANGELOG.md): Version history
-- [LICENSE](https://github.com/helgesverre/sql-splitter/blob/main/LICENSE): MIT License
-- [Makefile](https://github.com/helgesverre/sql-splitter/blob/main/Makefile): Build commands
+- [AGENTS.md](https://github.com/helgesverre/sql-splitter/blob/main/AGENTS.md): AI assistant guidance
+- [LICENSE.md](https://github.com/helgesverre/sql-splitter/blob/main/LICENSE.md): MIT License
