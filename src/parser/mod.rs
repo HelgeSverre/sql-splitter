@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod edge_case_tests;
 
+pub mod mysql_insert;
+pub mod postgres_copy;
+
 use once_cell::sync::Lazy;
 use regex::bytes::Regex;
 use std::io::{BufRead, BufReader, Read};

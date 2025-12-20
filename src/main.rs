@@ -2,6 +2,8 @@ mod analyzer;
 mod cmd;
 mod merger;
 mod parser;
+mod sample;
+mod schema;
 mod splitter;
 mod writer;
 

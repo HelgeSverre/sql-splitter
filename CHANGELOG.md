@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2025-12-20
+
+### Added
+
+- **Sample command**: Create reduced datasets from large SQL dumps for development/testing
+  - `sql-splitter sample dump.sql -o dev.sql --percent 10` - Sample 10% of rows
+  - `sql-splitter sample dump.sql -o dev.sql --rows 1000` - Sample up to 1000 rows per table
+  - `--preserve-relations` flag for FK-aware sampling that maintains referential integrity
+  - `--root-tables` flag to start sampling from specific tables
+  - `--include-global` flag to control lookup/global table handling (none, lookups, all)
+  - `--tables` and `--exclude` flags for table filtering
+  - `--seed` flag for reproducible sampling
+  - `--config` flag for YAML-based per-table sampling strategies
+  - `--max-total-rows` explosion guard
+  - `--strict-fk` flag to fail on FK integrity issues
+  - `--no-schema` flag to exclude CREATE TABLE statements
+  - `--dry-run` flag to preview sampling statistics
+  - Supports MySQL, PostgreSQL (COPY format), and SQLite dialects
+- **Schema graph module**: FK dependency analysis with topological sorting
+  - `src/schema/` module for DDL parsing and FK extraction
+  - Supports all three SQL dialects (backticks, double quotes, unquoted identifiers)
+  - Cycle detection for self-referential and circular FK relationships
+- **Row parsing module**: Extract individual rows from INSERT and COPY statements
+  - `src/parser/mysql_insert.rs` for MySQL INSERT parsing with PK/FK extraction
+  - `src/parser/postgres_copy.rs` for PostgreSQL COPY format parsing
+- **YAML configuration**: Per-table sampling strategies via config file
+  - Table classification (root, lookup, system, junction, normal)
+  - Per-table percent or row count overrides
+  - Skip specific tables
+- 15 new integration tests for sample command across all dialects
+- 40+ new unit tests for schema parsing, row parsing, and reservoir sampling
+
+### Changed
+
+- DDL parsing now supports PostgreSQL and SQLite identifier quoting
+- Column type parsing extended with PostgreSQL types (SERIAL, TIMESTAMPTZ, BYTEA, etc.)
+- Test suite expanded from 130 to 359 tests
+
+### Fixed
+
+- PostgreSQL COPY data now correctly converts to INSERT VALUES format in output
+
 ## [1.4.0] - 2025-12-20
 
 ### Added

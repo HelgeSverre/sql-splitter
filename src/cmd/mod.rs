@@ -1,5 +1,6 @@
 mod analyze;
 mod merge;
+mod sample;
 mod split;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -109,6 +110,76 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Sample a subset of rows from a SQL dump while preserving FK integrity
+    Sample {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        file: PathBuf,
+
+        /// Output SQL file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Sample percentage (1-100) - mutually exclusive with --rows
+        #[arg(long, conflicts_with = "rows")]
+        percent: Option<u32>,
+
+        /// Sample fixed number of rows per table - mutually exclusive with --percent
+        #[arg(long, conflicts_with = "percent")]
+        rows: Option<usize>,
+
+        /// Preserve foreign key relationships (filter rows that reference missing parents)
+        #[arg(long)]
+        preserve_relations: bool,
+
+        /// Only sample specific tables (comma-separated)
+        #[arg(short, long)]
+        tables: Option<String>,
+
+        /// Exclude specific tables (comma-separated)
+        #[arg(short, long)]
+        exclude: Option<String>,
+
+        /// Explicit root tables for sampling (comma-separated)
+        #[arg(long)]
+        root_tables: Option<String>,
+
+        /// How to handle global/lookup tables: none, lookups, all
+        #[arg(long, default_value = "lookups")]
+        include_global: Option<String>,
+
+        /// Random seed for reproducibility
+        #[arg(long)]
+        seed: Option<u64>,
+
+        /// YAML config file for per-table settings
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Maximum total rows to sample (explosion guard)
+        #[arg(long)]
+        max_total_rows: Option<usize>,
+
+        /// Fail if any FK integrity issues detected
+        #[arg(long)]
+        strict_fk: bool,
+
+        /// Exclude CREATE TABLE statements from output
+        #[arg(long)]
+        no_schema: bool,
+
+        /// Show progress during sampling
+        #[arg(short, long)]
+        progress: bool,
+
+        /// Preview without writing files (dry run)
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -163,6 +234,43 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             exclude,
             transaction,
             no_header,
+            progress,
+            dry_run,
+        ),
+        Commands::Sample {
+            file,
+            output,
+            dialect,
+            percent,
+            rows,
+            preserve_relations,
+            tables,
+            exclude,
+            root_tables,
+            include_global,
+            seed,
+            config,
+            max_total_rows,
+            strict_fk,
+            no_schema,
+            progress,
+            dry_run,
+        } => sample::run(
+            file,
+            output,
+            dialect,
+            percent,
+            rows,
+            preserve_relations,
+            tables,
+            exclude,
+            root_tables,
+            include_global,
+            seed,
+            config,
+            max_total_rows,
+            strict_fk,
+            no_schema,
             progress,
             dry_run,
         ),

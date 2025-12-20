@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.3.1 (current)  
+**Version**: 1.4.0 (current)  
 **Last Updated**: 2025-12-20  
-**Revision**: 2.0 — Reprioritized for core features
+**Revision**: 2.1 — Post v1.4.0 release
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -11,8 +11,8 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 ## Priority Summary
 
 **High Priority (v1.x):**
-1. Test Data Generator — Enables CI testing for all features
-2. Merge — Completes split/merge roundtrip
+1. ✅ Test Data Generator — Enables CI testing for all features (v1.4.0)
+2. ✅ Merge — Completes split/merge roundtrip (v1.4.0)
 3. Sample — FK-aware data sampling (builds shared infra)
 4. Shard — Tenant extraction (reuses Sample infra)
 5. Convert — Dialect conversion
@@ -55,70 +55,23 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ## Version Milestones
 
-### v1.4.0 — Test Data Generator & CI Foundation
-**Target**: 1-2 weeks  
-**Theme**: Deterministic fixtures for all integration testing
+### v1.4.0 — Test Data Generator & Merge ✅ RELEASED
+**Released**: 2025-12-20  
+**Theme**: Deterministic fixtures + split/merge roundtrip
 
-| Feature | Effort | Status | Notes |
-|---------|--------|--------|-------|
-| **Test Data Generator** | 20-27h | 🟡 Planned | Synthetic multi-tenant schema |
-| ├─ Schema model + types | 4h | | Dialect-agnostic definitions |
-| ├─ Generator core + RNG | 3h | | Seed-based reproducibility |
-| ├─ Fake data helpers | 2h | | Names, emails, dates |
-| ├─ MySQL renderer | 3h | | INSERT statements |
-| ├─ PostgreSQL renderer | 4h | | COPY + INSERT |
-| ├─ SQLite renderer | 2h | | Double-quote identifiers |
-| ├─ CLI binary | 2h | | `gen-fixtures` command |
-| └─ Test harness integration | 3h | | `tests/common/` utilities |
-| **Static fixtures** | 3h | 🟡 Planned | Edge cases per dialect |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Test Data Generator** | ✅ Done | `crates/test_data_gen` |
+| **Merge command** | ✅ Done | `src/merger/` |
 
-**MVP Scope (v1.4.0):**
-- MySQL-only generator
-- Single `small` scale (~500 rows)
-- Core schema: tenants, users, orders, order_items, one junction, one self-FK
-- Enough to test split, merge, sample, shard
-
-**Full Scope (v1.4.x):**
-- All 3 dialects
-- All 3 scales (small/medium/large)
-- Complete 18-table schema from TEST_DATA_GENERATOR.md
-
-**Deliverables:**
+**Delivered:**
 - `cargo run -p test_data_gen -- --dialect mysql --scale small --seed 42`
-- `tests/fixtures/generated/` with on-demand generation
-- Split roundtrip integration tests
+- `sql-splitter merge tables/ -o restored.sql`
+- Split→merge roundtrip tests
 
 ---
 
-### v1.5.0 — Merge Command
-**Target**: <1 week  
-**Theme**: Complete the split/merge roundtrip
-
-| Feature | Effort | Status | Notes |
-|---------|--------|--------|-------|
-| **Merge command (MVP)** | 6h | 🟡 Planned | Inverse of split |
-| ├─ Directory scanning | 1h | | Find .sql files |
-| ├─ Streaming concatenation | 2h | | 256KB buffers |
-| ├─ `--tables` / `--exclude` | 1h | | Filtering |
-| └─ Basic tests | 2h | | Split→merge roundtrip |
-| **Merge enhancements** | 4h | 🔵 Optional | |
-| ├─ `--order` explicit | 1h | | Manual table order |
-| ├─ `--transaction` wrap | 1h | | BEGIN/COMMIT |
-| └─ Dialect headers | 2h | | FK checks, encoding |
-
-**MVP Definition:**
-- `sql-splitter merge tables/ -o restored.sql`
-- Alphabetical ordering
-- Split→merge roundtrip produces equivalent output
-
-**Deliverables:**
-- `sql-splitter merge tables/ -o restored.sql`
-- `sql-splitter merge tables/ --tables users,posts -o partial.sql`
-- Integration tests using generator fixtures
-
----
-
-### v1.6.0 — Sample Command + Shared Infra v1
+### v1.5.0 — Sample Command + Shared Infra v1
 **Target**: 2-3 weeks  
 **Theme**: FK-aware sampling, builds core infrastructure
 
@@ -147,7 +100,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 - Basic table classification (hard-coded patterns)
 - No FK orphans on generator fixtures
 
-**Full Scope (v1.6.x):**
+**Full Scope (v1.5.x):**
 - Multi-dialect (PostgreSQL COPY, SQLite)
 - YAML config file (`--config sample.yaml`)
 - Rich table classification (`--include-global` modes)
@@ -162,7 +115,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.7.0 — Shard Command + Shared Infra v1.5
+### v1.6.0 — Shard Command + Shared Infra v1.5
 **Target**: 2-3 weeks  
 **Theme**: Tenant extraction with FK chain resolution
 
@@ -190,7 +143,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 - Global lookup tables included by default
 - No FK orphans on generator fixtures
 
-**Full Scope (v1.7.x):**
+**Full Scope (v1.6.x):**
 - Multi-tenant (`--tenant-values 1,2,3` → multiple files)
 - Hash-based sharding (`--hash --partitions 8`)
 - YAML config for classification overrides
@@ -203,7 +156,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.8.0 — Convert Command (MVP)
+### v1.7.0 — Convert Command (MVP)
 **Target**: 3-4 weeks  
 **Theme**: Dialect conversion for common cases
 
@@ -296,16 +249,15 @@ These features are valuable but lower priority:
 
 ## Effort Summary
 
-### Priority Features (v1.4–v1.8)
+### Priority Features (v1.4–v1.7)
 
 | Version | Theme | MVP Effort | Full Effort | Duration |
 |---------|-------|------------|-------------|----------|
-| v1.4.0 | Test Data Gen + CI | ~20h | 27h | 1-2 weeks |
-| v1.5.0 | Merge | ~6h | 10h | <1 week |
-| v1.6.0 | Sample + Infra v1 | ~30h | 43h | 2-3 weeks |
-| v1.7.0 | Shard + Infra v1.5 | ~40h | 48h | 2-3 weeks |
-| v1.8.0 | Convert MVP | ~35h | 56h | 3-4 weeks |
-| **Total** | | **~131h** | **~184h** | **~10-13 weeks** |
+| v1.4.0 | Test Data Gen + Merge | — | — | ✅ Released |
+| v1.5.0 | Sample + Infra v1 | ~30h | 43h | 2-3 weeks |
+| v1.6.0 | Shard + Infra v1.5 | ~40h | 48h | 2-3 weeks |
+| v1.7.0 | Convert MVP | ~35h | 56h | 3-4 weeks |
+| **Total** | | **~105h** | **~147h** | **~7-10 weeks** |
 
 ### Deferred Features (v2.x)
 
@@ -320,24 +272,20 @@ These features are valuable but lower priority:
 
 ## Implementation Order
 
-1. **v1.4.0 — Test Data Generator** ⭐ Start here
+1. ✅ **v1.4.0 — Test Data Generator + Merge** — Released
    - Enables CI testing for all features
-   - Validates multi-tenant patterns on synthetic data
-
-2. **v1.5.0 — Merge** ⭐ Quick win
    - Completes split/merge roundtrip
-   - Tests use generator fixtures
 
-3. **v1.6.0 — Sample** ⭐ High value + builds infra
+2. **v1.5.0 — Sample** ⭐ Next up
    - Common use case (dev fixtures)
    - Schema Graph + Row Parsing built here
 
-4. **v1.7.0 — Shard** ⭐ Unique differentiator
+3. **v1.6.0 — Shard** ⭐ Unique differentiator
    - Multi-tenant extraction
    - No other tools do this well
    - Matures shared infrastructure
 
-5. **v1.8.0 — Convert MVP** 
+4. **v1.7.0 — Convert MVP** 
    - Practical cross-dialect conversion
    - Benefits from mature parser types
 

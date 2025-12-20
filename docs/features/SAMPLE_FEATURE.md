@@ -1,8 +1,8 @@
 # Sample Command Design
 
-**Status**: Draft  
+**Status**: ✅ Fully Implemented (v1.5.0)  
 **Date**: 2025-12-20  
-**Updated**: 2025-12-20 (merged dependency-aware sampling)
+**Updated**: 2025-12-20 (Full implementation complete)
 
 ## Overview
 
