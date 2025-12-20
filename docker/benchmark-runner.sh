@@ -5,143 +5,221 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 show_help() {
-    echo "SQL Splitter Docker Benchmark Runner"
+    cat << EOF
+SQL Splitter Benchmark Runner
+
+Usage: benchmark-runner [OPTIONS] [SQL_FILE]
+
+Options:
+  --help           Show this help message
+  --generate SIZE  Generate test data (e.g., 10, 50, 100 for MB)
+  --runs N         Number of hyperfine runs (default: 3)
+  --warmup N       Number of warmup runs (default: 1)
+  --export FILE    Export results to markdown file
+  --list           List available tools
+  --test           Test which tools work with the given file
+
+Examples:
+  benchmark-runner /data/dump.sql
+  benchmark-runner --generate 100
+  benchmark-runner /data/dump.sql --export /results/bench.md
+EOF
+}
+
+list_tools() {
+    echo -e "${BOLD}Available Tools:${NC}"
     echo ""
-    echo "Usage: benchmark-runner [OPTIONS] [SQL_FILE]"
-    echo ""
-    echo "Options:"
-    echo "  --help           Show this help message"
-    echo "  --generate       Generate test data instead of using a file"
-    echo "  --rows N         Number of rows to generate (default: 200000)"
-    echo "  --runs N         Number of hyperfine runs (default: 5)"
-    echo "  --warmup N       Number of warmup runs (default: 2)"
-    echo "  --export FILE    Export results to markdown file"
-    echo "  --quick          Quick comparison (single run, no warmup)"
-    echo ""
-    echo "Examples:"
-    echo "  benchmark-runner /data/dump.sql"
-    echo "  benchmark-runner --generate --rows 500000"
-    echo "  benchmark-runner /data/dump.sql --export /results/bench.md"
+    
+    echo -n "  sql-splitter (Rust): "
+    command -v sql-splitter &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    
+    echo -n "  mysqldumpsplitter.sh (Bash/awk): "
+    [ -x /usr/local/bin/mysqldumpsplitter.sh ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    
+    echo -n "  mysql_splitdump.sh (csplit): "
+    [ -x /usr/local/bin/mysql_splitdump.sh ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    
+    echo -n "  mysqldumpsplit-go (Go): "
+    command -v mysqldumpsplit-go &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    
+    echo -n "  mysqldumpsplit (Node.js): "
+    command -v mysqldumpsplit &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    
+    echo -n "  mysql-dump-split.rb (Ruby): "
+    [ -x /usr/local/bin/mysql-dump-split.rb ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
 }
 
 generate_test_data() {
-    local rows=$1
-    local file="/tmp/generated_test.sql"
+    local size_mb=$1
+    local file="/tmp/benchmark_${size_mb}mb.sql"
     
-    echo -e "${YELLOW}Generating test data ($rows rows)...${NC}"
-    python3 << PYTHON
-import random
-tables = ['users', 'posts', 'comments', 'orders', 'products', 'sessions', 'logs', 'events']
-with open('$file', 'w') as f:
-    for table in tables:
-        f.write(f"CREATE TABLE {table} (id INT, data VARCHAR(255));\n")
-    for i in range($rows):
-        table = random.choice(tables)
-        body = "Lorem ipsum dolor sit amet " * 3
-        f.write(f"INSERT INTO {table} VALUES ({i}, '{body}');\n")
-PYTHON
+    echo -e "${YELLOW}Generating ${size_mb}MB test data...${NC}" >&2
+    python3 /usr/local/bin/generate-test-dump.py "$size_mb" -o "$file" >&2
     echo "$file"
 }
 
-run_quick_comparison() {
-    local sql_file=$1
+test_tool() {
+    local name="$1"
+    local cmd="$2"
+    local out_dir="$3"
+    local timeout_sec="${4:-60}"
     
-    echo -e "${BLUE}=== Quick Comparison ===${NC}"
-    echo ""
+    rm -rf "$out_dir" 2>/dev/null
+    mkdir -p "$out_dir"
     
-    rm -rf /tmp/out-rs /tmp/out-go /tmp/out-node /tmp/out-sql-split /tmp/out-ruby
+    echo -n "  $name: "
     
-    echo -e "${GREEN}Rust (sql-splitter-rs):${NC}"
-    time sql-splitter-rs split "$sql_file" -o /tmp/out-rs 2>&1 | grep -E "(Throughput|Elapsed|Statements|Tables)" || true
-    echo ""
-    
-    echo -e "${GREEN}Go (mysqldumpsplit-go):${NC}"
-    time mysqldumpsplit-go -o /tmp/out-go "$sql_file" 2>&1 || true
-    echo ""
-    
-    echo -e "${GREEN}Node.js (@vekexasia/mysqldumpsplit):${NC}"
-    time mysqldumpsplit -i "$sql_file" -o /tmp/out-node 2>&1 || true
-    echo ""
-    
-    if command -v sql-split-ooooak &> /dev/null; then
-        echo -e "${GREEN}Rust (ooooak/sql-split):${NC}"
-        time sql-split-ooooak "$sql_file" -o /tmp/out-sql-split 2>&1 || true
-        echo ""
-    fi
-    
-    if command -v mysql-dump-split &> /dev/null; then
-        echo -e "${GREEN}Ruby (ripienaar/mysql-dump-split):${NC}"
-        time mysql-dump-split --out /tmp/out-ruby "$sql_file" 2>&1 || true
-        echo ""
+    if timeout "$timeout_sec" bash -c "$cmd" > /dev/null 2>&1; then
+        local count=$(ls -1 "$out_dir" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$count" -gt 0 ]; then
+            echo -e "${GREEN}OK${NC} ($count files)"
+            return 0
+        else
+            echo -e "${YELLOW}no output${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}failed${NC}"
+        return 1
     fi
 }
 
-run_hyperfine_benchmark() {
-    local sql_file=$1
-    local runs=$2
-    local warmup=$3
-    local export_file=$4
+test_tools() {
+    local sql_file="$1"
     
-    echo -e "${BLUE}=== Hyperfine Benchmark ===${NC}"
-    echo -e "File: ${GREEN}$sql_file${NC}"
+    echo -e "${BOLD}Testing tools with: $sql_file${NC}"
+    echo ""
+    
+    test_tool "sql-splitter (Rust)" \
+        "sql-splitter split '$sql_file' -o /tmp/test-rust" \
+        "/tmp/test-rust"
+    
+    test_tool "mysqldumpsplitter.sh (Bash)" \
+        "bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none" \
+        "/tmp/test-bash"
+    
+    test_tool "mysql_splitdump.sh (csplit)" \
+        "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'" \
+        "/tmp/test-csplit"
+    
+    if command -v mysqldumpsplit-go &>/dev/null; then
+        test_tool "mysqldumpsplit-go (Go)" \
+            "mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" \
+            "/tmp/test-go" 30
+    fi
+    
+    if command -v mysqldumpsplit &>/dev/null; then
+        test_tool "mysqldumpsplit (Node.js)" \
+            "mysqldumpsplit -o /tmp/test-node '$sql_file'" \
+            "/tmp/test-node" 30
+    fi
+    
+    if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
+        test_tool "mysql-dump-split.rb (Ruby)" \
+            "ruby /usr/local/bin/mysql-dump-split.rb --out /tmp/test-ruby '$sql_file'" \
+            "/tmp/test-ruby" 30
+    fi
+}
+
+run_benchmark() {
+    local sql_file="$1"
+    local runs="$2"
+    local warmup="$3"
+    local export_file="$4"
+    
+    local file_size=$(ls -lh "$sql_file" | awk '{print $5}')
+    
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${BLUE}  SQL Splitter Benchmark${NC}"
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "File: ${GREEN}$sql_file${NC} ($file_size)"
     echo -e "Runs: $runs, Warmup: $warmup"
     echo ""
     
+    # Test which tools work first
+    echo -e "${CYAN}Testing tools...${NC}"
+    local working_tools=()
+    
+    rm -rf /tmp/test-* 2>/dev/null
+    mkdir -p /tmp/test-csplit
+    
+    if test_tool "sql-splitter" "sql-splitter split '$sql_file' -o /tmp/test-rust" "/tmp/test-rust"; then
+        working_tools+=("sql-splitter (Rust)|sql-splitter split '$sql_file' -o /tmp/bench-rust")
+    fi
+    
+    if test_tool "mysqldumpsplitter.sh" "bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none" "/tmp/test-bash"; then
+        working_tools+=("mysqldumpsplitter (Bash)|bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/bench-bash --compression none")
+    fi
+    
+    mkdir -p /tmp/test-csplit
+    if test_tool "mysql_splitdump.sh" "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'" "/tmp/test-csplit"; then
+        working_tools+=("mysql_splitdump (csplit)|cd /tmp/bench-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'")
+    fi
+    
+    if command -v mysqldumpsplit-go &>/dev/null; then
+        if test_tool "mysqldumpsplit-go" "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
+            working_tools+=("mysqldumpsplit (Go)|mysqldumpsplit-go -i '$sql_file' -o /tmp/bench-go")
+        fi
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Running benchmark with ${#working_tools[@]} working tools...${NC}"
+    echo ""
+    
+    if [ ${#working_tools[@]} -lt 2 ]; then
+        echo -e "${RED}Not enough working tools for comparison${NC}"
+        return 1
+    fi
+    
+    # Build hyperfine command
+    local cmds=()
+    for tool in "${working_tools[@]}"; do
+        local name="${tool%%|*}"
+        local cmd="${tool#*|}"
+        cmds+=("--command-name" "$name" "$cmd")
+    done
+    
     local export_arg=""
     if [ -n "$export_file" ]; then
-        export_arg="--export-markdown $export_file"
-    fi
-    
-    # Build command array dynamically based on available tools
-    local cmds=()
-    cmds+=("--command-name" "sql-splitter (Rust)" "sql-splitter-rs split '$sql_file' -o /tmp/out-rs")
-    cmds+=("--command-name" "mysqldumpsplit (Go)" "mysqldumpsplit-go -o /tmp/out-go '$sql_file'")
-    cmds+=("--command-name" "mysqldumpsplit (Node)" "mysqldumpsplit -i '$sql_file' -o /tmp/out-node")
-    
-    if command -v sql-split-ooooak &> /dev/null; then
-        cmds+=("--command-name" "sql-split (Rust/ooooak)" "sql-split-ooooak '$sql_file' -o /tmp/out-sql-split")
-    fi
-    
-    if command -v mysql-dump-split &> /dev/null; then
-        cmds+=("--command-name" "mysql-dump-split (Ruby)" "mysql-dump-split --out /tmp/out-ruby '$sql_file'")
+        export_arg="--export-markdown $export_file --export-json ${export_file%.md}.json"
     fi
     
     hyperfine \
         --warmup "$warmup" \
         --runs "$runs" \
-        --prepare 'rm -rf /tmp/out-rs /tmp/out-go /tmp/out-node /tmp/out-sql-split /tmp/out-ruby' \
+        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit' \
         $export_arg \
         "${cmds[@]}"
     
     if [ -n "$export_file" ]; then
+        echo ""
         echo -e "${GREEN}Results exported to: $export_file${NC}"
     fi
 }
 
 # Parse arguments
 SQL_FILE=""
-GENERATE=false
-ROWS=200000
-RUNS=5
-WARMUP=2
+GENERATE_SIZE=""
+RUNS=3
+WARMUP=1
 EXPORT_FILE=""
-QUICK=false
+DO_LIST=false
+DO_TEST=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --help)
+        --help|-h)
             show_help
             exit 0
             ;;
         --generate)
-            GENERATE=true
-            shift
-            ;;
-        --rows)
-            ROWS=$2
+            GENERATE_SIZE=$2
             shift 2
             ;;
         --runs)
@@ -156,8 +234,12 @@ while [[ $# -gt 0 ]]; do
             EXPORT_FILE=$2
             shift 2
             ;;
-        --quick)
-            QUICK=true
+        --list)
+            DO_LIST=true
+            shift
+            ;;
+        --test)
+            DO_TEST=true
             shift
             ;;
         *)
@@ -167,25 +249,26 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ "$DO_LIST" = true ]; then
+    list_tools
+    exit 0
+fi
+
 # Determine SQL file
-if [ "$GENERATE" = true ]; then
-    SQL_FILE=$(generate_test_data $ROWS)
+if [ -n "$GENERATE_SIZE" ]; then
+    SQL_FILE=$(generate_test_data "$GENERATE_SIZE")
 elif [ -z "$SQL_FILE" ]; then
     echo -e "${RED}Error: No SQL file specified${NC}"
-    echo "Use --generate to create test data or provide a SQL file path"
+    echo "Use --generate SIZE to create test data or provide a SQL file path"
     exit 1
 elif [ ! -f "$SQL_FILE" ]; then
     echo -e "${RED}Error: File not found: $SQL_FILE${NC}"
     exit 1
 fi
 
-FILE_SIZE=$(ls -lh "$SQL_FILE" | awk '{print $5}')
-echo -e "${BLUE}=== SQL Splitter Benchmark ===${NC}"
-echo -e "File: ${GREEN}$SQL_FILE${NC} ($FILE_SIZE)"
-echo ""
-
-if [ "$QUICK" = true ]; then
-    run_quick_comparison "$SQL_FILE"
-else
-    run_hyperfine_benchmark "$SQL_FILE" "$RUNS" "$WARMUP" "$EXPORT_FILE"
+if [ "$DO_TEST" = true ]; then
+    test_tools "$SQL_FILE"
+    exit 0
 fi
+
+run_benchmark "$SQL_FILE" "$RUNS" "$WARMUP" "$EXPORT_FILE"

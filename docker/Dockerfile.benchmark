@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     pkg-config \
     python3 \
+    python3-pip \
     hyperfine \
     ruby \
-    ruby-dev \
+    gawk \
+    bc \
+    coreutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
@@ -36,25 +39,46 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
-RUN cargo build --release && cp target/release/sql-splitter /usr/local/bin/sql-splitter-rs
+RUN cargo build --release && cp target/release/sql-splitter /usr/local/bin/sql-splitter
 
-# Install Go mysqldumpsplit (afrase/mysqldumpsplit)
-RUN go install github.com/afrase/mysqldumpsplit@latest \
-    && cp /root/go/bin/mysqldumpsplit /usr/local/bin/mysqldumpsplit-go
+# ============================================================
+# Competitor Tools
+# ============================================================
 
-# Install Node.js @vekexasia/mysqldumpsplit
-RUN npm install -g @vekexasia/mysqldumpsplit
+# 1. kedarvj/mysqldumpsplitter (Bash/awk) - Most popular shell-based tool
+RUN curl -sL "https://raw.githubusercontent.com/kedarvj/mysqldumpsplitter/master/mysqldumpsplitter.sh" \
+    -o /usr/local/bin/mysqldumpsplitter.sh && \
+    chmod +x /usr/local/bin/mysqldumpsplitter.sh
 
-# Install ooooak/sql-split (Rust)
-RUN cargo install sql-split && cp /root/.cargo/bin/sql-split /usr/local/bin/sql-split-ooooak || true
+# 2. jasny/mysql_splitdump.sh (csplit-based)
+RUN curl -sL "https://gist.githubusercontent.com/jasny/1608062/raw/mysql_splitdump.sh" \
+    -o /usr/local/bin/mysql_splitdump.sh && \
+    chmod +x /usr/local/bin/mysql_splitdump.sh
 
-# Install ripienaar/mysql-dump-split (Ruby)
-RUN gem install mysql-dump-split || true
+# 3. afrase/mysqldumpsplit (Go)
+RUN go install github.com/afrase/mysqldumpsplit@latest 2>/dev/null && \
+    cp /root/go/bin/mysqldumpsplit /usr/local/bin/mysqldumpsplit-go 2>/dev/null || \
+    echo "Warning: Go mysqldumpsplit failed to install"
+
+# 4. vekexasia/mysqldumpsplit (Node.js)
+RUN npm install -g mysqldumpsplit 2>/dev/null || \
+    echo "Warning: Node mysqldumpsplit not available on npm"
+
+# 5. davydmaker/sql-dump-splitter (Python)
+RUN pip3 install --break-system-packages sql-dump-splitter 2>/dev/null || \
+    echo "Warning: sql-dump-splitter not available on pip"
+
+# 6. ripienaar/mysql-dump-split (Ruby)
+RUN curl -sL "https://raw.githubusercontent.com/ripienaar/mysql-dump-split/master/split-mysql-dump.rb" \
+    -o /usr/local/bin/mysql-dump-split.rb && \
+    chmod +x /usr/local/bin/mysql-dump-split.rb 2>/dev/null || \
+    echo "Warning: mysql-dump-split script not available"
 
 WORKDIR /workspace
 
-# Copy benchmark script
+# Copy benchmark scripts
 COPY docker/benchmark-runner.sh /usr/local/bin/benchmark-runner
+COPY scripts/generate-test-dump.py /usr/local/bin/generate-test-dump.py
 RUN chmod +x /usr/local/bin/benchmark-runner
 
 # Cleanup build artifacts
