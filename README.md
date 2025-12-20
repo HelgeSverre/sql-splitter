@@ -94,6 +94,29 @@ make install-completions
 make install-completions-all
 ```
 
+## Why sql-splitter?
+
+sql-splitter is a **dump-first, CLI-first** tool designed for automation and CI/CD pipelines.
+
+**What it's optimized for**
+
+| Strength | Description |
+|----------|-------------|
+| **One tool for the workflow** | Split → sample → shard → convert → merge in a single binary |
+| **Works on dump files** | No running database or JDBC connection needed (unlike mydumper, Jailer, Condenser) |
+| **Streaming architecture** | 10GB+ dumps with constant memory, 600+ MB/s throughput |
+| **Multi-dialect + conversion** | MySQL, PostgreSQL, SQLite including `COPY FROM stdin` → INSERT |
+| **FK-aware operations** | Sampling and tenant sharding preserve referential integrity |
+
+**When another tool might be better**
+
+- **[mydumper](https://github.com/mydumper/mydumper)** — Parallel snapshots from live MySQL/MariaDB databases
+- **[Jailer](https://github.com/Wisser/Jailer)** — Rich GUI-based FK subsetting with JDBC across 12+ databases  
+- **[sqlglot](https://github.com/tobymao/sqlglot)** — Query-level transpilation and AST manipulation (31 dialects)
+- **[DuckDB](https://github.com/duckdb/duckdb)** — Complex analytical queries over SQL/CSV/JSON/Parquet
+
+See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed comparisons.
+
 ## Options
 
 ### Split Options
