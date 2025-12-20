@@ -27,3 +27,6 @@ flamegraph.svg
 # Generated test data
 /tests/data/generated/
 
+# Real-world verification test files
+/tests/realworld/
+
