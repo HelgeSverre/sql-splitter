@@ -224,14 +224,19 @@ Or manually at: https://github.com/HelgeSverre/sql-splitter/releases/new
 - Title: `vX.Y.Z`
 - Description: Copy relevant section from CHANGELOG.md
 
-### 5. Publish to crates.io (Optional)
+### 5. Automatic crates.io Publish
 
+**crates.io publishing is automatic** when you push a new tag. The GitHub Action workflow handles this.
+
+**Setup requirement**: Add the `CARGO_REGISTRY_TOKEN` secret to your GitHub repository:
+1. Go to https://crates.io/settings/tokens and create a new token
+2. Go to GitHub repo → Settings → Secrets and variables → Actions
+3. Add new secret: `CARGO_REGISTRY_TOKEN` with your crates.io token
+
+Manual publish (if needed):
 ```bash
-# Dry run first
-cargo publish --dry-run
-
-# Publish (requires crates.io API token)
-cargo publish
+cargo publish --dry-run  # Test first
+cargo publish            # Publish
 ```
 
 ### 6. Post-release Verification
