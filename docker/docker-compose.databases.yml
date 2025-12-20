@@ -1,0 +1,62 @@
+# Docker Compose for generating authentic SQL dumps from multiple databases
+#
+# Usage:
+#   docker compose -f docker/docker-compose.databases.yml up -d
+#   ./scripts/gen-test-dumps.sh
+#   docker compose -f docker/docker-compose.databases.yml down -v
+#
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: sql-splitter-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: testpass
+      MYSQL_DATABASE: testdb
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mariadb:
+    image: mariadb:11
+    container_name: sql-splitter-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: testpass
+      MARIADB_DATABASE: testdb
+    ports:
+      - "13307:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-uroot", "-ptestpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16
+    container_name: sql-splitter-postgres
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:
+  mariadb-data:
+  postgres-data:
