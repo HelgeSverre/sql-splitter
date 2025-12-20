@@ -12,7 +12,7 @@ A clear description of the bug.
 
 ## Steps to Reproduce
 
-1. Run `sql-splitter ...`
+1. Run `sql-splitter split ...`
 2. ...
 
 ## Expected Behavior
@@ -25,8 +25,8 @@ What actually happens.
 
 ## Environment
 
-- OS: [e.g., macOS 14, Ubuntu 22.04]
-- Go version: [e.g., 1.23]
+- OS: [e.g., macOS 14, Ubuntu 22.04, Windows 11]
+- Rust version: [e.g., 1.75]
 - sql-splitter version: [e.g., 1.0.0]
 
 ## SQL File Details (if relevant)

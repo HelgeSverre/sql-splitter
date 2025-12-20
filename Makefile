@@ -1,96 +1,152 @@
-.PHONY: build test bench clean install run-split run-analyze
+.PHONY: build build-release build-native test bench bench-all bench-compare clean fmt check clippy bench-docker bench-docker-build bench-docker-file test-workflows test-ci test-release test-job
 
-
-# Show help
-help:
-	@echo "Available targets:"
-	@echo "  build          - Build the application"
-	@echo "  build-release  - Build optimized release binary"
-	@echo "  test           - Run all tests"
-	@echo "  test-cover     - Run tests with coverage report"
-	@echo "  bench          - Run all benchmarks"
-	@echo "  bench-cpu      - Run parser benchmark with CPU profiling"
-	@echo "  bench-mem      - Run parser benchmark with memory profiling"
-	@echo "  clean          - Remove build artifacts"
-	@echo "  install        - Install to GOPATH/bin"
-	@echo "  fmt            - Format code"
-	@echo "  lint           - Run linter"
-	@echo "  run-split      - Run split command on test.sql"
-	@echo "  run-analyze    - Run analyze command on test.sql"
-
-
-# Build the application
+# Default build (debug)
 build:
-	go build -o sql-splitter -ldflags="-s -w" .
+	cargo build
 
-# Build with optimizations for release
+# Release build
 build-release:
-	CGO_ENABLED=0 go build -o sql-splitter -ldflags="-s -w -X github.com/helgesverre/sql-splitter/cmd.Version=$(shell git describe --tags --always 2>/dev/null || echo 1.0.0) -X github.com/helgesverre/sql-splitter/cmd.BuildDate=$(shell date -u +%Y-%m-%dT%H:%M:%SZ) -X github.com/helgesverre/sql-splitter/cmd.GitCommit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)" .
+	cargo build --release
+
+# Optimized build for current CPU (best for benchmarking)
+build-native:
+	RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 # Run all tests
 test:
-	go test -v ./...
+	cargo test
 
-# Run tests with coverage
-test-cover:
-	@echo "Running tests with coverage..."
-	@go test -coverprofile=coverage.out ./...
-	@echo ""
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "Coverage by function:"
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@go tool cover -func=coverage.out | grep -v "total:" | column -t
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@go tool cover -func=coverage.out | grep "total:" | awk '{printf "TOTAL COVERAGE: %s\n", $$3}'
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo "HTML report: coverage.html"
+# Run tests with output
+test-verbose:
+	cargo test -- --nocapture
 
-# Run benchmarks
+# Run all criterion benchmarks
 bench:
-	go test -bench=. -benchmem ./...
+	cargo bench
 
-# Run specific benchmark with profiling
-bench-cpu:
-	go test -bench=BenchmarkParser_ReadStatement -cpuprofile=cpu.prof ./internal/parser
-	go tool pprof -http=:8080 cpu.prof
+# Run parser benchmarks only
+bench-parser:
+	cargo bench --bench parser_bench
 
-bench-mem:
-	go test -bench=BenchmarkParser_ReadStatement -memprofile=mem.prof ./internal/parser
-	go tool pprof -http=:8080 mem.prof
+# Run writer benchmarks only
+bench-writer:
+	cargo bench --bench writer_bench
 
-# Clean build artifacts
-clean:
-	rm -f sql-splitter
-	rm -f coverage.out coverage.html
-	rm -f *.prof
-	rm -rf output/ tables/ out/
+# Run end-to-end benchmarks only
+bench-e2e:
+	cargo bench --bench e2e_bench
 
-# Install to GOPATH/bin
-install:
-	go install .
+# Run throughput benchmarks
+bench-throughput:
+	cargo bench -- parser_throughput
+
+# Run buffer size comparison benchmarks
+bench-buffers:
+	cargo bench -- buffer_sizes
+
+# Run comprehensive benchmark against all competitor tools
+# Usage: make bench-all [FILE=/path/to/dump.sql]
+bench-all:
+	@if [ -z "$(FILE)" ]; then \
+		./scripts/benchmark-all.sh; \
+	else \
+		./scripts/benchmark-all.sh "$(FILE)"; \
+	fi
+
+# Quick benchmark with smaller test files
+bench-quick:
+	./scripts/benchmark-all.sh --sizes 10 --runs 3 --warmup 1
+
+# Benchmark only the Rust implementation (no competitor comparison)
+bench-rust-only:
+	./scripts/benchmark-all.sh --rust-only
+
+# Legacy: Run old comparison script
+bench-compare:
+	@if [ -z "$(FILE)" ]; then \
+		./scripts/benchmark.sh; \
+	else \
+		./scripts/benchmark.sh "$(FILE)"; \
+	fi
+
+# Generate HTML benchmark report
+bench-report:
+	cargo bench -- --verbose
+	@echo "Report available at: target/criterion/report/index.html"
+
+# Profile with flamegraph (requires cargo-flamegraph)
+profile:
+	@echo "Profiling split command..."
+	cargo flamegraph --bin sql-splitter -- split /tmp/benchmark_test.sql -o /tmp/profile-output
 
 # Format code
 fmt:
-	go fmt ./...
-	npx prettier --write *.md
+	cargo fmt
 
-# Run linter
-lint:
-	golangci-lint run
+# Check code without building
+check:
+	cargo check
 
-# Run split command on test file
-run-split:
-	@if [ ! -f test.sql ]; then \
-		echo "Error: test.sql not found"; \
+# Clippy lints
+clippy:
+	cargo clippy -- -D warnings
+
+# Clean build artifacts
+clean:
+	cargo clean
+	rm -rf /tmp/rs-bench /tmp/go-bench
+
+# Build and run help
+run-help:
+	cargo run --release -- --help
+
+
+# Show binary size
+size:
+	@ls -lh target/release/sql-splitter 2>/dev/null || echo "Run 'make build-release' first"
+
+# Install locally
+install:
+	cargo install --path .
+
+# Uninstall
+uninstall:
+	cargo uninstall sql-splitter
+
+# Docker benchmarking
+bench-docker-build:
+	docker compose -f docker/docker-compose.benchmark.yml build
+
+bench-docker:
+	./docker/run-benchmark.sh -- --generate
+
+# Docker benchmark with custom file
+# Usage: make bench-docker-file FILE=/path/to/dump.sql
+bench-docker-file:
+	@if [ -z "$(FILE)" ]; then \
+		echo "Usage: make bench-docker-file FILE=/path/to/dump.sql"; \
 		exit 1; \
 	fi
-	./sql-splitter split test.sql -o output -v
+	./docker/run-benchmark.sh --file "$(FILE)"
 
-# Run analyze command on test file
-run-analyze:
-	@if [ ! -f test.sql ]; then \
-		echo "Error: test.sql not found"; \
-		exit 1; \
-	fi
-	./sql-splitter analyze test.sql --progress
+# === GitHub Actions Testing with act ===
+
+# Test all workflows locally using act
+test-workflows:
+	@command -v act >/dev/null 2>&1 || { echo "Install act: brew install act"; exit 1; }
+	act --list
+
+# Test the test workflow
+test-ci:
+	@command -v act >/dev/null 2>&1 || { echo "Install act: brew install act"; exit 1; }
+	act -W .github/workflows/test.yml
+
+# Test the release workflow (dry run)
+test-release:
+	@command -v act >/dev/null 2>&1 || { echo "Install act: brew install act"; exit 1; }
+	act -W .github/workflows/release.yml -n
+
+# Test with specific job
+test-job:
+	@if [ -z "$(JOB)" ]; then echo "Usage: make test-job JOB=lint"; exit 1; fi
+	act -j $(JOB)

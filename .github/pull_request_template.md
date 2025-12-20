@@ -9,9 +9,9 @@ What does this PR do? Why?
 
 ## Checklist
 
-- [ ] Tests pass (`make test`)
-- [ ] Code is formatted (`go fmt ./...`)
-- [ ] Linting passes (`make lint`)
+- [ ] Tests pass (`cargo test`)
+- [ ] Code is formatted (`cargo fmt`)
+- [ ] Linting passes (`cargo clippy`)
 - [ ] Documentation updated (if needed)
 
 ## Related Issues
