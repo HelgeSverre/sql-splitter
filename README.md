@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/sql-splitter.svg)](https://crates.io/crates/sql-splitter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.md)
-[![Build](https://github.com/helgesverre/sql-splitter/actions/workflows/ci.yml/badge.svg)](https://github.com/helgesverre/sql-splitter/actions)
+[![Build](https://github.com/helgesverre/sql-splitter/actions/workflows/test.yml/badge.svg)](https://github.com/helgesverre/sql-splitter/actions)
 
 High-performance CLI tool for splitting large SQL dump files into individual table files.
 
