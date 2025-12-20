@@ -165,7 +165,10 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
         (SqlDialect::MySql, conf)
     };
 
-    DialectDetectionResult { dialect, confidence }
+    DialectDetectionResult {
+        dialect,
+        confidence,
+    }
 }
 
 /// Detect dialect from a file, reading first 8KB
@@ -210,8 +213,9 @@ static CREATE_INDEX_RE: Lazy<Regex> =
 static ALTER_TABLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)ALTER\s+TABLE\s+`?([^\s`;]+)`?").unwrap());
 
-static DROP_TABLE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)DROP\s+TABLE\s+`?([^\s`;]+)`?").unwrap());
+static DROP_TABLE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[`"]?([^\s`"`;]+)[`"]?"#).unwrap()
+});
 
 // PostgreSQL COPY statement regex
 static COPY_RE: Lazy<Regex> =
@@ -321,9 +325,29 @@ impl<R: Read> Parser<R> {
                     if b == b'$' && !in_dollar_quote {
                         // Start of dollar-quote: scan for the closing $
                         if let Some(end) = buf[i + 1..].iter().position(|&c| c == b'$') {
-                            dollar_tag = buf[i + 1..i + 1 + end].to_vec();
-                            in_dollar_quote = true;
-                            continue;
+                            let tag_bytes = &buf[i + 1..i + 1 + end];
+
+                            // Validate tag: must be empty OR identifier-like [A-Za-z_][A-Za-z0-9_]*
+                            let is_valid_tag = if tag_bytes.is_empty() {
+                                true
+                            } else {
+                                let mut iter = tag_bytes.iter();
+                                match iter.next() {
+                                    Some(&first)
+                                        if first.is_ascii_alphabetic() || first == b'_' =>
+                                    {
+                                        iter.all(|&c| c.is_ascii_alphanumeric() || c == b'_')
+                                    }
+                                    _ => false,
+                                }
+                            };
+
+                            if is_valid_tag {
+                                dollar_tag = tag_bytes.to_vec();
+                                in_dollar_quote = true;
+                                continue;
+                            }
+                            // Invalid tag - treat $ as normal character
                         }
                     } else if b == b'$' && in_dollar_quote {
                         // Potential end of dollar-quote
@@ -624,7 +648,7 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
         return None;
     }
 
-    // Check for IF NOT EXISTS
+    // Check for IF NOT EXISTS or IF EXISTS
     let upper_check: Vec<u8> = stmt[i..]
         .iter()
         .take(20)
@@ -632,6 +656,11 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
         .collect();
     if upper_check.starts_with(b"IF NOT EXISTS") {
         i += 13; // Skip "IF NOT EXISTS"
+        while i < stmt.len() && is_whitespace(stmt[i]) {
+            i += 1;
+        }
+    } else if upper_check.starts_with(b"IF EXISTS") {
+        i += 9; // Skip "IF EXISTS"
         while i < stmt.len() && is_whitespace(stmt[i]) {
             i += 1;
         }

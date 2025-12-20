@@ -65,12 +65,41 @@ declare -a TEST_CASES=(
     "postgres-pagila-schema|postgres|https://raw.githubusercontent.com/devrimgunduz/pagila/master/pagila-schema.sql|none|pagila-schema.sql|Pagila PostgreSQL port of Sakila"
     "postgres-pagila-data|postgres|https://raw.githubusercontent.com/devrimgunduz/pagila/master/pagila-data.sql|none|pagila-data.sql|Pagila data with COPY statements"
     "postgres-airlines-small|postgres|https://edu.postgrespro.com/demo-small-en.zip|unzip -o|demo-small-en-20170815.sql|PostgresPro Airlines demo (small)"
+    "postgres-northwind|postgres|https://raw.githubusercontent.com/pthom/northwind_psql/master/northwind.sql|none|northwind.sql|Northwind PostgreSQL port"
+    "postgres-periodic|postgres|https://raw.githubusercontent.com/sdrahmath/PeriodicTableDatabase/main/periodic_table.sql|none|periodic_table.sql|Periodic table elements DB"
+    "postgres-ecommerce|postgres|https://raw.githubusercontent.com/larbisahli/e-commerce-database-schema/main/init.sql|none|init.sql|E-commerce schema with UUIDs"
+    "postgres-sakila-schema|postgres|https://raw.githubusercontent.com/jOOQ/sakila/main/postgres-sakila-db/postgres-sakila-schema.sql|none|postgres-sakila-schema.sql|jOOQ Sakila PostgreSQL schema"
+    "postgres-sakila-data|postgres|https://raw.githubusercontent.com/jOOQ/sakila/main/postgres-sakila-db/postgres-sakila-insert-data.sql|none|postgres-sakila-insert-data.sql|jOOQ Sakila PostgreSQL data"
+    "postgres-adventureworks|postgres|https://raw.githubusercontent.com/morenoh149/postgresDBSamples/master/adventureworks/install.sql|none|install.sql|AdventureWorks PostgreSQL port"
     
     # Generic SQL files - may not have specific dialect markers
     # These test that sql-splitter can handle files even with low-confidence detection
     "generic-chinook-pg|any|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_PostgreSql.sql|none|Chinook_PostgreSql.sql|Chinook DB (generic SQL)"
     "generic-chinook-sqlite|any|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sql|none|Chinook_Sqlite.sql|Chinook DB SQLite version"
     "generic-chinook-mysql|any|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_MySql.sql|none|Chinook_MySql.sql|Chinook DB MySQL version"
+    
+    # WordPress database dumps - real WordPress installations
+    "wordpress-films|mysql|https://raw.githubusercontent.com/chamathis/WordPress-Test/master/wp_films.sql|none|wp_films.sql|WordPress Films site (2017)"
+    
+    # Northwind - classic Microsoft sample database ported to MySQL
+    "mysql-northwind-data|mysql|https://raw.githubusercontent.com/dalers/mywind/master/northwind-data.sql|none|northwind-data.sql|Northwind MySQL data"
+    
+    # Geographic and reference data dumps
+    "mysql-countries|mysql|https://gist.githubusercontent.com/adhipg/1600028/raw/countries.sql|none|countries.sql|Countries with phone codes"
+    "mysql-wilayah|mysql|https://raw.githubusercontent.com/cahyadsn/wilayah/master/db/wilayah.sql|none|wilayah.sql|Indonesian administrative regions (large)"
+    
+    # Educational/tutorial database dumps
+    "mysql-coffeeshop|any|https://raw.githubusercontent.com/mochen862/full-sql-database-course/main/create_insert.sql|none|create_insert.sql|Coffee shop tutorial DB"
+    
+    # WordPress WooCommerce demo data
+    "wordpress-woocommerce|mysql|https://raw.githubusercontent.com/GoldenOwlAsia/wordpress-woocommerce-demo/master/demowordpress.sql|none|demowordpress.sql|WooCommerce demo with products/orders"
+    "wordpress-woo-replica|mysql|https://raw.githubusercontent.com/GoldenOwlAsia/wordpress-woocommerce-demo/master/demowordpress_replica.sql|none|demowordpress_replica.sql|WooCommerce replica DB"
+    "wordpress-plugin-test|mysql|https://raw.githubusercontent.com/WPBP/WordPress-Plugin-Boilerplate-Powered/master/plugin-name/tests/_data/dump.sql|none|dump.sql|WordPress plugin test fixture"
+    
+
+    
+    # Large real-world test - Stack Overflow subset (if available)
+    # Note: Large files may take time to download
 )
 
 print_header() {

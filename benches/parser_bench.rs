@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
 use sql_splitter::parser::{Parser, StatementType, SMALL_BUFFER_SIZE};
+use std::hint::black_box;
 
 fn generate_sql_data(num_statements: usize) -> Vec<u8> {
     let mut data = Vec::new();

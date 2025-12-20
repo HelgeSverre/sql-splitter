@@ -635,4 +635,434 @@ INSERT INTO `users` VALUES (2,'Bob');
             assert_eq!(name, "orders");
         }
     }
+
+    // =========================================================================
+    // PostgreSQL Dollar-Quoting Tests
+    // =========================================================================
+
+    mod postgres_dollar_quoting_tests {
+        use crate::parser::{Parser, SqlDialect, StatementType};
+
+        #[test]
+        fn test_postgres_empty_dollar_quote() {
+            let sql = b"CREATE FUNCTION test() RETURNS text AS $$SELECT 1$$ LANGUAGE sql;";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+            assert!(stmt.unwrap().ends_with(b";"));
+        }
+
+        #[test]
+        fn test_postgres_named_dollar_quote() {
+            let sql = b"CREATE FUNCTION test() RETURNS text AS $_$SELECT 1$_$ LANGUAGE sql;";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+        }
+
+        #[test]
+        fn test_postgres_dollar_quote_with_semicolon_inside() {
+            let sql =
+                b"CREATE FUNCTION test() RETURNS text AS $$SELECT 1; SELECT 2;$$ LANGUAGE sql;";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+            let s = stmt.unwrap();
+            assert!(s.starts_with(b"CREATE FUNCTION"));
+            assert!(s.ends_with(b";"));
+        }
+
+        #[test]
+        fn test_postgres_mixed_dollar_quote_tags() {
+            // This was the bug: $_$ followed by $$ would break parsing
+            let sql = br#"
+CREATE FUNCTION test1() RETURNS text AS $_$
+SELECT 1;
+$_$;
+
+CREATE FUNCTION test2() RETURNS text AS $$
+SELECT 2;
+$$;
+
+CREATE TABLE test (id INT);
+"#;
+            let mut parser = Parser::with_dialect(&sql[..], 4096, SqlDialect::Postgres);
+            let mut statements = Vec::new();
+
+            while let Some(stmt) = parser.read_statement().unwrap() {
+                statements.push(String::from_utf8_lossy(&stmt).into_owned());
+            }
+
+            assert!(
+                statements
+                    .iter()
+                    .any(|s| s.contains("CREATE FUNCTION test1")),
+                "Should find test1 function"
+            );
+            assert!(
+                statements
+                    .iter()
+                    .any(|s| s.contains("CREATE FUNCTION test2")),
+                "Should find test2 function"
+            );
+            assert!(
+                statements.iter().any(|s| s.contains("CREATE TABLE test")),
+                "Should find CREATE TABLE"
+            );
+        }
+
+        #[test]
+        fn test_postgres_invalid_dollar_tag_not_matched() {
+            // A $ followed by invalid chars then another $ should not be treated as dollar-quote
+            let sql = b"SELECT $1 + $2;";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+            assert_eq!(stmt.unwrap(), b"SELECT $1 + $2;");
+        }
+
+        #[test]
+        fn test_postgres_schema_qualified_table() {
+            let sql = b"CREATE TABLE public.users (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Postgres);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "users");
+        }
+
+        #[test]
+        fn test_postgres_copy_from_stdin() {
+            let sql = b"COPY users FROM stdin;\n1\tAlice\n2\tBob\n\\.\nCREATE TABLE test (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt1 = parser.read_statement().unwrap();
+            assert!(stmt1.is_some());
+            assert!(stmt1.unwrap().starts_with(b"COPY users"));
+
+            // COPY data block
+            let stmt2 = parser.read_statement().unwrap();
+            assert!(stmt2.is_some());
+
+            let stmt3 = parser.read_statement().unwrap();
+            assert!(stmt3.is_some());
+            assert!(std::str::from_utf8(&stmt3.unwrap())
+                .unwrap()
+                .contains("CREATE TABLE"));
+        }
+
+        #[test]
+        fn test_postgres_nested_dollar_quotes() {
+            // Function containing $$ inside $_$ quotes
+            let sql = b"CREATE FUNCTION test() AS $_$
+                SELECT '$$not a quote$$';
+            $_$;";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+            let s = stmt.unwrap();
+            assert!(s.starts_with(b"CREATE FUNCTION"));
+            assert!(s.ends_with(b";"));
+        }
+
+        #[test]
+        fn test_postgres_insert_into_schema_qualified() {
+            let sql = b"INSERT INTO public.users (id, name) VALUES (1, 'Alice');";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Postgres);
+
+            assert_eq!(typ, StatementType::Insert);
+            assert_eq!(name, "users");
+        }
+
+        #[test]
+        fn test_postgres_double_quoted_identifiers() {
+            let sql = b"CREATE TABLE \"My Table\" (\"Column One\" INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Postgres);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Postgres);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "My Table");
+        }
+    }
+
+    // =========================================================================
+    // SQLite-Specific Tests
+    // =========================================================================
+
+    mod sqlite_tests {
+        use crate::parser::{Parser, SqlDialect, StatementType};
+
+        #[test]
+        fn test_sqlite_create_table() {
+            let sql = b"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Sqlite);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Sqlite);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "users");
+        }
+
+        #[test]
+        fn test_sqlite_double_quoted_table() {
+            let sql = b"CREATE TABLE \"my-table\" (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Sqlite);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Sqlite);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "my-table");
+        }
+
+        #[test]
+        fn test_sqlite_insert_replace() {
+            let sql = b"INSERT OR REPLACE INTO users VALUES (1, 'Alice');";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Sqlite);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            // Should still be recognized as an insert
+            assert!(stmt.starts_with(b"INSERT"));
+        }
+
+        #[test]
+        fn test_sqlite_pragma_ignored() {
+            let sql = b"PRAGMA foreign_keys=ON; CREATE TABLE users (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::Sqlite);
+
+            let stmt1 = parser.read_statement().unwrap();
+            assert!(stmt1.is_some());
+
+            let stmt2 = parser.read_statement().unwrap();
+            assert!(stmt2.is_some());
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt2.unwrap(), SqlDialect::Sqlite);
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "users");
+        }
+    }
+
+    // =========================================================================
+    // MySQL-Specific Tests
+    // =========================================================================
+
+    mod mysql_tests {
+        use crate::parser::{Parser, SqlDialect, StatementType};
+
+        #[test]
+        fn test_mysql_backtick_with_spaces() {
+            let sql = b"CREATE TABLE `my table` (`column name` INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "my table");
+        }
+
+        #[test]
+        fn test_mysql_conditional_comment() {
+            let sql = b"/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */; CREATE TABLE t (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
+
+            let stmt1 = parser.read_statement().unwrap();
+            assert!(stmt1.is_some());
+
+            let stmt2 = parser.read_statement().unwrap();
+            assert!(stmt2.is_some());
+        }
+
+        #[test]
+        fn test_mysql_lock_unlock_tables() {
+            let sql = b"LOCK TABLES `users` WRITE; INSERT INTO `users` VALUES (1); UNLOCK TABLES;";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
+
+            let mut count = 0;
+            while let Some(_) = parser.read_statement().unwrap() {
+                count += 1;
+            }
+            assert_eq!(count, 3);
+        }
+
+        #[test]
+        fn test_mysql_escaped_backtick_in_name() {
+            let sql = b"CREATE TABLE `my``table` (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, _name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
+
+            assert_eq!(typ, StatementType::CreateTable);
+        }
+
+        #[test]
+        fn test_mysql_multiline_insert() {
+            let sql = b"INSERT INTO users VALUES
+                (1, 'Alice'),
+                (2, 'Bob'),
+                (3, 'Charlie');";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+            let s = stmt.unwrap();
+            let text = std::str::from_utf8(&s).unwrap();
+            assert!(text.contains("Alice"));
+            assert!(text.contains("Charlie"));
+        }
+
+        #[test]
+        fn test_mysql_create_table_if_not_exists() {
+            let sql = b"CREATE TABLE IF NOT EXISTS users (id INT);";
+            let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::MySql);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, "users");
+        }
+    }
+
+    // =========================================================================
+    // Cross-Dialect Edge Cases
+    // =========================================================================
+
+    mod cross_dialect_tests {
+        use crate::parser::{Parser, SqlDialect, StatementType};
+
+        #[test]
+        fn test_alter_table_all_dialects() {
+            for dialect in [SqlDialect::MySql, SqlDialect::Postgres, SqlDialect::Sqlite] {
+                let sql = b"ALTER TABLE users ADD COLUMN email VARCHAR(255);";
+                let mut parser = Parser::with_dialect(&sql[..], 1024, dialect);
+
+                let stmt = parser.read_statement().unwrap().unwrap();
+                let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+
+                assert_eq!(typ, StatementType::AlterTable);
+                assert_eq!(name, "users");
+            }
+        }
+
+        #[test]
+        fn test_drop_table_all_dialects() {
+            for dialect in [SqlDialect::MySql, SqlDialect::Postgres, SqlDialect::Sqlite] {
+                let sql = b"DROP TABLE IF EXISTS users;";
+                let mut parser = Parser::with_dialect(&sql[..], 1024, dialect);
+
+                let stmt = parser.read_statement().unwrap().unwrap();
+                let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+
+                assert_eq!(typ, StatementType::DropTable);
+                assert_eq!(name, "users");
+            }
+        }
+
+        #[test]
+        fn test_drop_table_simple() {
+            let sql = b"DROP TABLE users;";
+            let mut parser = Parser::new(&sql[..], 1024);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) = Parser::<&[u8]>::parse_statement(&stmt);
+
+            assert_eq!(typ, StatementType::DropTable);
+            assert_eq!(name, "users");
+        }
+
+        #[test]
+        fn test_create_index_all_dialects() {
+            for dialect in [SqlDialect::MySql, SqlDialect::Postgres, SqlDialect::Sqlite] {
+                let sql = b"CREATE INDEX idx_email ON users (email);";
+                let mut parser = Parser::with_dialect(&sql[..], 1024, dialect);
+
+                let stmt = parser.read_statement().unwrap().unwrap();
+                let (typ, name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+
+                assert_eq!(typ, StatementType::CreateIndex);
+                assert_eq!(name, "users");
+            }
+        }
+
+        #[test]
+        fn test_very_long_table_name() {
+            let long_name = "a".repeat(128);
+            let sql = format!("CREATE TABLE {} (id INT);", long_name);
+            let mut parser = Parser::new(sql.as_bytes(), 1024);
+
+            let stmt = parser.read_statement().unwrap().unwrap();
+            let (typ, name) = Parser::<&[u8]>::parse_statement(&stmt);
+
+            assert_eq!(typ, StatementType::CreateTable);
+            assert_eq!(name, long_name);
+        }
+
+        #[test]
+        fn test_unicode_in_string_values() {
+            let sql = "INSERT INTO users VALUES (1, '日本語テスト', 'émoji 🎉');".as_bytes();
+            let mut parser = Parser::new(sql, 1024);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+        }
+
+        #[test]
+        fn test_binary_data_in_blob() {
+            // Binary data with null bytes in a string
+            let sql = b"INSERT INTO files VALUES (1, X'00FF00FF');";
+            let mut parser = Parser::new(&sql[..], 1024);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+        }
+
+        #[test]
+        fn test_empty_table_name_handling() {
+            // Malformed SQL - should not crash
+            let sql = b"CREATE TABLE  (id INT);";
+            let mut parser = Parser::new(&sql[..], 1024);
+
+            let stmt = parser.read_statement().unwrap();
+            assert!(stmt.is_some());
+            // parse_statement should return Unknown for malformed SQL
+            let (typ, _) = Parser::<&[u8]>::parse_statement(&stmt.unwrap());
+            assert_eq!(typ, StatementType::Unknown);
+        }
+
+        #[test]
+        fn test_multiple_semicolons() {
+            let sql = b"SELECT 1;; SELECT 2;;;";
+            let mut parser = Parser::new(&sql[..], 1024);
+
+            let mut count = 0;
+            while let Some(_) = parser.read_statement().unwrap() {
+                count += 1;
+            }
+            // Should handle empty statements between semicolons
+            assert!(count >= 2);
+        }
+    }
 }

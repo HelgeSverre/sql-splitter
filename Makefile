@@ -1,4 +1,4 @@
-.PHONY: build release native test bench fmt check clippy clean install docker-build docker-bench
+.PHONY: build release native test bench fmt check clippy clean install docker-build docker-bench verify-realworld
 
 # Debug build
 build:
@@ -47,3 +47,7 @@ docker-build:
 # Run benchmarks in Docker (generates 100MB test data)
 docker-bench:
 	./docker/run-benchmark.sh --generate 100
+
+# Verify against real-world SQL dumps from public sources
+verify-realworld:
+	./scripts/verify-realworld.sh

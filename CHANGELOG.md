@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2025-12-20
+
+### Fixed
+
+- **PostgreSQL dollar-quoting bug**: Fixed parser getting stuck when SQL files contained mixed dollar-quote tags (e.g., `$_$` followed by `$$`). The parser now validates that dollar-quote tags are syntactically valid (empty or identifier-like `[A-Za-z_][A-Za-z0-9_]*`)
+- **DROP TABLE IF EXISTS**: Fixed table name extraction for `DROP TABLE IF EXISTS` statements
+
+### Added
+
+- Real-world SQL verification script (`scripts/verify-realworld.sh`) that tests against 25 public SQL dumps
+- `make verify-realworld` target for running real-world verification tests
+- 32 new edge case tests for PostgreSQL, MySQL, SQLite, and cross-dialect parsing
+- Tests for dollar-quoting, schema-qualified tables, IF EXISTS/IF NOT EXISTS clauses
+
+### Changed
+
+- Expanded test suite from 87 to 119 unit tests
+
 ## [1.0.0] - 2025-12-20
 
 ### Added

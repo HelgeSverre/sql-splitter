@@ -61,6 +61,16 @@ sql-splitter analyze dump.sql
 
 See [BENCHMARKS.md](BENCHMARKS.md) for detailed comparisons.
 
+## Testing
+
+```bash
+# Unit tests
+cargo test
+
+# Verify against real-world SQL dumps (MySQL, PostgreSQL, WordPress, etc.)
+make verify-realworld
+```
+
 ## License
 
 MIT — see [LICENSE.md](LICENSE.md)
