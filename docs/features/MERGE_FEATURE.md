@@ -256,5 +256,5 @@ Directory Scan → File Iterator → BufReader → Output BufWriter
 
 ## Related
 
-- [Split Command](../src/cmd/split.rs)
-- [Splitter Module](../src/splitter/mod.rs)
+- [Split Command](../../src/cmd/split.rs)
+- [Splitter Module](../../src/splitter/mod.rs)

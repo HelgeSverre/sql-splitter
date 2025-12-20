@@ -6,7 +6,7 @@ This document outlines potential future features for sql-splitter. These are ide
 
 ## 1. Merge Command
 
-**Status**: [Detailed design available](./MERGE_FEATURE.md)
+**Status**: [Detailed design available](MERGE_FEATURE.md)
 
 Combine split SQL table files back into a single dump file.
 
@@ -56,7 +56,7 @@ sql-splitter query dump.sql --table orders --where "total > 1000 AND status = 'c
 
 ## 3. Sample Command — Create Reduced Test Datasets
 
-**Status**: [Detailed design available](./SAMPLE_FEATURE.md)
+**Status**: [Detailed design available](SAMPLE_FEATURE.md)
 
 Generate smaller representative datasets for development and testing.
 
@@ -115,7 +115,7 @@ sql-splitter convert dump.sql -o converted.sql --to postgres
 - INSERT syntax normalization
 - COPY ↔ INSERT conversion (PostgreSQL)
 
-**See:** [Detailed feasibility analysis](./CONVERT_FEASIBILITY.md)
+**See:** [Detailed feasibility analysis](CONVERT_FEASIBILITY.md)
 
 **Use cases:**
 - Database migration between platforms

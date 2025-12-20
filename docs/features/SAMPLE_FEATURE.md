@@ -464,6 +464,6 @@ sql-splitter sample prod.sql -o team-dev.sql --config team-sample.yaml
 
 ## Related
 
-- [Split Command](../src/cmd/split.rs)
-- [Merge Feature](./MERGE_FEATURE.md)
-- [Redact Feature](./IDEAS.md#6-redact-command--anonymize-sensitive-data)
+- [Split Command](../../src/cmd/split.rs)
+- [Merge Feature](MERGE_FEATURE.md)
+- [Redact Feature](IDEAS.md#6-redact-command--anonymize-sensitive-data)
