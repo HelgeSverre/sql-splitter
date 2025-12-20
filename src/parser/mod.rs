@@ -109,9 +109,6 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
     if contains_bytes(header, b"PRAGMA") {
         score.sqlite += 5;
     }
-    if contains_bytes(header, b"BEGIN TRANSACTION") {
-        score.sqlite += 5;
-    }
 
     // Low confidence markers (+2)
     if contains_bytes(header, b"$$") {
@@ -120,7 +117,11 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
     if contains_bytes(header, b"CREATE EXTENSION") {
         score.postgres += 2;
     }
-    // Backticks suggest MySQL (but check it's not inside a string)
+    // BEGIN TRANSACTION is generic ANSI SQL, only slightly suggests SQLite
+    if contains_bytes(header, b"BEGIN TRANSACTION") {
+        score.sqlite += 2;
+    }
+    // Backticks suggest MySQL (could also appear in data/comments)
     if header.contains(&b'`') {
         score.mysql += 2;
     }
@@ -947,7 +948,9 @@ $$ LANGUAGE plpgsql;
 
     #[test]
     fn test_detect_sqlite_dump_header() {
-        let header = b"PRAGMA foreign_keys=OFF;
+        // Real sqlite3 .dump output has a comment at the top
+        let header = b"-- SQLite database dump
+PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
 INSERT INTO users VALUES(1,'Alice');
@@ -955,6 +958,7 @@ COMMIT;
 ";
         let result = detect_dialect(header);
         assert_eq!(result.dialect, SqlDialect::Sqlite);
+        // SQLite (+10) + PRAGMA (+5) + BEGIN TRANSACTION (+2) = High
         assert_eq!(result.confidence, DialectConfidence::High);
     }
 
@@ -1053,6 +1057,43 @@ INSERT INTO notes VALUES (1, 'Use `code` for inline code');
 ";
         let result = detect_dialect(header);
         assert_eq!(result.dialect, SqlDialect::Postgres);
+        assert_eq!(result.confidence, DialectConfidence::High);
+    }
+
+    #[test]
+    fn test_begin_transaction_alone_is_low_confidence() {
+        // BEGIN TRANSACTION is generic ANSI SQL, not definitive for SQLite
+        let header = b"BEGIN TRANSACTION;
+CREATE TABLE t (id INTEGER);
+COMMIT;
+";
+        let result = detect_dialect(header);
+        // Should detect SQLite but with low confidence since only generic markers
+        assert_eq!(result.dialect, SqlDialect::Sqlite);
+        assert_eq!(result.confidence, DialectConfidence::Low);
+    }
+
+    #[test]
+    fn test_backticks_only_is_low_confidence() {
+        // Backticks alone shouldn't give high confidence MySQL
+        let header = b"CREATE TABLE `users` (id INT);
+INSERT INTO `users` VALUES (1);
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::Low);
+    }
+
+    #[test]
+    fn test_conflicting_markers_postgres_wins() {
+        // PostgreSQL dump header should beat MySQL-style backticks in data
+        let header = b"-- PostgreSQL database dump
+SET search_path = public;
+INSERT INTO notes VALUES (1, 'Use `backticks` for code');
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Postgres);
+        // High confidence because we have strong Postgres markers
         assert_eq!(result.confidence, DialectConfidence::High);
     }
 }
