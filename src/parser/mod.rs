@@ -102,6 +102,7 @@ pub struct Parser<R: Read> {
 }
 
 impl<R: Read> Parser<R> {
+    #[allow(dead_code)]
     pub fn new(reader: R, buffer_size: usize) -> Self {
         Self::with_dialect(reader, buffer_size, SqlDialect::default())
     }
@@ -307,6 +308,7 @@ impl<R: Read> Parser<R> {
         last_line == b"\\.\n" || last_line == b"\\.\r\n"
     }
 
+    #[allow(dead_code)]
     pub fn parse_statement(stmt: &[u8]) -> (StatementType, String) {
         Self::parse_statement_with_dialect(stmt, SqlDialect::MySql)
     }
@@ -335,7 +337,7 @@ impl<R: Read> Parser<R> {
                 if let Some(m) = caps.get(1) {
                     let name = String::from_utf8_lossy(m.as_bytes()).into_owned();
                     // Handle schema.table - extract just the table name
-                    let table_name = name.split('.').last().unwrap_or(&name).to_string();
+                    let table_name = name.split('.').next_back().unwrap_or(&name).to_string();
                     return (StatementType::Copy, table_name);
                 }
             }
