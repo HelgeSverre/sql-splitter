@@ -33,9 +33,10 @@ impl TypeMapper {
     fn mysql_to_postgres(stmt: &str) -> String {
         let mut result = stmt.to_string();
 
-        // Integer types
+        // Integer types - strip display width, PostgreSQL doesn't use it
         result = RE_TINYINT_BOOL.replace_all(&result, "BOOLEAN").to_string();
         result = RE_TINYINT.replace_all(&result, "SMALLINT").to_string();
+        result = RE_SMALLINT.replace_all(&result, "SMALLINT").to_string();
         result = RE_MEDIUMINT.replace_all(&result, "INTEGER").to_string();
         result = RE_INT_SIZE.replace_all(&result, "INTEGER").to_string();
         result = RE_BIGINT_SIZE.replace_all(&result, "BIGINT").to_string();
@@ -156,6 +157,9 @@ impl TypeMapper {
         // TIMESTAMPTZ → DATETIME
         result = RE_TIMESTAMPTZ.replace_all(&result, "DATETIME").to_string();
 
+        // TIMESTAMP WITH TIME ZONE → DATETIME
+        result = RE_TIMESTAMP_WITH_TZ.replace_all(&result, "DATETIME").to_string();
+
         // TIMESTAMP WITHOUT TIME ZONE → DATETIME
         result = RE_TIMESTAMP_NO_TZ.replace_all(&result, "DATETIME").to_string();
 
@@ -188,6 +192,7 @@ impl TypeMapper {
 
         // Timestamps → TEXT
         result = RE_TIMESTAMPTZ.replace_all(&result, "TEXT").to_string();
+        result = RE_TIMESTAMP_WITH_TZ.replace_all(&result, "TEXT").to_string();
         result = RE_TIMESTAMP_NO_TZ.replace_all(&result, "TEXT").to_string();
 
         // JSONB/JSON → TEXT
@@ -298,6 +303,8 @@ static RE_REAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bREAL\b").unwrap())
 static RE_BOOLEAN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bBOOLEAN\b").unwrap());
 static RE_TIMESTAMPTZ: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMPTZ\b").unwrap());
+static RE_TIMESTAMP_WITH_TZ: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMP\s+WITH\s+TIME\s+ZONE\b").unwrap());
 static RE_TIMESTAMP_NO_TZ: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bTIMESTAMP\s+WITHOUT\s+TIME\s+ZONE\b").unwrap());
 static RE_JSONB: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bJSONB\b").unwrap());

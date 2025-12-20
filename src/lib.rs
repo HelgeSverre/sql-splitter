@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod convert;
 pub mod merger;
 pub mod parser;
 pub mod sample;

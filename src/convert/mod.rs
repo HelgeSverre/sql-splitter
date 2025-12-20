@@ -4,11 +4,15 @@
 //! - Identifier quoting conversion (backticks ↔ double quotes)
 //! - String escape normalization (\' ↔ '')
 //! - Data type mapping (AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY)
+//! - COPY FROM stdin → INSERT conversion
 //! - Session header conversion
 //! - Warning system for unsupported features
 
+mod copy_to_insert;
 mod types;
 mod warnings;
+
+pub use copy_to_insert::{copy_to_inserts, parse_copy_header, CopyHeader};
 
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::splitter::Compression;
@@ -74,6 +78,8 @@ pub struct Converter {
     to: SqlDialect,
     warnings: WarningCollector,
     strict: bool,
+    /// Pending COPY header for data block processing
+    pending_copy_header: Option<CopyHeader>,
 }
 
 impl Converter {
@@ -83,12 +89,31 @@ impl Converter {
             to,
             warnings: WarningCollector::new(),
             strict: false,
+            pending_copy_header: None,
         }
     }
 
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
         self
+    }
+
+    /// Check if we have a pending COPY header (waiting for data block)
+    pub fn has_pending_copy(&self) -> bool {
+        self.pending_copy_header.is_some()
+    }
+
+    /// Process a COPY data block using the pending header
+    pub fn process_copy_data(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>, ConvertWarning> {
+        if let Some(header) = self.pending_copy_header.take() {
+            if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+                // Convert COPY data to INSERT statements
+                let inserts = copy_to_inserts(&header, data, self.to);
+                return Ok(inserts);
+            }
+        }
+        // Pass through if same dialect or no pending header
+        Ok(vec![data.to_vec()])
     }
 
     /// Convert a single statement
@@ -136,6 +161,14 @@ impl Converter {
         // Convert AUTO_INCREMENT
         result = self.convert_auto_increment(&result, table_name);
 
+        // Convert PostgreSQL-specific syntax
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            result = self.strip_postgres_casts(&result);
+            result = self.convert_nextval(&result);
+            result = self.convert_default_now(&result);
+            result = self.strip_schema_prefix(&result);
+        }
+
         // Convert string escapes
         result = self.convert_string_escapes(&result);
 
@@ -163,6 +196,12 @@ impl Converter {
         // Convert identifier quoting
         result = self.convert_identifiers(&result);
 
+        // Convert PostgreSQL-specific syntax
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            result = self.strip_postgres_casts(&result);
+            result = self.strip_schema_prefix(&result);
+        }
+
         // Convert string escapes (careful with data!)
         result = self.convert_string_escapes(&result);
 
@@ -176,6 +215,12 @@ impl Converter {
 
         // Convert identifier quoting
         result = self.convert_identifiers(&result);
+
+        // Convert PostgreSQL-specific syntax
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            result = self.strip_postgres_casts(&result);
+            result = self.strip_schema_prefix(&result);
+        }
 
         // Detect FULLTEXT/SPATIAL
         if result.contains("FULLTEXT") || result.contains("fulltext") {
@@ -202,6 +247,14 @@ impl Converter {
         result = self.convert_identifiers(&result);
         result = self.convert_data_types(&result);
 
+        // Convert PostgreSQL-specific syntax
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            result = self.strip_postgres_casts(&result);
+            result = self.convert_nextval(&result);
+            result = self.convert_default_now(&result);
+            result = self.strip_schema_prefix(&result);
+        }
+
         Ok(result.into_bytes())
     }
 
@@ -212,29 +265,40 @@ impl Converter {
 
         result = self.convert_identifiers(&result);
 
+        // Strip PostgreSQL schema prefix
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            result = self.strip_schema_prefix(&result);
+        }
+
         Ok(result.into_bytes())
     }
 
     /// Convert COPY statement (PostgreSQL-specific)
+    /// 
+    /// This handles the COPY header. The data block is processed separately
+    /// via process_copy_data() when called from the run() function.
     fn convert_copy(
         &mut self,
         stmt: &[u8],
         _table_name: Option<&str>,
     ) -> Result<Vec<u8>, ConvertWarning> {
-        // COPY is PostgreSQL only - if converting FROM postgres, we need to convert to INSERTs
-        // For now, just pass through or warn
-        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
-            self.warnings.add(ConvertWarning::UnsupportedFeature {
-                feature: "COPY FROM stdin".to_string(),
-                suggestion: Some("COPY statements require conversion to INSERT - not yet implemented in MVP".to_string()),
-            });
-            if self.strict {
-                return Err(ConvertWarning::UnsupportedFeature {
-                    feature: "COPY FROM stdin".to_string(),
-                    suggestion: None,
-                });
+        let stmt_str = String::from_utf8_lossy(stmt);
+        
+        // Check if this contains "FROM stdin" (COPY header) or is data
+        let upper = stmt_str.to_uppercase();
+        if upper.contains("FROM STDIN") {
+            // This is a COPY header - parse it and store for later
+            if let Some(header) = parse_copy_header(&stmt_str) {
+                if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+                    // Store the header, will convert data block in process_copy_data
+                    self.pending_copy_header = Some(header);
+                    // Return empty - the actual INSERT will be generated from data
+                    return Ok(Vec::new());
+                }
             }
         }
+        
+        // If same dialect or couldn't parse, pass through
         Ok(stmt.to_vec())
     }
 
@@ -242,6 +306,7 @@ impl Converter {
     fn convert_other(&mut self, stmt: &[u8]) -> Result<Vec<u8>, ConvertWarning> {
         let stmt_str = String::from_utf8_lossy(stmt);
         let result = stmt_str.to_string();
+        let trimmed = result.trim();
 
         // Skip MySQL session commands when converting to other dialects
         if self.from == SqlDialect::MySql && self.to != SqlDialect::MySql {
@@ -250,9 +315,16 @@ impl Converter {
             }
         }
 
-        // Skip PostgreSQL session commands when converting to other dialects
+        // Skip PostgreSQL session commands and unsupported features when converting to other dialects
         if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
             if self.is_postgres_session_command(&result) {
+                return Ok(Vec::new()); // Skip
+            }
+            if self.is_postgres_only_feature(trimmed) {
+                self.warnings.add(ConvertWarning::SkippedStatement {
+                    reason: "PostgreSQL-only feature".to_string(),
+                    statement_preview: trimmed.chars().take(60).collect(),
+                });
                 return Ok(Vec::new()); // Skip
             }
         }
@@ -285,9 +357,10 @@ impl Converter {
             || upper.contains("UNLOCK TABLES")
     }
 
-    /// Check if statement is a PostgreSQL session command
+    /// Check if statement is a PostgreSQL session command or unsupported statement
     fn is_postgres_session_command(&self, stmt: &str) -> bool {
         let upper = stmt.to_uppercase();
+        // Session/transaction settings
         upper.contains("SET CLIENT_ENCODING")
             || upper.contains("SET STANDARD_CONFORMING_STRINGS")
             || upper.contains("SET CHECK_FUNCTION_BODIES")
@@ -296,7 +369,67 @@ impl Converter {
             || upper.contains("SET LOCK_TIMEOUT")
             || upper.contains("SET IDLE_IN_TRANSACTION_SESSION_TIMEOUT")
             || upper.contains("SET ROW_SECURITY")
+            || upper.contains("SET STATEMENT_TIMEOUT")
+            || upper.contains("SET XMLOPTION")
+            || upper.contains("SET CLIENT_MIN_MESSAGES")
+            || upper.contains("SET DEFAULT_TABLE_ACCESS_METHOD")
             || upper.contains("SELECT PG_CATALOG")
+            // Ownership/permission statements
+            || upper.contains("OWNER TO")
+            || upper.contains("GRANT ")
+            || upper.contains("REVOKE ")
+    }
+
+    /// Check if statement is a PostgreSQL-only feature that should be skipped
+    fn is_postgres_only_feature(&self, stmt: &str) -> bool {
+        // Strip leading comments to find the actual statement
+        let stripped = self.strip_leading_sql_comments(stmt);
+        let upper = stripped.to_uppercase();
+        
+        // These PostgreSQL features have no MySQL/SQLite equivalent
+        upper.starts_with("CREATE DOMAIN")
+            || upper.starts_with("CREATE TYPE")
+            || upper.starts_with("CREATE FUNCTION")
+            || upper.starts_with("CREATE PROCEDURE")
+            || upper.starts_with("CREATE AGGREGATE")
+            || upper.starts_with("CREATE OPERATOR")
+            || upper.starts_with("CREATE SEQUENCE")
+            || upper.starts_with("CREATE EXTENSION")
+            || upper.starts_with("CREATE SCHEMA")
+            || upper.starts_with("CREATE TRIGGER")
+            || upper.starts_with("ALTER DOMAIN")
+            || upper.starts_with("ALTER TYPE")
+            || upper.starts_with("ALTER FUNCTION")
+            || upper.starts_with("ALTER SEQUENCE")
+            || upper.starts_with("ALTER SCHEMA")
+            || upper.starts_with("COMMENT ON")
+    }
+
+    /// Strip leading SQL comments (-- and /* */) from a string
+    fn strip_leading_sql_comments(&self, stmt: &str) -> String {
+        let mut result = stmt.trim();
+        loop {
+            // Strip -- comments
+            if result.starts_with("--") {
+                if let Some(pos) = result.find('\n') {
+                    result = result[pos + 1..].trim();
+                    continue;
+                } else {
+                    return String::new();
+                }
+            }
+            // Strip /* */ comments
+            if result.starts_with("/*") {
+                if let Some(pos) = result.find("*/") {
+                    result = result[pos + 2..].trim();
+                    continue;
+                } else {
+                    return String::new();
+                }
+            }
+            break;
+        }
+        result.to_string()
     }
 
     /// Check if statement is a SQLite pragma
@@ -321,7 +454,7 @@ impl Converter {
     }
 
     /// Convert backticks to double quotes
-    fn backticks_to_double_quotes(&self, stmt: &str) -> String {
+    pub fn backticks_to_double_quotes(&self, stmt: &str) -> String {
         let mut result = String::with_capacity(stmt.len());
         let mut in_string = false;
         let mut in_backtick = false;
@@ -342,7 +475,7 @@ impl Converter {
     }
 
     /// Convert double quotes to backticks
-    fn double_quotes_to_backticks(&self, stmt: &str) -> String {
+    pub fn double_quotes_to_backticks(&self, stmt: &str) -> String {
         let mut result = String::with_capacity(stmt.len());
         let mut in_string = false;
         let mut in_dquote = false;
@@ -540,6 +673,59 @@ impl Converter {
         re2.replace_all(&result, "").to_string()
     }
 
+    /// Strip PostgreSQL type casts (::type and ::regclass)
+    fn strip_postgres_casts(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+        
+        // Match ::regclass, ::text, ::integer, etc. (including complex types like character varying)
+        static RE_CAST: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"::[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)*").unwrap()
+        });
+        
+        RE_CAST.replace_all(stmt, "").to_string()
+    }
+
+    /// Convert nextval('sequence') to NULL or remove (AUTO_INCREMENT handles it)
+    fn convert_nextval(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+        
+        // Match nextval('sequence_name'::regclass) or nextval('sequence_name')
+        // Remove the DEFAULT nextval(...) entirely - AUTO_INCREMENT is already applied
+        static RE_NEXTVAL: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\s*DEFAULT\s+nextval\s*\([^)]+\)").unwrap()
+        });
+        
+        RE_NEXTVAL.replace_all(stmt, "").to_string()
+    }
+
+    /// Convert DEFAULT now() to DEFAULT CURRENT_TIMESTAMP
+    fn convert_default_now(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+        
+        static RE_NOW: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\bDEFAULT\s+now\s*\(\s*\)").unwrap()
+        });
+        
+        RE_NOW.replace_all(stmt, "DEFAULT CURRENT_TIMESTAMP").to_string()
+    }
+
+    /// Strip schema prefix from table names (e.g., public.users -> users)
+    fn strip_schema_prefix(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+        
+        // Match schema.table patterns (with optional quotes)
+        // Handle: public.table, "public"."table", public."table"
+        static RE_SCHEMA: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i)\b(public|pg_catalog|pg_temp)\s*\.\s*"#).unwrap()
+        });
+        
+        RE_SCHEMA.replace_all(stmt, "").to_string()
+    }
+
     /// Detect unsupported features and add warnings
     fn detect_unsupported_features(
         &mut self,
@@ -717,6 +903,29 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
             if stats.statements_processed % 1000 == 0 {
                 pb.set_message(format!("Processed {} statements...", stats.statements_processed));
             }
+        }
+
+        // Check if this is a COPY data block (follows a COPY header)
+        if converter.has_pending_copy() {
+            // This is a data block, convert it to INSERT statements
+            match converter.process_copy_data(&stmt) {
+                Ok(inserts) => {
+                    for insert in inserts {
+                        if !insert.is_empty() {
+                            stats.statements_converted += 1;
+                            if !config.dry_run {
+                                writer.write_all(&insert)?;
+                                writer.write_all(b"\n")?;
+                            }
+                        }
+                    }
+                }
+                Err(warning) => {
+                    stats.warnings.push(warning);
+                    stats.statements_skipped += 1;
+                }
+            }
+            continue;
         }
 
         match converter.convert_statement(&stmt) {
@@ -959,5 +1168,91 @@ mod tests {
         
         assert!(output.contains("'hello \"world\"'"));
         assert!(output.contains("`users`"));
+    }
+
+    #[test]
+    fn test_postgres_only_feature_detection() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        // With comments prefix
+        assert!(converter.is_postgres_only_feature("-- Comment\nCREATE FUNCTION foo()"));
+        assert!(converter.is_postgres_only_feature("CREATE SEQUENCE my_seq"));
+        assert!(converter.is_postgres_only_feature("CREATE DOMAIN my_domain AS INTEGER"));
+        assert!(converter.is_postgres_only_feature("CREATE TYPE my_enum AS ENUM ('a', 'b')"));
+        assert!(converter.is_postgres_only_feature("CREATE TRIGGER my_trigger"));
+        assert!(converter.is_postgres_only_feature("COMMENT ON TABLE foo"));
+        
+        // Should NOT match regular CREATE TABLE
+        assert!(!converter.is_postgres_only_feature("CREATE TABLE users (id INT)"));
+    }
+
+    #[test]
+    fn test_strip_leading_sql_comments() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        assert_eq!(
+            converter.strip_leading_sql_comments("-- Comment\nCREATE TABLE"),
+            "CREATE TABLE"
+        );
+        assert_eq!(
+            converter.strip_leading_sql_comments("/* Block */CREATE TABLE"),
+            "CREATE TABLE"
+        );
+        assert_eq!(
+            converter.strip_leading_sql_comments("-- Line 1\n-- Line 2\nCREATE"),
+            "CREATE"
+        );
+    }
+
+    #[test]
+    fn test_strip_postgres_casts() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        assert_eq!(
+            converter.strip_postgres_casts("'sequence_name'::regclass"),
+            "'sequence_name'"
+        );
+        assert_eq!(
+            converter.strip_postgres_casts("col::text"),
+            "col"
+        );
+        assert_eq!(
+            converter.strip_postgres_casts("value::character varying"),
+            "value"
+        );
+    }
+
+    #[test]
+    fn test_convert_nextval() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        let input = "id INTEGER DEFAULT nextval('users_id_seq'::regclass)";
+        let output = converter.convert_nextval(input);
+        assert!(!output.contains("nextval"));
+        assert!(!output.contains("users_id_seq"));
+    }
+
+    #[test]
+    fn test_convert_default_now() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        let input = "created_at TIMESTAMP DEFAULT now()";
+        let output = converter.convert_default_now(input);
+        assert!(output.contains("DEFAULT CURRENT_TIMESTAMP"));
+        assert!(!output.contains("now()"));
+    }
+
+    #[test]
+    fn test_strip_schema_prefix() {
+        let converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        
+        assert_eq!(
+            converter.strip_schema_prefix("INSERT INTO public.users"),
+            "INSERT INTO users"
+        );
+        assert_eq!(
+            converter.strip_schema_prefix("CREATE TABLE pg_catalog.pg_type"),
+            "CREATE TABLE pg_type"
+        );
     }
 }
