@@ -35,7 +35,7 @@
             <p class="subtitle">Split SQL dumps at 400+ MB/s</p>
             <p class="description">
                 High-performance CLI tool for splitting large SQL dump files into individual
-                table files. Written in Rust. 1.25x faster than the Go version on 10GB files.
+                table files. Supports MySQL, PostgreSQL, and SQLite. Written in Rust.
             </p>
             <div class="hero-actions">
                 <a href="#install" class="btn btn-primary">Get Started</a>
@@ -108,8 +108,14 @@ cargo build --release</code></pre>
         <section id="install" class="install">
             <h2>Installation</h2>
 
-            <h3>Using Cargo</h3>
+            <h3>From crates.io (Recommended)</h3>
             <p>If you have Rust 1.70+ installed:</p>
+            <div class="code-block">
+                <pre><code>cargo install sql-splitter</code></pre>
+                <button class="copy-btn" data-copy="cargo install sql-splitter">Copy</button>
+            </div>
+
+            <h3>From GitHub</h3>
             <div class="code-block">
                 <pre><code>cargo install --git https://github.com/helgesverre/sql-splitter</code></pre>
                 <button class="copy-btn" data-copy="cargo install --git https://github.com/helgesverre/sql-splitter">Copy</button>
@@ -154,20 +160,20 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                 <h4>split</h4>
                 <p>Split a SQL dump file into individual table files.</p>
                 <div class="code-block">
-                    <pre><code># Basic usage
-sql-splitter split database.sql
-
-# Custom output directory
+                    <pre><code># MySQL/MariaDB dump (default)
 sql-splitter split database.sql --output=tables
 
-# Show progress
-sql-splitter split database.sql --progress
+# PostgreSQL pg_dump
+sql-splitter split pg_dump.sql --output=tables --dialect=postgres
+
+# SQLite dump
+sql-splitter split sqlite.sql --output=tables --dialect=sqlite
 
 # Split only specific tables
 sql-splitter split database.sql --tables=users,posts
 
 # Dry run (preview without writing)
-sql-splitter split database.sql --dry-run</code></pre>
+sql-splitter split database.sql --dry-run --progress</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
                 </div>
 
@@ -189,9 +195,9 @@ sql-splitter analyze database.sql --progress</code></pre>
                     </thead>
                     <tbody>
                         <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output directory</td><td>output</td></tr>
-                        <tr><td><code>--verbose</code></td><td><code>-v</code></td><td>Verbose output</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress</td><td>false</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>mysql</td></tr>
                         <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Filter tables (comma-separated)</td><td>-</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress</td><td>false</td></tr>
                         <tr><td><code>--dry-run</code></td><td>-</td><td>Preview without writing</td><td>false</td></tr>
                     </tbody>
                 </table>

@@ -54,7 +54,8 @@ impl Analyzer {
         let mut parser = Parser::with_dialect(file, buffer_size, dialect);
 
         while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+            let (stmt_type, table_name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
             if stmt_type == StatementType::Unknown || table_name.is_empty() {
                 continue;
@@ -79,7 +80,8 @@ impl Analyzer {
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+            let (stmt_type, table_name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
             if stmt_type == StatementType::Unknown || table_name.is_empty() {
                 continue;

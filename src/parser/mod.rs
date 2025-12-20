@@ -28,7 +28,10 @@ impl std::str::FromStr for SqlDialect {
             "mysql" | "mariadb" => Ok(SqlDialect::MySql),
             "postgres" | "postgresql" | "pg" => Ok(SqlDialect::Postgres),
             "sqlite" | "sqlite3" => Ok(SqlDialect::Sqlite),
-            _ => Err(format!("Unknown dialect: {}. Valid options: mysql, postgres, sqlite", s)),
+            _ => Err(format!(
+                "Unknown dialect: {}. Valid options: mysql, postgres, sqlite",
+                s
+            )),
         }
     }
 }
@@ -71,9 +74,8 @@ static DROP_TABLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)DROP\s+TABLE\s+`?([^\s`;]+)`?").unwrap());
 
 // PostgreSQL COPY statement regex
-static COPY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)^\s*COPY\s+(?:ONLY\s+)?[`"]?([^\s`"(]+)[`"]?"#).unwrap()
-});
+static COPY_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)^\s*COPY\s+(?:ONLY\s+)?[`"]?([^\s`"(]+)[`"]?"#).unwrap());
 
 // More flexible table name regex that handles:
 // - Backticks: `table`
@@ -85,7 +87,10 @@ static CREATE_TABLE_FLEXIBLE_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 static INSERT_FLEXIBLE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)^\s*INSERT\s+INTO\s+(?:ONLY\s+)?(?:[`"]?[\w]+[`"]?\s*\.\s*)?[`"]?([\w]+)[`"]?"#).unwrap()
+    Regex::new(
+        r#"(?i)^\s*INSERT\s+INTO\s+(?:ONLY\s+)?(?:[`"]?[\w]+[`"]?\s*\.\s*)?[`"]?([\w]+)[`"]?"#,
+    )
+    .unwrap()
 });
 
 pub struct Parser<R: Read> {
@@ -168,7 +173,10 @@ impl<R: Read> Parser<R> {
                 }
 
                 // Handle dollar-quoting for PostgreSQL
-                if self.dialect == SqlDialect::Postgres && !inside_single_quote && !inside_double_quote {
+                if self.dialect == SqlDialect::Postgres
+                    && !inside_single_quote
+                    && !inside_double_quote
+                {
                     if b == b'$' && !in_dollar_quote {
                         // Start of dollar-quote: scan for the closing $
                         if let Some(end) = buf[i + 1..].iter().position(|&c| c == b'$') {
@@ -179,7 +187,7 @@ impl<R: Read> Parser<R> {
                     } else if b == b'$' && in_dollar_quote {
                         // Potential end of dollar-quote
                         let tag_len = dollar_tag.len();
-                        if i + 1 + tag_len < buf.len() 
+                        if i + 1 + tag_len < buf.len()
                             && buf[i + 1..i + 1 + tag_len] == dollar_tag[..]
                             && buf.get(i + 1 + tag_len) == Some(&b'$')
                         {
@@ -205,12 +213,12 @@ impl<R: Read> Parser<R> {
             if found_terminator {
                 self.reader.consume(consumed);
                 let result = std::mem::take(&mut self.stmt_buffer);
-                
+
                 // Check if this is a PostgreSQL COPY FROM stdin statement
                 if self.dialect == SqlDialect::Postgres && self.is_copy_from_stdin(&result) {
                     self.in_copy_data = true;
                 }
-                
+
                 return Ok(Some(result));
             }
 
@@ -227,18 +235,22 @@ impl<R: Read> Parser<R> {
         if stmt.len() < 4 {
             return false;
         }
-        
+
         // Take enough bytes to cover column lists - typical COPY statements are <500 bytes
-        let upper: Vec<u8> = stmt.iter().take(500).map(|b| b.to_ascii_uppercase()).collect();
-        upper.starts_with(b"COPY ") && 
-            (upper.windows(10).any(|w| w == b"FROM STDIN") ||
-             upper.windows(11).any(|w| w == b"FROM STDIN;"))
+        let upper: Vec<u8> = stmt
+            .iter()
+            .take(500)
+            .map(|b| b.to_ascii_uppercase())
+            .collect();
+        upper.starts_with(b"COPY ")
+            && (upper.windows(10).any(|w| w == b"FROM STDIN")
+                || upper.windows(11).any(|w| w == b"FROM STDIN;"))
     }
 
     /// Read PostgreSQL COPY data block until we see the terminator line (\.)
     fn read_copy_data(&mut self) -> std::io::Result<Option<Vec<u8>>> {
         self.stmt_buffer.clear();
-        
+
         loop {
             // First, fill the buffer and check if empty
             let buf = self.reader.fill_buf()?;
@@ -252,12 +264,12 @@ impl<R: Read> Parser<R> {
 
             // Look for a newline in the buffer
             let newline_pos = buf.iter().position(|&b| b == b'\n');
-            
+
             if let Some(i) = newline_pos {
                 // Include this newline
                 self.stmt_buffer.extend_from_slice(&buf[..=i]);
                 self.reader.consume(i + 1);
-                
+
                 // Check if the line we just added ends the COPY block
                 // Looking for a line that is just "\.\n" or "\.\r\n"
                 if self.ends_with_copy_terminator() {
@@ -280,7 +292,7 @@ impl<R: Read> Parser<R> {
         if data.len() < 2 {
             return false;
         }
-        
+
         // Look for a line that is just "\.\n" or "\.\r\n"
         // We need to find the start of the last line
         let last_newline = data[..data.len() - 1]
@@ -288,9 +300,9 @@ impl<R: Read> Parser<R> {
             .rposition(|&b| b == b'\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        
+
         let last_line = &data[last_newline..];
-        
+
         // Check if it's "\.\n" or "\.\r\n"
         last_line == b"\\.\n" || last_line == b"\\.\r\n"
     }
@@ -300,7 +312,10 @@ impl<R: Read> Parser<R> {
     }
 
     /// Parse a statement with dialect-specific handling
-    pub fn parse_statement_with_dialect(stmt: &[u8], dialect: SqlDialect) -> (StatementType, String) {
+    pub fn parse_statement_with_dialect(
+        stmt: &[u8],
+        dialect: SqlDialect,
+    ) -> (StatementType, String) {
         // Strip leading comments (e.g., pg_dump adds -- comments before statements)
         let stmt = strip_leading_comments_and_whitespace(stmt);
 
@@ -468,7 +483,11 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
     }
 
     // Check for IF NOT EXISTS
-    let upper_check: Vec<u8> = stmt[i..].iter().take(20).map(|b| b.to_ascii_uppercase()).collect();
+    let upper_check: Vec<u8> = stmt[i..]
+        .iter()
+        .take(20)
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
     if upper_check.starts_with(b"IF NOT EXISTS") {
         i += 13; // Skip "IF NOT EXISTS"
         while i < stmt.len() && is_whitespace(stmt[i]) {
@@ -477,7 +496,11 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
     }
 
     // Check for ONLY (PostgreSQL)
-    let upper_check: Vec<u8> = stmt[i..].iter().take(10).map(|b| b.to_ascii_uppercase()).collect();
+    let upper_check: Vec<u8> = stmt[i..]
+        .iter()
+        .take(10)
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
     if upper_check.starts_with(b"ONLY ") || upper_check.starts_with(b"ONLY\t") {
         i += 4;
         while i < stmt.len() && is_whitespace(stmt[i]) {
@@ -491,7 +514,7 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
 
     // Read identifier (potentially schema-qualified)
     let mut parts: Vec<String> = Vec::new();
-    
+
     loop {
         // Determine quote character
         let quote_char = match stmt.get(i) {
@@ -541,7 +564,7 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
         while i < stmt.len() && is_whitespace(stmt[i]) {
             i += 1;
         }
-        
+
         if i < stmt.len() && stmt[i] == b'.' {
             i += 1; // Skip the dot
             while i < stmt.len() && is_whitespace(stmt[i]) {
@@ -660,42 +683,52 @@ mod tests {
 mod copy_tests {
     use super::*;
     use std::io::Cursor;
-    
+
     #[test]
     fn test_copy_from_stdin_detection() {
         let data = b"COPY public.table_001 (id, col_int, col_varchar, col_text, col_decimal, created_at) FROM stdin;\n1\t6892\tvalue_1\tLorem ipsum\n\\.\n";
         let reader = Cursor::new(&data[..]);
         let mut parser = Parser::with_dialect(reader, 1024, SqlDialect::Postgres);
-        
+
         // First statement should be the COPY header
         let stmt1 = parser.read_statement().unwrap().unwrap();
         let s1 = String::from_utf8_lossy(&stmt1);
         assert!(s1.starts_with("COPY"), "First statement should be COPY");
         assert!(s1.contains("FROM stdin"), "Should contain FROM stdin");
-        
+
         // Second statement should be the data block
         let stmt2 = parser.read_statement().unwrap().unwrap();
         let s2 = String::from_utf8_lossy(&stmt2);
-        assert!(s2.contains("1\t6892"), "Data block should contain first row");
-        assert!(s2.ends_with("\\.\n"), "Data block should end with terminator");
+        assert!(
+            s2.contains("1\t6892"),
+            "Data block should contain first row"
+        );
+        assert!(
+            s2.ends_with("\\.\n"),
+            "Data block should end with terminator"
+        );
     }
-    
+
     #[test]
     fn test_copy_with_leading_comments() {
         // pg_dump adds -- comments before COPY statements
         let data = b"--\n-- Data for Name: table_001\n--\n\nCOPY public.table_001 (id, name) FROM stdin;\n1\tfoo\n\\.\n";
         let reader = Cursor::new(&data[..]);
         let mut parser = Parser::with_dialect(reader, 1024, SqlDialect::Postgres);
-        
+
         // First statement should be the COPY header (with leading comments)
         let stmt1 = parser.read_statement().unwrap().unwrap();
-        let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt1, SqlDialect::Postgres);
+        let (stmt_type, table_name) =
+            Parser::<&[u8]>::parse_statement_with_dialect(&stmt1, SqlDialect::Postgres);
         assert_eq!(stmt_type, StatementType::Copy);
         assert_eq!(table_name, "table_001");
-        
+
         // Second statement should be the data block
         let stmt2 = parser.read_statement().unwrap().unwrap();
         let s2 = String::from_utf8_lossy(&stmt2);
-        assert!(s2.ends_with("\\.\n"), "Data block should end with terminator");
+        assert!(
+            s2.ends_with("\\.\n"),
+            "Data block should end with terminator"
+        );
     }
 }

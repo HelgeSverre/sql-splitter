@@ -76,7 +76,11 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             let dialect: SqlDialect = dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             split::run(file, output, dialect, verbose, dry_run, progress, tables)
         }
-        Commands::Analyze { file, dialect, progress } => {
+        Commands::Analyze {
+            file,
+            dialect,
+            progress,
+        } => {
             let dialect: SqlDialect = dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             analyze::run(file, dialect, progress)
         }

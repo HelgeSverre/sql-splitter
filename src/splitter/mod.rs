@@ -83,12 +83,13 @@ impl Splitter {
             bytes_processed: 0,
             table_names: Vec::new(),
         };
-        
+
         // Track the last COPY table for PostgreSQL COPY data blocks
         let mut last_copy_table: Option<String> = None;
 
         while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, mut table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+            let (stmt_type, mut table_name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
             // Track COPY statements for data association
             if stmt_type == StatementType::Copy {

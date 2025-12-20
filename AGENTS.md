@@ -153,3 +153,84 @@ cargo bench -- read_statement
 - **HashMap**: `ahash::AHashMap` for performance
 - **Buffer management**: `std::io::{BufReader, BufWriter}`
 - **Statement types**: CREATE TABLE, INSERT INTO, CREATE INDEX, ALTER TABLE, DROP TABLE, COPY (PostgreSQL)
+
+## Release Process
+
+Follow these steps to create a new release:
+
+### 1. Pre-release Checks
+
+```bash
+# Ensure all tests pass
+cargo test
+
+# Ensure it builds in release mode
+cargo build --release
+
+# Run lints
+cargo clippy
+
+# Verify formatting
+cargo fmt --check
+```
+
+### 2. Update Version
+
+1. Update version in `Cargo.toml`:
+   ```toml
+   version = "X.Y.Z"
+   ```
+
+2. Update `CHANGELOG.md`:
+   - Move items from `[Unreleased]` to new version section
+   - Add release date
+   - Document all notable changes
+
+### 3. Commit and Tag
+
+```bash
+# Commit version bump
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit -m "chore: bump version to X.Y.Z"
+
+# Create annotated tag
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+
+# Push with tags
+git push origin main --tags
+```
+
+### 4. Publish to crates.io
+
+```bash
+# Dry run first
+cargo publish --dry-run
+
+# Publish
+cargo publish
+```
+
+### 5. Create GitHub Release
+
+```bash
+# Create release from tag (uses CHANGELOG content)
+gh release create vX.Y.Z \
+  --title "vX.Y.Z" \
+  --notes-file CHANGELOG.md \
+  --latest
+```
+
+Or create via GitHub UI at https://github.com/HelgeSverre/sql-splitter/releases/new
+
+### 6. Post-release
+
+- Verify crates.io listing: https://crates.io/crates/sql-splitter
+- Verify GitHub release: https://github.com/HelgeSverre/sql-splitter/releases
+- Update website if needed (auto-deploys via Vercel)
+
+### Versioning Guidelines
+
+Follow [Semantic Versioning](https://semver.org/):
+- **MAJOR** (X.0.0): Breaking changes to CLI interface or output format
+- **MINOR** (0.X.0): New features, new dialects, new commands
+- **PATCH** (0.0.X): Bug fixes, performance improvements, documentation

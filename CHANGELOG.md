@@ -46,5 +46,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Planned
 
 - Compressed file support (gzip, bzip2)
-- PostgreSQL COPY statement support
 - Parallel parsing for very large files
+
+## [1.1.0] - 2025-12-20
+
+### Added
+
+- **Multi-dialect support**: Now supports MySQL, PostgreSQL, and SQLite dump formats
+  - `--dialect=mysql` (default): MySQL/MariaDB mysqldump format
+  - `--dialect=postgres`: PostgreSQL pg_dump format with COPY FROM stdin support
+  - `--dialect=sqlite`: SQLite .dump format
+- **PostgreSQL COPY statement support**: Properly handles `COPY table FROM stdin` blocks
+- **Dollar-quoting support**: PostgreSQL dollar-quoted strings (`$$`, `$tag$`) are correctly parsed
+- **Comprehensive benchmarks**: Added benchmark suite comparing against 6 competitor tools
+- **Test data generator**: Python script for generating synthetic mysqldump files
+
+### Changed
+
+- Improved table name extraction for different identifier quoting styles
+- Updated documentation with multi-dialect examples and benchmark results
+
+### Fixed
+
+- Correct handling of double-quote identifiers in PostgreSQL/SQLite
+- Edge cases with escaped characters in different SQL dialects
