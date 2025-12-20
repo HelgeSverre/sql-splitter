@@ -157,7 +157,7 @@ impl<'a> CopyParser<'a> {
     }
 
     /// Decode PostgreSQL COPY escape sequences
-    fn decode_copy_escapes(&self, value: &[u8]) -> Vec<u8> {
+    pub fn decode_copy_escapes(&self, value: &[u8]) -> Vec<u8> {
         let mut result = Vec::with_capacity(value.len());
         let mut i = 0;
 
@@ -324,104 +324,4 @@ pub fn parse_postgres_copy_rows(
         .with_schema(schema)
         .with_column_order(column_order);
     parser.parse_rows()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::schema::{Column, ColumnType, ForeignKey, TableId};
-
-    fn create_simple_schema() -> TableSchema {
-        let mut schema = TableSchema::new("users".to_string(), TableId(0));
-        schema.columns = vec![
-            Column {
-                name: "id".to_string(),
-                col_type: ColumnType::Int,
-                ordinal: ColumnId(0),
-                is_primary_key: true,
-                is_nullable: false,
-            },
-            Column {
-                name: "name".to_string(),
-                col_type: ColumnType::Text,
-                ordinal: ColumnId(1),
-                is_primary_key: false,
-                is_nullable: true,
-            },
-            Column {
-                name: "company_id".to_string(),
-                col_type: ColumnType::Int,
-                ordinal: ColumnId(2),
-                is_primary_key: false,
-                is_nullable: true,
-            },
-        ];
-        schema.primary_key = vec![ColumnId(0)];
-        schema.foreign_keys = vec![ForeignKey {
-            name: None,
-            columns: vec![ColumnId(2)],
-            column_names: vec!["company_id".to_string()],
-            referenced_table: "companies".to_string(),
-            referenced_columns: vec!["id".to_string()],
-            referenced_table_id: Some(TableId(1)),
-        }];
-        schema
-    }
-
-    #[test]
-    fn test_parse_copy_data() {
-        let data = b"1\tAlice\t5\n2\tBob\t5\n3\tCarol\t\\N\n\\.";
-        let schema = create_simple_schema();
-
-        let rows = parse_postgres_copy_rows(
-            data,
-            &schema,
-            vec![
-                "id".to_string(),
-                "name".to_string(),
-                "company_id".to_string(),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].pk.as_ref().unwrap()[0], PkValue::Int(1));
-        assert_eq!(rows[1].pk.as_ref().unwrap()[0], PkValue::Int(2));
-        assert_eq!(rows[2].pk.as_ref().unwrap()[0], PkValue::Int(3));
-    }
-
-    #[test]
-    fn test_parse_null_values() {
-        let data = b"1\t\\N\t\\N\n";
-        let schema = create_simple_schema();
-
-        let rows = parse_postgres_copy_rows(
-            data,
-            &schema,
-            vec![
-                "id".to_string(),
-                "name".to_string(),
-                "company_id".to_string(),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(rows.len(), 1);
-        // FK should not be extracted when NULL
-        assert!(rows[0].fk_values.is_empty());
-    }
-
-    #[test]
-    fn test_parse_copy_columns() {
-        let header = r#"COPY public.users (id, name, email) FROM stdin;"#;
-        let cols = parse_copy_columns(header);
-        assert_eq!(cols, vec!["id", "name", "email"]);
-    }
-
-    #[test]
-    fn test_decode_escapes() {
-        let parser = CopyParser::new(&[]);
-        let decoded = parser.decode_copy_escapes(b"hello\\tworld\\n");
-        assert_eq!(decoded, b"hello\tworld\n");
-    }
 }
