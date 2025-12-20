@@ -646,6 +646,7 @@ fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
         // First trim leading ASCII whitespace
         data = trim_ascii_start(data);
 
+        // Handle -- line comments
         if data.len() >= 2 && data[0] == b'-' && data[1] == b'-' {
             // Skip until end of line
             if let Some(pos) = data.iter().position(|&b| b == b'\n') {
@@ -653,6 +654,41 @@ fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
                 continue;
             } else {
                 // Comment runs to EOF, nothing left
+                return &[];
+            }
+        }
+
+        // Handle /* */ block comments (including MySQL conditional comments)
+        if data.len() >= 2 && data[0] == b'/' && data[1] == b'*' {
+            // Find the closing */
+            let mut i = 2;
+            let mut depth = 1;
+            while i < data.len() - 1 && depth > 0 {
+                if data[i] == b'*' && data[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else if data[i] == b'/' && data[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if depth == 0 {
+                data = &data[i..];
+                continue;
+            } else {
+                // Unclosed comment runs to EOF
+                return &[];
+            }
+        }
+
+        // Handle # line comments (MySQL)
+        if !data.is_empty() && data[0] == b'#' {
+            if let Some(pos) = data.iter().position(|&b| b == b'\n') {
+                data = &data[pos + 1..];
+                continue;
+            } else {
                 return &[];
             }
         }
