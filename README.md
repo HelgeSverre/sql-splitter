@@ -2,13 +2,15 @@
 
 [![Crates.io](https://img.shields.io/crates/v/sql-splitter.svg)](https://crates.io/crates/sql-splitter)
 [![Downloads](https://img.shields.io/crates/d/sql-splitter.svg)](https://crates.io/crates/sql-splitter)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.md)
 [![Build](https://github.com/helgesverre/sql-splitter/actions/workflows/test.yml/badge.svg)](https://github.com/helgesverre/sql-splitter/actions)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.md)
 
-High-performance CLI tool for splitting large SQL dump files into individual table files.
+Split large SQL dump files into individual table files. Fast, memory-efficient, multi-dialect.
 
-Supports MySQL, MariaDB, PostgreSQL (including `COPY FROM stdin`), and SQLite. Fastest streaming tool with 1.1-5x speedup over alternatives.
+- **600+ MB/s** throughput on modern hardware
+- **MySQL, PostgreSQL, SQLite** support (including `COPY FROM stdin`)
+- **Streaming architecture** — handles files larger than RAM
+- **5x faster** than shell-based alternatives
 
 ## Installation
 
@@ -45,28 +47,20 @@ sql-splitter split dump.sql --tables users,posts,orders
 sql-splitter analyze dump.sql
 ```
 
-## Performance
+## Options
 
-| File Size | Time | Throughput |
-|-----------|------|------------|
-| 100 MB | 142 ms | 726 MB/s |
-| 1 GB | 1.32 s | 783 MB/s |
-| 10 GB | 23.1 s | 445 MB/s |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-o, --output` | Output directory | `output` |
+| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | `mysql` |
+| `-t, --tables` | Only split these tables (comma-separated) | — |
+| `-p, --progress` | Show progress bar | — |
+| `--dry-run` | Preview without writing files | — |
+
+## Performance
 
 See [BENCHMARKS.md](BENCHMARKS.md) for detailed comparisons.
 
-## Options
-
-```
-sql-splitter split [OPTIONS] <FILE>
-
-  -o, --output <DIR>      Output directory [default: output]
-  -d, --dialect <DIALECT> mysql, postgres, sqlite [default: mysql]
-  -t, --tables <LIST>     Only split these tables (comma-separated)
-  -p, --progress          Show progress bar
-      --dry-run           Preview without writing files
-```
-
 ## License
 
-This project is licensed under the MIT License. See [LICENSE.md](LICENSE.md) for details.
+MIT — see [LICENSE.md](LICENSE.md)
