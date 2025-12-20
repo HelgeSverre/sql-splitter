@@ -9,28 +9,95 @@ permissions:
   contents: write
 
 jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: sql-splitter-linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: sql-splitter-linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: sql-splitter-darwin-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: sql-splitter-darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: sql-splitter-windows-amd64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv target/${{ matrix.target }}/release/sql-splitter ${{ matrix.name }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mv target/${{ matrix.target }}/release/sql-splitter.exe ${{ matrix.name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
   release:
     name: Release
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          go-version: "1.23"
+          path: artifacts
 
-      - name: Run tests
-        run: go test -v ./...
+      - name: Create release archives
+        run: |
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            if [[ "$name" == *".exe" ]]; then
+              zip "../${name%.exe}.zip" "$name"
+            else
+              tar -czvf "../${name}.tar.gz" "$name"
+            fi
+          done
+          cd ..
+          sha256sum *.tar.gz *.zip > checksums.txt
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
         with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
+          files: |
+            *.tar.gz
+            *.zip
+            checksums.txt
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
