@@ -31,3 +31,4 @@ flamegraph.svg
 # Real-world verification test files
 /tests/realworld/
 
+linus-ignore-this-file.md
