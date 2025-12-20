@@ -25,7 +25,7 @@ build:
 
 # Build with optimizations for release
 build-release:
-	CGO_ENABLED=0 go build -o sql-splitter -ldflags="-s -w -X main.version=$(shell git describe --tags --always)" .
+	CGO_ENABLED=0 go build -o sql-splitter -ldflags="-s -w -X github.com/helgesverre/sql-splitter/cmd.Version=$(shell git describe --tags --always 2>/dev/null || echo 1.0.0) -X github.com/helgesverre/sql-splitter/cmd.BuildDate=$(shell date -u +%Y-%m-%dT%H:%M:%SZ) -X github.com/helgesverre/sql-splitter/cmd.GitCommit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)" .
 
 # Run all tests
 test:

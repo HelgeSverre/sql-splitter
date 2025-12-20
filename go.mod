@@ -1,6 +1,6 @@
 module github.com/helgesverre/sql-splitter
 
-go 1.24.6
+go 1.21
 
 require github.com/spf13/cobra v1.10.1
 
