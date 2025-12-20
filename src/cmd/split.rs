@@ -1,3 +1,4 @@
+use crate::parser::SqlDialect;
 use crate::splitter::Splitter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -6,6 +7,7 @@ use std::time::Instant;
 pub fn run(
     file: PathBuf,
     output: PathBuf,
+    dialect: SqlDialect,
     verbose: bool,
     dry_run: bool,
     progress: bool,
@@ -42,7 +44,9 @@ pub fn run(
         println!("Filtering to tables: {}\n", table_filter.join(", "));
     }
 
-    let mut splitter = Splitter::new(file, output.clone()).with_dry_run(dry_run);
+    let mut splitter = Splitter::new(file, output.clone())
+        .with_dialect(dialect)
+        .with_dry_run(dry_run);
 
     if !table_filter.is_empty() {
         splitter = splitter.with_table_filter(table_filter);

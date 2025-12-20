@@ -1,6 +1,7 @@
 mod analyze;
 mod split;
 
+use crate::parser::SqlDialect;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -25,6 +26,10 @@ pub enum Commands {
         #[arg(short, long, default_value = "output")]
         output: PathBuf,
 
+        /// SQL dialect: mysql, postgres, or sqlite
+        #[arg(short, long, default_value = "mysql")]
+        dialect: String,
+
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -47,6 +52,10 @@ pub enum Commands {
         /// Input SQL file
         file: PathBuf,
 
+        /// SQL dialect: mysql, postgres, or sqlite
+        #[arg(short, long, default_value = "mysql")]
+        dialect: String,
+
         /// Show progress during analysis
         #[arg(short, long)]
         progress: bool,
@@ -58,11 +67,18 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Split {
             file,
             output,
+            dialect,
             verbose,
             dry_run,
             progress,
             tables,
-        } => split::run(file, output, verbose, dry_run, progress, tables),
-        Commands::Analyze { file, progress } => analyze::run(file, progress),
+        } => {
+            let dialect: SqlDialect = dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            split::run(file, output, dialect, verbose, dry_run, progress, tables)
+        }
+        Commands::Analyze { file, dialect, progress } => {
+            let dialect: SqlDialect = dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            analyze::run(file, dialect, progress)
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::parser::{determine_buffer_size, Parser, StatementType};
+use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
 use ahash::AHashMap;
 use std::fs::File;
 use std::io::Read;
@@ -27,6 +27,7 @@ impl TableStats {
 
 pub struct Analyzer {
     input_file: PathBuf,
+    dialect: SqlDialect,
     stats: AHashMap<String, TableStats>,
 }
 
@@ -34,19 +35,26 @@ impl Analyzer {
     pub fn new(input_file: PathBuf) -> Self {
         Self {
             input_file,
+            dialect: SqlDialect::default(),
             stats: AHashMap::new(),
         }
+    }
+
+    pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
+        self.dialect = dialect;
+        self
     }
 
     pub fn analyze(mut self) -> anyhow::Result<Vec<TableStats>> {
         let file = File::open(&self.input_file)?;
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
+        let dialect = self.dialect;
 
-        let mut parser = Parser::new(file, buffer_size);
+        let mut parser = Parser::with_dialect(file, buffer_size, dialect);
 
         while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement(&stmt);
+            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
             if stmt_type == StatementType::Unknown || table_name.is_empty() {
                 continue;
@@ -65,12 +73,13 @@ impl Analyzer {
         let file = File::open(&self.input_file)?;
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
+        let dialect = self.dialect;
 
         let reader = ProgressReader::new(file, progress_fn);
-        let mut parser = Parser::new(reader, buffer_size);
+        let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement(&stmt);
+            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
             if stmt_type == StatementType::Unknown || table_name.is_empty() {
                 continue;
@@ -93,7 +102,7 @@ impl Analyzer {
 
         match stmt_type {
             StatementType::CreateTable => stats.create_count += 1,
-            StatementType::Insert => stats.insert_count += 1,
+            StatementType::Insert | StatementType::Copy => stats.insert_count += 1,
             _ => {}
         }
     }

@@ -1,9 +1,10 @@
 use crate::analyzer::Analyzer;
+use crate::parser::SqlDialect;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
 
-pub fn run(file: PathBuf, progress: bool) -> anyhow::Result<()> {
+pub fn run(file: PathBuf, dialect: SqlDialect, progress: bool) -> anyhow::Result<()> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
     }
@@ -12,9 +13,10 @@ pub fn run(file: PathBuf, progress: bool) -> anyhow::Result<()> {
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
     println!(
-        "Analyzing SQL file: {} ({:.2} MB)",
+        "Analyzing SQL file: {} ({:.2} MB) [dialect: {}]",
         file.display(),
-        file_size_mb
+        file_size_mb,
+        dialect
     );
     println!();
 
@@ -22,7 +24,7 @@ pub fn run(file: PathBuf, progress: bool) -> anyhow::Result<()> {
 
     let stats = if progress {
         let last_progress = AtomicI32::new(0);
-        let analyzer = Analyzer::new(file);
+        let analyzer = Analyzer::new(file).with_dialect(dialect);
         let stats = analyzer.analyze_with_progress(move |bytes_read| {
             let pct = (bytes_read as f64 / file_size as f64 * 100.0) as i32;
             let last = last_progress.load(Ordering::Relaxed);
@@ -34,7 +36,7 @@ pub fn run(file: PathBuf, progress: bool) -> anyhow::Result<()> {
         eprintln!();
         stats
     } else {
-        let analyzer = Analyzer::new(file);
+        let analyzer = Analyzer::new(file).with_dialect(dialect);
         analyzer.analyze()?
     };
 
