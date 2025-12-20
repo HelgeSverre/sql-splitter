@@ -1,0 +1,64 @@
+# Benchmark environment for sql-splitter comparisons
+FROM debian:bookworm-slim
+
+ARG RUST_VERSION=1.83.0
+ARG GO_VERSION=1.23.4
+ARG NODE_VERSION=22
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    build-essential \
+    git \
+    pkg-config \
+    python3 \
+    hyperfine \
+    ruby \
+    ruby-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install Go
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy sql-splitter source and build
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY benches ./benches
+RUN cargo build --release && cp target/release/sql-splitter /usr/local/bin/sql-splitter-rs
+
+# Install Go mysqldumpsplit (afrase/mysqldumpsplit)
+RUN go install github.com/afrase/mysqldumpsplit@latest \
+    && cp /root/go/bin/mysqldumpsplit /usr/local/bin/mysqldumpsplit-go
+
+# Install Node.js @vekexasia/mysqldumpsplit
+RUN npm install -g @vekexasia/mysqldumpsplit
+
+# Install ooooak/sql-split (Rust)
+RUN cargo install sql-split && cp /root/.cargo/bin/sql-split /usr/local/bin/sql-split-ooooak || true
+
+# Install ripienaar/mysql-dump-split (Ruby)
+RUN gem install mysql-dump-split || true
+
+WORKDIR /workspace
+
+# Copy benchmark script
+COPY docker/benchmark-runner.sh /usr/local/bin/benchmark-runner
+RUN chmod +x /usr/local/bin/benchmark-runner
+
+# Cleanup build artifacts
+RUN rm -rf /build /root/.cargo/registry /root/.cargo/git /root/go/pkg
+
+ENTRYPOINT ["benchmark-runner"]
+CMD ["--help"]

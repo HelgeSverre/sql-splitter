@@ -1,0 +1,21 @@
+services:
+  benchmark:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.benchmark
+    volumes:
+      - benchmark-data:/data
+      - benchmark-results:/results
+    tmpfs:
+      - /tmp:size=2G,mode=1777
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+    stdin_open: true
+    tty: true
+
+volumes:
+  benchmark-data:
+  benchmark-results:

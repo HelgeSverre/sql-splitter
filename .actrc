@@ -1,0 +1,14 @@
+# act configuration for local GitHub Actions testing
+# https://github.com/nektos/act
+
+# Use medium-sized runner images (good balance of speed vs compatibility)
+--platform ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Use Docker socket binding
+--bind
+
+# Reuse containers for faster subsequent runs
+--reuse
+
+# Default to pulling images if not present
+--pull=false
