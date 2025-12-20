@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod edge_case_tests;
+
 use once_cell::sync::Lazy;
 use regex::bytes::Regex;
 use std::io::{BufRead, BufReader, Read};
