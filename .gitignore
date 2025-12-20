@@ -1,52 +1,25 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Build artifacts
+/target/
 
-# Test binary, built with `go test -c`
-*.test
+# Profiling
+*.prof
+*.svg
+flamegraph.svg
 
-# Output of the go coverage tool
-*.out
-coverage.html
-coverage.txt
+# Output directories
+/output/
 
-# Go workspace file
-go.work
-
-# Build output
-sql-splitter
-sql-splitter-release
-profile_split
-dist/
-build/
+# Benchmark results
+/bench-results.md
 
 # IDE
 .idea/
 .vscode/
 *.swp
-*.swo
-*~
-
-# Output directories
-output/
-tables/
-out/
-test_output/
-profile_output/
-
-# Test files
-*.sql
-!testdata/*.sql
-*.gz
-
-# Profiling
-*.prof
-cpu.prof
-mem.prof
 
 # OS
 .DS_Store
-Thumbs.db
+
+# Test artifacts
+/tmp/
+
