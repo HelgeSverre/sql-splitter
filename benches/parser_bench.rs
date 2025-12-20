@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use sql_splitter::parser::{Parser, StatementType, SMALL_BUFFER_SIZE};
 
 fn generate_sql_data(num_statements: usize) -> Vec<u8> {

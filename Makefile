@@ -1,4 +1,4 @@
-.PHONY: build release native test bench fmt check clippy clean install
+.PHONY: build release native test bench fmt check clippy clean install docker-build docker-bench
 
 # Debug build
 build:
@@ -39,3 +39,11 @@ clean:
 # Install locally
 install:
 	cargo install --path .
+
+# Docker benchmark setup
+docker-build:
+	docker compose -f docker/docker-compose.benchmark.yml build
+
+# Run benchmarks in Docker (generates test data)
+docker-bench:
+	./docker/run-benchmark.sh --generate

@@ -55,9 +55,10 @@ RUN curl -sL "https://gist.githubusercontent.com/jasny/1608062/raw/mysql_splitdu
     -o /usr/local/bin/mysql_splitdump.sh && \
     chmod +x /usr/local/bin/mysql_splitdump.sh
 
-# 3. mysqldumpsplit-go (fixed version from our benches directory)
-COPY benches/mysqldumpsplit-go /tmp/mysqldumpsplit-go
-RUN cd /tmp/mysqldumpsplit-go && go build -o /usr/local/bin/mysqldumpsplit-go . && \
+# 3. mysqldumpsplit-go (patched fork that fixes deadlock with non-interleaved dumps)
+RUN git clone --branch fix/handle-non-interleaved-dumps --depth 1 \
+    https://github.com/HelgeSverre/mysqldumpsplit.git /tmp/mysqldumpsplit-go && \
+    cd /tmp/mysqldumpsplit-go && go build -o /usr/local/bin/mysqldumpsplit-go . && \
     rm -rf /tmp/mysqldumpsplit-go
 
 # 4. vekexasia/mysqldumpsplit (Node.js)
