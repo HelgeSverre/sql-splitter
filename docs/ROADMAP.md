@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.6.0 (current)  
+**Version**: 1.7.0 (current)  
 **Last Updated**: 2025-12-20  
-**Revision**: 2.2 — Post v1.6.0 release
+**Revision**: 2.3 — Post v1.7.0 release
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -15,7 +15,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 2. ✅ Merge — Completes split/merge roundtrip (v1.4.0)
 3. ✅ Sample — FK-aware data sampling (builds shared infra) (v1.5.0)
 4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
-5. Convert — Dialect conversion
+5. ✅ Convert — Dialect conversion (v1.7.0)
 
 **Deferred to v2.x:**
 - Query, Redact, Validate, Detect-PII, Diff, MSSQL
@@ -148,45 +148,39 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.7.0 — Convert Command (MVP)
-**Target**: 3-4 weeks  
+### v1.7.0 — Convert Command (MVP) ✅ RELEASED
+**Released**: 2025-12-20  
 **Theme**: Dialect conversion for common cases
 
-| Feature | Effort | Status | Notes |
-|---------|--------|--------|-------|
-| **Convert core** | 20h | 🟡 Planned | |
-| ├─ Converter architecture | 3h | | Trait-based per pair |
-| ├─ Identifier quoting | 2h | | Backticks ↔ double quotes |
-| ├─ String escaping | 2h | | `\'` ↔ `''` |
-| ├─ Common type mapping | 6h | | INT, VARCHAR, BOOLEAN, etc. |
-| ├─ AUTO_INCREMENT → SERIAL | 2h | | Per-dialect |
-| ├─ Session headers | 2h | | Strip/convert |
-| └─ Warning system | 3h | | Unsupported features |
-| **Conversion pairs (MVP)** | 8h | 🟡 Planned | |
-| ├─ MySQL → PostgreSQL | 4h | | INSERT-based |
-| └─ MySQL → SQLite | 4h | | Simpler mapping |
-| **Testing** | 7h | | Per-pair validation |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Convert core** | ✅ Done | |
+| ├─ Converter architecture | ✅ Done | Streaming, per-statement |
+| ├─ Identifier quoting | ✅ Done | Backticks ↔ double quotes |
+| ├─ String escaping | ✅ Done | `\'` ↔ `''` |
+| ├─ Common type mapping | ✅ Done | 20+ type mappings |
+| ├─ AUTO_INCREMENT → SERIAL | ✅ Done | Per-dialect |
+| ├─ Session headers | ✅ Done | Strip/convert |
+| └─ Warning system | ✅ Done | Unsupported features |
+| **Conversion pairs (MVP)** | ✅ Done | |
+| ├─ MySQL → PostgreSQL | ✅ Done | INSERT-based |
+| └─ MySQL → SQLite | ✅ Done | All common types |
+| **Testing** | ✅ Done | 29 tests |
 
-**Total: ~35h MVP, ~56h Full**
-
-**MVP Definition:**
-- `sql-splitter convert mysql.sql -o postgres.sql --to postgres`
-- MySQL → PostgreSQL + MySQL → SQLite
-- INSERT-based only (no COPY parsing in MVP)
-- Common types only (skip ENUM, SET, UNSIGNED with warning)
-- Triggers/procedures: warn and skip
-
-**Full Scope (v2.0.0):**
-- All 6 pairs (MySQL ↔ PostgreSQL ↔ SQLite)
-- PostgreSQL COPY ↔ INSERT bidirectional
-- Complete type mapping (ENUM, arrays, JSONB)
-- Full constraint + index conversion
-- Roundtrip tests
-
-**Deliverables:**
+**Delivered:**
 - `sql-splitter convert mysql.sql -o postgres.sql --to postgres`
 - `sql-splitter convert mysql.sql -o sqlite.sql --to sqlite`
-- Clear warnings for unsupported features
+- Auto-detect source dialect
+- Comprehensive type mapping (TINYINT→BOOLEAN, DATETIME→TIMESTAMP, JSON→JSONB)
+- Warnings for unsupported features (ENUM, SET, UNSIGNED, FULLTEXT)
+- Strips MySQL-specific clauses (ENGINE, CHARSET, COLLATE, conditional comments)
+
+**Future (v2.0.0):**
+- All 6 pairs (MySQL ↔ PostgreSQL ↔ SQLite)
+- PostgreSQL COPY → INSERT conversion
+- Complete type mapping (arrays, GEOMETRY)
+- Full constraint + index conversion
+- Roundtrip tests
 
 ---
 
@@ -243,13 +237,14 @@ These features are valuable but lower priority:
 
 ### Priority Features (v1.4–v1.7)
 
-| Version | Theme | MVP Effort | Full Effort | Duration |
-|---------|-------|------------|-------------|----------|
-| v1.4.0 | Test Data Gen + Merge | — | — | ✅ Released |
-| v1.5.0 | Sample + Infra v1 | — | — | ✅ Released |
-| v1.6.0 | Shard + Infra v1.5 | — | — | ✅ Released |
-| v1.7.0 | Convert MVP | ~35h | 56h | 3-4 weeks |
-| **Total** | | **~35h** | **~56h** | **~3-4 weeks** |
+| Version | Theme | Status |
+|---------|-------|--------|
+| v1.4.0 | Test Data Gen + Merge | ✅ Released |
+| v1.5.0 | Sample + Infra v1 | ✅ Released |
+| v1.6.0 | Shard + Infra v1.5 | ✅ Released |
+| v1.7.0 | Convert MVP | ✅ Released |
+
+**All v1.x priority features complete!**
 
 ### Deferred Features (v2.x)
 
@@ -277,9 +272,9 @@ These features are valuable but lower priority:
    - No other tools do this well
    - Matures shared infrastructure
 
-4. **v1.7.0 — Convert MVP** ⭐ Next up
+4. ✅ **v1.7.0 — Convert MVP** — Released
    - Practical cross-dialect conversion
-   - Benefits from mature parser types
+   - MySQL → PostgreSQL, MySQL → SQLite
 
 ---
 

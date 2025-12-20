@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2025-12-20
+
+### Added
+
+- **Convert command**: Convert SQL dumps between MySQL, PostgreSQL, and SQLite dialects
+  - `sql-splitter convert mysql.sql -o postgres.sql --to postgres`
+  - `sql-splitter convert mysql.sql -o sqlite.sql --to sqlite`
+  - `--from` flag to specify source dialect (auto-detected if not specified)
+  - `--to` flag to specify target dialect (required)
+  - `--strict` flag to fail on any unsupported feature
+  - `--dry-run` flag to preview conversion statistics
+  - `--progress` flag to show conversion progress
+  - Supports compressed input files (.gz, .bz2, .xz, .zst)
+- **Identifier quoting conversion**: Backticks ↔ double quotes between dialects
+- **String escape normalization**: MySQL `\'` → PostgreSQL/SQLite `''`
+- **Data type mapping**: Comprehensive type conversion including:
+  - `TINYINT(1)` → `BOOLEAN` (PostgreSQL)
+  - `INT AUTO_INCREMENT` → `SERIAL` (PostgreSQL) or `INTEGER` (SQLite)
+  - `LONGTEXT/MEDIUMTEXT/TINYTEXT` → `TEXT`
+  - `BLOB/LONGBLOB` → `BYTEA` (PostgreSQL) or `BLOB` (SQLite)
+  - `DATETIME` → `TIMESTAMP` (PostgreSQL) or `TEXT` (SQLite)
+  - `JSON` → `JSONB` (PostgreSQL) or `TEXT` (SQLite)
+  - `ENUM`/`SET` → `VARCHAR(255)` with warning
+  - `UNSIGNED` modifier removed with warning
+- **MySQL-specific cleanup**: Strips ENGINE, CHARSET, COLLATE clauses and conditional comments
+- **Warning system**: Reports unsupported features (ENUM, SET, UNSIGNED, FULLTEXT indexes)
+- 20 new unit tests for converter module
+- 9 new integration tests for convert command
+
+### Changed
+
+- Test suite expanded from 359 to 406 tests
+
 ## [1.6.0] - 2025-12-20
 
 ### Added

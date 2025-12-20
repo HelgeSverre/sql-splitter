@@ -1,4 +1,5 @@
 mod analyze;
+mod convert;
 mod merge;
 mod sample;
 mod shard;
@@ -239,6 +240,36 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Convert a SQL dump between dialects (MySQL, PostgreSQL, SQLite)
+    Convert {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        file: PathBuf,
+
+        /// Output SQL file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Source dialect: mysql, postgres, sqlite (auto-detected if not specified)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Target dialect: mysql, postgres, sqlite (required)
+        #[arg(long)]
+        to: String,
+
+        /// Strict mode: fail on any unsupported feature
+        #[arg(long)]
+        strict: bool,
+
+        /// Show progress during conversion
+        #[arg(short, long)]
+        progress: bool,
+
+        /// Preview without writing files (dry run)
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -364,6 +395,15 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             progress,
             dry_run,
         ),
+        Commands::Convert {
+            file,
+            output,
+            from,
+            to,
+            strict,
+            progress,
+            dry_run,
+        } => convert::run(file, output, from, to, strict, progress, dry_run),
         Commands::Completions { shell } => {
             generate(
                 shell,

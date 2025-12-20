@@ -1,5 +1,6 @@
 mod analyzer;
 mod cmd;
+mod convert;
 mod merger;
 mod parser;
 mod sample;
