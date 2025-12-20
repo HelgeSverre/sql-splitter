@@ -1,9 +1,9 @@
-use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
+use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
 use crate::writer::WriterPool;
 use ahash::AHashSet;
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Stats {
     pub statements_processed: u64,
@@ -18,6 +18,58 @@ pub struct SplitterConfig {
     pub dry_run: bool,
     pub table_filter: Option<AHashSet<String>>,
     pub progress_fn: Option<Box<dyn Fn(u64)>>,
+    pub content_filter: ContentFilter,
+}
+
+/// Compression format detected from file extension
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    None,
+    Gzip,
+    Bzip2,
+    Xz,
+    Zstd,
+}
+
+impl Compression {
+    /// Detect compression format from file extension
+    pub fn from_path(path: &Path) -> Self {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+
+        match ext.as_deref() {
+            Some("gz" | "gzip") => Compression::Gzip,
+            Some("bz2" | "bzip2") => Compression::Bzip2,
+            Some("xz" | "lzma") => Compression::Xz,
+            Some("zst" | "zstd") => Compression::Zstd,
+            _ => Compression::None,
+        }
+    }
+
+    /// Wrap a reader with the appropriate decompressor
+    pub fn wrap_reader<'a>(&self, reader: Box<dyn Read + 'a>) -> Box<dyn Read + 'a> {
+        match self {
+            Compression::None => reader,
+            Compression::Gzip => Box::new(flate2::read::GzDecoder::new(reader)),
+            Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(reader)),
+            Compression::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
+            Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader).unwrap()),
+        }
+    }
+}
+
+impl std::fmt::Display for Compression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Compression::None => write!(f, "none"),
+            Compression::Gzip => write!(f, "gzip"),
+            Compression::Bzip2 => write!(f, "bzip2"),
+            Compression::Xz => write!(f, "xz"),
+            Compression::Zstd => write!(f, "zstd"),
+        }
+    }
 }
 
 pub struct Splitter {
@@ -57,16 +109,26 @@ impl Splitter {
         self
     }
 
+    pub fn with_content_filter(mut self, filter: ContentFilter) -> Self {
+        self.config.content_filter = filter;
+        self
+    }
+
     pub fn split(self) -> anyhow::Result<Stats> {
         let file = File::open(&self.input_file)?;
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.config.dialect;
+        let content_filter = self.config.content_filter;
+
+        // Detect and apply decompression
+        let compression = Compression::from_path(&self.input_file);
 
         let reader: Box<dyn Read> = if self.config.progress_fn.is_some() {
-            Box::new(ProgressReader::new(file, self.config.progress_fn.unwrap()))
+            let progress_reader = ProgressReader::new(file, self.config.progress_fn.unwrap());
+            compression.wrap_reader(Box::new(progress_reader))
         } else {
-            Box::new(file)
+            compression.wrap_reader(Box::new(file))
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
@@ -111,6 +173,22 @@ impl Splitter {
 
             if !is_copy_data && (stmt_type == StatementType::Unknown || table_name.is_empty()) {
                 continue;
+            }
+
+            // Apply content filter (schema-only or data-only)
+            match content_filter {
+                ContentFilter::SchemaOnly => {
+                    if !stmt_type.is_schema() {
+                        continue;
+                    }
+                }
+                ContentFilter::DataOnly => {
+                    // For data-only, include INSERT, COPY, and COPY data blocks
+                    if !stmt_type.is_data() && !is_copy_data {
+                        continue;
+                    }
+                }
+                ContentFilter::All => {}
             }
 
             if let Some(ref filter) = self.config.table_filter {
@@ -228,5 +306,107 @@ mod tests {
         assert!(output_dir.join("users.sql").exists());
         assert!(!output_dir.join("posts.sql").exists());
         assert!(output_dir.join("orders.sql").exists());
+    }
+
+    #[test]
+    fn test_splitter_schema_only() {
+        use crate::parser::ContentFilter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let input_file = temp_dir.path().join("input.sql");
+        let output_dir = temp_dir.path().join("output");
+
+        std::fs::write(
+            &input_file,
+            b"CREATE TABLE users (id INT);\nINSERT INTO users VALUES (1);\nINSERT INTO users VALUES (2);",
+        )
+        .unwrap();
+
+        let splitter = Splitter::new(input_file, output_dir.clone())
+            .with_content_filter(ContentFilter::SchemaOnly);
+        let stats = splitter.split().unwrap();
+
+        assert_eq!(stats.tables_found, 1);
+        assert_eq!(stats.statements_processed, 1); // Only CREATE TABLE
+
+        let content = std::fs::read_to_string(output_dir.join("users.sql")).unwrap();
+        assert!(content.contains("CREATE TABLE"));
+        assert!(!content.contains("INSERT"));
+    }
+
+    #[test]
+    fn test_splitter_data_only() {
+        use crate::parser::ContentFilter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let input_file = temp_dir.path().join("input.sql");
+        let output_dir = temp_dir.path().join("output");
+
+        std::fs::write(
+            &input_file,
+            b"CREATE TABLE users (id INT);\nINSERT INTO users VALUES (1);\nINSERT INTO users VALUES (2);",
+        )
+        .unwrap();
+
+        let splitter = Splitter::new(input_file, output_dir.clone())
+            .with_content_filter(ContentFilter::DataOnly);
+        let stats = splitter.split().unwrap();
+
+        assert_eq!(stats.tables_found, 1);
+        assert_eq!(stats.statements_processed, 2); // Only INSERTs
+
+        let content = std::fs::read_to_string(output_dir.join("users.sql")).unwrap();
+        assert!(!content.contains("CREATE TABLE"));
+        assert!(content.contains("INSERT"));
+    }
+
+    #[test]
+    fn test_splitter_gzip_compressed() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression as GzCompression;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let input_file = temp_dir.path().join("input.sql.gz");
+        let output_dir = temp_dir.path().join("output");
+
+        // Create gzipped SQL file
+        let file = std::fs::File::create(&input_file).unwrap();
+        let mut encoder = GzEncoder::new(file, GzCompression::default());
+        encoder
+            .write_all(b"CREATE TABLE users (id INT);\nINSERT INTO users VALUES (1);")
+            .unwrap();
+        encoder.finish().unwrap();
+
+        let splitter = Splitter::new(input_file, output_dir.clone());
+        let stats = splitter.split().unwrap();
+
+        assert_eq!(stats.tables_found, 1);
+        assert_eq!(stats.statements_processed, 2);
+        assert!(output_dir.join("users.sql").exists());
+    }
+
+    #[test]
+    fn test_compression_detection() {
+        assert_eq!(
+            Compression::from_path(std::path::Path::new("file.sql")),
+            Compression::None
+        );
+        assert_eq!(
+            Compression::from_path(std::path::Path::new("file.sql.gz")),
+            Compression::Gzip
+        );
+        assert_eq!(
+            Compression::from_path(std::path::Path::new("file.sql.bz2")),
+            Compression::Bzip2
+        );
+        assert_eq!(
+            Compression::from_path(std::path::Path::new("file.sql.xz")),
+            Compression::Xz
+        );
+        assert_eq!(
+            Compression::from_path(std::path::Path::new("file.sql.zst")),
+            Compression::Zstd
+        );
     }
 }

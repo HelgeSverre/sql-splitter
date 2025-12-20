@@ -1,4 +1,4 @@
-.PHONY: build release native test bench fmt check clippy clean install docker-build docker-bench verify-realworld
+.PHONY: build release native test bench fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld
 
 # Debug build
 build:
@@ -36,9 +36,19 @@ clippy:
 clean:
 	cargo clean
 
-# Install locally
+# Install locally (binary + shell completions)
 install:
 	cargo install --path .
+	@echo ""
+	@./scripts/install-completions.sh sql-splitter
+
+# Install completions only (for current shell)
+install-completions:
+	@./scripts/install-completions.sh sql-splitter
+
+# Install completions for all supported shells
+install-completions-all:
+	@./scripts/install-completions.sh sql-splitter all
 
 # Docker benchmark setup
 docker-build:

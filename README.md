@@ -9,6 +9,7 @@ Split large SQL dump files into individual table files. Fast, memory-efficient, 
 
 - **600+ MB/s** throughput on modern hardware
 - **MySQL, PostgreSQL, SQLite** support (including `COPY FROM stdin`)
+- **Compressed files** — gzip, bzip2, xz, zstd auto-detected
 - **Streaming architecture** — handles files larger than RAM
 - **5x faster** than shell-based alternatives
 
@@ -23,7 +24,9 @@ cargo install sql-splitter
 ### From source
 
 ```bash
-cargo install --git https://github.com/helgesverre/sql-splitter
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+make install  # Installs binary + shell completions
 ```
 
 Or download pre-built binaries from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases).
@@ -40,11 +43,38 @@ sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
 # SQLite dump
 sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
 
+# Compressed files (auto-detected)
+sql-splitter split backup.sql.gz -o tables/
+sql-splitter split backup.sql.zst -o tables/
+
 # Split specific tables only
 sql-splitter split dump.sql --tables users,posts,orders
 
+# Schema only (CREATE TABLE, indexes, etc.)
+sql-splitter split dump.sql -o schema/ --schema-only
+
+# Data only (INSERT/COPY statements)
+sql-splitter split dump.sql -o data/ --data-only
+
 # Analyze without splitting
 sql-splitter analyze dump.sql
+
+# Generate shell completions (auto-installed with make install)
+sql-splitter completions bash >> ~/.bashrc
+sql-splitter completions zsh >> ~/.zshrc
+sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
+```
+
+### Shell Completions
+
+Shell completions are automatically installed when using `make install`. For manual installation:
+
+```bash
+# Install for current shell only
+make install-completions
+
+# Install for all shells (bash, zsh, fish)
+make install-completions-all
 ```
 
 ## Options
@@ -52,10 +82,12 @@ sql-splitter analyze dump.sql
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-o, --output` | Output directory | `output` |
-| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | `mysql` |
+| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
 | `-t, --tables` | Only split these tables (comma-separated) | — |
 | `-p, --progress` | Show progress bar | — |
 | `--dry-run` | Preview without writing files | — |
+| `--schema-only` | Only DDL statements (CREATE, ALTER, DROP) | — |
+| `--data-only` | Only DML statements (INSERT, COPY) | — |
 
 ## Performance
 

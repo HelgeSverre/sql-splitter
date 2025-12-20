@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2025-12-20
+
+### Added
+
+- **Compressed file support**: Automatically decompress gzip (`.gz`), bzip2 (`.bz2`), xz (`.xz`), and zstd (`.zst`) files during processing — no manual decompression needed
+- **Schema/Data filtering**: New `--schema-only` and `--data-only` flags to extract only DDL or DML statements
+  - `--schema-only`: Only CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP TABLE
+  - `--data-only`: Only INSERT and COPY statements
+- **Shell completions**: New `completions` subcommand generates completions for bash, zsh, fish, elvish, and PowerShell
+  - `sql-splitter completions bash >> ~/.bashrc`
+- **Automatic shell completion installation**: `make install` now automatically installs shell completions for the detected shell
+- New Makefile targets:
+  - `make install-completions`: Install completions for current shell only
+  - `make install-completions-all`: Install completions for bash, zsh, and fish
+- New `scripts/install-completions.sh` script for flexible completion installation
+- 4 new tests for compression and content filtering
+
+### Changed
+
+- Updated README with improved installation instructions and shell completions section
+- Expanded test suite from 119 to 123 unit tests
+
 ## [1.2.1] - 2025-12-20
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "sql-splitter"
-version = "1.2.1"
+version = "1.3.0"
 edition = "2021"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "High-performance CLI tool for splitting large SQL dump files into individual table files"
@@ -15,11 +15,16 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 regex = "1"
 memchr = "2"
 once_cell = "1"
 ahash = "0.8"
 anyhow = "1"
+flate2 = "1"
+bzip2 = "0.5"
+xz2 = "0.1"
+zstd = "0.13"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

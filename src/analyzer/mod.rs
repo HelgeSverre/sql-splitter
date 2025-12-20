@@ -1,4 +1,5 @@
 use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
+use crate::splitter::Compression;
 use ahash::AHashMap;
 use std::fs::File;
 use std::io::Read;
@@ -51,7 +52,11 @@ impl Analyzer {
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.dialect;
 
-        let mut parser = Parser::with_dialect(file, buffer_size, dialect);
+        // Detect and apply decompression
+        let compression = Compression::from_path(&self.input_file);
+        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file));
+
+        let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         while let Some(stmt) = parser.read_statement()? {
             let (stmt_type, table_name) =
@@ -67,7 +72,7 @@ impl Analyzer {
         Ok(self.get_sorted_stats())
     }
 
-    pub fn analyze_with_progress<F: Fn(u64)>(
+    pub fn analyze_with_progress<F: Fn(u64) + 'static>(
         mut self,
         progress_fn: F,
     ) -> anyhow::Result<Vec<TableStats>> {
@@ -76,7 +81,11 @@ impl Analyzer {
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.dialect;
 
-        let reader = ProgressReader::new(file, progress_fn);
+        // Detect and apply decompression
+        let compression = Compression::from_path(&self.input_file);
+        let progress_reader = ProgressReader::new(file, progress_fn);
+        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(progress_reader));
+
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         while let Some(stmt) = parser.read_statement()? {

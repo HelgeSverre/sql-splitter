@@ -201,6 +201,36 @@ pub enum StatementType {
     Copy,
 }
 
+impl StatementType {
+    /// Returns true if this is a schema-related statement (DDL)
+    pub fn is_schema(&self) -> bool {
+        matches!(
+            self,
+            StatementType::CreateTable
+                | StatementType::CreateIndex
+                | StatementType::AlterTable
+                | StatementType::DropTable
+        )
+    }
+
+    /// Returns true if this is a data-related statement (DML)
+    pub fn is_data(&self) -> bool {
+        matches!(self, StatementType::Insert | StatementType::Copy)
+    }
+}
+
+/// Content filter mode for splitting
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentFilter {
+    /// Include both schema and data statements (default)
+    #[default]
+    All,
+    /// Only schema statements (CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP TABLE)
+    SchemaOnly,
+    /// Only data statements (INSERT, COPY)
+    DataOnly,
+}
+
 static CREATE_TABLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*CREATE\s+TABLE\s+`?([^\s`(]+)`?").unwrap());
 

@@ -1,5 +1,6 @@
 use crate::analyzer::Analyzer;
-use crate::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
+use crate::parser::{detect_dialect, detect_dialect_from_file, DialectConfidence, SqlDialect};
+use crate::splitter::Compression;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
@@ -12,7 +13,13 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
     let file_size = std::fs::metadata(&file)?.len();
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-    let dialect = resolve_dialect(&file, dialect)?;
+    // Detect compression
+    let compression = Compression::from_path(&file);
+    if compression != Compression::None {
+        println!("Detected compression: {}", compression);
+    }
+
+    let dialect = resolve_dialect(&file, dialect, compression)?;
 
     println!(
         "Analyzing SQL file: {} ({:.2} MB) [dialect: {}]",
@@ -87,11 +94,28 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
     Ok(())
 }
 
-fn resolve_dialect(file: &std::path::Path, dialect: Option<String>) -> anyhow::Result<SqlDialect> {
+fn resolve_dialect(
+    file: &std::path::Path,
+    dialect: Option<String>,
+    compression: Compression,
+) -> anyhow::Result<SqlDialect> {
+    use std::io::Read;
+
     match dialect {
         Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
         None => {
-            let result = detect_dialect_from_file(file)?;
+            // For compressed files, decompress a sample first
+            let result = if compression != Compression::None {
+                let file_handle = std::fs::File::open(file)?;
+                let mut reader = compression.wrap_reader(Box::new(file_handle));
+                let mut header = vec![0u8; 8192];
+                let bytes_read = reader.read(&mut header)?;
+                header.truncate(bytes_read);
+                detect_dialect(&header)
+            } else {
+                detect_dialect_from_file(file)?
+            };
+
             let confidence_str = match result.confidence {
                 DialectConfidence::High => "high confidence",
                 DialectConfidence::Medium => "medium confidence",
