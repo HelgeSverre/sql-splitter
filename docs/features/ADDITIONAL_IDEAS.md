@@ -1,77 +1,18 @@
 # Additional Feature Ideas
 
 **Date**: 2025-12-20  
+**Updated**: 2025-12-20  
 **Source**: Oracle analysis
 
-Five additional high-value features beyond the current roadmap (split, merge, analyze, sample, query, redact, diff, convert).
+Additional high-value features beyond the current roadmap (split, merge, analyze, sample, shard, query, redact, diff, convert).
+
+> **Note:** Dependency-aware sampling and shard-by-key have been moved to their own feature documents:
+> - [Sample Feature](SAMPLE_FEATURE.md) — includes `--preserve-relations` for FK-aware sampling
+> - [Shard Feature](SHARD_FEATURE.md) — tenant extraction with FK chain resolution
 
 ---
 
-## 1. Dependency-Aware Sampling (`sample --preserve-relations`)
-
-**Already partially planned in SAMPLE_FEATURE.md, but worth emphasizing as distinct capability.**
-
-Enhanced sampling that preserves referential integrity across the entire database graph.
-
-```bash
-# Sample 1% of orders, automatically include all referenced customers, products, etc.
-sql-splitter sample dump.sql -o subset.sql --percent 1 --preserve-relations
-
-# Start from specific "root" tables
-sql-splitter sample dump.sql -o subset.sql --root-tables orders --percent 5 --preserve-relations
-```
-
-**Algorithm:**
-1. Parse CREATE TABLE statements to build FK dependency graph
-2. Sample rows from root/specified tables
-3. Track selected primary key values in hash sets
-4. Include all referenced rows from dependent tables
-5. Recursively follow FK chains
-
-**Why unique:** Most tools sample tables independently; maintaining a consistent relational slice is rare.
-
----
-
-## 2. Shard/Partition by Key
-
-Split table data into multiple dumps by tenant, hash, or key range — for multi-tenant systems and parallel loading.
-
-```bash
-# Partition by tenant_id into separate dumps
-sql-splitter shard dump.sql -o shards/ --key tenant_id --partitions 10
-
-# Hash-based sharding for parallel load
-sql-splitter shard dump.sql -o chunks/ --key id --hash --partitions 8
-
-# Key range partitioning
-sql-splitter shard dump.sql -o ranges/ --key created_at --ranges "2023-01-01,2024-01-01,2025-01-01"
-
-# Explicit mapping file (tenant_id -> shard)
-sql-splitter shard dump.sql -o tenants/ --key tenant_id --mapping tenant_shards.json
-```
-
-**Output structure:**
-```
-shards/
-├── shard_0/
-│   ├── users.sql
-│   ├── orders.sql
-│   └── ...
-├── shard_1/
-│   └── ...
-└── schema.sql  # Shared DDL (optional)
-```
-
-**Use cases:**
-- Split multi-tenant monolith dump into per-tenant dumps
-- Prepare N balanced chunks for parallel bulk loading
-- Migrate specific tenants to different databases
-
-**Effort:** M (2-3 days)
-
----
-
-## 3. Canonicalize + Checksum
+## 1. Canonicalize + Checksum
 
 Normalize SQL formatting and compute strong checksums for CI verification and artifact deduplication.
 
@@ -114,7 +55,7 @@ sql-splitter verify dump.sql --checksums checksums.json
 
 ---
 
-## 4. Auto-Detect PII (`detect-pii`)
+## 2. Auto-Detect PII (`detect-pii`)
 
 Scan schema and sample rows to automatically suggest a redaction configuration.
 
@@ -171,7 +112,7 @@ detected_columns:
 
 ---
 
-## 5. Validate/Lint (`validate`)
+## 3. Validate/Lint (`validate`)
 
 Check dump files for structural integrity and common issues.
 
@@ -224,28 +165,123 @@ Summary: 0 errors, 2 warnings (use --strict to fail on warnings)
 
 ---
 
-## Priority Matrix (Updated)
+## 4. Key Range Partitioning
+
+Extend the shard command with date/time range partitioning for temporal data.
+
+```bash
+# Partition by date ranges
+sql-splitter shard dump.sql -o ranges/ \
+  --key created_at \
+  --ranges "2023-01-01,2024-01-01,2025-01-01"
+
+# Monthly partitions
+sql-splitter shard dump.sql -o monthly/ \
+  --key order_date \
+  --interval month \
+  --start 2024-01-01 \
+  --end 2025-01-01
+```
+
+**Output structure:**
+```
+ranges/
+├── before_2023-01-01.sql
+├── 2023-01-01_to_2024-01-01.sql
+├── 2024-01-01_to_2025-01-01.sql
+└── after_2025-01-01.sql
+```
+
+**Use cases:**
+- Archive old data separately
+- Time-based data retention
+- Faster partial restores
+
+**Effort:** M (2-3 days, builds on shard infrastructure)
+
+---
+
+## 5. Streaming Output Compression
+
+Output directly to compressed formats without intermediate files.
+
+```bash
+# Output to gzip
+sql-splitter split dump.sql -o tables/ --compress gzip
+
+# Output to zstd (faster, better compression)
+sql-splitter sample dump.sql -o sample.sql.zst --compress zstd
+
+# Specify compression level
+sql-splitter shard dump.sql -o tenant.sql.gz --compress gzip --level 9
+```
+
+**Supported formats:**
+- gzip (`.gz`)
+- zstd (`.zst`) — recommended for speed + ratio
+- bzip2 (`.bz2`)
+- xz (`.xz`)
+
+**Effort:** S (1 day, extend existing compression infrastructure)
+
+---
+
+## Priority Matrix
 
 | Feature | Value | Complexity | Recommendation |
 |---------|-------|------------|----------------|
-| **Existing planned:** |
-| Merge | High | Low | Do first |
-| Sample | High | Medium | Do second |
+| **Core roadmap:** |
+| Merge | High | Low | ✅ Implemented |
+| Sample | High | Medium | Next priority |
+| Shard | High | Medium-High | After sample (shares FK graph) |
 | Redact | High | Medium-High | High value |
 | Query | Medium | Medium-High | Nice to have |
 | Convert | Medium | High | Complex |
 | Diff | Medium | High | Later |
-| **New ideas:** |
-| Validate | High | Medium | **Easy win for CI** |
+| **Additional ideas:** |
+| Validate | High | Medium | **Easy CI win** |
 | Detect-PII | High | Low-Medium | **Pairs with redact** |
-| Shard | Medium | Medium | Multi-tenant use case |
 | Canonicalize | Medium | Medium | CI/verification |
-| Dependency sampling | Medium | High | Already in sample plan |
+| Key Range Partitioning | Medium | Low | Builds on shard |
+| Streaming Compression | Medium | Low | Quick win |
+
+---
+
+## Shared Infrastructure
+
+Several features share common components:
+
+### Schema Graph (FK Parsing)
+
+Used by:
+- `sample --preserve-relations`
+- `shard`
+- `validate --check-fk`
+- `diff` (structural comparison)
+
+### Row Parsing (INSERT/COPY values)
+
+Used by:
+- `sample` (PK/FK extraction)
+- `shard` (tenant column + FK values)
+- `redact` (column value replacement)
+- `detect-pii` (data pattern analysis)
+- `validate` (PK uniqueness, NOT NULL checks)
+
+### PK Tracking
+
+Used by:
+- `sample --preserve-relations`
+- `shard`
+- `validate --check-fk`
+
+**Implementation strategy:** Build these as reusable modules in `src/schema/` and `src/row/`.
 
 ---
 
 ## Related
 
-- [Sample Feature](SAMPLE_FEATURE.md)
-- [Redact Feature](REDACT_FEATURE.md)
-- [MSSQL Support Analysis](MSSQL_FEASIBILITY.md)
+- [Sample Feature](SAMPLE_FEATURE.md) — FK-aware sampling with `--preserve-relations`
+- [Shard Feature](SHARD_FEATURE.md) — Tenant extraction with FK chain resolution
+- [Redact Feature](REDACT_FEATURE.md) — Data anonymization
+- [MSSQL Support Analysis](MSSQL_FEASIBILITY.md) — T-SQL dialect support

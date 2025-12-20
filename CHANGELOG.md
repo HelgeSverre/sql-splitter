@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2025-12-20
+
+### Added
+
+- **Merge command**: Combine split SQL files back into a single dump file
+  - `sql-splitter merge tables/ -o restored.sql`
+  - `--tables` flag to merge specific tables only
+  - `--exclude` flag to skip certain tables
+  - `--transaction` flag to wrap output in BEGIN/COMMIT
+  - `--dialect` flag for MySQL, PostgreSQL, or SQLite output format
+  - Streaming concatenation with 256KB buffers
+  - Progress bar support with `--progress` flag
+- **Test data generator**: New `test_data_gen` crate for generating synthetic SQL fixtures
+  - Deterministic, seed-based generation for reproducible tests
+  - Multi-tenant schema with 16 tables (FK chains, self-refs, junctions, global tables)
+  - Three scales: small (~500 rows), medium (~10K), large (~200K)
+  - MySQL, PostgreSQL (COPY + INSERT), and SQLite output
+  - CLI tool: `gen-fixtures --dialect mysql --scale small --seed 42`
+- **New merger module**: Reusable `Merger` struct in `src/merger/` for programmatic use
+- **Static test fixtures**: Edge case SQL files for MySQL, PostgreSQL, SQLite in `tests/fixtures/static/`
+- 7 new tests for merge functionality
+
+### Changed
+
+- Project now uses Cargo workspace with `crates/test_data_gen/` subcrate
+- Expanded test suite from 123 to 130 unit tests
+
 ## [1.3.1] - 2025-12-20
 
 ### Added

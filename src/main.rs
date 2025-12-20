@@ -1,5 +1,6 @@
 mod analyzer;
 mod cmd;
+mod merger;
 mod parser;
 mod splitter;
 mod writer;

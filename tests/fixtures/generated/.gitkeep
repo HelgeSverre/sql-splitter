@@ -1,0 +1,2 @@
+# Generated fixtures are created on-demand and ignored by git
+# Run: cargo run -p test_data_gen --bin gen-fixtures -- --dialect mysql --scale small > mysql_small.sql

@@ -56,6 +56,15 @@ sql-splitter split dump.sql -o schema/ --schema-only
 # Data only (INSERT/COPY statements)
 sql-splitter split dump.sql -o data/ --data-only
 
+# Merge split files back into single dump
+sql-splitter merge tables/ -o restored.sql
+
+# Merge specific tables only
+sql-splitter merge tables/ -o partial.sql --tables users,orders
+
+# Merge with transaction wrapper
+sql-splitter merge tables/ -o restored.sql --transaction
+
 # Analyze without splitting
 sql-splitter analyze dump.sql
 
@@ -79,6 +88,8 @@ make install-completions-all
 
 ## Options
 
+### Split Options
+
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-o, --output` | Output directory | `output` |
@@ -88,6 +99,19 @@ make install-completions-all
 | `--dry-run` | Preview without writing files | — |
 | `--schema-only` | Only DDL statements (CREATE, ALTER, DROP) | — |
 | `--data-only` | Only DML statements (INSERT, COPY) | — |
+
+### Merge Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-o, --output` | Output SQL file | stdout |
+| `-d, --dialect` | SQL dialect for headers/footers | `mysql` |
+| `-t, --tables` | Only merge these tables (comma-separated) | all |
+| `-e, --exclude` | Exclude these tables (comma-separated) | — |
+| `--transaction` | Wrap in BEGIN/COMMIT transaction | — |
+| `--no-header` | Skip header comments | — |
+| `-p, --progress` | Show progress bar | — |
+| `--dry-run` | Preview without writing files | — |
 
 ## Performance
 

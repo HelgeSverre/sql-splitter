@@ -61,6 +61,28 @@ Options:
 - `--dry-run`: Preview what would be split without writing files
 - `-p, --progress`: Show progress bar during processing
 
+### merge
+
+Merge split SQL files back into a single dump file.
+
+```bash
+sql-splitter merge tables/ -o restored.sql           # merge all tables
+sql-splitter merge tables/ -o partial.sql --tables users,orders  # specific tables
+sql-splitter merge tables/ -o restored.sql --exclude cache,sessions
+sql-splitter merge tables/ -o restored.sql --transaction  # wrap in transaction
+sql-splitter merge tables/ -o restored.sql --dialect postgres
+```
+
+Options:
+- `-o, --output <FILE>`: Output SQL file (default: stdout)
+- `-d, --dialect <DIALECT>`: SQL dialect for headers/footers (default: mysql)
+- `-t, --tables <TABLES>`: Only merge these tables (comma-separated)
+- `-e, --exclude <TABLES>`: Exclude these tables (comma-separated)
+- `--transaction`: Wrap output in BEGIN/COMMIT transaction
+- `--no-header`: Skip header comments
+- `-p, --progress`: Show progress bar during merging
+- `--dry-run`: Preview what would be merged without writing
+
 ### analyze
 
 Analyze a SQL file and display table statistics without splitting.
@@ -125,7 +147,9 @@ Files are auto-detected by extension:
 - [src/parser/](https://github.com/helgesverre/sql-splitter/tree/main/src/parser): Streaming SQL parser
 - [src/writer/](https://github.com/helgesverre/sql-splitter/tree/main/src/writer): Buffered file writers
 - [src/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/src/splitter): Split orchestration
+- [src/merger/](https://github.com/helgesverre/sql-splitter/tree/main/src/merger): Merge orchestration
 - [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
+- [crates/test_data_gen/](https://github.com/helgesverre/sql-splitter/tree/main/crates/test_data_gen): Test fixture generator
 
 ## Optional
 

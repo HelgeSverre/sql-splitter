@@ -1,4 +1,23 @@
-.PHONY: build release native test bench fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld
+.PHONY: help build release native test bench fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld
+
+# Show available commands (default target)
+help:
+	@echo "Available commands:"
+	@echo "  make build                 - Debug build"
+	@echo "  make release               - Release build"
+	@echo "  make native                - Optimized build for current CPU (best performance)"
+	@echo "  make test                  - Run all tests"
+	@echo "  make bench                 - Run criterion benchmarks"
+	@echo "  make fmt                   - Format code"
+	@echo "  make check                 - Check code without building"
+	@echo "  make clippy                - Run clippy lints"
+	@echo "  make clean                 - Clean build artifacts"
+	@echo "  make install               - Install locally (binary + shell completions)"
+	@echo "  make install-completions   - Install completions only (for current shell)"
+	@echo "  make install-completions-all - Install completions for all supported shells"
+	@echo "  make docker-build          - Docker benchmark setup"
+	@echo "  make docker-bench          - Run benchmarks in Docker (generates 100MB test data)"
+	@echo "  make verify-realworld      - Verify against real-world SQL dumps from public sources"
 
 # Debug build
 build:

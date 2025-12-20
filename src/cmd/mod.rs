@@ -1,4 +1,5 @@
 mod analyze;
+mod merge;
 mod split;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -70,6 +71,44 @@ pub enum Commands {
         progress: bool,
     },
 
+    /// Merge split SQL files back into a single file
+    Merge {
+        /// Directory containing split SQL files
+        input_dir: PathBuf,
+
+        /// Output SQL file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, or sqlite
+        #[arg(short, long, default_value = "mysql")]
+        dialect: Option<String>,
+
+        /// Only merge specific tables (comma-separated)
+        #[arg(short, long)]
+        tables: Option<String>,
+
+        /// Exclude specific tables (comma-separated)
+        #[arg(short, long)]
+        exclude: Option<String>,
+
+        /// Wrap output in a transaction
+        #[arg(long)]
+        transaction: bool,
+
+        /// Skip header comments
+        #[arg(long)]
+        no_header: bool,
+
+        /// Show progress during merging
+        #[arg(short, long)]
+        progress: bool,
+
+        /// Preview without writing files (dry run)
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -106,6 +145,27 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             dialect,
             progress,
         } => analyze::run(file, dialect, progress),
+        Commands::Merge {
+            input_dir,
+            output,
+            dialect,
+            tables,
+            exclude,
+            transaction,
+            no_header,
+            progress,
+            dry_run,
+        } => merge::run(
+            input_dir,
+            output,
+            dialect,
+            tables,
+            exclude,
+            transaction,
+            no_header,
+            progress,
+            dry_run,
+        ),
         Commands::Completions { shell } => {
             generate(
                 shell,
