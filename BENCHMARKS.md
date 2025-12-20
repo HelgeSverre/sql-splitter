@@ -18,25 +18,38 @@ Comprehensive benchmarking for sql-splitter.
 
 ### vs Competitor Tools
 
-**sql-splitter is 29x faster than the nearest working competitor:**
+**100MB mysqldump file (Docker Linux amd64):**
 
 | Command | Mean | Relative |
 |:--------|-----:|:---------|
-| **sql-splitter** (Rust) | 67.4 ms | 1.00 |
-| mysqldumpsplitter (Bash/awk) | 1,946 ms | **28.85x slower** |
+| **sql-splitter** (Rust) | 189 ms | 1.00 |
+| mysql_splitdump (csplit) | 221 ms | 1.17x slower |
+| mysqldumpsplit (Node.js) | 334 ms | 1.77x slower |
+| mysql-dump-split (Ruby) | 904 ms | **4.78x slower** |
+| mysqldumpsplitter (Bash/awk) | 930 ms | **4.91x slower** |
 
-*Tested on 21 MB mysqldump file, Apple M2 Max*
+**50MB mysqldump file (Docker Linux amd64):**
+
+| Command | Mean | Relative |
+|:--------|-----:|:---------|
+| **sql-splitter** (Rust) | 97 ms | 1.00 |
+| mysql_splitdump (csplit) | 115 ms | 1.18x slower |
+| mysqldumpsplit (Node.js) | 196 ms | 2.01x slower |
+| mysqldumpsplitter (Bash/awk) | 460 ms | **4.73x slower** |
+| mysql-dump-split (Ruby) | 467 ms | **4.81x slower** |
+
+*Benchmarks run in Docker on Apple M2 Max (linux/arm64)*
 
 ### Competitive Landscape
 
 | Tool | Language | Stars | Speed | Notes |
 |------|----------|-------|-------|-------|
-| **sql-splitter** | Rust | - | **29x faster** | Multi-dialect, parses actual SQL |
-| [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter) | Bash/awk | 540+ | Slow | mysqldump format only |
-| [jasny/mysql_splitdump.sh](https://gist.github.com/jasny/1608062) | Bash/csplit | 93 | N/A | Failed on test files |
+| **sql-splitter** | Rust | - | **Fastest** | Multi-dialect, parses actual SQL |
+| [jasny/mysql_splitdump.sh](https://gist.github.com/jasny/1608062) | Bash/csplit | 93 | 1.2x slower | mysqldump only, needs GNU coreutils |
+| [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit) | Node.js | 55 | 1.8x slower | Requires Node.js 18 (bugs on v22) |
+| [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter) | Bash/awk | 540+ | 5x slower | mysqldump format only |
+| [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split) | Ruby | 77 | 5x slower | Archived project |
 | [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit) | Go | ~40 | N/A | Deadlocks on valid input |
-| [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit) | Node.js | 55 | N/A | RangeError bugs |
-| [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split) | Ruby | 77 | N/A | Archived, deprecated API |
 
 ### Multi-Database Dialect Support
 
@@ -65,7 +78,8 @@ These markers are only present in standard `mysqldump` output. **sql-splitter** 
 
 ### Key Findings
 
-- sql-splitter is **29x faster** than the nearest working competitor
+- sql-splitter is the **fastest tool** across all benchmarks
+- sql-splitter is **1.2x faster** than csplit, **1.8x faster** than Node.js, **5x faster** than awk/Ruby
 - sql-splitter achieves **600-800 MB/s** throughput on synthetic files  
 - sql-splitter achieves **~450 MB/s** on real 10GB production dumps
 - sql-splitter is the **only multi-dialect tool** (MySQL, PostgreSQL, SQLite)

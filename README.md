@@ -6,7 +6,7 @@
 
 High-performance CLI tool for splitting large SQL dump files into individual table files.
 
-Supports MySQL, MariaDB, PostgreSQL (including `COPY FROM stdin`), and SQLite. 29x faster than shell-based alternatives.
+Supports MySQL, MariaDB, PostgreSQL (including `COPY FROM stdin`), and SQLite. Fastest in benchmarks: 1.2-5x faster than alternatives.
 
 ## Installation
 
