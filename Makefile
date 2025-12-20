@@ -44,6 +44,6 @@ install:
 docker-build:
 	docker compose -f docker/docker-compose.benchmark.yml build
 
-# Run benchmarks in Docker (generates test data)
+# Run benchmarks in Docker (generates 100MB test data)
 docker-bench:
-	./docker/run-benchmark.sh --generate
+	./docker/run-benchmark.sh --generate 100
