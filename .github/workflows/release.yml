@@ -59,7 +59,7 @@ jobs:
           mv target/${{ matrix.target }}/release/sql-splitter.exe ${{ matrix.name }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
