@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sql-splitter - High-Performance SQL File Splitter</title>
+    <meta name="description" content="Split large SQL dump files into individual table files at 300-400 MB/s. Memory-efficient, streaming architecture handles gigabyte-scale files.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav>
+        <div class="nav-content">
+            <a href="#" class="logo">
+                <span class="logo-icon">;</span>
+                sql-splitter
+            </a>
+            <div class="nav-links">
+                <a href="#install">Install</a>
+                <a href="#guide">Guide</a>
+                <a href="https://github.com/helgesverre/sql-splitter" target="_blank">GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <main>
+        <!-- Hero -->
+        <section class="hero">
+            <h1>
+                <span class="logo-icon">;</span>
+                sql-splitter
+            </h1>
+            <p class="subtitle">Split SQL dumps at 400 MB/s</p>
+            <p class="description">
+                High-performance CLI tool for splitting large SQL dump files into individual
+                table files. Process gigabyte-scale files with minimal memory usage.
+            </p>
+            <div class="hero-actions">
+                <a href="#install" class="btn btn-primary">Get Started</a>
+                <a href="https://github.com/helgesverre/sql-splitter" class="btn btn-secondary" target="_blank">View on GitHub</a>
+            </div>
+        </section>
+
+        <!-- Why -->
+        <section class="why">
+            <h2>Why sql-splitter?</h2>
+            <p class="lead">
+                Working with large SQL dumps is painful. Importing a 10GB file takes forever,
+                and you often just need a few tables. sql-splitter lets you split the dump
+                into individual files so you can import only what you need.
+            </p>
+            <div class="benefits">
+                <div class="benefit">
+                    <div class="benefit-icon">~</div>
+                    <h3>Blazing Fast</h3>
+                    <p>300-400 MB/s throughput</p>
+                </div>
+                <div class="benefit">
+                    <div class="benefit-icon">&lt;</div>
+                    <h3>Memory Efficient</h3>
+                    <p>~100MB constant usage</p>
+                </div>
+                <div class="benefit">
+                    <div class="benefit-icon">*</div>
+                    <h3>Streaming</h3>
+                    <p>Handles files larger than RAM</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Quick Start -->
+        <section class="quickstart">
+            <h2>Quick Start</h2>
+            <p class="lead">Split a SQL file in seconds.</p>
+
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <div class="step-content">
+                        <h3>Install</h3>
+                        <div class="code-block">
+                            <pre><code>go install github.com/helgesverre/sql-splitter@latest</code></pre>
+                            <button class="copy-btn" data-copy="go install github.com/helgesverre/sql-splitter@latest">Copy</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <div class="step-content">
+                        <h3>Split your dump</h3>
+                        <div class="code-block">
+                            <pre><code>sql-splitter split database.sql --output=tables</code></pre>
+                            <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <p class="note">That's it! Each table gets its own .sql file in the output directory.</p>
+        </section>
+
+        <!-- Install -->
+        <section id="install" class="install">
+            <h2>Installation</h2>
+
+            <h3>Using Go</h3>
+            <p>If you have Go 1.21+ installed:</p>
+            <div class="code-block">
+                <pre><code>go install github.com/helgesverre/sql-splitter@latest</code></pre>
+                <button class="copy-btn" data-copy="go install github.com/helgesverre/sql-splitter@latest">Copy</button>
+            </div>
+
+            <h3>Build from Source</h3>
+            <div class="code-block">
+                <pre><code>git clone https://github.com/helgesverre/sql-splitter.git
+cd sql-splitter
+go build -o sql-splitter
+sudo mv sql-splitter /usr/local/bin/</code></pre>
+                <button class="copy-btn" data-copy="git clone https://github.com/helgesverre/sql-splitter.git
+cd sql-splitter
+go build -o sql-splitter
+sudo mv sql-splitter /usr/local/bin/">Copy</button>
+            </div>
+
+            <div class="verify">
+                <p>Verify installation:</p>
+                <div class="code-block">
+                    <pre><code>sql-splitter --version</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter --version">Copy</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- User Guide -->
+        <section id="guide" class="guide">
+            <h2>User Guide</h2>
+
+            <!-- Commands -->
+            <article class="guide-section">
+                <h3>Commands</h3>
+
+                <h4>split</h4>
+                <p>Split a SQL dump file into individual table files.</p>
+                <div class="code-block">
+                    <pre><code># Basic usage
+sql-splitter split database.sql
+
+# Custom output directory
+sql-splitter split database.sql --output=tables
+
+# Show progress
+sql-splitter split database.sql --progress
+
+# Split only specific tables
+sql-splitter split database.sql --tables=users,posts
+
+# Dry run (preview without writing)
+sql-splitter split database.sql --dry-run</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
+                </div>
+
+                <h4>analyze</h4>
+                <p>Analyze a SQL file and display table statistics.</p>
+                <div class="code-block">
+                    <pre><code>sql-splitter analyze database.sql
+sql-splitter analyze database.sql --progress</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
+                </div>
+            </article>
+
+            <!-- Split Options -->
+            <article class="guide-section">
+                <h3>Split Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output directory</td><td>output</td></tr>
+                        <tr><td><code>--verbose</code></td><td><code>-v</code></td><td>Verbose output</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress</td><td>false</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Filter tables (comma-separated)</td><td>-</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>-</td><td>Preview without writing</td><td>false</td></tr>
+                    </tbody>
+                </table>
+            </article>
+
+            <!-- Supported Statements -->
+            <article class="guide-section">
+                <h3>Supported Statement Types</h3>
+                <p>sql-splitter recognizes and routes these SQL statement types to their respective table files:</p>
+                <div class="two-col">
+                    <div>
+                        <ul>
+                            <li>CREATE TABLE</li>
+                            <li>INSERT INTO</li>
+                            <li>CREATE INDEX</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <ul>
+                            <li>ALTER TABLE</li>
+                            <li>DROP TABLE</li>
+                        </ul>
+                    </div>
+                </div>
+                <p class="note">Other statements (SELECT, UPDATE, DELETE, etc.) are skipped.</p>
+            </article>
+
+            <!-- Examples -->
+            <article class="guide-section">
+                <h3>Examples</h3>
+
+                <h4>Split a large production dump</h4>
+                <div class="code-block">
+                    <pre><code>sql-splitter split production-backup.sql -o tables -p</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter split production-backup.sql -o tables -p">Copy</button>
+                </div>
+
+                <h4>Extract only specific tables</h4>
+                <div class="code-block">
+                    <pre><code>sql-splitter split database.sql --tables=users,orders,products</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter split database.sql --tables=users,orders,products">Copy</button>
+                </div>
+
+                <h4>Preview before splitting</h4>
+                <div class="code-block">
+                    <pre><code>sql-splitter split database.sql --dry-run</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter split database.sql --dry-run">Copy</button>
+                </div>
+
+                <h4>Analyze tables before splitting</h4>
+                <div class="code-block">
+                    <pre><code>sql-splitter analyze database.sql</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
+                </div>
+
+                <h4>Import a single table</h4>
+                <div class="code-block">
+                    <pre><code>mysql -u root -p mydb < tables/users.sql</code></pre>
+                    <button class="copy-btn" data-copy="mysql -u root -p mydb < tables/users.sql">Copy</button>
+                </div>
+            </article>
+
+            <!-- Performance -->
+            <article class="guide-section">
+                <h3>Performance</h3>
+                <p>Benchmarks on Apple M2 Max:</p>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Metric</th><th>Value</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Parser Throughput</td><td>327-411 MB/s</td></tr>
+                        <tr><td>Table Extraction</td><td>65 ns/op</td></tr>
+                        <tr><td>Memory Usage</td><td>~100 MB constant</td></tr>
+                        <tr><td>Cold Start</td><td>~10ms</td></tr>
+                    </tbody>
+                </table>
+
+                <p class="note">Actual performance depends on disk I/O speed and file complexity.</p>
+            </article>
+
+            <!-- FAQ -->
+            <article class="guide-section">
+                <h3>FAQ</h3>
+
+                <details>
+                    <summary>Does it modify my source file?</summary>
+                    <div class="details-content">
+                        <p>No. sql-splitter only reads from your source file. It never modifies the original.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>What about statements with semicolons in strings?</summary>
+                    <div class="details-content">
+                        <p>sql-splitter correctly handles semicolons inside quoted strings. It tracks quote boundaries and escape sequences.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Can it handle multi-line statements?</summary>
+                    <div class="details-content">
+                        <p>Yes. The parser uses streaming and statement boundary detection, not line-based parsing.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>What about backtick-quoted table names?</summary>
+                    <div class="details-content">
+                        <p>Both backtick-quoted (<code>`table`</code>) and regular table names are supported.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Is it faster than other tools?</summary>
+                    <div class="details-content">
+                        <p>sql-splitter is among the fastest SQL splitters available. It ranks #2 among open-source alternatives, behind only mysqldumpsplit which achieves 533 MB/s.</p>
+                    </div>
+                </details>
+            </article>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            <a href="https://github.com/helgesverre/sql-splitter">GitHub</a>
+            <span class="sep">|</span>
+            <a href="https://github.com/helgesverre/sql-splitter/releases">Releases</a>
+            <span class="sep">|</span>
+            <a href="https://github.com/helgesverre/sql-splitter/blob/main/LICENSE">MIT License</a>
+            <span class="sep">|</span>
+            <a href="llms.txt">llms.txt</a>
+        </p>
+        <p class="credit">Built by <a href="https://github.com/helgesverre">Helge Sverre</a></p>
+    </footer>
+
+    <script>
+        // Copy button functionality
+        document.querySelectorAll('.copy-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const text = btn.dataset.copy;
+                try {
+                    await navigator.clipboard.writeText(text);
+                    const original = btn.textContent;
+                    btn.textContent = 'Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => {
+                        btn.textContent = original;
+                        btn.classList.remove('copied');
+                    }, 2000);
+                } catch (err) {
+                    btn.textContent = 'Failed';
+                    setTimeout(() => btn.textContent = 'Copy', 2000);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
