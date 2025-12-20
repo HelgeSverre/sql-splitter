@@ -1,6 +1,7 @@
 mod analyze;
 mod merge;
 mod sample;
+mod shard;
 mod split;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -180,6 +181,64 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Extract tenant-specific data from a multi-tenant SQL dump
+    Shard {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        file: PathBuf,
+
+        /// Output SQL file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Column name for tenant identification (auto-detected if not specified)
+        #[arg(long)]
+        tenant_column: Option<String>,
+
+        /// Tenant value to extract (use this OR --tenant-values)
+        #[arg(long, conflicts_with = "tenant_values")]
+        tenant_value: Option<String>,
+
+        /// Multiple tenant values to extract (comma-separated, outputs to directory)
+        #[arg(long, conflicts_with = "tenant_value")]
+        tenant_values: Option<String>,
+
+        /// Explicit root tables that have the tenant column (comma-separated)
+        #[arg(long)]
+        root_tables: Option<String>,
+
+        /// How to handle global/lookup tables: none, lookups, all
+        #[arg(long, default_value = "lookups")]
+        include_global: Option<String>,
+
+        /// YAML config file for table classification overrides
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Maximum rows to select (memory guard)
+        #[arg(long)]
+        max_selected_rows: Option<usize>,
+
+        /// Fail if any FK integrity issues detected
+        #[arg(long)]
+        strict_fk: bool,
+
+        /// Exclude CREATE TABLE statements from output
+        #[arg(long)]
+        no_schema: bool,
+
+        /// Show progress during sharding
+        #[arg(short, long)]
+        progress: bool,
+
+        /// Preview without writing files (dry run)
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -269,6 +328,37 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             seed,
             config,
             max_total_rows,
+            strict_fk,
+            no_schema,
+            progress,
+            dry_run,
+        ),
+        Commands::Shard {
+            file,
+            output,
+            dialect,
+            tenant_column,
+            tenant_value,
+            tenant_values,
+            root_tables,
+            include_global,
+            config,
+            max_selected_rows,
+            strict_fk,
+            no_schema,
+            progress,
+            dry_run,
+        } => shard::run(
+            file,
+            output,
+            dialect,
+            tenant_column,
+            tenant_value,
+            tenant_values,
+            root_tables,
+            include_global,
+            config,
+            max_selected_rows,
             strict_fk,
             no_schema,
             progress,

@@ -4,6 +4,7 @@ mod merger;
 mod parser;
 mod sample;
 mod schema;
+mod shard;
 mod splitter;
 mod writer;
 
