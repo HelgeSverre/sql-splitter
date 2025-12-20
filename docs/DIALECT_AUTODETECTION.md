@@ -1,163 +1,111 @@
-# Dialect Auto-Detection Design
+# Dialect Auto-Detection
 
 ## Overview
 
-Automatically detect SQL dialect from file content instead of requiring `--dialect` flag.
+SQL Splitter can automatically detect the SQL dialect from file content when the `--dialect` flag is not specified.
+
+## Usage
+
+```bash
+# Auto-detect dialect (reads first 8KB of file)
+sql-splitter split dump.sql --output=tables
+
+# Explicit dialect (skip auto-detection)
+sql-splitter split dump.sql --output=tables --dialect=postgres
+```
 
 ## Detection Strategy
 
-Read first 4-16KB of file and look for dialect-specific markers:
+The detector reads the first 8KB of the file and uses a weighted scoring system to identify the dialect:
 
-### PostgreSQL Indicators (high confidence)
-```sql
--- PostgreSQL database dump
--- Dumped from database version 15.x
--- Dumped by pg_dump version 15.x
-COPY table_name (columns) FROM stdin;
-SET search_path = 
-\\.                          -- COPY terminator
-$$                           -- Dollar-quoting
-CREATE EXTENSION
-```
+### PostgreSQL Indicators
 
-### MySQL/MariaDB Indicators (high confidence)
-```sql
--- MySQL dump 10.13
--- Server version	8.0.x
--- MariaDB dump 10.19
-/*!40101 SET                 -- MySQL conditional comments
-/*!50503 SET NAMES utf8mb4
-LOCK TABLES `table` WRITE;
-`backtick_quoted`            -- Backtick identifiers
-```
+| Marker | Confidence | Score |
+|--------|------------|-------|
+| `PostgreSQL database dump` | High | +10 |
+| `pg_dump` | High | +10 |
+| `COPY ... FROM stdin` | Medium | +5 |
+| `search_path` | Medium | +5 |
+| `$$` (dollar-quoting) | Low | +2 |
+| `CREATE EXTENSION` | Low | +2 |
 
-### SQLite Indicators (medium confidence)
-```sql
--- SQLite database dump
-PRAGMA foreign_keys=OFF;
-BEGIN TRANSACTION;
-CREATE TABLE IF NOT EXISTS
-```
+### MySQL/MariaDB Indicators
+
+| Marker | Confidence | Score |
+|--------|------------|-------|
+| `MySQL dump` | High | +10 |
+| `MariaDB dump` | High | +10 |
+| `/*!40...` or `/*!50...` (conditional comments) | Medium | +5 |
+| `LOCK TABLES` | Medium | +5 |
+| Backtick character (`` ` ``) | Low | +2 |
+
+### SQLite Indicators
+
+| Marker | Confidence | Score |
+|--------|------------|-------|
+| `SQLite` | High | +10 |
+| `PRAGMA` | Medium | +5 |
+| `BEGIN TRANSACTION` | Medium | +5 |
+
+## Scoring
+
+The dialect with the highest score wins. If no markers are found (score = 0), MySQL is used as the default since it's the most common format.
+
+Confidence levels reported to the user:
+- **High confidence**: Score ≥ 10
+- **Medium confidence**: Score ≥ 5
+- **Low confidence**: Score < 5
 
 ## Implementation
 
-```rust
-pub fn detect_dialect(reader: &mut impl BufRead) -> SqlDialect {
-    let mut buf = [0u8; 8192];
-    let n = reader.read(&mut buf).unwrap_or(0);
-    let header = &buf[..n];
-    
-    // Check for PostgreSQL markers
-    if header.windows(9).any(|w| w == b"pg_dump") 
-        || header.windows(4).any(|w| w == b"COPY")
-        || header.windows(12).any(|w| w == b"search_path")
-    {
-        return SqlDialect::Postgres;
-    }
-    
-    // Check for MySQL/MariaDB markers
-    if header.windows(10).any(|w| w == b"MySQL dump")
-        || header.windows(12).any(|w| w == b"MariaDB dump")
-        || header.windows(6).any(|w| w == b"/*!40")
-    {
-        return SqlDialect::MySql;
-    }
-    
-    // Check for SQLite markers
-    if header.windows(6).any(|w| w == b"PRAGMA")
-        || header.windows(17).any(|w| w == b"BEGIN TRANSACTION")
-    {
-        return SqlDialect::Sqlite;
-    }
-    
-    // Default to MySQL (most common)
-    SqlDialect::MySql
-}
-```
-
-## CLI Changes
+The detection is implemented in `src/parser/mod.rs`:
 
 ```rust
-#[derive(Parser)]
-struct SplitArgs {
-    /// SQL dialect (auto-detected if not specified)
-    #[arg(short, long)]
-    dialect: Option<String>,
-}
-
-// Usage
-let dialect = match args.dialect {
-    Some(d) => d.parse()?,
-    None => detect_dialect(&mut file)?,
-};
+pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult;
+pub fn detect_dialect_from_file(path: &Path) -> io::Result<DialectDetectionResult>;
 ```
 
-## Considerations
+## Examples
 
-1. **Seekable files**: After detection, need to seek back to start
-2. **Stdin/pipes**: Can use `fill_buf()` + peek without consuming
-3. **False positives**: Some markers overlap; use weighted scoring
-4. **Performance**: Only read first 8KB; negligible overhead
+### PostgreSQL pg_dump output
 
-## Scoring Approach (Alternative)
+```sql
+--
+-- PostgreSQL database dump
+--
+-- Dumped by pg_dump version 15.2
 
-For higher accuracy, use weighted scoring:
+SET search_path = public;
 
-```rust
-struct DialectScore {
-    mysql: u32,
-    postgres: u32,
-    sqlite: u32,
-}
-
-fn detect_with_scoring(header: &[u8]) -> SqlDialect {
-    let mut score = DialectScore::default();
-    
-    // High confidence markers (+10)
-    if contains(header, b"pg_dump") { score.postgres += 10; }
-    if contains(header, b"MySQL dump") { score.mysql += 10; }
-    if contains(header, b"PRAGMA") { score.sqlite += 10; }
-    
-    // Medium confidence (+5)
-    if contains(header, b"COPY") { score.postgres += 5; }
-    if contains(header, b"/*!40") { score.mysql += 5; }
-    if contains(header, b"BEGIN TRANSACTION") { score.sqlite += 5; }
-    
-    // Low confidence (+2)
-    if contains(header, b"`") { score.mysql += 2; }
-    if contains(header, b"$$") { score.postgres += 2; }
-    
-    // Return highest score, default to MySQL
-    if score.postgres > score.mysql && score.postgres > score.sqlite {
-        SqlDialect::Postgres
-    } else if score.sqlite > score.mysql {
-        SqlDialect::Sqlite
-    } else {
-        SqlDialect::MySql
-    }
-}
+COPY users (id, name) FROM stdin;
+1   Alice
+\.
 ```
 
-## Testing
+Detected as: **PostgreSQL** (high confidence)
 
-Create test files for each dialect and verify detection:
+### MySQL mysqldump output
 
-```rust
-#[test]
-fn test_detect_mysql() {
-    let dump = b"-- MySQL dump 10.13\n/*!40101 SET...";
-    assert_eq!(detect_dialect(dump), SqlDialect::MySql);
-}
+```sql
+-- MySQL dump 10.13  Distrib 8.0.32
 
-#[test]
-fn test_detect_postgres() {
-    let dump = b"-- PostgreSQL database dump\n-- Dumped by pg_dump";
-    assert_eq!(detect_dialect(dump), SqlDialect::Postgres);
-}
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
 
-#[test]
-fn test_detect_sqlite() {
-    let dump = b"PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;";
-    assert_eq!(detect_dialect(dump), SqlDialect::Sqlite);
-}
+LOCK TABLES `users` WRITE;
+INSERT INTO `users` VALUES (1,'Alice');
+UNLOCK TABLES;
 ```
+
+Detected as: **MySQL** (high confidence)
+
+### SQLite .dump output
+
+```sql
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+INSERT INTO users VALUES(1,'Alice');
+COMMIT;
+```
+
+Detected as: **SQLite** (high confidence)

@@ -1,4 +1,4 @@
-use crate::parser::SqlDialect;
+use crate::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
 use crate::splitter::Splitter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -7,7 +7,7 @@ use std::time::Instant;
 pub fn run(
     file: PathBuf,
     output: PathBuf,
-    dialect: SqlDialect,
+    dialect: Option<String>,
     verbose: bool,
     dry_run: bool,
     progress: bool,
@@ -19,6 +19,8 @@ pub fn run(
 
     let file_size = std::fs::metadata(&file)?.len();
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
+
+    let dialect = resolve_dialect(&file, dialect)?;
 
     if dry_run {
         println!(
@@ -102,4 +104,23 @@ pub fn run(
     }
 
     Ok(())
+}
+
+fn resolve_dialect(file: &std::path::Path, dialect: Option<String>) -> anyhow::Result<SqlDialect> {
+    match dialect {
+        Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
+        None => {
+            let result = detect_dialect_from_file(file)?;
+            let confidence_str = match result.confidence {
+                DialectConfidence::High => "high confidence",
+                DialectConfidence::Medium => "medium confidence",
+                DialectConfidence::Low => "low confidence",
+            };
+            println!(
+                "Auto-detected dialect: {} ({})",
+                result.dialect, confidence_str
+            );
+            Ok(result.dialect)
+        }
+    }
 }

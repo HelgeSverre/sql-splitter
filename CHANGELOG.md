@@ -48,6 +48,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compressed file support (gzip, bzip2)
 - Parallel parsing for very large files
 
+## [1.2.0] - 2025-12-20
+
+### Added
+
+- **Automatic dialect detection**: The `--dialect` flag is now optional. When omitted, sql-splitter automatically detects the SQL dialect by analyzing the first 8KB of the file
+  - Uses weighted scoring to identify PostgreSQL, MySQL/MariaDB, or SQLite formats
+  - Reports detection confidence level (high, medium, low)
+  - Detects MySQL/MariaDB by: header comments, conditional comments (`/*!40...`), `LOCK TABLES`, backticks
+  - Detects PostgreSQL by: pg_dump header, `COPY ... FROM stdin`, `search_path`, dollar-quoting, `CREATE EXTENSION`
+  - Detects SQLite by: header comments, `PRAGMA`, `BEGIN TRANSACTION`
+  - Defaults to MySQL when no markers are found
+
+### Changed
+
+- `--dialect` flag is now optional for both `split` and `analyze` commands
+- Added 16 new tests for dialect detection
+
+### Documentation
+
+- Updated docs/DIALECT_AUTODETECTION.md with implementation details
+
 ## [1.1.0] - 2025-12-20
 
 ### Added

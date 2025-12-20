@@ -46,6 +46,145 @@ impl std::fmt::Display for SqlDialect {
     }
 }
 
+/// Result of dialect auto-detection
+#[derive(Debug, Clone)]
+pub struct DialectDetectionResult {
+    pub dialect: SqlDialect,
+    pub confidence: DialectConfidence,
+}
+
+/// Confidence level of dialect detection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialectConfidence {
+    /// High confidence - found definitive markers (e.g., "pg_dump", "MySQL dump")
+    High,
+    /// Medium confidence - found likely markers
+    Medium,
+    /// Low confidence - defaulting to MySQL
+    Low,
+}
+
+#[derive(Default)]
+struct DialectScore {
+    mysql: u32,
+    postgres: u32,
+    sqlite: u32,
+}
+
+/// Detect SQL dialect from file header content.
+/// Reads up to 8KB and looks for dialect-specific markers.
+pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
+    let mut score = DialectScore::default();
+
+    // High confidence markers (+10)
+    if contains_bytes(header, b"pg_dump") {
+        score.postgres += 10;
+    }
+    if contains_bytes(header, b"PostgreSQL database dump") {
+        score.postgres += 10;
+    }
+    if contains_bytes(header, b"MySQL dump") {
+        score.mysql += 10;
+    }
+    if contains_bytes(header, b"MariaDB dump") {
+        score.mysql += 10;
+    }
+    if contains_bytes(header, b"SQLite") {
+        score.sqlite += 10;
+    }
+
+    // Medium confidence markers (+5)
+    if contains_bytes(header, b"COPY ") && contains_bytes(header, b"FROM stdin") {
+        score.postgres += 5;
+    }
+    if contains_bytes(header, b"search_path") {
+        score.postgres += 5;
+    }
+    if contains_bytes(header, b"/*!40") || contains_bytes(header, b"/*!50") {
+        score.mysql += 5;
+    }
+    if contains_bytes(header, b"LOCK TABLES") {
+        score.mysql += 5;
+    }
+    if contains_bytes(header, b"PRAGMA") {
+        score.sqlite += 5;
+    }
+    if contains_bytes(header, b"BEGIN TRANSACTION") {
+        score.sqlite += 5;
+    }
+
+    // Low confidence markers (+2)
+    if contains_bytes(header, b"$$") {
+        score.postgres += 2;
+    }
+    if contains_bytes(header, b"CREATE EXTENSION") {
+        score.postgres += 2;
+    }
+    // Backticks suggest MySQL (but check it's not inside a string)
+    if header.contains(&b'`') {
+        score.mysql += 2;
+    }
+
+    // Determine winner and confidence
+    let max_score = score.mysql.max(score.postgres).max(score.sqlite);
+
+    if max_score == 0 {
+        return DialectDetectionResult {
+            dialect: SqlDialect::MySql,
+            confidence: DialectConfidence::Low,
+        };
+    }
+
+    let (dialect, confidence) = if score.postgres > score.mysql && score.postgres > score.sqlite {
+        let conf = if score.postgres >= 10 {
+            DialectConfidence::High
+        } else if score.postgres >= 5 {
+            DialectConfidence::Medium
+        } else {
+            DialectConfidence::Low
+        };
+        (SqlDialect::Postgres, conf)
+    } else if score.sqlite > score.mysql {
+        let conf = if score.sqlite >= 10 {
+            DialectConfidence::High
+        } else if score.sqlite >= 5 {
+            DialectConfidence::Medium
+        } else {
+            DialectConfidence::Low
+        };
+        (SqlDialect::Sqlite, conf)
+    } else {
+        let conf = if score.mysql >= 10 {
+            DialectConfidence::High
+        } else if score.mysql >= 5 {
+            DialectConfidence::Medium
+        } else {
+            DialectConfidence::Low
+        };
+        (SqlDialect::MySql, conf)
+    };
+
+    DialectDetectionResult { dialect, confidence }
+}
+
+/// Detect dialect from a file, reading first 8KB
+pub fn detect_dialect_from_file(path: &std::path::Path) -> std::io::Result<DialectDetectionResult> {
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut file = File::open(path)?;
+    let mut buf = [0u8; 8192];
+    let n = file.read(&mut buf)?;
+    Ok(detect_dialect(&buf[..n]))
+}
+
+#[inline]
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementType {
     Unknown,
@@ -732,5 +871,188 @@ mod copy_tests {
             s2.ends_with("\\.\n"),
             "Data block should end with terminator"
         );
+    }
+}
+
+#[cfg(test)]
+mod dialect_detection_tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_mysql_dump_header() {
+        let header = b"-- MySQL dump 10.13  Distrib 8.0.32, for Linux (x86_64)
+--
+-- Host: localhost    Database: mydb
+-- ------------------------------------------------------
+-- Server version	8.0.32
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::High);
+    }
+
+    #[test]
+    fn test_detect_mariadb_dump_header() {
+        let header = b"-- MariaDB dump 10.19  Distrib 10.11.2-MariaDB
+--
+-- Host: localhost    Database: test
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::High);
+    }
+
+    #[test]
+    fn test_detect_postgres_pgdump_header() {
+        let header = b"--
+-- PostgreSQL database dump
+--
+
+-- Dumped from database version 15.2
+-- Dumped by pg_dump version 15.2
+
+SET statement_timeout = 0;
+SET search_path = public, pg_catalog;
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Postgres);
+        assert_eq!(result.confidence, DialectConfidence::High);
+    }
+
+    #[test]
+    fn test_detect_postgres_copy_statement() {
+        let header = b"COPY public.users (id, name, email) FROM stdin;
+1\tAlice\talice@example.com
+2\tBob\tbob@example.com
+\\.
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Postgres);
+        assert_eq!(result.confidence, DialectConfidence::Medium);
+    }
+
+    #[test]
+    fn test_detect_postgres_dollar_quoting() {
+        let header = b"CREATE OR REPLACE FUNCTION test() RETURNS void AS $$
+BEGIN
+    RAISE NOTICE 'Hello';
+END;
+$$ LANGUAGE plpgsql;
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Postgres);
+    }
+
+    #[test]
+    fn test_detect_sqlite_dump_header() {
+        let header = b"PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+INSERT INTO users VALUES(1,'Alice');
+COMMIT;
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Sqlite);
+        assert_eq!(result.confidence, DialectConfidence::High);
+    }
+
+    #[test]
+    fn test_detect_sqlite_pragma_only() {
+        let header = b"PRAGMA foreign_keys=OFF;
+CREATE TABLE test (id INT);
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Sqlite);
+        assert_eq!(result.confidence, DialectConfidence::Medium);
+    }
+
+    #[test]
+    fn test_detect_mysql_backticks() {
+        let header = b"CREATE TABLE `users` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+);
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+    }
+
+    #[test]
+    fn test_detect_mysql_conditional_comments() {
+        let header = b"/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!50503 SET NAMES utf8mb4 */;
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::Medium);
+    }
+
+    #[test]
+    fn test_detect_mysql_lock_tables() {
+        let header = b"LOCK TABLES `users` WRITE;
+INSERT INTO `users` VALUES (1,'test');
+UNLOCK TABLES;
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::Medium);
+    }
+
+    #[test]
+    fn test_detect_empty_defaults_to_mysql() {
+        let header = b"";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::Low);
+    }
+
+    #[test]
+    fn test_detect_generic_sql_defaults_to_mysql() {
+        let header = b"CREATE TABLE users (id INT, name VARCHAR(100));
+INSERT INTO users VALUES (1, 'Alice');
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::MySql);
+        assert_eq!(result.confidence, DialectConfidence::Low);
+    }
+
+    #[test]
+    fn test_detect_postgres_create_extension() {
+        let header = b"CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";
+CREATE TABLE users (id uuid DEFAULT uuid_generate_v4());
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Postgres);
+    }
+
+    #[test]
+    fn test_detect_sqlite_comment() {
+        let header = b"-- SQLite database dump
+-- Created by sqlite3
+
+CREATE TABLE test (id INTEGER);
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Sqlite);
+        assert_eq!(result.confidence, DialectConfidence::High);
+    }
+
+    #[test]
+    fn test_scoring_postgres_beats_mysql_backticks() {
+        // pg_dump header with some backticks in data shouldn't confuse it
+        let header = b"--
+-- PostgreSQL database dump
+--
+-- Dumped by pg_dump version 15.2
+
+INSERT INTO notes VALUES (1, 'Use `code` for inline code');
+";
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Postgres);
+        assert_eq!(result.confidence, DialectConfidence::High);
     }
 }
