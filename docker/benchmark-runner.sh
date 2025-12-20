@@ -95,6 +95,9 @@ test_tools() {
     echo -e "${BOLD}Testing tools with: $sql_file${NC}"
     echo ""
     
+    rm -rf /tmp/test-* 2>/dev/null
+    mkdir -p /tmp/test-rust /tmp/test-bash /tmp/test-csplit /tmp/test-go /tmp/test-node /tmp/test-ruby
+    
     test_tool "sql-splitter (Rust)" \
         "sql-splitter split '$sql_file' -o /tmp/test-rust" \
         "/tmp/test-rust"
@@ -109,20 +112,20 @@ test_tools() {
     
     if command -v mysqldumpsplit-go &>/dev/null; then
         test_tool "mysqldumpsplit-go (Go)" \
-            "mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" \
-            "/tmp/test-go" 30
+            "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" \
+            "/tmp/test-go" 30 || true
     fi
     
-    if command -v mysqldumpsplit &>/dev/null; then
+    if [ -x /usr/bin/mysqldumpsplit ]; then
         test_tool "mysqldumpsplit (Node.js)" \
-            "mysqldumpsplit -o /tmp/test-node '$sql_file'" \
-            "/tmp/test-node" 30
+            "timeout 60 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" \
+            "/tmp/test-node" 60 || true
     fi
     
     if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
         test_tool "mysql-dump-split.rb (Ruby)" \
-            "ruby /usr/local/bin/mysql-dump-split.rb --out /tmp/test-ruby '$sql_file'" \
-            "/tmp/test-ruby" 30
+            "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" \
+            "/tmp/test-ruby/tables" 60 || true
     fi
 }
 
@@ -163,8 +166,23 @@ run_benchmark() {
     fi
     
     if command -v mysqldumpsplit-go &>/dev/null; then
+        mkdir -p /tmp/test-go
         if test_tool "mysqldumpsplit-go" "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
             working_tools+=("mysqldumpsplit (Go)|mysqldumpsplit-go -i '$sql_file' -o /tmp/bench-go")
+        fi
+    fi
+    
+    if [ -x /usr/bin/mysqldumpsplit ]; then
+        mkdir -p /tmp/test-node
+        if test_tool "mysqldumpsplit (Node.js)" "timeout 60 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" "/tmp/test-node"; then
+            working_tools+=("mysqldumpsplit (Node.js)|/usr/bin/mysqldumpsplit -o /tmp/bench-node '$sql_file'")
+        fi
+    fi
+    
+    if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
+        mkdir -p /tmp/test-ruby
+        if test_tool "mysql-dump-split.rb (Ruby)" "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" "/tmp/test-ruby/tables"; then
+            working_tools+=("mysql-dump-split (Ruby)|cd /tmp/bench-ruby && ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'")
         fi
     fi
     
@@ -193,7 +211,8 @@ run_benchmark() {
     hyperfine \
         --warmup "$warmup" \
         --runs "$runs" \
-        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit' \
+        --ignore-failure \
+        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit /tmp/bench-ruby /tmp/bench-node' \
         $export_arg \
         "${cmds[@]}"
     

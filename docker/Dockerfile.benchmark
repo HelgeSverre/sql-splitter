@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 
 ARG RUST_VERSION=1.83.0
 ARG GO_VERSION=1.23.4
-ARG NODE_VERSION=22
+ARG NODE_VERSION=18
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
