@@ -1,4 +1,4 @@
-use crate::parser::{determine_buffer_size, Parser, StatementType};
+use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
 use crate::writer::WriterPool;
 use ahash::AHashSet;
 use std::fs::File;
@@ -14,6 +14,7 @@ pub struct Stats {
 
 #[derive(Default)]
 pub struct SplitterConfig {
+    pub dialect: SqlDialect,
     pub dry_run: bool,
     pub table_filter: Option<AHashSet<String>>,
     pub progress_fn: Option<Box<dyn Fn(u64)>>,
@@ -32,6 +33,11 @@ impl Splitter {
             output_dir,
             config: SplitterConfig::default(),
         }
+    }
+
+    pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
+        self.config.dialect = dialect;
+        self
     }
 
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
@@ -55,6 +61,7 @@ impl Splitter {
         let file = File::open(&self.input_file)?;
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
+        let dialect = self.config.dialect;
 
         let reader: Box<dyn Read> = if self.config.progress_fn.is_some() {
             Box::new(ProgressReader::new(file, self.config.progress_fn.unwrap()))
@@ -62,7 +69,7 @@ impl Splitter {
             Box::new(file)
         };
 
-        let mut parser = Parser::new(reader, buffer_size);
+        let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         let mut writer_pool = WriterPool::new(self.output_dir.clone());
         if !self.config.dry_run {
@@ -76,11 +83,32 @@ impl Splitter {
             bytes_processed: 0,
             table_names: Vec::new(),
         };
+        
+        // Track the last COPY table for PostgreSQL COPY data blocks
+        let mut last_copy_table: Option<String> = None;
 
         while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement(&stmt);
+            let (stmt_type, mut table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
-            if stmt_type == StatementType::Unknown || table_name.is_empty() {
+            // Track COPY statements for data association
+            if stmt_type == StatementType::Copy {
+                last_copy_table = Some(table_name.clone());
+            }
+
+            // Handle PostgreSQL COPY data blocks - associate with last COPY table
+            let is_copy_data = if stmt_type == StatementType::Unknown && last_copy_table.is_some() {
+                // Check if this looks like COPY data (ends with \.\n)
+                if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
+                    table_name = last_copy_table.take().unwrap();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !is_copy_data && (stmt_type == StatementType::Unknown || table_name.is_empty()) {
                 continue;
             }
 
