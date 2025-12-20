@@ -55,10 +55,10 @@ RUN curl -sL "https://gist.githubusercontent.com/jasny/1608062/raw/mysql_splitdu
     -o /usr/local/bin/mysql_splitdump.sh && \
     chmod +x /usr/local/bin/mysql_splitdump.sh
 
-# 3. afrase/mysqldumpsplit (Go)
-RUN go install github.com/afrase/mysqldumpsplit@latest 2>/dev/null && \
-    cp /root/go/bin/mysqldumpsplit /usr/local/bin/mysqldumpsplit-go 2>/dev/null || \
-    echo "Warning: Go mysqldumpsplit failed to install"
+# 3. mysqldumpsplit-go (fixed version from our benches directory)
+COPY benches/mysqldumpsplit-go /tmp/mysqldumpsplit-go
+RUN cd /tmp/mysqldumpsplit-go && go build -o /usr/local/bin/mysqldumpsplit-go . && \
+    rm -rf /tmp/mysqldumpsplit-go
 
 # 4. vekexasia/mysqldumpsplit (Node.js)
 RUN npm install -g mysqldumpsplit 2>/dev/null || \
