@@ -29,6 +29,41 @@ Thanks for your interest in contributing! This document covers everything you ne
 - Keep functions focused and small
 - Add comments for non-obvious logic
 
+## AI-Assisted Development
+
+AI coding assistants are encouraged for contributing to this project. Tools like [Amp Code](https://ampcode.com), [Claude Code](https://claude.ai/code), Cursor, and similar assistants can significantly accelerate development.
+
+### Quality Requirements
+
+AI-generated code must meet the same standards as human-written code:
+
+- **All tests must pass genuinely** - Tests verify actual behavior, not just compile
+- **No stubbed tests** - Never use `todo!()`, `unimplemented!()`, or hardcoded expected values to make tests pass artificially
+- **No skipped assertions** - Every test must assert meaningful behavior
+- **Review critically** - Understand and verify all generated code before committing
+
+### Feature Design Workflow
+
+For new features or significant changes, follow this workflow:
+
+1. **Check existing designs** - Review `docs/features/` for related design docs
+2. **Write a design doc** - For new features, create `docs/features/FEATURE_NAME.md` (see `SAMPLE_FEATURE.md` for template)
+3. **Implement in phases** - Break large features into phases as shown in the design doc
+4. **Test thoroughly** - Add tests that verify the design requirements
+5. **Reference in PR** - Link to the design doc in your pull request
+
+### Modes of Work
+
+When starting an AI session, consider which mode you're in:
+
+| Mode | Purpose | Example |
+|------|---------|---------|
+| **Build** | New functionality | "Implement sample command (Phase 1)" |
+| **Improve** | Refactor without changing behavior | "Extract sampler module" |
+| **Sweep** | Fix related bugs | "Fix all INSERT parsing edge cases" |
+
+This prevents scope creep and keeps AI contributions focused.
+
 ## Testing
 
 - Run all tests: `cargo test`
