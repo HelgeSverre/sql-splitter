@@ -91,7 +91,7 @@ make install-completions-all
 
 ## Performance
 
-See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for detailed comparisons.
+See [BENCHMARKS.md](BENCHMARKS.md) for detailed comparisons.
 
 ## Testing
 

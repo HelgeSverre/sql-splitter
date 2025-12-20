@@ -40,7 +40,7 @@ Comprehensive benchmarking for sql-splitter.
 | mysql-dump-split (Ruby) | 887 ms | **4.77x slower** |
 | mysqldumpsplitter (Bash/awk) | 892 ms | **4.80x slower** |
 
-*\*Go tool uses our [patched version](benches/mysqldumpsplit-go/) that fixes a deadlock bug in the original.*
+*\*Go tool has a deadlock bug in the original; we used a patched version for benchmarks.*
 
 *Benchmarks run in Docker on Apple M2 Max (linux/arm64)*
 
@@ -55,7 +55,7 @@ Comprehensive benchmarking for sql-splitter.
 | [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter) | Bash/awk | 540+ | 5x slower | mysqldump format only |
 | [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split) | Ruby | 77 | 5x slower | Archived project |
 
-*\*Original Go tool deadlocks; we maintain a [patched version](benches/mysqldumpsplit-go/).*
+*\*Original Go tool has a deadlock bug.*
 
 ### Multi-Database Dialect Support
 
