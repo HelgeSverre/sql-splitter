@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
 **Version**: 1.7.0 (current)  
-**Last Updated**: 2025-12-20  
-**Revision**: 2.3 — Post v1.7.0 release
+**Last Updated**: 2025-12-21  
+**Revision**: 2.4 — Post v1.7.0 with full COPY→INSERT support
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -149,8 +149,8 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 ---
 
 ### v1.7.0 — Convert Command ✅ RELEASED
-**Released**: 2025-12-20  
-**Theme**: Full dialect conversion for all 6 pairs
+**Released**: 2025-12-21  
+**Theme**: Full dialect conversion for all 6 pairs with COPY→INSERT support
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -158,31 +158,52 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | ├─ Converter architecture | ✅ Done | Streaming, per-statement |
 | ├─ Identifier quoting | ✅ Done | Backticks ↔ double quotes |
 | ├─ String escaping | ✅ Done | `\'` ↔ `''` |
-| ├─ Common type mapping | ✅ Done | 30+ type mappings |
+| ├─ Complete type mapping | ✅ Done | 30+ type mappings |
 | ├─ AUTO_INCREMENT ↔ SERIAL | ✅ Done | Bidirectional |
 | ├─ Session headers | ✅ Done | Strip MySQL/PostgreSQL/SQLite |
 | └─ Warning system | ✅ Done | Unsupported features |
+| **PostgreSQL handling** | ✅ Done | |
+| ├─ COPY → INSERT conversion | ✅ Done | Tab-separated, NULL handling, escape sequences |
+| ├─ ::type cast stripping | ✅ Done | ::regclass, ::text, ::character varying |
+| ├─ nextval() removal | ✅ Done | Replaced by AUTO_INCREMENT |
+| ├─ DEFAULT now() → CURRENT_TIMESTAMP | ✅ Done | |
+| ├─ Schema prefix stripping | ✅ Done | public., pg_catalog., pg_temp. |
+| ├─ PostgreSQL-only feature filtering | ✅ Done | CREATE DOMAIN/TYPE/FUNCTION/SEQUENCE, triggers |
+| └─ TIMESTAMP WITH TIME ZONE | ✅ Done | → DATETIME |
 | **All 6 conversion pairs** | ✅ Done | |
 | ├─ MySQL → PostgreSQL | ✅ Done | Full type mapping |
 | ├─ MySQL → SQLite | ✅ Done | Full type mapping |
-| ├─ PostgreSQL → MySQL | ✅ Done | SERIAL→AUTO_INCREMENT, BYTEA→BLOB |
-| ├─ PostgreSQL → SQLite | ✅ Done | Full type mapping |
+| ├─ PostgreSQL → MySQL | ✅ Done | COPY→INSERT, SERIAL→AUTO_INCREMENT |
+| ├─ PostgreSQL → SQLite | ✅ Done | COPY→INSERT, full type mapping |
 | ├─ SQLite → MySQL | ✅ Done | REAL→DOUBLE |
 | └─ SQLite → PostgreSQL | ✅ Done | BLOB→BYTEA, REAL→DOUBLE PRECISION |
-| **Testing** | ✅ Done | 52 tests (37 unit + 15 integration) |
+| **Testing** | ✅ Done | 268 tests, real-world verification |
 
 **Delivered:**
 - All 6 conversion pairs (MySQL ↔ PostgreSQL ↔ SQLite)
+- **COPY → INSERT conversion** with batched inserts (100 rows/INSERT)
+- NULL marker handling (`\N` → NULL)
+- Escape sequence handling (`\t`, `\n`, `\\`, octal)
+- PostgreSQL type cast stripping (::regclass, ::text, etc.)
+- Schema prefix removal (public.table → table)
+- DEFAULT now() → DEFAULT CURRENT_TIMESTAMP
+- nextval() sequence removal (AUTO_INCREMENT handles it)
+- PostgreSQL-only feature filtering with warnings (CREATE DOMAIN/TYPE/FUNCTION/SEQUENCE)
+- TIMESTAMP WITH TIME ZONE → DATETIME
+- Block comment handling at statement start
 - Auto-detect source dialect
-- Bidirectional type mapping
+- Bidirectional type mapping (30+ types)
 - Session command stripping for all dialects
 - Warnings for unsupported features (ENUM, SET, arrays, INHERITS)
+- Real-world verification script (`scripts/verify-realworld.sh`)
+- Comprehensive benchmarks (`benches/convert_bench.rs`)
 
-**Future (v2.0.0):**
-- PostgreSQL COPY → INSERT conversion
-- Complete type mapping (arrays, GEOMETRY)
-- Full constraint + index conversion
-- Roundtrip tests
+**Remaining low-priority gaps** (rare in practice):
+- Array types (warning issued, no conversion)
+- EXCLUDE constraints
+- Partial indexes (`WHERE` clause in indexes)
+- Expression indexes
+- INTERVAL types
 
 ---
 
@@ -190,10 +211,9 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 These features are valuable but lower priority:
 
-### v2.0.0 — Convert Full + Diff
+### v2.0.0 — Diff Command
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| Convert Full | 21h | All 6 pairs, COPY handling |
 | Diff | 40h | Schema + data comparison |
 
 ### v2.1.0 — Query + Redact
@@ -252,7 +272,7 @@ These features are valuable but lower priority:
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v2.0.0 | Convert Full, Diff | ~61h | 4-5 weeks |
+| v2.0.0 | Diff | ~40h | 2-3 weeks |
 | v2.1.0 | Query, Redact | ~70h | 4-5 weeks |
 | v2.2.0 | Validate, Detect-PII | ~24h | 1-2 weeks |
 | v2.3.0 | MSSQL | ~24h | 2-3 weeks |
@@ -329,6 +349,11 @@ tests/
 - [Sample Feature Design](features/SAMPLE_FEATURE.md)
 - [Shard Feature Design](features/SHARD_FEATURE.md)
 - [Merge Feature Design](features/MERGE_FEATURE.md)
-- [Convert Feasibility](features/CONVERT_FEASIBILITY.md)
+- [Convert Gap Analysis](features/CONVERT_GAP_ANALYSIS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
-- [Roadmap Review](ROADMAP_REVIEW.md)
+
+### Archived Documents
+
+Historical planning documents moved to `docs/archived/`:
+- ROADMAP_REVIEW.md — Pre-implementation recommendations
+- CONVERT_FEASIBILITY.md — Pre-implementation analysis

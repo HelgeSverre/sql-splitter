@@ -68,6 +68,14 @@ sql-splitter merge tables/ -o restored.sql --transaction
 # Analyze without splitting
 sql-splitter analyze dump.sql
 
+# Convert between SQL dialects
+sql-splitter convert mysql_dump.sql -o postgres_dump.sql --to postgres
+sql-splitter convert pg_dump.sql -o mysql_dump.sql --to mysql
+sql-splitter convert dump.sql -o sqlite_dump.sql --to sqlite
+
+# Convert with explicit source dialect
+sql-splitter convert dump.sql --from postgres --to mysql -o output.sql
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -112,6 +120,29 @@ make install-completions-all
 | `--no-header` | Skip header comments | — |
 | `-p, --progress` | Show progress bar | — |
 | `--dry-run` | Preview without writing files | — |
+
+### Convert Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-o, --output` | Output SQL file | stdout |
+| `--from` | Source dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
+| `--to` | Target dialect: `mysql`, `postgres`, `sqlite` | required |
+| `--strict` | Fail on any unsupported feature | — |
+| `-p, --progress` | Show progress bar | — |
+| `--dry-run` | Preview without writing files | — |
+
+**Supported conversions:**
+- MySQL ↔ PostgreSQL (including COPY → INSERT)
+- MySQL ↔ SQLite
+- PostgreSQL ↔ SQLite
+
+**Features:**
+- 30+ data type mappings
+- AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY
+- PostgreSQL COPY → INSERT with NULL and escape handling
+- Session command stripping
+- Warnings for unsupported features (ENUM, arrays, triggers)
 
 ## Performance
 

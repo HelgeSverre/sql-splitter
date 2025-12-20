@@ -92,6 +92,39 @@ sql-splitter analyze database.sql
 sql-splitter analyze database.sql --progress
 ```
 
+### convert
+
+Convert SQL dumps between dialects (MySQL, PostgreSQL, SQLite).
+
+```bash
+sql-splitter convert mysql.sql -o postgres.sql --to postgres
+sql-splitter convert pg_dump.sql -o mysql.sql --to mysql
+sql-splitter convert dump.sql -o sqlite.sql --to sqlite
+sql-splitter convert dump.sql --from postgres --to mysql -o output.sql
+```
+
+Options:
+- `-o, --output <FILE>`: Output SQL file (default: stdout)
+- `--from <DIALECT>`: Source dialect (auto-detected if omitted)
+- `--to <DIALECT>`: Target dialect (required)
+- `--strict`: Fail on any unsupported feature
+- `-p, --progress`: Show progress bar
+- `--dry-run`: Preview without writing files
+
+Supported conversions (all 6 pairs):
+- MySQL ↔ PostgreSQL (including COPY → INSERT conversion)
+- MySQL ↔ SQLite
+- PostgreSQL ↔ SQLite
+
+Features:
+- 30+ data type mappings (AUTO_INCREMENT ↔ SERIAL, DATETIME ↔ TIMESTAMP, etc.)
+- PostgreSQL COPY → INSERT with NULL handling and escape sequences
+- Schema prefix stripping (public.table → table)
+- Type cast removal (::regclass, ::text)
+- nextval() and DEFAULT now() conversion
+- Session command stripping for all dialects
+- Warnings for unsupported features (ENUM, arrays, triggers)
+
 ### completions
 
 Generate shell completions for bash, zsh, or fish.
@@ -149,6 +182,7 @@ Files are auto-detected by extension:
 - [src/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/src/splitter): Split orchestration
 - [src/merger/](https://github.com/helgesverre/sql-splitter/tree/main/src/merger): Merge orchestration
 - [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
+- [src/convert/](https://github.com/helgesverre/sql-splitter/tree/main/src/convert): Dialect conversion
 - [crates/test_data_gen/](https://github.com/helgesverre/sql-splitter/tree/main/crates/test_data_gen): Test fixture generator
 
 ## Optional
