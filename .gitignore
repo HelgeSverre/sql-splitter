@@ -11,6 +11,7 @@ flamegraph.svg
 
 # Benchmark results
 /bench-results.md
+/benchmark-results/
 
 # IDE
 .idea/
@@ -22,4 +23,7 @@ flamegraph.svg
 
 # Test artifacts
 /tmp/
+
+# Generated test data
+/tests/data/generated/
 
