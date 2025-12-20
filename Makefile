@@ -1,4 +1,4 @@
-.PHONY: help build release native test bench fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld
+.PHONY: help build release native test bench fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld website-deploy
 
 # Show available commands (default target)
 help:
@@ -18,6 +18,7 @@ help:
 	@echo "  make docker-build          - Docker benchmark setup"
 	@echo "  make docker-bench          - Run benchmarks in Docker (generates 100MB test data)"
 	@echo "  make verify-realworld      - Verify against real-world SQL dumps from public sources"
+	@echo "  make website-deploy        - Deploy website to Vercel"
 
 # Debug build
 build:
@@ -80,3 +81,7 @@ docker-bench:
 # Verify against real-world SQL dumps from public sources
 verify-realworld:
 	./scripts/verify-realworld.sh
+
+# Deploy website to Vercel
+website-deploy:
+	cd website && vc --prod
