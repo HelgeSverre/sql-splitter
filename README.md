@@ -1,7 +1,12 @@
 # SQL Splitter - High-Performance SQL File Splitter
 
+[![Tests](https://github.com/helgesverre/sql-splitter/actions/workflows/test.yml/badge.svg)](https://github.com/helgesverre/sql-splitter/actions/workflows/test.yml)
+[![Release](https://github.com/helgesverre/sql-splitter/actions/workflows/release.yml/badge.svg)](https://github.com/helgesverre/sql-splitter/actions/workflows/release.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Report Card](https://goreportcard.com/badge/github.com/helgesverre/sql-splitter)](https://goreportcard.com/report/github.com/helgesverre/sql-splitter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
 
 A blazingly fast CLI tool written in Go for splitting large SQL dump files into individual table files. Designed for
 extreme performance with efficient memory streaming, buffered I/O, and concurrent processing.
@@ -64,6 +69,15 @@ sql-splitter split large-dump.sql
 
 # Specify output directory
 sql-splitter split database.sql --output=tables
+
+# Show progress during processing
+sql-splitter split database.sql -o tables --progress
+
+# Split only specific tables
+sql-splitter split database.sql --tables=users,posts,orders
+
+# Preview without writing (dry run)
+sql-splitter split database.sql --dry-run
 
 # Verbose output
 sql-splitter split database.sql -o tables -v
@@ -181,7 +195,7 @@ TOTAL                                        125000             -      1250.57
 The tool uses performance-optimized buffer sizes based on extensive benchmarking:
 
 | File Size | Read Buffer | Write Buffer | Rationale                                |
-| --------- | ----------- | ------------ | ---------------------------------------- |
+|-----------|-------------|--------------|------------------------------------------|
 | < 1GB     | 64KB        | 256KB        | Optimal CPU cache utilization (411 MB/s) |
 | > 1GB     | 256KB       | 256KB        | Better for very large files              |
 
@@ -278,7 +292,7 @@ To support additional SQL statements:
 ### Similar Tools
 
 | Tool                                                                                    | Language | Throughput       | Memory  | Repository |
-| --------------------------------------------------------------------------------------- | -------- | ---------------- | ------- | ---------- |
+|-----------------------------------------------------------------------------------------|----------|------------------|---------|------------|
 | [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit)                       | Go       | **533 MB/s**     | <20MB   | GitHub     |
 | **sql-splitter (this tool)**                                                            | Go       | **327-411 MB/s** | ~100MB  | -          |
 | [Bash csplit scripts](https://gist.github.com/jasny/1608062)                            | Bash     | ~250 MB/s        | Unknown | Gist       |
@@ -292,7 +306,7 @@ _This tool ranks **#2** among open-source SQL file splitters_
 ### Comparison with PHP Version
 
 | Metric            | PHP Version | Go Version | Improvement |
-| ----------------- | ----------- | ---------- | ----------- |
+|-------------------|-------------|------------|-------------|
 | Parser Throughput | ~50 MB/s    | 327 MB/s   | **6.5x**    |
 | Table Extraction  | ~5000 ns/op | 65 ns/op   | **75x**     |
 | Memory Usage      | ~300MB      | ~100MB     | **3x**      |
@@ -310,12 +324,12 @@ _Benchmarks performed on Apple M2 Max, macOS, Go 1.24_
 
 ## Roadmap
 
+- [x] Progress bar for split command
+- [x] Filter by table name (split only specific tables)
+- [x] Dry-run mode
 - [ ] Compressed file support (gzip, bzip2)
 - [ ] PostgreSQL COPY statement support
 - [ ] Parallel parsing for very large files
-- [ ] Progress bar for split command
-- [ ] Filter by table name (split only specific tables)
-- [ ] Dry-run mode
 
 ## License
 
