@@ -255,7 +255,6 @@ impl<'a> InsertParser<'a> {
 
     /// Parse a string literal 'value'
     fn parse_string_value(&mut self) -> anyhow::Result<ParsedValue> {
-        let start = self.pos;
         self.pos += 1; // Skip opening quote
 
         let mut value = Vec::new();
@@ -294,11 +293,9 @@ impl<'a> InsertParser<'a> {
             }
         }
 
-        let end = self.pos;
-        let raw = self.stmt[start..end].to_vec();
         let text = String::from_utf8_lossy(&value).into_owned();
 
-        Ok(ParsedValue::String { raw, value: text })
+        Ok(ParsedValue::String { value: text })
     }
 
     /// Parse a hex literal 0xABCD...
@@ -458,7 +455,7 @@ impl<'a> InsertParser<'a> {
             ParsedValue::Null => PkValue::Null,
             ParsedValue::Integer(n) => PkValue::Int(*n),
             ParsedValue::BigInteger(n) => PkValue::BigInt(*n),
-            ParsedValue::String { value, .. } => {
+            ParsedValue::String { value } => {
                 // Check if this might be an integer stored as string
                 if let Some(col) = col {
                     match col.col_type {
@@ -493,7 +490,7 @@ enum ParsedValue {
     Null,
     Integer(i64),
     BigInteger(i128),
-    String { raw: Vec<u8>, value: String },
+    String { value: String },
     Hex(Vec<u8>),
     Other(Vec<u8>),
 }

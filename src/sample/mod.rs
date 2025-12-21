@@ -772,7 +772,7 @@ fn write_output(
         };
 
         for chunk in runtime.selected_rows.chunks(CHUNK_SIZE) {
-            write!(writer, "INSERT INTO {} VALUES\n", quoted_name)?;
+            writeln!(writer, "INSERT INTO {} VALUES", quoted_name)?;
 
             for (i, row) in chunk.iter().enumerate() {
                 if i > 0 {

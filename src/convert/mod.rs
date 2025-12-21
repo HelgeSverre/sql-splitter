@@ -12,9 +12,8 @@ mod copy_to_insert;
 mod types;
 mod warnings;
 
-pub use copy_to_insert::{
-    copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
-};
+#[allow(unused_imports)]
+pub use copy_to_insert::{copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue};
 
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::splitter::Compression;
@@ -309,31 +308,37 @@ impl Converter {
         let trimmed = result.trim();
 
         // Skip MySQL session commands when converting to other dialects
-        if self.from == SqlDialect::MySql && self.to != SqlDialect::MySql {
-            if self.is_mysql_session_command(&result) {
-                return Ok(Vec::new()); // Skip
-            }
+        if self.from == SqlDialect::MySql
+            && self.to != SqlDialect::MySql
+            && self.is_mysql_session_command(&result)
+        {
+            return Ok(Vec::new()); // Skip
         }
 
         // Skip PostgreSQL session commands and unsupported features when converting to other dialects
-        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
-            if self.is_postgres_session_command(&result) {
-                return Ok(Vec::new()); // Skip
-            }
-            if self.is_postgres_only_feature(trimmed) {
-                self.warnings.add(ConvertWarning::SkippedStatement {
-                    reason: "PostgreSQL-only feature".to_string(),
-                    statement_preview: trimmed.chars().take(60).collect(),
-                });
-                return Ok(Vec::new()); // Skip
-            }
+        if self.from == SqlDialect::Postgres
+            && self.to != SqlDialect::Postgres
+            && self.is_postgres_session_command(&result)
+        {
+            return Ok(Vec::new()); // Skip
+        }
+        if self.from == SqlDialect::Postgres
+            && self.to != SqlDialect::Postgres
+            && self.is_postgres_only_feature(trimmed)
+        {
+            self.warnings.add(ConvertWarning::SkippedStatement {
+                reason: "PostgreSQL-only feature".to_string(),
+                statement_preview: trimmed.chars().take(60).collect(),
+            });
+            return Ok(Vec::new()); // Skip
         }
 
         // Skip SQLite pragmas when converting to other dialects
-        if self.from == SqlDialect::Sqlite && self.to != SqlDialect::Sqlite {
-            if self.is_sqlite_pragma(&result) {
-                return Ok(Vec::new()); // Skip
-            }
+        if self.from == SqlDialect::Sqlite
+            && self.to != SqlDialect::Sqlite
+            && self.is_sqlite_pragma(&result)
+        {
+            return Ok(Vec::new()); // Skip
         }
 
         // Strip conditional comments
@@ -458,9 +463,8 @@ impl Converter {
         let mut result = String::with_capacity(stmt.len());
         let mut in_string = false;
         let mut in_backtick = false;
-        let mut chars = stmt.chars().peekable();
 
-        while let Some(c) = chars.next() {
+        for c in stmt.chars() {
             if c == '\'' && !in_backtick {
                 in_string = !in_string;
                 result.push(c);

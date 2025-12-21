@@ -163,13 +163,6 @@ impl UnifiedRow {
         }
     }
 
-    fn raw(&self) -> &[u8] {
-        match self {
-            UnifiedRow::Insert(r) => &r.raw,
-            UnifiedRow::Copy(r) => &r.raw,
-        }
-    }
-
     fn into_selected(self) -> SelectedRow {
         match self {
             UnifiedRow::Insert(r) => SelectedRow {
@@ -180,13 +173,6 @@ impl UnifiedRow {
                 raw: r.raw,
                 format: RowFormat::Copy,
             },
-        }
-    }
-
-    fn clone_row(&self) -> Self {
-        match self {
-            UnifiedRow::Insert(r) => UnifiedRow::Insert(r.clone()),
-            UnifiedRow::Copy(r) => UnifiedRow::Copy(r.clone()),
         }
     }
 }
@@ -536,7 +522,7 @@ fn build_schema_graph(tables_dir: &Path, config: &ShardConfig) -> anyhow::Result
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map_or(false, |e| e == "sql") {
+        if path.extension().is_some_and(|e| e == "sql") {
             let file = File::open(&path)?;
             let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
 
@@ -636,9 +622,7 @@ fn find_tenant_root_tables(
     for table in graph.schema.iter() {
         let lower_name = table.name.to_lowercase();
 
-        if explicit_roots.contains(&lower_name) {
-            roots.insert(table.id);
-        } else if table.get_column(tenant_column).is_some() {
+        if explicit_roots.contains(&lower_name) || table.get_column(tenant_column).is_some() {
             roots.insert(table.id);
         }
     }
@@ -767,6 +751,7 @@ fn should_skip_table(
 }
 
 /// Check if a row should be included in the shard
+#[allow(clippy::too_many_arguments)]
 fn should_include_row(
     row: &UnifiedRow,
     table_schema: &TableSchema,
@@ -1019,7 +1004,7 @@ fn write_output(
         };
 
         for chunk in runtime.selected_rows.chunks(CHUNK_SIZE) {
-            write!(writer, "INSERT INTO {} VALUES\n", quoted_name)?;
+            writeln!(writer, "INSERT INTO {} VALUES", quoted_name)?;
 
             for (i, row) in chunk.iter().enumerate() {
                 if i > 0 {

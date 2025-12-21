@@ -258,7 +258,7 @@ fn decode_escapes(value: &[u8]) -> String {
                         for j in 0..3 {
                             if i + 1 + j < value.len() {
                                 let d = value[i + 1 + j];
-                                if d >= b'0' && d <= b'7' {
+                                if (b'0'..=b'7').contains(&d) {
                                     octal_val = octal_val * 8 + (d - b'0');
                                     consumed += 1;
                                 } else {
