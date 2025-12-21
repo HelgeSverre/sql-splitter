@@ -1,5 +1,6 @@
 mod analyze;
 mod convert;
+mod glob_util;
 mod merge;
 mod sample;
 mod shard;
@@ -25,7 +26,8 @@ pub struct Cli {
 pub enum Commands {
     /// Split a SQL file into individual table files
     Split {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
+        /// Supports .gz, .bz2, .xz, .zst compression
         file: PathBuf,
 
         /// Output directory for split files
@@ -59,11 +61,16 @@ pub enum Commands {
         /// Only include data statements (INSERT, COPY)
         #[arg(long, conflicts_with = "schema_only")]
         data_only: bool,
+
+        /// Stop on first file that fails (for glob patterns)
+        #[arg(long)]
+        fail_fast: bool,
     },
 
     /// Analyze a SQL file and display statistics
     Analyze {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
+        /// Supports .gz, .bz2, .xz, .zst compression
         file: PathBuf,
 
         /// SQL dialect: mysql, postgres, or sqlite (auto-detected if not specified)
@@ -73,6 +80,10 @@ pub enum Commands {
         /// Show progress during analysis
         #[arg(short, long)]
         progress: bool,
+
+        /// Stop on first file that fails (for glob patterns)
+        #[arg(long)]
+        fail_fast: bool,
     },
 
     /// Merge split SQL files back into a single file
@@ -162,9 +173,13 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Maximum total rows to sample (explosion guard)
+        /// Maximum total rows to sample (explosion guard). Use 0 or --no-limit to disable.
         #[arg(long)]
         max_total_rows: Option<usize>,
+
+        /// Disable row limit (equivalent to --max-total-rows=0)
+        #[arg(long)]
+        no_limit: bool,
 
         /// Fail if any FK integrity issues detected
         #[arg(long)]
@@ -220,9 +235,13 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Maximum rows to select (memory guard)
+        /// Maximum rows to select (memory guard). Use 0 or --no-limit to disable.
         #[arg(long)]
         max_selected_rows: Option<usize>,
+
+        /// Disable row limit (equivalent to --max-selected-rows=0)
+        #[arg(long)]
+        no_limit: bool,
 
         /// Fail if any FK integrity issues detected
         #[arg(long)]
@@ -243,10 +262,11 @@ pub enum Commands {
 
     /// Convert a SQL dump between dialects (MySQL, PostgreSQL, SQLite)
     Convert {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
+        /// Supports .gz, .bz2, .xz, .zst compression
         file: PathBuf,
 
-        /// Output SQL file (default: stdout)
+        /// Output SQL file or directory (default: stdout for single file, required for glob)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -269,11 +289,16 @@ pub enum Commands {
         /// Preview without writing files (dry run)
         #[arg(long)]
         dry_run: bool,
+
+        /// Stop on first file that fails (for glob patterns)
+        #[arg(long)]
+        fail_fast: bool,
     },
 
     /// Validate a SQL dump for structural and data integrity issues
     Validate {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
+        /// Supports .gz, .bz2, .xz, .zst compression
         file: PathBuf,
 
         /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
@@ -292,13 +317,21 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
 
-        /// Maximum rows per table for heavy checks (PK/FK)
+        /// Maximum rows per table for heavy checks (PK/FK). Use 0 or --no-limit to disable.
         #[arg(long, default_value = "1000000")]
         max_rows_per_table: usize,
+
+        /// Disable row limit for PK/FK checks (equivalent to --max-rows-per-table=0)
+        #[arg(long)]
+        no_limit: bool,
 
         /// Disable PK/FK data integrity checks
         #[arg(long)]
         no_fk_checks: bool,
+
+        /// Stop on first file that fails validation (for glob patterns)
+        #[arg(long)]
+        fail_fast: bool,
     },
 
     /// Generate shell completions
@@ -321,6 +354,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             tables,
             schema_only,
             data_only,
+            fail_fast,
         } => split::run(
             file,
             output,
@@ -331,12 +365,14 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             tables,
             schema_only,
             data_only,
+            fail_fast,
         ),
         Commands::Analyze {
             file,
             dialect,
             progress,
-        } => analyze::run(file, dialect, progress),
+            fail_fast,
+        } => analyze::run(file, dialect, progress, fail_fast),
         Commands::Merge {
             input_dir,
             output,
@@ -372,29 +408,37 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             seed,
             config,
             max_total_rows,
+            no_limit,
             strict_fk,
             no_schema,
             progress,
             dry_run,
-        } => sample::run(
-            file,
-            output,
-            dialect,
-            percent,
-            rows,
-            preserve_relations,
-            tables,
-            exclude,
-            root_tables,
-            include_global,
-            seed,
-            config,
-            max_total_rows,
-            strict_fk,
-            no_schema,
-            progress,
-            dry_run,
-        ),
+        } => {
+            let effective_limit = if no_limit || max_total_rows == Some(0) {
+                None
+            } else {
+                max_total_rows
+            };
+            sample::run(
+                file,
+                output,
+                dialect,
+                percent,
+                rows,
+                preserve_relations,
+                tables,
+                exclude,
+                root_tables,
+                include_global,
+                seed,
+                config,
+                effective_limit,
+                strict_fk,
+                no_schema,
+                progress,
+                dry_run,
+            )
+        }
         Commands::Shard {
             file,
             output,
@@ -406,26 +450,34 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             include_global,
             config,
             max_selected_rows,
+            no_limit,
             strict_fk,
             no_schema,
             progress,
             dry_run,
-        } => shard::run(
-            file,
-            output,
-            dialect,
-            tenant_column,
-            tenant_value,
-            tenant_values,
-            root_tables,
-            include_global,
-            config,
-            max_selected_rows,
-            strict_fk,
-            no_schema,
-            progress,
-            dry_run,
-        ),
+        } => {
+            let effective_limit = if no_limit || max_selected_rows == Some(0) {
+                None
+            } else {
+                max_selected_rows
+            };
+            shard::run(
+                file,
+                output,
+                dialect,
+                tenant_column,
+                tenant_value,
+                tenant_values,
+                root_tables,
+                include_global,
+                config,
+                effective_limit,
+                strict_fk,
+                no_schema,
+                progress,
+                dry_run,
+            )
+        }
         Commands::Convert {
             file,
             output,
@@ -434,7 +486,8 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             strict,
             progress,
             dry_run,
-        } => convert::run(file, output, from, to, strict, progress, dry_run),
+            fail_fast,
+        } => convert::run(file, output, from, to, strict, progress, dry_run, fail_fast),
         Commands::Validate {
             file,
             dialect,
@@ -442,16 +495,26 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             strict,
             json,
             max_rows_per_table,
+            no_limit,
             no_fk_checks,
-        } => validate::run(
-            file,
-            dialect,
-            progress,
-            strict,
-            json,
-            max_rows_per_table,
-            no_fk_checks,
-        ),
+            fail_fast,
+        } => {
+            let effective_limit = if no_limit || max_rows_per_table == 0 {
+                usize::MAX
+            } else {
+                max_rows_per_table
+            };
+            validate::run(
+                file,
+                dialect,
+                progress,
+                strict,
+                json,
+                effective_limit,
+                no_fk_checks,
+                fail_fast,
+            )
+        }
         Commands::Completions { shell } => {
             generate(
                 shell,
