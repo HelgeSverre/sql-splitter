@@ -72,11 +72,10 @@ declare -a TEST_CASES=(
     "postgres-sakila-data|postgres|https://raw.githubusercontent.com/jOOQ/sakila/main/postgres-sakila-db/postgres-sakila-insert-data.sql|none|postgres-sakila-insert-data.sql|jOOQ Sakila PostgreSQL data"
     "postgres-adventureworks|postgres|https://raw.githubusercontent.com/morenoh149/postgresDBSamples/master/adventureworks/install.sql|none|install.sql|AdventureWorks PostgreSQL port"
     
-    # Generic SQL files - may not have specific dialect markers
-    # These test that sql-splitter can handle files even with low-confidence detection
-    "generic-chinook-pg|any|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_PostgreSql.sql|none|Chinook_PostgreSql.sql|Chinook DB (generic SQL)"
-    "generic-chinook-sqlite|any|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sql|none|Chinook_Sqlite.sql|Chinook DB SQLite version"
-    "generic-chinook-mysql|any|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_MySql.sql|none|Chinook_MySql.sql|Chinook DB MySQL version"
+    # Chinook database - multi-dialect sample database with dialect-specific versions
+    "chinook-postgres|postgres|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_PostgreSql.sql|none|Chinook_PostgreSql.sql|Chinook DB PostgreSQL version"
+    "chinook-sqlite|sqlite|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sql|none|Chinook_Sqlite.sql|Chinook DB SQLite version"
+    "chinook-mysql|mysql|https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_MySql.sql|none|Chinook_MySql.sql|Chinook DB MySQL version"
     
     # WordPress database dumps - real WordPress installations
     "wordpress-films|mysql|https://raw.githubusercontent.com/chamathis/WordPress-Test/master/wp_films.sql|none|wp_films.sql|WordPress Films site (2017)"
@@ -88,8 +87,8 @@ declare -a TEST_CASES=(
     "mysql-countries|mysql|https://gist.githubusercontent.com/adhipg/1600028/raw/countries.sql|none|countries.sql|Countries with phone codes"
     "mysql-wilayah|mysql|https://raw.githubusercontent.com/cahyadsn/wilayah/master/db/wilayah.sql|none|wilayah.sql|Indonesian administrative regions (large)"
     
-    # Educational/tutorial database dumps
-    "mysql-coffeeshop|any|https://raw.githubusercontent.com/mochen862/full-sql-database-course/main/create_insert.sql|none|create_insert.sql|Coffee shop tutorial DB"
+    # Educational/tutorial database dumps (ANSI SQL, treating as MySQL for conversion tests)
+    "mysql-coffeeshop|mysql|https://raw.githubusercontent.com/mochen862/full-sql-database-course/main/create_insert.sql|none|create_insert.sql|Coffee shop tutorial DB"
     
     # WordPress WooCommerce demo data
     "wordpress-woocommerce|mysql|https://raw.githubusercontent.com/GoldenOwlAsia/wordpress-woocommerce-demo/master/demowordpress.sql|none|demowordpress.sql|WooCommerce demo with products/orders"
@@ -142,7 +141,7 @@ cleanup() {
     if [[ "$KEEP_FILES" == "false" ]]; then
         echo ""
         echo "Cleaning up test files..."
-        rm -rf "$TEST_DIR"
+        /bin/rm -rf "$TEST_DIR"
         echo -e "${GREEN}✓ Cleanup complete${NC}"
     else
         echo ""
