@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Multi-dialect PK/FK validation**: Extended PK duplicate detection and FK referential integrity checking to all dialects (MySQL, PostgreSQL, SQLite). Previously MySQL-only.
+  - PostgreSQL: Supports both INSERT statements and COPY ... FROM stdin format
+  - SQLite: Reuses MySQL INSERT parser for validation
+  - 6 new dialect-specific tests for PostgreSQL and SQLite PK/FK validation
+
 ## [1.8.0] - 2025-12-21
 
 ### Added

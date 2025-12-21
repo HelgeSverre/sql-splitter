@@ -204,7 +204,8 @@ fn test_validate_encoding_issue() {
 }
 
 #[test]
-fn test_validate_postgres_skips_fk_checks() {
+fn test_validate_postgres_with_fk_checks() {
+    // PostgreSQL now supports PK/FK validation via INSERT parsing
     let sql = r#"
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
@@ -226,9 +227,9 @@ fn test_validate_postgres_skips_fk_checks() {
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
     
-    // Should have info about FK checks being skipped
-    let info_issues: Vec<_> = summary.issues.iter().filter(|i| i.code == "FK_CHECK_UNSUPPORTED").collect();
-    assert_eq!(info_issues.len(), 1);
+    // PostgreSQL now supports FK checks - should have no errors for valid dump
+    assert_eq!(summary.summary.errors, 0);
+    assert!(summary.summary.tables_scanned > 0);
 }
 
 #[test]
@@ -742,4 +743,124 @@ fn test_validate_composite_fk() {
         .filter(|i| i.code == "FK_MISSING_PARENT")
         .collect();
     assert_eq!(fk_issues.len(), 1, "Should detect composite FK violation");
+}
+
+// =============================================================================
+// PostgreSQL-Specific PK/FK Validation Tests
+// =============================================================================
+
+#[test]
+fn test_validate_postgres_duplicate_pk() {
+    let sql = r#"
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255)
+        );
+        INSERT INTO users VALUES (1, 'Alice');
+        INSERT INTO users VALUES (2, 'Bob');
+        INSERT INTO users VALUES (1, 'Charlie');
+    "#;
+    
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Postgres, true);
+    
+    let pk_issues: Vec<_> = summary.issues.iter()
+        .filter(|i| i.code == "DUPLICATE_PK")
+        .collect();
+    assert_eq!(pk_issues.len(), 1, "PostgreSQL should detect duplicate PK");
+}
+
+#[test]
+fn test_validate_postgres_fk_violation() {
+    let sql = r#"
+        CREATE TABLE departments (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255)
+        );
+        CREATE TABLE employees (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255),
+            department_id INTEGER,
+            CONSTRAINT fk_dept FOREIGN KEY (department_id) REFERENCES departments (id)
+        );
+        INSERT INTO departments VALUES (1, 'Engineering');
+        INSERT INTO employees VALUES (1, 'Alice', 1);
+        INSERT INTO employees VALUES (2, 'Bob', 99);
+    "#;
+    
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Postgres, true);
+    
+    let fk_issues: Vec<_> = summary.issues.iter()
+        .filter(|i| i.code == "FK_MISSING_PARENT")
+        .collect();
+    assert_eq!(fk_issues.len(), 1, "PostgreSQL should detect FK violation");
+}
+
+#[test]
+fn test_validate_postgres_generated_with_fk_checks() {
+    let dump = generate_postgres_dump_file(42, Scale::Small);
+    let summary = validate_file(dump.path(), SqlDialect::Postgres, true);
+    
+    // Generated data should be FK-consistent
+    assert_eq!(summary.summary.errors, 0, "Generated PostgreSQL dump should have no errors with FK checks");
+    assert!(summary.summary.tables_scanned > 0);
+}
+
+// =============================================================================
+// SQLite-Specific PK/FK Validation Tests
+// =============================================================================
+
+#[test]
+fn test_validate_sqlite_duplicate_pk() {
+    let sql = r#"
+        CREATE TABLE "users" (
+            "id" INTEGER PRIMARY KEY,
+            "name" TEXT
+        );
+        INSERT INTO "users" VALUES (1, 'Alice');
+        INSERT INTO "users" VALUES (2, 'Bob');
+        INSERT INTO "users" VALUES (1, 'Charlie');
+    "#;
+    
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Sqlite, true);
+    
+    let pk_issues: Vec<_> = summary.issues.iter()
+        .filter(|i| i.code == "DUPLICATE_PK")
+        .collect();
+    assert_eq!(pk_issues.len(), 1, "SQLite should detect duplicate PK");
+}
+
+#[test]
+fn test_validate_sqlite_fk_violation() {
+    let sql = r#"
+        CREATE TABLE "categories" (
+            "id" INTEGER PRIMARY KEY,
+            "name" TEXT
+        );
+        CREATE TABLE "products" (
+            "id" INTEGER PRIMARY KEY,
+            "name" TEXT,
+            "category_id" INTEGER,
+            FOREIGN KEY ("category_id") REFERENCES "categories" ("id")
+        );
+        INSERT INTO "categories" VALUES (1, 'Electronics');
+        INSERT INTO "products" VALUES (1, 'Phone', 1);
+        INSERT INTO "products" VALUES (2, 'Laptop', 99);
+    "#;
+    
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Sqlite, true);
+    
+    let fk_issues: Vec<_> = summary.issues.iter()
+        .filter(|i| i.code == "FK_MISSING_PARENT")
+        .collect();
+    assert_eq!(fk_issues.len(), 1, "SQLite should detect FK violation");
+}
+
+#[test]
+fn test_validate_sqlite_generated_with_fk_checks() {
+    let dump = generate_sqlite_dump_file(42, Scale::Small);
+    let summary = validate_file(dump.path(), SqlDialect::Sqlite, true);
+    
+    // Generated data should be FK-consistent
+    assert_eq!(summary.summary.errors, 0, "Generated SQLite dump should have no errors with FK checks");
+    assert!(summary.summary.tables_scanned > 0);
 }

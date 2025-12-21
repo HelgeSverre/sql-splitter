@@ -223,10 +223,14 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | ├─ SQL syntax validation | ✅ Done | Parser error detection |
 | ├─ DDL/DML consistency | ✅ Done | INSERT references existing tables |
 | ├─ Encoding validation | ✅ Done | UTF-8 checks with warnings |
-| ├─ Duplicate PK detection | ✅ Done | MySQL only, with max-rows guard |
-| ├─ FK referential integrity | ✅ Done | MySQL only, first-5 violations |
+| ├─ Duplicate PK detection | ✅ Done | All dialects, with max-rows guard |
+| ├─ FK referential integrity | ✅ Done | All dialects, first-5 violations |
 | └─ Output formats | ✅ Done | Text + JSON |
-| **Testing** | ✅ Done | 13 integration tests |
+| **Multi-dialect support** | ✅ Done | |
+| ├─ MySQL INSERT parsing | ✅ Done | |
+| ├─ PostgreSQL COPY parsing | ✅ Done | COPY FROM stdin support |
+| └─ SQLite INSERT parsing | ✅ Done | Reuses MySQL parser |
+| **Testing** | ✅ Done | 38 integration tests |
 
 **Delivered:**
 - `sql-splitter validate dump.sql`
@@ -234,11 +238,10 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 - `--json` flag for CI integration
 - `--max-rows-per-table` memory guard (default: 1M rows)
 - `--no-fk-checks` to disable heavy data checks
-- All 5 validation checks implemented
+- All 5 validation checks for all 3 dialects
 - Compressed file support
 
 **Limitations (documented):**
-- PK/FK data checks: MySQL only (PostgreSQL/SQLite emit info message)
 - FK checks assume parent-before-child insertion order
 - Parent-orphan detection deferred to future release
 

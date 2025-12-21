@@ -3,11 +3,13 @@
 //! This module provides:
 //! - SQL syntax validation (via parser error detection)
 //! - DDL/DML consistency checks (INSERTs reference existing tables)
-//! - Duplicate primary key detection (MySQL only)
-//! - FK referential integrity checking (MySQL only)
+//! - Duplicate primary key detection (all dialects)
+//! - FK referential integrity checking (all dialects)
 //! - Encoding validation (UTF-8)
 
-use crate::parser::{determine_buffer_size, mysql_insert, Parser, SqlDialect, StatementType};
+use crate::parser::{
+    determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
+};
 use crate::schema::{Schema, SchemaBuilder, TableId};
 use crate::splitter::Compression;
 use ahash::{AHashMap, AHashSet};
@@ -367,8 +369,8 @@ impl Validator {
             self.add_issue(issue);
         }
 
-        // Finalize schema and resolve FK references for data checks
-        if self.dialect == SqlDialect::MySql && self.options.fk_checks_enabled {
+        // Finalize schema and resolve FK references for data checks (all dialects)
+        if self.options.fk_checks_enabled {
             self.schema = Some(self.schema_builder.build());
             self.schema_builder = SchemaBuilder::new(); // Reset to avoid double use
             self.initialize_table_states();
@@ -376,16 +378,8 @@ impl Validator {
 
         // Pass 2: Data checks (PK/FK) - requires re-reading the file
         let schema_not_empty = self.schema.as_ref().is_some_and(|s| !s.is_empty());
-        if self.dialect == SqlDialect::MySql && self.options.fk_checks_enabled && schema_not_empty {
+        if self.options.fk_checks_enabled && schema_not_empty {
             self.run_data_checks()?;
-        } else if self.dialect != SqlDialect::MySql && self.options.fk_checks_enabled {
-            self.add_issue(ValidationIssue::info(
-                "FK_CHECK_UNSUPPORTED",
-                format!(
-                    "PK/FK data integrity checks are only supported for MySQL dumps; skipping for {}",
-                    self.dialect
-                ),
-            ));
         }
 
         Ok(self.build_summary())
@@ -408,20 +402,16 @@ impl Validator {
                 if !table_name.is_empty() {
                     self.tables_from_ddl.insert(table_name.clone());
 
-                    // For MySQL, parse the CREATE TABLE for schema info
-                    if self.dialect == SqlDialect::MySql {
-                        if let Ok(stmt_str) = std::str::from_utf8(stmt) {
-                            self.schema_builder.parse_create_table(stmt_str);
-                        }
+                    // Parse CREATE TABLE for schema info (all dialects supported)
+                    if let Ok(stmt_str) = std::str::from_utf8(stmt) {
+                        self.schema_builder.parse_create_table(stmt_str);
                     }
                 }
             }
             StatementType::AlterTable => {
-                // For MySQL, parse ALTER TABLE for FK constraints
-                if self.dialect == SqlDialect::MySql {
-                    if let Ok(stmt_str) = std::str::from_utf8(stmt) {
-                        self.schema_builder.parse_alter_table(stmt_str);
-                    }
+                // Parse ALTER TABLE for FK constraints (all dialects supported)
+                if let Ok(stmt_str) = std::str::from_utf8(stmt) {
+                    self.schema_builder.parse_alter_table(stmt_str);
                 }
             }
             StatementType::Insert | StatementType::Copy => {
@@ -472,44 +462,156 @@ impl Validator {
             let (stmt_type, table_name) =
                 Parser::<&[u8]>::parse_statement_with_dialect(&stmt, self.dialect);
 
-            if stmt_type != StatementType::Insert {
-                continue;
-            }
-
-            let schema = match &self.schema {
-                Some(s) => s,
+            // Get table_id without holding a borrow on self.schema
+            let table_id = match &self.schema {
+                Some(s) => match s.get_table_id(&table_name) {
+                    Some(id) => id,
+                    None => continue,
+                },
                 None => continue,
             };
 
-            let table_id = match schema.get_table_id(&table_name) {
-                Some(id) => id,
-                None => continue,
-            };
-
-            let table_schema = match schema.table(table_id) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // Parse rows from INSERT using the schema
-            let rows = match mysql_insert::parse_mysql_insert_rows(&stmt, table_schema) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            for row in rows {
-                self.check_row(table_id, &table_name, &row, stmt_count);
+            match stmt_type {
+                StatementType::Insert => {
+                    // MySQL and SQLite use INSERT VALUES syntax
+                    self.check_insert_statement(&stmt, table_id, &table_name, stmt_count);
+                }
+                StatementType::Copy => {
+                    // PostgreSQL uses COPY ... FROM stdin format
+                    self.check_copy_statement(&stmt, table_id, &table_name, stmt_count);
+                }
+                _ => continue,
             }
         }
 
         Ok(())
     }
 
-    fn check_row(
+    /// Check rows from a MySQL/SQLite INSERT statement
+    fn check_insert_statement(
+        &mut self,
+        stmt: &[u8],
+        table_id: TableId,
+        table_name: &str,
+        stmt_count: u64,
+    ) {
+        let table_schema = match &self.schema {
+            Some(s) => match s.table(table_id) {
+                Some(ts) => ts,
+                None => return,
+            },
+            None => return,
+        };
+
+        // Parse rows from INSERT using the schema (works for MySQL and SQLite)
+        let rows = match mysql_insert::parse_mysql_insert_rows(stmt, table_schema) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        for row in rows {
+            self.check_mysql_row(table_id, table_name, &row, stmt_count);
+        }
+    }
+
+    /// Check rows from a PostgreSQL COPY statement
+    fn check_copy_statement(
+        &mut self,
+        stmt: &[u8],
+        table_id: TableId,
+        table_name: &str,
+        stmt_count: u64,
+    ) {
+        // Find the COPY header line and the data section
+        let stmt_str = match std::str::from_utf8(stmt) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Find the data section (after the header line ending with "FROM stdin;")
+        let data_start = if let Some(pos) = stmt_str.find("FROM stdin;") {
+            pos + "FROM stdin;".len()
+        } else if let Some(pos) = stmt_str.find("from stdin;") {
+            pos + "from stdin;".len()
+        } else {
+            return;
+        };
+
+        // Skip any whitespace/newlines after the header
+        let data_section = stmt_str[data_start..].trim_start();
+        if data_section.is_empty() {
+            return;
+        }
+
+        // Parse column list from the header
+        let header = &stmt_str[..data_start];
+        let column_order = postgres_copy::parse_copy_columns(header);
+
+        // Get table schema
+        let table_schema = match &self.schema {
+            Some(s) => match s.table(table_id) {
+                Some(ts) => ts,
+                None => return,
+            },
+            None => return,
+        };
+
+        // Parse the COPY data rows
+        let rows = match postgres_copy::parse_postgres_copy_rows(
+            data_section.as_bytes(),
+            table_schema,
+            column_order,
+        ) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        for row in rows {
+            self.check_copy_row(table_id, table_name, &row, stmt_count);
+        }
+    }
+
+    /// Check a row from MySQL INSERT or SQLite INSERT
+    fn check_mysql_row(
         &mut self,
         table_id: TableId,
         table_name: &str,
         row: &mysql_insert::ParsedRow,
+        stmt_idx: u64,
+    ) {
+        self.check_row_common(
+            table_id,
+            table_name,
+            row.pk.as_ref(),
+            &row.fk_values,
+            stmt_idx,
+        );
+    }
+
+    /// Check a row from PostgreSQL COPY
+    fn check_copy_row(
+        &mut self,
+        table_id: TableId,
+        table_name: &str,
+        row: &postgres_copy::ParsedCopyRow,
+        stmt_idx: u64,
+    ) {
+        self.check_row_common(
+            table_id,
+            table_name,
+            row.pk.as_ref(),
+            &row.fk_values,
+            stmt_idx,
+        );
+    }
+
+    /// Common row checking logic for all dialects
+    fn check_row_common(
+        &mut self,
+        table_id: TableId,
+        table_name: &str,
+        pk: Option<&smallvec::SmallVec<[mysql_insert::PkValue; 2]>>,
+        fk_values: &[(mysql_insert::FkRef, smallvec::SmallVec<[mysql_insert::PkValue; 2]>)],
         stmt_idx: u64,
     ) {
         let max_rows = self.options.max_rows_per_table as u64;
@@ -540,10 +642,10 @@ impl Validator {
         }
 
         // PK duplicate check using the parsed PK from the row
-        if let Some(ref pk) = row.pk {
+        if let Some(pk_values) = pk {
             if let Some(ref mut pk_set) = state.pk_values {
                 // Convert SmallVec<[PkValue; 2]> to Vec<Vec<u8>> for our set
-                let pk_tuple: PkTuple = pk
+                let pk_tuple: PkTuple = pk_values
                     .iter()
                     .map(|v| match v {
                         mysql_insert::PkValue::Int(i) => i.to_string().into_bytes(),
@@ -555,7 +657,7 @@ impl Validator {
 
                 if !pk_set.insert(pk_tuple.clone()) {
                     state.pk_duplicates += 1;
-                    let pk_display: String = pk
+                    let pk_display: String = pk_values
                         .iter()
                         .map(|v| match v {
                             mysql_insert::PkValue::Int(i) => i.to_string(),
@@ -604,14 +706,14 @@ impl Validator {
                 None => return,
             };
 
-            row.fk_values
+            fk_values
                 .iter()
-                .filter(|(_, fk_values)| !fk_values.iter().all(|v| v.is_null()))
-                .filter_map(|(fk_ref, fk_values)| {
+                .filter(|(_, fk_vals)| !fk_vals.iter().all(|v| v.is_null()))
+                .filter_map(|(fk_ref, fk_vals)| {
                     let fk_def = table_schema.foreign_keys.get(fk_ref.fk_index as usize)?;
                     let parent_table_id = fk_def.referenced_table_id?;
 
-                    let fk_tuple: PkTuple = fk_values
+                    let fk_tuple: PkTuple = fk_vals
                         .iter()
                         .map(|v| match v {
                             mysql_insert::PkValue::Int(i) => i.to_string().into_bytes(),
@@ -621,7 +723,7 @@ impl Validator {
                         })
                         .collect();
 
-                    let fk_display: String = fk_values
+                    let fk_display: String = fk_vals
                         .iter()
                         .map(|v| match v {
                             mysql_insert::PkValue::Int(i) => i.to_string(),
@@ -710,9 +812,7 @@ impl Validator {
             CheckStatus::Ok
         };
 
-        let pk_status = if self.dialect != SqlDialect::MySql {
-            CheckStatus::Skipped("MySQL only".to_string())
-        } else if !self.options.fk_checks_enabled {
+        let pk_status = if !self.options.fk_checks_enabled {
             CheckStatus::Skipped("--no-fk-checks".to_string())
         } else if self.pk_errors > 0 {
             CheckStatus::Failed(self.pk_errors)
@@ -720,9 +820,7 @@ impl Validator {
             CheckStatus::Ok
         };
 
-        let fk_status = if self.dialect != SqlDialect::MySql {
-            CheckStatus::Skipped("MySQL only".to_string())
-        } else if !self.options.fk_checks_enabled {
+        let fk_status = if !self.options.fk_checks_enabled {
             CheckStatus::Skipped("--no-fk-checks".to_string())
         } else if self.fk_errors > 0 {
             CheckStatus::Failed(self.fk_errors)

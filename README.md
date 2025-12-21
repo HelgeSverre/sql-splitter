@@ -191,10 +191,8 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 - SQL syntax validation (parser errors)
 - DDL/DML consistency (INSERTs reference existing tables)
 - Encoding validation (UTF-8)
-- Duplicate primary key detection (MySQL only)
-- FK referential integrity (MySQL only)
-
-**Note:** PK/FK data checks are MySQL-only; PostgreSQL and SQLite emit an info message.
+- Duplicate primary key detection (all dialects)
+- FK referential integrity (all dialects)
 
 ## Performance
 
