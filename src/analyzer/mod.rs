@@ -1,4 +1,5 @@
 use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
+use crate::progress::ProgressReader;
 use crate::splitter::Compression;
 use ahash::AHashMap;
 use std::fs::File;
@@ -122,30 +123,5 @@ impl Analyzer {
         let mut result: Vec<TableStats> = self.stats.values().cloned().collect();
         result.sort_by(|a, b| b.insert_count.cmp(&a.insert_count));
         result
-    }
-}
-
-struct ProgressReader<R: Read, F: Fn(u64)> {
-    reader: R,
-    callback: F,
-    bytes_read: u64,
-}
-
-impl<R: Read, F: Fn(u64)> ProgressReader<R, F> {
-    fn new(reader: R, callback: F) -> Self {
-        Self {
-            reader,
-            callback,
-            bytes_read: 0,
-        }
-    }
-}
-
-impl<R: Read, F: Fn(u64)> Read for ProgressReader<R, F> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.reader.read(buf)?;
-        self.bytes_read += n as u64;
-        (self.callback)(self.bytes_read);
-        Ok(n)
     }
 }

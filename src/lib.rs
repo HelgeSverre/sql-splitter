@@ -5,6 +5,7 @@ pub mod analyzer;
 pub mod convert;
 pub mod merger;
 pub mod parser;
+pub mod progress;
 pub mod sample;
 pub mod schema;
 pub mod shard;

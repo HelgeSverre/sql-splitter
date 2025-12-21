@@ -18,6 +18,7 @@ pub use copy_to_insert::{
 };
 
 use crate::parser::{Parser, SqlDialect, StatementType};
+use crate::progress::ProgressReader;
 use crate::splitter::Compression;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
@@ -875,13 +876,20 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
         );
     }
 
+    // Get file size for progress tracking
+    let file_size = std::fs::metadata(&config.input)?.len();
+
     let progress_bar = if config.progress {
-        let pb = ProgressBar::new_spinner();
+        let pb = ProgressBar::new(file_size);
         pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░  ")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
         pb.set_message("Converting...");
         Some(pb)
     } else {
@@ -891,10 +899,18 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     // Create converter
     let mut converter = Converter::new(from_dialect, config.to_dialect).with_strict(config.strict);
 
-    // Open input file
+    // Open input file with optional progress tracking
     let file = File::open(&config.input)?;
     let compression = Compression::from_path(&config.input);
-    let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file));
+    let reader: Box<dyn Read> = if let Some(ref pb) = progress_bar {
+        let pb_clone = pb.clone();
+        let progress_reader = ProgressReader::new(file, move |bytes| {
+            pb_clone.set_position(bytes);
+        });
+        compression.wrap_reader(Box::new(progress_reader))
+    } else {
+        compression.wrap_reader(Box::new(file))
+    };
     let mut parser = Parser::with_dialect(reader, 64 * 1024, from_dialect);
 
     // Open output
@@ -920,15 +936,6 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     // Process statements
     while let Some(stmt) = parser.read_statement()? {
         stats.statements_processed += 1;
-
-        if let Some(ref pb) = progress_bar {
-            if stats.statements_processed % 1000 == 0 {
-                pb.set_message(format!(
-                    "Processed {} statements...",
-                    stats.statements_processed
-                ));
-            }
-        }
 
         // Check if this is a COPY data block (follows a COPY header)
         if converter.has_pending_copy() {
@@ -982,10 +989,7 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     stats.warnings.extend(converter.warnings().iter().cloned());
 
     if let Some(pb) = progress_bar {
-        pb.finish_with_message(format!(
-            "Converted {} statements",
-            stats.statements_processed
-        ));
+        pb.finish_with_message("done");
     }
 
     Ok(stats)

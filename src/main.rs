@@ -6,6 +6,7 @@ mod cmd;
 mod convert;
 mod merger;
 mod parser;
+mod progress;
 mod sample;
 mod schema;
 mod shard;

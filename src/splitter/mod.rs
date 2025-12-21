@@ -1,4 +1,5 @@
 use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
+use crate::progress::ProgressReader;
 use crate::writer::WriterPool;
 use ahash::AHashSet;
 use std::fs::File;
@@ -114,7 +115,7 @@ impl Splitter {
         self
     }
 
-    pub fn split(self) -> anyhow::Result<Stats> {
+    pub fn split(mut self) -> anyhow::Result<Stats> {
         let file = File::open(&self.input_file)?;
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
@@ -124,8 +125,8 @@ impl Splitter {
         // Detect and apply decompression
         let compression = Compression::from_path(&self.input_file);
 
-        let reader: Box<dyn Read> = if self.config.progress_fn.is_some() {
-            let progress_reader = ProgressReader::new(file, self.config.progress_fn.unwrap());
+        let reader: Box<dyn Read> = if let Some(cb) = self.config.progress_fn.take() {
+            let progress_reader = ProgressReader::new(file, move |bytes| cb(bytes));
             compression.wrap_reader(Box::new(progress_reader))
         } else {
             compression.wrap_reader(Box::new(file))
@@ -216,30 +217,5 @@ impl Splitter {
         }
 
         Ok(stats)
-    }
-}
-
-struct ProgressReader<R: Read> {
-    reader: R,
-    callback: Box<dyn Fn(u64)>,
-    bytes_read: u64,
-}
-
-impl<R: Read> ProgressReader<R> {
-    fn new(reader: R, callback: Box<dyn Fn(u64)>) -> Self {
-        Self {
-            reader,
-            callback,
-            bytes_read: 0,
-        }
-    }
-}
-
-impl<R: Read> Read for ProgressReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.reader.read(buf)?;
-        self.bytes_read += n as u64;
-        (self.callback)(self.bytes_read);
-        Ok(n)
     }
 }
