@@ -29,6 +29,7 @@ GENERATE_ONLY=false
 SIZE="medium"
 CUSTOM_FILE=""
 SEED=42
+OUTPUT_FILE=""
 
 # Size configurations (measured: ~100 bytes/row)
 # Formula: rows × tables × 100 bytes ≈ file size
@@ -75,13 +76,18 @@ while [[ $# -gt 0 ]]; do
             CUSTOM_FILE="$2"
             shift 2
             ;;
+        --output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--generate-only] [--size SIZE] [--file FILE]"
+            echo "Usage: $0 [--generate-only] [--size SIZE] [--file FILE] [--output FILE]"
             echo ""
             echo "Options:"
             echo "  --generate-only   Only generate test fixtures"
             echo "  --size SIZE       Test data size (default: medium)"
             echo "  --file FILE       Use existing file instead of generating"
+            echo "  --output FILE     Save results to file (in addition to stdout)"
             echo ""
             echo "Size configurations:"
             echo "  tiny:    500 rows/table,    10 tables (~0.5MB)"
@@ -361,6 +367,13 @@ run_all_profiles() {
 
 # Main execution
 main() {
+    # Set up output file if specified
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        mkdir -p "$(dirname "$OUTPUT_FILE")"
+        echo "Results will be saved to: $OUTPUT_FILE"
+        exec > >(tee "$OUTPUT_FILE") 2>&1
+    fi
+
     if [[ -n "$CUSTOM_FILE" ]]; then
         if [[ ! -f "$CUSTOM_FILE" ]]; then
             echo "Error: File not found: $CUSTOM_FILE" >&2

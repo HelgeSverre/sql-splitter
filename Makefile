@@ -46,19 +46,19 @@ bench:
 
 # Memory profile all commands (requires GNU time: brew install gnu-time)
 profile: release
-	./scripts/profile-memory.sh --size medium
+	./scripts/profile-memory.sh --size medium --output benchmark-results/profile-medium.txt
 
 # Memory profile with large test data (~125MB)
 profile-large: release
-	./scripts/profile-memory.sh --size large
+	./scripts/profile-memory.sh --size large --output benchmark-results/profile-large.txt
 
 # Stress test memory profile (~1GB: 100 tables × 100k rows)
 profile-mega: release
-	./scripts/profile-memory.sh --size mega
+	./scripts/profile-memory.sh --size mega --output benchmark-results/profile-mega.txt
 
 # Extreme stress test (~10GB MySQL only, takes 10-30 min to generate)
 profile-giga: release
-	./scripts/profile-memory.sh --size giga
+	./scripts/profile-memory.sh --size giga --output benchmark-results/profile-giga.txt
 
 # Format code
 fmt:
