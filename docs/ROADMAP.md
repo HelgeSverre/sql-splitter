@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.8.1 (current)  
+**Version**: 1.8.2 (current)  
 **Last Updated**: 2025-12-21  
-**Revision**: 2.6 — Post v1.8.1 with Agent Skills documentation
+**Revision**: 2.7 — Post v1.8.2 with sample memory optimization
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -274,6 +274,29 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
+### v1.8.2 — Sample Memory Optimization ✅ RELEASED
+**Released**: 2025-12-21  
+**Theme**: Performance optimization and profiling infrastructure
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Sample memory optimization** | ✅ Done | 98.5% reduction |
+| ├─ Streaming row processing | ✅ Done | Temp files instead of memory |
+| ├─ PkHashSet (64-bit hashes) | ✅ Done | Compact PK tracking |
+| └─ Both --percent and --rows | ✅ Done | All modes optimized |
+| **Profiling infrastructure** | ✅ Done | |
+| ├─ profile-memory.sh script | ✅ Done | Automated profiling |
+| ├─ make profile targets | ✅ Done | medium, large, mega |
+| └─ Size presets | ✅ Done | 1MB to 2GB |
+
+**Delivered:**
+- 2.9 GB file: 8.2 GB → 114 MB peak RSS
+- `make profile` / `make profile-large` / `make profile-mega`
+- `scripts/profile-memory.sh` with 7 size presets
+- Memory profiling documentation in AGENTS.md
+
+---
+
 ## Upcoming Features (v1.9+)
 
 ### v1.9.0 — Diff Command
@@ -380,6 +403,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.7.0 | Convert MVP | ✅ Released |
 | v1.8.0 | Validate | ✅ Released |
 | v1.8.1 | Glob Patterns + Agent Skills | ✅ Released |
+| v1.8.2 | Sample Memory Optimization | ✅ Released |
 
 ### Upcoming Features (v1.9+)
 
@@ -421,6 +445,10 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
    - Batch processing with glob patterns
    - Multi-dialect PK/FK validation
    - Agent Skill for AI coding tools
+
+7. ✅ **v1.8.2 — Sample Memory Optimization** — Released
+   - 98.5% memory reduction for sample command
+   - Memory profiling infrastructure
 
 ---
 

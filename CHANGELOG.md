@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.2] - 2025-12-21
+
+### Changed
+
+- **Sample command memory optimization**: Reduced memory usage by ~98.5% for large files
+  - 2.9 GB file: 8.2 GB → 114 MB peak RSS
+  - Uses streaming approach with temp files instead of in-memory accumulation
+  - Introduced `PkHashSet` (64-bit hashes) for compact primary key tracking
+  - Both `--percent` and `--rows` modes benefit from optimization
+
+### Added
+
+- **Memory profiling infrastructure**: New profiling script and Makefile targets
+  - `make profile` - Profile with medium dataset (~50MB)
+  - `make profile-large` - Profile with large dataset (~250MB)
+  - `make profile-mega` - Stress test with ~2GB dataset (100 tables × 100k rows)
+  - `scripts/profile-memory.sh` - Automated profiling for all commands
+  - Size presets: tiny (1MB), small (5MB), medium (50MB), large (250MB), xlarge (500MB), huge (1GB), mega (2GB)
+
 ## [1.8.1] - 2025-12-21
 
 ### Added

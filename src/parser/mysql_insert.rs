@@ -30,8 +30,45 @@ impl PkValue {
 /// Tuple of PK values for composite primary keys
 pub type PkTuple = SmallVec<[PkValue; 2]>;
 
-/// Set of primary key values for a table
+/// Set of primary key values for a table (stores full tuples)
 pub type PkSet = AHashSet<PkTuple>;
+
+/// Compact hash-based set of primary keys for memory efficiency.
+/// Uses 64-bit hashes instead of full values - suitable for large datasets
+/// where collision risk is acceptable (sampling, validation).
+pub type PkHashSet = AHashSet<u64>;
+
+/// Hash a PK tuple into a compact 64-bit hash for memory-efficient storage.
+/// Uses AHash for fast, high-quality hashing.
+pub fn hash_pk_tuple(pk: &PkTuple) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = ahash::AHasher::default();
+
+    // Include arity (number of columns) in the hash
+    (pk.len() as u8).hash(&mut hasher);
+
+    for v in pk {
+        match v {
+            PkValue::Int(i) => {
+                0u8.hash(&mut hasher);
+                i.hash(&mut hasher);
+            }
+            PkValue::BigInt(i) => {
+                1u8.hash(&mut hasher);
+                i.hash(&mut hasher);
+            }
+            PkValue::Text(s) => {
+                2u8.hash(&mut hasher);
+                s.hash(&mut hasher);
+            }
+            PkValue::Null => {
+                3u8.hash(&mut hasher);
+            }
+        }
+    }
+
+    hasher.finish()
+}
 
 /// Reference to a specific foreign key in a table
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

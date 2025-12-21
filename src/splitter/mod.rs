@@ -126,7 +126,7 @@ impl Splitter {
         let compression = Compression::from_path(&self.input_file);
 
         let reader: Box<dyn Read> = if let Some(cb) = self.config.progress_fn.take() {
-            let progress_reader = ProgressReader::new(file, move |bytes| cb(bytes));
+            let progress_reader = ProgressReader::new(file, cb);
             compression.wrap_reader(Box::new(progress_reader))
         } else {
             compression.wrap_reader(Box::new(file))

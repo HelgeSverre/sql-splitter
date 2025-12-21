@@ -102,6 +102,7 @@ fn run_single(
         json,
         max_rows_per_table,
         fk_checks_enabled: !no_fk_checks,
+        max_pk_fk_keys: None,
     };
 
     let mut validator = Validator::new(options);
@@ -238,6 +239,7 @@ fn run_multi(
             json,
             max_rows_per_table,
             fk_checks_enabled: !no_fk_checks,
+            max_pk_fk_keys: None,
         };
 
         let validator = Validator::new(options);

@@ -129,5 +129,6 @@ fn scale_description(scale: Scale) -> &'static str {
         Scale::Small => "small fixture (~500 rows)",
         Scale::Medium => "medium fixture (~10K rows)",
         Scale::Large => "large fixture (~200K rows)",
+        Scale::XLarge => "xlarge fixture (~1M rows)",
     }
 }

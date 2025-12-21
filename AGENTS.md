@@ -19,6 +19,9 @@ Run `make help` to see all available commands. Key commands:
 | `make native` | Optimized build for current CPU (best performance) |
 | `make test` | Run all tests |
 | `make bench` | Run criterion benchmarks |
+| `make profile` | Memory profile all commands (medium dataset) |
+| `make profile-large` | Memory profile with large dataset (~250MB) |
+| `make profile-mega` | Stress test profile (~2GB: 100 tables × 100k rows) |
 | `make fmt` | Format code |
 | `make check` | Check code without building |
 | `make clippy` | Run clippy lints |
@@ -171,6 +174,85 @@ cargo bench
 # Specific benchmark
 cargo bench -- read_statement
 ```
+
+## Memory Profiling
+
+Use GNU time to measure peak memory usage (Maximum Resident Set Size) for commands.
+
+### Prerequisites
+
+```bash
+# macOS: Install GNU time
+brew install gnu-time
+
+# Linux: GNU time is typically at /usr/bin/time
+```
+
+### Quick Profiling
+
+```bash
+# Profile a single command with gtime (macOS) or /usr/bin/time (Linux)
+gtime -v ./target/release/sql-splitter sample input.sql --percent 10 --output out.sql 2>&1 | grep "Maximum resident set size"
+
+# Full metrics
+gtime -v ./target/release/sql-splitter validate large-dump.sql --check-fk 2>&1 | tail -25
+```
+
+### Automated Profiling Script
+
+Use the profiling script to consistently benchmark all commands:
+
+```bash
+# Profile all commands with medium-sized generated test data
+./scripts/profile-memory.sh
+
+# Profile with larger test data
+./scripts/profile-memory.sh --size large
+
+# Profile with a specific file
+./scripts/profile-memory.sh --file /path/to/dump.sql
+
+# Only generate test fixtures (don't run profiling)
+./scripts/profile-memory.sh --generate-only --size xlarge
+```
+
+Size configurations:
+| Size | Rows/Table | Tables | Approx File Size |
+|------|------------|--------|------------------|
+| tiny | 500 | 10 | ~1MB |
+| small | 2,500 | 10 | ~5MB |
+| medium | 25,000 | 10 | ~50MB |
+| large | 125,000 | 10 | ~250MB |
+| xlarge | 250,000 | 10 | ~500MB |
+| huge | 500,000 | 10 | ~1GB |
+| mega | 100,000 | 100 | ~2GB |
+
+### Key Metrics
+
+From GNU time output:
+- **Maximum resident set size (kbytes)**: Peak memory usage
+- **Elapsed (wall clock) time**: Total execution time
+- **User time (seconds)**: CPU time in user mode
+
+### Example Output
+
+```
+Command      Dialect    File Size    Peak RSS    Wall Time   Extra Args
+------------------------------------------------------------
+analyze      mysql        2.05 MB      6.50 MB     0:00.05
+split        mysql        2.05 MB      7.20 MB     0:00.08
+validate     mysql        2.05 MB     12.30 MB     0:00.15   --check-fk
+sample       mysql        2.05 MB      8.10 MB     0:00.12
+sample       mysql        2.05 MB      8.50 MB     0:00.14   --preserve-relations
+```
+
+### Memory Optimization Guidelines
+
+When optimizing for memory:
+1. Use streaming/chunked processing instead of loading all data
+2. Use hash-based sets (`PkHashSet` with 64-bit hashes) instead of storing full values
+3. Write intermediate results to temp files instead of accumulating in memory
+4. Process tables sequentially in dependency order
 
 ## Key Implementation Details
 

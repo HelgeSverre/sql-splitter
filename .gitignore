@@ -26,6 +26,7 @@ flamegraph.svg
 
 # Generated test data
 /tests/data/generated/
+/tests/data/profile/
 /tests/fixtures/generated/*.sql
 
 # Real-world verification test files

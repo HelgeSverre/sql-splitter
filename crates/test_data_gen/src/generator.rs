@@ -17,6 +17,8 @@ pub enum Scale {
     Medium,
     /// ~200,000 total rows, 50 tenants
     Large,
+    /// ~1,000,000 total rows, 100 tenants (for memory stress testing)
+    XLarge,
 }
 
 impl Scale {
@@ -25,6 +27,7 @@ impl Scale {
             Scale::Small => 3,
             Scale::Medium => 10,
             Scale::Large => 50,
+            Scale::XLarge => 100,
         }
     }
 
@@ -33,6 +36,7 @@ impl Scale {
             Scale::Small => 5,
             Scale::Medium => 50,
             Scale::Large => 200,
+            Scale::XLarge => 500,
         }
     }
 
@@ -41,6 +45,7 @@ impl Scale {
             Scale::Small => 10,
             Scale::Medium => 100,
             Scale::Large => 500,
+            Scale::XLarge => 1500,
         }
     }
 
@@ -49,6 +54,7 @@ impl Scale {
             Scale::Small => 10,
             Scale::Medium => 50,
             Scale::Large => 200,
+            Scale::XLarge => 500,
         }
     }
 
@@ -57,6 +63,7 @@ impl Scale {
             Scale::Small => 5,
             Scale::Medium => 15,
             Scale::Large => 30,
+            Scale::XLarge => 50,
         }
     }
 
@@ -65,6 +72,7 @@ impl Scale {
             Scale::Small => 3,
             Scale::Medium => 20,
             Scale::Large => 100,
+            Scale::XLarge => 200,
         }
     }
 
@@ -73,6 +81,7 @@ impl Scale {
             Scale::Small => 5,
             Scale::Medium => 10,
             Scale::Large => 20,
+            Scale::XLarge => 30,
         }
     }
 
@@ -81,6 +90,7 @@ impl Scale {
             Scale::Small => 5,
             Scale::Medium => 20,
             Scale::Large => 50,
+            Scale::XLarge => 100,
         }
     }
 
@@ -89,6 +99,7 @@ impl Scale {
             Scale::Small => 10,
             Scale::Medium => 50,
             Scale::Large => 200,
+            Scale::XLarge => 500,
         }
     }
 }
@@ -101,7 +112,11 @@ impl std::str::FromStr for Scale {
             "small" | "s" => Ok(Scale::Small),
             "medium" | "m" => Ok(Scale::Medium),
             "large" | "l" => Ok(Scale::Large),
-            _ => Err(format!("Unknown scale: {}. Use small, medium, or large", s)),
+            "xlarge" | "xl" | "x" => Ok(Scale::XLarge),
+            _ => Err(format!(
+                "Unknown scale: {}. Use small, medium, large, or xlarge",
+                s
+            )),
         }
     }
 }

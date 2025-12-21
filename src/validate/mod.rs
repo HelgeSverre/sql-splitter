@@ -17,6 +17,7 @@ use ahash::{AHashMap, AHashSet};
 use serde::Serialize;
 use std::fmt;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -158,6 +159,10 @@ pub struct ValidateOptions {
     pub json: bool,
     pub max_rows_per_table: usize,
     pub fk_checks_enabled: bool,
+    /// Optional global cap on tracked PK/FK keys for memory safety.
+    /// When exceeded, PK/FK checks are skipped for the remainder of the run.
+    /// If None, no limit is enforced (default).
+    pub max_pk_fk_keys: Option<usize>,
 }
 
 /// Validation summary with collected issues
@@ -215,24 +220,57 @@ impl ValidationSummary {
     }
 }
 
-/// Primary key tuple for duplicate detection
-type PkTuple = Vec<Vec<u8>>;
+/// Compact primary/foreign key representation for duplicate and FK checks.
+/// We use a 64-bit hash; collision risk is negligible for realistic dumps.
+type PkHash = u64;
 
-/// Pending FK check to be validated after all PKs are loaded
+/// Hash a list of PK/FK values into a compact 64-bit hash.
+/// Uses AHash for fast, high-quality hashing.
+fn hash_pk_values(values: &smallvec::SmallVec<[mysql_insert::PkValue; 2]>) -> PkHash {
+    let mut hasher = ahash::AHasher::default();
+
+    // Include arity (number of columns) in the hash to distinguish (1) from (1, NULL)
+    (values.len() as u8).hash(&mut hasher);
+
+    for v in values {
+        match v {
+            mysql_insert::PkValue::Int(i) => {
+                0u8.hash(&mut hasher);
+                i.hash(&mut hasher);
+            }
+            mysql_insert::PkValue::BigInt(i) => {
+                1u8.hash(&mut hasher);
+                i.hash(&mut hasher);
+            }
+            mysql_insert::PkValue::Text(s) => {
+                2u8.hash(&mut hasher);
+                s.hash(&mut hasher);
+            }
+            mysql_insert::PkValue::Null => {
+                3u8.hash(&mut hasher);
+            }
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Pending FK check to be validated after all PKs are loaded.
+/// Uses compact hash representation to minimize memory usage.
 struct PendingFkCheck {
     child_table_id: TableId,
-    child_table_name: String,
     parent_table_id: TableId,
-    parent_table_name: String,
-    fk_tuple: PkTuple,
-    fk_display: String,
+    fk_hash: PkHash,
     stmt_idx: u64,
 }
 
-/// Per-table tracking state for data checks
+/// Per-table tracking state for data checks.
+/// Uses hashed PK values to minimize memory usage.
 struct TableState {
     row_count: u64,
-    pk_values: Option<AHashSet<PkTuple>>,
+    /// Set of hashed PKs for duplicate and FK parent existence checks.
+    /// When None, PK/FK checks for this table are skipped (due to row or memory limits).
+    pk_values: Option<AHashSet<PkHash>>,
     pk_column_indices: Vec<usize>,
     pk_duplicates: u64,
     fk_missing_parents: u64,
@@ -285,6 +323,11 @@ pub struct Validator {
     ddl_dml_errors: usize,
     pk_errors: usize,
     fk_errors: usize,
+
+    // Memory tracking for PK/FK checks
+    tracked_pk_count: usize,
+    tracked_fk_count: usize,
+    pk_fk_checks_disabled_due_to_memory: bool,
 }
 
 impl Validator {
@@ -306,6 +349,9 @@ impl Validator {
             ddl_dml_errors: 0,
             pk_errors: 0,
             fk_errors: 0,
+            tracked_pk_count: 0,
+            tracked_fk_count: 0,
+            pk_fk_checks_disabled_due_to_memory: false,
         }
     }
 
@@ -341,6 +387,38 @@ impl Validator {
         }
 
         self.issues.push(issue);
+    }
+
+    /// Check if we've exceeded the memory budget for PK/FK tracking.
+    /// If so, disable further checks and free existing state.
+    fn enforce_pk_fk_memory_budget(&mut self) {
+        if self.pk_fk_checks_disabled_due_to_memory {
+            return;
+        }
+
+        let Some(limit) = self.options.max_pk_fk_keys else {
+            return;
+        };
+
+        let total_tracked = self.tracked_pk_count + self.tracked_fk_count;
+        if total_tracked > limit {
+            self.pk_fk_checks_disabled_due_to_memory = true;
+
+            // Drop existing state to free memory
+            for state in self.table_states.values_mut() {
+                state.pk_values = None;
+            }
+            self.pending_fk_checks.clear();
+            self.pending_fk_checks.shrink_to_fit();
+
+            self.add_issue(ValidationIssue::warning(
+                "PK_FK_CHECKS_SKIPPED_MEMORY",
+                format!(
+                    "Skipping PK/FK checks after tracking {} keys (memory limit of {} exceeded)",
+                    total_tracked, limit
+                ),
+            ));
+        }
     }
 
     pub fn validate(mut self) -> anyhow::Result<ValidationSummary> {
@@ -667,6 +745,11 @@ impl Validator {
         fk_values: &[(mysql_insert::FkRef, smallvec::SmallVec<[mysql_insert::PkValue; 2]>)],
         stmt_idx: u64,
     ) {
+        // Skip if memory budget exceeded
+        if self.pk_fk_checks_disabled_due_to_memory {
+            return;
+        }
+
         let max_rows = self.options.max_rows_per_table as u64;
 
         let state = match self.table_states.get_mut(&table_id) {
@@ -694,22 +777,20 @@ impl Validator {
             return;
         }
 
-        // PK duplicate check using the parsed PK from the row
+        // PK duplicate check using hash-based storage (8 bytes per key instead of full values)
         if let Some(pk_values) = pk {
             if let Some(ref mut pk_set) = state.pk_values {
-                // Convert SmallVec<[PkValue; 2]> to Vec<Vec<u8>> for our set
-                let pk_tuple: PkTuple = pk_values
-                    .iter()
-                    .map(|v| match v {
-                        mysql_insert::PkValue::Int(i) => i.to_string().into_bytes(),
-                        mysql_insert::PkValue::BigInt(i) => i.to_string().into_bytes(),
-                        mysql_insert::PkValue::Text(s) => s.as_bytes().to_vec(),
-                        mysql_insert::PkValue::Null => Vec::new(),
-                    })
-                    .collect();
+                let pk_hash = hash_pk_values(pk_values);
 
-                if !pk_set.insert(pk_tuple.clone()) {
+                if pk_set.insert(pk_hash) {
+                    // Only count unique keys
+                    self.tracked_pk_count += 1;
+                    self.enforce_pk_fk_memory_budget();
+                } else {
+                    // Duplicate detected
                     state.pk_duplicates += 1;
+
+                    // Build human-readable display on demand (duplicates are rare)
                     let pk_display: String = pk_values
                         .iter()
                         .map(|v| match v {
@@ -739,63 +820,55 @@ impl Validator {
             }
         }
 
+        // Skip FK collection if checks are disabled
+        if self.pk_fk_checks_disabled_due_to_memory {
+            return;
+        }
+
         // Collect FK references for deferred validation (after all PKs are loaded)
-        let schema = match &self.schema {
-            Some(s) => s,
-            None => return,
-        };
-
-        let table_schema = match schema.table(table_id) {
-            Some(t) => t,
-            None => return,
-        };
-
-        for (fk_ref, fk_vals) in fk_values.iter() {
-            // Skip if all FK values are NULL (nullable FK)
-            if fk_vals.iter().all(|v| v.is_null()) {
-                continue;
-            }
-
-            let fk_def = match table_schema.foreign_keys.get(fk_ref.fk_index as usize) {
-                Some(fk) => fk,
-                None => continue,
+        // First, gather the FK checks into a temp vec to avoid borrow issues
+        let new_fk_checks: Vec<PendingFkCheck> = {
+            let schema = match &self.schema {
+                Some(s) => s,
+                None => return,
             };
 
-            let parent_table_id = match fk_def.referenced_table_id {
-                Some(id) => id,
-                None => continue,
+            let table_schema = match schema.table(table_id) {
+                Some(t) => t,
+                None => return,
             };
 
-            let fk_tuple: PkTuple = fk_vals
+            fk_values
                 .iter()
-                .map(|v| match v {
-                    mysql_insert::PkValue::Int(i) => i.to_string().into_bytes(),
-                    mysql_insert::PkValue::BigInt(i) => i.to_string().into_bytes(),
-                    mysql_insert::PkValue::Text(s) => s.as_bytes().to_vec(),
-                    mysql_insert::PkValue::Null => Vec::new(),
-                })
-                .collect();
+                .filter_map(|(fk_ref, fk_vals)| {
+                    // Skip if all FK values are NULL (nullable FK)
+                    if fk_vals.iter().all(|v| v.is_null()) {
+                        return None;
+                    }
 
-            let fk_display: String = fk_vals
-                .iter()
-                .map(|v| match v {
-                    mysql_insert::PkValue::Int(i) => i.to_string(),
-                    mysql_insert::PkValue::BigInt(i) => i.to_string(),
-                    mysql_insert::PkValue::Text(s) => s.to_string(),
-                    mysql_insert::PkValue::Null => "NULL".to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+                    let fk_def = table_schema.foreign_keys.get(fk_ref.fk_index as usize)?;
+                    let parent_table_id = fk_def.referenced_table_id?;
 
-            self.pending_fk_checks.push(PendingFkCheck {
-                child_table_id: table_id,
-                child_table_name: table_name.to_string(),
-                parent_table_id,
-                parent_table_name: fk_def.referenced_table.clone(),
-                fk_tuple,
-                fk_display,
-                stmt_idx,
-            });
+                    // Store only the hash, not full values - saves significant memory
+                    let fk_hash = hash_pk_values(fk_vals);
+
+                    Some(PendingFkCheck {
+                        child_table_id: table_id,
+                        parent_table_id,
+                        fk_hash,
+                        stmt_idx,
+                    })
+                })
+                .collect()
+        };
+
+        // Now add the FK checks and update memory tracking
+        let new_count = new_fk_checks.len();
+        self.pending_fk_checks.extend(new_fk_checks);
+        self.tracked_fk_count += new_count;
+
+        if new_count > 0 {
+            self.enforce_pk_fk_memory_budget();
         }
     }
 
@@ -806,7 +879,7 @@ impl Validator {
                 .table_states
                 .get(&check.parent_table_id)
                 .and_then(|s| s.pk_values.as_ref())
-                .is_some_and(|set| set.contains(&check.fk_tuple));
+                .is_some_and(|set| set.contains(&check.fk_hash));
 
             if !parent_has_pk {
                 let state = match self.table_states.get_mut(&check.child_table_id) {
@@ -817,17 +890,32 @@ impl Validator {
 
                 // Only add issue for first few violations per table
                 if state.fk_missing_parents <= 5 {
+                    // Derive table names from the schema (not stored per FK to save memory)
+                    let (child_name, parent_name) = if let Some(schema) = &self.schema {
+                        let child = schema
+                            .table(check.child_table_id)
+                            .map(|t| t.name.clone())
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        let parent = schema
+                            .table(check.parent_table_id)
+                            .map(|t| t.name.clone())
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        (child, parent)
+                    } else {
+                        ("<unknown>".to_string(), "<unknown>".to_string())
+                    };
+
                     self.add_issue(
                         ValidationIssue::error(
                             "FK_MISSING_PARENT",
                             format!(
-                                "FK violation in '{}': ({}) references missing row in '{}'",
-                                check.child_table_name, check.fk_display, check.parent_table_name
+                                "FK violation in '{}': references missing row in '{}'",
+                                child_name, parent_name
                             ),
                         )
                         .with_location(
                             Location::new()
-                                .with_table(&check.child_table_name)
+                                .with_table(child_name)
                                 .with_statement(check.stmt_idx),
                         ),
                     );
@@ -873,6 +961,8 @@ impl Validator {
 
         let pk_status = if !self.options.fk_checks_enabled {
             CheckStatus::Skipped("--no-fk-checks".to_string())
+        } else if self.pk_fk_checks_disabled_due_to_memory {
+            CheckStatus::Skipped("memory limit exceeded".to_string())
         } else if self.pk_errors > 0 {
             CheckStatus::Failed(self.pk_errors)
         } else {
@@ -881,6 +971,8 @@ impl Validator {
 
         let fk_status = if !self.options.fk_checks_enabled {
             CheckStatus::Skipped("--no-fk-checks".to_string())
+        } else if self.pk_fk_checks_disabled_due_to_memory {
+            CheckStatus::Skipped("memory limit exceeded".to_string())
         } else if self.fk_errors > 0 {
             CheckStatus::Failed(self.fk_errors)
         } else {
