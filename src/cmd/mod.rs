@@ -65,6 +65,10 @@ pub enum Commands {
         /// Stop on first file that fails (for glob patterns)
         #[arg(long)]
         fail_fast: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Analyze a SQL file and display statistics
@@ -84,6 +88,10 @@ pub enum Commands {
         /// Stop on first file that fails (for glob patterns)
         #[arg(long)]
         fail_fast: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Merge split SQL files back into a single file
@@ -122,6 +130,10 @@ pub enum Commands {
         /// Preview without writing files (dry run)
         #[arg(long)]
         dry_run: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Sample a subset of rows from a SQL dump while preserving FK integrity
@@ -196,6 +208,10 @@ pub enum Commands {
         /// Preview without writing files (dry run)
         #[arg(long)]
         dry_run: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Extract tenant-specific data from a multi-tenant SQL dump
@@ -258,6 +274,10 @@ pub enum Commands {
         /// Preview without writing files (dry run)
         #[arg(long)]
         dry_run: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Convert a SQL dump between dialects (MySQL, PostgreSQL, SQLite)
@@ -293,6 +313,10 @@ pub enum Commands {
         /// Stop on first file that fails (for glob patterns)
         #[arg(long)]
         fail_fast: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Validate a SQL dump for structural and data integrity issues
@@ -355,6 +379,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             schema_only,
             data_only,
             fail_fast,
+            json,
         } => split::run(
             file,
             output,
@@ -366,13 +391,15 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             schema_only,
             data_only,
             fail_fast,
+            json,
         ),
         Commands::Analyze {
             file,
             dialect,
             progress,
             fail_fast,
-        } => analyze::run(file, dialect, progress, fail_fast),
+            json,
+        } => analyze::run(file, dialect, progress, fail_fast, json),
         Commands::Merge {
             input_dir,
             output,
@@ -383,6 +410,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             no_header,
             progress,
             dry_run,
+            json,
         } => merge::run(
             input_dir,
             output,
@@ -393,6 +421,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             no_header,
             progress,
             dry_run,
+            json,
         ),
         Commands::Sample {
             file,
@@ -413,6 +442,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             no_schema,
             progress,
             dry_run,
+            json,
         } => {
             let effective_limit = if no_limit || max_total_rows == Some(0) {
                 None
@@ -437,6 +467,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 no_schema,
                 progress,
                 dry_run,
+                json,
             )
         }
         Commands::Shard {
@@ -455,6 +486,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             no_schema,
             progress,
             dry_run,
+            json,
         } => {
             let effective_limit = if no_limit || max_selected_rows == Some(0) {
                 None
@@ -476,6 +508,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 no_schema,
                 progress,
                 dry_run,
+                json,
             )
         }
         Commands::Convert {
@@ -487,7 +520,10 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             progress,
             dry_run,
             fail_fast,
-        } => convert::run(file, output, from, to, strict, progress, dry_run, fail_fast),
+            json,
+        } => convert::run(
+            file, output, from, to, strict, progress, dry_run, fail_fast, json,
+        ),
         Commands::Validate {
             file,
             dialect,

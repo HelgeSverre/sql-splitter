@@ -29,6 +29,7 @@ All commands support:
     - `--progress` / `-p`: Show progress bar
     - `--dry-run`: Preview without writing output
     - `--fail-fast`: Stop on first error (for glob patterns)
+    - `--json`: Machine-readable JSON output for automation
 - **Auto-dialect detection**: MySQL, PostgreSQL, SQLite (override with `--dialect`)
 
 ## Decision Guide: Which Command to Use
@@ -137,7 +138,46 @@ sql-splitter validate "dumps/*.sql.gz" --strict --fail-fast --progress
 
 ---
 
-## Workflow 4: Multi-Tenant Data Extraction
+## Workflow 4: JSON Output for Automation
+
+**Goal:** Use structured JSON output for scripting, CI/CD, and programmatic processing.
+
+All commands support `--json` for machine-readable output:
+
+```bash
+# Analyze with JSON output
+sql-splitter analyze dump.sql --json | jq '.summary.total_tables'
+
+# Split with JSON statistics
+sql-splitter split dump.sql -o tables/ --json | jq '.statistics.throughput_mb_per_sec'
+
+# Sample with JSON breakdown
+sql-splitter sample dump.sql --percent 10 --json | jq '.tables[] | {name, rows_selected}'
+
+# Convert with JSON warnings
+sql-splitter convert dump.sql --to postgres --json | jq '.warnings'
+
+# Shard with JSON tenant info
+sql-splitter shard dump.sql --tenant-value 42 --json | jq '.statistics.reduction_percent'
+
+# Merge with JSON statistics
+sql-splitter merge tables/ -o merged.sql --json | jq '.statistics.tables_merged'
+
+# Multi-file validation with aggregated JSON
+sql-splitter validate "dumps/*.sql" --json | jq '.results[] | select(.passed == false)'
+```
+
+**JSON output includes:**
+
+- Input/output file paths
+- Processing statistics (tables, rows, bytes, elapsed time)
+- Per-table breakdowns
+- Warnings and errors
+- Command-specific metadata (dialect, mode, tenant info)
+
+---
+
+## Workflow 5: Multi-Tenant Data Extraction
 
 **Goal:** Extract data for a specific tenant from a multi-tenant dump.
 

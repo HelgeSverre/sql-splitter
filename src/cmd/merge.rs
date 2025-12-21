@@ -1,5 +1,6 @@
 use crate::parser::SqlDialect;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -7,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Statistics from merge operation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct MergeStats {
     pub tables_merged: usize,
     pub bytes_written: u64,
@@ -27,6 +28,34 @@ pub struct MergeConfig {
     pub progress: bool,
 }
 
+/// JSON output for merge command
+#[derive(Serialize)]
+struct MergeJsonOutput {
+    input_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_file: Option<String>,
+    dialect: String,
+    dry_run: bool,
+    statistics: MergeStatistics,
+    tables: Vec<String>,
+    options: MergeOptions,
+}
+
+#[derive(Serialize)]
+struct MergeStatistics {
+    tables_merged: usize,
+    bytes_written: u64,
+    elapsed_secs: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    throughput_kb_per_sec: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct MergeOptions {
+    transaction: bool,
+    header: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     input_dir: PathBuf,
@@ -38,6 +67,7 @@ pub fn run(
     no_header: bool,
     progress: bool,
     dry_run: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     // Validate input directory
     if !input_dir.exists() {
@@ -92,24 +122,47 @@ pub fn run(
     let mut sorted_files = filtered_files;
     sorted_files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    println!(
-        "Merging {} tables from: {}",
-        sorted_files.len(),
-        input_dir.display()
-    );
-    if let Some(ref out) = output {
-        println!("Output: {}", out.display());
-    } else {
-        println!("Output: stdout");
+    if !json {
+        println!(
+            "Merging {} tables from: {}",
+            sorted_files.len(),
+            input_dir.display()
+        );
+        if let Some(ref out) = output {
+            println!("Output: {}", out.display());
+        } else {
+            println!("Output: stdout");
+        }
+        println!();
     }
-    println!();
 
     if dry_run {
-        println!("Tables to merge:");
-        for (name, _) in &sorted_files {
-            println!("  - {}", name);
+        if json {
+            let output_json = MergeJsonOutput {
+                input_dir: input_dir.display().to_string(),
+                output_file: output.as_ref().map(|p| p.display().to_string()),
+                dialect: dialect.to_string(),
+                dry_run: true,
+                statistics: MergeStatistics {
+                    tables_merged: sorted_files.len(),
+                    bytes_written: 0,
+                    elapsed_secs: 0.0,
+                    throughput_kb_per_sec: None,
+                },
+                tables: sorted_files.iter().map(|(name, _)| name.clone()).collect(),
+                options: MergeOptions {
+                    transaction,
+                    header: !no_header,
+                },
+            };
+            println!("{}", serde_json::to_string_pretty(&output_json)?);
+        } else {
+            println!("Tables to merge:");
+            for (name, _) in &sorted_files {
+                println!("  - {}", name);
+            }
+            println!("\nDry run complete. No files written.");
         }
-        println!("\nDry run complete. No files written.");
         return Ok(());
     }
 
@@ -129,7 +182,7 @@ pub fn run(
             dialect,
             transaction,
             !no_header,
-            progress,
+            progress && !json,
         )?
     } else {
         let stdout = io::stdout();
@@ -140,13 +193,45 @@ pub fn run(
             dialect,
             transaction,
             !no_header,
-            progress,
+            progress && !json,
         )?
     };
 
     let elapsed = start_time.elapsed();
 
-    if output.is_some() {
+    if json {
+        let throughput = if elapsed.as_secs_f64() > 0.0 {
+            Some(stats.bytes_written as f64 / 1024.0 / elapsed.as_secs_f64())
+        } else {
+            None
+        };
+
+        let output_json = MergeJsonOutput {
+            input_dir: input_dir.display().to_string(),
+            output_file: output.as_ref().map(|p| p.display().to_string()),
+            dialect: dialect.to_string(),
+            dry_run: false,
+            statistics: MergeStatistics {
+                tables_merged: stats.tables_merged,
+                bytes_written: stats.bytes_written,
+                elapsed_secs: elapsed.as_secs_f64(),
+                throughput_kb_per_sec: throughput,
+            },
+            tables: stats.table_names.clone(),
+            options: MergeOptions {
+                transaction,
+                header: !no_header,
+            },
+        };
+        // Only print JSON to stdout if we're not also writing merge output to stdout
+        if output.is_some() {
+            println!("{}", serde_json::to_string_pretty(&output_json)?);
+        } else {
+            // Can't output JSON when merge output goes to stdout
+            // The JSON would be mixed with SQL output
+            eprintln!("{}", serde_json::to_string_pretty(&output_json)?);
+        }
+    } else if output.is_some() {
         println!("\n✓ Merge completed successfully!");
         println!("\nStatistics:");
         println!("  Tables merged: {}", stats.tables_merged);

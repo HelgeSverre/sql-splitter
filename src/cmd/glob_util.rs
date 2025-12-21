@@ -30,7 +30,7 @@ pub fn is_glob_pattern(path: &str) -> bool {
 /// - A literal path doesn't exist
 pub fn expand_file_pattern(pattern: &Path) -> anyhow::Result<ExpandedFiles> {
     let pattern_str = pattern.to_string_lossy();
-    
+
     if !is_glob_pattern(&pattern_str) {
         if !pattern.exists() {
             anyhow::bail!("file does not exist: {}", pattern.display());
@@ -145,7 +145,7 @@ mod tests {
 
         let pattern = dir.path().join("*.sql");
         let result = expand_file_pattern(&pattern).unwrap();
-        
+
         assert!(result.pattern_was_glob);
         assert_eq!(result.files.len(), 2);
         assert!(result.files.iter().all(|f| f.extension().unwrap() == "sql"));
@@ -156,7 +156,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pattern = dir.path().join("*.sql");
         let result = expand_file_pattern(&pattern);
-        
+
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("no files match"));
     }
@@ -166,13 +166,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let subdir = dir.path().join("subdir");
         fs::create_dir(&subdir).unwrap();
-        
+
         fs::write(dir.path().join("a.sql"), "SELECT 1;").unwrap();
         fs::write(subdir.join("b.sql"), "SELECT 2;").unwrap();
 
         let pattern = dir.path().join("**/*.sql");
         let result = expand_file_pattern(&pattern).unwrap();
-        
+
         assert!(result.pattern_was_glob);
         assert_eq!(result.files.len(), 2);
     }

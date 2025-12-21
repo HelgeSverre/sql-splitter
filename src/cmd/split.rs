@@ -1,12 +1,68 @@
 use crate::parser::{detect_dialect_from_file, ContentFilter, DialectConfidence, SqlDialect};
 use crate::splitter::{Compression, Splitter};
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use super::glob_util::{expand_file_pattern, MultiFileResult};
+
+/// JSON output for single file split
+#[derive(Serialize)]
+struct SplitJsonOutput {
+    input_file: String,
+    output_dir: String,
+    dialect: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialect_confidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compression: Option<String>,
+    dry_run: bool,
+    statistics: SplitStatistics,
+    tables: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SplitStatistics {
+    tables_found: usize,
+    statements_processed: u64,
+    bytes_processed: u64,
+    elapsed_secs: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    throughput_mb_per_sec: Option<f64>,
+}
+
+/// JSON output for multi-file split
+#[derive(Serialize)]
+struct MultiSplitJsonOutput {
+    total_files: usize,
+    succeeded: usize,
+    failed: usize,
+    elapsed_secs: f64,
+    results: Vec<SplitFileResult>,
+}
+
+#[derive(Serialize)]
+struct SplitFileResult {
+    file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_mb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tables_found: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statements_processed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tables: Option<Vec<String>>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -20,6 +76,7 @@ pub fn run(
     schema_only: bool,
     data_only: bool,
     fail_fast: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     let expanded = expand_file_pattern(&file)?;
 
@@ -34,6 +91,7 @@ pub fn run(
             tables,
             schema_only,
             data_only,
+            json,
         )
     } else {
         run_multi(
@@ -47,6 +105,7 @@ pub fn run(
             schema_only,
             data_only,
             fail_fast,
+            json,
         )
     }
 }
@@ -62,6 +121,7 @@ fn run_single(
     tables: Option<String>,
     schema_only: bool,
     data_only: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
@@ -71,11 +131,29 @@ fn run_single(
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
     let compression = Compression::from_path(&file);
-    if compression != Compression::None {
-        println!("Detected compression: {}", compression);
-    }
+    let compression_str = if compression != Compression::None {
+        if !json {
+            println!("Detected compression: {}", compression);
+        }
+        Some(compression.to_string())
+    } else {
+        None
+    };
 
-    let dialect = resolve_dialect(&file, dialect, compression)?;
+    let (dialect_resolved, dialect_confidence) =
+        resolve_dialect_with_confidence(&file, dialect.clone(), compression)?;
+
+    if !json && dialect.is_none() {
+        let confidence_str = match dialect_confidence {
+            DialectConfidence::High => "high confidence",
+            DialectConfidence::Medium => "medium confidence",
+            DialectConfidence::Low => "low confidence",
+        };
+        println!(
+            "Auto-detected dialect: {} ({})",
+            dialect_resolved, confidence_str
+        );
+    }
 
     let content_filter = if schema_only {
         ContentFilter::SchemaOnly
@@ -85,38 +163,40 @@ fn run_single(
         ContentFilter::All
     };
 
-    if dry_run {
-        println!(
-            "Dry run: analyzing SQL file: {} ({:.2} MB)",
-            file.display(),
-            file_size_mb
-        );
-    } else {
-        println!(
-            "Splitting SQL file: {} ({:.2} MB)",
-            file.display(),
-            file_size_mb
-        );
-        println!("Output directory: {}", output.display());
-    }
+    if !json {
+        if dry_run {
+            println!(
+                "Dry run: analyzing SQL file: {} ({:.2} MB)",
+                file.display(),
+                file_size_mb
+            );
+        } else {
+            println!(
+                "Splitting SQL file: {} ({:.2} MB)",
+                file.display(),
+                file_size_mb
+            );
+            println!("Output directory: {}", output.display());
+        }
 
-    match content_filter {
-        ContentFilter::SchemaOnly => println!("Mode: schema-only (DDL statements)"),
-        ContentFilter::DataOnly => println!("Mode: data-only (INSERT/COPY statements)"),
-        ContentFilter::All => {}
+        match content_filter {
+            ContentFilter::SchemaOnly => println!("Mode: schema-only (DDL statements)"),
+            ContentFilter::DataOnly => println!("Mode: data-only (INSERT/COPY statements)"),
+            ContentFilter::All => {}
+        }
+        println!();
     }
-    println!();
 
     let table_filter: Vec<String> = tables
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
-    if !table_filter.is_empty() {
+    if !json && !table_filter.is_empty() {
         println!("Filtering to tables: {}\n", table_filter.join(", "));
     }
 
-    let mut splitter = Splitter::new(file, output.clone())
-        .with_dialect(dialect)
+    let mut splitter = Splitter::new(file.clone(), output.clone())
+        .with_dialect(dialect_resolved)
         .with_dry_run(dry_run)
         .with_content_filter(content_filter);
 
@@ -126,7 +206,7 @@ fn run_single(
 
     let start_time = Instant::now();
 
-    let stats = if progress {
+    let stats = if progress && !json {
         let pb = ProgressBar::new(file_size);
         pb.set_style(
             ProgressStyle::with_template(
@@ -156,32 +236,63 @@ fn run_single(
 
     let elapsed = start_time.elapsed();
 
-    if dry_run {
-        println!("\n✓ Dry run completed!");
-        println!("\nWould create {} table files:", stats.tables_found);
-        for name in &stats.table_names {
-            println!("  - {}.sql", name);
-        }
+    if json {
+        let throughput = if elapsed.as_secs_f64() > 0.0 {
+            Some(stats.bytes_processed as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64())
+        } else {
+            None
+        };
+
+        let output_json = SplitJsonOutput {
+            input_file: file.display().to_string(),
+            output_dir: output.display().to_string(),
+            dialect: dialect_resolved.to_string(),
+            dialect_confidence: if dialect.is_none() {
+                Some(format!("{:?}", dialect_confidence).to_lowercase())
+            } else {
+                None
+            },
+            compression: compression_str,
+            dry_run,
+            statistics: SplitStatistics {
+                tables_found: stats.tables_found,
+                statements_processed: stats.statements_processed,
+                bytes_processed: stats.bytes_processed,
+                elapsed_secs: elapsed.as_secs_f64(),
+                throughput_mb_per_sec: throughput,
+            },
+            tables: stats.table_names,
+        };
+        println!("{}", serde_json::to_string_pretty(&output_json)?);
     } else {
-        println!("\n✓ Split completed successfully!");
-    }
+        if dry_run {
+            println!("\n✓ Dry run completed!");
+            println!("\nWould create {} table files:", stats.tables_found);
+            for name in &stats.table_names {
+                println!("  - {}.sql", name);
+            }
+        } else {
+            println!("\n✓ Split completed successfully!");
+        }
 
-    println!("\nStatistics:");
-    println!("  Tables found: {}", stats.tables_found);
-    println!("  Statements processed: {}", stats.statements_processed);
-    println!(
-        "  Bytes processed: {:.2} MB",
-        stats.bytes_processed as f64 / (1024.0 * 1024.0)
-    );
-    println!("  Elapsed time: {:.3?}", elapsed);
+        println!("\nStatistics:");
+        println!("  Tables found: {}", stats.tables_found);
+        println!("  Statements processed: {}", stats.statements_processed);
+        println!(
+            "  Bytes processed: {:.2} MB",
+            stats.bytes_processed as f64 / (1024.0 * 1024.0)
+        );
+        println!("  Elapsed time: {:.3?}", elapsed);
 
-    if elapsed.as_secs_f64() > 0.0 {
-        let throughput = stats.bytes_processed as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
-        println!("  Throughput: {:.2} MB/s", throughput);
-    }
+        if elapsed.as_secs_f64() > 0.0 {
+            let throughput =
+                stats.bytes_processed as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
+            println!("  Throughput: {:.2} MB/s", throughput);
+        }
 
-    if verbose && !dry_run {
-        println!("\nOutput files created in: {}", output.display());
+        if verbose && !dry_run {
+            println!("\nOutput files created in: {}", output.display());
+        }
     }
 
     Ok(())
@@ -199,22 +310,28 @@ fn run_multi(
     schema_only: bool,
     data_only: bool,
     fail_fast: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     let total = files.len();
     let mut result = MultiFileResult::new();
     result.total_files = total;
 
-    println!("Splitting {} files...\n", total);
+    if !json {
+        println!("Splitting {} files...\n", total);
+    }
 
     let start_time = Instant::now();
+    let mut json_results: Vec<SplitFileResult> = Vec::new();
 
     for (idx, file) in files.iter().enumerate() {
-        println!(
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
-            idx + 1,
-            total,
-            file.display()
-        );
+        if !json {
+            println!(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
+                idx + 1,
+                total,
+                file.display()
+            );
+        }
 
         let file_stem = file
             .file_stem()
@@ -225,7 +342,20 @@ fn run_multi(
         let file_size = match std::fs::metadata(file) {
             Ok(m) => m.len(),
             Err(e) => {
-                println!("  Error: {}\n", e);
+                if !json {
+                    println!("  Error: {}\n", e);
+                }
+                json_results.push(SplitFileResult {
+                    file: file.display().to_string(),
+                    size_mb: None,
+                    dialect: None,
+                    output_dir: None,
+                    tables_found: None,
+                    statements_processed: None,
+                    tables: None,
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                });
                 result.record_failure(file.clone(), e.to_string());
                 if fail_fast {
                     break;
@@ -239,7 +369,20 @@ fn run_multi(
         let resolved_dialect = match resolve_dialect(file, dialect.clone(), compression) {
             Ok(d) => d,
             Err(e) => {
-                println!("  Error: {}\n", e);
+                if !json {
+                    println!("  Error: {}\n", e);
+                }
+                json_results.push(SplitFileResult {
+                    file: file.display().to_string(),
+                    size_mb: Some(file_size_mb),
+                    dialect: None,
+                    output_dir: None,
+                    tables_found: None,
+                    statements_processed: None,
+                    tables: None,
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                });
                 result.record_failure(file.clone(), e.to_string());
                 if fail_fast {
                     break;
@@ -248,9 +391,14 @@ fn run_multi(
             }
         };
 
-        println!("  Size: {:.2} MB | Dialect: {}", file_size_mb, resolved_dialect);
-        if !dry_run {
-            println!("  Output: {}", output_dir.display());
+        if !json {
+            println!(
+                "  Size: {:.2} MB | Dialect: {}",
+                file_size_mb, resolved_dialect
+            );
+            if !dry_run {
+                println!("  Output: {}", output_dir.display());
+            }
         }
 
         let content_filter = if schema_only {
@@ -266,7 +414,7 @@ fn run_multi(
             .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
-        let mut splitter = Splitter::new(file.clone(), output_dir)
+        let mut splitter = Splitter::new(file.clone(), output_dir.clone())
             .with_dialect(resolved_dialect)
             .with_dry_run(dry_run)
             .with_content_filter(content_filter);
@@ -275,7 +423,7 @@ fn run_multi(
             splitter = splitter.with_table_filter(table_filter);
         }
 
-        let split_result = if progress {
+        let split_result = if progress && !json {
             let pb = ProgressBar::new(file_size);
             pb.set_style(
                 ProgressStyle::with_template(
@@ -300,22 +448,48 @@ fn run_multi(
 
         match split_result {
             Ok(stats) => {
-                println!(
-                    "  Tables: {} | Statements: {} | {}\n",
-                    stats.tables_found,
-                    stats.statements_processed,
-                    if dry_run { "(dry run)" } else { "✓" }
-                );
-                if verbose {
-                    for name in &stats.table_names {
-                        println!("    - {}.sql", name);
+                if !json {
+                    println!(
+                        "  Tables: {} | Statements: {} | {}\n",
+                        stats.tables_found,
+                        stats.statements_processed,
+                        if dry_run { "(dry run)" } else { "✓" }
+                    );
+                    if verbose {
+                        for name in &stats.table_names {
+                            println!("    - {}.sql", name);
+                        }
+                        println!();
                     }
-                    println!();
                 }
+                json_results.push(SplitFileResult {
+                    file: file.display().to_string(),
+                    size_mb: Some(file_size_mb),
+                    dialect: Some(resolved_dialect.to_string()),
+                    output_dir: Some(output_dir.display().to_string()),
+                    tables_found: Some(stats.tables_found),
+                    statements_processed: Some(stats.statements_processed),
+                    tables: Some(stats.table_names),
+                    status: "success".to_string(),
+                    error: None,
+                });
                 result.record_success();
             }
             Err(e) => {
-                println!("  Error: {}\n", e);
+                if !json {
+                    println!("  Error: {}\n", e);
+                }
+                json_results.push(SplitFileResult {
+                    file: file.display().to_string(),
+                    size_mb: Some(file_size_mb),
+                    dialect: Some(resolved_dialect.to_string()),
+                    output_dir: None,
+                    tables_found: None,
+                    statements_processed: None,
+                    tables: None,
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                });
                 result.record_failure(file.clone(), e.to_string());
                 if fail_fast {
                     break;
@@ -326,20 +500,31 @@ fn run_multi(
 
     let elapsed = start_time.elapsed();
 
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Split Summary:");
-    println!("  Total files: {}", total);
-    println!("  Succeeded: {}", result.succeeded);
-    println!("  Failed: {}", result.failed);
-    println!("  Time: {:.3?}", elapsed);
+    if json {
+        let output_json = MultiSplitJsonOutput {
+            total_files: total,
+            succeeded: result.succeeded,
+            failed: result.failed,
+            elapsed_secs: elapsed.as_secs_f64(),
+            results: json_results,
+        };
+        println!("{}", serde_json::to_string_pretty(&output_json)?);
+    } else {
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Split Summary:");
+        println!("  Total files: {}", total);
+        println!("  Succeeded: {}", result.succeeded);
+        println!("  Failed: {}", result.failed);
+        println!("  Time: {:.3?}", elapsed);
 
-    if result.has_failures() {
-        println!();
-        println!("Failed files:");
-        for (path, error) in &result.errors {
-            println!("  - {}: {}", path.display(), error);
+        if result.has_failures() {
+            println!();
+            println!("Failed files:");
+            for (path, error) in &result.errors {
+                println!("  - {}: {}", path.display(), error);
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
     }
 
     Ok(())
@@ -350,11 +535,23 @@ fn resolve_dialect(
     dialect: Option<String>,
     compression: Compression,
 ) -> anyhow::Result<SqlDialect> {
+    let (dialect, _) = resolve_dialect_with_confidence(file, dialect, compression)?;
+    Ok(dialect)
+}
+
+fn resolve_dialect_with_confidence(
+    file: &std::path::Path,
+    dialect: Option<String>,
+    compression: Compression,
+) -> anyhow::Result<(SqlDialect, DialectConfidence)> {
     use crate::parser::detect_dialect;
     use std::io::Read;
 
     match dialect {
-        Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
+        Some(d) => {
+            let parsed: SqlDialect = d.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            Ok((parsed, DialectConfidence::High))
+        }
         None => {
             let result = if compression != Compression::None {
                 let file_handle = std::fs::File::open(file)?;
@@ -367,16 +564,7 @@ fn resolve_dialect(
                 detect_dialect_from_file(file)?
             };
 
-            let confidence_str = match result.confidence {
-                DialectConfidence::High => "high confidence",
-                DialectConfidence::Medium => "medium confidence",
-                DialectConfidence::Low => "low confidence",
-            };
-            println!(
-                "Auto-detected dialect: {} ({})",
-                result.dialect, confidence_str
-            );
-            Ok(result.dialect)
+            Ok((result.dialect, result.confidence))
         }
     }
 }

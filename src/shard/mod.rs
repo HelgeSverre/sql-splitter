@@ -78,7 +78,7 @@ impl Default for ShardConfig {
 }
 
 /// Statistics from shard operation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct ShardStats {
     /// Number of tables processed
     pub tables_processed: usize,
@@ -101,7 +101,7 @@ pub struct ShardStats {
 }
 
 /// Per-table sharding statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableShardStats {
     pub name: String,
     pub rows_seen: u64,

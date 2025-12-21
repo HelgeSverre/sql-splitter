@@ -200,12 +200,7 @@ fn run_multi(
 
     for (idx, file) in files.iter().enumerate() {
         if !json {
-            eprintln!(
-                "[{}/{}] Validating: {}",
-                idx + 1,
-                total,
-                file.display()
-            );
+            eprintln!("[{}/{}] Validating: {}", idx + 1, total, file.display());
         }
 
         let file_size = match std::fs::metadata(file) {

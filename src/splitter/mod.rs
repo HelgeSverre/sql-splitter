@@ -2,10 +2,12 @@ use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, St
 use crate::progress::ProgressReader;
 use crate::writer::WriterPool;
 use ahash::AHashSet;
+use serde::Serialize;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[derive(Serialize)]
 pub struct Stats {
     pub statements_processed: u64,
     pub tables_found: usize,

@@ -95,7 +95,7 @@ impl Default for SampleConfig {
 }
 
 /// Statistics from sample operation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct SampleStats {
     /// Number of tables sampled
     pub tables_sampled: usize,
@@ -114,7 +114,7 @@ pub struct SampleStats {
 }
 
 /// Per-table sampling statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableSampleStats {
     pub name: String,
     pub rows_seen: u64,
@@ -301,7 +301,10 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
 
     // Phase 2: Process tables in dependency order
     if config.progress {
-        eprintln!("Sampling {} tables in dependency order...", topo_order.len());
+        eprintln!(
+            "Sampling {} tables in dependency order...",
+            topo_order.len()
+        );
     }
 
     // Process acyclic tables first, then cyclic tables
@@ -645,8 +648,7 @@ fn sample_table_streaming(
                             if rng.gen::<f64>() < prob {
                                 // Write to temp file
                                 if temp_writer.is_none() {
-                                    temp_writer =
-                                        Some(BufWriter::new(File::create(&temp_path)?));
+                                    temp_writer = Some(BufWriter::new(File::create(&temp_path)?));
                                 }
                                 let writer = temp_writer.as_mut().unwrap();
                                 // Format: 1-byte type (0=insert, 1=copy), then row bytes, then newline
@@ -822,7 +824,8 @@ fn sample_table_streaming(
             }
 
             // Collect PK hashes and sort indices for second pass
-            let mut selected_indices: Vec<(u64, RowFormat)> = Vec::with_capacity(selected_items.len());
+            let mut selected_indices: Vec<(u64, RowFormat)> =
+                Vec::with_capacity(selected_items.len());
             for (idx, format, pk_hash) in selected_items {
                 if let Some(h) = pk_hash {
                     selected_pk_hashes.push(h);
@@ -1174,12 +1177,10 @@ fn write_insert_chunk<W: Write>(
         }
 
         let values = match format {
-            RowFormat::Insert => {
-                match dialect {
-                    SqlDialect::Postgres => convert_row_to_postgres(row_bytes),
-                    _ => row_bytes.clone(),
-                }
-            }
+            RowFormat::Insert => match dialect {
+                SqlDialect::Postgres => convert_row_to_postgres(row_bytes),
+                _ => row_bytes.clone(),
+            },
             RowFormat::Copy => convert_copy_to_insert_values(row_bytes, dialect),
         };
         writer.write_all(&values)?;

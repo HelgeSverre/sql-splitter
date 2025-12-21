@@ -62,7 +62,7 @@ impl Default for ConvertConfig {
 }
 
 /// Statistics from convert operation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct ConvertStats {
     /// Total statements processed
     pub statements_processed: u64,

@@ -67,12 +67,12 @@ INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
 fn test_validate_glob_single_file_match() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "dump.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args(["validate", &dir.path().join("*.sql").to_string_lossy()])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Should succeed: {}", stderr);
     assert!(stderr.contains("Result: PASSED"));
@@ -84,16 +84,17 @@ fn test_validate_glob_multiple_files() {
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "c.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Should succeed: {}", stderr);
     assert!(stderr.contains("Validating 3 files"));
@@ -106,16 +107,17 @@ fn test_validate_glob_mixed_results() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "good.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "bad.sql", simple_mysql_dump_with_error());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "Should fail due to bad.sql");
     assert!(stderr.contains("Passed: 1"));
@@ -129,32 +131,37 @@ fn test_validate_glob_fail_fast() {
     create_sql_file(dir.path(), "a_bad.sql", simple_mysql_dump_with_error());
     create_sql_file(dir.path(), "b_good.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "c_good.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
             "--fail-fast",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("Failed: 1"));
-    assert!(stderr.contains("Passed: 0"), "Should stop after first failure: {}", stderr);
+    assert!(
+        stderr.contains("Passed: 0"),
+        "Should stop after first failure: {}",
+        stderr
+    );
 }
 
 #[test]
 fn test_validate_glob_no_match() {
     let dir = TempDir::new().unwrap();
-    
+
     let output = Command::new(binary_path())
         .args(["validate", &dir.path().join("*.sql").to_string_lossy()])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("no files match"));
@@ -165,20 +172,21 @@ fn test_validate_glob_json_output() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
             "--json",
         ])
         .output()
         .unwrap();
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    
+
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(json["total_files"], 2);
     assert_eq!(json["passed"], 2);
@@ -190,19 +198,20 @@ fn test_validate_glob_recursive() {
     let dir = TempDir::new().unwrap();
     let subdir = dir.path().join("subdir");
     fs::create_dir(&subdir).unwrap();
-    
+
     create_sql_file(dir.path(), "root.sql", simple_mysql_dump());
     create_sql_file(&subdir, "nested.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("**/*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Should succeed: {}", stderr);
     assert!(stderr.contains("Validating 2 files"));
@@ -217,16 +226,17 @@ fn test_analyze_glob_multiple_files() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "analyze",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "Should succeed");
     assert!(stdout.contains("Analyzing 2 files"));
@@ -237,12 +247,12 @@ fn test_analyze_glob_multiple_files() {
 #[test]
 fn test_analyze_glob_no_match() {
     let dir = TempDir::new().unwrap();
-    
+
     let output = Command::new(binary_path())
         .args(["analyze", &dir.path().join("*.sql").to_string_lossy()])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("no files match"));
@@ -256,24 +266,26 @@ fn test_analyze_glob_no_match() {
 fn test_split_glob_multiple_files() {
     let dir = TempDir::new().unwrap();
     let output_dir = dir.path().join("output");
-    
+
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "split",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--output", &output_dir.to_string_lossy(),
-            "--dialect", "mysql",
+            "--output",
+            &output_dir.to_string_lossy(),
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "Should succeed: {}", stdout);
     assert!(stdout.contains("Splitting 2 files"));
-    
+
     assert!(output_dir.join("a").exists());
     assert!(output_dir.join("b").exists());
     assert!(output_dir.join("a").join("users.sql").exists());
@@ -284,26 +296,28 @@ fn test_split_glob_multiple_files() {
 fn test_split_glob_dry_run() {
     let dir = TempDir::new().unwrap();
     let output_dir = dir.path().join("output");
-    
+
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "split",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--output", &output_dir.to_string_lossy(),
-            "--dialect", "mysql",
+            "--output",
+            &output_dir.to_string_lossy(),
+            "--dialect",
+            "mysql",
             "--dry-run",
         ])
         .output()
         .unwrap();
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     assert!(stdout.contains("Splitting 2 files"));
     assert!(stdout.contains("(dry run)"));
-    
+
     assert!(!output_dir.exists());
 }
 
@@ -316,16 +330,17 @@ fn test_convert_glob_requires_output_dir_for_multiple_files() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "convert",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--to", "postgres",
+            "--to",
+            "postgres",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("Output directory required"));
@@ -335,16 +350,17 @@ fn test_convert_glob_requires_output_dir_for_multiple_files() {
 fn test_convert_single_file_via_glob_to_stdout() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "convert",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--to", "postgres",
+            "--to",
+            "postgres",
         ])
         .output()
         .unwrap();
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     assert!(stdout.contains("CREATE TABLE"));
@@ -354,26 +370,29 @@ fn test_convert_single_file_via_glob_to_stdout() {
 fn test_convert_glob_multiple_files() {
     let dir = TempDir::new().unwrap();
     let output_dir = dir.path().join("converted");
-    
+
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "convert",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--from", "mysql",
-            "--to", "postgres",
-            "--output", &output_dir.to_string_lossy(),
+            "--from",
+            "mysql",
+            "--to",
+            "postgres",
+            "--output",
+            &output_dir.to_string_lossy(),
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Should succeed: {}", stderr);
     assert!(stderr.contains("Converting 2 files"));
     assert!(stderr.contains("Succeeded: 2"));
-    
+
     assert!(output_dir.join("a.sql").exists());
     assert!(output_dir.join("b.sql").exists());
 }
@@ -382,26 +401,29 @@ fn test_convert_glob_multiple_files() {
 fn test_convert_glob_dry_run() {
     let dir = TempDir::new().unwrap();
     let output_dir = dir.path().join("converted");
-    
+
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "convert",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--from", "mysql",
-            "--to", "postgres",
-            "--output", &output_dir.to_string_lossy(),
+            "--from",
+            "mysql",
+            "--to",
+            "postgres",
+            "--output",
+            &output_dir.to_string_lossy(),
             "--dry-run",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Stderr: {}", stderr);
     assert!(stderr.contains("Converting 2 files"));
-    
+
     assert!(!output_dir.exists());
 }
 
@@ -413,12 +435,12 @@ fn test_convert_glob_dry_run() {
 fn test_glob_single_file_no_pattern() {
     let dir = TempDir::new().unwrap();
     let file = create_sql_file(dir.path(), "dump.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args(["validate", &file.to_string_lossy()])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success());
     assert!(stderr.contains("Result: PASSED"));
@@ -430,7 +452,7 @@ fn test_glob_nonexistent_single_file() {
         .args(["validate", "/nonexistent/file.sql"])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("does not exist"));
@@ -442,19 +464,24 @@ fn test_glob_pattern_with_question_mark() {
     create_sql_file(dir.path(), "dump1.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "dump2.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "dump10.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("dump?.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success());
-    assert!(stderr.contains("Validating 2 files"), "Should match dump1.sql and dump2.sql: {}", stderr);
+    assert!(
+        stderr.contains("Validating 2 files"),
+        "Should match dump1.sql and dump2.sql: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -463,19 +490,24 @@ fn test_glob_pattern_with_brackets() {
     create_sql_file(dir.path(), "a.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "b.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "c.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("[ab].sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success());
-    assert!(stderr.contains("Validating 2 files"), "Should match a.sql and b.sql: {}", stderr);
+    assert!(
+        stderr.contains("Validating 2 files"),
+        "Should match a.sql and b.sql: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -484,19 +516,24 @@ fn test_glob_skip_directories() {
     let subdir = dir.path().join("subdir.sql");
     fs::create_dir(&subdir).unwrap();
     create_sql_file(dir.path(), "file.sql", simple_mysql_dump());
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success());
-    assert!(stderr.contains("Result: PASSED"), "Should only process file.sql, not subdir.sql: {}", stderr);
+    assert!(
+        stderr.contains("Result: PASSED"),
+        "Should only process file.sql, not subdir.sql: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -504,42 +541,44 @@ fn test_glob_mixed_dialects_with_auto_detect() {
     let dir = TempDir::new().unwrap();
     create_sql_file(dir.path(), "mysql.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "postgres.sql", postgres_dump());
-    
+
     let output = Command::new(binary_path())
-        .args([
-            "validate",
-            &dir.path().join("*.sql").to_string_lossy(),
-        ])
+        .args(["validate", &dir.path().join("*.sql").to_string_lossy()])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "Auto-detection should work for each file: {}", stderr);
+    assert!(
+        output.status.success(),
+        "Auto-detection should work for each file: {}",
+        stderr
+    );
     assert!(stderr.contains("Passed: 2"));
 }
 
 #[test]
 fn test_validate_strict_mode_with_glob() {
     let dir = TempDir::new().unwrap();
-    
+
     let sql_with_warning = r#"
 CREATE TABLE `users` (`id` INT PRIMARY KEY);
 INSERT INTO `nonexistent` VALUES (1);
 "#;
-    
+
     create_sql_file(dir.path(), "good.sql", simple_mysql_dump());
     create_sql_file(dir.path(), "warning.sql", sql_with_warning);
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
             "--strict",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("Result: SOME FAILED"));
@@ -552,52 +591,62 @@ INSERT INTO `nonexistent` VALUES (1);
 #[test]
 fn test_validate_no_limit_flag() {
     let dir = TempDir::new().unwrap();
-    
+
     let mut sql = String::from("CREATE TABLE `items` (`id` INT PRIMARY KEY);\n");
     for i in 1..=100 {
         sql.push_str(&format!("INSERT INTO `items` VALUES ({});\n", i));
     }
     create_sql_file(dir.path(), "many_rows.sql", &sql);
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("many_rows.sql").to_string_lossy(),
-            "--dialect", "mysql",
-            "--max-rows-per-table", "10",
+            "--dialect",
+            "mysql",
+            "--max-rows-per-table",
+            "10",
             "--no-limit",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Should pass: {}", stderr);
-    assert!(!stderr.contains("PK_CHECK_SKIPPED"), "--no-limit should prevent skipping");
+    assert!(
+        !stderr.contains("PK_CHECK_SKIPPED"),
+        "--no-limit should prevent skipping"
+    );
 }
 
 #[test]
 fn test_validate_zero_limit_same_as_no_limit() {
     let dir = TempDir::new().unwrap();
-    
+
     let mut sql = String::from("CREATE TABLE `items` (`id` INT PRIMARY KEY);\n");
     for i in 1..=100 {
         sql.push_str(&format!("INSERT INTO `items` VALUES ({});\n", i));
     }
     create_sql_file(dir.path(), "many_rows.sql", &sql);
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("many_rows.sql").to_string_lossy(),
-            "--dialect", "mysql",
-            "--max-rows-per-table", "0",
+            "--dialect",
+            "mysql",
+            "--max-rows-per-table",
+            "0",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "Should pass: {}", stderr);
-    assert!(!stderr.contains("PK_CHECK_SKIPPED"), "--max-rows-per-table=0 should prevent skipping");
+    assert!(
+        !stderr.contains("PK_CHECK_SKIPPED"),
+        "--max-rows-per-table=0 should prevent skipping"
+    );
 }
 
 // =============================================================================
@@ -607,20 +656,25 @@ fn test_validate_zero_limit_same_as_no_limit() {
 #[test]
 fn test_glob_many_files() {
     let dir = TempDir::new().unwrap();
-    
+
     for i in 0..10 {
-        create_sql_file(dir.path(), &format!("dump_{:02}.sql", i), simple_mysql_dump());
+        create_sql_file(
+            dir.path(),
+            &format!("dump_{:02}.sql", i),
+            simple_mysql_dump(),
+        );
     }
-    
+
     let output = Command::new(binary_path())
         .args([
             "validate",
             &dir.path().join("*.sql").to_string_lossy(),
-            "--dialect", "mysql",
+            "--dialect",
+            "mysql",
         ])
         .output()
         .unwrap();
-    
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success());
     assert!(stderr.contains("Validating 10 files"));

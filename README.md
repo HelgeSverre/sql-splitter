@@ -147,6 +147,7 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)  | —           |
 | `--data-only`    | Only DML statements (INSERT, COPY)         | —           |
 | `--fail-fast`    | Stop on first error (for glob patterns)    | —           |
+| `--json`         | Output results as JSON                     | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
@@ -162,6 +163,18 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | `--no-header`    | Skip header comments                      | —       |
 | `-p, --progress` | Show progress bar                         | —       |
 | `--dry-run`      | Preview without writing files             | —       |
+| `--json`         | Output results as JSON                    | —       |
+
+### Analyze Options
+
+| Flag             | Description                                | Default     |
+|------------------|--------------------------------------------|-------------|
+| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
+| `-p, --progress` | Show progress bar                          | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)    | —           |
+| `--json`         | Output results as JSON                     | —           |
+
+Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Convert Options
 
@@ -174,6 +187,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | `-p, --progress` | Show progress bar                                | —           |
 | `--dry-run`      | Preview without writing files                    | —           |
 | `--fail-fast`    | Stop on first error (for glob patterns)          | —           |
+| `--json`         | Output results as JSON                           | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
@@ -213,6 +227,49 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 - Encoding validation (UTF-8)
 - Duplicate primary key detection (all dialects)
 - FK referential integrity (all dialects)
+
+### Sample Options
+
+| Flag                  | Description                                        | Default     |
+|-----------------------|----------------------------------------------------|-------------|
+| `-o, --output`        | Output SQL file                                    | stdout      |
+| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
+| `--percent`           | Sample percentage (1-100)                          | —           |
+| `--rows`              | Sample fixed number of rows per table              | —           |
+| `--preserve-relations`| Preserve FK relationships                          | —           |
+| `-t, --tables`        | Only sample these tables (comma-separated)         | all         |
+| `-e, --exclude`       | Exclude these tables (comma-separated)             | —           |
+| `--root-tables`       | Explicit root tables for sampling                  | —           |
+| `--include-global`    | Global table handling: `none`, `lookups`, `all`    | `lookups`   |
+| `--seed`              | Random seed for reproducibility                    | random      |
+| `-c, --config`        | YAML config file for per-table settings            | —           |
+| `--max-total-rows`    | Maximum total rows to sample (0 = no limit)        | —           |
+| `--no-limit`          | Disable row limit                                  | —           |
+| `--strict-fk`         | Fail if any FK integrity issues detected           | —           |
+| `--no-schema`         | Exclude CREATE TABLE statements from output        | —           |
+| `-p, --progress`      | Show progress bar                                  | —           |
+| `--dry-run`           | Preview without writing files                      | —           |
+| `--json`              | Output results as JSON                             | —           |
+
+### Shard Options
+
+| Flag                  | Description                                        | Default     |
+|-----------------------|----------------------------------------------------|-------------|
+| `-o, --output`        | Output SQL file or directory                       | stdout      |
+| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
+| `--tenant-column`     | Column name for tenant identification              | auto-detect |
+| `--tenant-value`      | Single tenant value to extract                     | —           |
+| `--tenant-values`     | Multiple tenant values (comma-separated)           | —           |
+| `--root-tables`       | Explicit root tables with tenant column            | —           |
+| `--include-global`    | Global table handling: `none`, `lookups`, `all`    | `lookups`   |
+| `-c, --config`        | YAML config file for table classification          | —           |
+| `--max-selected-rows` | Maximum rows to select (0 = no limit)              | —           |
+| `--no-limit`          | Disable row limit                                  | —           |
+| `--strict-fk`         | Fail if any FK integrity issues detected           | —           |
+| `--no-schema`         | Exclude CREATE TABLE statements from output        | —           |
+| `-p, --progress`      | Show progress bar                                  | —           |
+| `--dry-run`           | Preview without writing files                      | —           |
+| `--json`              | Output results as JSON                             | —           |
 
 ## Performance
 

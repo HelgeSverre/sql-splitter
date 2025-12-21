@@ -2,11 +2,12 @@ use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
 use crate::splitter::Compression;
 use ahash::AHashMap;
+use serde::Serialize;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TableStats {
     pub table_name: String,
     pub insert_count: u64,

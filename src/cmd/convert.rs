@@ -1,10 +1,75 @@
 //! Convert command CLI handler.
 
-use crate::convert::{self, ConvertConfig};
+use crate::convert::{self, ConvertConfig, ConvertStats};
 use crate::parser::SqlDialect;
+use serde::Serialize;
 use std::path::PathBuf;
 
 use super::glob_util::{expand_file_pattern, MultiFileResult};
+
+/// JSON output for single file convert
+#[derive(Serialize)]
+struct ConvertJsonOutput {
+    input_file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_file: Option<String>,
+    conversion: ConversionInfo,
+    dry_run: bool,
+    statistics: ConvertStatistics,
+    warnings: Vec<crate::convert::ConvertWarning>,
+}
+
+#[derive(Serialize)]
+struct ConversionInfo {
+    from: String,
+    to: String,
+}
+
+#[derive(Serialize)]
+struct ConvertStatistics {
+    statements_processed: u64,
+    statements_converted: u64,
+    statements_unchanged: u64,
+    statements_skipped: u64,
+}
+
+/// JSON output for multi-file convert
+#[derive(Serialize)]
+struct MultiConvertJsonOutput {
+    total_files: usize,
+    succeeded: usize,
+    failed: usize,
+    conversion: ConversionInfo,
+    aggregate_stats: AggregateConvertStats,
+    results: Vec<ConvertFileResult>,
+}
+
+#[derive(Serialize)]
+struct AggregateConvertStats {
+    statements_processed: u64,
+    statements_converted: u64,
+    statements_unchanged: u64,
+    statements_skipped: u64,
+    total_warnings: usize,
+}
+
+#[derive(Serialize)]
+struct ConvertFileResult {
+    file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_mb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statements_converted: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statements_unchanged: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warnings_count: Option<usize>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -16,6 +81,7 @@ pub fn run(
     progress: bool,
     dry_run: bool,
     fail_fast: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     let expanded = expand_file_pattern(&file)?;
 
@@ -28,6 +94,7 @@ pub fn run(
             strict,
             progress,
             dry_run,
+            json,
         )
     } else {
         let output_dir = match output {
@@ -48,10 +115,12 @@ pub fn run(
             progress,
             dry_run,
             fail_fast,
+            json,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_single(
     file: PathBuf,
     output: Option<PathBuf>,
@@ -60,8 +129,9 @@ fn run_single(
     strict: bool,
     progress: bool,
     dry_run: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
-    let from = if let Some(d) = from_dialect {
+    let from = if let Some(d) = from_dialect.clone() {
         Some(
             d.parse::<SqlDialect>()
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
@@ -75,18 +145,42 @@ fn run_single(
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let config = ConvertConfig {
-        input: file,
-        output,
+        input: file.clone(),
+        output: output.clone(),
         from_dialect: from,
         to_dialect: to,
         dry_run,
-        progress,
+        progress: progress && !json,
         strict,
     };
 
     let stats = convert::run(config)?;
 
-    print_stats(&stats, dry_run, progress);
+    if json {
+        let from_str = from
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "auto".to_string());
+
+        let output_json = ConvertJsonOutput {
+            input_file: file.display().to_string(),
+            output_file: output.as_ref().map(|p| p.display().to_string()),
+            conversion: ConversionInfo {
+                from: from_str,
+                to: to.to_string(),
+            },
+            dry_run,
+            statistics: ConvertStatistics {
+                statements_processed: stats.statements_processed,
+                statements_converted: stats.statements_converted,
+                statements_unchanged: stats.statements_unchanged,
+                statements_skipped: stats.statements_skipped,
+            },
+            warnings: stats.warnings.clone(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output_json)?);
+    } else {
+        print_stats(&stats, dry_run, progress);
+    }
 
     if strict && !stats.warnings.is_empty() {
         anyhow::bail!("Strict mode: {} warnings generated", stats.warnings.len());
@@ -105,6 +199,7 @@ fn run_multi(
     _progress: bool,
     dry_run: bool,
     fail_fast: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     let total = files.len();
     let mut result = MultiFileResult::new();
@@ -118,20 +213,40 @@ fn run_multi(
         std::fs::create_dir_all(&output_dir)?;
     }
 
-    eprintln!("Converting {} files to {}...\n", total, to);
+    if !json {
+        eprintln!("Converting {} files to {}...\n", total, to);
+    }
+
+    let mut json_results: Vec<ConvertFileResult> = Vec::new();
+    let mut aggregate = AggregateConvertStats {
+        statements_processed: 0,
+        statements_converted: 0,
+        statements_unchanged: 0,
+        statements_skipped: 0,
+        total_warnings: 0,
+    };
 
     for (idx, file) in files.iter().enumerate() {
-        eprintln!(
-            "[{}/{}] Converting: {}",
-            idx + 1,
-            total,
-            file.display()
-        );
+        if !json {
+            eprintln!("[{}/{}] Converting: {}", idx + 1, total, file.display());
+        }
 
         let file_size = match std::fs::metadata(file) {
             Ok(m) => m.len(),
             Err(e) => {
-                eprintln!("  Error: {}\n", e);
+                if !json {
+                    eprintln!("  Error: {}\n", e);
+                }
+                json_results.push(ConvertFileResult {
+                    file: file.display().to_string(),
+                    output_file: None,
+                    size_mb: None,
+                    statements_converted: None,
+                    statements_unchanged: None,
+                    warnings_count: None,
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                });
                 result.record_failure(file.clone(), e.to_string());
                 if fail_fast {
                     break;
@@ -172,24 +287,43 @@ fn run_multi(
 
         match convert::run(config) {
             Ok(stats) => {
-                let warning_str = if stats.warnings.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({} warnings)", stats.warnings.len())
-                };
+                if !json {
+                    let warning_str = if stats.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} warnings)", stats.warnings.len())
+                    };
 
-                eprintln!(
-                    "  {:.2} MB → {} converted, {} unchanged{}",
-                    file_size_mb,
-                    stats.statements_converted,
-                    stats.statements_unchanged,
-                    warning_str
-                );
+                    eprintln!(
+                        "  {:.2} MB → {} converted, {} unchanged{}",
+                        file_size_mb,
+                        stats.statements_converted,
+                        stats.statements_unchanged,
+                        warning_str
+                    );
 
-                if let Some(out) = output_file {
-                    eprintln!("  → {}", out.display());
+                    if let Some(ref out) = output_file {
+                        eprintln!("  → {}", out.display());
+                    }
+                    eprintln!();
                 }
-                eprintln!();
+
+                aggregate.statements_processed += stats.statements_processed;
+                aggregate.statements_converted += stats.statements_converted;
+                aggregate.statements_unchanged += stats.statements_unchanged;
+                aggregate.statements_skipped += stats.statements_skipped;
+                aggregate.total_warnings += stats.warnings.len();
+
+                json_results.push(ConvertFileResult {
+                    file: file.display().to_string(),
+                    output_file: output_file.as_ref().map(|p| p.display().to_string()),
+                    size_mb: Some(file_size_mb),
+                    statements_converted: Some(stats.statements_converted),
+                    statements_unchanged: Some(stats.statements_unchanged),
+                    warnings_count: Some(stats.warnings.len()),
+                    status: "success".to_string(),
+                    error: None,
+                });
 
                 if strict && !stats.warnings.is_empty() {
                     result.record_failure(
@@ -204,7 +338,19 @@ fn run_multi(
                 }
             }
             Err(e) => {
-                eprintln!("  Error: {}\n", e);
+                if !json {
+                    eprintln!("  Error: {}\n", e);
+                }
+                json_results.push(ConvertFileResult {
+                    file: file.display().to_string(),
+                    output_file: None,
+                    size_mb: Some(file_size_mb),
+                    statements_converted: None,
+                    statements_unchanged: None,
+                    warnings_count: None,
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                });
                 result.record_failure(file.clone(), e.to_string());
                 if fail_fast {
                     break;
@@ -213,25 +359,44 @@ fn run_multi(
         }
     }
 
-    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!("Conversion Summary:");
-    eprintln!("  Total files: {}", total);
-    eprintln!("  Succeeded: {}", result.succeeded);
-    eprintln!("  Failed: {}", result.failed);
+    if json {
+        let from_str = from_dialect
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "auto".to_string());
 
-    if result.has_failures() {
-        eprintln!();
-        eprintln!("Failed files:");
-        for (path, error) in &result.errors {
-            eprintln!("  - {}: {}", path.display(), error);
+        let output_json = MultiConvertJsonOutput {
+            total_files: total,
+            succeeded: result.succeeded,
+            failed: result.failed,
+            conversion: ConversionInfo {
+                from: from_str,
+                to: to.to_string(),
+            },
+            aggregate_stats: aggregate,
+            results: json_results,
+        };
+        println!("{}", serde_json::to_string_pretty(&output_json)?);
+    } else {
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("Conversion Summary:");
+        eprintln!("  Total files: {}", total);
+        eprintln!("  Succeeded: {}", result.succeeded);
+        eprintln!("  Failed: {}", result.failed);
+
+        if result.has_failures() {
+            eprintln!();
+            eprintln!("Failed files:");
+            for (path, error) in &result.errors {
+                eprintln!("  - {}: {}", path.display(), error);
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
     }
 
     Ok(())
 }
 
-fn print_stats(stats: &convert::ConvertStats, dry_run: bool, progress: bool) {
+fn print_stats(stats: &ConvertStats, dry_run: bool, progress: bool) {
     if !progress && !dry_run {
         return;
     }

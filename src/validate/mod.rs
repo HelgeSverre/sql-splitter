@@ -742,7 +742,10 @@ impl Validator {
         table_id: TableId,
         table_name: &str,
         pk: Option<&smallvec::SmallVec<[mysql_insert::PkValue; 2]>>,
-        fk_values: &[(mysql_insert::FkRef, smallvec::SmallVec<[mysql_insert::PkValue; 2]>)],
+        fk_values: &[(
+            mysql_insert::FkRef,
+            smallvec::SmallVec<[mysql_insert::PkValue; 2]>,
+        )],
         stmt_idx: u64,
     ) {
         // Skip if memory budget exceeded

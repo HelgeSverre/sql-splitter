@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2025-12-21
+
+### Added
+
+- **`--json` flag for all commands**: Machine-readable JSON output for automation and CI/CD pipelines
+  - `split --json`: Output split statistics, table names, and throughput as JSON
+  - `analyze --json`: Output table statistics, INSERT counts, and byte sizes as JSON
+  - `merge --json`: Output merge statistics and table list as JSON
+  - `sample --json`: Output sample mode, statistics, and per-table breakdown as JSON
+  - `shard --json`: Output tenant info, statistics, and table breakdown as JSON
+  - `convert --json`: Output conversion statistics and warnings as JSON
+  - Multi-file operations return aggregated JSON with per-file results
+  - All JSON output uses `serde_json::to_string_pretty()` for readability
+  - Progress bars automatically suppressed in JSON mode
+- **11 new integration tests** for JSON output validation across all commands
+
 ## [1.8.2] - 2025-12-21
 
 ### Changed
