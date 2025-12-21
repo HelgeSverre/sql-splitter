@@ -37,7 +37,7 @@
             </h1>
             <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
             <p class="description">
-                Split, merge, convert, validate, sample, and shard SQL dump files.
+                Split, merge, convert, validate, sample, shard, diff, and redact SQL dump files.
                 MySQL, PostgreSQL, and SQLite. Written in Rust.
             </p>
             <div class="hero-actions">
@@ -285,6 +285,53 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
                 </div>
+
+                <h4>diff</h4>
+                <p>Compare two SQL dumps for schema and data changes.</p>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Full comparison (schema + data)</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql
+
+<span class="sh-comment"># Schema-only (fast)</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --schema-only
+
+<span class="sh-comment"># Data-only</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --data-only
+
+<span class="sh-comment"># Output formats: text, json, sql</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --format json -o diff.json
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --format sql -o migration.sql
+
+<span class="sh-comment"># Verbose with sample PK values</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --verbose
+
+<span class="sh-comment"># Ignore timestamp columns</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --ignore-columns "*.updated_at"</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter diff old.sql new.sql">Copy</button>
+                </div>
+
+                <h4>redact</h4>
+                <p>Anonymize sensitive data (PII) in SQL dumps.</p>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Using inline patterns</span>
+<span class="sh-tool">sql-splitter</span> redact dump.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"
+
+<span class="sh-comment"># Using YAML config file</span>
+<span class="sh-tool">sql-splitter</span> redact dump.sql -o safe.sql --config redact.yaml
+
+<span class="sh-comment"># Generate config by analyzing input</span>
+<span class="sh-tool">sql-splitter</span> redact dump.sql --generate-config -o redact.yaml
+
+<span class="sh-comment"># Reproducible with seed</span>
+<span class="sh-tool">sql-splitter</span> redact dump.sql -o safe.sql --null "*.password" --seed 42
+
+<span class="sh-comment"># Mask credit cards (keep last 4 digits)</span>
+<span class="sh-tool">sql-splitter</span> redact dump.sql -o safe.sql --mask "****-****-****-XXXX=*.credit_card"
+
+<span class="sh-comment"># Validate config only</span>
+<span class="sh-tool">sql-splitter</span> redact dump.sql --config redact.yaml --validate</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter redact dump.sql -o safe.sql --null &quot;*.ssn&quot; --hash &quot;*.email&quot; --fake &quot;*.name&quot;">Copy</button>
+                </div>
             </article>
 
             <!-- Split Options -->
@@ -417,6 +464,61 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                 <p class="note">Auto-detects tenant columns: tenant_id, company_id, account_id, org_id, etc.</p>
             </article>
 
+            <!-- Diff Options -->
+            <article class="guide-section">
+                <h3>Diff Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output file</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
+                        <tr><td><code>--schema-only</code></td><td>—</td><td>Compare schema only</td><td>false</td></tr>
+                        <tr><td><code>--data-only</code></td><td>—</td><td>Compare data only</td><td>false</td></tr>
+                        <tr><td><code>--format</code></td><td>—</td><td>Output format: text, json, sql</td><td>text</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only compare specific tables</td><td>all</td></tr>
+                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables</td><td>—</td></tr>
+                        <tr><td><code>--verbose</code></td><td><code>-v</code></td><td>Show sample PK values</td><td>false</td></tr>
+                        <tr><td><code>--ignore-columns</code></td><td>—</td><td>Ignore columns matching glob</td><td>—</td></tr>
+                        <tr><td><code>--primary-key</code></td><td>—</td><td>Override PK (table:col1+col2)</td><td>auto</td></tr>
+                        <tr><td><code>--max-pk-entries</code></td><td>—</td><td>Max PK entries to track</td><td>10M</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Detects: tables added/removed, columns changed, PK/FK/index changes, rows added/removed/modified</p>
+            </article>
+
+            <!-- Redact Options -->
+            <article class="guide-section">
+                <h3>Redact Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
+                        <tr><td><code>--config</code></td><td><code>-c</code></td><td>YAML config file</td><td>—</td></tr>
+                        <tr><td><code>--generate-config</code></td><td>—</td><td>Analyze input and generate YAML config</td><td>false</td></tr>
+                        <tr><td><code>--null</code></td><td>—</td><td>Columns to set to NULL (glob patterns)</td><td>—</td></tr>
+                        <tr><td><code>--hash</code></td><td>—</td><td>Columns to hash with SHA256</td><td>—</td></tr>
+                        <tr><td><code>--fake</code></td><td>—</td><td>Columns to replace with fake data</td><td>—</td></tr>
+                        <tr><td><code>--mask</code></td><td>—</td><td>Columns to mask (pattern=column)</td><td>—</td></tr>
+                        <tr><td><code>--constant</code></td><td>—</td><td>Column=value pairs</td><td>—</td></tr>
+                        <tr><td><code>--seed</code></td><td>—</td><td>Random seed for reproducibility</td><td>random</td></tr>
+                        <tr><td><code>--locale</code></td><td>—</td><td>Locale for fake data (en, de_de, etc.)</td><td>en</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only redact specific tables</td><td>all</td></tr>
+                        <tr><td><code>--exclude</code></td><td><code>-x</code></td><td>Exclude tables</td><td>—</td></tr>
+                        <tr><td><code>--strict</code></td><td>—</td><td>Fail on warnings</td><td>false</td></tr>
+                        <tr><td><code>--validate</code></td><td>—</td><td>Validate config only</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Strategies: null, hash, fake, mask, constant, shuffle, skip. 25+ fake generators available.</p>
+            </article>
+
             <!-- Supported Statements -->
             <article class="guide-section">
                 <h3>Supported Statement Types</h3>
@@ -498,6 +600,29 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-tool">sql-splitter</span> validate "*.sql" --json | jq '.results[] | select(.passed == false)'</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter validate &quot;dumps/*.sql&quot; --strict --json --fail-fast">Copy</button>
                 </div>
+
+                <h4>Compare Dumps for Changes</h4>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Full comparison</span>
+<span class="sh-tool">sql-splitter</span> diff old_backup.sql new_backup.sql -p
+
+<span class="sh-comment"># Generate migration script</span>
+<span class="sh-tool">sql-splitter</span> diff old.sql new.sql --format sql -o migration.sql</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter diff old.sql new.sql --format sql -o migration.sql">Copy</button>
+                </div>
+
+                <h4>Anonymize for Dev Environment</h4>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Generate redact config</span>
+<span class="sh-tool">sql-splitter</span> redact prod.sql --generate-config -o redact.yaml
+
+<span class="sh-comment"># Apply redaction</span>
+<span class="sh-tool">sql-splitter</span> redact prod.sql -o dev.sql --config redact.yaml --seed 42
+
+<span class="sh-comment"># Quick inline redaction</span>
+<span class="sh-tool">sql-splitter</span> redact prod.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter redact prod.sql -o dev.sql --null &quot;*.ssn&quot; --hash &quot;*.email&quot; --fake &quot;*.name&quot;">Copy</button>
+                </div>
             </article>
 
             <!-- Performance -->
@@ -534,6 +659,8 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                         <tr><td><code>convert</code></td><td>Convert dumps between MySQL, PostgreSQL, and SQLite</td></tr>
                         <tr><td><code>sample</code></td><td>Create smaller test datasets while preserving FK relationships</td></tr>
                         <tr><td><code>shard</code></td><td>Extract tenant-specific data from multi-tenant dumps</td></tr>
+                        <tr><td><code>diff</code></td><td>Compare two dumps for schema and data changes</td></tr>
+                        <tr><td><code>redact</code></td><td>Anonymize sensitive data (PII) for safe sharing</td></tr>
                     </tbody>
                 </table>
             </article>

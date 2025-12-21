@@ -301,6 +301,9 @@ run_profile() {
             # Diff file against itself (measures memory for schema+data parsing)
             cmd+=("$input_file" "$input_file" "--dialect" "$dialect")
             ;;
+        redact)
+            cmd+=("$input_file" "--dialect" "$dialect" "--output" "$output_file" "--null" "*.password" "--hash" "*.email")
+            ;;
     esac
     
     cmd+=("${extra_args[@]}")
@@ -361,6 +364,8 @@ run_all_profiles() {
     run_profile "sample" "$input_file" "$dialect" "--rows" "1000"
     run_profile "diff" "$input_file" "$dialect"
     run_profile "diff" "$input_file" "$dialect" "--schema-only"
+    run_profile "redact" "$input_file" "$dialect"
+    run_profile "redact" "$input_file" "$dialect" "--fake" "*.name"
     
     # Convert only for mysql/postgres
     if [[ "$dialect" != "sqlite" ]]; then

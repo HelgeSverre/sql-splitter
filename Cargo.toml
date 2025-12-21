@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "sql-splitter"
-version = "1.9.2"
+version = "1.10.0"
 edition = "2021"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "High-performance CLI tool for splitting large SQL dump files into individual table files"
@@ -38,6 +38,9 @@ tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+fake = { version = "3.0", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

@@ -120,6 +120,18 @@ sql-splitter diff old.sql new.sql --verbose --ignore-columns "*.updated_at,*.cre
 # Override primary key for tables without PK
 sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
 
+# Redact sensitive data using inline patterns
+sql-splitter redact dump.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"
+
+# Redact using YAML config file
+sql-splitter redact dump.sql -o safe.sql --config redact.yaml
+
+# Generate redaction config by analyzing input file
+sql-splitter redact dump.sql --generate-config -o redact.yaml
+
+# Reproducible redaction with seed
+sql-splitter redact dump.sql -o safe.sql --null "*.password" --seed 42
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -331,6 +343,43 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 - `text`: Human-readable summary with optional PK samples
 - `json`: Structured data for automation (includes warnings)
 - `sql`: Migration script with ALTER/CREATE INDEX/DROP INDEX statements
+
+### Redact Options
+
+| Flag                | Description                                                | Default     |
+|---------------------|------------------------------------------------------------|-------------|
+| `-o, --output`      | Output SQL file                                            | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-c, --config`      | YAML config file for redaction rules                       | —           |
+| `--generate-config` | Analyze input and generate annotated YAML config           | —           |
+| `--null`            | Columns to set to NULL (glob patterns, comma-separated)    | —           |
+| `--hash`            | Columns to hash with SHA256 (glob patterns)                | —           |
+| `--fake`            | Columns to replace with fake data (glob patterns)          | —           |
+| `--mask`            | Columns to partially mask (format: `pattern=column`)       | —           |
+| `--constant`        | Column=value pairs for constant replacement                | —           |
+| `--seed`            | Random seed for reproducible redaction                     | random      |
+| `--locale`          | Locale for fake data (en, de_de, fr_fr, etc.)              | `en`        |
+| `-t, --tables`      | Only redact specific tables (comma-separated)              | all         |
+| `-e, --exclude`     | Exclude specific tables (comma-separated)                  | —           |
+| `--strict`          | Fail on warnings (e.g., unsupported locale)                | —           |
+| `-p, --progress`    | Show progress bar                                          | —           |
+| `--dry-run`         | Preview without writing files                              | —           |
+| `--json`            | Output results as JSON                                     | —           |
+| `--validate`        | Validate config only, don't process                        | —           |
+
+**Redaction strategies:**
+
+- `null`: Replace value with NULL
+- `constant`: Replace with fixed value
+- `hash`: SHA256 hash (deterministic, preserves FK relationships)
+- `mask`: Partial masking with pattern (`*`=asterisk, `X`=keep, `#`=random digit)
+- `fake`: Generate realistic fake data (25+ generators)
+- `shuffle`: Redistribute values within column (preserves distribution)
+- `skip`: No redaction (passthrough)
+
+**Fake data generators:**
+
+`email`, `name`, `first_name`, `last_name`, `phone`, `address`, `city`, `state`, `zip`, `country`, `company`, `job_title`, `username`, `url`, `ip`, `ipv6`, `uuid`, `date`, `datetime`, `credit_card`, `iban`, `ssn`, `lorem`, `paragraph`, `sentence`
 
 ## Performance
 

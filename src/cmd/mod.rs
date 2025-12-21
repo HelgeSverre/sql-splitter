@@ -3,6 +3,7 @@ mod convert;
 mod diff;
 mod glob_util;
 mod merge;
+mod redact;
 mod sample;
 mod shard;
 mod split;
@@ -505,6 +506,91 @@ pub enum Commands {
         progress: bool,
     },
 
+    /// Redact sensitive data (PII) from SQL dumps
+    #[command(visible_alias = "rd")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter redact dump.sql -o safe.sql --config redact.yaml
+  sql-splitter redact dump.sql -o safe.sql --null \"*.ssn\" --hash \"*.email\"
+  sql-splitter redact dump.sql --generate-config -o redact.yaml
+  sql-splitter redact dump.sql -o safe.sql --config redact.yaml --seed 42")]
+    Redact {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        file: PathBuf,
+
+        /// Output file (default: stdout)
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// YAML config file for redaction rules
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        config: Option<PathBuf>,
+
+        /// Generate annotated YAML config by analyzing input file
+        #[arg(long, help_heading = MODE)]
+        generate_config: bool,
+
+        /// Columns to set to NULL (glob patterns, comma-separated)
+        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
+        null: Vec<String>,
+
+        /// Columns to hash with SHA256 (glob patterns)
+        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
+        hash: Vec<String>,
+
+        /// Columns to replace with fake data (glob patterns)
+        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
+        fake: Vec<String>,
+
+        /// Columns to mask (format: pattern=column, e.g., "****-XXXX=*.credit_card")
+        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
+        mask: Vec<String>,
+
+        /// Column=value pairs for constant replacement
+        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
+        constant: Vec<String>,
+
+        /// Random seed for reproducible redaction
+        #[arg(long, help_heading = MODE)]
+        seed: Option<u64>,
+
+        /// Locale for fake data generation (default: en)
+        #[arg(long, default_value = "en", help_heading = MODE)]
+        locale: String,
+
+        /// Only redact specific tables (comma-separated)
+        #[arg(short, long, value_delimiter = ',', help_heading = FILTERING)]
+        tables: Vec<String>,
+
+        /// Exclude specific tables (comma-separated)
+        #[arg(short = 'x', long, value_delimiter = ',', help_heading = FILTERING)]
+        exclude: Vec<String>,
+
+        /// Fail on warnings (e.g., unsupported locale)
+        #[arg(long, help_heading = BEHAVIOR)]
+        strict: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Preview without writing files
+        #[arg(long, help_heading = BEHAVIOR)]
+        dry_run: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+
+        /// Validate config only, don't process
+        #[arg(long, help_heading = BEHAVIOR)]
+        validate: bool,
+    },
+
     /// Generate shell completion scripts
     #[command(after_help = "\x1b[1mInstallation:\x1b[0m
   Bash:
@@ -746,6 +832,47 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             ignore_order,
             primary_key,
             ignore_columns,
+        ),
+        Commands::Redact {
+            file,
+            output,
+            dialect,
+            config,
+            generate_config,
+            null,
+            hash,
+            fake,
+            mask,
+            constant,
+            seed,
+            locale,
+            tables,
+            exclude,
+            strict,
+            progress,
+            dry_run,
+            json,
+            validate,
+        } => redact::run(
+            file,
+            output,
+            dialect,
+            config,
+            generate_config,
+            null,
+            hash,
+            fake,
+            mask,
+            constant,
+            seed,
+            locale,
+            tables,
+            exclude,
+            strict,
+            progress,
+            dry_run,
+            json,
+            validate,
         ),
         Commands::Completions { shell } => {
             generate(

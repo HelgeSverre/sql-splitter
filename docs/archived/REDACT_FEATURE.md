@@ -1,7 +1,10 @@
 # Redact Command Design
 
-**Status**: Draft  
-**Date**: 2025-12-20
+**Status**: Planning (v1.10.0)  
+**Date**: 2025-12-20  
+**Last Updated**: 2025-12-21
+
+> **Implementation Plan**: See [REDACT_IMPLEMENTATION_PLAN.md](REDACT_IMPLEMENTATION_PLAN.md) for the detailed 8-phase implementation plan (~74h total effort).
 
 ## Overview
 

@@ -113,6 +113,41 @@ sql-splitter diff old.sql new.sql --primary-key logs:ts+msg           # Override
 sql-splitter diff old.sql new.sql --allow-no-pk                       # Tables without PK
 ```
 
+### redact
+Anonymize PII in SQL dumps by replacing sensitive data with fake, hashed, or null values.
+
+```bash
+# Using YAML config file
+sql-splitter redact dump.sql --output safe.sql --config redact.yaml
+
+# Using CLI flags
+sql-splitter redact dump.sql --output safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"
+
+# Mask credit cards (keep last 4 digits)
+sql-splitter redact dump.sql --output safe.sql --mask "****-****-****-XXXX=*.credit_card"
+
+# Generate config by analyzing input file
+sql-splitter redact dump.sql --generate-config --output redact.yaml
+
+# Reproducible with seed
+sql-splitter redact dump.sql --output safe.sql --config redact.yaml --seed 42
+
+# Validate config only
+sql-splitter redact dump.sql --config redact.yaml --validate
+
+# With specific locale for fake data
+sql-splitter redact dump.sql --output safe.sql --fake "*.name" --locale de_de
+```
+
+**Strategies:**
+- `--null "pattern"`: Replace with NULL
+- `--hash "pattern"`: SHA256 hash (deterministic, preserves FK integrity)
+- `--fake "pattern"`: Generate realistic fake data
+- `--mask "pattern=column"`: Partial masking
+- `--constant "column=value"`: Fixed value replacement
+
+**Fake generators:** email, name, first_name, last_name, phone, address, city, zip, company, ip, uuid, date, credit_card, ssn, lorem, and more.
+
 ---
 
 ## Step-by-Step Patterns
@@ -250,6 +285,35 @@ For detecting schema or data changes between two versions:
 4. **JSON output for automation**
    ```bash
    sql-splitter diff old.sql new.sql --format json | jq '.summary'
+   ```
+
+### Pattern 8: Data Anonymization
+
+For creating safe development/testing datasets:
+
+1. **Generate redaction config by analyzing dump**
+   ```bash
+   sql-splitter redact dump.sql --generate-config --output redact.yaml
+   ```
+
+2. **Review and customize** the generated config
+
+3. **Apply redaction**
+   ```bash
+   sql-splitter redact dump.sql --output safe.sql --config redact.yaml --progress
+   ```
+
+4. **Or use inline patterns for quick redaction**
+   ```bash
+   sql-splitter redact dump.sql --output safe.sql \
+     --null "*.ssn,*.tax_id" \
+     --hash "*.email" \
+     --fake "*.name,*.phone"
+   ```
+
+5. **Validate the redacted output**
+   ```bash
+   sql-splitter validate safe.sql --strict
    ```
 
 ---

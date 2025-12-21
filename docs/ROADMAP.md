@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.9.0 (current)  
+**Version**: 1.10.0 (current)  
 **Last Updated**: 2025-12-21  
-**Revision**: 2.8 — Post v1.9.0 with diff command
+**Revision**: 2.9 — Post v1.10.0 with redact command
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -18,10 +18,10 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 5. ✅ Convert — Dialect conversion (v1.7.0)
 6. ✅ Validate — Dump integrity checking (v1.8.0)
 7. ✅ Diff — Schema + data comparison (v1.9.0)
+8. ✅ Redact — Data anonymization (v1.10.0)
 
-**Next (v1.10+):**
-- v1.10.0: Query — SQL-like row filtering
-- v1.11.0: Redact — Data anonymization
+**Next (v1.11+):**
+- v1.11.0: Query — SQL-like row filtering
 - v1.12.0: Detect-PII — Auto-suggest redaction config
 - v1.13.0: MSSQL — Fourth dialect support
 
@@ -319,11 +319,47 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.10+)
+### v1.10.0 — Redact Command ✅ RELEASED
+**Released**: 2025-12-21  
+**Theme**: Data anonymization
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Redact command** | ✅ Done | |
+| ├─ CLI + options | ✅ Done | --config, --null, --hash, --fake, --mask, --constant |
+| ├─ YAML config parsing | ✅ Done | Rules, defaults, skip_tables |
+| ├─ Column pattern matching | ✅ Done | Glob patterns (*.email, users.ssn) |
+| ├─ 7 redaction strategies | ✅ Done | null, constant, hash, mask, shuffle, fake, skip |
+| ├─ 25+ fake generators | ✅ Done | email, name, phone, address, ip, uuid, etc. |
+| ├─ --generate-config | ✅ Done | Auto-detect PII columns |
+| ├─ Multi-locale support | ✅ Done | 8 locales |
+| ├─ --seed reproducibility | ✅ Done | Deterministic fake data |
+| └─ Streaming architecture | ✅ Done | ~87MB for 10GB files, ~230 MB/s |
+| **Documentation** | ✅ Done | |
+| ├─ Man page | ✅ Done | sql-splitter-redact.1 |
+| ├─ README | ✅ Done | |
+| ├─ llms.txt | ✅ Done | |
+| └─ SKILL.md | ✅ Done | |
+| **Testing** | ✅ Done | verify-realworld.sh integration |
+
+**Delivered:**
+- `sql-splitter redact dump.sql -o safe.sql --config redact.yaml`
+- `sql-splitter redact dump.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"`
+- `sql-splitter redact dump.sql --generate-config -o redact.yaml`
+- All strategies: null, constant, hash, mask, shuffle, fake, skip
+- 25+ fake generators with 8 locale support
+- Streaming architecture with constant memory usage
+- ~230 MB/s throughput on large files
+
+**Note:** Phase 3 (INSERT/COPY rewriting) is stubbed; current implementation passes through statements unchanged. Framework is complete for future implementation.
 
 ---
 
-### v1.10.0 — Query Command
+## Upcoming Features (v1.11+)
+
+---
+
+### v1.11.0 — Query Command
 **Theme**: SQL-like row filtering
 
 | Feature | Effort | Notes |
@@ -334,20 +370,6 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 - Basic WHERE: `=`, `!=`, `<`, `>`, `AND`, `OR`, `IS NULL`, `IN`
 - Table selection
 - Output formats: SQL, CSV, JSON
-
----
-
-### v1.11.0 — Redact Command
-**Theme**: Data anonymization
-
-| Feature | Effort | Notes |
-|---------|--------|-------|
-| Redact | ~40h | Column-based anonymization |
-
-**Strategies:**
-- null, constant, hash, mask, shuffle
-- Fake data generation (names, emails, etc.)
-- Glob pattern matching for column selection
 
 ---
 
@@ -402,7 +424,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ## Effort Summary
 
-### Priority Features (v1.4–v1.8)
+### Priority Features (v1.4–v1.10)
 
 | Version | Theme | Status |
 |---------|-------|--------|
@@ -413,14 +435,16 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.8.0 | Validate | ✅ Released |
 | v1.8.1 | Glob Patterns + Agent Skills | ✅ Released |
 | v1.8.2 | Sample Memory Optimization | ✅ Released |
+| v1.9.0 | Diff | ✅ Released |
+| v1.9.1 | Diff Enhanced | ✅ Released |
+| v1.9.2 | CLI UX + Man Pages | ✅ Released |
+| v1.10.0 | Redact | ✅ Released |
 
-### Upcoming Features (v1.9+)
+### Upcoming Features (v1.11+)
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v1.9.0 | Diff | ~40h | 2-3 weeks |
-| v1.10.0 | Query | ~30h | 2 weeks |
-| v1.11.0 | Redact | ~40h | 2-3 weeks |
+| v1.11.0 | Query | ~30h | 2 weeks |
 | v1.12.0 | Detect-PII | ~8h | 1 week |
 | v1.13.0 | MSSQL | ~24h | 2 weeks |
 
@@ -458,6 +482,23 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 7. ✅ **v1.8.2 — Sample Memory Optimization** — Released
    - 98.5% memory reduction for sample command
    - Memory profiling infrastructure
+
+8. ✅ **v1.9.0 — Diff** — Released
+   - Schema + data comparison
+   - Memory-bounded PK tracking (10M entries)
+
+9. ✅ **v1.9.1 — Diff Enhanced** — Released
+   - Verbose PK samples, PK override, ignore patterns
+   - Index diff support
+
+10. ✅ **v1.9.2 — CLI UX + Man Pages** — Released
+    - Help headings, examples, aliases
+    - Man page generation
+
+11. ✅ **v1.10.0 — Redact** — Released
+    - Data anonymization with 7 strategies
+    - 25+ fake generators, YAML config
+    - ~230 MB/s throughput, constant memory
 
 ---
 
@@ -514,14 +555,16 @@ tests/
 
 ### Upcoming Feature Designs
 
-- [Diff Feature](features/DIFF_FEATURE.md) — v1.9.0
-- [Query Feature](features/QUERY_FEATURE.md) — v1.10.0
-- [Redact Feature](features/REDACT_FEATURE.md) — v1.11.0
+- [Query Feature](features/QUERY_FEATURE.md) — v1.11.0
 - [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md) — v1.13.0
 
 ### Archived (Implemented)
 
 Historical documents for completed features in `docs/archived/`:
+- REDACT_FEATURE.md — v1.10.0
+- REDACT_IMPLEMENTATION_PLAN.md — v1.10.0
+- DIFF_FEATURE.md — v1.9.0
+- DIFF_IMPLEMENTATION_PLAN.md — v1.9.0
 - SAMPLE_FEATURE.md — v1.5.0
 - SHARD_FEATURE.md — v1.6.0
 - MERGE_FEATURE.md — v1.4.0

@@ -11,6 +11,7 @@
 #   3. Validate (input) - Run integrity checks on downloaded SQL files
 #   4. Validate (glob) - Use glob pattern to validate all split output files
 #   5. Validate (roundtrip) - Split→Merge→Validate to verify no data loss
+#   6. Redact command - Test data anonymization with various strategies
 #
 # Usage:
 #   ./scripts/verify-realworld.sh           # Run all tests
@@ -217,6 +218,10 @@ declare -a VALIDATE_OUTPUT_VALUES=()
 declare -a VALIDATE_GLOB_NAMES=()
 declare -a VALIDATE_GLOB_VALUES=()
 
+# Redact results storage
+declare -a REDACT_NAMES=()
+declare -a REDACT_VALUES=()
+
 # Get validation result by name from parallel arrays
 # Args: name, type (input/output/glob)
 # Returns: result string via stdout
@@ -247,6 +252,109 @@ get_validate_result() {
         done
     fi
     echo "?"
+}
+
+# Get redact result by name
+get_redact_result() {
+    local name=$1
+    for i in "${!REDACT_NAMES[@]}"; do
+        if [[ "${REDACT_NAMES[$i]}" == "$name" ]]; then
+            echo "${REDACT_VALUES[$i]}"
+            return
+        fi
+    done
+    echo "?"
+}
+
+# Run redact test on a SQL file
+# Args: name, sql_file, dialect
+# Returns: 0 on success, 1 on failure
+run_redact_test() {
+    local name=$1
+    local sql_file=$2
+    local dialect=$3
+    local redact_output_dir="$OUTPUT_DIR/redact/$name"
+    local redact_output="$redact_output_dir/${name}_redacted.sql"
+
+    if [[ ! -f "$sql_file" ]]; then
+        return 1
+    fi
+
+    mkdir -p "$redact_output_dir"
+
+    local result_str=""
+    local all_passed=true
+
+    # Test 1: Dry-run mode (basic functionality)
+    if "$BINARY" redact "$sql_file" --dialect="$dialect" --dry-run --null "*.password" >/dev/null 2>&1; then
+        result_str+="dry:✓ "
+    else
+        result_str+="dry:✗ "
+        all_passed=false
+    fi
+
+    # Test 2: With --null strategy
+    if "$BINARY" redact "$sql_file" --dialect="$dialect" --output="$redact_output" --null "*.password,*.ssn" >/dev/null 2>&1; then
+        if [[ -f "$redact_output" ]]; then
+            result_str+="null:✓ "
+        else
+            result_str+="null:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="null:✗ "
+        all_passed=false
+    fi
+
+    # Test 3: With --hash strategy
+    local hash_output="$redact_output_dir/${name}_hash.sql"
+    if "$BINARY" redact "$sql_file" --dialect="$dialect" --output="$hash_output" --hash "*.email" >/dev/null 2>&1; then
+        if [[ -f "$hash_output" ]]; then
+            result_str+="hash:✓ "
+        else
+            result_str+="hash:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="hash:✗ "
+        all_passed=false
+    fi
+
+    # Test 4: With --fake strategy
+    local fake_output="$redact_output_dir/${name}_fake.sql"
+    if "$BINARY" redact "$sql_file" --dialect="$dialect" --output="$fake_output" --fake "*.name,*.phone" >/dev/null 2>&1; then
+        if [[ -f "$fake_output" ]]; then
+            result_str+="fake:✓ "
+        else
+            result_str+="fake:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="fake:✗ "
+        all_passed=false
+    fi
+
+    # Test 5: Reproducible with --seed
+    local seed_output1="$redact_output_dir/${name}_seed1.sql"
+    local seed_output2="$redact_output_dir/${name}_seed2.sql"
+    if "$BINARY" redact "$sql_file" --dialect="$dialect" --output="$seed_output1" --null "*.password" --seed 42 >/dev/null 2>&1 && \
+       "$BINARY" redact "$sql_file" --dialect="$dialect" --output="$seed_output2" --null "*.password" --seed 42 >/dev/null 2>&1; then
+        result_str+="seed:✓"
+    else
+        result_str+="seed:✗"
+        all_passed=false
+    fi
+
+    # Trim trailing space
+    result_str="${result_str% }"
+
+    REDACT_NAMES+=("$name")
+    REDACT_VALUES+=("$result_str")
+
+    if [[ "$all_passed" == "true" ]]; then
+        return 0
+    fi
+    return 1
 }
 
 # Run validation on a SQL file
@@ -529,6 +637,9 @@ run_all_tests() {
     local validate_glob_passed=0
     local validate_glob_failed=0
     local validate_glob_skipped=0
+    local redact_passed=0
+    local redact_failed=0
+    local redact_skipped=0
     
     for test_case in "${TEST_CASES[@]}"; do
         IFS='|' read -r name dialect url unzip_cmd sql_file notes <<< "$test_case"
@@ -544,6 +655,7 @@ run_all_tests() {
             ((validate_input_skipped++))
             ((validate_merge_skipped++))
             ((validate_glob_skipped++))
+            ((redact_skipped++))
             continue
         fi
         
@@ -554,6 +666,7 @@ run_all_tests() {
             ((validate_input_skipped++))
             ((validate_merge_skipped++))
             ((validate_glob_skipped++))
+            ((redact_skipped++))
             continue
         fi
         
@@ -627,6 +740,21 @@ run_all_tests() {
             echo -e "  Convert tests: ${CYAN}skipped (dialect=any)${NC}"
             ((convert_skipped++))
         fi
+        
+        # Run redact tests
+        if [[ "$dialect" != "any" ]]; then
+            echo -e "  Testing redact..."
+            if run_redact_test "$name" "$full_path" "$dialect"; then
+                ((redact_passed++))
+                echo -e "  Redact: ${GREEN}$(get_redact_result "$name")${NC}"
+            else
+                ((redact_failed++))
+                echo -e "  Redact: ${YELLOW}$(get_redact_result "$name")${NC}"
+            fi
+        else
+            echo -e "  Redact tests: ${CYAN}skipped (dialect=any)${NC}"
+            ((redact_skipped++))
+        fi
     done
     
     echo ""
@@ -659,6 +787,11 @@ run_all_tests() {
     echo -e "  ${RED}Failed:${NC}  $validate_glob_failed"
     echo -e "  ${YELLOW}Skipped:${NC} $validate_glob_skipped"
     echo ""
+    echo -e "${CYAN}Redact Command (all strategies):${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $redact_passed"
+    echo -e "  ${RED}Failed:${NC}  $redact_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $redact_skipped"
+    echo ""
     echo "Legend:"
     echo "  ✓ = Success / No issues"
     echo "  ⚠ = Warnings but no errors"
@@ -667,6 +800,7 @@ run_all_tests() {
     echo "  (any) = Generic SQL, detection accuracy not checked"
     echo "  Nerr/Nwarn = N errors/warnings found"
     echo "  N/M = N files passed out of M total"
+    echo "  dry/null/hash/fake/seed = redact strategy tests"
     echo ""
     
     if [[ $split_failed -gt 0 || $convert_failed -gt 0 ]]; then

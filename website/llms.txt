@@ -19,6 +19,7 @@ database connections. It is designed to be **safe to automate** in scripts, CI p
 | `sample`   | Create reduced FK-consistent datasets     | Dev/CI seeding, testing with realistic data       |
 | `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
 | `diff`     | Compare two SQL dumps for changes         | Schema migrations, change detection, auditing     |
+| `redact`   | Anonymize PII in SQL dumps                | GDPR compliance, dev data, safe sharing           |
 
 ## Universal Capabilities
 
@@ -45,6 +46,7 @@ All commands support:
 | Convert MySQL dump to PostgreSQL         | `convert --to postgres`   | Validate before and after conversion                        |
 | Validate all dumps in CI pipeline        | `validate "*.sql" --json` | Parse JSON output with `jq` for automation                  |
 | Compare two dumps for changes            | `diff`                    | Schema + data comparison; outputs text, json, or sql        |
+| Anonymize sensitive data for dev/sharing | `redact`                  | Replace PII with fake/hashed values; YAML config or CLI     |
 
 ---
 
@@ -329,6 +331,121 @@ sql-splitter diff old.sql new.sql --allow-no-pk
 
 ---
 
+## Workflow 7: Data Anonymization for Dev/Testing
+
+**Goal:** Anonymize sensitive PII data for safe sharing, development, or demo environments.
+
+```bash
+# 1. Analyze dump to understand what data exists
+sql-splitter analyze prod_dump.sql --progress
+
+# 2. Generate redaction config by analyzing input file
+sql-splitter redact prod_dump.sql --generate-config -o redact.yaml
+
+# 3. Review and customize the generated config (edit redact.yaml)
+
+# 4. Apply redaction using config file
+sql-splitter redact prod_dump.sql -o safe_dump.sql --config redact.yaml --progress
+
+# 5. Validate the redacted output
+sql-splitter validate safe_dump.sql --strict --progress
+```
+
+**Quick inline redaction (no config file):**
+
+```bash
+# Set SSN columns to NULL, hash emails, generate fake names
+sql-splitter redact dump.sql -o safe.sql \
+  --null "*.ssn,*.tax_id" \
+  --hash "*.email" \
+  --fake "*.name,*.phone,*.address"
+
+# Reproducible redaction with seed
+sql-splitter redact dump.sql -o safe.sql \
+  --null "*.password" \
+  --hash "*.email" \
+  --seed 42
+
+# Preview without writing (dry-run)
+sql-splitter redact dump.sql --dry-run \
+  --null "*.ssn" \
+  --hash "*.email"
+```
+
+**Redaction strategies:**
+
+- `--null "pattern"`: Replace matching columns with NULL
+- `--hash "pattern"`: SHA256 hash (deterministic, preserves FK integrity)
+- `--fake "pattern"`: Generate realistic fake data (names, emails, phones, etc.)
+- `--mask "pattern=column"`: Partial masking (e.g., `****-XXXX=*.credit_card`)
+- `--constant "column=value"`: Replace with fixed value
+
+**YAML config format:**
+
+```yaml
+# redact.yaml
+seed: 12345  # Reproducible fake data
+locale: en   # Locale for fake data (en, de_de, fr_fr, etc.)
+
+defaults:
+  strategy: skip  # Default for unmatched columns
+
+rules:
+  - column: "*.ssn"
+    strategy: null
+  - column: "*.email"
+    strategy: hash
+    preserve_domain: true
+  - column: "*.name"
+    strategy: fake
+    generator: name
+  - column: "*.credit_card"
+    strategy: mask
+    pattern: "****-****-****-XXXX"
+  - column: "admins.email"
+    strategy: skip  # Don't redact admin emails
+
+skip_tables:
+  - schema_migrations
+  - ar_internal_metadata
+```
+
+**Fake data generators (25+):**
+
+| Generator | Example Output |
+|-----------|----------------|
+| `email` | `jessica.smith@example.com` |
+| `name` | `Robert Johnson` |
+| `first_name` | `Sarah` |
+| `last_name` | `Williams` |
+| `phone` | `+1 (555) 234-5678` |
+| `address` | `123 Oak Street, Springfield, IL 62701` |
+| `city` | `Portland` |
+| `zip` | `90210` |
+| `company` | `Acme Corporation` |
+| `ip` | `192.168.1.100` |
+| `uuid` | `550e8400-e29b-41d4-a716-446655440000` |
+| `date` | `1985-07-23` |
+| `credit_card` | `4532015112830366` |
+| `ssn` | `123-45-6789` |
+
+**Redact options:**
+
+- `-o, --output`: Output file (default: stdout)
+- `-c, --config`: YAML config file for redaction rules
+- `--generate-config`: Analyze input and generate annotated YAML config
+- `--null`, `--hash`, `--fake`, `--mask`, `--constant`: Inline strategy patterns
+- `--seed`: Random seed for reproducible redaction
+- `--locale`: Locale for fake data (en, de_de, fr_fr, zh_cn, ja_jp, etc.)
+- `-t, --tables`: Only redact specific tables
+- `-e, --exclude`: Exclude specific tables
+- `--strict`: Fail on warnings
+- `--dry-run`: Preview without writing files
+- `--json`: Output results as JSON
+- `--validate`: Validate config only, don't process
+
+---
+
 ## Piping and Composition Patterns
 
 ### Stream convert to database (no intermediate file)
@@ -425,6 +542,7 @@ If commands fail with syntax errors or unknown keywords:
 - [src/sample/](https://github.com/helgesverre/sql-splitter/tree/main/src/sample): FK-aware sampling
 - [src/shard/](https://github.com/helgesverre/sql-splitter/tree/main/src/shard): Tenant extraction
 - [src/differ/](https://github.com/helgesverre/sql-splitter/tree/main/src/differ): Schema + data diffing
+- [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
 
 ## Agent Skill Installation
 

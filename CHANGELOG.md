@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2025-12-21
+
+### Added
+
+- **Redact command**: Anonymize sensitive data (PII) in SQL dumps
+  - `sql-splitter redact dump.sql -o safe.sql --config redact.yaml` - Apply redaction rules from YAML config
+  - `sql-splitter redact dump.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"` - Inline patterns
+  - `sql-splitter redact dump.sql --generate-config -o redact.yaml` - Auto-generate config by analyzing schema
+  - **7 redaction strategies**: null, constant, hash, mask, shuffle, fake, skip
+  - **25+ fake data generators**: email, name, first_name, last_name, phone, address, city, zip, company, ip, uuid, date, credit_card, ssn, lorem, and more
+  - **Glob pattern matching**: Match columns with patterns like `*.email`, `users.ssn`, `*.password`
+  - **YAML config support**: Define rules in a config file with defaults, rules, and skip_tables
+  - **Multi-locale fake data**: Support for 8 locales (en, de_de, fr_fr, zh_cn, zh_tw, ja_jp, pt_br, ar_sa)
+  - **Reproducible redaction**: `--seed` flag for deterministic fake data
+  - **Streaming architecture**: Constant memory usage (~87MB for 10GB files)
+  - **High throughput**: ~230 MB/s on large files
+  - `--dry-run` flag to preview redaction without writing
+  - `--json` flag for machine-readable output
+  - `--strict` flag to fail on warnings
+  - `--tables` and `--exclude` flags for table filtering
+  - Supports all 3 dialects (MySQL, PostgreSQL, SQLite)
+  - Supports compressed input files (.gz, .bz2, .xz, .zst)
+  - Man page: `man sql-splitter-redact`
+  - Command alias: `rd`
+
+### Changed
+
+- Updated verify-realworld.sh to test redact command on all 25+ real-world dumps
+- Updated profile-memory.sh to profile redact command
+
 ## [1.9.2] - 2025-12-21
 
 ### Added

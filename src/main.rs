@@ -9,6 +9,7 @@ mod merger;
 mod parser;
 mod pk;
 mod progress;
+mod redactor;
 mod sample;
 mod schema;
 mod shard;
