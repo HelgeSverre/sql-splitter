@@ -1,3 +1,5 @@
+/* V4: Terminal Theme - Darker background + v2 styling + shell syntax highlighting */
+
 /* Reset */
 *, *::before, *::after {
     margin: 0;
@@ -6,27 +8,49 @@
 }
 
 :root {
-    --color-bg: #fafafa;
-    --color-surface: #fff;
-    --color-text: #1a1a1a;
-    --color-text-muted: #666;
-    --color-border: #e5e5e5;
-    --color-code-bg: #f4f4f5;
-    --color-accent: #18181b;
-    --color-accent-hover: #3f3f46;
+    /* Darker background from original */
+    --color-bg: #0a0a0a;
+    --color-surface: #111111;
+    --color-text: #e6edf3;
+    --color-text-muted: #8b949e;
+    --color-border: #27272a;
+    --color-code-bg: #0a0a0a;
+    --color-accent: #58a6ff;
+    --color-accent-hover: #79b8ff;
+
+    /* Neon command colors */
+    --cmd-split: #58a6ff;
+    --cmd-merge: #a371f7;
+    --cmd-analyze: #3fb950;
+    --cmd-validate: #3fb950;
+    --cmd-convert: #f78166;
+    --cmd-sample: #db61a2;
+    --cmd-shard: #a371f7;
+
+    /* Shell syntax highlighting */
+    --syn-comment: #6e7681;
+    --syn-command: #79c0ff;
+    --syn-subcommand: #d2a8ff;
+    --syn-flag: #7ee787;
+    --syn-flag-value: #ffa657;
+    --syn-string: #a5d6ff;
+    --syn-path: #ffa657;
+    --syn-variable: #ffa657;
+    --syn-pipe: #ff7b72;
+    --syn-prompt: #3fb950;
 
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     --font-display: 'Monda', var(--font-sans);
     --font-mono: "SF Mono", ui-monospace, "Cascadia Code", "Roboto Mono", Menlo, monospace;
 
-    --max-width: 720px;
+    --max-width: 780px;
     --space-xs: 0.5rem;
     --space-sm: 1rem;
     --space-md: 1.5rem;
     --space-lg: 2.5rem;
     --space-xl: 4rem;
 
-    --radius: 6px;
+    --radius: 8px;
 }
 
 html {
@@ -46,7 +70,8 @@ body {
 nav {
     position: sticky;
     top: 0;
-    background: var(--color-bg);
+    background: rgba(10, 10, 10, 0.9);
+    backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--color-border);
     z-index: 100;
 }
@@ -75,7 +100,8 @@ nav {
     font-family: var(--font-mono);
     font-size: 1.5em;
     font-weight: 700;
-    color: var(--color-accent);
+    color: var(--cmd-split);
+    text-shadow: 0 0 10px var(--cmd-split);
 }
 
 .nav-links {
@@ -87,10 +113,11 @@ nav {
     color: var(--color-text-muted);
     text-decoration: none;
     font-size: 0.9rem;
+    transition: color 0.15s;
 }
 
 .nav-links a:hover {
-    color: var(--color-text);
+    color: var(--cmd-split);
 }
 
 /* Main */
@@ -123,17 +150,31 @@ h2 {
     font-size: 1.5rem;
     margin-bottom: var(--space-sm);
     font-weight: 700;
+    color: var(--color-text);
 }
 
 h3 {
     font-size: 1.125rem;
     margin-bottom: var(--space-xs);
+    color: var(--color-text);
 }
 
+/* Command headings as terminal prompts */
 h4 {
-    font-size: 1rem;
-    margin: var(--space-md) 0 var(--space-xs);
-    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    margin: var(--space-lg) 0 var(--space-xs);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    color: var(--color-text);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+h4::before {
+    content: '$';
+    color: var(--cmd-validate);
+    font-weight: 700;
 }
 
 p {
@@ -149,6 +190,10 @@ p {
 .note {
     font-size: 0.875rem;
     color: var(--color-text-muted);
+    padding: var(--space-xs) var(--space-sm);
+    background: var(--color-surface);
+    border-left: 3px solid var(--cmd-analyze);
+    border-radius: 0 var(--radius) var(--radius) 0;
 }
 
 /* Hero */
@@ -163,7 +208,8 @@ p {
 
 .subtitle {
     font-size: 1.25rem;
-    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    color: var(--cmd-split);
     margin-bottom: var(--space-sm);
 }
 
@@ -192,22 +238,26 @@ p {
 }
 
 .btn-primary {
-    background: var(--color-accent);
-    color: #fff;
+    background: var(--cmd-split);
+    color: #0a0a0a;
+    box-shadow: 0 0 20px rgba(88, 166, 255, 0.3);
 }
 
 .btn-primary:hover {
     background: var(--color-accent-hover);
+    box-shadow: 0 0 30px rgba(88, 166, 255, 0.5);
+    transform: translateY(-1px);
 }
 
 .btn-secondary {
-    background: var(--color-surface);
+    background: transparent;
     color: var(--color-text);
     border: 1px solid var(--color-border);
 }
 
 .btn-secondary:hover {
-    background: var(--color-code-bg);
+    border-color: var(--cmd-split);
+    color: var(--cmd-split);
 }
 
 /* Why Section */
@@ -224,15 +274,24 @@ p {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
+    transition: all 0.2s;
+}
+
+.benefit:hover {
+    border-color: var(--cmd-split);
+    box-shadow: 0 0 20px rgba(88, 166, 255, 0.1);
 }
 
 .benefit-icon {
     font-family: var(--font-mono);
     font-size: 1.5rem;
     font-weight: 700;
-    color: var(--color-accent);
     margin-bottom: var(--space-xs);
 }
+
+.benefit:nth-child(1) .benefit-icon { color: var(--cmd-split); text-shadow: 0 0 10px var(--cmd-split); }
+.benefit:nth-child(2) .benefit-icon { color: var(--cmd-validate); text-shadow: 0 0 10px var(--cmd-validate); }
+.benefit:nth-child(3) .benefit-icon { color: var(--cmd-convert); text-shadow: 0 0 10px var(--cmd-convert); }
 
 .benefit h3 {
     margin-bottom: var(--space-xs);
@@ -264,8 +323,9 @@ p {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--color-accent);
-    color: #fff;
+    background: var(--color-surface);
+    color: var(--cmd-split);
+    border: 1px solid var(--cmd-split);
     font-weight: 600;
     font-size: 0.875rem;
     border-radius: 50%;
@@ -285,7 +345,7 @@ p {
     margin-bottom: var(--space-xs);
 }
 
-/* Code Blocks */
+/* Code Blocks - Terminal style */
 .code-block {
     position: relative;
     margin: var(--space-xs) 0 var(--space-sm);
@@ -298,6 +358,27 @@ p {
     padding: var(--space-sm);
     padding-right: 4.5rem;
     overflow-x: auto;
+    position: relative;
+}
+
+/* Terminal window dots */
+.code-block pre::before {
+    content: '● ● ●';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 0.5rem var(--space-sm);
+    font-size: 0.6rem;
+    letter-spacing: 0.25rem;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.code-block pre {
+    padding-top: 2.5rem;
 }
 
 .code-block code {
@@ -307,9 +388,13 @@ p {
     color: var(--color-text);
 }
 
+/* Shell Syntax Highlighting Classes */
+.sh-comment { color: #3d6a47; font-style: italic; }
+.sh-tool { color: var(--cmd-split); }
+
 .copy-btn {
     position: absolute;
-    top: var(--space-xs);
+    top: calc(var(--space-xs) / 2);
     right: var(--space-xs);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
@@ -323,28 +408,30 @@ p {
 }
 
 .copy-btn:hover {
-    background: var(--color-bg);
-    color: var(--color-text);
+    border-color: var(--cmd-split);
+    color: var(--cmd-split);
 }
 
 .copy-btn.copied {
-    background: var(--color-accent);
-    color: #fff;
-    border-color: var(--color-accent);
+    background: var(--cmd-validate);
+    color: #0a0a0a;
+    border-color: var(--cmd-validate);
 }
 
 /* Inline code */
 code {
     font-family: var(--font-mono);
     font-size: 0.875em;
-    background: var(--color-code-bg);
+    background: var(--color-surface);
     padding: 0.125rem 0.375rem;
     border-radius: 3px;
+    color: var(--cmd-split);
 }
 
 pre code {
     background: none;
     padding: 0;
+    color: var(--color-text);
 }
 
 /* Verify */
@@ -371,7 +458,7 @@ details summary {
 }
 
 details summary:hover {
-    color: var(--color-accent);
+    color: var(--cmd-split);
 }
 
 details summary::marker {
@@ -422,6 +509,15 @@ details summary::marker {
     margin-bottom: 0.5rem;
 }
 
+/* Additional spacing after code blocks in guide sections */
+.guide-section .code-block {
+    margin-bottom: var(--space-md);
+}
+
+.guide-section h4 + .code-block {
+    margin-top: var(--space-xs);
+}
+
 /* Tables */
 .options-table {
     width: 100%;
@@ -439,7 +535,11 @@ details summary::marker {
 
 .options-table th {
     font-weight: 600;
-    background: var(--color-code-bg);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
 }
 
 .options-table tr:last-child td {
@@ -470,6 +570,11 @@ details summary::marker {
     color: var(--color-text-muted);
 }
 
+.two-col li::before {
+    content: '→ ';
+    color: var(--cmd-validate);
+}
+
 /* Footer */
 footer {
     max-width: var(--max-width);
@@ -487,7 +592,7 @@ footer a {
 }
 
 footer a:hover {
-    text-decoration: underline;
+    color: var(--cmd-split);
 }
 
 footer .sep {
@@ -536,28 +641,50 @@ footer .credit {
     }
 }
 
-/* Dark Mode */
-@media (prefers-color-scheme: dark) {
+/* Light mode override */
+@media (prefers-color-scheme: light) {
     :root {
-        --color-bg: #0a0a0a;
-        --color-surface: #141414;
-        --color-text: #fafafa;
-        --color-text-muted: #a1a1aa;
-        --color-border: #27272a;
-        --color-code-bg: #18181b;
-        --color-accent: #fafafa;
-        --color-accent-hover: #d4d4d8;
+        --color-bg: #ffffff;
+        --color-surface: #f6f8fa;
+        --color-text: #24292f;
+        --color-text-muted: #57606a;
+        --color-border: #d0d7de;
+        --color-code-bg: #f6f8fa;
+
+        --cmd-split: #0969da;
+        --cmd-merge: #8250df;
+        --cmd-analyze: #1a7f37;
+        --cmd-validate: #1a7f37;
+        --cmd-convert: #bc4c00;
+        --cmd-sample: #bf3989;
+        --cmd-shard: #8250df;
+
+        /* Light mode syntax highlighting */
+        --syn-comment: #6e7681;
+        --syn-command: #0550ae;
+        --syn-subcommand: #8250df;
+        --syn-flag: #116329;
+        --syn-flag-value: #953800;
+        --syn-string: #0a3069;
+        --syn-path: #953800;
+        --syn-variable: #953800;
+        --syn-pipe: #cf222e;
+        --syn-prompt: #1a7f37;
+    }
+
+    .logo-icon {
+        text-shadow: none;
+    }
+
+    .benefit-icon {
+        text-shadow: none;
     }
 
     .btn-primary {
-        color: #0a0a0a;
+        box-shadow: none;
     }
 
-    .copy-btn.copied {
-        color: #0a0a0a;
-    }
-
-    .step-number {
-        color: #0a0a0a;
+    .btn-primary:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
     }
 }

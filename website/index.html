@@ -94,7 +94,7 @@ cargo build --release</code></pre>
                     <div class="step-content">
                         <h3>Split your dump</h3>
                         <div class="code-block">
-                            <pre><code>./target/release/sql-splitter split database.sql --output=tables</code></pre>
+                            <pre><code>./target/release/<span class="sh-tool">sql-splitter</span> split database.sql --output=tables</code></pre>
                             <button class="copy-btn" data-copy="./target/release/sql-splitter split database.sql --output=tables">Copy</button>
                         </div>
                     </div>
@@ -111,22 +111,22 @@ cargo build --release</code></pre>
             <h3>From crates.io (Recommended)</h3>
             <p>If you have Rust installed:</p>
             <div class="code-block">
-                <pre><code>cargo install sql-splitter</code></pre>
+                <pre><code>cargo install <span class="sh-tool">sql-splitter</span></code></pre>
                 <button class="copy-btn" data-copy="cargo install sql-splitter">Copy</button>
             </div>
 
             <h3>From GitHub</h3>
             <div class="code-block">
-                <pre><code>cargo install --git https://github.com/helgesverre/sql-splitter</code></pre>
+                <pre><code>cargo install --git https://github.com/helgesverre/<span class="sh-tool">sql-splitter</span></code></pre>
                 <button class="copy-btn" data-copy="cargo install --git https://github.com/helgesverre/sql-splitter">Copy</button>
             </div>
 
             <h3>Build from Source</h3>
             <div class="code-block">
-                <pre><code>git clone https://github.com/helgesverre/sql-splitter.git
-cd sql-splitter
+                <pre><code>git clone https://github.com/helgesverre/<span class="sh-tool">sql-splitter</span>.git
+cd <span class="sh-tool">sql-splitter</span>
 cargo build --release
-sudo cp target/release/sql-splitter /usr/local/bin/</code></pre>
+sudo cp target/release/<span class="sh-tool">sql-splitter</span> /usr/local/bin/</code></pre>
                 <button class="copy-btn" data-copy="git clone https://github.com/helgesverre/sql-splitter.git
 cd sql-splitter
 cargo build --release
@@ -143,7 +143,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
             <div class="verify">
                 <p>Verify installation:</p>
                 <div class="code-block">
-                    <pre><code>sql-splitter --version</code></pre>
+                    <pre><code><span class="sh-tool">sql-splitter</span> --version</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter --version">Copy</button>
                 </div>
             </div>
@@ -160,126 +160,126 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                 <h4>split</h4>
                 <p>Split a SQL dump file into individual table files.</p>
                 <div class="code-block">
-                    <pre><code># MySQL/MariaDB dump (default)
-sql-splitter split database.sql --output=tables
+                    <pre><code><span class="sh-comment"># MySQL/MariaDB dump (default)</span>
+<span class="sh-tool">sql-splitter</span> split database.sql --output=tables
 
-# PostgreSQL pg_dump
-sql-splitter split pg_dump.sql --output=tables --dialect=postgres
+<span class="sh-comment"># PostgreSQL pg_dump</span>
+<span class="sh-tool">sql-splitter</span> split pg_dump.sql --output=tables --dialect=postgres
 
-# SQLite dump
-sql-splitter split sqlite.sql --output=tables --dialect=sqlite
+<span class="sh-comment"># SQLite dump</span>
+<span class="sh-tool">sql-splitter</span> split sqlite.sql --output=tables --dialect=sqlite
 
-# Split only specific tables
-sql-splitter split database.sql --tables=users,posts
+<span class="sh-comment"># Split only specific tables</span>
+<span class="sh-tool">sql-splitter</span> split database.sql --tables=users,posts
 
-# Schema only (CREATE TABLE, indexes)
-sql-splitter split database.sql --schema-only -o schema/
+<span class="sh-comment"># Schema only (CREATE TABLE, indexes)</span>
+<span class="sh-tool">sql-splitter</span> split database.sql --schema-only -o schema/
 
-# Data only (INSERT/COPY statements)
-sql-splitter split database.sql --data-only -o data/
+<span class="sh-comment"># Data only (INSERT/COPY statements)</span>
+<span class="sh-tool">sql-splitter</span> split database.sql --data-only -o data/
 
-# Batch with glob patterns
-sql-splitter split "*.sql" -o output/ --fail-fast</code></pre>
+<span class="sh-comment"># Batch with glob patterns</span>
+<span class="sh-tool">sql-splitter</span> split "*.sql" -o output/ --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
                 </div>
 
                 <h4>merge</h4>
                 <p>Merge split SQL files back into a single file.</p>
                 <div class="code-block">
-                    <pre><code># Merge all tables
-sql-splitter merge tables/ -o restored.sql
+                    <pre><code><span class="sh-comment"># Merge all tables</span>
+<span class="sh-tool">sql-splitter</span> merge tables/ -o restored.sql
 
-# Merge with transaction wrapper
-sql-splitter merge tables/ -o restored.sql --transaction
+<span class="sh-comment"># Merge with transaction wrapper</span>
+<span class="sh-tool">sql-splitter</span> merge tables/ -o restored.sql --transaction
 
-# Merge only specific tables
-sql-splitter merge tables/ -o partial.sql --tables=users,orders
+<span class="sh-comment"># Merge only specific tables</span>
+<span class="sh-tool">sql-splitter</span> merge tables/ -o partial.sql --tables=users,orders
 
-# Exclude specific tables
-sql-splitter merge tables/ -o restored.sql --exclude=logs,cache</code></pre>
+<span class="sh-comment"># Exclude specific tables</span>
+<span class="sh-tool">sql-splitter</span> merge tables/ -o restored.sql --exclude=logs,cache</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter merge tables/ -o restored.sql">Copy</button>
                 </div>
 
                 <h4>analyze</h4>
                 <p>Analyze a SQL file and display table statistics.</p>
                 <div class="code-block">
-                    <pre><code>sql-splitter analyze database.sql
-sql-splitter analyze database.sql --progress
-sql-splitter analyze "**/*.sql" --fail-fast</code></pre>
+                    <pre><code><span class="sh-tool">sql-splitter</span> analyze database.sql
+<span class="sh-tool">sql-splitter</span> analyze database.sql --progress
+<span class="sh-tool">sql-splitter</span> analyze "**/*.sql" --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
                 </div>
 
                 <h4>validate</h4>
                 <p>Check SQL dump integrity with comprehensive validation.</p>
                 <div class="code-block">
-                    <pre><code># Basic validation
-sql-splitter validate dump.sql
+                    <pre><code><span class="sh-comment"># Basic validation</span>
+<span class="sh-tool">sql-splitter</span> validate dump.sql
 
-# Strict mode for CI (warnings = errors)
-sql-splitter validate dump.sql --strict --json
+<span class="sh-comment"># Strict mode for CI (warnings = errors)</span>
+<span class="sh-tool">sql-splitter</span> validate dump.sql --strict --json
 
-# Skip expensive PK/FK checks
-sql-splitter validate dump.sql --no-fk-checks
+<span class="sh-comment"># Skip expensive PK/FK checks</span>
+<span class="sh-tool">sql-splitter</span> validate dump.sql --no-fk-checks
 
-# Batch validation
-sql-splitter validate "*.sql" --fail-fast</code></pre>
+<span class="sh-comment"># Batch validation</span>
+<span class="sh-tool">sql-splitter</span> validate "*.sql" --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter validate dump.sql">Copy</button>
                 </div>
 
                 <h4>convert</h4>
                 <p>Convert SQL dumps between MySQL, PostgreSQL, and SQLite.</p>
                 <div class="code-block">
-                    <pre><code># MySQL to PostgreSQL
-sql-splitter convert mysql.sql --to postgres -o pg.sql
+                    <pre><code><span class="sh-comment"># MySQL to PostgreSQL</span>
+<span class="sh-tool">sql-splitter</span> convert mysql.sql --to postgres -o pg.sql
 
-# PostgreSQL to MySQL (COPY → INSERT)
-sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
+<span class="sh-comment"># PostgreSQL to MySQL (COPY → INSERT)</span>
+<span class="sh-tool">sql-splitter</span> convert pg_dump.sql --to mysql -o mysql.sql
 
-# Auto-detect source, convert to SQLite
-sql-splitter convert dump.sql --to sqlite -o sqlite.sql
+<span class="sh-comment"># Auto-detect source, convert to SQLite</span>
+<span class="sh-tool">sql-splitter</span> convert dump.sql --to sqlite -o sqlite.sql
 
-# Explicit source dialect
-sql-splitter convert dump.sql --from postgres --to mysql -o out.sql
+<span class="sh-comment"># Explicit source dialect</span>
+<span class="sh-tool">sql-splitter</span> convert dump.sql --from postgres --to mysql -o out.sql
 
-# Strict mode (fail on unsupported features)
-sql-splitter convert dump.sql --to postgres --strict -o out.sql
+<span class="sh-comment"># Strict mode (fail on unsupported features)</span>
+<span class="sh-tool">sql-splitter</span> convert dump.sql --to postgres --strict -o out.sql
 
-# Batch conversion
-sql-splitter convert "*.sql" --to postgres -o converted/</code></pre>
+<span class="sh-comment"># Batch conversion</span>
+<span class="sh-tool">sql-splitter</span> convert "*.sql" --to postgres -o converted/</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql">Copy</button>
                 </div>
 
                 <h4>sample</h4>
                 <p>Create reduced datasets with FK preservation.</p>
                 <div class="code-block">
-                    <pre><code># Sample 10% of rows
-sql-splitter sample dump.sql -o sampled.sql --percent 10
+                    <pre><code><span class="sh-comment"># Sample 10% of rows</span>
+<span class="sh-tool">sql-splitter</span> sample dump.sql -o sampled.sql --percent 10
 
-# Sample fixed rows per table
-sql-splitter sample dump.sql -o sampled.sql --rows 1000
+<span class="sh-comment"># Sample fixed rows per table</span>
+<span class="sh-tool">sql-splitter</span> sample dump.sql -o sampled.sql --rows 1000
 
-# Preserve FK relationships
-sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
+<span class="sh-comment"># Preserve FK relationships</span>
+<span class="sh-tool">sql-splitter</span> sample dump.sql -o dev.sql --percent 10 --preserve-relations
 
-# Reproducible sampling with seed
-sql-splitter sample dump.sql -o dev.sql --percent 10 --seed 42</code></pre>
+<span class="sh-comment"># Reproducible sampling with seed</span>
+<span class="sh-tool">sql-splitter</span> sample dump.sql -o dev.sql --percent 10 --seed 42</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter sample dump.sql -o sampled.sql --percent 10 --preserve-relations">Copy</button>
                 </div>
 
                 <h4>shard</h4>
                 <p>Extract tenant-specific data from multi-tenant dumps.</p>
                 <div class="code-block">
-                    <pre><code># Extract single tenant
-sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql
+                    <pre><code><span class="sh-comment"># Extract single tenant</span>
+<span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-value 123 -o tenant_123.sql
 
-# Auto-detect tenant column (tenant_id, company_id, etc.)
-sql-splitter shard dump.sql --tenant-value 5 -o tenant.sql
+<span class="sh-comment"># Auto-detect tenant column (tenant_id, company_id, etc.)</span>
+<span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-value 5 -o tenant.sql
 
-# Explicit tenant column
-sql-splitter shard dump.sql --tenant-column account_id --tenant-value 42 -o out.sql
+<span class="sh-comment"># Explicit tenant column</span>
+<span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-column account_id --tenant-value 42 -o out.sql
 
-# Extract multiple tenants
-sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
+<span class="sh-comment"># Extract multiple tenants</span>
+<span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
                 </div>
             </article>
@@ -443,56 +443,56 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
 
                 <h4>Split → Edit → Merge</h4>
                 <div class="code-block">
-                    <pre><code># Split into per-table files
-sql-splitter split dump.sql -o tables/ -p
+                    <pre><code><span class="sh-comment"># Split into per-table files</span>
+<span class="sh-tool">sql-splitter</span> split dump.sql -o tables/ -p
 
-# Edit specific tables as needed...
+<span class="sh-comment"># Edit specific tables as needed...</span>
 
-# Merge back into single file
-sql-splitter merge tables/ -o updated.sql --transaction</code></pre>
+<span class="sh-comment"># Merge back into single file</span>
+<span class="sh-tool">sql-splitter</span> merge tables/ -o updated.sql --transaction</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter split dump.sql -o tables/ -p">Copy</button>
                 </div>
 
                 <h4>MySQL to PostgreSQL Migration</h4>
                 <div class="code-block">
-                    <pre><code># Validate source dump
-sql-splitter validate mysql.sql --strict
+                    <pre><code><span class="sh-comment"># Validate source dump</span>
+<span class="sh-tool">sql-splitter</span> validate mysql.sql --strict
 
-# Convert to PostgreSQL
-sql-splitter convert mysql.sql --to postgres -o pg.sql -p
+<span class="sh-comment"># Convert to PostgreSQL</span>
+<span class="sh-tool">sql-splitter</span> convert mysql.sql --to postgres -o pg.sql -p
 
-# Validate converted output
-sql-splitter validate pg.sql --dialect=postgres --strict</code></pre>
+<span class="sh-comment"># Validate converted output</span>
+<span class="sh-tool">sql-splitter</span> validate pg.sql --dialect=postgres --strict</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql -p">Copy</button>
                 </div>
 
                 <h4>Create Dev Dataset</h4>
                 <div class="code-block">
-                    <pre><code># Sample 10% with FK integrity
-sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations
+                    <pre><code><span class="sh-comment"># Sample 10% with FK integrity</span>
+<span class="sh-tool">sql-splitter</span> sample prod.sql -o dev.sql --percent 10 --preserve-relations
 
-# Or sample fixed row count
-sql-splitter sample prod.sql -o dev.sql --rows 1000 --preserve-relations --seed 42</code></pre>
+<span class="sh-comment"># Or sample fixed row count</span>
+<span class="sh-tool">sql-splitter</span> sample prod.sql -o dev.sql --rows 1000 --preserve-relations --seed 42</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations">Copy</button>
                 </div>
 
                 <h4>Extract Tenant Data</h4>
                 <div class="code-block">
-                    <pre><code># Extract single tenant
-sql-splitter shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql
+                    <pre><code><span class="sh-comment"># Extract single tenant</span>
+<span class="sh-tool">sql-splitter</span> shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql
 
-# Extract multiple tenants to separate files
-sql-splitter shard multi-tenant.sql --tenant-values "1,2,3" -o tenants/</code></pre>
+<span class="sh-comment"># Extract multiple tenants to separate files</span>
+<span class="sh-tool">sql-splitter</span> shard multi-tenant.sql --tenant-values "1,2,3" -o tenants/</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
                 </div>
 
                 <h4>CI Validation Pipeline</h4>
                 <div class="code-block">
-                    <pre><code># Validate all dumps in CI
-sql-splitter validate "dumps/*.sql" --strict --json --fail-fast
+                    <pre><code><span class="sh-comment"># Validate all dumps in CI</span>
+<span class="sh-tool">sql-splitter</span> validate "dumps/*.sql" --strict --json --fail-fast
 
-# Parse results with jq
-sql-splitter validate "*.sql" --json | jq '.results[] | select(.passed == false)'</code></pre>
+<span class="sh-comment"># Parse results with jq</span>
+<span class="sh-tool">sql-splitter</span> validate "*.sql" --json | jq '.results[] | select(.passed == false)'</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter validate &quot;dumps/*.sql&quot; --strict --json --fail-fast">Copy</button>
                 </div>
             </article>
@@ -516,49 +516,110 @@ sql-splitter validate "*.sql" --json | jq '.results[] | select(.passed == false)
                 <p class="note">Actual performance depends on disk I/O speed and file complexity.</p>
             </article>
 
+            <!-- What Each Command Does -->
+            <article class="guide-section">
+                <h3>What Each Command Does</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Command</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>split</code></td><td>Split a large SQL dump into separate files, one per table</td></tr>
+                        <tr><td><code>merge</code></td><td>Combine per-table SQL files back into a single dump</td></tr>
+                        <tr><td><code>analyze</code></td><td>Scan dumps and show per-table statistics (row counts, sizes)</td></tr>
+                        <tr><td><code>validate</code></td><td>Check dumps for syntax errors and PK/FK integrity issues</td></tr>
+                        <tr><td><code>convert</code></td><td>Convert dumps between MySQL, PostgreSQL, and SQLite</td></tr>
+                        <tr><td><code>sample</code></td><td>Create smaller test datasets while preserving FK relationships</td></tr>
+                        <tr><td><code>shard</code></td><td>Extract tenant-specific data from multi-tenant dumps</td></tr>
+                    </tbody>
+                </table>
+            </article>
+
             <!-- FAQ -->
             <article class="guide-section">
                 <h3>FAQ</h3>
 
                 <details>
+                    <summary>Do I need a running database to use sql-splitter?</summary>
+                    <div class="details-content">
+                        <p>No. sql-splitter is file-based. It reads <code>.sql</code> files from disk and writes <code>.sql</code> files back. No database server required.</p>
+                    </div>
+                </details>
+
+                <details>
                     <summary>Does it modify my source file?</summary>
                     <div class="details-content">
-                        <p>No. sql-splitter only reads from your source file. It never modifies the original.</p>
+                        <p>No. All commands are read-only with respect to input files. They only write to the output paths you specify.</p>
                     </div>
                 </details>
 
                 <details>
-                    <summary>What about statements with semicolons in strings?</summary>
+                    <summary>Can it handle dumps larger than RAM?</summary>
                     <div class="details-content">
-                        <p>sql-splitter correctly handles semicolons inside quoted strings. It tracks quote boundaries and escape sequences.</p>
+                        <p>Yes. The core design is streaming: it reads input in fixed-size buffers and writes to buffered output files. Memory usage is constant regardless of file size, so 10GB+ dumps work fine.</p>
                     </div>
                 </details>
 
                 <details>
-                    <summary>Can it handle multi-line statements?</summary>
+                    <summary>Which SQL dialects are supported?</summary>
                     <div class="details-content">
-                        <p>Yes. The parser uses streaming and statement boundary detection, not line-based parsing.</p>
+                        <p>MySQL/MariaDB (<code>mysqldump</code>), PostgreSQL (<code>pg_dump</code> plain-text), and SQLite (<code>.dump</code>). Binary dump formats are not supported.</p>
                     </div>
                 </details>
 
                 <details>
-                    <summary>What about backtick-quoted table names?</summary>
+                    <summary>What compression formats work?</summary>
                     <div class="details-content">
-                        <p>Both backtick-quoted (<code>`table`</code>) and regular table names are supported.</p>
+                        <p>Compressed input is auto-detected: gzip (<code>.gz</code>), bzip2 (<code>.bz2</code>), xz (<code>.xz</code>), and zstd (<code>.zst</code>). Pass compressed files directly to any command.</p>
                     </div>
                 </details>
 
                 <details>
-                    <summary>Why Rust instead of Go?</summary>
+                    <summary>What's the difference between sample and shard?</summary>
                     <div class="details-content">
-                        <p>Rust's zero-cost abstractions and lack of garbage collection enable higher throughput. The Rust version achieves 1.25x faster performance than Go on large files, with lower memory usage and faster cold starts.</p>
+                        <p><code>sample</code> creates a smaller dataset (N rows or percentage) while preserving FK integrity. <code>shard</code> splits by tenant ID, producing one dump per tenant with all related rows.</p>
                     </div>
                 </details>
 
                 <details>
-                    <summary>Is it faster than other tools?</summary>
+                    <summary>How reliable is dialect conversion?</summary>
                     <div class="details-content">
-                        <p>sql-splitter is among the fastest SQL splitters available, achieving 400+ MB/s throughput with minimal memory footprint thanks to Rust's ownership model and zero-copy parsing.</p>
+                        <p>For typical schemas with common types, conversions import successfully. Advanced features (triggers, custom types, arrays) may need manual adjustments. Use <code>--strict</code> to fail on unsupported features.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Does splitting and merging produce identical output?</summary>
+                    <div class="details-content">
+                        <p>No, sql-splitter aims for semantic equivalence, not byte-for-byte equality. Formatting may differ, but the schema and data import to the same database contents.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>How does validate check FK integrity without a database?</summary>
+                    <div class="details-content">
+                        <p>It parses <code>CREATE TABLE</code> to understand PKs and FKs, then scans INSERT/COPY data to detect duplicates and broken references. Use <code>--no-fk-checks</code> to skip expensive checks.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Does it use regex or a real parser?</summary>
+                    <div class="details-content">
+                        <p>A streaming SQL parser that tracks quotes, escaping, and multi-line strings. Regexes are used as fallback/optimization, not as the primary mechanism.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Can I run it in Docker or CI?</summary>
+                    <div class="details-content">
+                        <p>Yes. It's a single static binary with no runtime dependencies. Use <code>validate --strict --json</code> for machine-readable CI output.</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Why Rust?</summary>
+                    <div class="details-content">
+                        <p>Zero-cost abstractions, no garbage collection, and memory safety enable 600+ MB/s throughput with constant memory usage regardless of file size.</p>
                     </div>
                 </details>
             </article>
