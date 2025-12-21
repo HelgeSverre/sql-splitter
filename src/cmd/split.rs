@@ -6,8 +6,53 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::glob_util::{expand_file_pattern, MultiFileResult};
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    file: PathBuf,
+    output: PathBuf,
+    dialect: Option<String>,
+    verbose: bool,
+    dry_run: bool,
+    progress: bool,
+    tables: Option<String>,
+    schema_only: bool,
+    data_only: bool,
+    fail_fast: bool,
+) -> anyhow::Result<()> {
+    let expanded = expand_file_pattern(&file)?;
+
+    if expanded.files.len() == 1 {
+        run_single(
+            expanded.files.into_iter().next().unwrap(),
+            output,
+            dialect,
+            verbose,
+            dry_run,
+            progress,
+            tables,
+            schema_only,
+            data_only,
+        )
+    } else {
+        run_multi(
+            expanded.files,
+            output,
+            dialect,
+            verbose,
+            dry_run,
+            progress,
+            tables,
+            schema_only,
+            data_only,
+            fail_fast,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_single(
     file: PathBuf,
     output: PathBuf,
     dialect: Option<String>,
@@ -25,7 +70,6 @@ pub fn run(
     let file_size = std::fs::metadata(&file)?.len();
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-    // Detect compression
     let compression = Compression::from_path(&file);
     if compression != Compression::None {
         println!("Detected compression: {}", compression);
@@ -33,7 +77,6 @@ pub fn run(
 
     let dialect = resolve_dialect(&file, dialect, compression)?;
 
-    // Determine content filter
     let content_filter = if schema_only {
         ContentFilter::SchemaOnly
     } else if data_only {
@@ -57,7 +100,6 @@ pub fn run(
         println!("Output directory: {}", output.display());
     }
 
-    // Show content filter mode
     match content_filter {
         ContentFilter::SchemaOnly => println!("Mode: schema-only (DDL statements)"),
         ContentFilter::DataOnly => println!("Mode: data-only (INSERT/COPY statements)"),
@@ -145,6 +187,164 @@ pub fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_multi(
+    files: Vec<PathBuf>,
+    base_output: PathBuf,
+    dialect: Option<String>,
+    verbose: bool,
+    dry_run: bool,
+    progress: bool,
+    tables: Option<String>,
+    schema_only: bool,
+    data_only: bool,
+    fail_fast: bool,
+) -> anyhow::Result<()> {
+    let total = files.len();
+    let mut result = MultiFileResult::new();
+    result.total_files = total;
+
+    println!("Splitting {} files...\n", total);
+
+    let start_time = Instant::now();
+
+    for (idx, file) in files.iter().enumerate() {
+        println!(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
+            idx + 1,
+            total,
+            file.display()
+        );
+
+        let file_stem = file
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("file_{}", idx));
+        let output_dir = base_output.join(&file_stem);
+
+        let file_size = match std::fs::metadata(&file) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                println!("  Error: {}\n", e);
+                result.record_failure(file.clone(), e.to_string());
+                if fail_fast {
+                    break;
+                }
+                continue;
+            }
+        };
+        let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
+
+        let compression = Compression::from_path(&file);
+        let resolved_dialect = match resolve_dialect(&file, dialect.clone(), compression) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("  Error: {}\n", e);
+                result.record_failure(file.clone(), e.to_string());
+                if fail_fast {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        println!("  Size: {:.2} MB | Dialect: {}", file_size_mb, resolved_dialect);
+        if !dry_run {
+            println!("  Output: {}", output_dir.display());
+        }
+
+        let content_filter = if schema_only {
+            ContentFilter::SchemaOnly
+        } else if data_only {
+            ContentFilter::DataOnly
+        } else {
+            ContentFilter::All
+        };
+
+        let table_filter: Vec<String> = tables
+            .clone()
+            .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        let mut splitter = Splitter::new(file.clone(), output_dir)
+            .with_dialect(resolved_dialect)
+            .with_dry_run(dry_run)
+            .with_content_filter(content_filter);
+
+        if !table_filter.is_empty() {
+            splitter = splitter.with_table_filter(table_filter);
+        }
+
+        let split_result = if progress {
+            let pb = ProgressBar::new(file_size);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "  {spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
+                )
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+            let pb_clone = pb.clone();
+            splitter = splitter.with_progress(move |bytes| {
+                pb_clone.set_position(bytes);
+            });
+
+            let result = splitter.split();
+            pb.finish_and_clear();
+            result
+        } else {
+            splitter.split()
+        };
+
+        match split_result {
+            Ok(stats) => {
+                println!(
+                    "  Tables: {} | Statements: {} | {}\n",
+                    stats.tables_found,
+                    stats.statements_processed,
+                    if dry_run { "(dry run)" } else { "✓" }
+                );
+                if verbose {
+                    for name in &stats.table_names {
+                        println!("    - {}.sql", name);
+                    }
+                    println!();
+                }
+                result.record_success();
+            }
+            Err(e) => {
+                println!("  Error: {}\n", e);
+                result.record_failure(file.clone(), e.to_string());
+                if fail_fast {
+                    break;
+                }
+            }
+        }
+    }
+
+    let elapsed = start_time.elapsed();
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Split Summary:");
+    println!("  Total files: {}", total);
+    println!("  Succeeded: {}", result.succeeded);
+    println!("  Failed: {}", result.failed);
+    println!("  Time: {:.3?}", elapsed);
+
+    if result.has_failures() {
+        println!();
+        println!("Failed files:");
+        for (path, error) in &result.errors {
+            println!("  - {}: {}", path.display(), error);
+        }
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 fn resolve_dialect(
     file: &std::path::Path,
     dialect: Option<String>,
@@ -156,7 +356,6 @@ fn resolve_dialect(
     match dialect {
         Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
         None => {
-            // For compressed files, we need to decompress a sample first
             let result = if compression != Compression::None {
                 let file_handle = std::fs::File::open(file)?;
                 let mut reader = compression.wrap_reader(Box::new(file_handle));
