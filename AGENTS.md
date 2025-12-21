@@ -30,6 +30,7 @@ Run `make help` to see all available commands. Key commands:
 | `make verify-realworld` | Verify against real-world SQL dumps |
 | `make website-deploy` | Deploy website to Vercel |
 | `make docker-bench` | Run benchmarks in Docker (generates 100MB test data) |
+| `make man` | Generate man pages in man/ directory |
 
 ### Building and Running
 

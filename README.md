@@ -27,10 +27,21 @@ cargo install sql-splitter
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install  # Installs binary + shell completions
+make install  # Installs binary + shell completions + man pages
 ```
 
 Or download pre-built binaries from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases).
+
+### Man pages (optional)
+
+After installation, view documentation with `man sql-splitter` or `man sql-splitter-diff`.
+
+For `cargo install` users, install man pages manually:
+```bash
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+make install-man
+```
 
 ## Usage
 

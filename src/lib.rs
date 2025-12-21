@@ -2,9 +2,12 @@
 #![allow(dead_code)]
 
 pub mod analyzer;
+pub mod cmd;
 pub mod convert;
+pub mod differ;
 pub mod merger;
 pub mod parser;
+pub mod pk;
 pub mod progress;
 pub mod sample;
 pub mod schema;

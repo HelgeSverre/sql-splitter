@@ -1,4 +1,4 @@
-.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld website-deploy
+.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all install-man docker-build docker-bench verify-realworld website-deploy man
 
 # Show available commands (default target)
 help:
@@ -23,6 +23,7 @@ help:
 	@echo "  make docker-bench          - Run benchmarks in Docker (generates 100MB test data)"
 	@echo "  make verify-realworld      - Verify against real-world SQL dumps from public sources"
 	@echo "  make website-deploy        - Deploy website to Vercel"
+	@echo "  make man                   - Generate man pages"
 
 # Debug build
 build:
@@ -76,11 +77,12 @@ clippy:
 clean:
 	cargo clean
 
-# Install locally (binary + shell completions)
-install:
+# Install locally (binary + shell completions + man pages)
+install: man
 	cargo install --path .
 	@echo ""
 	@./scripts/install-completions.sh sql-splitter
+	@./scripts/install-man.sh
 
 # Install completions only (for current shell)
 install-completions:
@@ -89,6 +91,10 @@ install-completions:
 # Install completions for all supported shells
 install-completions-all:
 	@./scripts/install-completions.sh sql-splitter all
+
+# Install man pages only
+install-man: man
+	@./scripts/install-man.sh
 
 # Docker benchmark setup
 docker-build:
@@ -105,4 +111,11 @@ verify-realworld:
 # Deploy website to Vercel
 website-deploy:
 	cd website && vc --prod
+
+# Generate man pages
+man:
+	cargo run --example generate-man
+	@echo ""
+	@echo "Man pages generated in man/ directory"
+	@echo "Install with: sudo cp man/*.1 /usr/local/share/man/man1/"
 

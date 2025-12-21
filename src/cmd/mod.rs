@@ -8,425 +8,520 @@ mod shard;
 mod split;
 mod validate;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::{generate, Shell};
 use std::io;
 use std::path::PathBuf;
+
+const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
+  Split a dump into per-table files:
+    sql-splitter split dump.sql -o tables/
+
+  Create a 10% sample for development:
+    sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
+
+  Convert MySQL to PostgreSQL:
+    sql-splitter convert mysql.sql --to postgres -o pg.sql
+
+  Compare two dumps for changes:
+    sql-splitter diff old.sql new.sql --format sql -o migration.sql
+
+\x1b[1mMore info:\x1b[0m
+  Run 'sql-splitter <command> --help' for command-specific options.
+  Documentation: https://github.com/helgesverre/sql-splitter
+  Enable completions: sql-splitter completions <shell>";
 
 #[derive(Parser)]
 #[command(name = "sql-splitter")]
 #[command(author = "Helge Sverre <helge.sverre@gmail.com>")]
 #[command(version)]
-#[command(about = "Split large SQL dump files into individual table files", long_about = None)]
+#[command(about = "High-performance CLI for splitting, merging, converting, and analyzing SQL dump files")]
+#[command(after_help = AFTER_HELP)]
+#[command(arg_required_else_help = true)]
+#[command(max_term_width = 100)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 }
 
+// Help heading constants for consistency
+const INPUT_OUTPUT: &str = "Input/Output";
+const FILTERING: &str = "Filtering";
+const MODE: &str = "Mode";
+const BEHAVIOR: &str = "Behavior";
+const LIMITS: &str = "Limits";
+const OUTPUT_FORMAT: &str = "Output";
+
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Split a SQL file into individual table files
+    /// Split a SQL dump into individual table files
+    #[command(visible_alias = "sp")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter split dump.sql -o tables/
+  sql-splitter split dump.sql.gz -o tables/ --tables users,orders
+  sql-splitter split dump.sql -o schema/ --schema-only
+  sql-splitter split \"backups/*.sql\" -o out/ --fail-fast")]
     Split {
         /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
-        /// Supports .gz, .bz2, .xz, .zst compression
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         file: PathBuf,
 
         /// Output directory for split files
-        #[arg(short, long, default_value = "output")]
+        #[arg(short, long, default_value = "output", value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
         output: PathBuf,
 
-        /// SQL dialect: mysql, postgres, or sqlite (auto-detected if not specified)
-        #[arg(short, long)]
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
-        /// Verbose output
-        #[arg(short, long)]
-        verbose: bool,
-
-        /// Preview without writing files (dry run)
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Show progress during processing
-        #[arg(short, long)]
-        progress: bool,
-
         /// Only split specific tables (comma-separated)
-        #[arg(short, long)]
+        #[arg(short, long, help_heading = FILTERING)]
         tables: Option<String>,
 
-        /// Only include schema statements (CREATE TABLE, CREATE INDEX, ALTER TABLE, DROP TABLE)
-        #[arg(long, conflicts_with = "data_only")]
+        /// Only include schema statements (CREATE, ALTER, DROP)
+        #[arg(long, conflicts_with = "data_only", help_heading = FILTERING)]
         schema_only: bool,
 
         /// Only include data statements (INSERT, COPY)
-        #[arg(long, conflicts_with = "schema_only")]
+        #[arg(long, conflicts_with = "schema_only", help_heading = FILTERING)]
         data_only: bool,
 
-        /// Stop on first file that fails (for glob patterns)
-        #[arg(long)]
-        fail_fast: bool,
-
-        /// Output results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Analyze a SQL file and display statistics
-    Analyze {
-        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
-        /// Supports .gz, .bz2, .xz, .zst compression
-        file: PathBuf,
-
-        /// SQL dialect: mysql, postgres, or sqlite (auto-detected if not specified)
-        #[arg(short, long)]
-        dialect: Option<String>,
-
-        /// Show progress during analysis
-        #[arg(short, long)]
-        progress: bool,
-
-        /// Stop on first file that fails (for glob patterns)
-        #[arg(long)]
-        fail_fast: bool,
-
-        /// Output results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Merge split SQL files back into a single file
-    Merge {
-        /// Directory containing split SQL files
-        input_dir: PathBuf,
-
-        /// Output SQL file (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, or sqlite
-        #[arg(short, long, default_value = "mysql")]
-        dialect: Option<String>,
-
-        /// Only merge specific tables (comma-separated)
-        #[arg(short, long)]
-        tables: Option<String>,
-
-        /// Exclude specific tables (comma-separated)
-        #[arg(short, long)]
-        exclude: Option<String>,
-
-        /// Wrap output in a transaction
-        #[arg(long)]
-        transaction: bool,
-
-        /// Skip header comments
-        #[arg(long)]
-        no_header: bool,
-
-        /// Show progress during merging
-        #[arg(short, long)]
-        progress: bool,
-
-        /// Preview without writing files (dry run)
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Sample a subset of rows from a SQL dump while preserving FK integrity
-    Sample {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
-        file: PathBuf,
-
-        /// Output SQL file (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
-        #[arg(short, long)]
-        dialect: Option<String>,
-
-        /// Sample percentage (1-100) - mutually exclusive with --rows
-        #[arg(long, conflicts_with = "rows")]
-        percent: Option<u32>,
-
-        /// Sample fixed number of rows per table - mutually exclusive with --percent
-        #[arg(long, conflicts_with = "percent")]
-        rows: Option<usize>,
-
-        /// Preserve foreign key relationships (filter rows that reference missing parents)
-        #[arg(long)]
-        preserve_relations: bool,
-
-        /// Only sample specific tables (comma-separated)
-        #[arg(short, long)]
-        tables: Option<String>,
-
-        /// Exclude specific tables (comma-separated)
-        #[arg(short, long)]
-        exclude: Option<String>,
-
-        /// Explicit root tables for sampling (comma-separated)
-        #[arg(long)]
-        root_tables: Option<String>,
-
-        /// How to handle global/lookup tables: none, lookups, all
-        #[arg(long, default_value = "lookups")]
-        include_global: Option<String>,
-
-        /// Random seed for reproducibility
-        #[arg(long)]
-        seed: Option<u64>,
-
-        /// YAML config file for per-table settings
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
-        /// Maximum total rows to sample (explosion guard). Use 0 or --no-limit to disable.
-        #[arg(long)]
-        max_total_rows: Option<usize>,
-
-        /// Disable row limit (equivalent to --max-total-rows=0)
-        #[arg(long)]
-        no_limit: bool,
-
-        /// Fail if any FK integrity issues detected
-        #[arg(long)]
-        strict_fk: bool,
-
-        /// Exclude CREATE TABLE statements from output
-        #[arg(long)]
-        no_schema: bool,
-
-        /// Show progress during sampling
-        #[arg(short, long)]
-        progress: bool,
-
-        /// Preview without writing files (dry run)
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Extract tenant-specific data from a multi-tenant SQL dump
-    Shard {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
-        file: PathBuf,
-
-        /// Output SQL file (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
-        #[arg(short, long)]
-        dialect: Option<String>,
-
-        /// Column name for tenant identification (auto-detected if not specified)
-        #[arg(long)]
-        tenant_column: Option<String>,
-
-        /// Tenant value to extract (use this OR --tenant-values)
-        #[arg(long, conflicts_with = "tenant_values")]
-        tenant_value: Option<String>,
-
-        /// Multiple tenant values to extract (comma-separated, outputs to directory)
-        #[arg(long, conflicts_with = "tenant_value")]
-        tenant_values: Option<String>,
-
-        /// Explicit root tables that have the tenant column (comma-separated)
-        #[arg(long)]
-        root_tables: Option<String>,
-
-        /// How to handle global/lookup tables: none, lookups, all
-        #[arg(long, default_value = "lookups")]
-        include_global: Option<String>,
-
-        /// YAML config file for table classification overrides
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
-        /// Maximum rows to select (memory guard). Use 0 or --no-limit to disable.
-        #[arg(long)]
-        max_selected_rows: Option<usize>,
-
-        /// Disable row limit (equivalent to --max-selected-rows=0)
-        #[arg(long)]
-        no_limit: bool,
-
-        /// Fail if any FK integrity issues detected
-        #[arg(long)]
-        strict_fk: bool,
-
-        /// Exclude CREATE TABLE statements from output
-        #[arg(long)]
-        no_schema: bool,
-
-        /// Show progress during sharding
-        #[arg(short, long)]
-        progress: bool,
-
-        /// Preview without writing files (dry run)
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Convert a SQL dump between dialects (MySQL, PostgreSQL, SQLite)
-    Convert {
-        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
-        /// Supports .gz, .bz2, .xz, .zst compression
-        file: PathBuf,
-
-        /// Output SQL file or directory (default: stdout for single file, required for glob)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// Source dialect: mysql, postgres, sqlite (auto-detected if not specified)
-        #[arg(long)]
-        from: Option<String>,
-
-        /// Target dialect: mysql, postgres, sqlite (required)
-        #[arg(long)]
-        to: String,
-
-        /// Strict mode: fail on any unsupported feature
-        #[arg(long)]
-        strict: bool,
-
-        /// Show progress during conversion
-        #[arg(short, long)]
-        progress: bool,
-
-        /// Preview without writing files (dry run)
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Stop on first file that fails (for glob patterns)
-        #[arg(long)]
-        fail_fast: bool,
-
-        /// Output results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Validate a SQL dump for structural and data integrity issues
-    Validate {
-        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
-        /// Supports .gz, .bz2, .xz, .zst compression
-        file: PathBuf,
-
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
-        #[arg(short, long)]
-        dialect: Option<String>,
-
-        /// Show progress during validation
-        #[arg(short, long)]
-        progress: bool,
-
-        /// Treat warnings as errors (non-zero exit on any warning)
-        #[arg(long)]
-        strict: bool,
-
-        /// Output results as JSON instead of human-readable text
-        #[arg(long)]
-        json: bool,
-
-        /// Maximum rows per table for heavy checks (PK/FK). Use 0 or --no-limit to disable.
-        #[arg(long, default_value = "1000000")]
-        max_rows_per_table: usize,
-
-        /// Disable row limit for PK/FK checks (equivalent to --max-rows-per-table=0)
-        #[arg(long)]
-        no_limit: bool,
-
-        /// Disable PK/FK data integrity checks
-        #[arg(long)]
-        no_fk_checks: bool,
-
-        /// Stop on first file that fails validation (for glob patterns)
-        #[arg(long)]
-        fail_fast: bool,
-    },
-
-    /// Compare two SQL dumps and report schema + data differences
-    Diff {
-        /// Original SQL dump file (supports .gz, .bz2, .xz, .zst compression)
-        old_file: PathBuf,
-
-        /// Updated SQL dump file (supports .gz, .bz2, .xz, .zst compression)
-        new_file: PathBuf,
-
-        /// Output file (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// Only compare these tables (comma-separated)
-        #[arg(short, long)]
-        tables: Option<String>,
-
-        /// Exclude these tables (comma-separated)
-        #[arg(short, long)]
-        exclude: Option<String>,
-
-        /// Compare schema only, skip data
-        #[arg(long, conflicts_with = "data_only")]
-        schema_only: bool,
-
-        /// Compare data only, skip schema
-        #[arg(long, conflicts_with = "schema_only")]
-        data_only: bool,
-
-        /// Output format: text, json, sql
-        #[arg(short, long, default_value = "text")]
-        format: Option<String>,
-
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
-        #[arg(short, long)]
-        dialect: Option<String>,
-
-        /// Show sample PK values for added/removed/modified rows
-        #[arg(short, long)]
+        /// Show verbose output
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
         verbose: bool,
 
         /// Show progress bar
-        #[arg(short, long)]
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
         progress: bool,
 
-        /// Max PK entries to track per table (limits memory usage)
-        #[arg(long, default_value = "10000000")]
-        max_pk_entries: usize,
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
 
-        /// Compare tables without primary key using all columns as key
-        #[arg(long)]
-        allow_no_pk: bool,
+        /// Preview without writing files
+        #[arg(long, help_heading = BEHAVIOR)]
+        dry_run: bool,
 
-        /// Ignore column order differences in schema comparison
-        #[arg(long)]
-        ignore_order: bool,
-
-        /// Override primary key for data comparison (format: table:col1+col2,table2:col)
-        #[arg(long)]
-        primary_key: Option<String>,
-
-        /// Ignore columns matching glob patterns (e.g., *.updated_at, users.password)
-        #[arg(long)]
-        ignore_columns: Option<String>,
+        /// Stop on first error (for glob patterns)
+        #[arg(long, help_heading = BEHAVIOR)]
+        fail_fast: bool,
     },
 
-    /// Generate shell completions
+    /// Analyze a SQL dump and display table statistics
+    #[command(visible_alias = "an")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter analyze dump.sql
+  sql-splitter analyze dump.sql.gz --progress
+  sql-splitter analyze \"dumps/*.sql\" --json")]
+    Analyze {
+        /// Input SQL file or glob pattern
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        file: PathBuf,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+
+        /// Stop on first error (for glob patterns)
+        #[arg(long, help_heading = BEHAVIOR)]
+        fail_fast: bool,
+    },
+
+    /// Merge split SQL files back into a single dump
+    #[command(visible_alias = "mg")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter merge tables/ -o restored.sql
+  sql-splitter merge tables/ -o restored.sql --transaction
+  sql-splitter merge tables/ -o partial.sql --tables users,orders
+  sql-splitter merge tables/ -o clean.sql --exclude logs,cache")]
+    Merge {
+        /// Directory containing split SQL files
+        #[arg(value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
+        input_dir: PathBuf,
+
+        /// Output SQL file (default: stdout)
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect for output formatting
+        #[arg(short, long, default_value = "mysql", help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// Only merge specific tables (comma-separated)
+        #[arg(short, long, help_heading = FILTERING)]
+        tables: Option<String>,
+
+        /// Exclude specific tables (comma-separated)
+        #[arg(short, long, help_heading = FILTERING)]
+        exclude: Option<String>,
+
+        /// Wrap output in BEGIN/COMMIT transaction
+        #[arg(long, help_heading = BEHAVIOR)]
+        transaction: bool,
+
+        /// Omit header comments
+        #[arg(long, help_heading = BEHAVIOR)]
+        no_header: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+
+        /// Preview without writing files
+        #[arg(long, help_heading = BEHAVIOR)]
+        dry_run: bool,
+    },
+
+    /// Create a reduced dataset preserving FK relationships
+    #[command(visible_alias = "sa")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter sample dump.sql -o dev.sql --percent 10
+  sql-splitter sample dump.sql -o dev.sql --rows 1000 --preserve-relations
+  sql-splitter sample dump.sql -o dev.sql --percent 5 --seed 42
+  sql-splitter sample dump.sql -o dev.sql --tables users,orders --percent 20")]
+    Sample {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        file: PathBuf,
+
+        /// Output SQL file (default: stdout)
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// YAML config file for per-table settings
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        config: Option<PathBuf>,
+
+        /// Sample percentage of rows (1-100)
+        #[arg(long, conflicts_with = "rows", help_heading = MODE)]
+        percent: Option<u32>,
+
+        /// Sample fixed number of rows per table
+        #[arg(long, conflicts_with = "percent", help_heading = MODE)]
+        rows: Option<usize>,
+
+        /// Random seed for reproducible sampling
+        #[arg(long, help_heading = MODE)]
+        seed: Option<u64>,
+
+        /// Only sample specific tables (comma-separated)
+        #[arg(short, long, help_heading = FILTERING)]
+        tables: Option<String>,
+
+        /// Exclude specific tables (comma-separated)
+        #[arg(short, long, help_heading = FILTERING)]
+        exclude: Option<String>,
+
+        /// Tables to start sampling from (comma-separated)
+        #[arg(long, help_heading = FILTERING)]
+        root_tables: Option<String>,
+
+        /// Handle lookup tables: none, lookups, all
+        #[arg(long, default_value = "lookups", help_heading = FILTERING)]
+        include_global: Option<String>,
+
+        /// Maintain FK integrity by including referenced rows
+        #[arg(long, help_heading = BEHAVIOR)]
+        preserve_relations: bool,
+
+        /// Fail on FK integrity violations
+        #[arg(long, help_heading = BEHAVIOR)]
+        strict_fk: bool,
+
+        /// Exclude CREATE TABLE statements from output
+        #[arg(long, help_heading = BEHAVIOR)]
+        no_schema: bool,
+
+        /// Max total rows to sample (0 = unlimited)
+        #[arg(long, help_heading = LIMITS)]
+        max_total_rows: Option<usize>,
+
+        /// Disable row limit
+        #[arg(long, help_heading = LIMITS)]
+        no_limit: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+
+        /// Preview without writing files
+        #[arg(long, help_heading = BEHAVIOR)]
+        dry_run: bool,
+    },
+
+    /// Extract tenant-specific data from a multi-tenant dump
+    #[command(visible_alias = "sh")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter shard dump.sql -o tenant.sql --tenant-value 123
+  sql-splitter shard dump.sql -o tenant.sql --tenant-column company_id --tenant-value 42
+  sql-splitter shard dump.sql -o shards/ --tenant-values \"1,2,3\"")]
+    Shard {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        file: PathBuf,
+
+        /// Output SQL file or directory (default: stdout)
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// YAML config file for table classification
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        config: Option<PathBuf>,
+
+        /// Column containing tenant ID (auto-detected if omitted)
+        #[arg(long, help_heading = MODE)]
+        tenant_column: Option<String>,
+
+        /// Single tenant value to extract
+        #[arg(long, conflicts_with = "tenant_values", help_heading = MODE)]
+        tenant_value: Option<String>,
+
+        /// Multiple tenant values (comma-separated, outputs to directory)
+        #[arg(long, conflicts_with = "tenant_value", help_heading = MODE)]
+        tenant_values: Option<String>,
+
+        /// Tables containing tenant column (comma-separated)
+        #[arg(long, help_heading = FILTERING)]
+        root_tables: Option<String>,
+
+        /// Handle lookup tables: none, lookups, all
+        #[arg(long, default_value = "lookups", help_heading = FILTERING)]
+        include_global: Option<String>,
+
+        /// Fail on FK integrity violations
+        #[arg(long, help_heading = BEHAVIOR)]
+        strict_fk: bool,
+
+        /// Exclude CREATE TABLE statements from output
+        #[arg(long, help_heading = BEHAVIOR)]
+        no_schema: bool,
+
+        /// Max rows to select (0 = unlimited)
+        #[arg(long, help_heading = LIMITS)]
+        max_selected_rows: Option<usize>,
+
+        /// Disable row limit
+        #[arg(long, help_heading = LIMITS)]
+        no_limit: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+
+        /// Preview without writing files
+        #[arg(long, help_heading = BEHAVIOR)]
+        dry_run: bool,
+    },
+
+    /// Convert a SQL dump between MySQL, PostgreSQL, and SQLite
+    #[command(visible_alias = "cv")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter convert mysql.sql --to postgres -o pg.sql
+  sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
+  sql-splitter convert dump.sql --from mysql --to sqlite -o sqlite.sql
+  sql-splitter convert mysql.sql --to postgres | psql mydb")]
+    Convert {
+        /// Input SQL file or glob pattern
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        file: PathBuf,
+
+        /// Output SQL file or directory (default: stdout)
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        output: Option<PathBuf>,
+
+        /// Source dialect (auto-detected if omitted)
+        #[arg(long, help_heading = MODE)]
+        from: Option<String>,
+
+        /// Target dialect (required)
+        #[arg(long, help_heading = MODE)]
+        to: String,
+
+        /// Fail on unsupported features instead of warning
+        #[arg(long, help_heading = BEHAVIOR)]
+        strict: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+
+        /// Preview without writing files
+        #[arg(long, help_heading = BEHAVIOR)]
+        dry_run: bool,
+
+        /// Stop on first error (for glob patterns)
+        #[arg(long, help_heading = BEHAVIOR)]
+        fail_fast: bool,
+    },
+
+    /// Validate SQL dump syntax, encoding, and data integrity
+    #[command(visible_alias = "val")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter validate dump.sql
+  sql-splitter validate dump.sql --strict
+  sql-splitter validate \"dumps/*.sql\" --json --fail-fast
+  sql-splitter validate dump.sql --no-fk-checks")]
+    Validate {
+        /// Input SQL file or glob pattern
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        file: PathBuf,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// Treat warnings as errors (exit code 1)
+        #[arg(long, help_heading = BEHAVIOR)]
+        strict: bool,
+
+        /// Skip PK/FK data integrity checks
+        #[arg(long, help_heading = BEHAVIOR)]
+        no_fk_checks: bool,
+
+        /// Stop on first error (for glob patterns)
+        #[arg(long, help_heading = BEHAVIOR)]
+        fail_fast: bool,
+
+        /// Max rows per table for PK/FK checks (0 = unlimited)
+        #[arg(long, default_value = "1000000", help_heading = LIMITS)]
+        max_rows_per_table: usize,
+
+        /// Disable row limit for PK/FK checks
+        #[arg(long, help_heading = LIMITS)]
+        no_limit: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+
+        /// Output results as JSON
+        #[arg(long, help_heading = OUTPUT_FORMAT)]
+        json: bool,
+    },
+
+    /// Compare two SQL dumps and report schema + data differences
+    #[command(visible_alias = "df")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter diff old.sql new.sql
+  sql-splitter diff old.sql new.sql --schema-only
+  sql-splitter diff old.sql new.sql --format sql -o migration.sql
+  sql-splitter diff old.sql new.sql --verbose --ignore-columns \"*.updated_at\"
+  sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message")]
+    Diff {
+        /// Original SQL dump file
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        old_file: PathBuf,
+
+        /// Updated SQL dump file
+        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        new_file: PathBuf,
+
+        /// Output file (default: stdout)
+        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+        output: Option<PathBuf>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        #[arg(short, long, help_heading = INPUT_OUTPUT)]
+        dialect: Option<String>,
+
+        /// Only compare these tables (comma-separated)
+        #[arg(short, long, help_heading = FILTERING)]
+        tables: Option<String>,
+
+        /// Exclude these tables (comma-separated)
+        #[arg(short, long, help_heading = FILTERING)]
+        exclude: Option<String>,
+
+        /// Ignore columns matching glob patterns (e.g., *.updated_at)
+        #[arg(long, help_heading = FILTERING)]
+        ignore_columns: Option<String>,
+
+        /// Compare schema only, skip data
+        #[arg(long, conflicts_with = "data_only", help_heading = MODE)]
+        schema_only: bool,
+
+        /// Compare data only, skip schema
+        #[arg(long, conflicts_with = "schema_only", help_heading = MODE)]
+        data_only: bool,
+
+        /// Override primary key (format: table:col1+col2,table2:col)
+        #[arg(long, help_heading = MODE)]
+        primary_key: Option<String>,
+
+        /// Compare tables without PK using all columns as key
+        #[arg(long, help_heading = BEHAVIOR)]
+        allow_no_pk: bool,
+
+        /// Ignore column order differences in schema
+        #[arg(long, help_heading = BEHAVIOR)]
+        ignore_order: bool,
+
+        /// Max PK entries per table (limits memory)
+        #[arg(long, default_value = "10000000", help_heading = LIMITS)]
+        max_pk_entries: usize,
+
+        /// Output format: text, json, sql
+        #[arg(short, long, default_value = "text", help_heading = OUTPUT_FORMAT)]
+        format: Option<String>,
+
+        /// Show sample PK values for changes
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        verbose: bool,
+
+        /// Show progress bar
+        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+        progress: bool,
+    },
+
+    /// Generate shell completion scripts
+    #[command(after_help = "\x1b[1mInstallation:\x1b[0m
+  Bash:
+    sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
+    # or: sql-splitter completions bash >> ~/.bashrc
+
+  Zsh:
+    sql-splitter completions zsh > \"${fpath[1]}/_sql-splitter\"
+    # or for oh-my-zsh: sql-splitter completions zsh > ~/.oh-my-zsh/completions/_sql-splitter
+
+  Fish:
+    sql-splitter completions fish > ~/.config/fish/completions/sql-splitter.fish
+
+  PowerShell:
+    sql-splitter completions powershell >> $PROFILE")]
     Completions {
-        /// Shell to generate completions for
+        /// Target shell
         #[arg(value_enum)]
         shell: Shell,
     },

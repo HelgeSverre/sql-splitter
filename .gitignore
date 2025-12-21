@@ -32,4 +32,7 @@ flamegraph.svg
 # Real-world verification test files
 /tests/realworld/
 
+# Generated man pages
+/man/
+
 linus-ignore-this-file.md

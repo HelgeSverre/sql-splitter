@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.2] - 2025-12-21
+
+### Added
+
+- **CLI UX improvements**: Enhanced help output and discoverability
+  - **Help headings**: Options grouped by category (Input/Output, Filtering, Mode, Behavior, Limits, Output)
+  - **After-help examples**: Each command shows 2-5 practical usage examples
+  - **Command aliases**: Short aliases for common commands (`sp`, `an`, `mg`, `sa`, `sh`, `cv`, `val`, `df`)
+  - **Value hints**: Improved shell completion suggestions for file/directory paths
+  - **Improved completions command**: Detailed installation instructions for bash, zsh, fish, PowerShell
+- **Man page generation**: `make man` generates man pages for all commands
+  - Uses `clap_mangen` for automatic generation from CLI definitions
+  - Generates `sql-splitter.1` and per-command pages like `sql-splitter-diff.1`
+  - `make install` now installs man pages automatically
+  - `make install-man` for standalone man page installation
+
+### Changed
+
+- Updated CLI about text: "High-performance CLI for splitting, merging, converting, and analyzing SQL dump files"
+- All commands now show `--help` when run without required arguments
+
 ## [1.9.1] - 2025-12-21
 
 ### Added
