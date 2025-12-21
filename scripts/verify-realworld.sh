@@ -198,128 +198,146 @@ extract_file() {
     return 0
 }
 
+# Store test results for grouped display
+declare -a RESULTS_MYSQL=()
+declare -a RESULTS_POSTGRES=()
+declare -a RESULTS_GENERIC=()
+
 run_test() {
     local name=$1
     local expected_dialect=$2
     local sql_file=$3
     local notes=$4
     local test_output_dir="$OUTPUT_DIR/$name"
-    
+
     local full_path="$DOWNLOADS_DIR/$sql_file"
-    
+
     if [[ ! -f "$full_path" ]]; then
-        echo -e "  ${YELLOW}⚠ SQL file not found: $sql_file (skipping)${NC}"
         return 1
     fi
-    
+
     local file_size=$(du -h "$full_path" | cut -f1)
-    echo "  File: $sql_file ($file_size)"
-    
+
     mkdir -p "$test_output_dir"
-    
+
     # Run sql-splitter with auto-detection (no --dialect flag)
-    local start_time=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
     local output
     if ! output=$("$BINARY" split "$full_path" --output="$test_output_dir" --dry-run 2>&1); then
-        echo -e "  ${RED}✗ FAILED - sql-splitter crashed${NC}"
-        echo "  Error: $output"
+        # Store failure result
+        store_result "$expected_dialect" "✗" "$name" "0" "0" "" "$file_size"
         return 1
     fi
-    local end_time=$(python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s)
-    
+
     # Parse output
-    local detected_dialect=$(echo "$output" | grep -o "Auto-detected dialect: [a-z]*" | awk '{print $3}' || echo "unknown")
-    local confidence=$(echo "$output" | grep -o "([a-z]* confidence)" | tr -d '()' || echo "unknown")
     local tables=$(echo "$output" | grep "Tables found:" | awk '{print $3}' || echo "0")
     local statements=$(echo "$output" | grep "Statements processed:" | awk '{print $3}' || echo "0")
-    
-    # Calculate duration
-    local duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "?")
-    
-    # Determine if dialect matches
-    local dialect_status=""
-    if [[ "$expected_dialect" == "any" ]]; then
-        dialect_status="${CYAN}(any)${NC}"
-    elif [[ "$detected_dialect" == "$expected_dialect" ]]; then
-        dialect_status="${GREEN}✓${NC}"
-    else
-        dialect_status="${YELLOW}~${NC}"
-    fi
-    
-    # Check if we got meaningful results
-    if [[ "$tables" == "0" && "$statements" == "0" ]]; then
-        echo -e "  ${YELLOW}⚠ WARNING - No tables or statements found${NC}"
-        echo "    Detected: $detected_dialect ($confidence)"
-        return 0  # Not a failure, just a warning
-    fi
-    
-    echo -e "  ${GREEN}✓ PASSED${NC} - Tables: $tables, Statements: $statements"
-    echo -e "    Detected: $detected_dialect ($confidence) $dialect_status Expected: $expected_dialect"
-    
+
+    # Store success result (convert results filled in later)
+    store_result "$expected_dialect" "✓" "$name" "$tables" "$statements" "" "$file_size"
+
     return 0
 }
 
+store_result() {
+    local dialect=$1
+    local status=$2
+    local name=$3
+    local tables=$4
+    local stmts=$5
+    local convert=$6
+    local size=$7
+
+    local result="${status}|${name}|${tables}|${stmts}|${convert}|${size}"
+
+    case "$dialect" in
+        mysql)
+            RESULTS_MYSQL+=("$result")
+            ;;
+        postgres)
+            RESULTS_POSTGRES+=("$result")
+            ;;
+        *)
+            RESULTS_GENERIC+=("$result")
+            ;;
+    esac
+}
+
+update_result_convert() {
+    local dialect=$1
+    local name=$2
+    local convert_result=$3
+
+    local -n arr
+    case "$dialect" in
+        mysql) arr=RESULTS_MYSQL ;;
+        postgres) arr=RESULTS_POSTGRES ;;
+        *) arr=RESULTS_GENERIC ;;
+    esac
+
+    for i in "${!arr[@]}"; do
+        if [[ "${arr[$i]}" == *"|${name}|"* ]]; then
+            IFS='|' read -r status n tables stmts _ size <<< "${arr[$i]}"
+            arr[$i]="${status}|${n}|${tables}|${stmts}|${convert_result}|${size}"
+            break
+        fi
+    done
+}
+
 # Run convert test for a single source file to all target dialects
+# Returns a compact result string like "pg:✓ sqlite:✓"
 run_convert_test() {
     local name=$1
     local source_dialect=$2
     local sql_file=$3
-    local notes=$4
     local convert_output_dir="$OUTPUT_DIR/convert/$name"
-    
+
     local full_path="$DOWNLOADS_DIR/$sql_file"
-    
+
     if [[ ! -f "$full_path" ]]; then
         return 1
     fi
-    
-    # Define all target dialects
-    local -a target_dialects=("mysql" "postgres" "sqlite")
-    local convert_passed=0
+
+    # Skip 'any' dialect (can't reliably convert)
+    if [[ "$source_dialect" == "any" ]]; then
+        update_result_convert "$source_dialect" "$name" "(no convert)"
+        return 0
+    fi
+
+    # Define target dialects (abbreviations for display)
+    local -a targets=("mysql" "postgres" "sqlite")
+    local -A abbrev=( ["mysql"]="my" ["postgres"]="pg" ["sqlite"]="sq" )
+    local convert_result=""
     local convert_failed=0
-    
+
     mkdir -p "$convert_output_dir"
-    
-    echo "  Convert tests:"
-    
-    for target in "${target_dialects[@]}"; do
+
+    for target in "${targets[@]}"; do
         # Skip same dialect conversion
         if [[ "$source_dialect" == "$target" ]]; then
             continue
         fi
-        
-        # Skip 'any' dialect (can't reliably convert)
-        if [[ "$source_dialect" == "any" ]]; then
-            continue
-        fi
-        
+
         local output_file="$convert_output_dir/${name}_to_${target}.sql"
-        local convert_output
-        
+
         # Run conversion
-        if convert_output=$("$BINARY" convert "$full_path" --from="$source_dialect" --to="$target" --output="$output_file" 2>&1); then
-            # Parse conversion stats
-            local converted=$(echo "$convert_output" | grep "Statements converted:" | awk '{print $3}' || echo "0")
-            local unchanged=$(echo "$convert_output" | grep "Statements unchanged:" | awk '{print $3}' || echo "0")
-            local skipped=$(echo "$convert_output" | grep "Statements skipped:" | awk '{print $3}' || echo "0")
-            local warnings=$(echo "$convert_output" | grep -c "⚠" || echo "0")
-            
-            # Check output file exists and has content
+        if "$BINARY" convert "$full_path" --from="$source_dialect" --to="$target" --output="$output_file" >/dev/null 2>&1; then
             if [[ -f "$output_file" && -s "$output_file" ]]; then
-                local output_size=$(du -h "$output_file" | cut -f1)
-                echo -e "    ${source_dialect} → ${target}: ${GREEN}✓${NC} (conv:$converted, unch:$unchanged, skip:$skipped, warn:$warnings) [$output_size]"
-                ((convert_passed++))
+                convert_result+="${abbrev[$target]}:✓ "
             else
-                echo -e "    ${source_dialect} → ${target}: ${YELLOW}⚠ empty output${NC}"
+                convert_result+="${abbrev[$target]}:⚠ "
                 ((convert_failed++))
             fi
         else
-            echo -e "    ${source_dialect} → ${target}: ${RED}✗ FAILED${NC}"
-            echo "      Error: $(echo "$convert_output" | head -1)"
+            convert_result+="${abbrev[$target]}:✗ "
             ((convert_failed++))
         fi
     done
-    
+
+    # Trim trailing space
+    convert_result="${convert_result% }"
+
+    update_result_convert "$source_dialect" "$name" "$convert_result"
+
     if [[ $convert_failed -gt 0 ]]; then
         return 1
     fi
@@ -370,7 +388,7 @@ run_all_tests() {
                 ((convert_failed++))
             fi
         else
-            echo "  Convert tests: ${CYAN}skipped (dialect=any)${NC}"
+            echo -e "  Convert tests: ${CYAN}skipped (dialect=any)${NC}"
             ((convert_skipped++))
         fi
     done

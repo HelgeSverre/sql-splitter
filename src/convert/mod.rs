@@ -13,7 +13,9 @@ mod types;
 mod warnings;
 
 #[allow(unused_imports)]
-pub use copy_to_insert::{copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue};
+pub use copy_to_insert::{
+    copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
+};
 
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::splitter::Compression;
