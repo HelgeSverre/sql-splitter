@@ -7,7 +7,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Result<()> {
+use super::glob_util::{expand_file_pattern, MultiFileResult};
+
+pub fn run(file: PathBuf, dialect: Option<String>, progress: bool, fail_fast: bool) -> anyhow::Result<()> {
+    let expanded = expand_file_pattern(&file)?;
+
+    if expanded.files.len() == 1 {
+        run_single(expanded.files.into_iter().next().unwrap(), dialect, progress)
+    } else {
+        run_multi(expanded.files, dialect, progress, fail_fast)
+    }
+}
+
+fn run_single(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Result<()> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
     }
@@ -15,7 +27,6 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
     let file_size = std::fs::metadata(&file)?.len();
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-    // Detect compression
     let compression = Compression::from_path(&file);
     if compression != Compression::None {
         println!("Detected compression: {}", compression);
@@ -71,6 +82,127 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
         return Ok(());
     }
 
+    print_stats(&stats);
+    Ok(())
+}
+
+fn run_multi(
+    files: Vec<PathBuf>,
+    dialect: Option<String>,
+    progress: bool,
+    fail_fast: bool,
+) -> anyhow::Result<()> {
+    let total = files.len();
+    let mut result = MultiFileResult::new();
+    result.total_files = total;
+
+    println!("Analyzing {} files...\n", total);
+
+    let start_time = Instant::now();
+
+    for (idx, file) in files.iter().enumerate() {
+        println!(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
+            idx + 1,
+            total,
+            file.display()
+        );
+
+        let file_size = match std::fs::metadata(&file) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                println!("  Error: {}\n", e);
+                result.record_failure(file.clone(), e.to_string());
+                if fail_fast {
+                    break;
+                }
+                continue;
+            }
+        };
+        let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
+
+        let compression = Compression::from_path(&file);
+        let resolved_dialect = match resolve_dialect(&file, dialect.clone(), compression) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("  Error: {}\n", e);
+                result.record_failure(file.clone(), e.to_string());
+                if fail_fast {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        println!("  Size: {:.2} MB | Dialect: {}", file_size_mb, resolved_dialect);
+
+        let analyzer = Analyzer::new(file.clone()).with_dialect(resolved_dialect);
+        let stats = if progress {
+            let pb = ProgressBar::new(file_size);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "  {spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
+                )
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+            let pb_clone = pb.clone();
+            let result = analyzer.analyze_with_progress(move |bytes| {
+                pb_clone.set_position(bytes);
+            });
+
+            pb.finish_and_clear();
+            result
+        } else {
+            analyzer.analyze()
+        };
+
+        match stats {
+            Ok(stats) => {
+                let total_inserts: u64 = stats.iter().map(|s| s.insert_count).sum();
+                let total_bytes: u64 = stats.iter().map(|s| s.total_bytes).sum();
+                println!(
+                    "  Tables: {} | INSERTs: {} | Data: {:.2} MB\n",
+                    stats.len(),
+                    total_inserts,
+                    total_bytes as f64 / (1024.0 * 1024.0)
+                );
+                result.record_success();
+            }
+            Err(e) => {
+                println!("  Error: {}\n", e);
+                result.record_failure(file.clone(), e.to_string());
+                if fail_fast {
+                    break;
+                }
+            }
+        }
+    }
+
+    let elapsed = start_time.elapsed();
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Analysis Summary:");
+    println!("  Total files: {}", total);
+    println!("  Succeeded: {}", result.succeeded);
+    println!("  Failed: {}", result.failed);
+    println!("  Time: {:.3?}", elapsed);
+
+    if result.has_failures() {
+        println!();
+        println!("Failed files:");
+        for (path, error) in &result.errors {
+            println!("  - {}: {}", path.display(), error);
+        }
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn print_stats(stats: &[crate::analyzer::TableStats]) {
     println!("Found {} tables:\n", stats.len());
     println!(
         "{:<40} {:>12} {:>12} {:>12}",
@@ -81,7 +213,7 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
     let mut total_inserts: u64 = 0;
     let mut total_bytes: u64 = 0;
 
-    for stat in &stats {
+    for stat in stats {
         let name = truncate_string(&stat.table_name, 40);
         println!(
             "{:<40} {:>12} {:>12} {:>12.2}",
@@ -103,8 +235,6 @@ pub fn run(file: PathBuf, dialect: Option<String>, progress: bool) -> anyhow::Re
         "-",
         total_bytes as f64 / (1024.0 * 1024.0)
     );
-
-    Ok(())
 }
 
 fn resolve_dialect(
@@ -117,7 +247,6 @@ fn resolve_dialect(
     match dialect {
         Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
         None => {
-            // For compressed files, decompress a sample first
             let result = if compression != Compression::None {
                 let file_handle = std::fs::File::open(file)?;
                 let mut reader = compression.wrap_reader(Box::new(file_handle));
