@@ -266,21 +266,33 @@ update_result_convert() {
     local dialect=$1
     local name=$2
     local convert_result=$3
+    local status n tables stmts _ size
 
-    local -n arr
-    case "$dialect" in
-        mysql) arr=RESULTS_MYSQL ;;
-        postgres) arr=RESULTS_POSTGRES ;;
-        *) arr=RESULTS_GENERIC ;;
-    esac
-
-    for i in "${!arr[@]}"; do
-        if [[ "${arr[$i]}" == *"|${name}|"* ]]; then
-            IFS='|' read -r status n tables stmts _ size <<< "${arr[$i]}"
-            arr[$i]="${status}|${n}|${tables}|${stmts}|${convert_result}|${size}"
-            break
-        fi
-    done
+    if [[ "$dialect" == "mysql" ]]; then
+        for i in "${!RESULTS_MYSQL[@]}"; do
+            if [[ "${RESULTS_MYSQL[$i]}" == *"|${name}|"* ]]; then
+                IFS='|' read -r status n tables stmts _ size <<< "${RESULTS_MYSQL[$i]}"
+                RESULTS_MYSQL[$i]="${status}|${n}|${tables}|${stmts}|${convert_result}|${size}"
+                break
+            fi
+        done
+    elif [[ "$dialect" == "postgres" ]]; then
+        for i in "${!RESULTS_POSTGRES[@]}"; do
+            if [[ "${RESULTS_POSTGRES[$i]}" == *"|${name}|"* ]]; then
+                IFS='|' read -r status n tables stmts _ size <<< "${RESULTS_POSTGRES[$i]}"
+                RESULTS_POSTGRES[$i]="${status}|${n}|${tables}|${stmts}|${convert_result}|${size}"
+                break
+            fi
+        done
+    else
+        for i in "${!RESULTS_GENERIC[@]}"; do
+            if [[ "${RESULTS_GENERIC[$i]}" == *"|${name}|"* ]]; then
+                IFS='|' read -r status n tables stmts _ size <<< "${RESULTS_GENERIC[$i]}"
+                RESULTS_GENERIC[$i]="${status}|${n}|${tables}|${stmts}|${convert_result}|${size}"
+                break
+            fi
+        done
+    fi
 }
 
 # Run convert test for a single source file to all target dialects
@@ -303,9 +315,8 @@ run_convert_test() {
         return 0
     fi
 
-    # Define target dialects (abbreviations for display)
+    # Define target dialects
     local -a targets=("mysql" "postgres" "sqlite")
-    local -A abbrev=( ["mysql"]="my" ["postgres"]="pg" ["sqlite"]="sq" )
     local convert_result=""
     local convert_failed=0
 
@@ -317,18 +328,27 @@ run_convert_test() {
             continue
         fi
 
+        # Get abbreviation for target dialect
+        local target_abbrev
+        case "$target" in
+            mysql)    target_abbrev="my" ;;
+            postgres) target_abbrev="pg" ;;
+            sqlite)   target_abbrev="sq" ;;
+            *)        target_abbrev="$target" ;;
+        esac
+
         local output_file="$convert_output_dir/${name}_to_${target}.sql"
 
         # Run conversion
         if "$BINARY" convert "$full_path" --from="$source_dialect" --to="$target" --output="$output_file" >/dev/null 2>&1; then
             if [[ -f "$output_file" && -s "$output_file" ]]; then
-                convert_result+="${abbrev[$target]}:✓ "
+                convert_result+="${target_abbrev}:✓ "
             else
-                convert_result+="${abbrev[$target]}:⚠ "
+                convert_result+="${target_abbrev}:⚠ "
                 ((convert_failed++))
             fi
         else
-            convert_result+="${abbrev[$target]}:✗ "
+            convert_result+="${target_abbrev}:✗ "
             ((convert_failed++))
         fi
     done

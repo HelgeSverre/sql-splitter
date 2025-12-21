@@ -39,6 +39,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
+COPY crates ./crates
 RUN cargo build --release && cp target/release/sql-splitter /usr/local/bin/sql-splitter
 
 # ============================================================
