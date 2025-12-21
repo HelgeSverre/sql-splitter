@@ -32,10 +32,10 @@
                 <span class="logo-icon">;</span>
                 sql-splitter
             </h1>
-            <p class="subtitle">Split SQL dumps at 400+ MB/s</p>
+            <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
             <p class="description">
-                High-performance CLI tool for splitting large SQL dump files into individual
-                table files. Supports MySQL, PostgreSQL, and SQLite. Written in Rust.
+                Split, merge, convert, validate, sample, and shard SQL dump files.
+                MySQL, PostgreSQL, and SQLite. Written in Rust.
             </p>
             <div class="hero-actions">
                 <a href="#install" class="btn btn-primary">Get Started</a>
@@ -55,7 +55,7 @@
                 <div class="benefit">
                     <div class="benefit-icon">~</div>
                     <h3>Blazing Fast</h3>
-                    <p>400+ MB/s throughput</p>
+                    <p>600+ MB/s throughput</p>
                 </div>
                 <div class="benefit">
                     <div class="benefit-icon">&lt;</div>
@@ -64,8 +64,8 @@
                 </div>
                 <div class="benefit">
                     <div class="benefit-icon">*</div>
-                    <h3>Zero-Copy</h3>
-                    <p>No garbage collection</p>
+                    <h3>Multi-Dialect</h3>
+                    <p>MySQL, PostgreSQL, SQLite</p>
                 </div>
             </div>
         </section>
@@ -423,51 +423,77 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
                         <ul>
                             <li>CREATE TABLE</li>
                             <li>INSERT INTO</li>
-                            <li>CREATE INDEX</li>
+                            <li>COPY ... FROM stdin (PostgreSQL)</li>
                         </ul>
                     </div>
                     <div>
                         <ul>
+                            <li>CREATE INDEX</li>
                             <li>ALTER TABLE</li>
                             <li>DROP TABLE</li>
                         </ul>
                     </div>
                 </div>
-                <p class="note">Other statements (SELECT, UPDATE, DELETE, etc.) are skipped.</p>
+                <p class="note">Compressed files supported: .gz, .bz2, .xz, .zst (auto-detected)</p>
             </article>
 
             <!-- Examples -->
             <article class="guide-section">
-                <h3>Examples</h3>
+                <h3>Common Workflows</h3>
 
-                <h4>Split a large production dump</h4>
+                <h4>Split → Edit → Merge</h4>
                 <div class="code-block">
-                    <pre><code>sql-splitter split production-backup.sql -o tables -p</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter split production-backup.sql -o tables -p">Copy</button>
+                    <pre><code># Split into per-table files
+sql-splitter split dump.sql -o tables/ -p
+
+# Edit specific tables as needed...
+
+# Merge back into single file
+sql-splitter merge tables/ -o updated.sql --transaction</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter split dump.sql -o tables/ -p">Copy</button>
                 </div>
 
-                <h4>Extract only specific tables</h4>
+                <h4>MySQL to PostgreSQL Migration</h4>
                 <div class="code-block">
-                    <pre><code>sql-splitter split database.sql --tables=users,orders,products</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter split database.sql --tables=users,orders,products">Copy</button>
+                    <pre><code># Validate source dump
+sql-splitter validate mysql.sql --strict
+
+# Convert to PostgreSQL
+sql-splitter convert mysql.sql --to postgres -o pg.sql -p
+
+# Validate converted output
+sql-splitter validate pg.sql --dialect=postgres --strict</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql -p">Copy</button>
                 </div>
 
-                <h4>Preview before splitting</h4>
+                <h4>Create Dev Dataset</h4>
                 <div class="code-block">
-                    <pre><code>sql-splitter split database.sql --dry-run</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter split database.sql --dry-run">Copy</button>
+                    <pre><code># Sample 10% with FK integrity
+sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations
+
+# Or sample fixed row count
+sql-splitter sample prod.sql -o dev.sql --rows 1000 --preserve-relations --seed 42</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations">Copy</button>
                 </div>
 
-                <h4>Analyze tables before splitting</h4>
+                <h4>Extract Tenant Data</h4>
                 <div class="code-block">
-                    <pre><code>sql-splitter analyze database.sql</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
+                    <pre><code># Extract single tenant
+sql-splitter shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql
+
+# Extract multiple tenants to separate files
+sql-splitter shard multi-tenant.sql --tenant-values "1,2,3" -o tenants/</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
                 </div>
 
-                <h4>Import a single table</h4>
+                <h4>CI Validation Pipeline</h4>
                 <div class="code-block">
-                    <pre><code>mysql -u root -p mydb < tables/users.sql</code></pre>
-                    <button class="copy-btn" data-copy="mysql -u root -p mydb < tables/users.sql">Copy</button>
+                    <pre><code># Validate all dumps in CI
+sql-splitter validate "dumps/*.sql" --strict --json --fail-fast
+
+# Parse results with jq
+sql-splitter validate "*.sql" --json | jq '.results[] | select(.passed == false)'</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter validate &quot;dumps/*.sql&quot; --strict --json --fail-fast">Copy</button>
                 </div>
             </article>
 
@@ -480,10 +506,10 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
                         <tr><th>Metric</th><th>Value</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>Parser Throughput</td><td>400-500 MB/s</td></tr>
-                        <tr><td>vs Go Version</td><td>1.25x faster on 10GB files</td></tr>
+                        <tr><td>Parser Throughput</td><td>600+ MB/s</td></tr>
                         <tr><td>Memory Usage</td><td>~50 MB constant</td></tr>
                         <tr><td>Cold Start</td><td>~5ms</td></tr>
+                        <tr><td>Compressed Files</td><td>gzip, bz2, xz, zstd</td></tr>
                     </tbody>
                 </table>
 
