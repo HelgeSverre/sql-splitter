@@ -219,13 +219,14 @@ Use the profiling script to consistently benchmark all commands:
 Size configurations:
 | Size | Rows/Table | Tables | Approx File Size |
 |------|------------|--------|------------------|
-| tiny | 500 | 10 | ~1MB |
-| small | 2,500 | 10 | ~5MB |
-| medium | 25,000 | 10 | ~50MB |
-| large | 125,000 | 10 | ~250MB |
-| xlarge | 250,000 | 10 | ~500MB |
-| huge | 500,000 | 10 | ~1GB |
-| mega | 100,000 | 100 | ~2GB |
+| tiny | 500 | 10 | ~0.5MB |
+| small | 2,500 | 10 | ~2.5MB |
+| medium | 25,000 | 10 | ~25MB |
+| large | 125,000 | 10 | ~125MB |
+| xlarge | 250,000 | 10 | ~250MB |
+| huge | 500,000 | 10 | ~500MB |
+| mega | 100,000 | 100 | ~1GB |
+| giga | 1,000,000 | 100 | ~10GB (MySQL only) |
 
 ### Key Metrics
 

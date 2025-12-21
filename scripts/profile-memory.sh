@@ -30,17 +30,18 @@ SIZE="medium"
 CUSTOM_FILE=""
 SEED=42
 
-# Size configurations (tuned for realistic file sizes)
-# Approx formula: ~200 bytes/row, so rows * tables * 200 ≈ file size
+# Size configurations (measured: ~100 bytes/row)
+# Formula: rows × tables × 100 bytes ≈ file size
 get_size_rows() {
     case $1 in
-        tiny)   echo 500 ;;      # ~1MB
-        small)  echo 2500 ;;     # ~5MB
-        medium) echo 25000 ;;    # ~50MB
-        large)  echo 125000 ;;   # ~250MB
-        xlarge) echo 250000 ;;   # ~500MB
-        huge)   echo 500000 ;;   # ~1GB
-        mega)   echo 100000 ;;   # ~2GB (100 tables × 100k rows)
+        tiny)   echo 500 ;;       # ~0.5MB
+        small)  echo 2500 ;;      # ~2.5MB
+        medium) echo 25000 ;;     # ~25MB
+        large)  echo 125000 ;;    # ~125MB
+        xlarge) echo 250000 ;;    # ~250MB
+        huge)   echo 500000 ;;    # ~500MB
+        mega)   echo 100000 ;;    # ~1GB (100 tables × 100k rows)
+        giga)   echo 1000000 ;;   # ~10GB (100 tables × 1M rows) - MySQL only
         *) echo 25000 ;;
     esac
 }
@@ -54,6 +55,7 @@ get_size_tables() {
         xlarge) echo 10 ;;
         huge)   echo 10 ;;
         mega)   echo 100 ;;
+        giga)   echo 100 ;;
         *) echo 10 ;;
     esac
 }
@@ -82,13 +84,14 @@ while [[ $# -gt 0 ]]; do
             echo "  --file FILE       Use existing file instead of generating"
             echo ""
             echo "Size configurations:"
-            echo "  tiny:    500 rows/table,   10 tables (~1MB)"
-            echo "  small:   2500 rows/table,  10 tables (~5MB)"
-            echo "  medium:  25000 rows/table, 10 tables (~50MB)"
-            echo "  large:   125000 rows/table, 10 tables (~250MB)"
-            echo "  xlarge:  250000 rows/table, 10 tables (~500MB)"
-            echo "  huge:    500000 rows/table, 10 tables (~1GB)"
-            echo "  mega:    100000 rows/table, 100 tables (~2GB)"
+            echo "  tiny:    500 rows/table,    10 tables (~0.5MB)"
+            echo "  small:   2500 rows/table,   10 tables (~2.5MB)"
+            echo "  medium:  25000 rows/table,  10 tables (~25MB)"
+            echo "  large:   125000 rows/table, 10 tables (~125MB)"
+            echo "  xlarge:  250000 rows/table, 10 tables (~250MB)"
+            echo "  huge:    500000 rows/table, 10 tables (~500MB)"
+            echo "  mega:    100000 rows/table, 100 tables (~1GB)"
+            echo "  giga:    1000000 rows/table, 100 tables (~10GB, MySQL only)"
             exit 0
             ;;
         *)
@@ -383,22 +386,40 @@ main() {
     else
         echo "Generating test fixtures (size: $SIZE)..."
         
-        mysql_file=$(generate_fixture "mysql")
-        postgres_file=$(generate_fixture "postgres")
-        sqlite_file=$(generate_fixture "sqlite")
-        
-        if [[ "$GENERATE_ONLY" == "true" ]]; then
+        # Giga size is MySQL-only to save disk space (~10GB vs ~30GB)
+        if [[ "$SIZE" == "giga" ]]; then
             echo ""
-            echo "Fixtures generated:"
-            echo "  MySQL:    $mysql_file ($(du -h "$mysql_file" | cut -f1))"
-            echo "  Postgres: $postgres_file ($(du -h "$postgres_file" | cut -f1))"
-            echo "  SQLite:   $sqlite_file ($(du -h "$sqlite_file" | cut -f1))"
-            exit 0
+            echo "WARNING: giga generates ~10GB MySQL file. This may take 10-30 minutes."
+            echo ""
+            mysql_file=$(generate_fixture "mysql")
+            
+            if [[ "$GENERATE_ONLY" == "true" ]]; then
+                echo ""
+                echo "Fixtures generated:"
+                echo "  MySQL:    $mysql_file ($(du -h "$mysql_file" | cut -f1))"
+                echo "  (giga is MySQL-only to save disk space)"
+                exit 0
+            fi
+            
+            run_all_profiles "$mysql_file" "mysql"
+        else
+            mysql_file=$(generate_fixture "mysql")
+            postgres_file=$(generate_fixture "postgres")
+            sqlite_file=$(generate_fixture "sqlite")
+            
+            if [[ "$GENERATE_ONLY" == "true" ]]; then
+                echo ""
+                echo "Fixtures generated:"
+                echo "  MySQL:    $mysql_file ($(du -h "$mysql_file" | cut -f1))"
+                echo "  Postgres: $postgres_file ($(du -h "$postgres_file" | cut -f1))"
+                echo "  SQLite:   $sqlite_file ($(du -h "$sqlite_file" | cut -f1))"
+                exit 0
+            fi
+            
+            run_all_profiles "$mysql_file" "mysql"
+            run_all_profiles "$postgres_file" "postgres"
+            run_all_profiles "$sqlite_file" "sqlite"
         fi
-        
-        run_all_profiles "$mysql_file" "mysql"
-        run_all_profiles "$postgres_file" "postgres"
-        run_all_profiles "$sqlite_file" "sqlite"
     fi
     
     echo "Profiling complete!"

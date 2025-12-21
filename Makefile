@@ -1,4 +1,4 @@
-.PHONY: help build release native test bench profile profile-large profile-mega fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld website-deploy
+.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all docker-build docker-bench verify-realworld website-deploy
 
 # Show available commands (default target)
 help:
@@ -9,8 +9,9 @@ help:
 	@echo "  make test                  - Run all tests"
 	@echo "  make bench                 - Run criterion benchmarks"
 	@echo "  make profile               - Memory profile all commands (medium dataset)"
-	@echo "  make profile-large         - Memory profile with large dataset (~250MB)"
-	@echo "  make profile-mega          - Stress test profile (~2GB: 100 tables × 100k rows)"
+	@echo "  make profile-large         - Memory profile with large dataset (~125MB)"
+	@echo "  make profile-mega          - Stress test profile (~1GB: 100 tables × 100k rows)"
+	@echo "  make profile-giga          - Extreme stress test (~10GB MySQL only)"
 	@echo "  make fmt                   - Format code"
 	@echo "  make check                 - Check code without building"
 	@echo "  make clippy                - Run clippy lints"
@@ -47,13 +48,17 @@ bench:
 profile: release
 	./scripts/profile-memory.sh --size medium
 
-# Memory profile with large test data (~250MB)
+# Memory profile with large test data (~125MB)
 profile-large: release
 	./scripts/profile-memory.sh --size large
 
-# Stress test memory profile (~2GB: 100 tables × 100k rows)
+# Stress test memory profile (~1GB: 100 tables × 100k rows)
 profile-mega: release
 	./scripts/profile-memory.sh --size mega
+
+# Extreme stress test (~10GB MySQL only, takes 10-30 min to generate)
+profile-giga: release
+	./scripts/profile-memory.sh --size giga
 
 # Format code
 fmt:
