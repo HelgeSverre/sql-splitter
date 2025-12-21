@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.8.0 (current)  
+**Version**: 1.8.1 (current)  
 **Last Updated**: 2025-12-21  
-**Revision**: 2.5 — Post v1.8.0 with Validate command
+**Revision**: 2.6 — Post v1.8.1 with Agent Skills documentation
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -247,6 +247,33 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
+### v1.8.1 — Glob Patterns & Agent Skills ✅ RELEASED
+**Released**: 2025-12-21  
+**Theme**: Batch processing and AI tooling integration
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Glob pattern support** | ✅ Done | All file-based commands |
+| ├─ validate "*.sql" | ✅ Done | Multi-file validation |
+| ├─ analyze "**/*.sql" | ✅ Done | Recursive analysis |
+| ├─ split "*.sql" | ✅ Done | Multi-file splitting |
+| └─ convert "*.sql" | ✅ Done | Batch conversion |
+| **--fail-fast flag** | ✅ Done | Stop on first error |
+| **--no-limit flag** | ✅ Done | Disable row limits |
+| **Multi-dialect PK/FK** | ✅ Done | Extended to PostgreSQL/SQLite |
+| **Agent Skill** | ✅ Done | agentskills.io spec |
+| **llms.txt** | ✅ Done | LLM-friendly docs |
+
+**Delivered:**
+- Glob patterns: `sql-splitter validate "dumps/*.sql"`
+- `--fail-fast` for CI pipelines
+- `--no-limit` to disable memory guards
+- PK/FK validation for all 3 dialects
+- Agent Skill for 7+ AI coding tools
+- llms.txt with installation instructions
+
+---
+
 ## Upcoming Features (v1.9+)
 
 ### v1.9.0 — Diff Command
@@ -352,6 +379,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.6.0 | Shard + Infra v1.5 | ✅ Released |
 | v1.7.0 | Convert MVP | ✅ Released |
 | v1.8.0 | Validate | ✅ Released |
+| v1.8.1 | Glob Patterns + Agent Skills | ✅ Released |
 
 ### Upcoming Features (v1.9+)
 
@@ -388,6 +416,11 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
    - SQL dump integrity checking
    - DDL/DML consistency, PK/FK validation
    - MySQL-focused with dialect info for others
+
+6. ✅ **v1.8.1 — Glob Patterns + Agent Skills** — Released
+   - Batch processing with glob patterns
+   - Multi-dialect PK/FK validation
+   - Agent Skill for AI coding tools
 
 ---
 

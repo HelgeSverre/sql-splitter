@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2025-12-21
+
 ### Added
 
 - **Glob pattern support**: All file-based commands now accept glob patterns for batch processing
@@ -23,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `sample --no-limit` - disable explosion guard
   - `shard --no-limit` - disable memory guard
   - Also supports `--max-rows-per-table=0` as equivalent
-- **Glob validation in verify-realworld.sh**: Added validation of split output files using glob patterns
+- **Agent Skill**: Added SKILL.md following [agentskills.io](https://agentskills.io) specification
+  - Supports Amp, Claude Code, VS Code/GitHub Copilot, Cursor, Goose, Letta, OpenCode
+  - Install via `amp skill add helgesverre/sql-splitter` or manual copy
+  - Universal installer: `npx ai-agent-skills install sql-splitter --agent <agent>`
+- **llms.txt**: Added LLM-friendly documentation with Agent Skill installation instructions
 
 ### Changed
 
@@ -31,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - PostgreSQL: Supports both INSERT statements and COPY ... FROM stdin format
   - SQLite: Reuses MySQL INSERT parser for validation
   - 6 new dialect-specific tests for PostgreSQL and SQLite PK/FK validation
+- **Improved progress tracking**: Consolidated byte-based progress across all commands
+- **Simplified skill structure**: Single `skills/sql-splitter/` directory (removed duplicate)
 
 ## [1.8.0] - 2025-12-21
 
