@@ -160,7 +160,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
             <article class="guide-section">
                 <h3>Commands</h3>
 
-                <h4>split</h4>
+                <h4 id="split">split</h4>
                 <p>Split a SQL dump file into individual table files.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># MySQL/MariaDB dump (default)</span>
@@ -186,7 +186,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
                 </div>
 
-                <h4>merge</h4>
+                <h4 id="merge">merge</h4>
                 <p>Merge split SQL files back into a single file.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># Merge all tables</span>
@@ -203,7 +203,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter merge tables/ -o restored.sql">Copy</button>
                 </div>
 
-                <h4>analyze</h4>
+                <h4 id="analyze">analyze</h4>
                 <p>Analyze a SQL file and display table statistics.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-tool">sql-splitter</span> analyze database.sql
@@ -212,7 +212,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
                 </div>
 
-                <h4>validate</h4>
+                <h4 id="validate">validate</h4>
                 <p>Check SQL dump integrity with comprehensive validation.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># Basic validation</span>
@@ -229,7 +229,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter validate dump.sql">Copy</button>
                 </div>
 
-                <h4>convert</h4>
+                <h4 id="convert">convert</h4>
                 <p>Convert SQL dumps between MySQL, PostgreSQL, and SQLite.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># MySQL to PostgreSQL</span>
@@ -252,7 +252,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql">Copy</button>
                 </div>
 
-                <h4>sample</h4>
+                <h4 id="sample">sample</h4>
                 <p>Create reduced datasets with FK preservation.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># Sample 10% of rows</span>
@@ -269,7 +269,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter sample dump.sql -o sampled.sql --percent 10 --preserve-relations">Copy</button>
                 </div>
 
-                <h4>shard</h4>
+                <h4 id="shard">shard</h4>
                 <p>Extract tenant-specific data from multi-tenant dumps.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># Extract single tenant</span>
@@ -286,7 +286,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
                 </div>
 
-                <h4>diff</h4>
+                <h4 id="diff">diff</h4>
                 <p>Compare two SQL dumps for schema and data changes.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># Full comparison (schema + data)</span>
@@ -310,7 +310,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                     <button class="copy-btn" data-copy="sql-splitter diff old.sql new.sql">Copy</button>
                 </div>
 
-                <h4>redact</h4>
+                <h4 id="redact">redact</h4>
                 <p>Anonymize sensitive data (PII) in SQL dumps.</p>
                 <div class="code-block">
                     <pre><code><span class="sh-comment"># Using inline patterns</span>
