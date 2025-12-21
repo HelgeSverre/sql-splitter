@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>sql-splitter - High-Performance SQL File Splitter in Rust</title>
-    <meta name="description" content="Split large SQL dump files into individual table files at 400+ MB/s. Memory-efficient, streaming architecture handles gigabyte-scale files. Written in Rust.">
+    <title>sql-splitter - High-Performance SQL Dump Toolkit in Rust</title>
+    <meta name="description" content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files. MySQL, PostgreSQL, SQLite. Written in Rust.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap" rel="stylesheet">
@@ -294,13 +294,55 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
                     <tbody>
                         <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output directory</td><td>output</td></tr>
                         <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Filter tables (comma-separated)</td><td>-</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>-</td><td>Preview without writing</td><td>false</td></tr>
-                        <tr><td><code>--fail-fast</code></td><td>-</td><td>Stop on first error (glob)</td><td>false</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only split specific tables (comma-separated)</td><td>—</td></tr>
+                        <tr><td><code>--schema-only</code></td><td>—</td><td>Only DDL (CREATE TABLE, indexes)</td><td>false</td></tr>
+                        <tr><td><code>--data-only</code></td><td>—</td><td>Only DML (INSERT, COPY)</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
+                        <tr><td><code>--fail-fast</code></td><td>—</td><td>Stop on first error (glob)</td><td>false</td></tr>
                     </tbody>
                 </table>
                 <p class="note">Input accepts glob patterns: <code>*.sql</code>, <code>dumps/**/*.sql</code></p>
+            </article>
+
+            <!-- Merge Options -->
+            <article class="guide-section">
+                <h3>Merge Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect for headers/footers</td><td>mysql</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only merge specific tables</td><td>all</td></tr>
+                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables (comma-separated)</td><td>—</td></tr>
+                        <tr><td><code>--transaction</code></td><td>—</td><td>Wrap in BEGIN/COMMIT</td><td>false</td></tr>
+                        <tr><td><code>--no-header</code></td><td>—</td><td>Skip header comments</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
+                    </tbody>
+                </table>
+            </article>
+
+            <!-- Convert Options -->
+            <article class="guide-section">
+                <h3>Convert Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file or directory</td><td>stdout</td></tr>
+                        <tr><td><code>--from</code></td><td>—</td><td>Source dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
+                        <tr><td><code>--to</code></td><td>—</td><td>Target dialect (mysql, postgres, sqlite)</td><td>required</td></tr>
+                        <tr><td><code>--strict</code></td><td>—</td><td>Fail on unsupported features</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
+                        <tr><td><code>--fail-fast</code></td><td>—</td><td>Stop on first error (glob)</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Supports all 6 conversion pairs: MySQL ↔ PostgreSQL ↔ SQLite</p>
             </article>
 
             <!-- Validate Options -->
@@ -312,15 +354,64 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
                     </thead>
                     <tbody>
                         <tr><td><code>--dialect</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--strict</code></td><td>Treat warnings as errors</td><td>false</td></tr>
-                        <tr><td><code>--json</code></td><td>JSON output for CI</td><td>false</td></tr>
+                        <tr><td><code>--strict</code></td><td>Treat warnings as errors (exit 1)</td><td>false</td></tr>
+                        <tr><td><code>--json</code></td><td>JSON output for CI/automation</td><td>false</td></tr>
                         <tr><td><code>--max-rows-per-table</code></td><td>Row limit for PK/FK checks (0 = unlimited)</td><td>1M</td></tr>
                         <tr><td><code>--no-limit</code></td><td>Disable row limit</td><td>false</td></tr>
-                        <tr><td><code>--no-fk-checks</code></td><td>Skip PK/FK checks</td><td>false</td></tr>
+                        <tr><td><code>--no-fk-checks</code></td><td>Skip PK/FK data integrity checks</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td>Show progress bar</td><td>false</td></tr>
                         <tr><td><code>--fail-fast</code></td><td>Stop on first error (glob)</td><td>false</td></tr>
                     </tbody>
                 </table>
                 <p class="note">Input accepts glob patterns: <code>*.sql</code>, <code>dumps/**/*.sql</code></p>
+            </article>
+
+            <!-- Sample Options -->
+            <article class="guide-section">
+                <h3>Sample Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
+                        <tr><td><code>--percent</code></td><td>—</td><td>Sample percentage (1-100)</td><td>—</td></tr>
+                        <tr><td><code>--rows</code></td><td>—</td><td>Fixed rows per table</td><td>—</td></tr>
+                        <tr><td><code>--preserve-relations</code></td><td>—</td><td>Maintain FK integrity</td><td>false</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only sample specific tables</td><td>all</td></tr>
+                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables</td><td>—</td></tr>
+                        <tr><td><code>--seed</code></td><td>—</td><td>Random seed for reproducibility</td><td>random</td></tr>
+                        <tr><td><code>--include-global</code></td><td>—</td><td>Lookup tables: none, lookups, all</td><td>lookups</td></tr>
+                        <tr><td><code>--config</code></td><td><code>-c</code></td><td>YAML config file</td><td>—</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Use <code>--percent</code> OR <code>--rows</code>, not both</p>
+            </article>
+
+            <!-- Shard Options -->
+            <article class="guide-section">
+                <h3>Shard Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file or directory</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
+                        <tr><td><code>--tenant-column</code></td><td>—</td><td>Tenant column name</td><td>auto</td></tr>
+                        <tr><td><code>--tenant-value</code></td><td>—</td><td>Single tenant value to extract</td><td>—</td></tr>
+                        <tr><td><code>--tenant-values</code></td><td>—</td><td>Multiple tenants (comma-separated)</td><td>—</td></tr>
+                        <tr><td><code>--root-tables</code></td><td>—</td><td>Tables with tenant column</td><td>auto</td></tr>
+                        <tr><td><code>--include-global</code></td><td>—</td><td>Lookup tables: none, lookups, all</td><td>lookups</td></tr>
+                        <tr><td><code>--config</code></td><td><code>-c</code></td><td>YAML config file</td><td>—</td></tr>
+                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Auto-detects tenant columns: tenant_id, company_id, account_id, org_id, etc.</p>
             </article>
 
             <!-- Supported Statements -->
