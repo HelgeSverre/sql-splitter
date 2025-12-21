@@ -172,12 +172,32 @@ sql-splitter split sqlite.sql --output=tables --dialect=sqlite
 # Split only specific tables
 sql-splitter split database.sql --tables=users,posts
 
-# Dry run (preview without writing)
-sql-splitter split database.sql --dry-run --progress
+# Schema only (CREATE TABLE, indexes)
+sql-splitter split database.sql --schema-only -o schema/
+
+# Data only (INSERT/COPY statements)
+sql-splitter split database.sql --data-only -o data/
 
 # Batch with glob patterns
 sql-splitter split "*.sql" -o output/ --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
+                </div>
+
+                <h4>merge</h4>
+                <p>Merge split SQL files back into a single file.</p>
+                <div class="code-block">
+                    <pre><code># Merge all tables
+sql-splitter merge tables/ -o restored.sql
+
+# Merge with transaction wrapper
+sql-splitter merge tables/ -o restored.sql --transaction
+
+# Merge only specific tables
+sql-splitter merge tables/ -o partial.sql --tables=users,orders
+
+# Exclude specific tables
+sql-splitter merge tables/ -o restored.sql --exclude=logs,cache</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter merge tables/ -o restored.sql">Copy</button>
                 </div>
 
                 <h4>analyze</h4>
@@ -192,18 +212,75 @@ sql-splitter analyze "**/*.sql" --fail-fast</code></pre>
                 <h4>validate</h4>
                 <p>Check SQL dump integrity with comprehensive validation.</p>
                 <div class="code-block">
-                    <pre><code>sql-splitter validate dump.sql
+                    <pre><code># Basic validation
+sql-splitter validate dump.sql
+
+# Strict mode for CI (warnings = errors)
 sql-splitter validate dump.sql --strict --json
+
+# Skip expensive PK/FK checks
+sql-splitter validate dump.sql --no-fk-checks
+
+# Batch validation
 sql-splitter validate "*.sql" --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter validate dump.sql">Copy</button>
                 </div>
 
                 <h4>convert</h4>
-                <p>Convert SQL dumps between dialects.</p>
+                <p>Convert SQL dumps between MySQL, PostgreSQL, and SQLite.</p>
                 <div class="code-block">
-                    <pre><code>sql-splitter convert mysql.sql --to postgres -o pg.sql
-sql-splitter convert "*.sql" --to sqlite -o converted/</code></pre>
+                    <pre><code># MySQL to PostgreSQL
+sql-splitter convert mysql.sql --to postgres -o pg.sql
+
+# PostgreSQL to MySQL (COPY → INSERT)
+sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
+
+# Auto-detect source, convert to SQLite
+sql-splitter convert dump.sql --to sqlite -o sqlite.sql
+
+# Explicit source dialect
+sql-splitter convert dump.sql --from postgres --to mysql -o out.sql
+
+# Strict mode (fail on unsupported features)
+sql-splitter convert dump.sql --to postgres --strict -o out.sql
+
+# Batch conversion
+sql-splitter convert "*.sql" --to postgres -o converted/</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql">Copy</button>
+                </div>
+
+                <h4>sample</h4>
+                <p>Create reduced datasets with FK preservation.</p>
+                <div class="code-block">
+                    <pre><code># Sample 10% of rows
+sql-splitter sample dump.sql -o sampled.sql --percent 10
+
+# Sample fixed rows per table
+sql-splitter sample dump.sql -o sampled.sql --rows 1000
+
+# Preserve FK relationships
+sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
+
+# Reproducible sampling with seed
+sql-splitter sample dump.sql -o dev.sql --percent 10 --seed 42</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter sample dump.sql -o sampled.sql --percent 10 --preserve-relations">Copy</button>
+                </div>
+
+                <h4>shard</h4>
+                <p>Extract tenant-specific data from multi-tenant dumps.</p>
+                <div class="code-block">
+                    <pre><code># Extract single tenant
+sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql
+
+# Auto-detect tenant column (tenant_id, company_id, etc.)
+sql-splitter shard dump.sql --tenant-value 5 -o tenant.sql
+
+# Explicit tenant column
+sql-splitter shard dump.sql --tenant-column account_id --tenant-value 42 -o out.sql
+
+# Extract multiple tenants
+sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
                 </div>
             </article>
 
