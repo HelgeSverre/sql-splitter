@@ -261,6 +261,34 @@ fn test_validate_max_rows_per_table() {
 }
 
 #[test]
+fn test_validate_no_limit() {
+    let mut sql = String::from("CREATE TABLE `items` (`id` INT PRIMARY KEY);\n");
+    for i in 1..=100 {
+        sql.push_str(&format!("INSERT INTO `items` VALUES ({});\n", i));
+    }
+    
+    let file = create_temp_sql(&sql);
+    let options = ValidateOptions {
+        path: file.path().to_path_buf(),
+        dialect: Some(SqlDialect::MySql),
+        progress: false,
+        strict: false,
+        json: false,
+        max_rows_per_table: usize::MAX, // No limit (simulating --no-limit)
+        fk_checks_enabled: true,
+    };
+    let validator = Validator::new(options);
+    let summary = validator.validate().unwrap();
+    
+    // Should NOT have warning about skipping checks
+    let skip_issues: Vec<_> = summary.issues.iter()
+        .filter(|i| i.code == "PK_CHECK_SKIPPED")
+        .collect();
+    assert_eq!(skip_issues.len(), 0, "No limit should not skip PK checks");
+    assert_eq!(summary.summary.errors, 0);
+}
+
+#[test]
 fn test_validate_composite_pk() {
     let sql = r#"
         CREATE TABLE `order_items` (
