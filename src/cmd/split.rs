@@ -222,7 +222,7 @@ fn run_multi(
             .unwrap_or_else(|| format!("file_{}", idx));
         let output_dir = base_output.join(&file_stem);
 
-        let file_size = match std::fs::metadata(&file) {
+        let file_size = match std::fs::metadata(file) {
             Ok(m) => m.len(),
             Err(e) => {
                 println!("  Error: {}\n", e);
@@ -235,8 +235,8 @@ fn run_multi(
         };
         let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let compression = Compression::from_path(&file);
-        let resolved_dialect = match resolve_dialect(&file, dialect.clone(), compression) {
+        let compression = Compression::from_path(file);
+        let resolved_dialect = match resolve_dialect(file, dialect.clone(), compression) {
             Ok(d) => d,
             Err(e) => {
                 println!("  Error: {}\n", e);

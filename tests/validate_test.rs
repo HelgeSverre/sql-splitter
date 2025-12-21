@@ -36,6 +36,7 @@ fn validate_sql_with_dialect(content: &str, dialect: SqlDialect, fk_checks: bool
         json: false,
         max_rows_per_table: 1_000_000,
         fk_checks_enabled: fk_checks,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     validator.validate().unwrap()
@@ -50,6 +51,7 @@ fn validate_file(path: &std::path::Path, dialect: SqlDialect, fk_checks: bool) -
         json: false,
         max_rows_per_table: 1_000_000,
         fk_checks_enabled: fk_checks,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     validator.validate().unwrap()
@@ -194,6 +196,7 @@ fn test_validate_encoding_issue() {
         json: false,
         max_rows_per_table: 1_000_000,
         fk_checks_enabled: false,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
@@ -223,6 +226,7 @@ fn test_validate_postgres_with_fk_checks() {
         json: false,
         max_rows_per_table: 1_000_000,
         fk_checks_enabled: true,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
@@ -251,6 +255,7 @@ fn test_validate_max_rows_per_table() {
         json: false,
         max_rows_per_table: 3, // Small limit to trigger skip
         fk_checks_enabled: true,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
@@ -276,6 +281,7 @@ fn test_validate_no_limit() {
         json: false,
         max_rows_per_table: usize::MAX, // No limit (simulating --no-limit)
         fk_checks_enabled: true,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
@@ -379,6 +385,7 @@ fn test_validate_has_warnings() {
         json: false,
         max_rows_per_table: 3,
         fk_checks_enabled: true,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
@@ -674,6 +681,7 @@ fn test_validate_large_rows_warning() {
         json: false,
         max_rows_per_table: 50, // Trigger warning
         fk_checks_enabled: true,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();
@@ -700,6 +708,7 @@ fn test_validate_json_output_format() {
         json: true, // JSON mode
         max_rows_per_table: 1_000_000,
         fk_checks_enabled: true,
+        max_pk_fk_keys: None,
     };
     let validator = Validator::new(options);
     let summary = validator.validate().unwrap();

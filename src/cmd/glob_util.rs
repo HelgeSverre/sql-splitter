@@ -3,7 +3,7 @@
 //! Provides functions to expand glob patterns like `*.sql` or `dumps/**/*.sql`
 //! into lists of matching file paths.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Result of expanding a file pattern (either a literal path or glob pattern).
 #[derive(Debug)]
@@ -28,7 +28,7 @@ pub fn is_glob_pattern(path: &str) -> bool {
 /// - The glob pattern is invalid
 /// - No files match the pattern
 /// - A literal path doesn't exist
-pub fn expand_file_pattern(pattern: &PathBuf) -> anyhow::Result<ExpandedFiles> {
+pub fn expand_file_pattern(pattern: &Path) -> anyhow::Result<ExpandedFiles> {
     let pattern_str = pattern.to_string_lossy();
     
     if !is_glob_pattern(&pattern_str) {
@@ -36,7 +36,7 @@ pub fn expand_file_pattern(pattern: &PathBuf) -> anyhow::Result<ExpandedFiles> {
             anyhow::bail!("file does not exist: {}", pattern.display());
         }
         return Ok(ExpandedFiles {
-            files: vec![pattern.clone()],
+            files: vec![pattern.to_path_buf()],
             pattern_was_glob: false,
         });
     }

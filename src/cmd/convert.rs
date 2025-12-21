@@ -128,7 +128,7 @@ fn run_multi(
             file.display()
         );
 
-        let file_size = match std::fs::metadata(&file) {
+        let file_size = match std::fs::metadata(file) {
             Ok(m) => m.len(),
             Err(e) => {
                 eprintln!("  Error: {}\n", e);

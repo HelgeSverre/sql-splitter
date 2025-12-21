@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use super::glob_util::{expand_file_pattern, MultiFileResult};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     file: PathBuf,
     dialect: Option<String>,
@@ -207,7 +208,7 @@ fn run_multi(
             );
         }
 
-        let file_size = match std::fs::metadata(&file) {
+        let file_size = match std::fs::metadata(file) {
             Ok(m) => m.len(),
             Err(e) => {
                 result.record_failure(file.clone(), e.to_string());
@@ -219,8 +220,8 @@ fn run_multi(
         };
         let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let compression = Compression::from_path(&file);
-        let resolved_dialect = match resolve_dialect(&file, dialect.clone(), compression) {
+        let compression = Compression::from_path(file);
+        let resolved_dialect = match resolve_dialect(file, dialect.clone(), compression) {
             Ok(d) => d,
             Err(e) => {
                 result.record_failure(file.clone(), e.to_string());
@@ -254,7 +255,7 @@ fn run_multi(
             }
         };
 
-        let file_passed = !summary.has_errors() && !(strict && summary.has_warnings());
+        let file_passed = !(summary.has_errors() || strict && summary.has_warnings());
 
         if json {
             json_results.push(serde_json::json!({
