@@ -10,6 +10,7 @@
 use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
+use crate::progress::ProgressReader;
 use crate::schema::{Schema, SchemaBuilder, TableId};
 use crate::splitter::Compression;
 use ahash::{AHashMap, AHashSet};
@@ -18,6 +19,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Maximum number of issues to collect before stopping
 const MAX_ISSUES: usize = 1000;
@@ -216,6 +218,17 @@ impl ValidationSummary {
 /// Primary key tuple for duplicate detection
 type PkTuple = Vec<Vec<u8>>;
 
+/// Pending FK check to be validated after all PKs are loaded
+struct PendingFkCheck {
+    child_table_id: TableId,
+    child_table_name: String,
+    parent_table_id: TableId,
+    parent_table_name: String,
+    fk_tuple: PkTuple,
+    fk_display: String,
+    stmt_idx: u64,
+}
+
 /// Per-table tracking state for data checks
 struct TableState {
     row_count: u64,
@@ -259,6 +272,12 @@ pub struct Validator {
     // Per-table state for data checks
     table_states: AHashMap<TableId, TableState>,
 
+    // Pending FK checks (deferred until all PKs are loaded)
+    pending_fk_checks: Vec<PendingFkCheck>,
+
+    // Progress callback for byte-based progress tracking (Arc for reuse across passes)
+    progress_fn: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+
     // Counters
     statement_count: u64,
     syntax_errors: usize,
@@ -279,6 +298,8 @@ impl Validator {
             schema_builder: SchemaBuilder::new(),
             schema: None,
             table_states: AHashMap::new(),
+            pending_fk_checks: Vec::new(),
+            progress_fn: None,
             statement_count: 0,
             syntax_errors: 0,
             encoding_warnings: 0,
@@ -286,6 +307,16 @@ impl Validator {
             pk_errors: 0,
             fk_errors: 0,
         }
+    }
+
+    /// Set a progress callback for byte-based progress tracking.
+    /// The callback receives cumulative bytes read across both validation passes.
+    pub fn with_progress<F>(mut self, f: F) -> Self
+    where
+        F: Fn(u64) + Send + Sync + 'static,
+    {
+        self.progress_fn = Some(Arc::new(f));
+        self
     }
 
     fn add_issue(&mut self, issue: ValidationIssue) {
@@ -317,8 +348,18 @@ impl Validator {
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
 
+        // Pass 1 reports bytes as 0 to file_size/2 (first half of progress bar)
         let compression = Compression::from_path(&self.options.path);
-        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file));
+        let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
+            let cb = Arc::clone(cb);
+            let progress_reader = ProgressReader::new(file, move |bytes| {
+                // Scale to first half: 0% to 50%
+                cb(bytes / 2)
+            });
+            compression.wrap_reader(Box::new(progress_reader))
+        } else {
+            compression.wrap_reader(Box::new(file))
+        };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
 
@@ -376,10 +417,12 @@ impl Validator {
             self.initialize_table_states();
         }
 
-        // Pass 2: Data checks (PK/FK) - requires re-reading the file
+        // Pass 2: Data checks (PK + collect FK refs) - requires re-reading the file
         let schema_not_empty = self.schema.as_ref().is_some_and(|s| !s.is_empty());
         if self.options.fk_checks_enabled && schema_not_empty {
             self.run_data_checks()?;
+            // Now that all PKs are loaded, validate the collected FK references
+            self.validate_pending_fk_checks();
         }
 
         Ok(self.build_summary())
@@ -450,8 +493,18 @@ impl Validator {
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
 
+        // Pass 2 reports bytes as file_size/2 to file_size (second half of progress bar)
         let compression = Compression::from_path(&self.options.path);
-        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file));
+        let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
+            let cb = Arc::clone(cb);
+            let progress_reader = ProgressReader::new(file, move |bytes| {
+                // Scale to second half: 50% to 100%
+                cb(file_size / 2 + bytes / 2)
+            });
+            compression.wrap_reader(Box::new(progress_reader))
+        } else {
+            compression.wrap_reader(Box::new(file))
+        };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
         let mut stmt_count: u64 = 0;
@@ -686,66 +739,69 @@ impl Validator {
             }
         }
 
-        // FK integrity check using the parsed FK values
-        // First, collect FK check info without holding mutable borrows
-        struct FkCheckInfo {
-            parent_table_id: TableId,
-            fk_tuple: PkTuple,
-            fk_display: String,
-            referenced_table: String,
-        }
-
-        let fk_checks: Vec<FkCheckInfo> = {
-            let schema = match &self.schema {
-                Some(s) => s,
-                None => return,
-            };
-
-            let table_schema = match schema.table(table_id) {
-                Some(t) => t,
-                None => return,
-            };
-
-            fk_values
-                .iter()
-                .filter(|(_, fk_vals)| !fk_vals.iter().all(|v| v.is_null()))
-                .filter_map(|(fk_ref, fk_vals)| {
-                    let fk_def = table_schema.foreign_keys.get(fk_ref.fk_index as usize)?;
-                    let parent_table_id = fk_def.referenced_table_id?;
-
-                    let fk_tuple: PkTuple = fk_vals
-                        .iter()
-                        .map(|v| match v {
-                            mysql_insert::PkValue::Int(i) => i.to_string().into_bytes(),
-                            mysql_insert::PkValue::BigInt(i) => i.to_string().into_bytes(),
-                            mysql_insert::PkValue::Text(s) => s.as_bytes().to_vec(),
-                            mysql_insert::PkValue::Null => Vec::new(),
-                        })
-                        .collect();
-
-                    let fk_display: String = fk_vals
-                        .iter()
-                        .map(|v| match v {
-                            mysql_insert::PkValue::Int(i) => i.to_string(),
-                            mysql_insert::PkValue::BigInt(i) => i.to_string(),
-                            mysql_insert::PkValue::Text(s) => s.to_string(),
-                            mysql_insert::PkValue::Null => "NULL".to_string(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-
-                    Some(FkCheckInfo {
-                        parent_table_id,
-                        fk_tuple,
-                        fk_display,
-                        referenced_table: fk_def.referenced_table.clone(),
-                    })
-                })
-                .collect()
+        // Collect FK references for deferred validation (after all PKs are loaded)
+        let schema = match &self.schema {
+            Some(s) => s,
+            None => return,
         };
 
-        // Now check each FK
-        for check in fk_checks {
+        let table_schema = match schema.table(table_id) {
+            Some(t) => t,
+            None => return,
+        };
+
+        for (fk_ref, fk_vals) in fk_values.iter() {
+            // Skip if all FK values are NULL (nullable FK)
+            if fk_vals.iter().all(|v| v.is_null()) {
+                continue;
+            }
+
+            let fk_def = match table_schema.foreign_keys.get(fk_ref.fk_index as usize) {
+                Some(fk) => fk,
+                None => continue,
+            };
+
+            let parent_table_id = match fk_def.referenced_table_id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let fk_tuple: PkTuple = fk_vals
+                .iter()
+                .map(|v| match v {
+                    mysql_insert::PkValue::Int(i) => i.to_string().into_bytes(),
+                    mysql_insert::PkValue::BigInt(i) => i.to_string().into_bytes(),
+                    mysql_insert::PkValue::Text(s) => s.as_bytes().to_vec(),
+                    mysql_insert::PkValue::Null => Vec::new(),
+                })
+                .collect();
+
+            let fk_display: String = fk_vals
+                .iter()
+                .map(|v| match v {
+                    mysql_insert::PkValue::Int(i) => i.to_string(),
+                    mysql_insert::PkValue::BigInt(i) => i.to_string(),
+                    mysql_insert::PkValue::Text(s) => s.to_string(),
+                    mysql_insert::PkValue::Null => "NULL".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            self.pending_fk_checks.push(PendingFkCheck {
+                child_table_id: table_id,
+                child_table_name: table_name.to_string(),
+                parent_table_id,
+                parent_table_name: fk_def.referenced_table.clone(),
+                fk_tuple,
+                fk_display,
+                stmt_idx,
+            });
+        }
+    }
+
+    /// Validate all collected FK references after all PKs are loaded
+    fn validate_pending_fk_checks(&mut self) {
+        for check in std::mem::take(&mut self.pending_fk_checks) {
             let parent_has_pk = self
                 .table_states
                 .get(&check.parent_table_id)
@@ -753,7 +809,10 @@ impl Validator {
                 .is_some_and(|set| set.contains(&check.fk_tuple));
 
             if !parent_has_pk {
-                let state = self.table_states.get_mut(&table_id).unwrap();
+                let state = match self.table_states.get_mut(&check.child_table_id) {
+                    Some(s) => s,
+                    None => continue,
+                };
                 state.fk_missing_parents += 1;
 
                 // Only add issue for first few violations per table
@@ -763,13 +822,13 @@ impl Validator {
                             "FK_MISSING_PARENT",
                             format!(
                                 "FK violation in '{}': ({}) references missing row in '{}'",
-                                table_name, check.fk_display, check.referenced_table
+                                check.child_table_name, check.fk_display, check.parent_table_name
                             ),
                         )
                         .with_location(
                             Location::new()
-                                .with_table(table_name)
-                                .with_statement(stmt_idx),
+                                .with_table(&check.child_table_name)
+                                .with_statement(check.stmt_idx),
                         ),
                     );
                 }
