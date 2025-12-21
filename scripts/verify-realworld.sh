@@ -9,7 +9,8 @@
 #   1. Split command - Parse and split SQL files by table
 #   2. Convert command - Convert between MySQL, PostgreSQL, SQLite dialects
 #   3. Validate (input) - Run integrity checks on downloaded SQL files
-#   4. Validate (roundtrip) - Split→Merge→Validate to verify no data loss
+#   4. Validate (glob) - Use glob pattern to validate all split output files
+#   5. Validate (roundtrip) - Split→Merge→Validate to verify no data loss
 #
 # Usage:
 #   ./scripts/verify-realworld.sh           # Run all tests
@@ -213,18 +214,27 @@ declare -a VALIDATE_INPUT_NAMES=()
 declare -a VALIDATE_INPUT_VALUES=()
 declare -a VALIDATE_OUTPUT_NAMES=()
 declare -a VALIDATE_OUTPUT_VALUES=()
+declare -a VALIDATE_GLOB_NAMES=()
+declare -a VALIDATE_GLOB_VALUES=()
 
 # Get validation result by name from parallel arrays
-# Args: name, is_input (true/false)
+# Args: name, type (input/output/glob)
 # Returns: result string via stdout
 get_validate_result() {
     local name=$1
-    local is_input=$2
+    local type=$2
     
-    if [[ "$is_input" == "true" ]]; then
+    if [[ "$type" == "input" || "$type" == "true" ]]; then
         for i in "${!VALIDATE_INPUT_NAMES[@]}"; do
             if [[ "${VALIDATE_INPUT_NAMES[$i]}" == "$name" ]]; then
                 echo "${VALIDATE_INPUT_VALUES[$i]}"
+                return
+            fi
+        done
+    elif [[ "$type" == "glob" ]]; then
+        for i in "${!VALIDATE_GLOB_NAMES[@]}"; do
+            if [[ "${VALIDATE_GLOB_NAMES[$i]}" == "$name" ]]; then
+                echo "${VALIDATE_GLOB_VALUES[$i]}"
                 return
             fi
         done
@@ -282,6 +292,61 @@ run_validate() {
 
     # Return success if no errors (warnings are OK)
     if [[ "$errors" -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Run validation on split output using glob patterns
+# Args: name, output_dir, dialect
+# Returns: 0 on success (all files pass), 1 on any validation errors
+run_validate_glob() {
+    local name=$1
+    local output_dir=$2
+    local dialect=$3
+
+    # Check if output directory exists and has SQL files
+    if [[ ! -d "$output_dir" ]]; then
+        VALIDATE_GLOB_NAMES+=("$name")
+        VALIDATE_GLOB_VALUES+=("skipped (no dir)")
+        return 1
+    fi
+
+    local sql_count=$(find "$output_dir" -name "*.sql" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$sql_count" -eq 0 ]]; then
+        VALIDATE_GLOB_NAMES+=("$name")
+        VALIDATE_GLOB_VALUES+=("skipped (no files)")
+        return 1
+    fi
+
+    # Run validate with glob pattern on the split output directory
+    # Use --json for easy parsing of aggregated results
+    local glob_pattern="${output_dir}/*.sql"
+    local output
+    local exit_code=0
+    output=$("$BINARY" validate "$glob_pattern" --dialect="$dialect" --no-fk-checks --json 2>/dev/null) || exit_code=$?
+
+    # Parse JSON output for passed/failed counts
+    # The multi-file JSON format uses "passed" and "failed" at top level
+    # Handle pretty-printed JSON with spaces after colons
+    local passed=$(echo "$output" | grep -o '"passed": *[0-9]*' | head -1 | grep -o '[0-9]*' || echo "0")
+    local failed=$(echo "$output" | grep -o '"failed": *[0-9]*' | head -1 | grep -o '[0-9]*' || echo "0")
+    local total_files=$((passed + failed))
+
+    local result_str
+    if [[ "$failed" -gt 0 ]]; then
+        result_str="✗ ${passed}/${total_files}"
+    elif [[ "$passed" -gt 0 ]]; then
+        result_str="✓ ${passed}/${total_files}"
+    else
+        result_str="⚠ no files"
+    fi
+
+    VALIDATE_GLOB_NAMES+=("$name")
+    VALIDATE_GLOB_VALUES+=("$result_str")
+
+    # Return success if no failures
+    if [[ "$failed" -gt 0 ]]; then
         return 1
     fi
     return 0
@@ -461,6 +526,9 @@ run_all_tests() {
     local validate_merge_passed=0
     local validate_merge_failed=0
     local validate_merge_skipped=0
+    local validate_glob_passed=0
+    local validate_glob_failed=0
+    local validate_glob_skipped=0
     
     for test_case in "${TEST_CASES[@]}"; do
         IFS='|' read -r name dialect url unzip_cmd sql_file notes <<< "$test_case"
@@ -475,6 +543,7 @@ run_all_tests() {
             ((convert_skipped++))
             ((validate_input_skipped++))
             ((validate_merge_skipped++))
+            ((validate_glob_skipped++))
             continue
         fi
         
@@ -484,6 +553,7 @@ run_all_tests() {
             ((convert_skipped++))
             ((validate_input_skipped++))
             ((validate_merge_skipped++))
+            ((validate_glob_skipped++))
             continue
         fi
         
@@ -509,6 +579,16 @@ run_all_tests() {
             
             # Actually run split (not dry-run) to get output files
             if "$BINARY" split "$full_path" --output="$test_output_dir" --dialect="$dialect" >/dev/null 2>&1; then
+                # Run glob validation on split output files
+                echo -e "  Validating split output (glob)..."
+                if run_validate_glob "$name" "$test_output_dir" "$dialect"; then
+                    ((validate_glob_passed++))
+                    echo -e "  Glob validation: ${GREEN}$(get_validate_result "$name" "glob")${NC}"
+                else
+                    ((validate_glob_failed++))
+                    echo -e "  Glob validation: ${YELLOW}$(get_validate_result "$name" "glob")${NC}"
+                fi
+                
                 # Merge the split files back together
                 if "$BINARY" merge "$test_output_dir" --output="$merged_file" --dialect="$dialect" >/dev/null 2>&1; then
                     # Validate the merged output
@@ -526,11 +606,14 @@ run_all_tests() {
                 fi
             else
                 echo -e "  Merged validation: ${YELLOW}skipped (split failed)${NC}"
+                echo -e "  Glob validation: ${YELLOW}skipped (split failed)${NC}"
                 ((validate_merge_skipped++))
+                ((validate_glob_skipped++))
             fi
         else
             ((split_failed++))
             ((validate_merge_skipped++))
+            ((validate_glob_skipped++))
         fi
         
         # Run convert tests (all permutations)
@@ -571,6 +654,11 @@ run_all_tests() {
     echo -e "  ${RED}Failed:${NC}  $validate_merge_failed"
     echo -e "  ${YELLOW}Skipped:${NC} $validate_merge_skipped"
     echo ""
+    echo -e "${CYAN}Validate Split Output (Glob):${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $validate_glob_passed"
+    echo -e "  ${RED}Failed:${NC}  $validate_glob_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $validate_glob_skipped"
+    echo ""
     echo "Legend:"
     echo "  ✓ = Success / No issues"
     echo "  ⚠ = Warnings but no errors"
@@ -578,6 +666,7 @@ run_all_tests() {
     echo "  ~ = Dialect differs from expected (file may lack dialect markers)"
     echo "  (any) = Generic SQL, detection accuracy not checked"
     echo "  Nerr/Nwarn = N errors/warnings found"
+    echo "  N/M = N files passed out of M total"
     echo ""
     
     if [[ $split_failed -gt 0 || $convert_failed -gt 0 ]]; then
