@@ -17,8 +17,13 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
 5. ✅ Convert — Dialect conversion (v1.7.0)
 
-**Deferred to v2.x:**
-- Query, Redact, Validate, Detect-PII, Diff, MSSQL
+**Next (v1.8+):**
+- v1.8.0: Validate — Dump integrity checking
+- v1.9.0: Diff — Schema + data comparison
+- v1.10.0: Query — SQL-like row filtering
+- v1.11.0: Redact — Data anonymization
+- v1.12.0: Detect-PII — Auto-suggest redaction config
+- v1.13.0: MSSQL — Fourth dialect support
 
 ---
 
@@ -207,31 +212,93 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## v2.x — Deferred Features
+## Upcoming Features (v1.8+)
 
-These features are valuable but lower priority:
+### v1.8.0 — Validate Command
+**Theme**: Dump integrity checking
 
-### v2.0.0 — Diff Command
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| Diff | 40h | Schema + data comparison |
+| Validate | ~16h | Syntax errors, DDL/DML consistency, duplicate PKs, FK integrity |
 
-### v2.1.0 — Query + Redact
+**Checks:**
+- SQL syntax validation
+- DDL/DML consistency (INSERTs reference existing tables)
+- Duplicate primary keys
+- FK referential integrity
+- Encoding issues
+- Orphaned data detection
+
+---
+
+### v1.9.0 — Diff Command
+**Theme**: Schema + data comparison
+
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| Query | 30-35h | SQL-like filtering |
-| Redact | 40h | Data anonymization |
+| Diff | ~40h | Compare two SQL dumps |
 
-### v2.2.0 — Validate + Detect-PII
+**Features:**
+- Schema diff (table structure, indexes, constraints)
+- Row count comparison
+- Row-level diff for tables < 100K rows
+- Chunked hashing for large tables
+
+---
+
+### v1.10.0 — Query Command
+**Theme**: SQL-like row filtering
+
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| Validate | 16h | Dump integrity checking |
-| Detect-PII | 8h | Auto-suggest redaction config |
+| Query | ~30h | WHERE clause filtering |
 
-### v2.3.0 — MSSQL Support
+**Features:**
+- Basic WHERE: `=`, `!=`, `<`, `>`, `AND`, `OR`, `IS NULL`, `IN`
+- Table selection
+- Output formats: SQL, CSV, JSON
+
+---
+
+### v1.11.0 — Redact Command
+**Theme**: Data anonymization
+
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| MSSQL dialect | 24h | Fourth dialect support |
+| Redact | ~40h | Column-based anonymization |
+
+**Strategies:**
+- null, constant, hash, mask, shuffle
+- Fake data generation (names, emails, etc.)
+- Glob pattern matching for column selection
+
+---
+
+### v1.12.0 — Detect-PII Command
+**Theme**: Auto-suggest redaction config
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| Detect-PII | ~8h | Scan schema and data |
+
+**Detection:**
+- Column name patterns (email, phone, ssn, etc.)
+- Data patterns (regex matching)
+- Statistical uniqueness
+
+---
+
+### v1.13.0 — MSSQL Support
+**Theme**: Fourth dialect
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| MSSQL dialect | ~24h | SQL Server support |
+
+**Features:**
+- Parse MSSQL dumps
+- Convert to/from MySQL, PostgreSQL, SQLite
+- Handle MSSQL-specific syntax
 
 ---
 
@@ -241,17 +308,18 @@ These features are valuable but lower priority:
 |----------------|------------|---------|
 | **Test Data Gen** | (none) | All integration tests |
 | **Merge** | Split | — |
-| **Schema Graph v1** | (built in Sample) | Sample, Shard, future Validate/Diff |
-| **Row Parsing v1** | (built in Sample) | Sample, Shard, future Query/Redact/Convert |
+| **Schema Graph v1** | (built in Sample) | Sample, Shard, Validate, Diff |
+| **Row Parsing v1** | (built in Sample) | Sample, Shard, Query, Redact, Convert |
 | **Sample (basic)** | — | — |
 | **Sample --preserve** | Schema Graph v1, Row v1 | Shard |
 | **Shard** | Schema Graph v1.5, Row v1.5 | — |
-| **Convert MVP** | Row Parsing v1.5 | Convert Full |
-| **Query** *(v2.x)* | Row Parsing | — |
-| **Redact** *(v2.x)* | Row Parsing | Detect-PII |
-| **Validate** *(v2.x)* | Schema Graph, Row Parsing | — |
-| **Diff** *(v2.x)* | Schema Graph, Row Parsing | — |
-| **MSSQL** *(v2.x)* | Convert | — |
+| **Convert** | Row Parsing v1.5 | MSSQL |
+| **Validate** | Schema Graph, Row Parsing | — |
+| **Diff** | Schema Graph, Row Parsing | — |
+| **Query** | Row Parsing | — |
+| **Redact** | Row Parsing | Detect-PII |
+| **Detect-PII** | Redact | — |
+| **MSSQL** | Convert | — |
 
 ---
 
@@ -266,16 +334,16 @@ These features are valuable but lower priority:
 | v1.6.0 | Shard + Infra v1.5 | ✅ Released |
 | v1.7.0 | Convert MVP | ✅ Released |
 
-**All v1.x priority features complete!**
-
-### Deferred Features (v2.x)
+### Upcoming Features (v1.8+)
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v2.0.0 | Diff | ~40h | 2-3 weeks |
-| v2.1.0 | Query, Redact | ~70h | 4-5 weeks |
-| v2.2.0 | Validate, Detect-PII | ~24h | 1-2 weeks |
-| v2.3.0 | MSSQL | ~24h | 2-3 weeks |
+| v1.8.0 | Validate | ~16h | 1 week |
+| v1.9.0 | Diff | ~40h | 2-3 weeks |
+| v1.10.0 | Query | ~30h | 2 weeks |
+| v1.11.0 | Redact | ~40h | 2-3 weeks |
+| v1.12.0 | Detect-PII | ~8h | 1 week |
+| v1.13.0 | MSSQL | ~24h | 2 weeks |
 
 ---
 
@@ -351,12 +419,12 @@ tests/
 - [Additional Ideas](features/ADDITIONAL_IDEAS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
 
-### v2.x Feature Designs
+### Upcoming Feature Designs
 
-- [Diff Feature](features/DIFF_FEATURE.md)
-- [Query Feature](features/QUERY_FEATURE.md)
-- [Redact Feature](features/REDACT_FEATURE.md)
-- [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md)
+- [Diff Feature](features/DIFF_FEATURE.md) — v1.9.0
+- [Query Feature](features/QUERY_FEATURE.md) — v1.10.0
+- [Redact Feature](features/REDACT_FEATURE.md) — v1.11.0
+- [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md) — v1.13.0
 
 ### Archived (Implemented)
 
