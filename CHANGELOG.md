@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Glob pattern support**: All file-based commands now accept glob patterns for batch processing
+  - `sql-splitter validate "dumps/*.sql"` - validate multiple files
+  - `sql-splitter analyze "**/*.sql"` - analyze files recursively
+  - `sql-splitter split "*.sql" -o output/` - split multiple files to subdirectories
+  - `sql-splitter convert "*.sql" --to postgres -o converted/` - batch conversion
+  - Supports `*`, `**`, `?`, and `[abc]` patterns
+  - Aggregated JSON output for validate command with multi-file results
+- **`--fail-fast` flag**: Stop processing on first error when using glob patterns
+  - Available on: validate, analyze, split, convert commands
+- **`--no-limit` flag**: Disable row limits for memory-intensive operations
+  - `validate --no-limit` - no limit on rows for PK/FK checks
+  - `sample --no-limit` - disable explosion guard
+  - `shard --no-limit` - disable memory guard
+  - Also supports `--max-rows-per-table=0` as equivalent
+- **Glob validation in verify-realworld.sh**: Added validation of split output files using glob patterns
+
 ### Changed
 
 - **Multi-dialect PK/FK validation**: Extended PK duplicate detection and FK referential integrity checking to all dialects (MySQL, PostgreSQL, SQLite). Previously MySQL-only.

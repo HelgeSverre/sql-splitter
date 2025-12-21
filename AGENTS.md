@@ -309,3 +309,89 @@ Options:
 - `--format <FORMAT>`: Output format: sql, json (default: sql)  # ADD THIS
 ...
 ```
+
+## Agent Skills
+
+The file `skills/sql-splitter/SKILL.md` provides a skill definition following the [Agent Skills](https://agentskills.io) specification. This enables AI coding assistants to automatically discover and use sql-splitter.
+
+### Supported Tools
+
+Agent Skills are supported by: Amp, Claude Code, VS Code / GitHub Copilot, Cursor, Goose, Letta, and OpenCode.
+
+### When to Update SKILL.md
+
+Update `skills/sql-splitter/SKILL.md` when:
+- Adding new CLI commands
+- Changing command patterns or workflows
+- Adding new flags that affect common usage patterns
+- Updating decision logic for when to use commands
+
+### SKILL.md Format Requirements
+
+The file follows the Agent Skills specification:
+1. **YAML frontmatter**: name, description, license, compatibility
+2. **Markdown body**: Step-by-step instructions, patterns, and examples
+
+Key guidelines:
+- Focus on **when to use** vs **when not to use**
+- Provide step-by-step patterns for common workflows
+- Include error handling guidance
+- Keep instructions actionable and concise
+
+### Installing the Skill
+
+**Amp:**
+```bash
+amp skill add helgesverre/sql-splitter
+```
+
+**Claude Code:**
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.claude/skills/
+```
+
+**VS Code / GitHub Copilot:**
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .github/skills/
+```
+
+**Cursor:**
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .cursor/skills/
+```
+
+**Goose:**
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.config/goose/skills/
+```
+
+**Letta:**
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .skills/
+```
+
+**OpenCode:**
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.opencode/skills/
+```
+
+**Universal Installer (via npx):**
+```bash
+npx ai-agent-skills install sql-splitter --agent <agent>
+# Supported agents: claude, cursor, amp, vscode, goose, opencode
+```
+
+### Skill Directory Structure
+
+```
+sql-splitter/
+└── skills/
+    └── sql-splitter/
+        └── SKILL.md
+```
