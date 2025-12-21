@@ -1,219 +1,389 @@
 # sql-splitter
 
-> High-performance CLI tool for splitting large SQL dump files into individual table files. Written in Rust with 600+ MB/s throughput, streaming architecture that handles files larger than RAM, and multi-dialect support for MySQL, PostgreSQL, and SQLite.
+> High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
+> MySQL/PostgreSQL/SQLite, validate integrity, create FK-safe samples, and shard multi-tenant dumps. Optimized for
+> automation, CI/CD, and large compressed dumps with 600+ MB/s throughput and constant ~50MB memory usage.
 
-sql-splitter reads SQL dump files and routes statements to separate output files based on table name. It handles compressed files (gzip, bzip2, xz, zstd) with automatic detection.
+sql-splitter is a **dump-first** tool: it operates on SQL dump files on disk (optionally compressed) rather than live
+database connections. It is designed to be **safe to automate** in scripts, CI pipelines, and AI-driven workflows.
 
-## Installation
+## Commands Overview
 
-```bash
-# From crates.io (recommended)
-cargo install sql-splitter
+| Command    | Purpose                                   | Key Use Cases                                     |
+|------------|-------------------------------------------|---------------------------------------------------|
+| `split`    | Split dump into per-table SQL files       | Work on individual tables, parallel processing    |
+| `merge`    | Merge per-table files into single dump    | Reassemble after editing, restore preparation     |
+| `analyze`  | Read-only statistics about tables         | Planning, size estimation, table discovery        |
+| `convert`  | Transform between MySQL/PostgreSQL/SQLite | Database migrations, environment portability      |
+| `validate` | Check syntax, encoding, PK/FK integrity   | CI gates, backup verification, pre-restore checks |
+| `sample`   | Create reduced FK-consistent datasets     | Dev/CI seeding, testing with realistic data       |
+| `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
 
-# From source
-git clone https://github.com/helgesverre/sql-splitter
-cd sql-splitter
-cargo build --release
+## Universal Capabilities
 
-# Download pre-built binaries
-# https://github.com/helgesverre/sql-splitter/releases
-```
+All commands support:
 
-## Quick Start
+- **Compressed input**: `.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst` (auto-detected)
+- **Glob patterns**: `*.sql`, `**/*.sql`, `backups/**/*.sql.gz`
+- **Common flags**:
+    - `--progress` / `-p`: Show progress bar
+    - `--dry-run`: Preview without writing output
+    - `--fail-fast`: Stop on first error (for glob patterns)
+- **Auto-dialect detection**: MySQL, PostgreSQL, SQLite (override with `--dialect`)
 
-```bash
-# Split a MySQL/MariaDB dump (default dialect)
-sql-splitter split dump.sql -o tables/
+## Decision Guide: Which Command to Use
 
-# Split a PostgreSQL pg_dump file
-sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
+| Goal                                     | Command(s)                | Notes                                                       |
+|------------------------------------------|---------------------------|-------------------------------------------------------------|
+| Check if dump is valid before using      | `validate`                | Use `--strict` in CI to fail on warnings                    |
+| Understand dump contents (tables, sizes) | `analyze`                 | Fast read-only scan; plan sampling/sharding                 |
+| Edit specific tables inside a dump       | `split` → edit → `merge`  | Split, modify per-table files, merge back                   |
+| Create smaller realistic dev dataset     | `sample`                  | Preserves FK relationships; use with `--preserve-relations` |
+| Export one tenant's data                 | `shard`                   | Use `--tenant-value` and `--tenant-column`                  |
+| Convert MySQL dump to PostgreSQL         | `convert --to postgres`   | Validate before and after conversion                        |
+| Validate all dumps in CI pipeline        | `validate "*.sql" --json` | Parse JSON output with `jq` for automation                  |
 
-# Split a SQLite dump
-sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
+---
 
-# Compressed files are auto-detected
-sql-splitter split backup.sql.gz -o tables/
-sql-splitter split backup.sql.zst -o tables/
-```
+## Workflow 1: Database Migration (MySQL → PostgreSQL)
 
-## Commands
-
-### split
-
-Split a SQL dump file into individual table files.
-
-```bash
-sql-splitter split database.sql --output=tables
-sql-splitter split database.sql --dialect=postgres    # PostgreSQL mode
-sql-splitter split database.sql --tables=users,posts  # specific tables only
-sql-splitter split database.sql --schema-only         # DDL only
-sql-splitter split database.sql --data-only           # INSERT/COPY only
-sql-splitter split database.sql --dry-run             # preview without writing
-sql-splitter split database.sql --progress            # show progress bar
-```
-
-Options:
-- `-o, --output <DIR>`: Output directory (default: "output")
-- `-d, --dialect <DIALECT>`: SQL dialect: mysql, postgres, sqlite (auto-detected)
-- `-t, --tables <TABLES>`: Filter to specific tables (comma-separated)
-- `--schema-only`: Only DDL statements (CREATE, ALTER, DROP)
-- `--data-only`: Only DML statements (INSERT, COPY)
-- `--dry-run`: Preview what would be split without writing files
-- `-p, --progress`: Show progress bar during processing
-
-### merge
-
-Merge split SQL files back into a single dump file.
+**Goal:** Safely move data from MySQL dump to PostgreSQL with integrity checks.
 
 ```bash
-sql-splitter merge tables/ -o restored.sql           # merge all tables
-sql-splitter merge tables/ -o partial.sql --tables users,orders  # specific tables
-sql-splitter merge tables/ -o restored.sql --exclude cache,sessions
-sql-splitter merge tables/ -o restored.sql --transaction  # wrap in transaction
-sql-splitter merge tables/ -o restored.sql --dialect postgres
+# 1. Validate source dump
+sql-splitter validate prod_mysql.sql.gz --strict --progress
+
+# 2. Analyze to understand scale
+sql-splitter analyze prod_mysql.sql.gz --progress
+
+# 3. Convert dialect
+sql-splitter convert prod_mysql.sql.gz --to postgres -o prod_postgres.sql --progress
+
+# 4. Validate converted dump
+sql-splitter validate prod_postgres.sql --dialect=postgres --strict --progress
+
+# 5. (Optional) Stream directly into PostgreSQL
+sql-splitter convert prod_mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
 ```
 
-Options:
-- `-o, --output <FILE>`: Output SQL file (default: stdout)
-- `-d, --dialect <DIALECT>`: SQL dialect for headers/footers (default: mysql)
-- `-t, --tables <TABLES>`: Only merge these tables (comma-separated)
-- `-e, --exclude <TABLES>`: Exclude these tables (comma-separated)
-- `--transaction`: Wrap output in BEGIN/COMMIT transaction
-- `--no-header`: Skip header comments
-- `-p, --progress`: Show progress bar during merging
-- `--dry-run`: Preview what would be merged without writing
+**When conversion fails:** Check for unsupported features (ENUM, triggers). Use `--strict` to see all warnings, or omit
+it for "best-effort" conversion.
 
-### analyze
+---
 
-Analyze a SQL file and display table statistics without splitting.
+## Workflow 2: Dev Environment Setup with Sampled Data
+
+**Goal:** Create a smaller but realistic dataset for local development or CI.
 
 ```bash
-sql-splitter analyze database.sql
-sql-splitter analyze database.sql --progress
+# 1. Analyze to see table sizes
+sql-splitter analyze dumps/prod.sql.zst --progress
+
+# 2. Sample with FK preservation (10% of rows)
+sql-splitter sample dumps/prod.sql.zst \
+  --output dev_sample.sql \
+  --percent 10 \
+  --preserve-relations \
+  --progress
+
+# 3. Or sample fixed row count per table
+sql-splitter sample dumps/prod.sql.zst \
+  --output dev_sample.sql \
+  --rows 1000 \
+  --preserve-relations \
+  --progress
+
+# 4. Restore to dev database
+psql "$DEV_DB" < dev_sample.sql
+# or
+mysql -u dev -p dev_db < dev_sample.sql
 ```
 
-### convert
+**Sampling options:**
 
-Convert SQL dumps between dialects (MySQL, PostgreSQL, SQLite).
+- `--percent N`: Sample N% of rows (1-100)
+- `--rows N`: Sample up to N rows per table
+- `--preserve-relations`: Maintain FK integrity (recommended)
+- `--tables users,orders`: Only sample specific tables
+- `--exclude logs,events`: Skip specific tables
+- `--seed 42`: Reproducible sampling
+
+---
+
+## Workflow 3: CI/CD Validation Pipeline
+
+**Goal:** Gate builds on dump integrity; fail fast on errors.
 
 ```bash
-sql-splitter convert mysql.sql -o postgres.sql --to postgres
-sql-splitter convert pg_dump.sql -o mysql.sql --to mysql
-sql-splitter convert dump.sql -o sqlite.sql --to sqlite
-sql-splitter convert dump.sql --from postgres --to mysql -o output.sql
+# Validate all dumps with JSON output for automation
+sql-splitter validate "dumps/*.sql.gz" --json --fail-fast --strict
+
+# Parse results with jq
+sql-splitter validate "dumps/*.sql.gz" --json --fail-fast \
+  | jq '.results[] | select(.passed == false)'
+
+# Simple CI gate
+set -euo pipefail
+sql-splitter validate "dumps/*.sql.gz" --strict --fail-fast --progress
 ```
 
-Options:
-- `-o, --output <FILE>`: Output SQL file (default: stdout)
-- `--from <DIALECT>`: Source dialect (auto-detected if omitted)
-- `--to <DIALECT>`: Target dialect (required)
-- `--strict`: Fail on any unsupported feature
-- `-p, --progress`: Show progress bar
-- `--dry-run`: Preview without writing files
+**Validation checks include:**
 
-Supported conversions (all 6 pairs):
-- MySQL ↔ PostgreSQL (including COPY → INSERT conversion)
-- MySQL ↔ SQLite
-- PostgreSQL ↔ SQLite
-
-Features:
-- 30+ data type mappings (AUTO_INCREMENT ↔ SERIAL, DATETIME ↔ TIMESTAMP, etc.)
-- PostgreSQL COPY → INSERT with NULL handling and escape sequences
-- Schema prefix stripping (public.table → table)
-- Type cast removal (::regclass, ::text)
-- nextval() and DEFAULT now() conversion
-- Session command stripping for all dialects
-- Warnings for unsupported features (ENUM, arrays, triggers)
-
-### validate
-
-Validate SQL dump integrity with comprehensive checks.
-
-```bash
-sql-splitter validate dump.sql                    # validate MySQL dump
-sql-splitter validate dump.sql --dialect=postgres # specify dialect
-sql-splitter validate dump.sql --strict           # treat warnings as errors
-sql-splitter validate dump.sql --json             # JSON output for CI
-sql-splitter validate dump.sql --no-fk-checks     # skip heavy data checks
-```
-
-Options:
-- `-d, --dialect <DIALECT>`: SQL dialect (auto-detected if omitted)
-- `--strict`: Treat warnings as errors (exit 1 on any warning)
-- `--json`: Output results as JSON for programmatic parsing
-- `--max-rows-per-table <N>`: Max rows per table for PK/FK checks (default: 1,000,000)
-- `--no-fk-checks`: Skip PK/FK data integrity checks
-- `-p, --progress`: Show progress bar
-
-Validation checks:
-- SQL syntax validation (parser error detection)
+- SQL syntax validation
 - DDL/DML consistency (INSERTs reference existing tables)
-- Encoding validation (UTF-8)
-- Duplicate primary key detection (all dialects)
-- FK referential integrity (all dialects)
+- UTF-8 encoding validation
+- Duplicate primary key detection
+- Foreign key referential integrity
 
-### completions
+---
 
-Generate shell completions for bash, zsh, or fish.
+## Workflow 4: Multi-Tenant Data Extraction
+
+**Goal:** Extract data for a specific tenant from a multi-tenant dump.
 
 ```bash
-sql-splitter completions bash >> ~/.bashrc
-sql-splitter completions zsh >> ~/.zshrc
-sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
+# 1. Analyze to identify tenant-related tables
+sql-splitter analyze multi_tenant.sql.gz --progress
+
+# 2. Extract single tenant
+sql-splitter shard multi_tenant.sql.gz \
+  --tenant-value 12345 \
+  --tenant-column tenant_id \
+  --output tenant_12345.sql \
+  --progress
+
+# 3. Extract multiple tenants to separate files
+sql-splitter shard multi_tenant.sql.gz \
+  --tenant-values "123,456,789" \
+  --tenant-column account_id \
+  --output shards/ \
+  --progress
+
+# 4. Further sample within a tenant
+sql-splitter sample tenant_12345.sql \
+  --output tenant_12345_sample.sql \
+  --rows 5000 \
+  --preserve-relations \
+  --progress
 ```
 
-## Supported SQL Dialects
+**Sharding options:**
 
-| Dialect | Flag | Dump Tool | Features |
-|---------|------|-----------|----------|
-| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump | Backtick quoting, backslash escapes |
-| PostgreSQL | `--dialect=postgres` | pg_dump | Double-quote identifiers, COPY FROM stdin, dollar-quoting |
-| SQLite | `--dialect=sqlite` | sqlite3 .dump | Double-quote identifiers |
+- `--tenant-column`: Column name for tenant ID (auto-detected if common names used)
+- `--tenant-value`: Single tenant to extract
+- `--tenant-values`: Comma-separated list for batch extraction
+- `--root-tables`: Explicit root tables containing tenant column
+- `--include-global`: How to handle lookup tables (none, lookups, all)
 
-## Supported Statement Types
+---
 
-- CREATE TABLE / DROP TABLE
-- INSERT INTO
-- CREATE INDEX
-- ALTER TABLE
-- COPY (PostgreSQL)
+## Workflow 5: Per-Table Editing
 
-Other statements (SELECT, UPDATE, DELETE) are skipped.
+**Goal:** Edit specific tables within a large dump.
 
-## Supported Compression Formats
+```bash
+# 1. Split dump into per-table files
+sql-splitter split big_dump.sql --output tables/ --progress
 
-Files are auto-detected by extension:
-- `.gz` - gzip
-- `.bz2` - bzip2
-- `.xz` - xz/lzma
-- `.zst` - zstd
+# 2. Edit specific tables
+# Now you have tables/users.sql, tables/orders.sql, etc.
+# Edit or process these files as needed
 
-## Performance
+# 3. Merge back into single dump
+sql-splitter merge tables/ --output updated_dump.sql --transaction
 
-- **600+ MB/s** throughput on modern hardware
-- **Constant ~50MB memory** regardless of file size
-- **5x faster** than shell-based alternatives
-- Streaming architecture handles files larger than RAM
+# 4. Split only specific tables
+sql-splitter split big_dump.sql \
+  --output tables/ \
+  --tables users,orders,products \
+  --progress
+```
+
+**Split options:**
+
+- `--tables`: Only split specific tables (comma-separated)
+- `--schema-only`: Only DDL (CREATE TABLE, indexes)
+- `--data-only`: Only DML (INSERT, COPY statements)
+
+**Merge options:**
+
+- `--transaction`: Wrap output in BEGIN/COMMIT
+- `--exclude`: Skip specific tables when merging
+- `--no-header`: Omit header comments
+
+---
+
+## Piping and Composition Patterns
+
+### Stream convert to database (no intermediate file)
+
+```bash
+sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+sql-splitter convert pg_dump.sql --to mysql -o - | mysql -u user -p db
+```
+
+### Compress on the fly
+
+```bash
+sql-splitter merge tables/ -o - | gzip -c > merged.sql.gz
+sql-splitter merge tables/ -o - | zstd -c > merged.sql.zst
+```
+
+### Parallel validation of many dumps
+
+```bash
+find backups -name '*.sql.gz' -print0 \
+  | xargs -0 -n1 -P4 sql-splitter validate --fail-fast --progress
+```
+
+### Combine with database tools
+
+```bash
+# Validate, convert, and restore in one pipeline
+sql-splitter validate source.sql --strict && \
+  sql-splitter convert source.sql --to postgres -o - | psql "$PG_CONN"
+```
+
+### Safe exploration with dry-run
+
+```bash
+# Preview split without writing
+sql-splitter split big_dump.sql --output tables/ --dry-run
+
+# Preview sharding
+sql-splitter shard multi_tenant.sql.gz \
+  --tenant-value 12345 \
+  --tenant-column tenant_id \
+  --output tenant/ \
+  --dry-run
+```
+
+---
+
+## Error Handling for AI Agents
+
+### Dialect Issues
+
+If commands fail with syntax errors or unknown keywords:
+
+- Re-run with explicit `--dialect=postgres` or `--dialect=mysql`
+- For `convert`, use `--from` and `--to` explicitly
+- Check if dump was created with a different database version
+
+### Validation Failures
+
+- With `--json`, parse errors programmatically
+- Report specific tables and constraints to user
+- Suggest fixes: encoding issues, missing FKs, truncated dumps
+
+### Large File Handling
+
+- sql-splitter uses constant ~50MB memory regardless of file size
+- Downstream tools (psql, mysql) may be bottlenecks
+- Consider `sample` for testing before full operations
+
+### Glob Pattern Best Practices
+
+- In CI: Always use `--fail-fast` to stop on first error
+- For reports: Omit `--fail-fast` to gather complete results
+- Use `--json` output for programmatic parsing
+
+---
 
 ## Documentation
 
-- [README](https://github.com/helgesverre/sql-splitter/blob/main/README.md): Full documentation
+- [README.md](https://github.com/helgesverre/sql-splitter/blob/main/README.md): Installation and CLI reference
 - [BENCHMARKS.md](https://github.com/helgesverre/sql-splitter/blob/main/BENCHMARKS.md): Performance benchmarks
 - [CHANGELOG.md](https://github.com/helgesverre/sql-splitter/blob/main/CHANGELOG.md): Version history
+- [AGENTS.md](https://github.com/helgesverre/sql-splitter/blob/main/AGENTS.md): AI assistant guidance
 
 ## Source Code
 
-- [src/cmd/](https://github.com/helgesverre/sql-splitter/tree/main/src/cmd): CLI commands
+- [src/cmd/](https://github.com/helgesverre/sql-splitter/tree/main/src/cmd): CLI commands implementation
 - [src/parser/](https://github.com/helgesverre/sql-splitter/tree/main/src/parser): Streaming SQL parser
-- [src/writer/](https://github.com/helgesverre/sql-splitter/tree/main/src/writer): Buffered file writers
 - [src/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/src/splitter): Split orchestration
 - [src/merger/](https://github.com/helgesverre/sql-splitter/tree/main/src/merger): Merge orchestration
 - [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
 - [src/convert/](https://github.com/helgesverre/sql-splitter/tree/main/src/convert): Dialect conversion
 - [src/validate/](https://github.com/helgesverre/sql-splitter/tree/main/src/validate): Dump validation
-- [crates/test_data_gen/](https://github.com/helgesverre/sql-splitter/tree/main/crates/test_data_gen): Test fixture generator
+- [src/sample/](https://github.com/helgesverre/sql-splitter/tree/main/src/sample): FK-aware sampling
+- [src/shard/](https://github.com/helgesverre/sql-splitter/tree/main/src/shard): Tenant extraction
+
+## Agent Skill Installation
+
+sql-splitter includes an [Agent Skill](https://agentskills.io) for AI coding assistants. Install the skill in your
+preferred tool:
+
+### Amp
+
+```bash
+amp skill add helgesverre/sql-splitter
+```
+
+### Claude Code
+
+```bash
+# Clone and copy to Claude Code skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.claude/skills/
+```
+
+### VS Code / GitHub Copilot
+
+```bash
+# Copy to project's GitHub skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .github/skills/
+```
+
+### Cursor
+
+```bash
+# Copy to project's Cursor skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .cursor/skills/
+```
+
+### Goose
+
+```bash
+# Copy to Goose skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.config/goose/skills/
+```
+
+### Letta
+
+```bash
+# Copy to project's Letta skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .skills/
+```
+
+### OpenCode
+
+```bash
+# Copy to OpenCode skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.opencode/skills/
+```
+
+### Universal Installer (via npx)
+
+```bash
+# Works with Claude Code, Cursor, Amp, VS Code, Goose, OpenCode
+npx ai-agent-skills install sql-splitter --agent claude
+npx ai-agent-skills install sql-splitter --agent cursor
+npx ai-agent-skills install sql-splitter --agent amp
+npx ai-agent-skills install sql-splitter --agent vscode
+npx ai-agent-skills install sql-splitter --agent goose
+npx ai-agent-skills install sql-splitter --agent opencode
+```
 
 ## Optional
 
-- [AGENTS.md](https://github.com/helgesverre/sql-splitter/blob/main/AGENTS.md): AI assistant guidance
 - [LICENSE.md](https://github.com/helgesverre/sql-splitter/blob/main/LICENSE.md): MIT License
+- [docs/COMPETITIVE_ANALYSIS.md](https://github.com/helgesverre/sql-splitter/blob/main/docs/COMPETITIVE_ANALYSIS.md):
+  Comparison with other tools
+- [skills/sql-splitter/SKILL.md](https://github.com/helgesverre/sql-splitter/blob/main/skills/sql-splitter/SKILL.md):
+  Agent Skill definition

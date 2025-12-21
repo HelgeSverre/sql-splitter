@@ -173,7 +173,10 @@ sql-splitter split sqlite.sql --output=tables --dialect=sqlite
 sql-splitter split database.sql --tables=users,posts
 
 # Dry run (preview without writing)
-sql-splitter split database.sql --dry-run --progress</code></pre>
+sql-splitter split database.sql --dry-run --progress
+
+# Batch with glob patterns
+sql-splitter split "*.sql" -o output/ --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
                 </div>
 
@@ -181,8 +184,26 @@ sql-splitter split database.sql --dry-run --progress</code></pre>
                 <p>Analyze a SQL file and display table statistics.</p>
                 <div class="code-block">
                     <pre><code>sql-splitter analyze database.sql
-sql-splitter analyze database.sql --progress</code></pre>
+sql-splitter analyze database.sql --progress
+sql-splitter analyze "**/*.sql" --fail-fast</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
+                </div>
+
+                <h4>validate</h4>
+                <p>Check SQL dump integrity with comprehensive validation.</p>
+                <div class="code-block">
+                    <pre><code>sql-splitter validate dump.sql
+sql-splitter validate dump.sql --strict --json
+sql-splitter validate "*.sql" --fail-fast</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter validate dump.sql">Copy</button>
+                </div>
+
+                <h4>convert</h4>
+                <p>Convert SQL dumps between dialects.</p>
+                <div class="code-block">
+                    <pre><code>sql-splitter convert mysql.sql --to postgres -o pg.sql
+sql-splitter convert "*.sql" --to sqlite -o converted/</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql">Copy</button>
                 </div>
             </article>
 
@@ -195,12 +216,34 @@ sql-splitter analyze database.sql --progress</code></pre>
                     </thead>
                     <tbody>
                         <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output directory</td><td>output</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>mysql</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
                         <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Filter tables (comma-separated)</td><td>-</td></tr>
                         <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress</td><td>false</td></tr>
                         <tr><td><code>--dry-run</code></td><td>-</td><td>Preview without writing</td><td>false</td></tr>
+                        <tr><td><code>--fail-fast</code></td><td>-</td><td>Stop on first error (glob)</td><td>false</td></tr>
                     </tbody>
                 </table>
+                <p class="note">Input accepts glob patterns: <code>*.sql</code>, <code>dumps/**/*.sql</code></p>
+            </article>
+
+            <!-- Validate Options -->
+            <article class="guide-section">
+                <h3>Validate Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--dialect</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
+                        <tr><td><code>--strict</code></td><td>Treat warnings as errors</td><td>false</td></tr>
+                        <tr><td><code>--json</code></td><td>JSON output for CI</td><td>false</td></tr>
+                        <tr><td><code>--max-rows-per-table</code></td><td>Row limit for PK/FK checks (0 = unlimited)</td><td>1M</td></tr>
+                        <tr><td><code>--no-limit</code></td><td>Disable row limit</td><td>false</td></tr>
+                        <tr><td><code>--no-fk-checks</code></td><td>Skip PK/FK checks</td><td>false</td></tr>
+                        <tr><td><code>--fail-fast</code></td><td>Stop on first error (glob)</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Input accepts glob patterns: <code>*.sql</code>, <code>dumps/**/*.sql</code></p>
             </article>
 
             <!-- Supported Statements -->
