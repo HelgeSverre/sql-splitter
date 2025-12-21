@@ -1,5 +1,6 @@
 mod analyze;
 mod convert;
+mod diff;
 mod glob_util;
 mod merge;
 mod sample;
@@ -358,6 +359,71 @@ pub enum Commands {
         fail_fast: bool,
     },
 
+    /// Compare two SQL dumps and report schema + data differences
+    Diff {
+        /// Original SQL dump file (supports .gz, .bz2, .xz, .zst compression)
+        old_file: PathBuf,
+
+        /// Updated SQL dump file (supports .gz, .bz2, .xz, .zst compression)
+        new_file: PathBuf,
+
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Only compare these tables (comma-separated)
+        #[arg(short, long)]
+        tables: Option<String>,
+
+        /// Exclude these tables (comma-separated)
+        #[arg(short, long)]
+        exclude: Option<String>,
+
+        /// Compare schema only, skip data
+        #[arg(long, conflicts_with = "data_only")]
+        schema_only: bool,
+
+        /// Compare data only, skip schema
+        #[arg(long, conflicts_with = "schema_only")]
+        data_only: bool,
+
+        /// Output format: text, json, sql
+        #[arg(short, long, default_value = "text")]
+        format: Option<String>,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Show sample PK values for added/removed/modified rows
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Show progress bar
+        #[arg(short, long)]
+        progress: bool,
+
+        /// Max PK entries to track per table (limits memory usage)
+        #[arg(long, default_value = "10000000")]
+        max_pk_entries: usize,
+
+        /// Compare tables without primary key using all columns as key
+        #[arg(long)]
+        allow_no_pk: bool,
+
+        /// Ignore column order differences in schema comparison
+        #[arg(long)]
+        ignore_order: bool,
+
+        /// Override primary key for data comparison (format: table:col1+col2,table2:col)
+        #[arg(long)]
+        primary_key: Option<String>,
+
+        /// Ignore columns matching glob patterns (e.g., *.updated_at, users.password)
+        #[arg(long)]
+        ignore_columns: Option<String>,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -551,6 +617,41 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 fail_fast,
             )
         }
+        Commands::Diff {
+            old_file,
+            new_file,
+            output,
+            tables,
+            exclude,
+            schema_only,
+            data_only,
+            format,
+            dialect,
+            verbose,
+            progress,
+            max_pk_entries,
+            allow_no_pk,
+            ignore_order,
+            primary_key,
+            ignore_columns,
+        } => diff::run(
+            old_file,
+            new_file,
+            output,
+            tables,
+            exclude,
+            schema_only,
+            data_only,
+            format,
+            dialect,
+            verbose,
+            progress,
+            max_pk_entries,
+            allow_no_pk,
+            ignore_order,
+            primary_key,
+            ignore_columns,
+        ),
         Commands::Completions { shell } => {
             generate(
                 shell,

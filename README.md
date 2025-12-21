@@ -92,6 +92,23 @@ sql-splitter analyze "**/*.sql"
 sql-splitter split "*.sql" -o output/
 sql-splitter convert "*.sql" --to postgres -o converted/
 
+# Compare two SQL dumps for changes
+sql-splitter diff old.sql new.sql
+
+# Diff with schema-only or data-only
+sql-splitter diff old.sql new.sql --schema-only
+sql-splitter diff old.sql new.sql --data-only
+
+# Diff with JSON or SQL migration output
+sql-splitter diff old.sql new.sql --format json -o diff.json
+sql-splitter diff old.sql new.sql --format sql -o migration.sql
+
+# Diff with verbose PK samples and ignore timestamp columns
+sql-splitter diff old.sql new.sql --verbose --ignore-columns "*.updated_at,*.created_at"
+
+# Override primary key for tables without PK
+sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -270,6 +287,39 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | `-p, --progress`      | Show progress bar                                  | —           |
 | `--dry-run`           | Preview without writing files                      | —           |
 | `--json`              | Output results as JSON                             | —           |
+
+### Diff Options
+
+| Flag                | Description                                                | Default     |
+|---------------------|------------------------------------------------------------|-------------|
+| `-o, --output`      | Output file (default: stdout)                              | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `--schema-only`     | Compare schema only, skip data                             | —           |
+| `--data-only`       | Compare data only, skip schema                             | —           |
+| `--format`          | Output format: `text`, `json`, `sql`                       | `text`      |
+| `-t, --tables`      | Only compare these tables (comma-separated)                | all         |
+| `-e, --exclude`     | Exclude these tables (comma-separated)                     | —           |
+| `--max-pk-entries`  | Max PK entries to track (0 = no limit)                     | 10,000,000  |
+| `-v, --verbose`     | Show sample PK values for added/removed/modified rows      | —           |
+| `--primary-key`     | Override PK for tables (format: `table:col1+col2`)         | auto-detect |
+| `--ignore-order`    | Ignore column order differences in schema comparison       | —           |
+| `--ignore-columns`  | Ignore columns matching glob patterns (e.g., `*.updated_at`) | —         |
+| `--allow-no-pk`     | Compare tables without PK using all columns as key         | —           |
+| `-p, --progress`    | Show progress bar                                          | —           |
+
+**What diff detects:**
+
+- Tables added/removed/modified (columns, types, nullability)
+- Primary key changes
+- Foreign key changes
+- Index changes (CREATE INDEX, inline INDEX/KEY)
+- Rows added/removed/modified (via PK-based comparison)
+
+**Output formats:**
+
+- `text`: Human-readable summary with optional PK samples
+- `json`: Structured data for automation (includes warnings)
+- `sql`: Migration script with ALTER/CREATE INDEX/DROP INDEX statements
 
 ## Performance
 

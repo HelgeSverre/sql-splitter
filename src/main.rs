@@ -4,8 +4,10 @@
 mod analyzer;
 mod cmd;
 mod convert;
+mod differ;
 mod merger;
 mod parser;
+mod pk;
 mod progress;
 mod sample;
 mod schema;

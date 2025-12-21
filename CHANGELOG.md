@@ -7,9 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2025-12-21
+
+### Added
+
+- **Diff command enhanced features**: Extended schema and data comparison capabilities
+  - `--verbose` flag: Show sample PK values for added/removed/modified rows (up to 100 samples)
+  - `--primary-key` flag: Override PK for data comparison (format: `table:col1+col2,table2:col`)
+  - `--ignore-order` flag: Ignore column order differences in schema comparison
+  - `--ignore-columns` flag: Exclude columns from comparison using glob patterns (e.g., `*.updated_at`)
+  - `--allow-no-pk` flag: Compare tables without primary key using all columns as key
+  - **Index diff**: Detect added/removed indexes in schema comparison (inline and standalone CREATE INDEX)
+  - **Warnings system**: Emit warnings for tables without PK, invalid PK override columns, etc.
+  - Supports index types: BTREE, HASH, GIN (PostgreSQL), FULLTEXT (MySQL)
+- **40 new integration tests** for enhanced diff features across all 3 dialects
+- **Added `glob` dependency** (0.3) for column ignore pattern matching
+
+### Changed
+
+- `diff --format sql` now generates `CREATE INDEX` and `DROP INDEX` statements for index changes
+
 ## [1.9.0] - 2025-12-21
 
 ### Added
+
+- **Diff command**: Compare two SQL dumps and report schema + data differences
+  - `sql-splitter diff old.sql new.sql` - Compare two SQL dump files
+  - Schema comparison: tables added/removed, columns added/removed/modified, PK changes, FK changes
+  - Data comparison: rows added/removed/modified per table with memory-bounded PK tracking
+  - Output formats: text (human-readable), json (structured), sql (migration script)
+  - `--schema-only` flag to compare schema only, skip data
+  - `--data-only` flag to compare data only, skip schema
+  - `--tables` flag to compare only specific tables
+  - `--exclude` flag to exclude specific tables
+  - `--max-pk-entries` flag to limit memory usage for large tables (default: 10M entries ~160MB)
+  - Supports all 3 dialects (MySQL, PostgreSQL, SQLite)
+  - Progress bar support with `--progress` flag
+  - Supports compressed input files (.gz, .bz2, .xz, .zst)
+- **17 new integration tests** for diff command (schema diff, data diff, filters, output formats, PostgreSQL COPY)
+
+### Fixed
+
+- **PostgreSQL COPY data parsing**: Fixed a bug where data rows in PostgreSQL COPY ... FROM stdin format were not correctly parsed for PK/FK validation and data diff operations
+  - The parser returns COPY header and data as separate statements; consumers now correctly handle this
+  - Affects: `diff --data-only` and `validate` commands with PostgreSQL dumps using COPY format
+  - Now correctly detects duplicate PKs, FK violations, and row changes in COPY data blocks
 
 - **`--json` flag for all commands**: Machine-readable JSON output for automation and CI/CD pipelines
   - `split --json`: Output split statistics, table names, and throughput as JSON

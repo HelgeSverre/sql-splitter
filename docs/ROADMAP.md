@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.8.2 (current)  
+**Version**: 1.9.0 (current)  
 **Last Updated**: 2025-12-21  
-**Revision**: 2.7 — Post v1.8.2 with sample memory optimization
+**Revision**: 2.8 — Post v1.9.0 with diff command
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -17,9 +17,9 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
 5. ✅ Convert — Dialect conversion (v1.7.0)
 6. ✅ Validate — Dump integrity checking (v1.8.0)
+7. ✅ Diff — Schema + data comparison (v1.9.0)
 
-**Next (v1.9+):**
-- v1.9.0: Diff — Schema + data comparison
+**Next (v1.10+):**
 - v1.10.0: Query — SQL-like row filtering
 - v1.11.0: Redact — Data anonymization
 - v1.12.0: Detect-PII — Auto-suggest redaction config
@@ -297,20 +297,29 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.9+)
-
-### v1.9.0 — Diff Command
+### v1.9.0 — Diff Command ✅ RELEASED
+**Released**: 2025-12-21  
 **Theme**: Schema + data comparison
 
-| Feature | Effort | Notes |
+| Feature | Status | Notes |
 |---------|--------|-------|
-| Diff | ~40h | Compare two SQL dumps |
+| **Diff command** | ✅ Done | |
+| ├─ Schema comparison | ✅ Done | Tables, columns, PKs, FKs |
+| ├─ Data comparison | ✅ Done | Memory-bounded PK tracking |
+| ├─ Output formats | ✅ Done | text, json, sql |
+| └─ Table filters | ✅ Done | --tables, --exclude |
 
-**Features:**
-- Schema diff (table structure, indexes, constraints)
-- Row count comparison
-- Row-level diff for tables < 100K rows
-- Chunked hashing for large tables
+**Delivered:**
+- `sql-splitter diff old.sql new.sql`
+- Schema diff: tables added/removed, columns, PK/FK changes
+- Data diff: rows added/removed/modified per table
+- SQL migration output format
+- Memory-bounded: 10M PK entries (~160MB max)
+- 11 integration tests
+
+---
+
+## Upcoming Features (v1.10+)
 
 ---
 

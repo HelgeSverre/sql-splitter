@@ -584,7 +584,7 @@ impl<R: Read> Parser<R> {
             }
         }
 
-        if upper_prefix.starts_with(b"CREATE INDEX") {
+        if upper_prefix.starts_with(b"CREATE INDEX") || upper_prefix.starts_with(b"CREATE UNIQUE") {
             if let Some(caps) = CREATE_INDEX_RE.captures(stmt) {
                 if let Some(m) = caps.get(1) {
                     return (

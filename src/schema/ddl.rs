@@ -5,7 +5,7 @@
 //! - Primary key constraints
 //! - Foreign key constraints
 
-use super::{Column, ColumnId, ColumnType, ForeignKey, Schema, TableId, TableSchema};
+use super::{Column, ColumnId, ColumnType, ForeignKey, IndexDef, Schema, TableId, TableSchema};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -47,6 +47,21 @@ static FOREIGN_KEY_RE: Lazy<Regex> = Lazy::new(|| {
 
 /// Regex to detect NOT NULL constraint
 static NOT_NULL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNOT\s+NULL\b").unwrap());
+
+/// Regex for inline INDEX/KEY in CREATE TABLE
+/// Matches: INDEX idx_name (col1, col2), KEY idx_name (col1), UNIQUE INDEX idx_name (col1)
+static INLINE_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:(UNIQUE)\s+)?(?:INDEX|KEY)\s+[`"]?(\w+)[`"]?\s*\(([^)]+)\)"#).unwrap()
+});
+
+/// Regex for CREATE INDEX statement
+/// Matches: CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON table [USING method] (columns)
+static CREATE_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?\s+ON\s+(?:\w+\.)?[`"]?(\w+)[`"]?\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)"#,
+    )
+    .unwrap()
+});
 
 /// Builder for constructing schema from DDL statements
 #[derive(Debug, Default)]
@@ -101,6 +116,31 @@ impl SchemaBuilder {
                     .collect();
                 table.foreign_keys.push(resolved_fk);
             }
+        }
+
+        Some(table_id)
+    }
+
+    /// Parse a CREATE INDEX statement and add to the appropriate table
+    pub fn parse_create_index(&mut self, stmt: &str) -> Option<TableId> {
+        let caps = CREATE_INDEX_RE.captures(stmt)?;
+
+        let is_unique = caps.get(1).is_some();
+        let index_name = caps.get(2)?.as_str().to_string();
+        let table_name = caps.get(3)?.as_str().to_string();
+        let index_type = caps.get(4).map(|m| m.as_str().to_uppercase());
+        let columns_str = caps.get(5)?.as_str();
+        let columns = parse_column_list(columns_str);
+
+        let table_id = self.schema.get_table_id(&table_name)?;
+
+        if let Some(table) = self.schema.table_mut(table_id) {
+            table.indexes.push(IndexDef {
+                name: index_name,
+                columns,
+                is_unique,
+                index_type,
+            });
         }
 
         Some(table_id)
@@ -228,6 +268,11 @@ fn parse_table_body(body: &str, table: &mut TableSchema) {
                     .collect();
                 table.foreign_keys.push(resolved_fk);
             }
+
+            // Parse inline indexes (INDEX, KEY, UNIQUE INDEX, UNIQUE KEY)
+            if let Some(idx) = parse_inline_index(trimmed) {
+                table.indexes.push(idx);
+            }
         } else {
             // Parse column definition
             if let Some(col) = parse_column_def(trimmed, ColumnId(table.columns.len() as u16)) {
@@ -326,6 +371,23 @@ fn parse_primary_key_constraint(constraint: &str) -> Option<Vec<String>> {
     let caps = PRIMARY_KEY_RE.captures(constraint)?;
     let cols_str = caps.get(1)?.as_str();
     Some(parse_column_list(cols_str))
+}
+
+/// Parse inline INDEX/KEY constraint from CREATE TABLE body
+fn parse_inline_index(constraint: &str) -> Option<IndexDef> {
+    let caps = INLINE_INDEX_RE.captures(constraint)?;
+
+    let is_unique = caps.get(1).is_some();
+    let index_name = caps.get(2)?.as_str().to_string();
+    let columns_str = caps.get(3)?.as_str();
+    let columns = parse_column_list(columns_str);
+
+    Some(IndexDef {
+        name: index_name,
+        columns,
+        is_unique,
+        index_type: None, // Inline indexes don't specify type
+    })
 }
 
 /// Parse FOREIGN KEY constraints from a statement

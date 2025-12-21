@@ -21,6 +21,8 @@ pub struct ParsedCopyRow {
     pub pk: Option<PkTuple>,
     /// Extracted foreign key values with their references
     pub fk_values: Vec<(FkRef, PkTuple)>,
+    /// All column values (for data diff comparison)
+    pub all_values: Vec<PkValue>,
 }
 
 /// Parser for PostgreSQL COPY data blocks
@@ -104,14 +106,19 @@ impl<'a> CopyParser<'a> {
         // Split by tabs
         let values: Vec<CopyValue> = self.split_and_parse_values(line);
 
-        // Extract PK and FK if we have schema
-        let (pk, fk_values) = if let Some(schema) = self.table_schema {
+        // Extract PK, FK, and all values if we have schema
+        let (pk, fk_values, all_values) = if let Some(schema) = self.table_schema {
             self.extract_pk_fk(&values, schema)
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), Vec::new())
         };
 
-        Ok(Some(ParsedCopyRow { raw, pk, fk_values }))
+        Ok(Some(ParsedCopyRow {
+            raw,
+            pk,
+            fk_values,
+            all_values,
+        }))
     }
 
     /// Split line by tabs and parse each value
@@ -195,14 +202,28 @@ impl<'a> CopyParser<'a> {
         result
     }
 
-    /// Extract PK and FK values from parsed values
+    /// Extract PK, FK, and all values from parsed values
     fn extract_pk_fk(
         &self,
         values: &[CopyValue],
         schema: &TableSchema,
-    ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>) {
+    ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
         let mut pk_values = PkTuple::new();
         let mut fk_values = Vec::new();
+
+        // Build all_values: convert each value to PkValue
+        let all_values: Vec<PkValue> = values
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| {
+                let col = self
+                    .column_order
+                    .get(idx)
+                    .and_then(|c| *c)
+                    .and_then(|id| schema.column(id));
+                self.value_to_pk(v, col)
+            })
+            .collect();
 
         // Build PK from columns marked as primary key
         for (idx, col_id_opt) in self.column_order.iter().enumerate() {
@@ -255,7 +276,7 @@ impl<'a> CopyParser<'a> {
             Some(pk_values)
         };
 
-        (pk, fk_values)
+        (pk, fk_values, all_values)
     }
 
     /// Convert a parsed value to a PkValue

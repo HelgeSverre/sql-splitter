@@ -328,6 +328,9 @@ pub struct Validator {
     tracked_pk_count: usize,
     tracked_fk_count: usize,
     pk_fk_checks_disabled_due_to_memory: bool,
+
+    // PostgreSQL COPY context: (table_name, column_order, table_id)
+    current_copy_context: Option<(String, Vec<String>, TableId)>,
 }
 
 impl Validator {
@@ -352,6 +355,7 @@ impl Validator {
             tracked_pk_count: 0,
             tracked_fk_count: 0,
             pk_fk_checks_disabled_due_to_memory: false,
+            current_copy_context: None,
         }
     }
 
@@ -587,11 +591,34 @@ impl Validator {
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
         let mut stmt_count: u64 = 0;
 
+        // Reset COPY context for this pass
+        self.current_copy_context = None;
+
         while let Some(stmt) = parser.read_statement()? {
             stmt_count += 1;
 
             let (stmt_type, table_name) =
                 Parser::<&[u8]>::parse_statement_with_dialect(&stmt, self.dialect);
+
+            // Handle PostgreSQL COPY data (separate statement from header)
+            if self.dialect == SqlDialect::Postgres && stmt_type == StatementType::Unknown {
+                // Check if this looks like COPY data (ends with \.)
+                if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
+                    if let Some((ref copy_table, ref column_order, copy_table_id)) =
+                        self.current_copy_context.clone()
+                    {
+                        self.check_copy_data(
+                            &stmt,
+                            copy_table_id,
+                            copy_table,
+                            column_order.clone(),
+                            stmt_count,
+                        );
+                    }
+                }
+                self.current_copy_context = None;
+                continue;
+            }
 
             // Get table_id without holding a borrow on self.schema
             let table_id = match &self.schema {
@@ -608,8 +635,11 @@ impl Validator {
                     self.check_insert_statement(&stmt, table_id, &table_name, stmt_count);
                 }
                 StatementType::Copy => {
-                    // PostgreSQL uses COPY ... FROM stdin format
-                    self.check_copy_statement(&stmt, table_id, &table_name, stmt_count);
+                    // For PostgreSQL COPY, the data comes in the next statement
+                    // Save context for processing the data statement
+                    let header = String::from_utf8_lossy(&stmt);
+                    let column_order = postgres_copy::parse_copy_columns(&header);
+                    self.current_copy_context = Some((table_name.clone(), column_order, table_id));
                 }
                 _ => continue,
             }
@@ -693,6 +723,48 @@ impl Validator {
             table_schema,
             column_order,
         ) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        for row in rows {
+            self.check_copy_row(table_id, table_name, &row, stmt_count);
+        }
+    }
+
+    /// Check rows from PostgreSQL COPY data (separate statement from header)
+    fn check_copy_data(
+        &mut self,
+        data_stmt: &[u8],
+        table_id: TableId,
+        table_name: &str,
+        column_order: Vec<String>,
+        stmt_count: u64,
+    ) {
+        // The data_stmt contains the raw COPY data lines (may have leading newline)
+        // Strip leading whitespace/newlines
+        let data: Vec<u8> = data_stmt
+            .iter()
+            .skip_while(|&&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
+            .cloned()
+            .collect();
+
+        if data.is_empty() {
+            return;
+        }
+
+        // Get table schema
+        let table_schema = match &self.schema {
+            Some(s) => match s.table(table_id) {
+                Some(ts) => ts,
+                None => return,
+            },
+            None => return,
+        };
+
+        // Parse the COPY data rows
+        let rows = match postgres_copy::parse_postgres_copy_rows(&data, table_schema, column_order)
+        {
             Ok(r) => r,
             Err(_) => return,
         };

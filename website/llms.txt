@@ -18,6 +18,7 @@ database connections. It is designed to be **safe to automate** in scripts, CI p
 | `validate` | Check syntax, encoding, PK/FK integrity   | CI gates, backup verification, pre-restore checks |
 | `sample`   | Create reduced FK-consistent datasets     | Dev/CI seeding, testing with realistic data       |
 | `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
+| `diff`     | Compare two SQL dumps for changes         | Schema migrations, change detection, auditing     |
 
 ## Universal Capabilities
 
@@ -43,6 +44,7 @@ All commands support:
 | Export one tenant's data                 | `shard`                   | Use `--tenant-value` and `--tenant-column`                  |
 | Convert MySQL dump to PostgreSQL         | `convert --to postgres`   | Validate before and after conversion                        |
 | Validate all dumps in CI pipeline        | `validate "*.sql" --json` | Parse JSON output with `jq` for automation                  |
+| Compare two dumps for changes            | `diff`                    | Schema + data comparison; outputs text, json, or sql        |
 
 ---
 
@@ -253,6 +255,80 @@ sql-splitter split big_dump.sql \
 
 ---
 
+## Workflow 6: Comparing SQL Dumps
+
+**Goal:** Detect schema and data changes between two SQL dump files.
+
+```bash
+# 1. Basic comparison (schema + data)
+sql-splitter diff old_dump.sql new_dump.sql
+
+# 2. Compare with output file
+sql-splitter diff old_dump.sql new_dump.sql --output diff_report.txt --progress
+
+# 3. Schema-only comparison (fast)
+sql-splitter diff old.sql new.sql --schema-only
+
+# 4. Data-only comparison (skip schema changes)
+sql-splitter diff old.sql new.sql --data-only
+
+# 5. JSON output for automation
+sql-splitter diff old.sql new.sql --format json --output diff.json
+
+# 6. Generate SQL migration script
+sql-splitter diff old.sql new.sql --format sql --output migration.sql
+
+# 7. Compare specific tables only
+sql-splitter diff old.sql new.sql --tables users,orders --progress
+
+# 8. Exclude certain tables from comparison
+sql-splitter diff old.sql new.sql --exclude logs,sessions --progress
+
+# 9. Compare compressed dumps
+sql-splitter diff old.sql.gz new.sql.zst --progress
+
+# 10. Show sample PK values for changes (verbose mode)
+sql-splitter diff old.sql new.sql --verbose
+
+# 11. Ignore timestamp columns in comparison
+sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at,*.created_at"
+
+# 12. Override primary key for tables without PK
+sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
+
+# 13. Compare tables without PK using all columns
+sql-splitter diff old.sql new.sql --allow-no-pk
+```
+
+**Diff output formats:**
+
+- `text` (default): Human-readable summary with sample PKs when --verbose
+- `json`: Structured output with warnings and sample PKs
+- `sql`: Migration script with ALTER TABLE, CREATE INDEX, DROP INDEX
+
+**What diff detects:**
+
+- **Schema changes**: Tables added/removed, columns added/removed/modified, PK changes, FK changes
+- **Index changes**: Indexes added/removed (inline and CREATE INDEX statements)
+- **Data changes**: Rows added/removed/modified per table (using PK-based comparison)
+- **Memory-bounded**: Uses 64-bit PK hashing with configurable limits (`--max-pk-entries`)
+
+**Diff options:**
+
+- `--schema-only`: Compare schema only, skip data
+- `--data-only`: Compare data only, skip schema
+- `--format <FORMAT>`: Output format: text, json, sql (default: text)
+- `--tables`: Only compare specific tables
+- `--exclude`: Exclude specific tables from comparison
+- `--max-pk-entries`: Maximum PK entries to track (default: 10M, ~160MB)
+- `--verbose`: Show sample PK values for added/removed/modified rows
+- `--primary-key`: Override PK for data comparison (format: `table:col1+col2`)
+- `--ignore-order`: Ignore column order differences in schema comparison
+- `--ignore-columns`: Ignore columns matching glob patterns (e.g., `*.updated_at`)
+- `--allow-no-pk`: Compare tables without PK using all columns as key
+
+---
+
 ## Piping and Composition Patterns
 
 ### Stream convert to database (no intermediate file)
@@ -348,6 +424,7 @@ If commands fail with syntax errors or unknown keywords:
 - [src/validate/](https://github.com/helgesverre/sql-splitter/tree/main/src/validate): Dump validation
 - [src/sample/](https://github.com/helgesverre/sql-splitter/tree/main/src/sample): FK-aware sampling
 - [src/shard/](https://github.com/helgesverre/sql-splitter/tree/main/src/shard): Tenant extraction
+- [src/differ/](https://github.com/helgesverre/sql-splitter/tree/main/src/differ): Schema + data diffing
 
 ## Agent Skill Installation
 

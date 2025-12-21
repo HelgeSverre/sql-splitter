@@ -207,6 +207,23 @@ mod ddl_tests {
     }
 
     #[test]
+    fn test_parse_postgres_inline_primary_key() {
+        let mut builder = SchemaBuilder::new();
+        let stmt = r#"CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(100)
+)"#;
+
+        let id = builder.parse_create_table(stmt);
+        let schema = builder.build();
+        let table = schema.table(id.unwrap()).unwrap();
+
+        assert_eq!(table.primary_key.len(), 1, "Should have 1 PK column");
+        assert!(table.columns[0].is_primary_key, "First column should be PK");
+        assert_eq!(table.columns[0].name, "id");
+    }
+
+    #[test]
     fn test_split_table_body() {
         use sql_splitter::schema::split_table_body;
 

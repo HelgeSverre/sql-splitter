@@ -601,3 +601,25 @@ mod postgres_copy_tests {
         assert_eq!(decoded, b"hello\tworld\n");
     }
 }
+
+#[test]
+fn test_copy_statement_type_detection() {
+    use sql_splitter::parser::{Parser, SqlDialect, StatementType};
+    use std::io::Cursor;
+
+    let sql = b"COPY users (id, name) FROM stdin;
+1\tAlice
+2\tBob
+\\.
+";
+
+    let cursor = Cursor::new(&sql[..]);
+    let mut parser = Parser::with_dialect(cursor, 4096, SqlDialect::Postgres);
+
+    let stmt = parser.read_statement().unwrap().unwrap();
+    let (stmt_type, table_name) =
+        Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Postgres);
+
+    assert_eq!(stmt_type, StatementType::Copy, "Should be COPY statement");
+    assert_eq!(table_name, "users", "Should extract table name");
+}

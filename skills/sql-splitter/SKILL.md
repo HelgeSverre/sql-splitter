@@ -97,6 +97,22 @@ sql-splitter shard dump.sql --tenant-value 123 --tenant-column tenant_id --outpu
 sql-splitter shard dump.sql --tenant-values "1,2,3" --tenant-column account_id --output shards/
 ```
 
+### diff
+Compare two SQL dumps for schema and data changes.
+
+```bash
+sql-splitter diff old.sql new.sql --progress
+sql-splitter diff old.sql new.sql --schema-only
+sql-splitter diff old.sql new.sql --data-only
+sql-splitter diff old.sql new.sql --format json --output diff.json
+sql-splitter diff old.sql new.sql --format sql --output migration.sql
+sql-splitter diff old.sql new.sql --tables users,orders --progress
+sql-splitter diff old.sql new.sql --verbose                           # Show sample PKs
+sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at"     # Ignore columns
+sql-splitter diff old.sql new.sql --primary-key logs:ts+msg           # Override PK
+sql-splitter diff old.sql new.sql --allow-no-pk                       # Tables without PK
+```
+
 ---
 
 ## Step-by-Step Patterns
@@ -210,6 +226,30 @@ For multi-tenant databases:
      --tenant-column tenant_id \
      --output tenant_12345.sql \
      --progress
+   ```
+
+### Pattern 7: Comparing Dumps for Changes
+
+For detecting schema or data changes between two versions:
+
+1. **Full comparison (schema + data)**
+   ```bash
+   sql-splitter diff old_dump.sql new_dump.sql --progress
+   ```
+
+2. **Schema-only comparison** (fast, no data parsing)
+   ```bash
+   sql-splitter diff old.sql new.sql --schema-only
+   ```
+
+3. **Generate migration script**
+   ```bash
+   sql-splitter diff old.sql new.sql --format sql --output migration.sql
+   ```
+
+4. **JSON output for automation**
+   ```bash
+   sql-splitter diff old.sql new.sql --format json | jq '.summary'
    ```
 
 ---

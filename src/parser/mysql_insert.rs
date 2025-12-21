@@ -89,6 +89,8 @@ pub struct ParsedRow {
     /// Extracted foreign key values with their references
     /// Only includes FKs where all columns are non-NULL
     pub fk_values: Vec<(FkRef, PkTuple)>,
+    /// All column values (for data diff comparison)
+    pub all_values: Vec<PkValue>,
 }
 
 /// Parser for MySQL INSERT statements
@@ -244,14 +246,19 @@ impl<'a> InsertParser<'a> {
         let end = self.pos;
         let raw = self.stmt[start..end].to_vec();
 
-        // Extract PK and FK values if we have a schema
-        let (pk, fk_values) = if let Some(schema) = self.table_schema {
+        // Extract PK, FK, and all values if we have a schema
+        let (pk, fk_values, all_values) = if let Some(schema) = self.table_schema {
             self.extract_pk_fk(&values, schema)
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), Vec::new())
         };
 
-        Ok(Some(ParsedRow { raw, pk, fk_values }))
+        Ok(Some(ParsedRow {
+            raw,
+            pk,
+            fk_values,
+            all_values,
+        }))
     }
 
     /// Parse a single value (string, number, NULL, etc.)
@@ -422,14 +429,28 @@ impl<'a> InsertParser<'a> {
         }
     }
 
-    /// Extract PK and FK values from parsed values
+    /// Extract PK, FK, and all values from parsed values
     fn extract_pk_fk(
         &self,
         values: &[ParsedValue],
         schema: &TableSchema,
-    ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>) {
+    ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
         let mut pk_values = PkTuple::new();
         let mut fk_values = Vec::new();
+
+        // Build all_values: convert each value to PkValue
+        let all_values: Vec<PkValue> = values
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| {
+                let col = self
+                    .column_order
+                    .get(idx)
+                    .and_then(|c| *c)
+                    .and_then(|id| schema.column(id));
+                self.value_to_pk(v, col)
+            })
+            .collect();
 
         // Build PK from columns marked as primary key
         for (idx, col_id_opt) in self.column_order.iter().enumerate() {
@@ -483,7 +504,7 @@ impl<'a> InsertParser<'a> {
             Some(pk_values)
         };
 
-        (pk, fk_values)
+        (pk, fk_values, all_values)
     }
 
     /// Convert a parsed value to a PkValue

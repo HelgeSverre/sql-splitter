@@ -297,6 +297,10 @@ run_profile() {
             [[ "$dialect" == "postgres" ]] && target_dialect="mysql"
             cmd+=("$input_file" "--from" "$dialect" "--to" "$target_dialect" "--output" "$output_file")
             ;;
+        diff)
+            # Diff file against itself (measures memory for schema+data parsing)
+            cmd+=("$input_file" "$input_file" "--dialect" "$dialect")
+            ;;
     esac
     
     cmd+=("${extra_args[@]}")
@@ -355,6 +359,8 @@ run_all_profiles() {
     run_profile "sample" "$input_file" "$dialect"
     run_profile "sample" "$input_file" "$dialect" "--preserve-relations"
     run_profile "sample" "$input_file" "$dialect" "--rows" "1000"
+    run_profile "diff" "$input_file" "$dialect"
+    run_profile "diff" "$input_file" "$dialect" "--schema-only"
     
     # Convert only for mysql/postgres
     if [[ "$dialect" != "sqlite" ]]; then

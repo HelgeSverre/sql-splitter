@@ -118,6 +118,19 @@ pub struct Column {
     pub is_nullable: bool,
 }
 
+/// Index definition
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDef {
+    /// Index name
+    pub name: String,
+    /// Columns in the index
+    pub columns: Vec<String>,
+    /// Whether this is a unique index
+    pub is_unique: bool,
+    /// Index type (BTREE, HASH, GIN, etc.)
+    pub index_type: Option<String>,
+}
+
 /// Foreign key constraint definition
 #[derive(Debug, Clone)]
 pub struct ForeignKey {
@@ -148,6 +161,8 @@ pub struct TableSchema {
     pub primary_key: Vec<ColumnId>,
     /// Foreign key constraints
     pub foreign_keys: Vec<ForeignKey>,
+    /// Index definitions
+    pub indexes: Vec<IndexDef>,
     /// Raw CREATE TABLE statement (for output)
     pub create_statement: Option<String>,
 }
@@ -161,6 +176,7 @@ impl TableSchema {
             columns: Vec::new(),
             primary_key: Vec::new(),
             foreign_keys: Vec::new(),
+            indexes: Vec::new(),
             create_statement: None,
         }
     }
