@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.7.0 (current)  
+**Version**: 1.8.0 (current)  
 **Last Updated**: 2025-12-21  
-**Revision**: 2.4 — Post v1.7.0 with full COPY→INSERT support
+**Revision**: 2.5 — Post v1.8.0 with Validate command
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -16,9 +16,9 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 3. ✅ Sample — FK-aware data sampling (builds shared infra) (v1.5.0)
 4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
 5. ✅ Convert — Dialect conversion (v1.7.0)
+6. ✅ Validate — Dump integrity checking (v1.8.0)
 
-**Next (v1.8+):**
-- v1.8.0: Validate — Dump integrity checking
+**Next (v1.9+):**
 - v1.9.0: Diff — Schema + data comparison
 - v1.10.0: Query — SQL-like row filtering
 - v1.11.0: Redact — Data anonymization
@@ -212,24 +212,39 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.8+)
-
-### v1.8.0 — Validate Command
+### v1.8.0 — Validate Command ✅ RELEASED
+**Released**: 2025-12-21  
 **Theme**: Dump integrity checking
 
-| Feature | Effort | Notes |
+| Feature | Status | Notes |
 |---------|--------|-------|
-| Validate | ~16h | Syntax errors, DDL/DML consistency, duplicate PKs, FK integrity |
+| **Validate core** | ✅ Done | |
+| ├─ CLI + options | ✅ Done | --strict, --json, --no-fk-checks |
+| ├─ SQL syntax validation | ✅ Done | Parser error detection |
+| ├─ DDL/DML consistency | ✅ Done | INSERT references existing tables |
+| ├─ Encoding validation | ✅ Done | UTF-8 checks with warnings |
+| ├─ Duplicate PK detection | ✅ Done | MySQL only, with max-rows guard |
+| ├─ FK referential integrity | ✅ Done | MySQL only, first-5 violations |
+| └─ Output formats | ✅ Done | Text + JSON |
+| **Testing** | ✅ Done | 13 integration tests |
 
-**Checks:**
-- SQL syntax validation
-- DDL/DML consistency (INSERTs reference existing tables)
-- Duplicate primary keys
-- FK referential integrity
-- Encoding issues
-- Orphaned data detection
+**Delivered:**
+- `sql-splitter validate dump.sql`
+- `--strict` flag to fail on warnings
+- `--json` flag for CI integration
+- `--max-rows-per-table` memory guard (default: 1M rows)
+- `--no-fk-checks` to disable heavy data checks
+- All 5 validation checks implemented
+- Compressed file support
+
+**Limitations (documented):**
+- PK/FK data checks: MySQL only (PostgreSQL/SQLite emit info message)
+- FK checks assume parent-before-child insertion order
+- Parent-orphan detection deferred to future release
 
 ---
+
+## Upcoming Features (v1.9+)
 
 ### v1.9.0 — Diff Command
 **Theme**: Schema + data comparison
@@ -325,7 +340,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ## Effort Summary
 
-### Priority Features (v1.4–v1.7)
+### Priority Features (v1.4–v1.8)
 
 | Version | Theme | Status |
 |---------|-------|--------|
@@ -333,12 +348,12 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.5.0 | Sample + Infra v1 | ✅ Released |
 | v1.6.0 | Shard + Infra v1.5 | ✅ Released |
 | v1.7.0 | Convert MVP | ✅ Released |
+| v1.8.0 | Validate | ✅ Released |
 
-### Upcoming Features (v1.8+)
+### Upcoming Features (v1.9+)
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v1.8.0 | Validate | ~16h | 1 week |
 | v1.9.0 | Diff | ~40h | 2-3 weeks |
 | v1.10.0 | Query | ~30h | 2 weeks |
 | v1.11.0 | Redact | ~40h | 2-3 weeks |
@@ -365,6 +380,11 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 4. ✅ **v1.7.0 — Convert MVP** — Released
    - Practical cross-dialect conversion
    - MySQL → PostgreSQL, MySQL → SQLite
+
+5. ✅ **v1.8.0 — Validate** — Released
+   - SQL dump integrity checking
+   - DDL/DML consistency, PK/FK validation
+   - MySQL-focused with dialect info for others
 
 ---
 

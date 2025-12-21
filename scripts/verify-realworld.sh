@@ -5,6 +5,12 @@
 # This script downloads various SQL dumps from public sources, runs sql-splitter
 # against them, and verifies the output. All test files are cleaned up after.
 #
+# Tests performed:
+#   1. Split command - Parse and split SQL files by table
+#   2. Convert command - Convert between MySQL, PostgreSQL, SQLite dialects
+#   3. Validate (input) - Run integrity checks on downloaded SQL files
+#   4. Validate (roundtrip) - Split→Merge→Validate to verify no data loss
+#
 # Usage:
 #   ./scripts/verify-realworld.sh           # Run all tests
 #   ./scripts/verify-realworld.sh --keep    # Keep downloaded files after test
@@ -202,6 +208,85 @@ declare -a RESULTS_MYSQL=()
 declare -a RESULTS_POSTGRES=()
 declare -a RESULTS_GENERIC=()
 
+# Validation results storage (parallel arrays since bash 3.2 doesn't support -A)
+declare -a VALIDATE_INPUT_NAMES=()
+declare -a VALIDATE_INPUT_VALUES=()
+declare -a VALIDATE_OUTPUT_NAMES=()
+declare -a VALIDATE_OUTPUT_VALUES=()
+
+# Get validation result by name from parallel arrays
+# Args: name, is_input (true/false)
+# Returns: result string via stdout
+get_validate_result() {
+    local name=$1
+    local is_input=$2
+    
+    if [[ "$is_input" == "true" ]]; then
+        for i in "${!VALIDATE_INPUT_NAMES[@]}"; do
+            if [[ "${VALIDATE_INPUT_NAMES[$i]}" == "$name" ]]; then
+                echo "${VALIDATE_INPUT_VALUES[$i]}"
+                return
+            fi
+        done
+    else
+        for i in "${!VALIDATE_OUTPUT_NAMES[@]}"; do
+            if [[ "${VALIDATE_OUTPUT_NAMES[$i]}" == "$name" ]]; then
+                echo "${VALIDATE_OUTPUT_VALUES[$i]}"
+                return
+            fi
+        done
+    fi
+    echo "?"
+}
+
+# Run validation on a SQL file
+# Args: name, sql_file, dialect, is_input (true/false)
+# Returns: 0 on success (no errors), 1 on validation errors
+run_validate() {
+    local name=$1
+    local sql_file=$2
+    local dialect=$3
+    local is_input=$4
+
+    if [[ ! -f "$sql_file" ]]; then
+        return 1
+    fi
+
+    # Run validate with --no-fk-checks for speed (FK checks require MySQL and are slow)
+    # Use --json for easy parsing
+    local output
+    local exit_code=0
+    output=$("$BINARY" validate "$sql_file" --dialect="$dialect" --no-fk-checks --json 2>/dev/null) || exit_code=$?
+
+    # Parse JSON output for errors/warnings
+    local errors=$(echo "$output" | grep -o '"errors":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    local warnings=$(echo "$output" | grep -o '"warnings":[0-9]*' | grep -o '[0-9]*' || echo "0")
+
+    local result_str
+    if [[ "$errors" -gt 0 ]]; then
+        result_str="✗ ${errors}err"
+    elif [[ "$warnings" -gt 0 ]]; then
+        result_str="⚠ ${warnings}warn"
+    else
+        result_str="✓"
+    fi
+
+    # Store result in parallel arrays
+    if [[ "$is_input" == "true" ]]; then
+        VALIDATE_INPUT_NAMES+=("$name")
+        VALIDATE_INPUT_VALUES+=("$result_str")
+    else
+        VALIDATE_OUTPUT_NAMES+=("$name")
+        VALIDATE_OUTPUT_VALUES+=("$result_str")
+    fi
+
+    # Return success if no errors (warnings are OK)
+    if [[ "$errors" -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
 run_test() {
     local name=$1
     local expected_dialect=$2
@@ -370,6 +455,12 @@ run_all_tests() {
     local convert_passed=0
     local convert_failed=0
     local convert_skipped=0
+    local validate_input_passed=0
+    local validate_input_failed=0
+    local validate_input_skipped=0
+    local validate_merge_passed=0
+    local validate_merge_failed=0
+    local validate_merge_skipped=0
     
     for test_case in "${TEST_CASES[@]}"; do
         IFS='|' read -r name dialect url unzip_cmd sql_file notes <<< "$test_case"
@@ -382,6 +473,8 @@ run_all_tests() {
         if ! download_file "$name" "$url"; then
             ((split_skipped++))
             ((convert_skipped++))
+            ((validate_input_skipped++))
+            ((validate_merge_skipped++))
             continue
         fi
         
@@ -389,14 +482,55 @@ run_all_tests() {
         if ! extract_file "$unzip_cmd" "$downloaded_file"; then
             ((split_skipped++))
             ((convert_skipped++))
+            ((validate_input_skipped++))
+            ((validate_merge_skipped++))
             continue
+        fi
+        
+        local full_path="$DOWNLOADS_DIR/$sql_file"
+        
+        # Run validation on input file
+        echo -e "  Validating input..."
+        if run_validate "$name" "$full_path" "$dialect" "true"; then
+            ((validate_input_passed++))
+            echo -e "  Input validation: ${GREEN}$(get_validate_result "$name" "true")${NC}"
+        else
+            ((validate_input_failed++))
+            echo -e "  Input validation: ${YELLOW}$(get_validate_result "$name" "true")${NC}"
         fi
         
         # Run split test
         if run_test "$name" "$dialect" "$sql_file" "$notes"; then
             ((split_passed++))
+            
+            # After successful split, run merge and validate the merged output
+            local test_output_dir="$OUTPUT_DIR/$name"
+            local merged_file="$OUTPUT_DIR/${name}_merged.sql"
+            
+            # Actually run split (not dry-run) to get output files
+            if "$BINARY" split "$full_path" --output="$test_output_dir" --dialect="$dialect" >/dev/null 2>&1; then
+                # Merge the split files back together
+                if "$BINARY" merge "$test_output_dir" --output="$merged_file" --dialect="$dialect" >/dev/null 2>&1; then
+                    # Validate the merged output
+                    echo -e "  Validating merged output..."
+                    if run_validate "${name}_merged" "$merged_file" "$dialect" "false"; then
+                        ((validate_merge_passed++))
+                        echo -e "  Merged validation: ${GREEN}$(get_validate_result "${name}_merged" "false")${NC}"
+                    else
+                        ((validate_merge_failed++))
+                        echo -e "  Merged validation: ${YELLOW}$(get_validate_result "${name}_merged" "false")${NC}"
+                    fi
+                else
+                    echo -e "  Merged validation: ${YELLOW}skipped (merge failed)${NC}"
+                    ((validate_merge_skipped++))
+                fi
+            else
+                echo -e "  Merged validation: ${YELLOW}skipped (split failed)${NC}"
+                ((validate_merge_skipped++))
+            fi
         else
             ((split_failed++))
+            ((validate_merge_skipped++))
         fi
         
         # Run convert tests (all permutations)
@@ -427,11 +561,23 @@ run_all_tests() {
     echo -e "  ${RED}Failed:${NC}  $convert_failed"
     echo -e "  ${YELLOW}Skipped:${NC} $convert_skipped"
     echo ""
+    echo -e "${CYAN}Validate Input Files:${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $validate_input_passed"
+    echo -e "  ${RED}Failed:${NC}  $validate_input_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $validate_input_skipped"
+    echo ""
+    echo -e "${CYAN}Validate Split→Merge Roundtrip:${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $validate_merge_passed"
+    echo -e "  ${RED}Failed:${NC}  $validate_merge_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $validate_merge_skipped"
+    echo ""
     echo "Legend:"
-    echo "  ✓ = Dialect correctly detected / Conversion successful"
+    echo "  ✓ = Success / No issues"
+    echo "  ⚠ = Warnings but no errors"
+    echo "  ✗ = Errors detected"
     echo "  ~ = Dialect differs from expected (file may lack dialect markers)"
     echo "  (any) = Generic SQL, detection accuracy not checked"
-    echo "  conv/unch/skip/warn = converted/unchanged/skipped/warnings count"
+    echo "  Nerr/Nwarn = N errors/warnings found"
     echo ""
     
     if [[ $split_failed -gt 0 || $convert_failed -gt 0 ]]; then

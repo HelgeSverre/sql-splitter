@@ -125,6 +125,35 @@ Features:
 - Session command stripping for all dialects
 - Warnings for unsupported features (ENUM, arrays, triggers)
 
+### validate
+
+Validate SQL dump integrity with comprehensive checks.
+
+```bash
+sql-splitter validate dump.sql                    # validate MySQL dump
+sql-splitter validate dump.sql --dialect=postgres # specify dialect
+sql-splitter validate dump.sql --strict           # treat warnings as errors
+sql-splitter validate dump.sql --json             # JSON output for CI
+sql-splitter validate dump.sql --no-fk-checks     # skip heavy data checks
+```
+
+Options:
+- `-d, --dialect <DIALECT>`: SQL dialect (auto-detected if omitted)
+- `--strict`: Treat warnings as errors (exit 1 on any warning)
+- `--json`: Output results as JSON for programmatic parsing
+- `--max-rows-per-table <N>`: Max rows per table for PK/FK checks (default: 1,000,000)
+- `--no-fk-checks`: Skip PK/FK data integrity checks
+- `-p, --progress`: Show progress bar
+
+Validation checks:
+- SQL syntax validation (parser error detection)
+- DDL/DML consistency (INSERTs reference existing tables)
+- Encoding validation (UTF-8)
+- Duplicate primary key detection (MySQL only)
+- FK referential integrity (MySQL only)
+
+Note: PK/FK data checks are MySQL-only; PostgreSQL and SQLite emit an info message.
+
 ### completions
 
 Generate shell completions for bash, zsh, or fish.
@@ -183,6 +212,7 @@ Files are auto-detected by extension:
 - [src/merger/](https://github.com/helgesverre/sql-splitter/tree/main/src/merger): Merge orchestration
 - [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
 - [src/convert/](https://github.com/helgesverre/sql-splitter/tree/main/src/convert): Dialect conversion
+- [src/validate/](https://github.com/helgesverre/sql-splitter/tree/main/src/validate): Dump validation
 - [crates/test_data_gen/](https://github.com/helgesverre/sql-splitter/tree/main/crates/test_data_gen): Test fixture generator
 
 ## Optional

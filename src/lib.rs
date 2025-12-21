@@ -9,4 +9,5 @@ pub mod sample;
 pub mod schema;
 pub mod shard;
 pub mod splitter;
+pub mod validate;
 pub mod writer;

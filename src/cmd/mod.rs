@@ -4,6 +4,7 @@ mod merge;
 mod sample;
 mod shard;
 mod split;
+mod validate;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -270,6 +271,36 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Validate a SQL dump for structural and data integrity issues
+    Validate {
+        /// Input SQL file (supports .gz, .bz2, .xz, .zst compression)
+        file: PathBuf,
+
+        /// SQL dialect: mysql, postgres, sqlite (auto-detected if not specified)
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Show progress during validation
+        #[arg(short, long)]
+        progress: bool,
+
+        /// Treat warnings as errors (non-zero exit on any warning)
+        #[arg(long)]
+        strict: bool,
+
+        /// Output results as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum rows per table for heavy checks (PK/FK)
+        #[arg(long, default_value = "1000000")]
+        max_rows_per_table: usize,
+
+        /// Disable PK/FK data integrity checks
+        #[arg(long)]
+        no_fk_checks: bool,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -404,6 +435,23 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             progress,
             dry_run,
         } => convert::run(file, output, from, to, strict, progress, dry_run),
+        Commands::Validate {
+            file,
+            dialect,
+            progress,
+            strict,
+            json,
+            max_rows_per_table,
+            no_fk_checks,
+        } => validate::run(
+            file,
+            dialect,
+            progress,
+            strict,
+            json,
+            max_rows_per_table,
+            no_fk_checks,
+        ),
         Commands::Completions { shell } => {
             generate(
                 shell,

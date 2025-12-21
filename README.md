@@ -76,6 +76,15 @@ sql-splitter convert dump.sql -o sqlite_dump.sql --to sqlite
 # Convert with explicit source dialect
 sql-splitter convert dump.sql --from postgres --to mysql -o output.sql
 
+# Validate SQL dump integrity
+sql-splitter validate dump.sql
+
+# Validate with strict mode (warnings = errors)
+sql-splitter validate dump.sql --strict
+
+# Validate with JSON output for CI
+sql-splitter validate dump.sql --json
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -166,6 +175,26 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 - PostgreSQL COPY → INSERT with NULL and escape handling
 - Session command stripping
 - Warnings for unsupported features (ENUM, arrays, triggers)
+
+### Validate Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
+| `--strict` | Treat warnings as errors (exit 1) | — |
+| `--json` | Output results as JSON | — |
+| `--max-rows-per-table` | Max rows per table for PK/FK checks | 1,000,000 |
+| `--no-fk-checks` | Skip PK/FK data integrity checks | — |
+| `-p, --progress` | Show progress bar | — |
+
+**Validation checks:**
+- SQL syntax validation (parser errors)
+- DDL/DML consistency (INSERTs reference existing tables)
+- Encoding validation (UTF-8)
+- Duplicate primary key detection (MySQL only)
+- FK referential integrity (MySQL only)
+
+**Note:** PK/FK data checks are MySQL-only; PostgreSQL and SQLite emit an info message.
 
 ## Performance
 

@@ -10,6 +10,7 @@ mod sample;
 mod schema;
 mod shard;
 mod splitter;
+mod validate;
 mod writer;
 
 use clap::Parser;

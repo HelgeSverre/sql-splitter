@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2025-12-21
+
+### Added
+
+- **Validate command**: Check SQL dump integrity with comprehensive validation
+  - `sql-splitter validate dump.sql` - Validate a SQL dump file
+  - `--dialect` flag to specify dialect (mysql, postgres, sqlite - auto-detected if not specified)
+  - `--strict` flag to treat warnings as errors (non-zero exit on any warning)
+  - `--json` flag to output results as JSON for programmatic parsing
+  - `--max-rows-per-table` flag to limit memory usage for PK/FK checks (default: 1,000,000)
+  - `--no-fk-checks` flag to disable heavy data integrity checks
+  - `--progress` flag to show validation progress
+  - Supports compressed input files (.gz, .bz2, .xz, .zst)
+- **Validation checks**:
+  - **SQL syntax validation**: Detects parser errors and malformed statements
+  - **DDL/DML consistency**: Finds INSERTs referencing tables with no CREATE TABLE
+  - **Encoding validation**: Warns on invalid UTF-8 byte sequences
+  - **Duplicate primary key detection** (MySQL only): Finds rows with duplicate PKs
+  - **FK referential integrity** (MySQL only): Detects FK violations where child references missing parent
+- **Output formats**:
+  - Human-readable text output with colored severity levels
+  - JSON output for CI/automation integration
+  - Detailed summary with per-check status
+- 32 integration tests for validate command including:
+  - Basic validation tests (valid dump, missing tables, duplicate PK, FK violations)
+  - test_data_gen fixture tests for realistic multi-table scenarios
+  - Split→Merge→Validate roundtrip tests for all 3 dialects
+  - Edge case tests (empty files, comments-only, composite PKs/FKs, self-referential FKs)
+
+### Changed
+
+- Added `serde_json` dependency for JSON output support
+
 ## [1.7.0] - 2025-12-21
 
 ### Added
