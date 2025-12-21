@@ -8,29 +8,56 @@ High-performance CLI tool written in Rust for splitting large SQL dump files int
 
 ## Available Commands
 
+### Makefile Commands
+
+Run `make help` to see all available commands. Key commands:
+
+| Command | Description |
+|---------|-------------|
+| `make build` | Debug build |
+| `make release` | Release build |
+| `make native` | Optimized build for current CPU (best performance) |
+| `make test` | Run all tests |
+| `make bench` | Run criterion benchmarks |
+| `make fmt` | Format code |
+| `make check` | Check code without building |
+| `make clippy` | Run clippy lints |
+| `make clean` | Clean build artifacts |
+| `make install` | Install locally (binary + shell completions) |
+| `make verify-realworld` | Verify against real-world SQL dumps |
+| `make website-deploy` | Deploy website to Vercel |
+| `make docker-bench` | Run benchmarks in Docker (generates 100MB test data) |
+
 ### Building and Running
 
 ```bash
 # Build (debug)
 cargo build
+# or: make build
 
 # Build (release)
 cargo build --release
+# or: make release
 
 # Build optimized for current CPU (best for benchmarking)
 RUSTFLAGS="-C target-cpu=native" cargo build --release
-# or
-make build-native
+# or: make native
 
 # Run tests
 cargo test
-# or
-make test
+# or: make test
 
 # Run benchmarks
 cargo bench
-# or
-make bench
+# or: make bench
+
+# Run clippy lints
+cargo clippy -- -D warnings
+# or: make clippy
+
+# Format code
+cargo fmt
+# or: make fmt
 ```
 
 ### Main Commands
