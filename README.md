@@ -86,6 +86,12 @@ sql-splitter validate dump.sql --strict
 # Validate with JSON output for CI
 sql-splitter validate dump.sql --json
 
+# Batch operations with glob patterns
+sql-splitter validate "dumps/*.sql" --fail-fast
+sql-splitter analyze "**/*.sql"
+sql-splitter split "*.sql" -o output/
+sql-splitter convert "*.sql" --to postgres -o converted/
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -110,18 +116,18 @@ sql-splitter is a **dump-first, CLI-first** tool designed for automation and CI/
 
 **What it's optimized for**
 
-| Strength | Description |
-|----------|-------------|
-| **One tool for the workflow** | Split → sample → shard → convert → merge in a single binary |
-| **Works on dump files** | No running database or JDBC connection needed (unlike mydumper, Jailer, Condenser) |
-| **Streaming architecture** | 10GB+ dumps with constant memory, 600+ MB/s throughput |
-| **Multi-dialect + conversion** | MySQL, PostgreSQL, SQLite including `COPY FROM stdin` → INSERT |
-| **FK-aware operations** | Sampling and tenant sharding preserve referential integrity |
+| Strength                       | Description                                                                        |
+|--------------------------------|------------------------------------------------------------------------------------|
+| **One tool for the workflow**  | Split → sample → shard → convert → merge in a single binary                        |
+| **Works on dump files**        | No running database or JDBC connection needed (unlike mydumper, Jailer, Condenser) |
+| **Streaming architecture**     | 10GB+ dumps with constant memory, 600+ MB/s throughput                             |
+| **Multi-dialect + conversion** | MySQL, PostgreSQL, SQLite including `COPY FROM stdin` → INSERT                     |
+| **FK-aware operations**        | Sampling and tenant sharding preserve referential integrity                        |
 
 **When another tool might be better**
 
 - **[mydumper](https://github.com/mydumper/mydumper)** — Parallel snapshots from live MySQL/MariaDB databases
-- **[Jailer](https://github.com/Wisser/Jailer)** — Rich GUI-based FK subsetting with JDBC across 12+ databases  
+- **[Jailer](https://github.com/Wisser/Jailer)** — Rich GUI-based FK subsetting with JDBC across 12+ databases
 - **[sqlglot](https://github.com/tobymao/sqlglot)** — Query-level transpilation and AST manipulation (31 dialects)
 - **[DuckDB](https://github.com/duckdb/duckdb)** — Complex analytical queries over SQL/CSV/JSON/Parquet
 
@@ -131,46 +137,54 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 
 ### Split Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output directory | `output` |
-| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
-| `-t, --tables` | Only split these tables (comma-separated) | — |
-| `-p, --progress` | Show progress bar | — |
-| `--dry-run` | Preview without writing files | — |
-| `--schema-only` | Only DDL statements (CREATE, ALTER, DROP) | — |
-| `--data-only` | Only DML statements (INSERT, COPY) | — |
+| Flag             | Description                                | Default     |
+|------------------|--------------------------------------------|-------------|
+| `-o, --output`   | Output directory                           | `output`    |
+| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
+| `-t, --tables`   | Only split these tables (comma-separated)  | —           |
+| `-p, --progress` | Show progress bar                          | —           |
+| `--dry-run`      | Preview without writing files              | —           |
+| `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)  | —           |
+| `--data-only`    | Only DML statements (INSERT, COPY)         | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)    | —           |
+
+Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Merge Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output SQL file | stdout |
-| `-d, --dialect` | SQL dialect for headers/footers | `mysql` |
-| `-t, --tables` | Only merge these tables (comma-separated) | all |
-| `-e, --exclude` | Exclude these tables (comma-separated) | — |
-| `--transaction` | Wrap in BEGIN/COMMIT transaction | — |
-| `--no-header` | Skip header comments | — |
-| `-p, --progress` | Show progress bar | — |
-| `--dry-run` | Preview without writing files | — |
+| Flag             | Description                               | Default |
+|------------------|-------------------------------------------|---------|
+| `-o, --output`   | Output SQL file                           | stdout  |
+| `-d, --dialect`  | SQL dialect for headers/footers           | `mysql` |
+| `-t, --tables`   | Only merge these tables (comma-separated) | all     |
+| `-e, --exclude`  | Exclude these tables (comma-separated)    | —       |
+| `--transaction`  | Wrap in BEGIN/COMMIT transaction          | —       |
+| `--no-header`    | Skip header comments                      | —       |
+| `-p, --progress` | Show progress bar                         | —       |
+| `--dry-run`      | Preview without writing files             | —       |
 
 ### Convert Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output SQL file | stdout |
-| `--from` | Source dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
-| `--to` | Target dialect: `mysql`, `postgres`, `sqlite` | required |
-| `--strict` | Fail on any unsupported feature | — |
-| `-p, --progress` | Show progress bar | — |
-| `--dry-run` | Preview without writing files | — |
+| Flag             | Description                                      | Default     |
+|------------------|--------------------------------------------------|-------------|
+| `-o, --output`   | Output SQL file or directory (required for glob) | stdout      |
+| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`    | auto-detect |
+| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`    | required    |
+| `--strict`       | Fail on any unsupported feature                  | —           |
+| `-p, --progress` | Show progress bar                                | —           |
+| `--dry-run`      | Preview without writing files                    | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)          | —           |
+
+Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 **Supported conversions:**
+
 - MySQL ↔ PostgreSQL (including COPY → INSERT)
 - MySQL ↔ SQLite
 - PostgreSQL ↔ SQLite
 
 **Features:**
+
 - 30+ data type mappings
 - AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY
 - PostgreSQL COPY → INSERT with NULL and escape handling
@@ -179,16 +193,21 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 
 ### Validate Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
-| `--strict` | Treat warnings as errors (exit 1) | — |
-| `--json` | Output results as JSON | — |
-| `--max-rows-per-table` | Max rows per table for PK/FK checks | 1,000,000 |
-| `--no-fk-checks` | Skip PK/FK data integrity checks | — |
-| `-p, --progress` | Show progress bar | — |
+| Flag                   | Description                                        | Default     |
+|------------------------|----------------------------------------------------|-------------|
+| `-d, --dialect`        | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
+| `--strict`             | Treat warnings as errors (exit 1)                  | —           |
+| `--json`               | Output results as JSON                             | —           |
+| `--max-rows-per-table` | Max rows per table for PK/FK checks (0 = no limit) | 1,000,000   |
+| `--no-limit`           | Disable row limit for PK/FK checks                 | —           |
+| `--no-fk-checks`       | Skip PK/FK data integrity checks                   | —           |
+| `-p, --progress`       | Show progress bar                                  | —           |
+| `--fail-fast`          | Stop on first error (for glob patterns)            | —           |
+
+Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 **Validation checks:**
+
 - SQL syntax validation (parser errors)
 - DDL/DML consistency (INSERTs reference existing tables)
 - Encoding validation (UTF-8)
@@ -207,6 +226,18 @@ cargo test
 
 # Verify against real-world SQL dumps (MySQL, PostgreSQL, WordPress, etc.)
 make verify-realworld
+```
+
+## AI Agent Integration
+
+sql-splitter includes documentation optimized for AI agents:
+
+- **[llms.txt](website/llms.txt)** - LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification
+- **[Agent Skill](skills/sql-splitter/SKILL.md)** - Claude Code / Amp skill for automatic tool discovery
+
+Install the skill in Claude Code / Amp:
+```bash
+amp skill add helgesverre/sql-splitter
 ```
 
 ## License
