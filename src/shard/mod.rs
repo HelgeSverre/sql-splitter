@@ -187,13 +187,22 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
 
     let mut stats = ShardStats::default();
 
+    // Get file size for progress tracking
+    let file_size = std::fs::metadata(&config.input)?.len();
+
+    // Progress bar setup - byte-based for the split phase
     let progress_bar = if config.progress {
-        let pb = ProgressBar::new_spinner();
+        let pb = ProgressBar::new(file_size);
         pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░  ")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.set_message("Splitting dump...");
         Some(pb)
     } else {
         None
@@ -203,26 +212,34 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     let temp_dir = TempDir::new()?;
     let tables_dir = temp_dir.path().join("tables");
 
-    if let Some(ref pb) = progress_bar {
-        pb.set_message("Splitting dump into per-table files...");
-    }
-
-    let splitter = Splitter::new(config.input.clone(), tables_dir.clone())
+    let mut splitter = Splitter::new(config.input.clone(), tables_dir.clone())
         .with_dialect(config.dialect)
         .with_content_filter(ContentFilter::All);
 
+    if let Some(ref pb) = progress_bar {
+        let pb_clone = pb.clone();
+        splitter = splitter.with_progress(move |bytes| {
+            pb_clone.set_position(bytes);
+        });
+    }
+
     let split_stats = splitter.split()?;
 
+    // Finish byte-based progress, switch to milestone messages
     if let Some(ref pb) = progress_bar {
-        pb.set_message(format!(
+        pb.finish_and_clear();
+    }
+
+    if config.progress {
+        eprintln!(
             "Split complete: {} tables, {} statements",
             split_stats.tables_found, split_stats.statements_processed
-        ));
+        );
     }
 
     // Phase 1: Build schema graph
-    if let Some(ref pb) = progress_bar {
-        pb.set_message("Building schema graph...");
+    if config.progress {
+        eprintln!("Building schema graph...");
     }
 
     let graph = build_schema_graph(&tables_dir, &config)?;
@@ -231,8 +248,8 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     let tenant_column = detect_tenant_column(&config, &yaml_config, &graph)?;
     stats.detected_tenant_column = Some(tenant_column.clone());
 
-    if let Some(ref pb) = progress_bar {
-        pb.set_message(format!("Using tenant column: {}", tenant_column));
+    if config.progress {
+        eprintln!("Using tenant column: {}", tenant_column);
     }
 
     // Parse tenant value
@@ -297,12 +314,12 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     }
 
     // Phase 3: Process tables in dependency order
-    if let Some(ref pb) = progress_bar {
-        pb.set_message(format!(
+    if config.progress {
+        eprintln!(
             "Processing {} tables for tenant {}...",
             topo_order.len() + cyclic_tables.len(),
             config.tenant_value
-        ));
+        );
     }
 
     let all_tables: Vec<TableId> = topo_order.into_iter().chain(cyclic_tables).collect();
@@ -500,8 +517,8 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     }
     stats.tables_processed = stats.table_stats.len();
 
-    if let Some(ref pb) = progress_bar {
-        pb.finish_with_message("Processing complete");
+    if config.progress {
+        eprintln!("Processing complete");
     }
 
     // Phase 4: Output synthesis

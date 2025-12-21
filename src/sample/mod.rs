@@ -205,14 +205,22 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     let mut rng = StdRng::seed_from_u64(config.seed);
     let mut stats = SampleStats::default();
 
-    // Progress bar setup
+    // Get file size for progress tracking
+    let file_size = std::fs::metadata(&config.input)?.len();
+
+    // Progress bar setup - byte-based for the split phase
     let progress_bar = if config.progress {
-        let pb = ProgressBar::new_spinner();
+        let pb = ProgressBar::new(file_size);
         pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░  ")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.set_message("Splitting dump...");
         Some(pb)
     } else {
         None
@@ -222,26 +230,34 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     let temp_dir = TempDir::new()?;
     let tables_dir = temp_dir.path().join("tables");
 
-    if let Some(ref pb) = progress_bar {
-        pb.set_message("Splitting dump into per-table files...");
-    }
-
-    let splitter = Splitter::new(config.input.clone(), tables_dir.clone())
+    let mut splitter = Splitter::new(config.input.clone(), tables_dir.clone())
         .with_dialect(config.dialect)
         .with_content_filter(ContentFilter::All);
 
+    if let Some(ref pb) = progress_bar {
+        let pb_clone = pb.clone();
+        splitter = splitter.with_progress(move |bytes| {
+            pb_clone.set_position(bytes);
+        });
+    }
+
     let split_stats = splitter.split()?;
 
+    // Finish byte-based progress, switch to milestone messages
     if let Some(ref pb) = progress_bar {
-        pb.set_message(format!(
+        pb.finish_and_clear();
+    }
+
+    if config.progress {
+        eprintln!(
             "Split complete: {} tables, {} statements",
             split_stats.tables_found, split_stats.statements_processed
-        ));
+        );
     }
 
     // Phase 1: Build schema graph
-    if let Some(ref pb) = progress_bar {
-        pb.set_message("Building schema graph...");
+    if config.progress {
+        eprintln!("Building schema graph...");
     }
 
     let graph = build_schema_graph(&tables_dir, &config)?;
@@ -296,11 +312,8 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     }
 
     // Phase 2: Process tables in dependency order
-    if let Some(ref pb) = progress_bar {
-        pb.set_message(format!(
-            "Sampling {} tables in dependency order...",
-            topo_order.len()
-        ));
+    if config.progress {
+        eprintln!("Sampling {} tables in dependency order...", topo_order.len());
     }
 
     // Process acyclic tables first, then cyclic tables
@@ -491,8 +504,8 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     }
     stats.tables_sampled = stats.table_stats.len();
 
-    if let Some(ref pb) = progress_bar {
-        pb.finish_with_message("Sampling complete");
+    if config.progress {
+        eprintln!("Sampling complete");
     }
 
     // Phase 3: Output synthesis
