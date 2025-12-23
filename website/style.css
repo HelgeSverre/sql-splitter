@@ -648,6 +648,20 @@ footer .credit {
     .options-table td {
         padding: 0.375rem 0.5rem;
     }
+
+    /* Code block overflow fix for mobile */
+    .code-block pre {
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        word-break: break-word;
+    }
+
+    .code-block code {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+    }
 }
 
 /* Light mode override */
