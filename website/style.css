@@ -398,7 +398,7 @@ p {
 }
 
 /* Shell Syntax Highlighting Classes */
-.sh-comment { color: #3d6a47; font-style: italic; }
+.sh-comment { color: var(--syn-comment); font-style: italic; }
 .sh-tool { color: var(--cmd-split); }
 
 .copy-btn {
@@ -423,7 +423,7 @@ p {
 
 .copy-btn.copied {
     background: var(--cmd-validate);
-    color: #0a0a0a;
+    color: var(--color-bg);
     border-color: var(--cmd-validate);
 }
 
