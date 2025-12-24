@@ -21,29 +21,63 @@ Current workarounds require manual inspection or database introspection tools th
 
 ## Command Interface
 
-### Graph Export
+### Simple Database Diagram Mode (Default)
+
+The easiest way to visualize your database schema:
+
+```bash
+# Generate complete database diagram (auto-detects best format)
+sql-splitter diagram dump.sql
+
+# Opens Mermaid diagram in default browser
+# Shows all tables with FK relationships
+
+# Save to specific format
+sql-splitter diagram dump.sql -o schema.png
+sql-splitter diagram dump.sql -o schema.svg
+sql-splitter diagram dump.sql -o schema.pdf
+
+# Open diagram after generating
+sql-splitter diagram dump.sql --open
+
+# Exclude system/migration tables automatically
+sql-splitter diagram dump.sql --clean
+```
+
+**Note:** `diagram` is an alias for `graph --simple`. It automatically:
+- Excludes common system tables (migrations, schema_versions, etc.)
+- Uses sensible layout defaults
+- Renders to visual format (PNG/SVG) if possible
+- Groups related tables visually
+
+### Advanced Graph Export
+
+For more control and analysis:
 
 ```bash
 # Export as Graphviz DOT format
 sql-splitter graph dump.sql -o schema.dot
 
-# Export as Mermaid diagram
+# Export as Mermaid diagram (paste into GitHub/GitLab)
 sql-splitter graph dump.sql -o schema.mmd --format mermaid
 
 # Export as JSON for custom processing
 sql-splitter graph dump.sql -o graph.json --format json
 
-# Show only cycles
+# Show only tables involved in circular dependencies
 sql-splitter graph dump.sql --cycles-only
 
-# Filter to specific tables
+# Filter to specific tables and their relationships
 sql-splitter graph dump.sql --tables "users,orders,products"
 
 # Exclude system tables
 sql-splitter graph dump.sql --exclude "migrations,schema_*"
 
-# Show transitive dependencies
+# Show all tables that depend on 'users' (transitive)
 sql-splitter graph dump.sql --table users --transitive
+
+# Show what references 'users' (reverse dependencies)
+sql-splitter graph dump.sql --table users --reverse
 ```
 
 ### Topological Ordering
@@ -61,13 +95,33 @@ sql-splitter order dump.sql --dry-run
 
 ## CLI Options
 
-### Graph Command
+### Diagram Command (Simple Mode)
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-o, --output` | Output file (.png, .svg, .pdf, .html) | schema.html |
+| `--open` | Open diagram in browser after generation | false |
+| `--clean` | Exclude common system tables | true |
+| `--layout` | Layout algorithm: `lr`, `tb`, `radial` | lr |
+| `--theme` | Color theme: `default`, `dark`, `minimal` | default |
+| `-d, --dialect` | SQL dialect | auto-detect |
+
+**Supported output formats:**
+- `.html` — Interactive Mermaid diagram (default, opens in browser)
+- `.png` — PNG image (requires Graphviz)
+- `.svg` — SVG vector graphic (requires Graphviz)
+- `.pdf` — PDF document (requires Graphviz)
+- `.mmd` — Mermaid source (paste into GitHub/GitLab)
+- `.dot` — Graphviz DOT source
+
+### Graph Command (Advanced Mode)
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-o, --output` | Output file path | stdout |
-| `-f, --format` | Output format: `dot`, `mermaid`, `json` | dot |
+| `-f, --format` | Output format: `dot`, `mermaid`, `json`, `html` | dot |
 | `-d, --dialect` | SQL dialect | auto-detect |
+| `--simple` | Use simplified output (same as `diagram`) | false |
 | `--cycles-only` | Show only tables involved in cycles | false |
 | `--table` | Focus on specific table | all |
 | `--transitive` | Show transitive dependencies | false |
@@ -75,6 +129,9 @@ sql-splitter order dump.sql --dry-run
 | `--exclude` | Exclude tables (glob patterns) | none |
 | `--reverse` | Show reverse dependencies (who references X) | false |
 | `--max-depth` | Limit dependency depth | unlimited |
+| `--layout` | Layout algorithm: `lr`, `tb`, `radial`, `dot` | lr |
+| `--theme` | Color theme: `default`, `dark`, `minimal` | default |
+| `--render` | Auto-render to PNG/SVG (requires Graphviz) | false |
 
 ### Order Command
 
@@ -87,6 +144,45 @@ sql-splitter order dump.sql --dry-run
 | `--reverse` | Order children before parents | false |
 
 ## Output Formats
+
+### 0. Interactive HTML (Default for `diagram` command)
+
+Self-contained HTML file with embedded Mermaid diagram:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Database Schema - dump.sql</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <div class="mermaid">
+    graph LR
+      users[users<br/>5 columns]
+      orders[orders<br/>8 columns]
+      products[products<br/>10 columns]
+
+      orders -->|user_id| users
+      order_items -->|order_id| orders
+      order_items -->|product_id| products
+  </div>
+</body>
+</html>
+```
+
+**Features:**
+- No external dependencies (opens directly in browser)
+- Interactive: hover to highlight, click to focus
+- Responsive layout
+- Dark mode support
+- Zoom and pan
+
+**Usage:**
+```bash
+sql-splitter diagram dump.sql
+# Opens schema.html in default browser automatically
+```
 
 ### 1. Graphviz DOT
 
@@ -168,17 +264,21 @@ graph LR
 ```
 src/
 ├── cmd/
-│   ├── graph.rs           # CLI handler for graph command
+│   ├── diagram.rs         # CLI handler for diagram command (simple mode)
+│   ├── graph.rs           # CLI handler for graph command (advanced)
 │   └── order.rs           # CLI handler for order command
 ├── graph/
 │   ├── mod.rs             # Public API
 │   ├── builder.rs         # Build graph from schema
 │   ├── cycles.rs          # Cycle detection (Tarjan's SCC)
 │   ├── topo_sort.rs       # Topological sorting
+│   ├── simplify.rs        # Auto-exclude system tables, group tables
 │   ├── output/
+│   │   ├── html.rs        # Interactive HTML with Mermaid
 │   │   ├── dot.rs         # Graphviz DOT writer
 │   │   ├── mermaid.rs     # Mermaid writer
-│   │   └── json.rs        # JSON writer
+│   │   ├── json.rs        # JSON writer
+│   │   └── render.rs      # Auto-render to PNG/SVG (via Graphviz)
 │   └── analysis.rs        # Dependency analysis
 ```
 
@@ -413,17 +513,30 @@ Many schemas have implicit relationships without FK constraints.
 
 ## Example Workflows
 
-### 1. Generate Documentation
+### 1. Quick Database Visualization (Simplest)
 
 ```bash
+# Generate and open interactive diagram immediately
+sql-splitter diagram dump.sql
+
+# That's it! Browser opens with your schema diagram.
+```
+
+### 2. Generate Documentation
+
+```bash
+# Simple mode - automatic cleanup and formatting
+sql-splitter diagram prod.sql -o docs/schema.png
+
+# Advanced mode - full control
 sql-splitter graph prod.sql -o docs/schema.dot
 dot -Tpng docs/schema.dot -o docs/schema.png
 
-# Or for web-friendly Mermaid
-sql-splitter graph prod.sql -o docs/schema.mmd --format mermaid
+# Or for GitHub/GitLab markdown
+sql-splitter diagram prod.sql -o docs/schema.mmd
 ```
 
-### 2. Find Problematic Cycles
+### 3. Find Problematic Cycles
 
 ```bash
 sql-splitter graph dump.sql --cycles-only
@@ -433,7 +546,7 @@ sql-splitter graph dump.sql --cycles-only
 #   2. users -> groups -> users (admin_id, owner_id)
 ```
 
-### 3. Plan Migration
+### 4. Plan Migration
 
 ```bash
 # What tables depend on 'users'?
@@ -443,7 +556,7 @@ sql-splitter graph dump.sql --table users --reverse
 sql-splitter graph dump.sql --table orders --transitive
 ```
 
-### 4. Safe Import Order
+### 5. Safe Import Order
 
 ```bash
 sql-splitter order messy.sql -o clean.sql
@@ -480,12 +593,21 @@ sql-splitter order clean.sql --check
 | Topological sort (Kahn's) | 2 hours |
 | DOT output writer | 1 hour |
 | Mermaid output writer | 1 hour |
+| HTML output writer (interactive) | 2 hours |
 | JSON output writer | 30 min |
+| Table simplification/cleanup | 1 hour |
+| Diagram command (simple mode) | 2 hours |
+| Auto-render to PNG/SVG | 1.5 hours |
 | Order command | 1 hour |
 | CLI integration | 1 hour |
-| Testing | 3 hours |
+| Testing | 4 hours |
 | Documentation | 1 hour |
-| **Total** | **~8 hours** |
+| **Total** | **~12 hours** |
+
+**Note:** Effort increased from initial estimate due to:
+- Interactive HTML output with Mermaid
+- Simplified `diagram` command for better UX
+- Auto-rendering capabilities
 
 ## Future Enhancements
 

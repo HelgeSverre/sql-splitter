@@ -370,15 +370,19 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| Graph | ~8h | Export schema graph |
+| Graph | ~12h | Export schema graph + simple diagram mode |
 
 **Features:**
-- Export FK dependency graph (DOT, Mermaid, JSON)
+- **Simple mode:** `sql-splitter diagram dump.sql` (opens interactive HTML)
+- Export FK dependency graph (DOT, Mermaid, JSON, HTML)
 - Cycle detection and reporting
 - Topological ordering
 - Table dependency analysis
+- Auto-render to PNG/SVG/PDF
 
 **Deliverables:**
+- `sql-splitter diagram dump.sql` (simple mode - opens in browser)
+- `sql-splitter diagram dump.sql -o schema.png` (auto-render)
 - `sql-splitter graph dump.sql -o schema.dot --format dot`
 - `sql-splitter graph dump.sql --format mermaid`
 - `sql-splitter graph dump.sql --cycles-only`
@@ -544,7 +548,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v1.11.0 | Graph | ~8h | 1 week |
+| v1.11.0 | Graph + Diagram | ~12h | 1 week |
 | v1.12.0 | Query | ~30h | 2 weeks |
 | v1.13.0 | Detect-PII | ~8h | 1 week |
 | v1.14.0 | MSSQL | ~30h | 2 weeks |
