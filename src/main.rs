@@ -5,6 +5,7 @@ mod analyzer;
 mod cmd;
 mod convert;
 mod differ;
+mod duckdb;
 mod graph;
 mod merger;
 mod parser;

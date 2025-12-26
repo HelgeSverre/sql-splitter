@@ -8,7 +8,6 @@ use sql_splitter::parser::{Parser, StatementType};
 use sql_splitter::schema::{SchemaBuilder, SchemaGraph};
 use std::fs::File;
 
-
 /// Build a schema graph from a fixture
 fn build_graph(fixture: &Fixture) -> Option<SchemaGraph> {
     let file = File::open(&fixture.sql_path).ok()?;
@@ -17,7 +16,8 @@ fn build_graph(fixture: &Fixture) -> Option<SchemaGraph> {
 
     while let Some(stmt) = parser.read_statement().ok()? {
         let stmt_str = String::from_utf8_lossy(&stmt);
-        let (stmt_type, _) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, fixture.dialect());
+        let (stmt_type, _) =
+            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, fixture.dialect());
 
         match stmt_type {
             StatementType::CreateTable => {
@@ -76,12 +76,18 @@ fn run_graph_tests(case: &'static super::cases::TestCase) {
 
     // Test DOT format
     let dot = to_dot(&view, Layout::LR);
-    assert!(dot.contains("digraph ERD"), "DOT should have digraph header");
+    assert!(
+        dot.contains("digraph ERD"),
+        "DOT should have digraph header"
+    );
     eprintln!("  ✓ DOT ({} bytes)", dot.len());
 
     // Test Mermaid format
     let mermaid = to_mermaid(&view);
-    assert!(mermaid.contains("erDiagram"), "Mermaid should have erDiagram");
+    assert!(
+        mermaid.contains("erDiagram"),
+        "Mermaid should have erDiagram"
+    );
     eprintln!("  ✓ Mermaid ({} bytes)", mermaid.len());
 
     // Test JSON format

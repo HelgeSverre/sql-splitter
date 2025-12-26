@@ -506,3 +506,19 @@ sql-splitter/
     └── sql-splitter/
         └── SKILL.md
 ```
+
+## Test Performance
+
+### cargo test vs cargo-nextest
+
+For this codebase, `cargo test` is faster than `cargo-nextest`:
+
+| Runner | Wall Clock | CPU Time | Notes |
+|--------|------------|----------|-------|
+| `cargo test` | ~8s | ~38s | Default, runs tests in same process |
+| `cargo nextest run` | ~9s | ~80s | Per-test process isolation |
+
+**Recommendation:** Use `cargo test` for development. Consider `cargo nextest` only when:
+- You need better test failure diagnostics
+- You need test retries (`--retries`)
+- Tests have resource conflicts requiring process isolation

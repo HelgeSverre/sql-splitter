@@ -357,7 +357,10 @@ mod tests {
                 }],
             },
         );
-        GraphView { tables, edges: vec![] }
+        GraphView {
+            tables,
+            edges: vec![],
+        }
     }
 
     #[test]

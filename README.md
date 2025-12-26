@@ -152,6 +152,18 @@ sql-splitter order dump.sql -o ordered.sql        # Safe import order
 sql-splitter order dump.sql --check               # Check for cycles
 sql-splitter order dump.sql --reverse             # Reverse (for DROP operations)
 
+# Query SQL dumps with DuckDB analytics engine
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100" -f json
+sql-splitter query dump.sql "SELECT * FROM users LIMIT 10" -o results.csv -f csv
+sql-splitter query dump.sql --interactive         # Start REPL session
+sql-splitter query huge.sql "SELECT ..." --disk   # Use disk mode for large files
+
+# Query with caching for repeated queries
+sql-splitter query dump.sql "SELECT ..." --cache  # Cache imported database
+sql-splitter query --list-cache                   # Show cached databases
+sql-splitter query --clear-cache                  # Clear all cached databases
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -437,6 +449,34 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 **Fake data generators:**
 
 `email`, `name`, `first_name`, `last_name`, `phone`, `address`, `city`, `state`, `zip`, `country`, `company`, `job_title`, `username`, `url`, `ip`, `ipv6`, `uuid`, `date`, `datetime`, `credit_card`, `iban`, `ssn`, `lorem`, `paragraph`, `sentence`
+
+### Query Options
+
+| Flag                | Description                                                | Default     |
+|---------------------|------------------------------------------------------------|-------------|
+| `-f, --format`      | Output format: `table`, `json`, `jsonl`, `csv`, `tsv`      | `table`     |
+| `-o, --output`      | Write output to file instead of stdout                     | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-i, --interactive` | Start interactive REPL session                             | —           |
+| `--disk`            | Use disk-based storage (for large dumps >2GB)              | auto        |
+| `--cache`           | Cache imported database for repeated queries               | —           |
+| `-t, --tables`      | Only import specific tables (comma-separated)              | all         |
+| `--memory-limit`    | Memory limit for DuckDB (e.g., "4GB")                      | —           |
+| `--timing`          | Show query execution time                                  | —           |
+| `-p, --progress`    | Show import progress                                       | —           |
+| `--list-cache`      | List cached databases                                      | —           |
+| `--clear-cache`     | Clear all cached databases                                 | —           |
+
+**REPL commands:**
+
+- `.tables` — List all tables
+- `.schema [table]` — Show schema (all tables or specific table)
+- `.describe <table>` — Describe a specific table
+- `.format <fmt>` — Set output format (table, json, csv, tsv)
+- `.count <table>` — Count rows in a table
+- `.sample <table> [n]` — Show sample rows (default: 10)
+- `.export <file> <query>` — Export query results to file
+- `.exit` — Exit the REPL
 
 ## Performance
 

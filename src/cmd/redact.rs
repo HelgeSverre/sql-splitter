@@ -53,7 +53,11 @@ pub fn run(
         .constant_patterns(constant_patterns)
         .seed(seed)
         .locale(locale)
-        .tables_filter(if tables.is_empty() { None } else { Some(tables) })
+        .tables_filter(if tables.is_empty() {
+            None
+        } else {
+            Some(tables)
+        })
         .exclude(exclude)
         .strict(strict)
         .progress(progress)

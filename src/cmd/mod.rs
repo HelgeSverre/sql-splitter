@@ -5,6 +5,7 @@ mod glob_util;
 mod graph;
 mod merge;
 mod order;
+mod query;
 mod redact;
 mod sample;
 mod shard;
@@ -38,7 +39,9 @@ const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
 #[command(name = "sql-splitter")]
 #[command(author = "Helge Sverre <helge.sverre@gmail.com>")]
 #[command(version)]
-#[command(about = "High-performance CLI for splitting, merging, converting, and analyzing SQL dump files")]
+#[command(
+    about = "High-performance CLI for splitting, merging, converting, and analyzing SQL dump files"
+)]
 #[command(after_help = AFTER_HELP)]
 #[command(arg_required_else_help = true)]
 #[command(max_term_width = 100)]
@@ -696,6 +699,18 @@ pub enum Commands {
         reverse: bool,
     },
 
+    /// Query SQL dumps using DuckDB's analytical engine
+    #[command(visible_alias = "qy")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter query dump.sql \"SELECT COUNT(*) FROM users\"
+  sql-splitter query dump.sql \"SELECT * FROM orders WHERE total > 100\" -f json
+  sql-splitter query dump.sql \"SELECT * FROM users LIMIT 10\" -o results.csv -f csv
+  sql-splitter query dump.sql --interactive
+  sql-splitter query huge.sql \"SELECT ...\" --disk
+  sql-splitter query dump.sql \"SELECT ...\" --cache
+  sql-splitter query --list-cache")]
+    Query(query::QueryArgs),
+
     /// Generate shell completion scripts
     #[command(after_help = "\x1b[1mInstallation:\x1b[0m
   Bash:
@@ -996,8 +1011,21 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             progress,
             json,
         } => graph::run(
-            file, output, format, dialect, layout, cycles_only, table, transitive, reverse,
-            tables, exclude, max_depth, render, progress, json,
+            file,
+            output,
+            format,
+            dialect,
+            layout,
+            cycles_only,
+            table,
+            transitive,
+            reverse,
+            tables,
+            exclude,
+            max_depth,
+            render,
+            progress,
+            json,
         ),
         Commands::Order {
             file,
@@ -1007,6 +1035,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             reverse,
         } => order::run(file, output, dialect, check, dry_run, reverse),
+        Commands::Query(args) => query::run(args),
         Commands::Completions { shell } => {
             generate(
                 shell,

@@ -63,7 +63,7 @@
             </h1>
             <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
             <p class="description">
-                Split, merge, convert, validate, sample, shard, diff, and redact SQL dump files.
+                Split, merge, convert, validate, sample, shard, diff, redact, and query SQL dump files.
                 MySQL, PostgreSQL, and SQLite. Written in Rust.
             </p>
             <div class="hero-actions">
@@ -401,6 +401,33 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-tool">sql-splitter</span> order dump.sql --reverse -o drop-order.sql</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter order dump.sql -o ordered.sql">Copy</button>
                 </div>
+
+                <h4 id="query">query</h4>
+                <p>Run SQL analytics on dump files using embedded DuckDB.</p>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Execute a single query</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT COUNT(*) FROM users"
+
+<span class="sh-comment"># Output as JSON</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT * FROM orders" -f json
+
+<span class="sh-comment"># Export to CSV</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT * FROM users" -o users.csv -f csv
+
+<span class="sh-comment"># Interactive REPL session</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql --interactive
+
+<span class="sh-comment"># Use disk mode for large files (&gt;2GB)</span>
+<span class="sh-tool">sql-splitter</span> query huge.sql "SELECT ..." --disk
+
+<span class="sh-comment"># Cache for repeated queries (400x speedup)</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT ..." --cache
+
+<span class="sh-comment"># Cache management</span>
+<span class="sh-tool">sql-splitter</span> query --list-cache
+<span class="sh-tool">sql-splitter</span> query --clear-cache</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter query dump.sql &quot;SELECT COUNT(*) FROM users&quot;">Copy</button>
+                </div>
             </article>
 
             <!-- Split Options -->
@@ -630,6 +657,31 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                 <p class="note">Use <code>--check</code> to detect circular FK dependencies before importing.</p>
             </article>
 
+            <!-- Query Options -->
+            <article class="guide-section">
+                <h3>Query Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--format</code></td><td><code>-f</code></td><td>Output format: table, json, jsonl, csv, tsv</td><td>table</td></tr>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Write results to file</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect</td><td>auto</td></tr>
+                        <tr><td><code>--interactive</code></td><td><code>-i</code></td><td>Start REPL session</td><td>false</td></tr>
+                        <tr><td><code>--disk</code></td><td>—</td><td>Use disk storage (for &gt;2GB)</td><td>false</td></tr>
+                        <tr><td><code>--cache</code></td><td>—</td><td>Cache imported database</td><td>false</td></tr>
+                        <tr><td><code>--tables</code></td><td>—</td><td>Import specific tables only</td><td>all</td></tr>
+                        <tr><td><code>--memory-limit</code></td><td>—</td><td>DuckDB memory limit (e.g., 4GB)</td><td>—</td></tr>
+                        <tr><td><code>--timing</code></td><td>—</td><td>Show query execution time</td><td>false</td></tr>
+                        <tr><td><code>--progress</code></td><td>—</td><td>Show import progress</td><td>false</td></tr>
+                        <tr><td><code>--list-cache</code></td><td>—</td><td>List cached databases</td><td>—</td></tr>
+                        <tr><td><code>--clear-cache</code></td><td>—</td><td>Clear all cached databases</td><td>—</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">REPL commands: .tables, .schema, .describe, .count, .sample, .format, .export</p>
+            </article>
+
             <!-- Supported Statements -->
             <article class="guide-section">
                 <h3>Supported Statement Types</h3>
@@ -747,6 +799,19 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-tool">sql-splitter</span> order dump.sql --check</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter graph dump.sql -o schema.html">Copy</button>
                 </div>
+
+                <h4>Query Dump Data</h4>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Run ad-hoc analytics on dump</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT COUNT(*) FROM users"
+
+<span class="sh-comment"># Export results as CSV</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT * FROM orders WHERE status='pending'" -f csv -o pending.csv
+
+<span class="sh-comment"># Cache for 400x faster repeated queries</span>
+<span class="sh-tool">sql-splitter</span> query dump.sql "SELECT ..." --cache</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter query dump.sql &quot;SELECT COUNT(*) FROM users&quot;">Copy</button>
+                </div>
             </article>
 
             <!-- Performance -->
@@ -787,6 +852,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                         <tr><td><code>redact</code></td><td>Anonymize sensitive data (PII) for safe sharing</td></tr>
                         <tr><td><code>graph</code></td><td>Generate ERD diagrams (HTML, DOT, Mermaid, JSON)</td></tr>
                         <tr><td><code>order</code></td><td>Reorder dump in topological FK order for safe imports</td></tr>
+                        <tr><td><code>query</code></td><td>Run SQL analytics on dumps with embedded DuckDB</td></tr>
                     </tbody>
                 </table>
             </article>

@@ -8,7 +8,7 @@
 //! - Session header conversion
 //! - Warning system for unsupported features
 
-mod copy_to_insert;
+pub mod copy_to_insert;
 mod types;
 mod warnings;
 

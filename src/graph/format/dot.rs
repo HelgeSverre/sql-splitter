@@ -128,7 +128,7 @@ fn escape_dot_id(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::view::{ColumnInfo, EdgeInfo, TableInfo, Cardinality};
+    use crate::graph::view::{Cardinality, ColumnInfo, EdgeInfo, TableInfo};
     use ahash::AHashMap;
 
     fn create_test_view() -> GraphView {

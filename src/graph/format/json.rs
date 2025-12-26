@@ -206,11 +206,7 @@ mod tests {
         let erd = build_erd_json(&view);
 
         let orders = erd.tables.iter().find(|t| t.name == "orders").unwrap();
-        let fk_col = orders
-            .columns
-            .iter()
-            .find(|c| c.name == "user_id")
-            .unwrap();
+        let fk_col = orders.columns.iter().find(|c| c.name == "user_id").unwrap();
 
         assert!(fk_col.is_foreign_key);
         assert_eq!(fk_col.references_table, Some("users".to_string()));

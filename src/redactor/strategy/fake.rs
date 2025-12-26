@@ -241,10 +241,7 @@ mod tests {
         let strategy = FakeStrategy::new("phone".to_string(), "en".to_string());
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        let result = strategy.apply(
-            &RedactValue::String("555-123-4567".to_string()),
-            &mut rng,
-        );
+        let result = strategy.apply(&RedactValue::String("555-123-4567".to_string()), &mut rng);
         match result {
             RedactValue::String(s) => {
                 assert!(!s.is_empty());

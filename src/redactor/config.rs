@@ -49,7 +49,10 @@ impl RedactConfig {
 
         // Validate locale
         if !is_valid_locale(&self.locale) && self.strict {
-            anyhow::bail!("Unsupported locale: {}. Use --locale with a supported value.", self.locale);
+            anyhow::bail!(
+                "Unsupported locale: {}. Use --locale with a supported value.",
+                self.locale
+            );
         }
 
         // Validate rules
@@ -173,9 +176,15 @@ impl RedactConfigBuilder {
 
     /// Build the RedactConfig
     pub fn build(self) -> anyhow::Result<RedactConfig> {
-        let input = self.input.ok_or_else(|| anyhow::anyhow!("Input file is required"))?;
+        let input = self
+            .input
+            .ok_or_else(|| anyhow::anyhow!("Input file is required"))?;
         let dialect = self.dialect.unwrap_or(SqlDialect::MySql);
-        let locale = if self.locale.is_empty() { "en".to_string() } else { self.locale };
+        let locale = if self.locale.is_empty() {
+            "en".to_string()
+        } else {
+            self.locale
+        };
 
         // Load YAML config if specified
         let yaml_config = if let Some(ref path) = self.config_file {
@@ -250,7 +259,9 @@ impl RedactConfigBuilder {
             .unwrap_or(StrategyKind::Skip);
 
         // Merge seed (CLI overrides YAML)
-        let seed = self.seed.or_else(|| yaml_config.as_ref().and_then(|y| y.seed));
+        let seed = self
+            .seed
+            .or_else(|| yaml_config.as_ref().and_then(|y| y.seed));
 
         // Merge locale (CLI overrides YAML)
         let locale = if locale != "en" {

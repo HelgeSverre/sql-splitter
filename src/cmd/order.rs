@@ -1,6 +1,8 @@
 //! Order command - output SQL dump with tables in topological order.
 
-use crate::parser::{detect_dialect, detect_dialect_from_file, DialectConfidence, Parser, StatementType};
+use crate::parser::{
+    detect_dialect, detect_dialect_from_file, DialectConfidence, Parser, StatementType,
+};
 use crate::schema::{SchemaBuilder, SchemaGraph};
 use crate::splitter::Compression;
 use ahash::AHashMap;
@@ -165,16 +167,13 @@ fn collect_statements(
 
     while let Some(stmt) = parser.read_statement()? {
         let stmt_str = String::from_utf8_lossy(&stmt).to_string();
-        let (stmt_type, table_name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+        let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
         match stmt_type {
             StatementType::CreateTable => {
                 builder.parse_create_table(&stmt_str);
                 if !table_name.is_empty() {
-                    collected
-                        .create_statements
-                        .insert(table_name, stmt_str);
+                    collected.create_statements.insert(table_name, stmt_str);
                 }
             }
             StatementType::AlterTable => {

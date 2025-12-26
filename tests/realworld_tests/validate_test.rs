@@ -250,7 +250,10 @@ fn all_validate_tests() {
         match validator.validate() {
             Ok(summary) => {
                 if summary.summary.errors == 0 {
-                    eprintln!("✓ {} ({} tables)", case.name, summary.summary.tables_scanned);
+                    eprintln!(
+                        "✓ {} ({} tables)",
+                        case.name, summary.summary.tables_scanned
+                    );
                     passed += 1;
                 } else {
                     eprintln!("✗ {} ({} errors)", case.name, summary.summary.errors);

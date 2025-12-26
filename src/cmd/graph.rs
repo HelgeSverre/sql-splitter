@@ -70,11 +70,7 @@ pub fn run(
     let dialect = resolve_dialect(&file, dialect, compression)?;
 
     if !matches!(format, OutputFormat::Json) {
-        eprintln!(
-            "Generating ERD: {} [dialect: {}]",
-            file.display(),
-            dialect
-        );
+        eprintln!("Generating ERD: {} [dialect: {}]", file.display(), dialect);
     }
 
     // Build schema graph from file
@@ -92,10 +88,7 @@ pub fn run(
 
     // Apply filters
     if let Some(ref tables) = tables_filter {
-        let patterns: Vec<Pattern> = tables
-            .iter()
-            .filter_map(|t| Pattern::new(t).ok())
-            .collect();
+        let patterns: Vec<Pattern> = tables.iter().filter_map(|t| Pattern::new(t).ok()).collect();
         view.filter_tables(&patterns);
     }
 

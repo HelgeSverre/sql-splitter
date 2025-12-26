@@ -40,7 +40,7 @@ make install  # Installs binary + shell completions + man pages
 
 ```bash
 sql-splitter --version
-# sql-splitter 1.10.0
+# sql-splitter 1.12.0
 ```
 
 ## Commands Overview
@@ -58,6 +58,7 @@ sql-splitter --version
 | `redact`   | Anonymize PII in SQL dumps                | GDPR compliance, dev data, safe sharing           |
 | `graph`    | Generate ERD diagrams (HTML, DOT, Mermaid)| Schema visualization, documentation, onboarding   |
 | `order`    | Reorder dump in topological FK order      | Safe imports, cycle detection, DROP order         |
+| `query`    | Run SQL analytics on dumps with DuckDB    | Ad-hoc queries, data exploration, export results  |
 
 ## Universal Capabilities
 
@@ -87,6 +88,7 @@ All commands support:
 | Anonymize sensitive data for dev/sharing | `redact`                  | Replace PII with fake/hashed values; YAML config or CLI     |
 | Visualize schema as ERD diagram          | `graph`                   | HTML, DOT, Mermaid, JSON; focus on table or detect cycles   |
 | Reorder dump for safe FK imports         | `order`                   | Topological sort; `--check` to detect cycles                |
+| Run ad-hoc SQL queries on dump           | `query`                   | Uses embedded DuckDB; outputs table, JSON, CSV              |
 
 ---
 
@@ -587,6 +589,69 @@ sql-splitter shard multi_tenant.sql.gz \
 
 ---
 
+## Workflow 10: Analytics Queries on SQL Dumps
+
+**Goal:** Run ad-hoc SQL queries on dump files without restoring to a database.
+
+```bash
+# Execute a single query
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+
+# Query with JSON output
+sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100" -f json
+
+# Export results to CSV
+sql-splitter query dump.sql "SELECT id, name, email FROM users" -o users.csv -f csv
+
+# Start interactive REPL for exploration
+sql-splitter query dump.sql --interactive
+
+# Use disk mode for large dumps (>2GB)
+sql-splitter query huge.sql "SELECT ..." --disk
+
+# Cache imported database for repeated queries
+sql-splitter query dump.sql "SELECT ..." --cache
+
+# Import only specific tables
+sql-splitter query dump.sql "SELECT ..." --tables users,orders
+
+# Show query execution time
+sql-splitter query dump.sql "SELECT ..." --timing
+```
+
+**REPL commands (--interactive mode):**
+
+- `.tables` — List all tables
+- `.schema [table]` — Show schema (all tables or specific table)
+- `.describe <table>` — Describe a specific table's columns
+- `.format <fmt>` — Set output format (table, json, csv, tsv)
+- `.count <table>` — Count rows in a table
+- `.sample <table> [n]` — Show sample rows (default: 10)
+- `.export <file> <query>` — Export query results to file
+- `.exit` — Exit the REPL
+
+**Query output formats:**
+
+- `table`: ASCII table (default)
+- `json`: JSON array
+- `jsonl`: JSON lines (one object per line)
+- `csv`: Comma-separated values
+- `tsv`: Tab-separated values
+
+**Cache management:**
+
+```bash
+# List all cached databases
+sql-splitter query --list-cache
+
+# Clear all cached databases
+sql-splitter query --clear-cache
+```
+
+**Note:** Uses embedded DuckDB for analytics. Supports MySQL, PostgreSQL, and SQLite dumps with automatic type conversion.
+
+---
+
 ## Error Handling for AI Agents
 
 ### Dialect Issues
@@ -638,6 +703,7 @@ If commands fail with syntax errors or unknown keywords:
 - [src/differ/](https://github.com/helgesverre/sql-splitter/tree/main/src/differ): Schema + data diffing
 - [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
 - [src/graph/](https://github.com/helgesverre/sql-splitter/tree/main/src/graph): ERD generation and graph analysis
+- [src/duckdb/](https://github.com/helgesverre/sql-splitter/tree/main/src/duckdb): DuckDB query engine integration
 
 ## Agent Skill Installation
 

@@ -40,11 +40,11 @@ fn main() -> Result<()> {
         }
 
         let mut sub = subcommand.clone();
-        
+
         // Set the page title (NAME section) to hyphenated form
         let page_title: &'static str = Box::leak(format!("sql-splitter-{}", name).into_boxed_str());
         sub = sub.name(page_title);
-        
+
         // Set bin_name to space-separated form for SYNOPSIS
         // This is what the user actually types
         let bin_name = format!("sql-splitter {}", name);

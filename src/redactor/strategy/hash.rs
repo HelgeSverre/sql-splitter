@@ -108,8 +108,14 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         // Same input = same output (for referential integrity)
-        let result1 = strategy.apply(&RedactValue::String("test@example.com".to_string()), &mut rng);
-        let result2 = strategy.apply(&RedactValue::String("test@example.com".to_string()), &mut rng);
+        let result1 = strategy.apply(
+            &RedactValue::String("test@example.com".to_string()),
+            &mut rng,
+        );
+        let result2 = strategy.apply(
+            &RedactValue::String("test@example.com".to_string()),
+            &mut rng,
+        );
 
         match (result1, result2) {
             (RedactValue::String(s1), RedactValue::String(s2)) => assert_eq!(s1, s2),

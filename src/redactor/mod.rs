@@ -237,7 +237,12 @@ impl Redactor {
     /// Check if a table should be skipped
     fn should_skip_table(&self, name: &str) -> bool {
         // Check exclude list
-        if self.config.exclude.iter().any(|e| e.eq_ignore_ascii_case(name)) {
+        if self
+            .config
+            .exclude
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(name))
+        {
             return true;
         }
 

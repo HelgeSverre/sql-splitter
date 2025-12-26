@@ -54,10 +54,9 @@ impl ColumnMatcher {
             let table_pat = if table_part == "*" {
                 None
             } else {
-                Some(
-                    Pattern::new(table_part)
-                        .map_err(|e| anyhow::anyhow!("Invalid table pattern '{}': {}", table_part, e))?,
-                )
+                Some(Pattern::new(table_part).map_err(|e| {
+                    anyhow::anyhow!("Invalid table pattern '{}': {}", table_part, e)
+                })?)
             };
 
             let col_pat = Pattern::new(column_part)
@@ -182,7 +181,9 @@ mod tests {
             dialect: crate::parser::SqlDialect::MySql,
             rules: vec![Rule {
                 column: "*.email".to_string(),
-                strategy: StrategyKind::Hash { preserve_domain: true },
+                strategy: StrategyKind::Hash {
+                    preserve_domain: true,
+                },
             }],
             default_strategy: StrategyKind::Skip,
             seed: None,
@@ -252,7 +253,9 @@ mod tests {
                 // General rule second
                 Rule {
                     column: "*.email".to_string(),
-                    strategy: StrategyKind::Hash { preserve_domain: false },
+                    strategy: StrategyKind::Hash {
+                        preserve_domain: false,
+                    },
                 },
             ],
             default_strategy: StrategyKind::Skip,
@@ -285,7 +288,9 @@ mod tests {
             rules: vec![
                 Rule {
                     column: "*.email".to_string(),
-                    strategy: StrategyKind::Hash { preserve_domain: false },
+                    strategy: StrategyKind::Hash {
+                        preserve_domain: false,
+                    },
                 },
                 Rule {
                     column: "*.ssn".to_string(),

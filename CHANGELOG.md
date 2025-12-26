@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2025-12-26
+
+### Added
+
+- **Query command**: Run SQL analytics on dump files using embedded DuckDB
+  - `sql-splitter query dump.sql "SELECT COUNT(*) FROM users"` - Execute single query
+  - `sql-splitter query dump.sql --interactive` - Start REPL session for multiple queries
+  - `sql-splitter query dump.sql "SELECT * FROM orders" -f json -o results.json` - Export results
+  - **Zero dependencies**: DuckDB is bundled and compiled into sql-splitter
+  - **Multi-dialect support**: Imports MySQL, PostgreSQL, and SQLite dumps
+  - **Memory management**: Auto-switches to disk mode for dumps >2GB
+  - **Persistent caching**: `--cache` saves imported databases for repeated queries
+  - **Output formats**: table (default), json, jsonl, csv, tsv
+  - **REPL commands**: `.tables`, `.schema`, `.describe`, `.count`, `.sample`, `.format`, `.export`
+  - **Table filtering**: `--tables` to import specific tables only
+  - **Memory limit**: `--memory-limit 4GB` to control DuckDB memory usage
+  - **Query timing**: `--timing` flag shows execution time
+  - **Cache management**: `--list-cache` and `--clear-cache` for cache control
+  - Supports compressed input files (.gz, .bz2, .xz, .zst)
+  - Command alias: `qy`
+
+- **DuckDB module**: Reusable query engine infrastructure
+  - `QueryEngine`: Manages DuckDB connections (in-memory or disk-based)
+  - `DumpLoader`: Imports SQL dumps with type conversion and dialect handling
+  - `TypeConverter`: Maps MySQL/PostgreSQL/SQLite types to DuckDB types
+  - `QueryResultFormatter`: Formats results as table, JSON, CSV, or TSV
+  - `CacheManager`: Persistent caching with SHA256-based cache keys
+
 ## [1.11.0] - 2025-12-26
 
 ### Added

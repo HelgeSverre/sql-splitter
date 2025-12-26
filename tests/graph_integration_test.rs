@@ -61,7 +61,12 @@ fn test_graph_dot_output() {
     let output = dir.path().join("schema.dot");
 
     let status = Command::new(get_binary_path())
-        .args(["graph", dump.to_str().unwrap(), "-o", output.to_str().unwrap()])
+        .args([
+            "graph",
+            dump.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
         .status()
         .unwrap();
 
@@ -231,8 +236,6 @@ fn test_graph_table_focus_reverse() {
     assert!(!stdout.contains("products [label="));
 }
 
-
-
 #[test]
 fn test_order_dry_run() {
     let dir = TempDir::new().unwrap();
@@ -248,7 +251,7 @@ fn test_order_dry_run() {
 
     // Should show topological order
     assert!(stderr.contains("Topological order"));
-    
+
     // users should come before orders
     let users_pos = stderr.find("users").unwrap_or(usize::MAX);
     let orders_pos = stderr.find("orders").unwrap_or(usize::MAX);

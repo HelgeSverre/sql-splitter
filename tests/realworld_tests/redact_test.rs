@@ -64,7 +64,9 @@ fn run_redact_tests(case: &'static super::cases::TestCase) {
                 Ok(stats) => {
                     eprintln!("  ✓ null ({} values redacted)", stats.columns_redacted);
                     if null_output.exists() {
-                        let size = std::fs::metadata(&null_output).map(|m| m.len()).unwrap_or(0);
+                        let size = std::fs::metadata(&null_output)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
                         assert!(size > 0, "Null output should not be empty");
                     }
                 }

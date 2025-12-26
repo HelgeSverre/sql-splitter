@@ -34,7 +34,9 @@ fn run_convert_tests(case: &'static super::cases::TestCase) {
 
         let output_dir = super::temp_output_dir(&format!("{}-to-{:?}", case.name, target))
             .expect("Failed to create temp dir");
-        let output_path = output_dir.path().join(format!("converted_{:?}.sql", target));
+        let output_path = output_dir
+            .path()
+            .join(format!("converted_{:?}.sql", target));
 
         let config = ConvertConfig {
             input: fixture.sql_path.clone(),
@@ -48,11 +50,16 @@ fn run_convert_tests(case: &'static super::cases::TestCase) {
 
         match run(config) {
             Ok(stats) => {
-                eprintln!("  ✓ -> {:?} ({} converted)", target, stats.statements_converted);
+                eprintln!(
+                    "  ✓ -> {:?} ({} converted)",
+                    target, stats.statements_converted
+                );
 
                 // Verify output file exists and has content
                 if output_path.exists() {
-                    let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    let size = std::fs::metadata(&output_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     assert!(size > 0, "Output file should not be empty");
                 }
             }
@@ -161,11 +168,11 @@ fn all_convert_tests() {
                 continue;
             }
 
-            let output_dir =
-                match super::temp_output_dir(&format!("{}-to-{:?}", case.name, target)) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
+            let output_dir = match super::temp_output_dir(&format!("{}-to-{:?}", case.name, target))
+            {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
             let output_path = output_dir.path().join("converted.sql");
 
             let config = ConvertConfig {

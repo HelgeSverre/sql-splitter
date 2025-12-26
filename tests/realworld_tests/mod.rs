@@ -6,6 +6,7 @@
 mod cases;
 mod convert_test;
 mod graph_test;
+mod query_test;
 mod redact_test;
 mod split_test;
 mod validate_test;
@@ -112,7 +113,10 @@ fn ensure_downloaded(case: &TestCase) -> io::Result<PathBuf> {
     if !sql_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("SQL file not found after extraction: {}", sql_path.display()),
+            format!(
+                "SQL file not found after extraction: {}",
+                sql_path.display()
+            ),
         ));
     }
 

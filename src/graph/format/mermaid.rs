@@ -63,7 +63,13 @@ pub fn to_mermaid(view: &GraphView) -> String {
 fn escape_mermaid_id(s: &str) -> String {
     // Mermaid IDs should be alphanumeric with underscores
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

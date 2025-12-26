@@ -3,9 +3,10 @@ name: sql-splitter
 description: >
   High-performance CLI for working with SQL dump files: split/merge by table,
   analyze contents, validate integrity, convert between MySQL/PostgreSQL/SQLite,
-  create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams, and
-  reorder for safe imports. Use when working with .sql dump files for migrations,
-  dev seeding, CI validation, schema visualization, or data extraction.
+  create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
+  reorder for safe imports, and run SQL analytics with embedded DuckDB.
+  Use when working with .sql dump files for migrations, dev seeding, CI validation,
+  schema visualization, data extraction, or ad-hoc analytics.
 license: MIT
 compatibility: Requires sql-splitter binary installed (cargo install sql-splitter)
 ---
@@ -19,13 +20,14 @@ This skill helps you use `sql-splitter` to manipulate SQL dump files safely and 
 Use `sql-splitter` when:
 - The user mentions **SQL dump files** (`.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`)
 - The user wants to migrate, restore, or work with database dump files
-- The user needs to validate, analyze, split, merge, convert, sample, or shard dumps
+- The user needs to validate, analyze, split, merge, convert, sample, shard, or **query** dumps
 - Working with **MySQL, PostgreSQL, or SQLite** dump formats
+- The user wants to run **SQL analytics** on a dump file without loading it into a database
 
 ## When NOT to Use This Skill
 
 Do **not** use `sql-splitter` when:
-- Running ad-hoc SQL queries against a live database (use `psql`/`mysql` directly)
+- Running complex ad-hoc SQL queries against a live database (use `psql`/`mysql` directly)
 - No dump file exists; only a running database is available
 - The user needs interactive data editing rather than dump manipulation
 - Working with dialects beyond MySQL/PostgreSQL/SQLite
@@ -191,6 +193,47 @@ sql-splitter order dump.sql --check
 # Reverse order (for DROP operations)
 sql-splitter order dump.sql --reverse --output drop_order.sql
 ```
+
+### query
+Run SQL analytics on dump files using embedded DuckDB (no database required).
+
+```bash
+# Single query
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+
+# Interactive REPL
+sql-splitter query dump.sql --interactive
+
+# Export to JSON/CSV
+sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100" -f json -o results.json
+sql-splitter query dump.sql "SELECT * FROM users LIMIT 100" -f csv -o users.csv
+
+# With caching (400x faster on repeated queries)
+sql-splitter query dump.sql "SELECT ..." --cache
+
+# Disk mode for large dumps (>2GB auto-enabled)
+sql-splitter query huge.sql "SELECT ..." --disk
+
+# Filter tables to import (faster startup)
+sql-splitter query dump.sql "SELECT * FROM orders" --tables orders,users
+
+# Memory limit
+sql-splitter query dump.sql "SELECT ..." --memory-limit 4GB
+
+# Cache management
+sql-splitter query --list-cache
+sql-splitter query --clear-cache
+```
+
+**REPL commands:**
+- `.tables` - List all tables
+- `.schema [table]` - Show schema
+- `.describe <table>` - Describe table
+- `.count <table>` - Count rows
+- `.sample <table> [n]` - Sample rows
+- `.format <fmt>` - Set output format (table, json, csv, tsv)
+- `.export <file> <query>` - Export query results
+- `.exit` - Exit REPL
 
 ---
 
@@ -407,6 +450,49 @@ For ensuring FK constraints don't fail during restore:
 3. **For DROP operations (reverse order)**
    ```bash
    sql-splitter order dump.sql --reverse --output drop_order.sql
+   ```
+
+### Pattern 11: Ad-hoc SQL Analytics
+
+For running SQL queries on dump files without loading into a database:
+
+1. **Quick exploratory query**
+   ```bash
+   sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+   ```
+
+2. **Interactive exploration (REPL)**
+   ```bash
+   sql-splitter query dump.sql --interactive
+   # sql> .tables
+   # sql> SELECT * FROM orders LIMIT 10
+   # sql> .count users
+   ```
+
+3. **Export analysis results**
+   ```bash
+   sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 1000" -f csv -o big_orders.csv
+   ```
+
+4. **Repeated queries with caching** (400x speedup)
+   ```bash
+   # First run imports and caches
+   sql-splitter query dump.sql "SELECT COUNT(*) FROM orders" --cache
+   
+   # Subsequent runs use cache
+   sql-splitter query dump.sql "SELECT SUM(total) FROM orders" --cache
+   ```
+
+5. **Complex analytics**
+   ```bash
+   sql-splitter query dump.sql "
+     SELECT u.name, COUNT(o.id) as order_count, SUM(o.total) as total_spent
+     FROM users u
+     JOIN orders o ON u.id = o.user_id
+     GROUP BY u.name
+     ORDER BY total_spent DESC
+     LIMIT 10
+   " -f json
    ```
 
 ---

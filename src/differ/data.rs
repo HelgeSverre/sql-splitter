@@ -4,7 +4,6 @@
 //! differences between two SQL dumps.
 
 use super::{should_include_table, DiffWarning};
-use glob::Pattern;
 use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
@@ -13,6 +12,7 @@ use crate::progress::ProgressReader;
 use crate::schema::Schema;
 use crate::splitter::Compression;
 use ahash::AHashMap;
+use glob::Pattern;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -183,10 +183,7 @@ fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool
 }
 
 /// Hash non-PK column values to detect row modifications, excluding ignored column indices
-fn hash_row_digest_with_ignore(
-    values: &[mysql_insert::PkValue],
-    ignore_indices: &[usize],
-) -> u64 {
+fn hash_row_digest_with_ignore(values: &[mysql_insert::PkValue], ignore_indices: &[usize]) -> u64 {
     let mut hasher = ahash::AHasher::default();
     for (i, v) in values.iter().enumerate() {
         if ignore_indices.contains(&i) {
@@ -521,7 +518,13 @@ impl DataDiffer {
             } else {
                 row.pk
             };
-            self.record_row(table_name, &effective_pk, &row.all_values, is_old, &ignore_indices);
+            self.record_row(
+                table_name,
+                &effective_pk,
+                &row.all_values,
+                is_old,
+                &ignore_indices,
+            );
         }
 
         Ok(())
@@ -574,7 +577,13 @@ impl DataDiffer {
             } else {
                 row.pk
             };
-            self.record_row(table_name, &effective_pk, &row.all_values, is_old, &ignore_indices);
+            self.record_row(
+                table_name,
+                &effective_pk,
+                &row.all_values,
+                is_old,
+                &ignore_indices,
+            );
         }
 
         Ok(())

@@ -108,8 +108,10 @@ mod tests {
         let strategy = MaskStrategy::new("X***@*****".to_string());
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        let result =
-            strategy.apply(&RedactValue::String("john@example.com".to_string()), &mut rng);
+        let result = strategy.apply(
+            &RedactValue::String("john@example.com".to_string()),
+            &mut rng,
+        );
         match result {
             RedactValue::String(s) => {
                 assert!(s.starts_with('j'));
@@ -124,8 +126,7 @@ mod tests {
         let strategy = MaskStrategy::new("###-##-####".to_string());
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        let result =
-            strategy.apply(&RedactValue::String("123-45-6789".to_string()), &mut rng);
+        let result = strategy.apply(&RedactValue::String("123-45-6789".to_string()), &mut rng);
         match result {
             RedactValue::String(s) => {
                 assert_eq!(s.len(), 11);
