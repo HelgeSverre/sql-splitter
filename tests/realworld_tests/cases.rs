@@ -8,7 +8,7 @@
 pub struct TestCase {
     /// Unique name for the test case
     pub name: &'static str,
-    /// Expected SQL dialect: mysql, postgres, sqlite
+    /// Expected SQL dialect: mysql, postgres, sqlite, mssql
     pub dialect: &'static str,
     /// URL to download the SQL file or archive
     pub url: &'static str,
@@ -52,6 +52,11 @@ impl TestCase {
     /// Returns true if this is a SQLite test case
     pub fn is_sqlite(&self) -> bool {
         self.dialect == "sqlite"
+    }
+
+    /// Returns true if this is a MSSQL test case
+    pub fn is_mssql(&self) -> bool {
+        self.dialect == "mssql"
     }
 }
 
@@ -265,6 +270,23 @@ pub static TEST_CASES: &[TestCase] = &[
         "dump.sql",
         "WordPress plugin test fixture",
     ),
+    // MSSQL/T-SQL dumps
+    TestCase::new(
+        "mssql-northwind",
+        "mssql",
+        "https://raw.githubusercontent.com/microsoft/sql-server-samples/master/samples/databases/northwind-pubs/instnwnd.sql",
+        None,
+        "instnwnd.sql",
+        "Official Microsoft Northwind DB (MSSQL)",
+    ),
+    TestCase::new(
+        "chinook-mssql",
+        "mssql",
+        "https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_SqlServer.sql",
+        None,
+        "Chinook_SqlServer.sql",
+        "Chinook DB SQL Server version",
+    ),
 ];
 
 /// Get a test case by name
@@ -288,4 +310,10 @@ pub fn postgres_cases() -> impl Iterator<Item = &'static TestCase> {
 #[allow(dead_code)]
 pub fn sqlite_cases() -> impl Iterator<Item = &'static TestCase> {
     TEST_CASES.iter().filter(|c| c.is_sqlite())
+}
+
+/// Get all MSSQL test cases
+#[allow(dead_code)]
+pub fn mssql_cases() -> impl Iterator<Item = &'static TestCase> {
+    TEST_CASES.iter().filter(|c| c.is_mssql())
 }

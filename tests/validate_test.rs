@@ -1001,3 +1001,188 @@ fn test_validate_sqlite_generated_with_fk_checks() {
     );
     assert!(summary.summary.tables_scanned > 0);
 }
+
+// =============================================================================
+// MSSQL Dialect Tests
+// =============================================================================
+
+fn mssql_simple_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/static/mssql/simple.sql")
+}
+
+fn mssql_multi_tenant_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/static/mssql/multi_tenant.sql")
+}
+
+#[test]
+fn test_validate_mssql_basic_valid_dump() {
+    let sql = r#"
+SET ANSI_NULLS ON
+GO
+CREATE TABLE [dbo].[users] (
+    [id] INT IDENTITY(1,1) NOT NULL,
+    [name] NVARCHAR(100),
+    CONSTRAINT [PK_users] PRIMARY KEY CLUSTERED ([id])
+)
+GO
+INSERT INTO [dbo].[users] ([id], [name]) VALUES (1, N'Alice')
+GO
+INSERT INTO [dbo].[users] ([id], [name]) VALUES (2, N'Bob')
+GO
+"#;
+
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Mssql, false);
+
+    assert_eq!(
+        summary.summary.errors, 0,
+        "Valid MSSQL dump should have no errors"
+    );
+    assert!(
+        summary.summary.tables_scanned > 0,
+        "Should have scanned at least one table"
+    );
+}
+
+#[test]
+fn test_validate_mssql_duplicate_pk() {
+    let sql = r#"
+CREATE TABLE [users] (
+    [id] INT NOT NULL PRIMARY KEY,
+    [name] NVARCHAR(100)
+)
+GO
+INSERT INTO [users] VALUES (1, N'Alice')
+GO
+INSERT INTO [users] VALUES (2, N'Bob')
+GO
+INSERT INTO [users] VALUES (1, N'Charlie')
+GO
+"#;
+
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Mssql, true);
+
+    let pk_issues: Vec<_> = summary
+        .issues
+        .iter()
+        .filter(|i| i.code == "DUPLICATE_PK")
+        .collect();
+    assert_eq!(pk_issues.len(), 1, "MSSQL should detect duplicate PK");
+}
+
+#[test]
+fn test_validate_mssql_fk_violation() {
+    let sql = r#"
+CREATE TABLE [departments] (
+    [id] INT NOT NULL PRIMARY KEY,
+    [name] NVARCHAR(100)
+)
+GO
+CREATE TABLE [employees] (
+    [id] INT NOT NULL PRIMARY KEY,
+    [name] NVARCHAR(100),
+    [department_id] INT,
+    CONSTRAINT [fk_dept] FOREIGN KEY ([department_id]) REFERENCES [departments] ([id])
+)
+GO
+INSERT INTO [departments] VALUES (1, N'Engineering')
+GO
+INSERT INTO [employees] VALUES (1, N'Alice', 1)
+GO
+INSERT INTO [employees] VALUES (2, N'Bob', 99)
+GO
+"#;
+
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Mssql, true);
+
+    let fk_issues: Vec<_> = summary
+        .issues
+        .iter()
+        .filter(|i| i.code == "FK_MISSING_PARENT")
+        .collect();
+    assert_eq!(fk_issues.len(), 1, "MSSQL should detect FK violation");
+}
+
+#[test]
+fn test_validate_mssql_composite_pk() {
+    let sql = r#"
+CREATE TABLE [order_items] (
+    [order_id] INT NOT NULL,
+    [item_id] INT NOT NULL,
+    [quantity] INT,
+    CONSTRAINT [PK_order_items] PRIMARY KEY CLUSTERED ([order_id], [item_id])
+)
+GO
+INSERT INTO [order_items] VALUES (1, 1, 5)
+GO
+INSERT INTO [order_items] VALUES (1, 2, 3)
+GO
+INSERT INTO [order_items] VALUES (2, 1, 1)
+GO
+INSERT INTO [order_items] VALUES (1, 1, 10)
+GO
+"#;
+
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Mssql, true);
+
+    let pk_issues: Vec<_> = summary
+        .issues
+        .iter()
+        .filter(|i| i.code == "DUPLICATE_PK")
+        .collect();
+    assert_eq!(pk_issues.len(), 1, "MSSQL should detect duplicate composite PK");
+}
+
+#[test]
+fn test_validate_mssql_unicode_data() {
+    let sql = r#"
+CREATE TABLE [products] (
+    [id] INT NOT NULL PRIMARY KEY,
+    [name] NVARCHAR(255)
+)
+GO
+INSERT INTO [products] VALUES (1, N'日本語製品')
+GO
+INSERT INTO [products] VALUES (2, N'Ελληνικά')
+GO
+"#;
+
+    let summary = validate_sql_with_dialect(sql, SqlDialect::Mssql, false);
+
+    assert_eq!(
+        summary.summary.errors, 0,
+        "MSSQL dump with Unicode should have no errors"
+    );
+    assert!(summary.summary.tables_scanned > 0);
+}
+
+#[test]
+fn test_validate_mssql_simple_fixture() {
+    // Note: FK checks disabled because the simple fixture uses IDENTITY columns
+    // without explicit id values in INSERTs, which the validator can't track
+    let summary = validate_file(&mssql_simple_fixture(), SqlDialect::Mssql, false);
+
+    assert_eq!(
+        summary.summary.errors, 0,
+        "MSSQL simple fixture should have no errors"
+    );
+    assert!(
+        summary.summary.tables_scanned >= 2,
+        "Should have scanned at least 2 tables (users and orders)"
+    );
+}
+
+#[test]
+fn test_validate_mssql_multi_tenant_fixture() {
+    let summary = validate_file(&mssql_multi_tenant_fixture(), SqlDialect::Mssql, true);
+
+    assert_eq!(
+        summary.summary.errors, 0,
+        "MSSQL multi-tenant fixture should have no errors"
+    );
+    assert!(
+        summary.summary.tables_scanned >= 3,
+        "Should have scanned at least 3 tables"
+    );
+}

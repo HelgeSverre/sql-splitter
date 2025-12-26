@@ -207,3 +207,254 @@ include_global: lookups
         );
     }
 }
+
+// =============================================================================
+// Postgres Shard Tests
+// =============================================================================
+
+mod postgres_tests {
+    use super::*;
+
+    fn create_postgres_test_dump() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+CREATE TABLE "companies" (
+    "id" SERIAL PRIMARY KEY,
+    "name" VARCHAR(255)
+);
+
+INSERT INTO "companies" VALUES (1, 'Acme Corp'), (2, 'Widgets Inc'), (3, 'Tech Co');
+
+CREATE TABLE "users" (
+    "id" SERIAL PRIMARY KEY,
+    "name" VARCHAR(255),
+    "company_id" INTEGER,
+    FOREIGN KEY ("company_id") REFERENCES "companies" ("id")
+);
+
+INSERT INTO "users" VALUES (1, 'Alice', 1), (2, 'Bob', 1), (3, 'Carol', 2), (4, 'Dave', 3);
+
+CREATE TABLE "orders" (
+    "id" SERIAL PRIMARY KEY,
+    "company_id" INTEGER,
+    "user_id" INTEGER,
+    "amount" DECIMAL(10,2),
+    FOREIGN KEY ("company_id") REFERENCES "companies" ("id"),
+    FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+
+INSERT INTO "orders" VALUES (1, 1, 1, 100.00), (2, 1, 1, 200.00), (3, 2, 2, 150.00), (4, 3, 3, 300.00);
+"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_shard_postgres_single_tenant() {
+        let dump = create_postgres_test_dump();
+        let output = NamedTempFile::new().unwrap();
+
+        let config = ShardConfig {
+            input: dump.path().to_path_buf(),
+            output: Some(output.path().to_path_buf()),
+            dialect: SqlDialect::Postgres,
+            tenant_column: Some("company_id".to_string()),
+            tenant_value: "1".to_string(),
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+
+        assert!(stats.tables_processed > 0, "Should process tables");
+        assert!(stats.total_rows_selected > 0, "Should select some rows");
+    }
+
+    #[test]
+    fn test_shard_postgres_dry_run() {
+        let dump = create_postgres_test_dump();
+
+        let config = ShardConfig {
+            input: dump.path().to_path_buf(),
+            output: None,
+            dialect: SqlDialect::Postgres,
+            tenant_column: Some("company_id".to_string()),
+            tenant_value: "1".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+
+        assert!(stats.tables_processed > 0);
+        assert_eq!(stats.detected_tenant_column, Some("company_id".to_string()));
+    }
+
+    #[test]
+    fn test_shard_postgres_tenant_detection() {
+        let dump = create_postgres_test_dump();
+
+        let config = ShardConfig {
+            input: dump.path().to_path_buf(),
+            output: None,
+            dialect: SqlDialect::Postgres,
+            tenant_column: None, // Should auto-detect company_id
+            tenant_value: "1".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+        assert_eq!(stats.detected_tenant_column, Some("company_id".to_string()));
+    }
+}
+
+// =============================================================================
+// SQLite Shard Tests
+// =============================================================================
+
+mod sqlite_tests {
+    use super::*;
+
+    fn create_sqlite_test_dump() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+CREATE TABLE "companies" (
+    "id" INTEGER PRIMARY KEY,
+    "name" TEXT
+);
+
+INSERT INTO "companies" VALUES (1, 'Acme Corp'), (2, 'Widgets Inc'), (3, 'Tech Co');
+
+CREATE TABLE "users" (
+    "id" INTEGER PRIMARY KEY,
+    "name" TEXT,
+    "company_id" INTEGER,
+    FOREIGN KEY ("company_id") REFERENCES "companies" ("id")
+);
+
+INSERT INTO "users" VALUES (1, 'Alice', 1), (2, 'Bob', 1), (3, 'Carol', 2), (4, 'Dave', 3);
+
+CREATE TABLE "orders" (
+    "id" INTEGER PRIMARY KEY,
+    "company_id" INTEGER,
+    "user_id" INTEGER,
+    "amount" REAL,
+    FOREIGN KEY ("company_id") REFERENCES "companies" ("id"),
+    FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+
+INSERT INTO "orders" VALUES (1, 1, 1, 100.00), (2, 1, 1, 200.00), (3, 2, 2, 150.00), (4, 3, 3, 300.00);
+"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_shard_sqlite_single_tenant() {
+        let dump = create_sqlite_test_dump();
+        let output = NamedTempFile::new().unwrap();
+
+        let config = ShardConfig {
+            input: dump.path().to_path_buf(),
+            output: Some(output.path().to_path_buf()),
+            dialect: SqlDialect::Sqlite,
+            tenant_column: Some("company_id".to_string()),
+            tenant_value: "1".to_string(),
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+
+        assert!(stats.tables_processed > 0, "Should process tables");
+        assert!(stats.total_rows_selected > 0, "Should select some rows");
+    }
+
+    #[test]
+    fn test_shard_sqlite_dry_run() {
+        let dump = create_sqlite_test_dump();
+
+        let config = ShardConfig {
+            input: dump.path().to_path_buf(),
+            output: None,
+            dialect: SqlDialect::Sqlite,
+            tenant_column: Some("company_id".to_string()),
+            tenant_value: "1".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+
+        assert!(stats.tables_processed > 0);
+        assert_eq!(stats.detected_tenant_column, Some("company_id".to_string()));
+    }
+
+    #[test]
+    fn test_shard_sqlite_tenant_detection() {
+        let dump = create_sqlite_test_dump();
+
+        let config = ShardConfig {
+            input: dump.path().to_path_buf(),
+            output: None,
+            dialect: SqlDialect::Sqlite,
+            tenant_column: None, // Should auto-detect company_id
+            tenant_value: "1".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+        assert_eq!(stats.detected_tenant_column, Some("company_id".to_string()));
+    }
+}
+
+// =============================================================================
+// MSSQL Shard Tests (non-dry-run variant)
+// =============================================================================
+
+mod mssql_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn mssql_multi_tenant_fixture() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/static/mssql/multi_tenant.sql")
+    }
+
+    #[test]
+    fn test_shard_mssql_write_output() {
+        let tmp = TempDir::new().unwrap();
+        let out = tmp.path().join("shard.sql");
+
+        let config = ShardConfig {
+            input: mssql_multi_tenant_fixture(),
+            output: Some(out.clone()),
+            dialect: SqlDialect::Mssql,
+            tenant_column: Some("tenant_id".to_string()),
+            tenant_value: "1".to_string(),
+            dry_run: false,
+            include_schema: true,
+            ..Default::default()
+        };
+
+        let stats = sql_splitter::shard::run(config).unwrap();
+
+        assert!(stats.tables_processed > 0, "Should process tables");
+        assert!(out.exists(), "Output file should be created");
+
+        let content = fs::read_to_string(&out).unwrap();
+        assert!(
+            content.contains("INSERT INTO"),
+            "Output should contain INSERT statements"
+        );
+    }
+}

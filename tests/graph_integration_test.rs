@@ -296,3 +296,298 @@ fn test_order_output_file() {
     // Content should exist and contain CREATE TABLE statements
     assert!(content.contains("CREATE TABLE"));
 }
+
+// =============================================================================
+// Dialect-Specific Graph Tests
+// =============================================================================
+
+fn create_mysql_dump(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("mysql_test.sql");
+    fs::write(
+        &path,
+        r#"
+CREATE TABLE `users` (
+  `id` INT PRIMARY KEY AUTO_INCREMENT,
+  `email` VARCHAR(255)
+);
+
+CREATE TABLE `orders` (
+  `id` INT PRIMARY KEY AUTO_INCREMENT,
+  `user_id` INT,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`)
+);
+
+INSERT INTO `users` (`id`, `email`) VALUES (1, 'alice@example.com');
+"#,
+    )
+    .unwrap();
+    path
+}
+
+fn create_postgres_dump(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("postgres_test.sql");
+    fs::write(
+        &path,
+        r#"
+CREATE TABLE "users" (
+  "id" SERIAL PRIMARY KEY,
+  "email" VARCHAR(255)
+);
+
+CREATE TABLE "orders" (
+  "id" SERIAL PRIMARY KEY,
+  "user_id" INTEGER,
+  FOREIGN KEY ("user_id") REFERENCES "users"("id")
+);
+
+INSERT INTO "users" ("id", "email") VALUES (1, 'alice@example.com');
+"#,
+    )
+    .unwrap();
+    path
+}
+
+fn create_sqlite_dump(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("sqlite_test.sql");
+    fs::write(
+        &path,
+        r#"
+CREATE TABLE "users" (
+  "id" INTEGER PRIMARY KEY,
+  "email" TEXT
+);
+
+CREATE TABLE "orders" (
+  "id" INTEGER PRIMARY KEY,
+  "user_id" INTEGER,
+  FOREIGN KEY ("user_id") REFERENCES "users"("id")
+);
+
+INSERT INTO "users" ("id", "email") VALUES (1, 'alice@example.com');
+"#,
+    )
+    .unwrap();
+    path
+}
+
+fn create_mssql_dump(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("mssql_test.sql");
+    fs::write(
+        &path,
+        r#"
+SET ANSI_NULLS ON
+GO
+CREATE TABLE [dbo].[users] (
+  [id] INT IDENTITY(1,1) NOT NULL,
+  [email] NVARCHAR(255),
+  CONSTRAINT [PK_users] PRIMARY KEY CLUSTERED ([id])
+)
+GO
+CREATE TABLE [dbo].[orders] (
+  [id] INT IDENTITY(1,1) NOT NULL,
+  [user_id] INT,
+  CONSTRAINT [PK_orders] PRIMARY KEY CLUSTERED ([id]),
+  CONSTRAINT [FK_orders_users] FOREIGN KEY ([user_id]) REFERENCES [dbo].[users]([id])
+)
+GO
+INSERT INTO [dbo].[users] ([id], [email]) VALUES (1, N'alice@example.com')
+GO
+"#,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn test_graph_mysql_dialect() {
+    let dir = TempDir::new().unwrap();
+    let dump = create_mysql_dump(&dir);
+    let output = dir.path().join("mysql_schema.json");
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "graph",
+            dump.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+            "--dialect",
+            "mysql",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(output.exists());
+
+    let content = fs::read_to_string(&output).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(json["stats"]["table_count"], 2, "Should detect 2 tables");
+    assert_eq!(
+        json["stats"]["relationship_count"], 1,
+        "Should detect FK relationship"
+    );
+}
+
+#[test]
+fn test_graph_postgres_dialect() {
+    let dir = TempDir::new().unwrap();
+    let dump = create_postgres_dump(&dir);
+    let output = dir.path().join("postgres_schema.json");
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "graph",
+            dump.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+            "--dialect",
+            "postgres",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(output.exists());
+
+    let content = fs::read_to_string(&output).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(json["stats"]["table_count"], 2, "Should detect 2 tables");
+    assert_eq!(
+        json["stats"]["relationship_count"], 1,
+        "Should detect FK relationship"
+    );
+}
+
+#[test]
+fn test_graph_sqlite_dialect() {
+    let dir = TempDir::new().unwrap();
+    let dump = create_sqlite_dump(&dir);
+    let output = dir.path().join("sqlite_schema.json");
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "graph",
+            dump.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+            "--dialect",
+            "sqlite",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(output.exists());
+
+    let content = fs::read_to_string(&output).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(json["stats"]["table_count"], 2, "Should detect 2 tables");
+    assert_eq!(
+        json["stats"]["relationship_count"], 1,
+        "Should detect FK relationship"
+    );
+}
+
+#[test]
+fn test_graph_mssql_dialect() {
+    let dir = TempDir::new().unwrap();
+    let dump = create_mssql_dump(&dir);
+    let output = dir.path().join("mssql_schema.json");
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "graph",
+            dump.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+            "--dialect",
+            "mssql",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(output.exists());
+
+    let content = fs::read_to_string(&output).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(json["stats"]["table_count"], 2, "Should detect 2 tables");
+    assert_eq!(
+        json["stats"]["relationship_count"], 1,
+        "Should detect FK relationship between orders and users"
+    );
+}
+
+#[test]
+fn test_graph_mssql_dot_output() {
+    let dir = TempDir::new().unwrap();
+    let dump = create_mssql_dump(&dir);
+    let output = dir.path().join("mssql_schema.dot");
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "graph",
+            dump.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--dialect",
+            "mssql",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(output.exists());
+
+    let content = fs::read_to_string(&output).unwrap();
+    assert!(content.contains("digraph ERD"));
+    assert!(content.contains("orders:user_id -> users:id"));
+    assert!(content.contains("🔑 PK")); // Primary key markers
+}
+
+#[test]
+fn test_graph_mssql_fixture() {
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/static/mssql/simple.sql");
+
+    let dir = TempDir::new().unwrap();
+    let output = dir.path().join("mssql_fixture_schema.json");
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "graph",
+            fixture_path.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+            "--dialect",
+            "mssql",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(output.exists());
+
+    let content = fs::read_to_string(&output).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    // The fixture has 2 tables (users, orders) with FK relationship
+    assert!(
+        json["stats"]["table_count"].as_u64().unwrap() >= 2,
+        "Should detect at least 2 tables from MSSQL fixture"
+    );
+}

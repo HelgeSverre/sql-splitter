@@ -558,3 +558,326 @@ fn test_sample_postgres_preserve_relations() {
         "Output should contain INSERT statements"
     );
 }
+
+// =============================================================================
+// Extended Postgres Sample Tests
+// =============================================================================
+
+#[test]
+fn test_sample_postgres_no_schema() {
+    let dump = generate_postgres_dump();
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_postgres_no_schema.sql");
+
+    let config = SampleConfig {
+        input: dump.path().to_path_buf(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Postgres,
+        mode: SampleMode::Percent(100),
+        preserve_relations: false,
+        seed: 42,
+        include_schema: false,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(stats.tables_sampled > 0);
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        !content.contains("CREATE TABLE"),
+        "Should not contain CREATE TABLE"
+    );
+    assert!(
+        content.contains("INSERT INTO"),
+        "Should contain INSERT statements"
+    );
+}
+
+#[test]
+fn test_sample_postgres_dry_run() {
+    let dump = generate_postgres_dump();
+
+    let config = SampleConfig {
+        input: dump.path().to_path_buf(),
+        output: None,
+        dialect: SqlDialect::Postgres,
+        mode: SampleMode::Percent(50),
+        preserve_relations: false,
+        seed: 42,
+        dry_run: true,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(stats.tables_sampled > 0);
+    assert!(stats.total_rows_seen > 0);
+}
+
+#[test]
+fn test_sample_postgres_with_table_filter() {
+    let dump = generate_postgres_dump();
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_postgres_filtered.sql");
+
+    let config = SampleConfig {
+        input: dump.path().to_path_buf(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Postgres,
+        mode: SampleMode::Percent(100),
+        tables_filter: Some(vec!["tenants".to_string()]),
+        preserve_relations: false,
+        seed: 42,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert_eq!(
+        stats.tables_sampled, 1,
+        "Should have sampled only one table"
+    );
+}
+
+// =============================================================================
+// Extended SQLite Sample Tests
+// =============================================================================
+
+#[test]
+fn test_sample_sqlite_preserve_relations() {
+    let dump = generate_sqlite_dump();
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_sqlite_fk.sql");
+
+    let config = SampleConfig {
+        input: dump.path().to_path_buf(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Sqlite,
+        mode: SampleMode::Rows(10),
+        preserve_relations: true,
+        seed: 42,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(
+        stats.tables_sampled > 0,
+        "Should have sampled at least one table"
+    );
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("INSERT INTO"),
+        "Output should contain INSERT statements"
+    );
+}
+
+#[test]
+fn test_sample_sqlite_no_schema() {
+    let dump = generate_sqlite_dump();
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_sqlite_no_schema.sql");
+
+    let config = SampleConfig {
+        input: dump.path().to_path_buf(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Sqlite,
+        mode: SampleMode::Percent(100),
+        preserve_relations: false,
+        seed: 42,
+        include_schema: false,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(stats.tables_sampled > 0);
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        !content.contains("CREATE TABLE"),
+        "Should not contain CREATE TABLE"
+    );
+    assert!(
+        content.contains("INSERT INTO"),
+        "Should contain INSERT statements"
+    );
+}
+
+#[test]
+fn test_sample_sqlite_dry_run() {
+    let dump = generate_sqlite_dump();
+
+    let config = SampleConfig {
+        input: dump.path().to_path_buf(),
+        output: None,
+        dialect: SqlDialect::Sqlite,
+        mode: SampleMode::Percent(50),
+        preserve_relations: false,
+        seed: 42,
+        dry_run: true,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(stats.tables_sampled > 0);
+    assert!(stats.total_rows_seen > 0);
+}
+
+// =============================================================================
+// Extended MSSQL Sample Tests
+// =============================================================================
+
+fn mssql_simple_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/static/mssql/simple.sql")
+}
+
+fn mssql_multi_tenant_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/static/mssql/multi_tenant.sql")
+}
+
+#[test]
+fn test_sample_mssql_basic() {
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_mssql.sql");
+
+    let config = SampleConfig {
+        input: mssql_simple_fixture(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Mssql,
+        mode: SampleMode::Percent(100),
+        preserve_relations: false,
+        seed: 42,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(
+        stats.tables_sampled > 0,
+        "Should have sampled at least one table"
+    );
+    assert!(
+        stats.total_rows_selected > 0,
+        "Should have selected some rows"
+    );
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("INSERT INTO"),
+        "Output should contain INSERT statements"
+    );
+}
+
+#[test]
+fn test_sample_mssql_preserve_relations() {
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_mssql_fk.sql");
+
+    let config = SampleConfig {
+        input: mssql_multi_tenant_fixture(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Mssql,
+        mode: SampleMode::Rows(10),
+        preserve_relations: true,
+        seed: 42,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(
+        stats.tables_sampled > 0,
+        "Should have sampled at least one table"
+    );
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("INSERT INTO"),
+        "Output should contain INSERT statements"
+    );
+}
+
+#[test]
+fn test_sample_mssql_no_schema() {
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_mssql_no_schema.sql");
+
+    let config = SampleConfig {
+        input: mssql_simple_fixture(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Mssql,
+        mode: SampleMode::Percent(100),
+        preserve_relations: false,
+        seed: 42,
+        include_schema: false,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(stats.tables_sampled > 0);
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        !content.contains("CREATE TABLE"),
+        "Should not contain CREATE TABLE"
+    );
+    assert!(
+        content.contains("INSERT INTO"),
+        "Should contain INSERT statements"
+    );
+}
+
+#[test]
+fn test_sample_mssql_dry_run() {
+    let config = SampleConfig {
+        input: mssql_simple_fixture(),
+        output: None,
+        dialect: SqlDialect::Mssql,
+        mode: SampleMode::Percent(50),
+        preserve_relations: false,
+        seed: 42,
+        dry_run: true,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert!(stats.tables_sampled > 0);
+    assert!(stats.total_rows_seen > 0);
+}
+
+#[test]
+fn test_sample_mssql_with_table_filter() {
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("sampled_mssql_filtered.sql");
+
+    let config = SampleConfig {
+        input: mssql_simple_fixture(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Mssql,
+        mode: SampleMode::Percent(100),
+        tables_filter: Some(vec!["users".to_string()]),
+        preserve_relations: false,
+        seed: 42,
+        ..Default::default()
+    };
+
+    let stats = run(config).unwrap();
+
+    assert_eq!(
+        stats.tables_sampled, 1,
+        "Should have sampled only one table"
+    );
+    assert!(
+        stats.table_stats.iter().any(|t| t.name == "users"),
+        "Should have sampled users table"
+    );
+}

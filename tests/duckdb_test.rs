@@ -2572,3 +2572,244 @@ INSERT INTO comments VALUES (2, 2, 2, 'Very helpful', '2024-01-16 09:00:00');
         .unwrap();
     assert!(result.rows.len() >= 1);
 }
+
+// =============================================================================
+// Extended SQLite Query Tests
+// =============================================================================
+
+#[test]
+fn test_sqlite_with_fk() {
+    let dump = r#"
+CREATE TABLE "categories" (
+    "id" INTEGER PRIMARY KEY,
+    "name" TEXT NOT NULL
+);
+
+CREATE TABLE "products" (
+    "id" INTEGER PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "category_id" INTEGER,
+    FOREIGN KEY ("category_id") REFERENCES "categories"("id")
+);
+
+INSERT INTO "categories" VALUES (1, 'Electronics');
+INSERT INTO "categories" VALUES (2, 'Books');
+
+INSERT INTO "products" VALUES (1, 'Phone', 1);
+INSERT INTO "products" VALUES (2, 'Novel', 2);
+INSERT INTO "products" VALUES (3, 'Laptop', 1);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Sqlite),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let tables = engine.list_tables().unwrap();
+    assert!(tables.contains(&"categories".to_string()));
+    assert!(tables.contains(&"products".to_string()));
+
+    // Join query
+    let result = engine
+        .query("SELECT p.name, c.name as category FROM products p JOIN categories c ON p.category_id = c.id ORDER BY p.id")
+        .unwrap();
+    assert_eq!(result.rows.len(), 3);
+    assert_eq!(result.rows[0][1], "Electronics");
+}
+
+#[test]
+fn test_sqlite_aggregate_queries() {
+    let dump = r#"
+CREATE TABLE "sales" (
+    "id" INTEGER PRIMARY KEY,
+    "product" TEXT,
+    "amount" REAL
+);
+
+INSERT INTO "sales" VALUES (1, 'A', 100.00);
+INSERT INTO "sales" VALUES (2, 'B', 200.00);
+INSERT INTO "sales" VALUES (3, 'A', 150.00);
+INSERT INTO "sales" VALUES (4, 'B', 300.00);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Sqlite),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine
+        .query("SELECT product, SUM(amount) as total FROM sales GROUP BY product ORDER BY total DESC")
+        .unwrap();
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0][0], "B");
+}
+
+#[test]
+fn test_sqlite_table_filter() {
+    let dump = r#"
+CREATE TABLE "users" ("id" INTEGER PRIMARY KEY, "name" TEXT);
+CREATE TABLE "orders" ("id" INTEGER PRIMARY KEY, "user_id" INTEGER);
+CREATE TABLE "products" ("id" INTEGER PRIMARY KEY, "name" TEXT);
+
+INSERT INTO "users" VALUES (1, 'Alice');
+INSERT INTO "orders" VALUES (1, 1);
+INSERT INTO "products" VALUES (1, 'Widget');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Sqlite),
+        tables: Some(vec!["users".to_string(), "orders".to_string()]),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let tables = engine.list_tables().unwrap();
+    assert!(tables.contains(&"users".to_string()));
+    assert!(tables.contains(&"orders".to_string()));
+    assert!(
+        !tables.contains(&"products".to_string()),
+        "products should be filtered out"
+    );
+}
+
+// =============================================================================
+// Extended MSSQL Query Tests
+// =============================================================================
+
+fn mssql_simple_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/static/mssql/simple.sql")
+}
+
+#[test]
+fn test_mssql_import_and_query() {
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&mssql_simple_fixture()).unwrap();
+
+    let tables = engine.list_tables().unwrap();
+    assert!(tables.contains(&"users".to_string()));
+    assert!(tables.contains(&"orders".to_string()));
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+#[test]
+fn test_mssql_join_query() {
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&mssql_simple_fixture()).unwrap();
+
+    // Join orders with users
+    let result = engine
+        .query("SELECT u.name, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.id, u.name")
+        .unwrap();
+    assert!(result.rows.len() >= 1);
+}
+
+#[test]
+fn test_mssql_inline_dump() {
+    let dump = r#"
+CREATE TABLE [users] (
+    [id] INT NOT NULL PRIMARY KEY,
+    [email] NVARCHAR(255)
+)
+GO
+INSERT INTO [users] VALUES (1, N'alice@example.com')
+GO
+INSERT INTO [users] VALUES (2, N'bob@example.com')
+GO
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let tables = engine.list_tables().unwrap();
+    assert!(tables.contains(&"users".to_string()));
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+#[test]
+fn test_mssql_unicode_values() {
+    let dump = r#"
+CREATE TABLE [products] (
+    [id] INT NOT NULL PRIMARY KEY,
+    [name] NVARCHAR(255)
+)
+GO
+INSERT INTO [products] VALUES (1, N'日本語製品')
+GO
+INSERT INTO [products] VALUES (2, N'Ελληνικά')
+GO
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT name FROM products ORDER BY id").unwrap();
+    assert_eq!(result.rows.len(), 2);
+    // Verify Unicode was properly imported
+    assert!(result.rows[0][0].contains("日本語"));
+}
+
+#[test]
+fn test_mssql_table_filter() {
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        tables: Some(vec!["users".to_string()]),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&mssql_simple_fixture()).unwrap();
+
+    let tables = engine.list_tables().unwrap();
+    assert!(tables.contains(&"users".to_string()));
+    assert!(
+        !tables.contains(&"orders".to_string()),
+        "orders should be filtered out"
+    );
+}
+
+#[test]
+fn test_mssql_disk_mode() {
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        disk_mode: true,
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&mssql_simple_fixture()).unwrap();
+
+    let tables = engine.list_tables().unwrap();
+    assert!(tables.contains(&"users".to_string()));
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}

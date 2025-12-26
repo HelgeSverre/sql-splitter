@@ -617,17 +617,23 @@ CREATE TABLE "users" (
     assert!(!result.contains(" BLOB"), "Should not have BLOB");
 }
 
-// All 6 pairs roundtrip test (basic)
+// All 12 pairs roundtrip test (basic)
 
 #[test]
 fn test_convert_all_pairs_execute_successfully() {
     let test_cases = [
         ("mysql", "postgres", "CREATE TABLE `t` (`id` INT);"),
         ("mysql", "sqlite", "CREATE TABLE `t` (`id` INT);"),
+        ("mysql", "mssql", "CREATE TABLE `t` (`id` INT);"),
         ("postgres", "mysql", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
         ("postgres", "sqlite", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+        ("postgres", "mssql", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
         ("sqlite", "mysql", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
         ("sqlite", "postgres", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+        ("sqlite", "mssql", "CREATE TABLE \"t\" (\"id\" INTEGER);"),
+        ("mssql", "mysql", "CREATE TABLE [t] ([id] INT)\nGO"),
+        ("mssql", "postgres", "CREATE TABLE [t] ([id] INT)\nGO"),
+        ("mssql", "sqlite", "CREATE TABLE [t] ([id] INT)\nGO"),
     ];
 
     for (from, to, sql) in test_cases {
@@ -666,4 +672,313 @@ fn test_convert_all_pairs_execute_successfully() {
             to
         );
     }
+}
+
+// MSSQL → Other Dialects tests
+
+#[test]
+fn test_convert_mssql_to_postgres_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let mssql_sql = r#"SET ANSI_NULLS ON
+GO
+CREATE TABLE [dbo].[users] (
+    [id] INT IDENTITY(1,1) NOT NULL,
+    [email] NVARCHAR(255) NOT NULL,
+    [name] NVARCHAR(100),
+    [created_at] DATETIME2 DEFAULT GETDATE(),
+    CONSTRAINT [PK_users] PRIMARY KEY CLUSTERED ([id])
+) ON [PRIMARY]
+GO
+
+INSERT INTO [dbo].[users] ([email], [name]) VALUES (N'alice@example.com', N'Alice')
+GO
+"#;
+
+    fs::write(&input_file, mssql_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "mssql",
+            "--to",
+            "postgres",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(
+        result.contains("\"users\""),
+        "Should have double-quoted identifiers"
+    );
+    assert!(!result.contains("["), "Should not have brackets");
+    assert!(
+        result.contains("SERIAL") || result.contains("INTEGER"),
+        "Should convert IDENTITY"
+    );
+    assert!(!result.contains("ON [PRIMARY]"), "Should strip filegroup");
+    assert!(
+        result.contains("TIMESTAMP"),
+        "Should convert DATETIME2 to TIMESTAMP"
+    );
+}
+
+#[test]
+fn test_convert_mssql_to_mysql_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let mssql_sql = r#"CREATE TABLE [users] (
+    [id] INT IDENTITY(1,1) NOT NULL,
+    [email] NVARCHAR(255) NOT NULL,
+    [active] BIT DEFAULT 1
+)
+GO
+"#;
+
+    fs::write(&input_file, mssql_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "mssql",
+            "--to",
+            "mysql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(
+        result.contains("`users`"),
+        "Should have backtick identifiers"
+    );
+    assert!(!result.contains("["), "Should not have brackets");
+    assert!(
+        result.contains("AUTO_INCREMENT"),
+        "Should convert IDENTITY to AUTO_INCREMENT"
+    );
+    assert!(
+        result.contains("TINYINT(1)"),
+        "Should convert BIT to TINYINT(1)"
+    );
+}
+
+#[test]
+fn test_convert_mssql_to_sqlite_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let mssql_sql = r#"CREATE TABLE [products] (
+    [id] BIGINT IDENTITY(1,1) NOT NULL,
+    [name] NVARCHAR(MAX),
+    [price] MONEY,
+    [data] VARBINARY(MAX)
+)
+GO
+"#;
+
+    fs::write(&input_file, mssql_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "mssql",
+            "--to",
+            "sqlite",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(
+        result.contains("\"products\""),
+        "Should have double-quoted identifiers"
+    );
+    assert!(!result.contains("["), "Should not have brackets");
+    assert!(
+        result.contains("INTEGER") || result.contains("BIGINT"),
+        "Should convert to INTEGER or BIGINT"
+    );
+    assert!(result.contains("TEXT"), "Should convert NVARCHAR(MAX) to TEXT");
+    assert!(result.contains("BLOB"), "Should convert VARBINARY(MAX) to BLOB");
+}
+
+// Other Dialects → MSSQL tests
+
+#[test]
+fn test_convert_mysql_to_mssql_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let mysql_sql = r#"
+CREATE TABLE `users` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(255) NOT NULL,
+  `active` TINYINT(1) DEFAULT 1,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+
+INSERT INTO `users` (`id`, `name`, `active`) VALUES (1, 'John', 1);
+"#;
+
+    fs::write(&input_file, mysql_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "mysql",
+            "--to",
+            "mssql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(
+        result.contains("[users]"),
+        "Should have bracket identifiers"
+    );
+    assert!(!result.contains("`"), "Should not have backticks");
+    assert!(
+        result.contains("IDENTITY"),
+        "Should convert AUTO_INCREMENT to IDENTITY"
+    );
+    assert!(result.contains("BIT"), "Should convert TINYINT(1) to BIT");
+    assert!(!result.contains("ENGINE="), "Should strip ENGINE clause");
+}
+
+#[test]
+fn test_convert_postgres_to_mssql_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let postgres_sql = r#"
+CREATE TABLE "users" (
+  "id" SERIAL PRIMARY KEY,
+  "name" VARCHAR(255) NOT NULL,
+  "data" BYTEA,
+  "active" BOOLEAN DEFAULT TRUE,
+  "created_at" TIMESTAMPTZ NOT NULL
+);
+"#;
+
+    fs::write(&input_file, postgres_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "postgres",
+            "--to",
+            "mssql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(
+        result.contains("[users]"),
+        "Should have bracket identifiers"
+    );
+    assert!(
+        result.contains("IDENTITY"),
+        "Should convert SERIAL to IDENTITY"
+    );
+    assert!(
+        result.contains("VARBINARY") || result.contains("IMAGE"),
+        "Should convert BYTEA to binary type"
+    );
+    assert!(result.contains("BIT"), "Should convert BOOLEAN to BIT");
+}
+
+#[test]
+fn test_convert_sqlite_to_mssql_basic() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let sqlite_sql = r#"
+CREATE TABLE "users" (
+  "id" INTEGER PRIMARY KEY,
+  "name" TEXT NOT NULL,
+  "score" REAL,
+  "data" BLOB
+);
+"#;
+
+    fs::write(&input_file, sqlite_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "sqlite",
+            "--to",
+            "mssql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+
+    let result = fs::read_to_string(&output_file).unwrap();
+
+    assert!(
+        result.contains("[users]"),
+        "Should have bracket identifiers"
+    );
+    assert!(
+        result.contains("NVARCHAR") || result.contains("VARCHAR"),
+        "Should convert TEXT to VARCHAR"
+    );
+    assert!(result.contains("FLOAT"), "Should convert REAL to FLOAT");
+    assert!(
+        result.contains("VARBINARY"),
+        "Should convert BLOB to VARBINARY"
+    );
 }
