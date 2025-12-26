@@ -10,37 +10,41 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 /// Regex to extract table name from CREATE TABLE
-/// Supports: `table` (MySQL), "table" (PostgreSQL), table (SQLite/unquoted), schema.table
+/// Supports: `table` (MySQL), "table" (PostgreSQL), [table] (MSSQL), table (SQLite/unquoted), schema.table
 static CREATE_TABLE_NAME_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?[`"]?([^`"\s(]+)[`"]?"#)
+    // Match table name with various quoting styles including MSSQL brackets
+    // Pattern handles: schema.table, [schema].[table], `schema`.`table`, "schema"."table"
+    Regex::new(r#"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s(]+)[\]`"]?"#)
         .unwrap()
 });
 
 /// Regex to extract table name from ALTER TABLE
-/// Supports: `table` (MySQL), "table" (PostgreSQL), table (SQLite/unquoted), schema.table
+/// Supports: `table` (MySQL), "table" (PostgreSQL), [table] (MSSQL), table (SQLite/unquoted), schema.table
 static ALTER_TABLE_NAME_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?(?:\w+\.)?[`"]?([^`"\s]+)[`"]?"#).unwrap()
+    Regex::new(r#"(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s]+)[\]`"]?"#).unwrap()
 });
 
 /// Regex for column definition
-/// Supports: `column` (MySQL), "column" (PostgreSQL), column (unquoted)
+/// Supports: `column` (MySQL), "column" (PostgreSQL), [column] (MSSQL), column (unquoted)
 static COLUMN_DEF_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"^\s*[`"]?([^`"\s,]+)[`"]?\s+(\w+(?:\([^)]+\))?(?:\s+unsigned)?)"#).unwrap()
+    Regex::new(r#"^\s*[\[`"]?([^\[\]`"\s,]+)[\]`"]?\s+(\w+(?:\([^)]+\))?(?:\s+unsigned)?)"#).unwrap()
 });
 
 /// Regex for PRIMARY KEY constraint
-static PRIMARY_KEY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)PRIMARY\s+KEY\s*\(([^)]+)\)").unwrap());
+/// Supports MSSQL CLUSTERED/NONCLUSTERED keywords: PRIMARY KEY CLUSTERED ([col])
+static PRIMARY_KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)PRIMARY\s+KEY\s*(?:CLUSTERED\s+|NONCLUSTERED\s+)?\(([^)]+)\)").unwrap()
+});
 
 /// Regex for inline PRIMARY KEY on column
 static INLINE_PRIMARY_KEY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bPRIMARY\s+KEY\b").unwrap());
 
 /// Regex for FOREIGN KEY constraint with optional constraint name
-/// Supports: `name` (MySQL), "name" (PostgreSQL), name (unquoted)
+/// Supports: `name` (MySQL), "name" (PostgreSQL), [name] (MSSQL), name (unquoted)
 static FOREIGN_KEY_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:CONSTRAINT\s+[`"]?([^`"\s]+)[`"]?\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:\w+\.)?[`"]?([^`"\s(]+)[`"]?\s*\(([^)]+)\)"#,
+        r#"(?i)(?:CONSTRAINT\s+[\[`"]?([^\[\]`"\s]+)[\]`"]?\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s(]+)[\]`"]?\s*\(([^)]+)\)"#,
     )
     .unwrap()
 });
@@ -50,15 +54,17 @@ static NOT_NULL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNOT\s+NULL\b")
 
 /// Regex for inline INDEX/KEY in CREATE TABLE
 /// Matches: INDEX idx_name (col1, col2), KEY idx_name (col1), UNIQUE INDEX idx_name (col1)
+/// Supports MSSQL bracket quoting: INDEX [idx_name] ([col])
 static INLINE_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:(UNIQUE)\s+)?(?:INDEX|KEY)\s+[`"]?(\w+)[`"]?\s*\(([^)]+)\)"#).unwrap()
+    Regex::new(r#"(?i)(?:(UNIQUE)\s+)?(?:INDEX|KEY)\s+[\[`"]?(\w+)[\]`"]?\s*\(([^)]+)\)"#).unwrap()
 });
 
 /// Regex for CREATE INDEX statement
-/// Matches: CREATE [UNIQUE] INDEX [IF NOT EXISTS] idx_name ON table [USING method] (columns)
+/// Matches: CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX [IF NOT EXISTS] idx_name ON table [USING method] (columns)
+/// Supports MSSQL bracket quoting and schema prefixes
 static CREATE_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)[`"]?\s+ON\s+(?:\w+\.)?[`"]?(\w+)[`"]?\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)"#,
+        r#"(?i)CREATE\s+(UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[\[`"]?(\w+)[\]`"]?\s+ON\s+(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?(\w+)[\]`"]?\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)"#,
     )
     .unwrap()
 });
@@ -424,10 +430,17 @@ fn parse_foreign_keys(stmt: &str) -> Vec<ForeignKey> {
     fks
 }
 
-/// Parse a comma-separated column list, stripping backticks and whitespace
+/// Parse a comma-separated column list, stripping quotes (backticks, double quotes, brackets)
 pub fn parse_column_list(s: &str) -> Vec<String> {
     s.split(',')
-        .map(|c| c.trim().trim_matches('`').trim_matches('"').to_string())
+        .map(|c| {
+            c.trim()
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches('[')
+                .trim_matches(']')
+                .to_string()
+        })
         .filter(|c| !c.is_empty())
         .collect()
 }

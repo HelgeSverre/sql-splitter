@@ -1,4 +1,4 @@
-//! Type conversion from MySQL/PostgreSQL/SQLite types to DuckDB types.
+//! Type conversion from MySQL/PostgreSQL/SQLite/MSSQL types to DuckDB types.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -128,6 +128,23 @@ impl TypeConverter {
             // Bit types
             "BIT" => "BOOLEAN".to_string(),
 
+            // MSSQL-specific types
+            "NCHAR" => "VARCHAR".to_string(),
+            "NVARCHAR" => "VARCHAR".to_string(),
+            "NTEXT" => "TEXT".to_string(),
+            "DATETIME2" => "TIMESTAMP".to_string(),
+            "SMALLDATETIME" => "TIMESTAMP".to_string(),
+            "DATETIMEOFFSET" => "TIMESTAMPTZ".to_string(),
+            "UNIQUEIDENTIFIER" => "UUID".to_string(),
+            "IMAGE" => "BLOB".to_string(),
+            "ROWVERSION" => "BLOB".to_string(),
+            "SMALLMONEY" => "DECIMAL(10,4)".to_string(),
+            "SQL_VARIANT" => "VARCHAR".to_string(),
+            "XML" => "TEXT".to_string(),
+            "HIERARCHYID" => "VARCHAR".to_string(),
+            "GEOGRAPHY" => "BLOB".to_string(),
+            "GEOMETRY" => "BLOB".to_string(),
+
             _ => Self::convert_parameterized(trimmed),
         }
     }
@@ -189,9 +206,19 @@ impl TypeConverter {
                     return format!("VARCHAR({})", params);
                 }
                 "VARCHAR" | "CHARACTER VARYING" => {
+                    // Handle MSSQL VARCHAR(MAX)
+                    if params.to_uppercase() == "MAX" {
+                        return "TEXT".to_string();
+                    }
                     return format!("VARCHAR({})", params);
                 }
-                "BINARY" | "VARBINARY" => return "BLOB".to_string(),
+                "BINARY" | "VARBINARY" => {
+                    // Handle MSSQL VARBINARY(MAX)
+                    if params.to_uppercase() == "MAX" {
+                        return "BLOB".to_string();
+                    }
+                    return "BLOB".to_string();
+                }
 
                 // Decimal types - preserve precision and scale
                 "DECIMAL" | "NUMERIC" | "DEC" | "FIXED" => {
@@ -228,6 +255,18 @@ impl TypeConverter {
 
                 // SET - convert to VARCHAR
                 "SET" => return "VARCHAR".to_string(),
+
+                // MSSQL NVARCHAR/NCHAR - treat like VARCHAR
+                "NVARCHAR" => {
+                    if params.to_uppercase() == "MAX" {
+                        return "TEXT".to_string();
+                    }
+                    return format!("VARCHAR({})", params);
+                }
+                "NCHAR" => return format!("VARCHAR({})", params),
+
+                // MSSQL DATETIME2(precision)
+                "DATETIME2" => return "TIMESTAMP".to_string(),
 
                 _ => return type_str.to_string(),
             };

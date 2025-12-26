@@ -335,6 +335,13 @@ static INSERT_INTO_RE: Lazy<Regex> =
 static CREATE_INDEX_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)ON\s+`?([^\s`(;]+)`?").unwrap());
 
+// MSSQL CREATE INDEX: extracts table from ON [schema].[table] or ON [table]
+// Matches: ON [table], ON [dbo].[table], ON [db].[dbo].[table]
+// Captures the last bracketed or unbracketed identifier before (
+static CREATE_INDEX_MSSQL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)ON\s+(?:\[?[^\[\]\s]+\]?\s*\.\s*)*\[([^\[\]]+)\]").unwrap()
+});
+
 static ALTER_TABLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)ALTER\s+TABLE\s+`?([^\s`;]+)`?").unwrap());
 
@@ -795,7 +802,23 @@ impl<R: Read> Parser<R> {
             }
         }
 
-        if upper_prefix.starts_with(b"CREATE INDEX") || upper_prefix.starts_with(b"CREATE UNIQUE") {
+        if upper_prefix.starts_with(b"CREATE INDEX")
+            || upper_prefix.starts_with(b"CREATE UNIQUE")
+            || upper_prefix.starts_with(b"CREATE CLUSTERED")
+            || upper_prefix.starts_with(b"CREATE NONCLUSTER")
+        {
+            // For MSSQL, try the bracket-aware regex first
+            if dialect == SqlDialect::Mssql {
+                if let Some(caps) = CREATE_INDEX_MSSQL_RE.captures(stmt) {
+                    if let Some(m) = caps.get(1) {
+                        return (
+                            StatementType::CreateIndex,
+                            String::from_utf8_lossy(m.as_bytes()).into_owned(),
+                        );
+                    }
+                }
+            }
+            // Fall back to generic regex for MySQL/PostgreSQL/SQLite
             if let Some(caps) = CREATE_INDEX_RE.captures(stmt) {
                 if let Some(m) = caps.get(1) {
                     return (
