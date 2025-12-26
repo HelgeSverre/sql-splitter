@@ -154,6 +154,16 @@ impl Converter {
         // Detect unsupported features BEFORE conversion (so we see original types)
         self.detect_unsupported_features(&result, table_name)?;
 
+        // Convert MSSQL-specific syntax BEFORE identifier conversion
+        // (so we can strip [dbo]. schema prefix properly)
+        if self.from == SqlDialect::Mssql && self.to != SqlDialect::Mssql {
+            result = self.strip_mssql_schema_prefix(&result);
+            result = self.convert_mssql_getdate(&result);
+            result = self.strip_mssql_on_filegroup(&result);
+            result = self.strip_mssql_clustered(&result);
+            result = self.convert_mssql_unicode_strings(&result);
+        }
+
         // Convert identifier quoting
         result = self.convert_identifiers(&result);
 
@@ -195,6 +205,12 @@ impl Converter {
         let stmt_str = String::from_utf8_lossy(stmt);
         let mut result = stmt_str.to_string();
 
+        // Convert MSSQL-specific syntax BEFORE identifier conversion
+        if self.from == SqlDialect::Mssql && self.to != SqlDialect::Mssql {
+            result = self.strip_mssql_schema_prefix(&result);
+            result = self.convert_mssql_unicode_strings(&result);
+        }
+
         // Convert identifier quoting
         result = self.convert_identifiers(&result);
 
@@ -214,6 +230,12 @@ impl Converter {
     fn convert_create_index(&mut self, stmt: &[u8]) -> Result<Vec<u8>, ConvertWarning> {
         let stmt_str = String::from_utf8_lossy(stmt);
         let mut result = stmt_str.to_string();
+
+        // Convert MSSQL-specific syntax BEFORE identifier conversion
+        if self.from == SqlDialect::Mssql && self.to != SqlDialect::Mssql {
+            result = self.strip_mssql_schema_prefix(&result);
+            result = self.strip_mssql_clustered(&result);
+        }
 
         // Convert identifier quoting
         result = self.convert_identifiers(&result);
@@ -344,6 +366,14 @@ impl Converter {
             return Ok(Vec::new()); // Skip
         }
 
+        // Skip MSSQL session commands when converting to other dialects
+        if self.from == SqlDialect::Mssql
+            && self.to != SqlDialect::Mssql
+            && self.is_mssql_session_command(&result)
+        {
+            return Ok(Vec::new()); // Skip
+        }
+
         // Strip conditional comments
         if result.contains("/*!") {
             let stripped = self.strip_conditional_comments(&result);
@@ -444,6 +474,21 @@ impl Converter {
     fn is_sqlite_pragma(&self, stmt: &str) -> bool {
         let upper = stmt.to_uppercase();
         upper.contains("PRAGMA")
+    }
+
+    /// Check if statement is an MSSQL session command
+    fn is_mssql_session_command(&self, stmt: &str) -> bool {
+        let upper = stmt.to_uppercase();
+        upper.contains("SET ANSI_NULLS")
+            || upper.contains("SET QUOTED_IDENTIFIER")
+            || upper.contains("SET NOCOUNT")
+            || upper.contains("SET XACT_ABORT")
+            || upper.contains("SET ARITHABORT")
+            || upper.contains("SET ANSI_WARNINGS")
+            || upper.contains("SET ANSI_PADDING")
+            || upper.contains("SET CONCAT_NULL_YIELDS_NULL")
+            || upper.contains("SET NUMERIC_ROUNDABORT")
+            || upper.contains("SET IDENTITY_INSERT")
     }
 
     /// Convert identifier quoting based on dialects
@@ -655,8 +700,82 @@ impl Converter {
                 // We can't easily detect this pattern, so just pass through
                 stmt.to_string()
             }
+            // MSSQL conversions
+            (SqlDialect::MySql, SqlDialect::Mssql) => {
+                // AUTO_INCREMENT → IDENTITY(1,1)
+                let result = stmt.replace("BIGINT AUTO_INCREMENT", "BIGINT IDENTITY(1,1)");
+                let result = result.replace("bigint AUTO_INCREMENT", "BIGINT IDENTITY(1,1)");
+                let result = result.replace("INT AUTO_INCREMENT", "INT IDENTITY(1,1)");
+                let result = result.replace("int AUTO_INCREMENT", "INT IDENTITY(1,1)");
+                result.replace("AUTO_INCREMENT", "IDENTITY(1,1)")
+            }
+            (SqlDialect::Mssql, SqlDialect::MySql) => {
+                // IDENTITY(1,1) → AUTO_INCREMENT
+                self.convert_identity_to_auto_increment(stmt)
+            }
+            (SqlDialect::Postgres, SqlDialect::Mssql) => {
+                // SERIAL → INT IDENTITY(1,1) (handled by type mapper)
+                stmt.to_string()
+            }
+            (SqlDialect::Mssql, SqlDialect::Postgres) => {
+                // IDENTITY(1,1) → SERIAL (need to add SERIAL instead)
+                self.convert_identity_to_serial(stmt)
+            }
+            (SqlDialect::Sqlite, SqlDialect::Mssql) => {
+                // SQLite → MSSQL: pass through
+                stmt.to_string()
+            }
+            (SqlDialect::Mssql, SqlDialect::Sqlite) => {
+                // IDENTITY → strip (SQLite uses INTEGER PRIMARY KEY)
+                self.strip_identity(stmt)
+            }
             _ => stmt.to_string(),
         }
+    }
+
+    /// Convert MSSQL IDENTITY to MySQL AUTO_INCREMENT
+    fn convert_identity_to_auto_increment(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_IDENTITY: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bIDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
+
+        RE_IDENTITY.replace_all(stmt, "AUTO_INCREMENT").to_string()
+    }
+
+    /// Convert MSSQL IDENTITY to PostgreSQL SERIAL
+    fn convert_identity_to_serial(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        // Match INT IDENTITY(1,1) and replace with SERIAL
+        static RE_BIGINT_IDENTITY: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\bBIGINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap()
+        });
+        static RE_INT_IDENTITY: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\bINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap()
+        });
+        static RE_SMALLINT_IDENTITY: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\bSMALLINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap()
+        });
+
+        let result = RE_BIGINT_IDENTITY.replace_all(stmt, "BIGSERIAL").to_string();
+        let result = RE_INT_IDENTITY.replace_all(&result, "SERIAL").to_string();
+        RE_SMALLINT_IDENTITY
+            .replace_all(&result, "SMALLSERIAL")
+            .to_string()
+    }
+
+    /// Strip MSSQL IDENTITY clause for SQLite
+    fn strip_identity(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_IDENTITY: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
+
+        RE_IDENTITY.replace_all(stmt, "").to_string()
     }
 
     /// Convert string escape sequences
@@ -830,6 +949,82 @@ impl Converter {
             Lazy::new(|| Regex::new(r#"(?i)\b(public|pg_catalog|pg_temp)\s*\.\s*"#).unwrap());
 
         RE_SCHEMA.replace_all(stmt, "").to_string()
+    }
+
+    /// Convert MSSQL GETDATE() to CURRENT_TIMESTAMP
+    fn convert_mssql_getdate(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_GETDATE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bGETDATE\s*\(\s*\)").unwrap());
+        static RE_SYSDATETIME: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bSYSDATETIME\s*\(\s*\)").unwrap());
+        static RE_GETUTCDATE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bGETUTCDATE\s*\(\s*\)").unwrap());
+
+        let result = RE_GETDATE
+            .replace_all(stmt, "CURRENT_TIMESTAMP")
+            .to_string();
+        let result = RE_SYSDATETIME
+            .replace_all(&result, "CURRENT_TIMESTAMP")
+            .to_string();
+        RE_GETUTCDATE
+            .replace_all(&result, "CURRENT_TIMESTAMP")
+            .to_string()
+    }
+
+    /// Strip MSSQL ON [filegroup] clause
+    fn strip_mssql_on_filegroup(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        // Match ON [PRIMARY] or ON [filegroup_name]
+        static RE_ON_FILEGROUP: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s+ON\s*\[\s*\w+\s*\]").unwrap());
+
+        RE_ON_FILEGROUP.replace_all(stmt, "").to_string()
+    }
+
+    /// Strip MSSQL CLUSTERED/NONCLUSTERED keywords
+    fn strip_mssql_clustered(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_CLUSTERED: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bCLUSTERED\s+").unwrap());
+        static RE_NONCLUSTERED: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bNONCLUSTERED\s+").unwrap());
+
+        let result = RE_CLUSTERED.replace_all(stmt, "").to_string();
+        RE_NONCLUSTERED.replace_all(&result, "").to_string()
+    }
+
+    /// Convert MSSQL N'unicode' strings to regular 'unicode' strings
+    fn convert_mssql_unicode_strings(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        // Match N'...' unicode strings, being careful not to match inside strings
+        // This is a simplified version that handles most cases
+        static RE_UNICODE_STRING: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bN'").unwrap());
+
+        RE_UNICODE_STRING.replace_all(stmt, "'").to_string()
+    }
+
+    /// Strip MSSQL schema prefix (dbo., etc.) from table names
+    fn strip_mssql_schema_prefix(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        // Match [dbo].[table] or dbo.table and keep just [table] or table
+        // We replace schema.table with just table, handling both bracketed and unbracketed forms
+        static RE_MSSQL_SCHEMA: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\[?dbo\]?\s*\.\s*").unwrap()
+        });
+
+        RE_MSSQL_SCHEMA.replace_all(stmt, "").to_string()
     }
 
     /// Detect unsupported features and add warnings
