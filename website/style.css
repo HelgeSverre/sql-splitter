@@ -26,6 +26,7 @@ h4[id] {
     --color-code-bg: #0a0a0a;
     --color-accent: #58a6ff;
     --color-accent-hover: #79b8ff;
+    --color-nav-bg: rgba(10, 10, 10, 0.9);
 
     /* Neon command colors */
     --cmd-split: #58a6ff;
@@ -73,13 +74,14 @@ body {
     color: var(--color-text);
     background: var(--color-bg);
     -webkit-font-smoothing: antialiased;
+    transition: background-color 0.2s, color 0.2s;
 }
 
 /* Nav */
 nav {
     position: sticky;
     top: 0;
-    background: rgba(10, 10, 10, 0.9);
+    background: var(--color-nav-bg);
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--color-border);
     z-index: 100;
@@ -116,6 +118,7 @@ nav {
 .nav-links {
     display: flex;
     gap: var(--space-md);
+    align-items: center;
 }
 
 .nav-links a {
@@ -127,6 +130,45 @@ nav {
 
 .nav-links a:hover {
     color: var(--cmd-split);
+}
+
+/* Theme Toggle */
+.theme-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 8px;
+    color: var(--color-text-muted);
+    transition: color 0.2s;
+    display: flex;
+    align-items: center;
+}
+
+.theme-toggle:hover {
+    color: var(--color-text);
+}
+
+.theme-toggle svg {
+    width: 20px;
+    height: 20px;
+}
+
+/* Dark mode (default): show sun icon to switch to light */
+.theme-toggle .icon-sun {
+    display: block;
+}
+
+.theme-toggle .icon-moon {
+    display: none;
+}
+
+/* Light mode: show moon icon to switch to dark */
+[data-theme="light"] .theme-toggle .icon-sun {
+    display: none;
+}
+
+[data-theme="light"] .theme-toggle .icon-moon {
+    display: block;
 }
 
 /* Main */
@@ -248,7 +290,7 @@ p {
 
 .btn-primary {
     background: var(--cmd-split);
-    color: #0a0a0a;
+    color: var(--color-bg);
     box-shadow: 0 0 20px rgba(88, 166, 255, 0.3);
 }
 
@@ -398,7 +440,7 @@ p {
 }
 
 /* Shell Syntax Highlighting Classes */
-.sh-comment { color: #3d6a47; font-style: italic; }
+.sh-comment { color: var(--syn-comment); font-style: italic; }
 .sh-tool { color: var(--cmd-split); }
 
 .copy-btn {
@@ -423,7 +465,7 @@ p {
 
 .copy-btn.copied {
     background: var(--cmd-validate);
-    color: #0a0a0a;
+    color: var(--color-bg);
     border-color: var(--cmd-validate);
 }
 
@@ -648,52 +690,70 @@ footer .credit {
     .options-table td {
         padding: 0.375rem 0.5rem;
     }
+
+    /* Code block overflow fix for mobile */
+    .code-block pre {
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        word-break: break-word;
+    }
+
+    .code-block code {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+    }
 }
 
 /* Light mode override */
-@media (prefers-color-scheme: light) {
-    :root {
-        --color-bg: #ffffff;
-        --color-surface: #f6f8fa;
-        --color-text: #24292f;
-        --color-text-muted: #57606a;
-        --color-border: #d0d7de;
-        --color-code-bg: #f6f8fa;
+[data-theme="light"] {
+    --color-bg: #ffffff;
+    --color-surface: #f6f8fa;
+    --color-text: #24292f;
+    --color-text-muted: #57606a;
+    --color-border: #d0d7de;
+    --color-code-bg: #f6f8fa;
+    --color-nav-bg: rgba(255, 255, 255, 0.9);
+    --color-accent-hover: #0550ae;
 
-        --cmd-split: #0969da;
-        --cmd-merge: #8250df;
-        --cmd-analyze: #1a7f37;
-        --cmd-validate: #1a7f37;
-        --cmd-convert: #bc4c00;
-        --cmd-sample: #bf3989;
-        --cmd-shard: #8250df;
+    --cmd-split: #0969da;
+    --cmd-merge: #8250df;
+    --cmd-analyze: #1a7f37;
+    --cmd-validate: #1a7f37;
+    --cmd-convert: #bc4c00;
+    --cmd-sample: #bf3989;
+    --cmd-shard: #8250df;
 
-        /* Light mode syntax highlighting */
-        --syn-comment: #6e7681;
-        --syn-command: #0550ae;
-        --syn-subcommand: #8250df;
-        --syn-flag: #116329;
-        --syn-flag-value: #953800;
-        --syn-string: #0a3069;
-        --syn-path: #953800;
-        --syn-variable: #953800;
-        --syn-pipe: #cf222e;
-        --syn-prompt: #1a7f37;
-    }
+    /* Light mode syntax highlighting */
+    --syn-comment: #6e7681;
+    --syn-command: #0550ae;
+    --syn-subcommand: #8250df;
+    --syn-flag: #116329;
+    --syn-flag-value: #953800;
+    --syn-string: #0a3069;
+    --syn-path: #953800;
+    --syn-variable: #953800;
+    --syn-pipe: #cf222e;
+    --syn-prompt: #1a7f37;
+}
 
-    .logo-icon {
-        text-shadow: none;
-    }
+[data-theme="light"] .logo-icon {
+    text-shadow: none;
+}
 
-    .benefit-icon {
-        text-shadow: none;
-    }
+[data-theme="light"] .benefit-icon {
+    text-shadow: none;
+}
 
-    .btn-primary {
-        box-shadow: none;
-    }
+[data-theme="light"] .btn-primary {
+    box-shadow: none;
+}
 
-    .btn-primary:hover {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-    }
+[data-theme="light"] .btn-primary:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+[data-theme="light"] .benefit:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
