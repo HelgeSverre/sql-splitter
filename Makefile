@@ -106,7 +106,7 @@ docker-bench:
 
 # Verify against real-world SQL dumps from public sources
 verify-realworld:
-	./scripts/verify-realworld.sh
+	cargo test --test realworld -- --ignored
 
 # Deploy website to Vercel
 website-deploy:

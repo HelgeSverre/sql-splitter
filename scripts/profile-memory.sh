@@ -304,6 +304,12 @@ run_profile() {
         redact)
             cmd+=("$input_file" "--dialect" "$dialect" "--output" "$output_file" "--null" "*.password" "--hash" "*.email")
             ;;
+        graph)
+            cmd+=("$input_file" "--dialect" "$dialect" "--output" "$output_file")
+            ;;
+        order)
+            cmd+=("$input_file" "--dialect" "$dialect" "--output" "$output_file")
+            ;;
     esac
     
     cmd+=("${extra_args[@]}")
@@ -366,6 +372,10 @@ run_all_profiles() {
     run_profile "diff" "$input_file" "$dialect" "--schema-only"
     run_profile "redact" "$input_file" "$dialect"
     run_profile "redact" "$input_file" "$dialect" "--fake" "*.name"
+    run_profile "graph" "$input_file" "$dialect"
+    run_profile "graph" "$input_file" "$dialect" "--format" "json"
+    run_profile "order" "$input_file" "$dialect"
+    run_profile "order" "$input_file" "$dialect" "--dry-run"
     
     # Convert only for mysql/postgres
     if [[ "$dialect" != "sqlite" ]]; then
