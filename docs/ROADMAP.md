@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.11.0 (current)
+**Version**: 1.12.0 (current)
 **Last Updated**: 2025-12-26
-**Revision**: 3.1 — Graph command implemented, ERD generation
+**Revision**: 3.2 — Query command implemented with DuckDB integration
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -20,12 +20,11 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 7. ✅ Diff — Schema + data comparison (v1.9.0)
 8. ✅ Redact — Data anonymization (v1.10.0)
 9. ✅ Graph — ERD generation and FK visualization (v1.11.0)
+10. ✅ Query — SQL analytics with DuckDB (v1.12.0)
 
-**Next (v1.12+):**
-- v1.12.0: Query — SQL-like row filtering
-- v1.13.0: Detect-PII — Auto-suggest redaction config
-- v1.14.0: MSSQL — Fourth dialect support
-- v1.15.0: Migrate — Schema migration generation
+**Next (v1.13+):**
+- v1.13.0: MSSQL — Fourth dialect support (SQL Server)
+- v1.14.0: Migrate — Schema migration generation
 
 **Future (v2.x):**
 - v2.0.0: Parallel — Multi-threaded performance
@@ -399,54 +398,72 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.12+)
+### v1.12.0 — Query Command ✅ RELEASED
+**Released**: 2025-12-26  
+**Theme**: SQL analytics with embedded DuckDB
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Query command** | ✅ Done | Full SQL analytics on dump files |
+| ├─ DuckDB integration | ✅ Done | Bundled, zero dependencies |
+| ├─ Multi-dialect import | ✅ Done | MySQL, PostgreSQL, SQLite |
+| ├─ Interactive REPL | ✅ Done | .tables, .schema, .describe, .sample |
+| ├─ Output formats | ✅ Done | table, json, jsonl, csv, tsv |
+| ├─ Persistent caching | ✅ Done | --cache with 400x speedup |
+| ├─ Auto disk mode | ✅ Done | >2GB dumps use disk storage |
+| ├─ Memory limit | ✅ Done | --memory-limit flag |
+| └─ Table filtering | ✅ Done | --tables flag |
+| **DuckDB module** | ✅ Done | Reusable query engine infrastructure |
+| ├─ QueryEngine | ✅ Done | In-memory and disk connections |
+| ├─ DumpLoader | ✅ Done | Statement parsing and loading |
+| ├─ TypeConverter | ✅ Done | Cross-dialect type mapping |
+| └─ CacheManager | ✅ Done | SHA256-based cache keys |
+| **Testing** | ✅ Done | 119 DuckDB-specific tests |
+
+**Delivered:**
+- `sql-splitter query dump.sql "SELECT COUNT(*) FROM users"` — Single query
+- `sql-splitter query dump.sql --interactive` — REPL session
+- `sql-splitter query dump.sql "SELECT * FROM orders" -f json -o results.json` — Export
+- Full SQL support (JOINs, aggregations, window functions, CTEs)
+- Cached queries run 400x faster on repeated access
+- Auto-switches to disk mode for dumps >2GB
+- Supports compressed input files (.gz, .bz2, .xz, .zst)
+
+**Technical highlights:**
+- Zero external dependencies (DuckDB bundled)
+- ~15-25 MB binary size increase
+- 674 total tests (119 DuckDB-specific)
+- Type mapping for all MySQL/PostgreSQL/SQLite types to DuckDB
 
 ---
 
-### v1.12.0 — Query Command
-**Theme**: SQL-like row filtering
+## Upcoming Features (v1.13+)
+
+---
+
+### v1.13.0 — MSSQL Support
+**Theme**: Fourth dialect (SQL Server)
 
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| Query | ~30h | WHERE clause filtering |
+| MSSQL dialect | ~40-50h | Full SQL Server support for all commands |
 
 **Features:**
-- Basic WHERE: `=`, `!=`, `<`, `>`, `AND`, `OR`, `IS NULL`, `IN`
-- Table selection
-- Output formats: SQL, CSV, JSON
-
----
-
-### v1.13.0 — Detect-PII Command
-**Theme**: Auto-suggest redaction config
-
-| Feature | Effort | Notes |
-|---------|--------|-------|
-| Detect-PII | ~8h | Scan schema and data |
-
-**Detection:**
-- Column name patterns (email, phone, ssn, etc.)
-- Data patterns (regex matching)
-- Statistical uniqueness
-
----
-
-### v1.14.0 — MSSQL Support
-**Theme**: Fourth dialect
-
-| Feature | Effort | Notes |
-|---------|--------|-------|
-| MSSQL dialect | ~30h | SQL Server support |
-
-**Features:**
-- Parse MSSQL dumps (SSMS-generated scripts)
-- Convert to/from MySQL, PostgreSQL, SQLite
+- Parse MSSQL dumps (SSMS-generated scripts, sqlcmd, Azure Data Studio)
+- Convert to/from MySQL, PostgreSQL, SQLite (12 conversion pairs total)
 - Handle T-SQL syntax (GO batches, square brackets, IDENTITY)
 - Support unicode strings (N'...')
+- Full support in all commands: split, merge, analyze, sample, shard, convert, validate, diff, redact, graph, order, query
+- DuckDB query integration for MSSQL dumps
+
+**Out of scope:**
+- bcp file parsing (binary format)
+- Native backups (.bak files)
+- DACPAC/BACPAC support
 
 ---
 
-### v1.15.0 — Migration Generation
+### v1.14.0 — Migration Generation
 **Theme**: Schema evolution tracking
 
 | Feature | Effort | Notes |
@@ -541,7 +558,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ## Effort Summary
 
-### Priority Features (v1.4–v1.10)
+### Priority Features (v1.4–v1.12)
 
 | Version | Theme | Status |
 |---------|-------|--------|
@@ -557,15 +574,14 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.9.2 | CLI UX + Man Pages | ✅ Released |
 | v1.10.0 | Redact | ✅ Released |
 | v1.11.0 | Graph + Order | ✅ Released |
+| v1.12.0 | Query (DuckDB) | ✅ Released |
 
-### Upcoming Features (v1.12+)
+### Upcoming Features (v1.13+)
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v1.12.0 | Query | ~30h | 2 weeks |
-| v1.13.0 | Detect-PII | ~8h | 1 week |
-| v1.14.0 | MSSQL | ~30h | 2 weeks |
-| v1.15.0 | Migrate | ~40h | 2 weeks |
+| v1.13.0 | MSSQL | ~40-50h | 2-3 weeks |
+| v1.14.0 | Migrate | ~40h | 2 weeks |
 | v2.0.0 | Parallel | ~60h | 3 weeks |
 | v2.1.0 | Infer | ~50h | 2-3 weeks |
 
@@ -627,6 +643,13 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
     - Order command for topological FK ordering
     - Tested with 281 tables, 3104 columns
 
+13. ✅ **v1.12.0 — Query** — Released
+    - SQL analytics with embedded DuckDB
+    - Multi-dialect import, 5 output formats
+    - Interactive REPL with meta-commands
+    - Persistent caching with 400x speedup
+    - 674 total tests (119 DuckDB-specific)
+
 ---
 
 ## Test Strategy
@@ -682,12 +705,15 @@ tests/
 
 ### Upcoming Feature Designs
 
-- [Query Feature](features/QUERY_FEATURE.md) — v1.11.0
 - [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md) — v1.13.0
+- [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.14.0
 
 ### Archived (Implemented)
 
 Historical documents for completed features in `docs/archived/`:
+- QUERY_FEATURE.md — v1.12.0
+- DUCKDB_QUERY_FEASIBILITY.md — v1.12.0 feasibility study
+- GRAPH_FEATURE.md — v1.11.0
 - REDACT_FEATURE.md — v1.10.0
 - REDACT_IMPLEMENTATION_PLAN.md — v1.10.0
 - DIFF_FEATURE.md — v1.9.0
