@@ -5,6 +5,7 @@ pub mod analyzer;
 pub mod cmd;
 pub mod convert;
 pub mod differ;
+pub mod graph;
 pub mod merger;
 pub mod parser;
 pub mod pk;

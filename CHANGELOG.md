@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2025-12-26
+
+### Added
+
+- **Graph command**: Generate Entity-Relationship Diagrams (ERD) from SQL dumps
+  - `sql-splitter graph dump.sql -o schema.html` - Interactive HTML ERD (default)
+  - `sql-splitter graph dump.sql -o schema.dot` - Graphviz DOT format with full column details
+  - `sql-splitter graph dump.sql -o schema.mmd --format mermaid` - Mermaid erDiagram syntax
+  - `sql-splitter graph dump.sql -o schema.json --format json` - JSON with tables, columns, relationships
+  - **ERD features**: Shows tables with columns, types, PK/FK markers, nullability
+  - **Filtering**: `--tables` and `--exclude` with glob patterns, `--cycles-only` for circular deps
+  - **Focus mode**: `--table TABLE --transitive` (dependencies) or `--reverse` (dependents)
+  - **HTML viewer**: Dark/light theme toggle, copy Mermaid code button, sql-splitter branding
+  - **Cycle detection**: Tarjan's SCC algorithm finds self-references and circular FK chains
+  - `--render` to auto-render DOT to PNG/SVG/PDF using Graphviz
+  - `--layout lr|tb` for horizontal or vertical layout
+  - Handles large schemas (tested with 281 tables, 3104 columns)
+  - Command alias: `gr`
+
+- **Order command**: Output SQL dump with tables in topological FK order
+  - `sql-splitter order dump.sql -o ordered.sql` - Rewrite dump in safe import order
+  - `sql-splitter order dump.sql --check` - Verify ordering and detect cycles
+  - `sql-splitter order dump.sql --dry-run` - Show order without rewriting
+  - `sql-splitter order dump.sql --reverse` - Children before parents (for DROP operations)
+  - Detects and reports circular dependencies
+  - Command alias: `ord`
+
+- **Graph module**: Reusable ERD and graph analysis infrastructure
+  - `GraphView` with full column info (name, type, PK, FK, nullable, references)
+  - `TableInfo`, `ColumnInfo`, `EdgeInfo` structs for ERD rendering
+  - Cycle detection using Tarjan's strongly connected components
+  - Output formatters: DOT (ERD tables), Mermaid (erDiagram), JSON, HTML
+  - Integration with existing `SchemaGraph` infrastructure
+
 ## [1.10.0] - 2025-12-21
 
 ### Added

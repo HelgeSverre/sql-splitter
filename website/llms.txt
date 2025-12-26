@@ -1,8 +1,9 @@
 # sql-splitter
 
 > High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
-> MySQL/PostgreSQL/SQLite, validate integrity, create FK-safe samples, and shard multi-tenant dumps. Optimized for
-> automation, CI/CD, and large compressed dumps with 600+ MB/s throughput and constant ~50MB memory usage.
+> MySQL/PostgreSQL/SQLite, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
+> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 600+ MB/s throughput
+> and constant ~50MB memory usage.
 
 sql-splitter is a **dump-first** tool: it operates on SQL dump files on disk (optionally compressed) rather than live
 database connections. It is designed to be **safe to automate** in scripts, CI pipelines, and AI-driven workflows.
@@ -55,6 +56,8 @@ sql-splitter --version
 | `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
 | `diff`     | Compare two SQL dumps for changes         | Schema migrations, change detection, auditing     |
 | `redact`   | Anonymize PII in SQL dumps                | GDPR compliance, dev data, safe sharing           |
+| `graph`    | Generate ERD diagrams (HTML, DOT, Mermaid)| Schema visualization, documentation, onboarding   |
+| `order`    | Reorder dump in topological FK order      | Safe imports, cycle detection, DROP order         |
 
 ## Universal Capabilities
 
@@ -82,6 +85,8 @@ All commands support:
 | Validate all dumps in CI pipeline        | `validate "*.sql" --json` | Parse JSON output with `jq` for automation                  |
 | Compare two dumps for changes            | `diff`                    | Schema + data comparison; outputs text, json, or sql        |
 | Anonymize sensitive data for dev/sharing | `redact`                  | Replace PII with fake/hashed values; YAML config or CLI     |
+| Visualize schema as ERD diagram          | `graph`                   | HTML, DOT, Mermaid, JSON; focus on table or detect cycles   |
+| Reorder dump for safe FK imports         | `order`                   | Topological sort; `--check` to detect cycles                |
 
 ---
 
@@ -481,6 +486,60 @@ skip_tables:
 
 ---
 
+## Workflow 8: Schema Visualization and Import Order
+
+**Goal:** Generate ERD diagrams and ensure safe import order for dumps with FK dependencies.
+
+```bash
+# 1. Generate interactive HTML ERD
+sql-splitter graph dump.sql -o schema.html
+
+# 2. Generate Mermaid diagram (for documentation)
+sql-splitter graph dump.sql -o schema.mmd --format mermaid
+
+# 3. Generate DOT for Graphviz rendering
+sql-splitter graph dump.sql -o schema.dot
+dot -Tpng schema.dot -o schema.png
+
+# 4. Focus on specific table and its dependencies
+sql-splitter graph dump.sql --table orders --transitive -o orders.html
+
+# 5. Show only tables that depend on a given table
+sql-splitter graph dump.sql --table users --reverse -o users_dependents.html
+
+# 6. Detect circular FK dependencies
+sql-splitter graph dump.sql --cycles-only
+
+# 7. Check import order and detect cycles
+sql-splitter order dump.sql --check
+
+# 8. Rewrite dump in safe import order
+sql-splitter order dump.sql -o ordered.sql
+
+# 9. Reverse order for DROP operations
+sql-splitter order dump.sql --reverse -o drop_order.sql
+```
+
+**Graph options:**
+
+- `--format`: Output format: html, dot, mermaid, json (auto-detected from extension)
+- `--layout`: Layout direction: lr (left-right), tb (top-bottom)
+- `--tables`: Include only tables matching glob patterns
+- `--exclude`: Exclude tables matching glob patterns
+- `--table`: Focus on specific table
+- `--transitive`: Show all dependencies of focused table
+- `--reverse`: Show all tables that depend on focused table
+- `--cycles-only`: Only show tables in circular dependencies
+- `--render`: Render DOT to PNG/SVG/PDF using Graphviz
+
+**Order options:**
+
+- `--check`: Check for cycles without rewriting
+- `--dry-run`: Show order without writing
+- `--reverse`: Reverse order (children before parents, for DROP)
+
+---
+
 ## Piping and Composition Patterns
 
 ### Stream convert to database (no intermediate file)
@@ -578,6 +637,7 @@ If commands fail with syntax errors or unknown keywords:
 - [src/shard/](https://github.com/helgesverre/sql-splitter/tree/main/src/shard): Tenant extraction
 - [src/differ/](https://github.com/helgesverre/sql-splitter/tree/main/src/differ): Schema + data diffing
 - [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
+- [src/graph/](https://github.com/helgesverre/sql-splitter/tree/main/src/graph): ERD generation and graph analysis
 
 ## Agent Skill Installation
 

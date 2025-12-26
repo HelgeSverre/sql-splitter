@@ -341,6 +341,49 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-tool">sql-splitter</span> redact dump.sql --config redact.yaml --validate</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter redact dump.sql -o safe.sql --null &quot;*.ssn&quot; --hash &quot;*.email&quot; --fake &quot;*.name&quot;">Copy</button>
                 </div>
+
+                <h4 id="graph">graph</h4>
+                <p>Generate Entity-Relationship Diagrams (ERD) from SQL dumps.</p>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Interactive HTML (default)</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql -o schema.html
+
+<span class="sh-comment"># Graphviz DOT format</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql -o schema.dot
+
+<span class="sh-comment"># Mermaid erDiagram syntax</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql -o schema.mmd --format mermaid
+
+<span class="sh-comment"># JSON with full schema details</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql --json
+
+<span class="sh-comment"># Filter to specific tables</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql --tables "user*,order*" --exclude "log*"
+
+<span class="sh-comment"># Show only circular dependencies</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql --cycles-only
+
+<span class="sh-comment"># Focus on one table and its dependencies</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql --table orders --transitive</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter graph dump.sql -o schema.html">Copy</button>
+                </div>
+
+                <h4 id="order">order</h4>
+                <p>Reorder SQL dump in topological FK order for safe imports.</p>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Rewrite in safe import order</span>
+<span class="sh-tool">sql-splitter</span> order dump.sql -o ordered.sql
+
+<span class="sh-comment"># Check for cycles without rewriting</span>
+<span class="sh-tool">sql-splitter</span> order dump.sql --check
+
+<span class="sh-comment"># Show order without writing</span>
+<span class="sh-tool">sql-splitter</span> order dump.sql --dry-run
+
+<span class="sh-comment"># Reverse order (for DROP operations)</span>
+<span class="sh-tool">sql-splitter</span> order dump.sql --reverse -o drop-order.sql</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter order dump.sql -o ordered.sql">Copy</button>
+                </div>
             </article>
 
             <!-- Split Options -->
@@ -528,6 +571,48 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                 <p class="note">Strategies: null, hash, fake, mask, constant, shuffle, skip. 25+ fake generators available.</p>
             </article>
 
+            <!-- Graph Options -->
+            <article class="guide-section">
+                <h3>Graph Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output file (html, dot, mmd, json)</td><td>stdout</td></tr>
+                        <tr><td><code>--format</code></td><td>—</td><td>Output format: html, dot, mermaid, json</td><td>auto</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect</td><td>auto</td></tr>
+                        <tr><td><code>--layout</code></td><td>—</td><td>Layout: lr (horizontal), tb (vertical)</td><td>lr</td></tr>
+                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Include tables matching glob</td><td>all</td></tr>
+                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables matching glob</td><td>—</td></tr>
+                        <tr><td><code>--table</code></td><td>—</td><td>Focus on specific table</td><td>—</td></tr>
+                        <tr><td><code>--transitive</code></td><td>—</td><td>Show dependencies of focused table</td><td>false</td></tr>
+                        <tr><td><code>--reverse</code></td><td>—</td><td>Show dependents of focused table</td><td>false</td></tr>
+                        <tr><td><code>--cycles-only</code></td><td>—</td><td>Only tables in circular dependencies</td><td>false</td></tr>
+                        <tr><td><code>--render</code></td><td>—</td><td>Render DOT to PNG/SVG/PDF</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">HTML output includes dark/light theme toggle and copy Mermaid button.</p>
+            </article>
+
+            <!-- Order Options -->
+            <article class="guide-section">
+                <h3>Order Options</h3>
+                <table class="options-table">
+                    <thead>
+                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
+                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect</td><td>auto</td></tr>
+                        <tr><td><code>--check</code></td><td>—</td><td>Check for cycles, don't write</td><td>false</td></tr>
+                        <tr><td><code>--dry-run</code></td><td>—</td><td>Show order without writing</td><td>false</td></tr>
+                        <tr><td><code>--reverse</code></td><td>—</td><td>Reverse order (for DROP)</td><td>false</td></tr>
+                    </tbody>
+                </table>
+                <p class="note">Use <code>--check</code> to detect circular FK dependencies before importing.</p>
+            </article>
+
             <!-- Supported Statements -->
             <article class="guide-section">
                 <h3>Supported Statement Types</h3>
@@ -632,6 +717,19 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-tool">sql-splitter</span> redact prod.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"</code></pre>
                     <button class="copy-btn" data-copy="sql-splitter redact prod.sql -o dev.sql --null &quot;*.ssn&quot; --hash &quot;*.email&quot; --fake &quot;*.name&quot;">Copy</button>
                 </div>
+
+                <h4>Visualize Schema</h4>
+                <div class="code-block">
+                    <pre><code><span class="sh-comment"># Generate interactive ERD</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql -o schema.html
+
+<span class="sh-comment"># Focus on specific table's dependencies</span>
+<span class="sh-tool">sql-splitter</span> graph dump.sql --table orders --transitive -o orders.html
+
+<span class="sh-comment"># Check import order and detect cycles</span>
+<span class="sh-tool">sql-splitter</span> order dump.sql --check</code></pre>
+                    <button class="copy-btn" data-copy="sql-splitter graph dump.sql -o schema.html">Copy</button>
+                </div>
             </article>
 
             <!-- Performance -->
@@ -670,6 +768,8 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
                         <tr><td><code>shard</code></td><td>Extract tenant-specific data from multi-tenant dumps</td></tr>
                         <tr><td><code>diff</code></td><td>Compare two dumps for schema and data changes</td></tr>
                         <tr><td><code>redact</code></td><td>Anonymize sensitive data (PII) for safe sharing</td></tr>
+                        <tr><td><code>graph</code></td><td>Generate ERD diagrams (HTML, DOT, Mermaid, JSON)</td></tr>
+                        <tr><td><code>order</code></td><td>Reorder dump in topological FK order for safe imports</td></tr>
                     </tbody>
                 </table>
             </article>

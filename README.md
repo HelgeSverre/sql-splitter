@@ -132,6 +132,26 @@ sql-splitter redact dump.sql --generate-config -o redact.yaml
 # Reproducible redaction with seed
 sql-splitter redact dump.sql -o safe.sql --null "*.password" --seed 42
 
+# Generate ERD (Entity-Relationship Diagram)
+sql-splitter graph dump.sql -o schema.html        # Interactive HTML (default)
+sql-splitter graph dump.sql -o schema.dot         # Graphviz DOT format
+sql-splitter graph dump.sql -o schema.mmd         # Mermaid erDiagram
+sql-splitter graph dump.sql -o schema.json        # JSON with full schema details
+
+# Graph with filtering
+sql-splitter graph dump.sql --tables "user*,order*" -o filtered.html
+sql-splitter graph dump.sql --exclude "log*,audit*" -o clean.html
+sql-splitter graph dump.sql --cycles-only         # Only tables in circular dependencies
+
+# Focus on specific table and its relationships
+sql-splitter graph dump.sql --table orders --transitive  # Show all dependencies
+sql-splitter graph dump.sql --table users --reverse      # Show all dependents
+
+# Reorder SQL dump in topological FK order
+sql-splitter order dump.sql -o ordered.sql        # Safe import order
+sql-splitter order dump.sql --check               # Check for cycles
+sql-splitter order dump.sql --reverse             # Reverse (for DROP operations)
+
 # Generate shell completions (auto-installed with make install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
@@ -343,6 +363,43 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 - `text`: Human-readable summary with optional PK samples
 - `json`: Structured data for automation (includes warnings)
 - `sql`: Migration script with ALTER/CREATE INDEX/DROP INDEX statements
+
+### Graph Options
+
+| Flag                | Description                                                | Default     |
+|---------------------|------------------------------------------------------------|-------------|
+| `-o, --output`      | Output file (html, dot, mmd, json, png, svg, pdf)          | stdout      |
+| `--format`          | Output format: `html`, `dot`, `mermaid`, `json`            | auto-detect |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `--layout`          | Layout direction: `lr` (left-right), `tb` (top-bottom)     | `lr`        |
+| `-t, --tables`      | Only include tables matching glob patterns                 | all         |
+| `-e, --exclude`     | Exclude tables matching glob patterns                      | —           |
+| `--table`           | Focus on a specific table                                  | —           |
+| `--transitive`      | Show all dependencies of focused table                     | —           |
+| `--reverse`         | Show all tables that depend on focused table               | —           |
+| `--max-depth`       | Limit traversal depth                                      | unlimited   |
+| `--cycles-only`     | Only show tables in circular dependencies                  | —           |
+| `--render`          | Render DOT to PNG/SVG/PDF using Graphviz                   | —           |
+| `-p, --progress`    | Show progress bar                                          | —           |
+| `--json`            | Output as JSON                                             | —           |
+
+**Output formats:**
+
+- `html`: Interactive diagram with dark/light theme, copy Mermaid button
+- `dot`: Graphviz DOT with ERD-style tables (columns, types, PK/FK markers)
+- `mermaid`: Mermaid erDiagram syntax
+- `json`: Full schema with tables, columns, relationships, and stats
+- `png`/`svg`/`pdf`: Rendered image (requires Graphviz `dot` command)
+
+### Order Options
+
+| Flag                | Description                                                | Default     |
+|---------------------|------------------------------------------------------------|-------------|
+| `-o, --output`      | Output SQL file                                            | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `--check`           | Check for cycles and report order (don't write)            | —           |
+| `--dry-run`         | Show topological order without writing                     | —           |
+| `--reverse`         | Reverse order (children before parents, for DROP)          | —           |
 
 ### Redact Options
 

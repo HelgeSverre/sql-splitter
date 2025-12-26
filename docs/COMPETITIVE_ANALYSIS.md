@@ -1,20 +1,26 @@
 # Competitive Analysis
 
-**Date**: 2025-12-21  
-**Purpose**: Reference for understanding the SQL dump processing ecosystem
+**Last Updated**: 2025-12-26
+**Purpose**: Comprehensive competitive landscape and feature opportunity analysis
 
 ## Executive Summary
 
-sql-splitter occupies a **unique position** in the market by combining multiple capabilities that currently require separate tools. As of v1.7.0, we offer: **split + merge + sample with FK preservation + tenant sharding + dialect conversion**. Planned features include: redaction, query, and diff.
+sql-splitter occupies a **unique position** in the SQL dump processing ecosystem by combining multiple capabilities that currently require separate tools. As of v1.9.0, we offer: **split + merge + analyze + validate + sample (FK-preserving) + shard + convert + diff + redact**.
 
-No existing tool offers this combination in a single, streaming, CLI-first, multi-dialect tool.
+No existing tool offers this combination in a single, streaming, CLI-first, multi-dialect binary.
+
+**Key differentiators:**
+- Works on dump files directly (no database connection required)
+- Streaming architecture handles 10GB+ dumps
+- Multi-dialect support (MySQL, PostgreSQL, SQLite)
+- 600+ MB/s throughput
 
 ---
 
-## Current sql-splitter Feature Status (v1.7.0)
+## Current sql-splitter Feature Status
 
-| Feature | Status | Version Added |
-|---------|--------|---------------|
+| Feature | Status | Version |
+|---------|--------|---------|
 | Split per-table | ✅ Implemented | v1.0.0 |
 | Analyze dumps | ✅ Implemented | v1.0.0 |
 | Multi-dialect (MySQL, PostgreSQL, SQLite) | ✅ Implemented | v1.1.0 |
@@ -26,14 +32,15 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | FK-aware sampling | ✅ Implemented | v1.5.0 |
 | Tenant sharding | ✅ Implemented | v1.6.0 |
 | Dialect conversion | ✅ Implemented | v1.7.0 |
-| Redaction/anonymization | 🟡 Planned | — |
+| Validate (integrity checks) | ✅ Implemented | v1.8.0 |
+| Diff dumps | ✅ Implemented | v1.9.0 |
+| Redaction/anonymization | ✅ Implemented | v1.9.0 |
 | Query/Filter (WHERE-style) | 🟡 Planned | — |
-| Diff dumps | 🟡 Planned | — |
 | MSSQL support | 🟡 Planned | — |
 
 ---
 
-## Key Competitors by Feature
+## Core Competitors by Feature
 
 ### Split/Merge
 
@@ -44,21 +51,19 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | **mysqldumpsplitter** | Shell | 500+ | ✅ | ❌ | ❌ | ❌ | Basic regex extraction |
 | **pgloader** | Common Lisp | 5k+ | ❌ | ❌ | ✅ | ❌ | Loader only, not splitter |
 | **Dumpling** | Go | 282 | ✅ | ❌ | ✅ | ❌ | Archived, MySQL/TiDB only |
-| **SQLSplit** | C++ | 4 | ✅ | ✅ | ❌ | ❌ | Simple regex-based |
 
 **[mydumper](https://github.com/mydumper/mydumper)** is notable:
 - ✅ Multi-threaded parallel operations
 - ✅ Consistent snapshots
-- ✅ Active development (3k stars)
 - ✅ Basic masquerading (anonymization)
 - ❌ MySQL/MariaDB only
 - ❌ Requires database connection for dump
 
-**Gap**: No other tool combines split/merge with streaming + multi-dialect support. sql-splitter is unique.
+**Gap**: No other tool combines split/merge with streaming + multi-dialect support.
 
 ---
 
-### Sample with FK Preservation
+### FK-Aware Sampling
 
 | Tool | Language | Stars | FK-Aware | Streaming | CLI-First | Notes |
 |------|----------|-------|----------|-----------|-----------|-------|
@@ -66,25 +71,18 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | **Jailer** | Java | 3.1k | ✅ | ❌ | ❌ | GUI-heavy, JDBC-based |
 | **Condenser** | Python | 327 | ✅ | ❌ | ✅ | Config-driven, FK cycle breaking |
 | **subsetter** | Python | ~10 | ✅ | ❌ | ✅ | Simple, pip installable |
-| **DBSubsetter** | Scala | ~50 | ✅ | ❌ | ✅ | Less maintained |
 
-**[Jailer](https://github.com/Wisser/Jailer)** is the most comprehensive:
+**[Jailer](https://github.com/Wisser/Jailer)** is comprehensive:
 - ✅ Excellent FK-preserving subsetting
-- ✅ Topological sort output
 - ✅ 12+ database support (via JDBC)
-- ✅ Multiple export formats (SQL, JSON, XML, DbUnit)
-- ❌ Requires database connection (JDBC)
+- ✅ Multiple export formats
+- ❌ Requires database connection
 - ❌ GUI-focused, not CLI-first
-- ❌ No streaming for large dumps
-- ❌ No anonymization
 
 **[Condenser](https://github.com/TonicAI/condenser)** (by Tonic.ai):
 - ✅ Simple YAML config
 - ✅ FK cycle detection and breaking
-- ✅ Passthrough tables support
-- ✅ Implicit FK support
 - ❌ PostgreSQL/MySQL only
-- ❌ Limited to ~10GB databases
 - ❌ Requires database connection
 
 **Gap**: sql-splitter is the only streaming, CLI-first, FK-aware sampler that works on dump files directly.
@@ -108,30 +106,18 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool | Language | Stars | MySQL | PostgreSQL | SQLite | Streaming | Notes |
 |------|----------|-------|-------|------------|--------|-----------|-------|
-| **sql-splitter** | Rust | — | 🟡 | 🟡 | 🟡 | ✅ | Planned |
+| **sql-splitter** | Rust | — | ✅ | ✅ | ✅ | ✅ | v1.9.0 |
 | **nxs-data-anonymizer** | Go | 271 | ✅ | ✅ | ❌ | ✅ | Go templates + Sprig |
 | **pynonymizer** | Python | 109 | ✅ | ✅ | ❌ | ❌ | Faker integration, GDPR focus |
 | **myanon** | C | ~30 | ✅ | ❌ | ❌ | ✅ | stdin/stdout streaming |
-| **pganonymize** | Python | — | ❌ | ✅ | ❌ | ❌ | YAML config |
-| **pg-anonymizer** | TypeScript | 236 | ❌ | ✅ | ❌ | ✅ | |
-| **go-anonymize-mysqldump** | Go | 60 | ✅ | ❌ | ❌ | ✅ | |
-| **dumpctl** | Go | ~5 | ✅ | ❌ | ❌ | ✅ | Early stage |
 
-**[pynonymizer](https://github.com/rwnx/pynonymizer)** is notable:
+**[pynonymizer](https://github.com/rwnx/pynonymizer)**:
 - ✅ Faker integration for realistic data
 - ✅ GDPR compliance focus
-- ✅ Compressed I/O
-- ✅ MSSQL support
 - ❌ Requires temp database (not pure streaming)
 - ❌ No SQLite
 
-**[myanon](https://github.com/ppomes/myanon)** is notable:
-- ✅ True stdin/stdout streaming
-- ✅ HMAC-SHA256 for consistent hashing
-- ✅ Python/Faker rules
-- ❌ MySQL-only
-
-**Gap**: No SQLite anonymization tool exists. No combined sample+anonymize workflow.
+**Gap**: sql-splitter is the only multi-dialect, streaming anonymizer with SQLite support.
 
 ---
 
@@ -143,21 +129,17 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | **sqlglot** | Python | 7k+ | 31 | ❌ | ❌ |
 | **pgloader** | Common Lisp | 5k+ | → PG only | ✅ | ✅ |
 | **mysql2postgres** | Ruby | 300 | MySQL→PG | Partial | ❌ |
-| **node-sql-parser** | JavaScript | 800 | 12 | ❌ | ❌ |
-| **jOOQ Translator** | Web | — | 25+ | ❌ | ❌ |
 
 **[sqlglot](https://github.com/tobymao/sqlglot)** is excellent for query transpilation:
 - ✅ 31 dialect support
-- ✅ AST manipulation and optimization
-- ✅ Active development (7k+ stars)
+- ✅ AST manipulation
 - ❌ Not designed for full dump conversion
 - ❌ Doesn't handle COPY blocks or session commands
 
 **sql-splitter's convert advantages**:
 - ✅ PostgreSQL COPY → INSERT with NULL/escape handling
-- ✅ Session command stripping (SET, PRAGMA, etc.)
-- ✅ 30+ data type mappings (AUTO_INCREMENT ↔ SERIAL, etc.)
-- ✅ Streaming architecture
+- ✅ Session command stripping
+- ✅ 30+ data type mappings
 - ✅ Compressed input support
 
 **Gap**: sql-splitter handles full dump conversion with COPY↔INSERT that no other tool does.
@@ -172,12 +154,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | **DuckDB** | C++ | 34.8k | Query SQL/CSV/JSON/Parquet directly |
 | **sqlglot** | Python | 7k+ | Parse/transpile, not filter |
 
-**[DuckDB](https://github.com/duckdb/duckdb)** could solve querying:
-- ✅ Query SQL/CSV/JSON/Parquet directly
-- ✅ Extremely powerful analytical engine
-- ❌ Overkill for simple dump filtering
-- ❌ No FK-aware subsetting
-- ❌ Loads data into memory
+**[DuckDB](https://github.com/duckdb/duckdb)** could solve querying but is overkill for simple dump filtering.
 
 ---
 
@@ -190,23 +167,81 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | pynonymizer | ✅ |
 | sqlglot | ✅ (parsing only) |
 | pgloader | ❌ |
-| nxs-data-anonymizer | ❌ |
 
 **Gap**: Major gap in ecosystem for MSSQL dump processing CLI tools.
 
 ---
 
+## Extended Competitor Landscape
+
+### Schema Management & Versioning
+
+| Tool | Category | Key Features | sql-splitter Opportunity |
+|------|----------|--------------|--------------------------|
+| **Liquibase** | Schema versioning | Changeset tracking, rollback, diff | Migration tracking |
+| **Flyway** | Schema migration | Version control, repeatable migrations | Schema versioning |
+| **Atlas** | Schema-as-code | Declarative schema, drift detection | Drift detection |
+| **sqitch** | DB change mgmt | Plan-based migrations, VCS integration | Change tracking |
+| **Skeema** | MySQL schema mgmt | Schema sync, workspace isolation | Workspace management |
+
+### Data Quality & Profiling
+
+| Tool | Category | Key Features | sql-splitter Opportunity |
+|------|----------|--------------|--------------------------|
+| **Great Expectations** | Data quality | Expectations as tests, profiling | Data quality checks |
+| **dbt** | Data transformation | SQL-based tests, documentation | Test generation |
+| **Apache Griffin** | Data quality | Accuracy, profiling, timeliness | Statistical profiling |
+| **datafold** | Data diff | Column-level diff, value distribution | Distribution analysis |
+| **soda-sql** | Data testing | SQL-based quality checks | Quality metrics |
+
+### Database Optimization
+
+| Tool | Category | Key Features | sql-splitter Opportunity |
+|------|----------|--------------|--------------------------|
+| **pt-query-digest** | Query analysis | Slow query analysis, recommendations | Query optimization |
+| **pgBadger** | PostgreSQL analysis | Query stats, performance insights | Performance analysis |
+| **MySQLTuner** | MySQL tuning | Configuration recommendations | Config optimization |
+| **pganalyze** | PostgreSQL monitoring | Index recommendations, vacuum analysis | Index optimization |
+
+### Test Data & Fixtures
+
+| Tool | Category | Key Features | sql-splitter Opportunity |
+|------|----------|--------------|--------------------------|
+| **Faker** | Fake data | Locale-aware generators | (in redact) |
+| **Mockaroo** | Test data | Schema-based generation, APIs | Schema-driven generation |
+| **Snaplet** | Copy production | Subset + anonymize + seed | Production cloning |
+| **tonic.ai** | Test data platform | Smart subsetting, masking | AI-powered subsetting |
+
+### ETL & Data Pipeline
+
+| Tool | Category | Key Features | sql-splitter Opportunity |
+|------|----------|--------------|--------------------------|
+| **dlt** | Data pipeline | Python-based ETL, schema evolution | Pipeline generation |
+| **Airbyte** | Data integration | Connectors, CDC, normalization | CDC support |
+| **Meltano** | ELT platform | Singer taps, dbt integration | Change data capture |
+
+### Documentation & Discovery
+
+| Tool | Category | Key Features | sql-splitter Opportunity |
+|------|----------|--------------|--------------------------|
+| **SchemaSpy** | DB documentation | HTML reports, diagrams | Interactive docs |
+| **tbls** | DB documentation | Markdown docs, ER diagrams | Documentation generation |
+| **Azimutt** | Schema explorer | Interactive exploration, AI chat | Interactive exploration |
+| **DataHub** | Data catalog | Metadata, lineage, discovery | Metadata catalog |
+
+---
+
 ## Comparison Matrix
 
-| Feature | sql-splitter | mydumper | pgloader | Jailer | Condenser | nxs-anonymizer | sqlglot | DuckDB |
-|---------|-------------|----------|----------|--------|-----------|----------------|---------|--------|
+| Feature | sql-splitter | mydumper | pgloader | Jailer | Condenser | nxs-anon | sqlglot | DuckDB |
+|---------|-------------|----------|----------|--------|-----------|----------|---------|--------|
 | Split per-table | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Merge files | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Sample + FK | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Tenant sharding | ✅ | ❌ | ❌ | Limited | Limited | ❌ | ❌ | Via SQL |
-| Redaction | 🟡 | Basic | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Redaction | ✅ | Basic | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | Query/Filter | 🟡 | ❌ | ❌ | Limited | ❌ | ❌ | ✅ | ✅ |
-| Diff | 🟡 | ❌ | ❌ | Limited | ❌ | ❌ | ❌ | Via SQL |
+| Diff | ✅ | ❌ | ❌ | Limited | ❌ | ❌ | ❌ | Via SQL |
 | Convert dialects | ✅ | ❌ | → PG | Limited | ❌ | ❌ | ✅ | ✅ |
 | MySQL | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PostgreSQL | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -219,9 +254,9 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 ---
 
-## sql-splitter's Unique Value Proposition
+## Unique Value Proposition
 
-1. **Unified tool** — Split + merge + sample + shard + convert in one binary
+1. **Unified tool** — Split + merge + sample + shard + convert + diff + redact in one binary
 2. **Works on dump files** — No database connection required (unlike Jailer, Condenser, mydumper)
 3. **Streaming architecture** — Handle 10GB+ dumps without memory issues
 4. **CLI-first** — DevOps/automation friendly, pipe-compatible
@@ -229,35 +264,165 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 6. **FK-aware operations** — Sample and shard preserve referential integrity
 7. **Rust performance** — 600+ MB/s, faster than Python/Java alternatives
 8. **Compression support** — gzip, bz2, xz, zstd auto-detected
-9. **Composable** — Split → Sample → Convert → Merge pipeline
+9. **Composable** — Split → Sample → Redact → Convert → Merge pipeline
 
 ---
 
-## Potential Integrations
+## Feature Opportunities
 
-Consider these as complementary tools or inspiration:
+### Tier 1: High Impact, Unique Value
 
-| Tool | Use Case |
-|------|----------|
-| **sqlglot** | Reference for dialect conversion grammar |
-| **DuckDB** | Alternative for complex ad-hoc queries |
-| **Jailer** | Reference for FK subsetting algorithms |
-| **Condenser** | Reference for cycle detection in FK graphs |
-| **nxs-data-anonymizer** | Reference for Go template-based redaction |
-| **pynonymizer** | Reference for Faker-based anonymization |
-| **pgloader** | Reference for high-performance data loading |
-| **mydumper** | Reference for parallel dump operations |
+#### 1. Schema Drift Detection
+Compare production dump against expected schema:
+```bash
+sql-splitter drift prod.sql schema.sql
+# Detects: columns added/removed, type changes, missing indexes
+```
+**Gap**: Atlas does this but requires running database. sql-splitter works on dumps.
+**Effort**: ~16h (extends diff command)
+
+#### 2. Smart Index Recommendations
+Analyze schema and suggest optimal indexes:
+```bash
+sql-splitter recommend dump.sql --slow-queries slow.log
+# Suggests: missing indexes based on FKs, high-cardinality columns, query patterns
+```
+**Gap**: pganalyze/pt-query-digest require running DB
+**Effort**: ~24h
+
+#### 3. Data Quality Profiling
+Profile data quality from dumps:
+```bash
+sql-splitter profile dump.sql
+# Reports: NULL rates, duplicates, format validation, statistical outliers
+```
+**Gap**: Great Expectations requires Python setup
+**Effort**: ~32h
+
+#### 4. Change Data Capture (CDC)
+Generate CDC events from dump diffs:
+```bash
+sql-splitter cdc old.sql new.sql --format json
+# Outputs: INSERT/UPDATE/DELETE events for streaming
+```
+**Gap**: Airbyte/Meltano need live DB connection
+**Effort**: ~28h
+
+### Tier 2: High Value, Lower Effort
+
+#### 5. Schema Size Optimization
+Recommend efficient column types:
+```bash
+sql-splitter optimize dump.sql
+# Suggests: BIGINT→INT, VARCHAR(255)→VARCHAR(50), etc.
+```
+**Effort**: ~12h
+
+#### 6. Security Audit
+Detect security issues in schema/data:
+```bash
+sql-splitter audit dump.sql --security
+# Detects: plain text passwords, weak hashing, exposed PII
+```
+**Effort**: ~20h
+
+#### 7. Compliance Check (GDPR, HIPAA)
+Verify compliance:
+```bash
+sql-splitter compliance dump.sql --standard gdpr
+# Checks: deletion cascades, data retention, consent tracking
+```
+**Effort**: ~24h
+
+#### 8. Cost Estimation
+Estimate cloud database costs:
+```bash
+sql-splitter cost dump.sql --cloud aws
+# Estimates: RDS instance size, storage, backup costs
+```
+**Effort**: ~8h
+
+### Tier 3: Innovative / Experimental
+
+#### 9. AI-Powered Schema Suggestions
+LLM-based schema optimization:
+```bash
+sql-splitter suggest dump.sql --ai
+# Suggests: denormalization, partitioning, normalization fixes
+```
+**Effort**: ~40h
+
+#### 10. Natural Language Query
+Query dumps with natural language:
+```bash
+sql-splitter ask dump.sql "show me users who signed up in December"
+```
+**Effort**: ~24h
+
+#### 11. Schema Testing Framework
+Automated schema quality tests:
+```bash
+sql-splitter test dump.sql --config schema-tests.yaml
+# Tests: all tables have PKs, no VARCHAR(255), FKs indexed
+```
+**Effort**: ~16h
 
 ---
 
-## Recommendations
+## Strategic Recommendations
 
-1. **Prioritize redaction** — Next major differentiator; combine with sample for powerful dev data workflow
-2. **Don't over-invest in query** — DuckDB exists for complex needs; focus on simple WHERE filtering
-3. **Market the combination** — "One tool for split + sample + anonymize + convert"
-4. **Target DevOps** — CLI + streaming + pipes is the right approach
-5. **Consider MSSQL** — Major gap in ecosystem for dump processing
-6. **Highlight "works on dumps"** — Key differentiator vs Jailer/Condenser which require DB connections
+### Product Positioning
+1. **"Complete Dump Toolkit"** — Split, convert, anonymize, analyze, optimize, secure, test
+2. **Tagline**: "The Swiss Army knife for SQL dumps"
+
+### Target Markets
+1. **Enterprise** — Compliance (GDPR, HIPAA), security auditing, cost optimization
+2. **Developer Experience** — Index recommendations, schema testing, quality profiling
+3. **DevOps** — CLI-first, streaming, pipes, automation
+
+### Priorities
+1. **Complete v2.0** — Current roadmap features
+2. **Quick wins** — Schema drift (16h), size optimization (12h), cost estimation (8h)
+3. **Differentiation** — Data quality profiling, compliance checks
+4. **Future** — AI integration for schema suggestions, natural language queries
+
+---
+
+## Competitor Links
+
+### Split/Merge
+- [mydumper](https://github.com/mydumper/mydumper)
+- [mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter)
+- [Dumpling](https://github.com/pingcap/dumpling) (archived)
+
+### FK-Aware Sampling
+- [Jailer](https://github.com/Wisser/Jailer)
+- [Condenser](https://github.com/TonicAI/condenser)
+- [subsetter](https://github.com/msg555/subsetter)
+
+### Anonymization
+- [nxs-data-anonymizer](https://github.com/nixys/nxs-data-anonymizer)
+- [pynonymizer](https://github.com/rwnx/pynonymizer)
+- [myanon](https://github.com/ppomes/myanon)
+
+### Dialect Conversion
+- [sqlglot](https://github.com/tobymao/sqlglot)
+- [pgloader](https://github.com/dimitri/pgloader)
+- [node-sql-parser](https://www.npmjs.com/package/node-sql-parser)
+
+### Schema Management
+- [Liquibase](https://github.com/liquibase/liquibase)
+- [Flyway](https://github.com/flyway/flyway)
+- [Atlas](https://github.com/ariga/atlas)
+- [Skeema](https://github.com/skeema/skeema)
+
+### Data Quality
+- [Great Expectations](https://github.com/great-expectations/great_expectations)
+- [dbt](https://github.com/dbt-labs/dbt-core)
+- [soda-sql](https://github.com/sodadata/soda-sql)
+
+### General
+- [DuckDB](https://github.com/duckdb/duckdb)
 
 ---
 
@@ -265,31 +430,3 @@ Consider these as complementary tools or inspiration:
 
 - [Roadmap](ROADMAP.md)
 - [Changelog](../CHANGELOG.md)
-
-### Competitor Links
-
-**Split/Merge:**
-- [mydumper](https://github.com/mydumper/mydumper)
-- [mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter)
-- [Dumpling](https://github.com/pingcap/dumpling) (archived)
-
-**FK-Aware Sampling:**
-- [Jailer](https://github.com/Wisser/Jailer)
-- [Condenser](https://github.com/TonicAI/condenser)
-- [subsetter](https://github.com/msg555/subsetter)
-- [DBSubsetter](https://github.com/bluerogue251/DBSubsetter)
-
-**Anonymization:**
-- [nxs-data-anonymizer](https://github.com/nixys/nxs-data-anonymizer)
-- [pynonymizer](https://github.com/rwnx/pynonymizer)
-- [myanon](https://github.com/ppomes/myanon)
-- [pganonymize](https://pypi.org/project/pganonymize/)
-
-**Dialect Conversion:**
-- [sqlglot](https://github.com/tobymao/sqlglot)
-- [pgloader](https://github.com/dimitri/pgloader)
-- [mysql2postgres](https://github.com/mysql2postgres/mysql2postgres)
-- [node-sql-parser](https://www.npmjs.com/package/node-sql-parser)
-
-**General:**
-- [DuckDB](https://github.com/duckdb/duckdb)

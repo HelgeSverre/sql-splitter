@@ -3,8 +3,9 @@ name: sql-splitter
 description: >
   High-performance CLI for working with SQL dump files: split/merge by table,
   analyze contents, validate integrity, convert between MySQL/PostgreSQL/SQLite,
-  create FK-safe samples, and shard multi-tenant dumps. Use when working with
-  .sql dump files for migrations, dev seeding, CI validation, or data extraction.
+  create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams, and
+  reorder for safe imports. Use when working with .sql dump files for migrations,
+  dev seeding, CI validation, schema visualization, or data extraction.
 license: MIT
 compatibility: Requires sql-splitter binary installed (cargo install sql-splitter)
 ---
@@ -147,6 +148,49 @@ sql-splitter redact dump.sql --output safe.sql --fake "*.name" --locale de_de
 - `--constant "column=value"`: Fixed value replacement
 
 **Fake generators:** email, name, first_name, last_name, phone, address, city, zip, company, ip, uuid, date, credit_card, ssn, lorem, and more.
+
+### graph
+Generate Entity-Relationship Diagrams (ERD) from SQL dumps.
+
+```bash
+# Interactive HTML ERD with dark/light mode and panzoom
+sql-splitter graph dump.sql --output schema.html
+
+# Graphviz DOT format with ERD-style tables
+sql-splitter graph dump.sql --output schema.dot
+
+# Mermaid erDiagram syntax (paste into GitHub/GitLab)
+sql-splitter graph dump.sql --output schema.mmd --format mermaid
+
+# JSON with full schema details
+sql-splitter graph dump.sql --json
+
+# Filter tables
+sql-splitter graph dump.sql --tables "user*,order*" --exclude "log*"
+
+# Show only circular dependencies
+sql-splitter graph dump.sql --cycles-only
+
+# Focus on specific table and its dependencies
+sql-splitter graph dump.sql --table orders --transitive
+
+# Show tables that depend on users
+sql-splitter graph dump.sql --table users --reverse
+```
+
+### order
+Reorder SQL dump in topological FK order for safe imports.
+
+```bash
+# Rewrite in safe import order
+sql-splitter order dump.sql --output ordered.sql
+
+# Check for cycles without rewriting
+sql-splitter order dump.sql --check
+
+# Reverse order (for DROP operations)
+sql-splitter order dump.sql --reverse --output drop_order.sql
+```
 
 ---
 
@@ -314,6 +358,55 @@ For creating safe development/testing datasets:
 5. **Validate the redacted output**
    ```bash
    sql-splitter validate safe.sql --strict
+   ```
+
+### Pattern 9: Schema Visualization
+
+For understanding complex database schemas:
+
+1. **Generate interactive ERD**
+   ```bash
+   sql-splitter graph dump.sql --output schema.html
+   # Opens in browser with dark/light mode, zoom/pan
+   ```
+
+2. **For documentation (Mermaid)**
+   ```bash
+   sql-splitter graph dump.sql --output docs/schema.mmd --format mermaid
+   # Paste into GitHub/GitLab/Notion
+   ```
+
+3. **Focus on specific area**
+   ```bash
+   # What does orders depend on?
+   sql-splitter graph dump.sql --table orders --transitive --output orders.html
+   
+   # What depends on users?
+   sql-splitter graph dump.sql --table users --reverse --output users_deps.html
+   ```
+
+4. **Find circular dependencies**
+   ```bash
+   sql-splitter graph dump.sql --cycles-only
+   ```
+
+### Pattern 10: Safe Import Order
+
+For ensuring FK constraints don't fail during restore:
+
+1. **Check for cycles**
+   ```bash
+   sql-splitter order dump.sql --check
+   ```
+
+2. **Reorder if needed**
+   ```bash
+   sql-splitter order dump.sql --output ordered.sql
+   ```
+
+3. **For DROP operations (reverse order)**
+   ```bash
+   sql-splitter order dump.sql --reverse --output drop_order.sql
    ```
 
 ---

@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.10.0 (current)
-**Last Updated**: 2025-12-24
-**Revision**: 3.0 — Extended roadmap with graph, migrate, parallel, infer features
+**Version**: 1.11.0 (current)
+**Last Updated**: 2025-12-26
+**Revision**: 3.1 — Graph command implemented, ERD generation
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -19,9 +19,9 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 6. ✅ Validate — Dump integrity checking (v1.8.0)
 7. ✅ Diff — Schema + data comparison (v1.9.0)
 8. ✅ Redact — Data anonymization (v1.10.0)
+9. ✅ Graph — ERD generation and FK visualization (v1.11.0)
 
-**Next (v1.11+):**
-- v1.11.0: Graph — FK dependency visualization
+**Next (v1.12+):**
 - v1.12.0: Query — SQL-like row filtering
 - v1.13.0: Detect-PII — Auto-suggest redaction config
 - v1.14.0: MSSQL — Fourth dialect support
@@ -361,32 +361,45 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.11+)
+### v1.11.0 — Graph Command ✅ RELEASED
+**Released**: 2025-12-26  
+**Theme**: ERD generation and FK dependency visualization
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Graph command** | ✅ Done | Full ERD generation |
+| ├─ ERD-style diagrams | ✅ Done | Tables with columns, types, PK/FK markers |
+| ├─ Interactive HTML | ✅ Done | Dark/light mode, copy Mermaid, panzoom |
+| ├─ DOT format | ✅ Done | Graphviz ERD-style output |
+| ├─ Mermaid format | ✅ Done | erDiagram syntax |
+| ├─ JSON format | ✅ Done | Full schema with stats |
+| ├─ Table filtering | ✅ Done | --tables, --exclude with glob patterns |
+| ├─ Focus mode | ✅ Done | --table with --transitive or --reverse |
+| └─ Cycle detection | ✅ Done | Tarjan's SCC algorithm |
+| **Order command** | ✅ Done | Topological FK ordering |
+| ├─ Safe import order | ✅ Done | Parents before children |
+| ├─ --check mode | ✅ Done | Detect cycles |
+| └─ --reverse mode | ✅ Done | For DROP operations |
+
+**Delivered:**
+- `sql-splitter graph dump.sql -o schema.html` — Interactive HTML ERD
+- `sql-splitter graph dump.sql -o schema.dot` — Graphviz DOT ERD
+- `sql-splitter graph dump.sql -o schema.mmd --format mermaid` — Mermaid erDiagram
+- `sql-splitter graph dump.sql --json` — JSON with full schema details
+- `sql-splitter graph dump.sql --cycles-only` — Show circular dependencies
+- `sql-splitter graph dump.sql --table orders --transitive` — Focus on dependencies
+- `sql-splitter order dump.sql -o ordered.sql` — FK-aware ordering
+- `sql-splitter order dump.sql --check` — Cycle detection
+
+**Technical highlights:**
+- ERD diagrams show tables with full column details (name, type, PK/FK, nullable)
+- HTML viewer with dark/light mode toggle, copy Mermaid button, panzoom
+- Handles large schemas (tested with 281 tables, 3104 columns)
+- Tarjan's SCC algorithm for cycle detection
 
 ---
 
-### v1.11.0 — Graph Command
-**Theme**: FK dependency visualization and analysis
-
-| Feature | Effort | Notes |
-|---------|--------|-------|
-| Graph | ~12h | Export schema graph + simple diagram mode |
-
-**Features:**
-- **Simple mode:** `sql-splitter diagram dump.sql` (opens interactive HTML)
-- Export FK dependency graph (DOT, Mermaid, JSON, HTML)
-- Cycle detection and reporting
-- Topological ordering
-- Table dependency analysis
-- Auto-render to PNG/SVG/PDF
-
-**Deliverables:**
-- `sql-splitter diagram dump.sql` (simple mode - opens in browser)
-- `sql-splitter diagram dump.sql -o schema.png` (auto-render)
-- `sql-splitter graph dump.sql -o schema.dot --format dot`
-- `sql-splitter graph dump.sql --format mermaid`
-- `sql-splitter graph dump.sql --cycles-only`
-- `sql-splitter order dump.sql -o ordered.sql` (FK-aware ordering)
+## Upcoming Features (v1.12+)
 
 ---
 
@@ -543,12 +556,12 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.9.1 | Diff Enhanced | ✅ Released |
 | v1.9.2 | CLI UX + Man Pages | ✅ Released |
 | v1.10.0 | Redact | ✅ Released |
+| v1.11.0 | Graph + Order | ✅ Released |
 
-### Upcoming Features (v1.11+)
+### Upcoming Features (v1.12+)
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v1.11.0 | Graph + Diagram | ~12h | 1 week |
 | v1.12.0 | Query | ~30h | 2 weeks |
 | v1.13.0 | Detect-PII | ~8h | 1 week |
 | v1.14.0 | MSSQL | ~30h | 2 weeks |
@@ -607,6 +620,12 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
     - Data anonymization with 7 strategies
     - 25+ fake generators, YAML config
     - ~230 MB/s throughput, constant memory
+
+12. ✅ **v1.11.0 — Graph** — Released
+    - ERD generation (HTML, DOT, Mermaid, JSON)
+    - Cycle detection with Tarjan's SCC
+    - Order command for topological FK ordering
+    - Tested with 281 tables, 3104 columns
 
 ---
 
