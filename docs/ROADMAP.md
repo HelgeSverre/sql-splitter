@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.10.0 (current)  
-**Last Updated**: 2025-12-21  
-**Revision**: 2.9 — Post v1.10.0 with redact command
+**Version**: 1.10.0 (current)
+**Last Updated**: 2025-12-24
+**Revision**: 3.0 — Extended roadmap with graph, migrate, parallel, infer features
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -21,9 +21,15 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 8. ✅ Redact — Data anonymization (v1.10.0)
 
 **Next (v1.11+):**
-- v1.11.0: Query — SQL-like row filtering
-- v1.12.0: Detect-PII — Auto-suggest redaction config
-- v1.13.0: MSSQL — Fourth dialect support
+- v1.11.0: Graph — FK dependency visualization
+- v1.12.0: Query — SQL-like row filtering
+- v1.13.0: Detect-PII — Auto-suggest redaction config
+- v1.14.0: MSSQL — Fourth dialect support
+- v1.15.0: Migrate — Schema migration generation
+
+**Future (v2.x):**
+- v2.0.0: Parallel — Multi-threaded performance
+- v2.1.0: Infer — Schema inference from data
 
 ---
 
@@ -359,7 +365,32 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.11.0 — Query Command
+### v1.11.0 — Graph Command
+**Theme**: FK dependency visualization and analysis
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| Graph | ~12h | Export schema graph + simple diagram mode |
+
+**Features:**
+- **Simple mode:** `sql-splitter diagram dump.sql` (opens interactive HTML)
+- Export FK dependency graph (DOT, Mermaid, JSON, HTML)
+- Cycle detection and reporting
+- Topological ordering
+- Table dependency analysis
+- Auto-render to PNG/SVG/PDF
+
+**Deliverables:**
+- `sql-splitter diagram dump.sql` (simple mode - opens in browser)
+- `sql-splitter diagram dump.sql -o schema.png` (auto-render)
+- `sql-splitter graph dump.sql -o schema.dot --format dot`
+- `sql-splitter graph dump.sql --format mermaid`
+- `sql-splitter graph dump.sql --cycles-only`
+- `sql-splitter order dump.sql -o ordered.sql` (FK-aware ordering)
+
+---
+
+### v1.12.0 — Query Command
 **Theme**: SQL-like row filtering
 
 | Feature | Effort | Notes |
@@ -373,7 +404,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.12.0 — Detect-PII Command
+### v1.13.0 — Detect-PII Command
 **Theme**: Auto-suggest redaction config
 
 | Feature | Effort | Notes |
@@ -387,17 +418,85 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.13.0 — MSSQL Support
+### v1.14.0 — MSSQL Support
 **Theme**: Fourth dialect
 
 | Feature | Effort | Notes |
 |---------|--------|-------|
-| MSSQL dialect | ~24h | SQL Server support |
+| MSSQL dialect | ~30h | SQL Server support |
 
 **Features:**
-- Parse MSSQL dumps
+- Parse MSSQL dumps (SSMS-generated scripts)
 - Convert to/from MySQL, PostgreSQL, SQLite
-- Handle MSSQL-specific syntax
+- Handle T-SQL syntax (GO batches, square brackets, IDENTITY)
+- Support unicode strings (N'...')
+
+---
+
+### v1.15.0 — Migration Generation
+**Theme**: Schema evolution tracking
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| Migrate | ~40h | Generate ALTER statements |
+
+**Features:**
+- Analyze schema differences
+- Generate migration scripts (ALTER TABLE, CREATE INDEX, etc.)
+- Multi-dialect migration output
+- Rollback script generation
+- Breaking change detection
+
+**Deliverables:**
+- `sql-splitter migrate old.sql new.sql -o migration.sql`
+- `sql-splitter migrate old.sql new.sql --rollback -o rollback.sql`
+- `sql-splitter migrate old.sql new.sql --breaking-changes`
+
+---
+
+### v2.0.0 — Parallel Processing
+**Theme**: Multi-threaded performance
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| Parallel | ~60h | Multi-core utilization |
+
+**Features:**
+- Parallel table splitting
+- Parallel conversion
+- Parallel validation
+- Worker pool architecture
+- Configurable thread count
+
+**Performance targets:**
+- 4x speedup on 8-core systems
+- Linear scaling up to available cores
+- Memory-bounded parallel processing
+
+**Deliverables:**
+- `sql-splitter split dump.sql -o tables/ --parallel 8`
+- `sql-splitter convert dump.sql --parallel 4`
+- `sql-splitter validate dump.sql --parallel auto`
+
+---
+
+### v2.1.0 — Schema Inference
+**Theme**: Reverse-engineer schemas from data
+
+| Feature | Effort | Notes |
+|---------|--------|-------|
+| Infer | ~50h | Generate DDL from INSERTs |
+
+**Features:**
+- Type inference from INSERT values
+- Primary key detection
+- Index suggestion based on data patterns
+- Foreign key inference (heuristic)
+- NOT NULL constraint detection
+
+**Deliverables:**
+- `sql-splitter infer data-only.sql -o schema.sql`
+- `sql-splitter infer data.csv --table users --dialect mysql`
 
 ---
 
@@ -418,7 +517,12 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | **Query** | Row Parsing | — |
 | **Redact** | Row Parsing | Detect-PII |
 | **Detect-PII** | Redact | — |
+| **Graph** | Schema Graph | Order, Migrate |
+| **Order** | Schema Graph | — |
 | **MSSQL** | Convert | — |
+| **Migrate** | Diff, Schema Graph | — |
+| **Parallel** | (all commands) | — |
+| **Infer** | Row Parsing | — |
 
 ---
 
@@ -444,9 +548,13 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 | Version | Features | Effort | Duration |
 |---------|----------|--------|----------|
-| v1.11.0 | Query | ~30h | 2 weeks |
-| v1.12.0 | Detect-PII | ~8h | 1 week |
-| v1.13.0 | MSSQL | ~24h | 2 weeks |
+| v1.11.0 | Graph + Diagram | ~12h | 1 week |
+| v1.12.0 | Query | ~30h | 2 weeks |
+| v1.13.0 | Detect-PII | ~8h | 1 week |
+| v1.14.0 | MSSQL | ~30h | 2 weeks |
+| v1.15.0 | Migrate | ~40h | 2 weeks |
+| v2.0.0 | Parallel | ~60h | 3 weeks |
+| v2.1.0 | Infer | ~50h | 2-3 weeks |
 
 ---
 
