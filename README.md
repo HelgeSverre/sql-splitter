@@ -9,7 +9,7 @@
 Split large SQL dump files into individual table files. Fast, memory-efficient, multi-dialect.
 
 - **600+ MB/s** throughput on modern hardware
-- **MySQL, PostgreSQL, SQLite** support (including `COPY FROM stdin`)
+- **MySQL, PostgreSQL, SQLite, MSSQL** support (including `COPY FROM stdin`, `GO` batches)
 - **Compressed files** — gzip, bzip2, xz, zstd auto-detected
 - **Streaming architecture** — handles files larger than RAM
 - **5x faster** than shell-based alternatives
@@ -55,6 +55,9 @@ sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
 # SQLite dump
 sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
 
+# MSSQL/T-SQL dump (SSMS "Generate Scripts", sqlcmd)
+sql-splitter split mssql_dump.sql -o tables/ --dialect=mssql
+
 # Compressed files (auto-detected)
 sql-splitter split backup.sql.gz -o tables/
 sql-splitter split backup.sql.zst -o tables/
@@ -84,9 +87,11 @@ sql-splitter analyze dump.sql
 sql-splitter convert mysql_dump.sql -o postgres_dump.sql --to postgres
 sql-splitter convert pg_dump.sql -o mysql_dump.sql --to mysql
 sql-splitter convert dump.sql -o sqlite_dump.sql --to sqlite
+sql-splitter convert mssql_dump.sql -o mysql_dump.sql --to mysql
 
 # Convert with explicit source dialect
 sql-splitter convert dump.sql --from postgres --to mysql -o output.sql
+sql-splitter convert dump.sql --from mssql --to postgres -o output.sql
 
 # Validate SQL dump integrity
 sql-splitter validate dump.sql
@@ -212,7 +217,7 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | Flag             | Description                                | Default     |
 |------------------|--------------------------------------------|-------------|
 | `-o, --output`   | Output directory                           | `output`    |
-| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
+| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `-t, --tables`   | Only split these tables (comma-separated)  | —           |
 | `-p, --progress` | Show progress bar                          | —           |
 | `--dry-run`      | Preview without writing files              | —           |
@@ -239,40 +244,43 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Analyze Options
 
-| Flag             | Description                                | Default     |
-|------------------|--------------------------------------------|-------------|
-| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
-| `-p, --progress` | Show progress bar                          | —           |
-| `--fail-fast`    | Stop on first error (for glob patterns)    | —           |
-| `--json`         | Output results as JSON                     | —           |
+| Flag             | Description                                         | Default     |
+|------------------|-----------------------------------------------------|-------------|
+| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `-p, --progress` | Show progress bar                                   | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)             | —           |
+| `--json`         | Output results as JSON                              | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Convert Options
 
-| Flag             | Description                                      | Default     |
-|------------------|--------------------------------------------------|-------------|
-| `-o, --output`   | Output SQL file or directory (required for glob) | stdout      |
-| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`    | auto-detect |
-| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`    | required    |
-| `--strict`       | Fail on any unsupported feature                  | —           |
-| `-p, --progress` | Show progress bar                                | —           |
-| `--dry-run`      | Preview without writing files                    | —           |
-| `--fail-fast`    | Stop on first error (for glob patterns)          | —           |
-| `--json`         | Output results as JSON                           | —           |
+| Flag             | Description                                              | Default     |
+|------------------|----------------------------------------------------------|-------------|
+| `-o, --output`   | Output SQL file or directory (required for glob)         | stdout      |
+| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql`   | auto-detect |
+| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`, `mssql`   | required    |
+| `--strict`       | Fail on any unsupported feature                          | —           |
+| `-p, --progress` | Show progress bar                                        | —           |
+| `--dry-run`      | Preview without writing files                            | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)                  | —           |
+| `--json`         | Output results as JSON                                   | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
-**Supported conversions:**
+**Supported conversions (12 pairs):**
 
 - MySQL ↔ PostgreSQL (including COPY → INSERT)
 - MySQL ↔ SQLite
+- MySQL ↔ MSSQL
 - PostgreSQL ↔ SQLite
+- PostgreSQL ↔ MSSQL
+- SQLite ↔ MSSQL
 
 **Features:**
 
-- 30+ data type mappings
-- AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY
+- 50+ data type mappings
+- AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY ↔ IDENTITY
 - PostgreSQL COPY → INSERT with NULL and escape handling
 - Session command stripping
 - Warnings for unsupported features (ENUM, arrays, triggers)
@@ -281,7 +289,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 | Flag                   | Description                                        | Default     |
 |------------------------|----------------------------------------------------|-------------|
-| `-d, --dialect`        | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
+| `-d, --dialect`        | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `--strict`             | Treat warnings as errors (exit 1)                  | —           |
 | `--json`               | Output results as JSON                             | —           |
 | `--max-rows-per-table` | Max rows per table for PK/FK checks (0 = no limit) | 1,000,000   |
@@ -305,7 +313,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | Flag                  | Description                                        | Default     |
 |-----------------------|----------------------------------------------------|-------------|
 | `-o, --output`        | Output SQL file                                    | stdout      |
-| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
+| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `--percent`           | Sample percentage (1-100)                          | —           |
 | `--rows`              | Sample fixed number of rows per table              | —           |
 | `--preserve-relations`| Preserve FK relationships                          | —           |
@@ -328,7 +336,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | Flag                  | Description                                        | Default     |
 |-----------------------|----------------------------------------------------|-------------|
 | `-o, --output`        | Output SQL file or directory                       | stdout      |
-| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
+| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `--tenant-column`     | Column name for tenant identification              | auto-detect |
 | `--tenant-value`      | Single tenant value to extract                     | —           |
 | `--tenant-values`     | Multiple tenant values (comma-separated)           | —           |
@@ -348,7 +356,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | Flag                | Description                                                | Default     |
 |---------------------|------------------------------------------------------------|-------------|
 | `-o, --output`      | Output file (default: stdout)                              | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
 | `--schema-only`     | Compare schema only, skip data                             | —           |
 | `--data-only`       | Compare data only, skip schema                             | —           |
 | `--format`          | Output format: `text`, `json`, `sql`                       | `text`      |
@@ -382,7 +390,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 |---------------------|------------------------------------------------------------|-------------|
 | `-o, --output`      | Output file (html, dot, mmd, json, png, svg, pdf)          | stdout      |
 | `--format`          | Output format: `html`, `dot`, `mermaid`, `json`            | auto-detect |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
 | `--layout`          | Layout direction: `lr` (left-right), `tb` (top-bottom)     | `lr`        |
 | `-t, --tables`      | Only include tables matching glob patterns                 | all         |
 | `-e, --exclude`     | Exclude tables matching glob patterns                      | —           |
@@ -408,7 +416,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | Flag                | Description                                                | Default     |
 |---------------------|------------------------------------------------------------|-------------|
 | `-o, --output`      | Output SQL file                                            | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
 | `--check`           | Check for cycles and report order (don't write)            | —           |
 | `--dry-run`         | Show topological order without writing                     | —           |
 | `--reverse`         | Reverse order (children before parents, for DROP)          | —           |
@@ -418,7 +426,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | Flag                | Description                                                | Default     |
 |---------------------|------------------------------------------------------------|-------------|
 | `-o, --output`      | Output SQL file                                            | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
 | `-c, --config`      | YAML config file for redaction rules                       | —           |
 | `--generate-config` | Analyze input and generate annotated YAML config           | —           |
 | `--null`            | Columns to set to NULL (glob patterns, comma-separated)    | —           |
@@ -456,7 +464,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 |---------------------|------------------------------------------------------------|-------------|
 | `-f, --format`      | Output format: `table`, `json`, `jsonl`, `csv`, `tsv`      | `table`     |
 | `-o, --output`      | Write output to file instead of stdout                     | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`                 | auto-detect |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
 | `-i, --interactive` | Start interactive REPL session                             | —           |
 | `--disk`            | Use disk-based storage (for large dumps >2GB)              | auto        |
 | `--cache`           | Cache imported database for repeated queries               | —           |

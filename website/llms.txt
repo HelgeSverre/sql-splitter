@@ -1,7 +1,7 @@
 # sql-splitter
 
 > High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
-> MySQL/PostgreSQL/SQLite, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
+> MySQL/PostgreSQL/SQLite/MSSQL, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
 > and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 600+ MB/s throughput
 > and constant ~50MB memory usage.
 
@@ -50,7 +50,7 @@ sql-splitter --version
 | `split`    | Split dump into per-table SQL files       | Work on individual tables, parallel processing    |
 | `merge`    | Merge per-table files into single dump    | Reassemble after editing, restore preparation     |
 | `analyze`  | Read-only statistics about tables         | Planning, size estimation, table discovery        |
-| `convert`  | Transform between MySQL/PostgreSQL/SQLite | Database migrations, environment portability      |
+| `convert`  | Transform between MySQL/PostgreSQL/SQLite/MSSQL | Database migrations, environment portability   |
 | `validate` | Check syntax, encoding, PK/FK integrity   | CI gates, backup verification, pre-restore checks |
 | `sample`   | Create reduced FK-consistent datasets     | Dev/CI seeding, testing with realistic data       |
 | `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
@@ -71,7 +71,7 @@ All commands support:
     - `--dry-run`: Preview without writing output
     - `--fail-fast`: Stop on first error (for glob patterns)
     - `--json`: Machine-readable JSON output for automation
-- **Auto-dialect detection**: MySQL, PostgreSQL, SQLite (override with `--dialect`)
+- **Auto-dialect detection**: MySQL, PostgreSQL, SQLite, MSSQL (override with `--dialect`)
 
 ## Decision Guide: Which Command to Use
 
@@ -92,9 +92,9 @@ All commands support:
 
 ---
 
-## Workflow 1: Database Migration (MySQL → PostgreSQL)
+## Workflow 1: Database Migration (MySQL → PostgreSQL or MSSQL → MySQL)
 
-**Goal:** Safely move data from MySQL dump to PostgreSQL with integrity checks.
+**Goal:** Safely move data between databases with integrity checks.
 
 ```bash
 # 1. Validate source dump
@@ -103,17 +103,28 @@ sql-splitter validate prod_mysql.sql.gz --strict --progress
 # 2. Analyze to understand scale
 sql-splitter analyze prod_mysql.sql.gz --progress
 
-# 3. Convert dialect
+# 3. Convert dialect (MySQL → PostgreSQL)
 sql-splitter convert prod_mysql.sql.gz --to postgres -o prod_postgres.sql --progress
 
-# 4. Validate converted dump
+# 4. Or convert MSSQL → MySQL
+sql-splitter convert mssql_dump.sql --from mssql --to mysql -o mysql_dump.sql --progress
+
+# 5. Validate converted dump
 sql-splitter validate prod_postgres.sql --dialect=postgres --strict --progress
 
-# 5. (Optional) Stream directly into PostgreSQL
+# 6. (Optional) Stream directly into target database
 sql-splitter convert prod_mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
 ```
 
-**When conversion fails:** Check for unsupported features (ENUM, triggers). Use `--strict` to see all warnings, or omit
+**Supported conversion pairs (12 total):**
+- MySQL ↔ PostgreSQL (including COPY → INSERT)
+- MySQL ↔ SQLite
+- MySQL ↔ MSSQL
+- PostgreSQL ↔ SQLite
+- PostgreSQL ↔ MSSQL
+- SQLite ↔ MSSQL
+
+**When conversion fails:** Check for unsupported features (ENUM, triggers, BULK INSERT). Use `--strict` to see all warnings, or omit
 it for "best-effort" conversion.
 
 ---
@@ -648,7 +659,7 @@ sql-splitter query --list-cache
 sql-splitter query --clear-cache
 ```
 
-**Note:** Uses embedded DuckDB for analytics. Supports MySQL, PostgreSQL, and SQLite dumps with automatic type conversion.
+**Note:** Uses embedded DuckDB for analytics. Supports MySQL, PostgreSQL, SQLite, and MSSQL dumps with automatic type conversion.
 
 ---
 
@@ -658,9 +669,10 @@ sql-splitter query --clear-cache
 
 If commands fail with syntax errors or unknown keywords:
 
-- Re-run with explicit `--dialect=postgres` or `--dialect=mysql`
+- Re-run with explicit `--dialect=postgres`, `--dialect=mysql`, or `--dialect=mssql`
 - For `convert`, use `--from` and `--to` explicitly
 - Check if dump was created with a different database version
+- For MSSQL dumps, ensure GO batch separators are on their own lines
 
 ### Validation Failures
 

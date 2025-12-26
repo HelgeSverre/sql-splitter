@@ -2,7 +2,7 @@
 name: sql-splitter
 description: >
   High-performance CLI for working with SQL dump files: split/merge by table,
-  analyze contents, validate integrity, convert between MySQL/PostgreSQL/SQLite,
+  analyze contents, validate integrity, convert between MySQL/PostgreSQL/SQLite/MSSQL,
   create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
   reorder for safe imports, and run SQL analytics with embedded DuckDB.
   Use when working with .sql dump files for migrations, dev seeding, CI validation,
@@ -21,16 +21,17 @@ Use `sql-splitter` when:
 - The user mentions **SQL dump files** (`.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`)
 - The user wants to migrate, restore, or work with database dump files
 - The user needs to validate, analyze, split, merge, convert, sample, shard, or **query** dumps
-- Working with **MySQL, PostgreSQL, or SQLite** dump formats
+- Working with **MySQL, PostgreSQL, SQLite, or MSSQL** dump formats
 - The user wants to run **SQL analytics** on a dump file without loading it into a database
 
 ## When NOT to Use This Skill
 
 Do **not** use `sql-splitter` when:
-- Running complex ad-hoc SQL queries against a live database (use `psql`/`mysql` directly)
+- Running complex ad-hoc SQL queries against a live database (use `psql`/`mysql`/`sqlcmd` directly)
 - No dump file exists; only a running database is available
 - The user needs interactive data editing rather than dump manipulation
-- Working with dialects beyond MySQL/PostgreSQL/SQLite
+- Working with dialects beyond MySQL/PostgreSQL/SQLite/MSSQL
+- Working with MSSQL binary backup files (.bak) or DACPAC/BACPAC formats (only script-based .sql dumps are supported)
 
 ---
 
@@ -64,12 +65,14 @@ sql-splitter analyze "dumps/*.sql" --fail-fast
 ```
 
 ### convert
-Convert between MySQL, PostgreSQL, and SQLite.
+Convert between MySQL, PostgreSQL, SQLite, and MSSQL (12 conversion pairs).
 
 ```bash
 sql-splitter convert mysql.sql --to postgres --output pg.sql
 sql-splitter convert pg_dump.sql --to mysql --output mysql.sql
 sql-splitter convert dump.sql --from postgres --to sqlite --output sqlite.sql
+sql-splitter convert mssql_dump.sql --from mssql --to mysql --output mysql.sql
+sql-splitter convert mysql.sql --to mssql --output mssql.sql
 sql-splitter convert mysql.sql --to postgres --output - | psql "$PG_CONN"
 ```
 
@@ -249,9 +252,10 @@ Before using any dump from an external source:
    ```
 
 2. **If validation fails**, check:
-   - Incorrect dialect? Try `--dialect=postgres` or `--dialect=mysql`
+   - Incorrect dialect? Try `--dialect=postgres`, `--dialect=mysql`, or `--dialect=mssql`
    - Encoding issues? Report specific errors to user
    - Truncated file? Check file size and completeness
+   - For MSSQL: Ensure GO batch separators are on their own lines
 
 3. **Analyze structure**
    ```bash
@@ -260,7 +264,7 @@ Before using any dump from an external source:
 
 ### Pattern 2: Database Migration
 
-For migrating MySQL to PostgreSQL (or vice versa):
+For migrating between MySQL, PostgreSQL, SQLite, and MSSQL (12 conversion pairs):
 
 1. **Validate source**
    ```bash
@@ -270,6 +274,8 @@ For migrating MySQL to PostgreSQL (or vice versa):
 2. **Convert dialect**
    ```bash
    sql-splitter convert source.sql.gz --to postgres --output target.sql --strict
+   # or for MSSQL
+   sql-splitter convert mssql_dump.sql --from mssql --to mysql --output mysql.sql
    ```
 
 3. **Validate converted output**
@@ -515,7 +521,9 @@ For running SQL queries on dump files without loading into a database:
 If auto-detection fails, specify explicitly:
 ```bash
 sql-splitter validate dump.sql --dialect=postgres
+sql-splitter validate mssql_dump.sql --dialect=mssql
 sql-splitter convert dump.sql --from mysql --to postgres --output out.sql
+sql-splitter convert dump.sql --from mssql --to mysql --output out.sql
 ```
 
 ### Validation Failures
