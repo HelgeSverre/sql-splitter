@@ -12,6 +12,7 @@
 #   4. Validate (glob) - Use glob pattern to validate all split output files
 #   5. Validate (roundtrip) - Split→Merge→Validate to verify no data loss
 #   6. Redact command - Test data anonymization with various strategies
+#   7. Graph command - Generate ERD in all formats (HTML, DOT, Mermaid, JSON)
 #
 # Usage:
 #   ./scripts/verify-realworld.sh           # Run all tests
@@ -222,6 +223,10 @@ declare -a VALIDATE_GLOB_VALUES=()
 declare -a REDACT_NAMES=()
 declare -a REDACT_VALUES=()
 
+# Graph results storage
+declare -a GRAPH_NAMES=()
+declare -a GRAPH_VALUES=()
+
 # Get validation result by name from parallel arrays
 # Args: name, type (input/output/glob)
 # Returns: result string via stdout
@@ -260,6 +265,18 @@ get_redact_result() {
     for i in "${!REDACT_NAMES[@]}"; do
         if [[ "${REDACT_NAMES[$i]}" == "$name" ]]; then
             echo "${REDACT_VALUES[$i]}"
+            return
+        fi
+    done
+    echo "?"
+}
+
+# Get graph result by name
+get_graph_result() {
+    local name=$1
+    for i in "${!GRAPH_NAMES[@]}"; do
+        if [[ "${GRAPH_NAMES[$i]}" == "$name" ]]; then
+            echo "${GRAPH_VALUES[$i]}"
             return
         fi
     done
@@ -350,6 +367,103 @@ run_redact_test() {
 
     REDACT_NAMES+=("$name")
     REDACT_VALUES+=("$result_str")
+
+    if [[ "$all_passed" == "true" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Run graph test on a SQL file - generate ERD in all formats
+# Args: name, sql_file, dialect
+# Returns: 0 on success, 1 on failure
+run_graph_test() {
+    local name=$1
+    local sql_file=$2
+    local dialect=$3
+    local graph_output_dir="$OUTPUT_DIR/graph/$name"
+
+    if [[ ! -f "$sql_file" ]]; then
+        return 1
+    fi
+
+    mkdir -p "$graph_output_dir"
+
+    local result_str=""
+    local all_passed=true
+
+    # Test 1: HTML format (default)
+    local html_output="$graph_output_dir/${name}.html"
+    if "$BINARY" graph "$sql_file" --dialect="$dialect" --output="$html_output" >/dev/null 2>&1; then
+        if [[ -f "$html_output" && -s "$html_output" ]]; then
+            result_str+="html:✓ "
+        else
+            result_str+="html:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="html:✗ "
+        all_passed=false
+    fi
+
+    # Test 2: DOT format
+    local dot_output="$graph_output_dir/${name}.dot"
+    if "$BINARY" graph "$sql_file" --dialect="$dialect" --output="$dot_output" >/dev/null 2>&1; then
+        if [[ -f "$dot_output" && -s "$dot_output" ]]; then
+            result_str+="dot:✓ "
+        else
+            result_str+="dot:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="dot:✗ "
+        all_passed=false
+    fi
+
+    # Test 3: Mermaid format
+    local mmd_output="$graph_output_dir/${name}.mmd"
+    if "$BINARY" graph "$sql_file" --dialect="$dialect" --output="$mmd_output" --format mermaid >/dev/null 2>&1; then
+        if [[ -f "$mmd_output" && -s "$mmd_output" ]]; then
+            result_str+="mmd:✓ "
+        else
+            result_str+="mmd:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="mmd:✗ "
+        all_passed=false
+    fi
+
+    # Test 4: JSON format
+    local json_output="$graph_output_dir/${name}.json"
+    if "$BINARY" graph "$sql_file" --dialect="$dialect" --output="$json_output" --format json >/dev/null 2>&1; then
+        if [[ -f "$json_output" && -s "$json_output" ]]; then
+            # Verify it's valid JSON and has expected structure
+            if grep -q '"tables"' "$json_output" && grep -q '"relationships"' "$json_output"; then
+                result_str+="json:✓ "
+            else
+                result_str+="json:⚠ "
+                all_passed=false
+            fi
+        else
+            result_str+="json:⚠ "
+            all_passed=false
+        fi
+    else
+        result_str+="json:✗ "
+        all_passed=false
+    fi
+
+    # Test 5: Cycles detection
+    if "$BINARY" graph "$sql_file" --dialect="$dialect" --cycles-only >/dev/null 2>&1; then
+        result_str+="cycles:✓"
+    else
+        result_str+="cycles:✗"
+        all_passed=false
+    fi
+
+    GRAPH_NAMES+=("$name")
+    GRAPH_VALUES+=("$result_str")
 
     if [[ "$all_passed" == "true" ]]; then
         return 0
@@ -640,6 +754,9 @@ run_all_tests() {
     local redact_passed=0
     local redact_failed=0
     local redact_skipped=0
+    local graph_passed=0
+    local graph_failed=0
+    local graph_skipped=0
     
     for test_case in "${TEST_CASES[@]}"; do
         IFS='|' read -r name dialect url unzip_cmd sql_file notes <<< "$test_case"
@@ -656,6 +773,7 @@ run_all_tests() {
             ((validate_merge_skipped++))
             ((validate_glob_skipped++))
             ((redact_skipped++))
+            ((graph_skipped++))
             continue
         fi
         
@@ -667,6 +785,7 @@ run_all_tests() {
             ((validate_merge_skipped++))
             ((validate_glob_skipped++))
             ((redact_skipped++))
+            ((graph_skipped++))
             continue
         fi
         
@@ -755,6 +874,21 @@ run_all_tests() {
             echo -e "  Redact tests: ${CYAN}skipped (dialect=any)${NC}"
             ((redact_skipped++))
         fi
+        
+        # Run graph tests (ERD generation in all formats)
+        if [[ "$dialect" != "any" ]]; then
+            echo -e "  Testing graph (ERD)..."
+            if run_graph_test "$name" "$full_path" "$dialect"; then
+                ((graph_passed++))
+                echo -e "  Graph: ${GREEN}$(get_graph_result "$name")${NC}"
+            else
+                ((graph_failed++))
+                echo -e "  Graph: ${YELLOW}$(get_graph_result "$name")${NC}"
+            fi
+        else
+            echo -e "  Graph tests: ${CYAN}skipped (dialect=any)${NC}"
+            ((graph_skipped++))
+        fi
     done
     
     echo ""
@@ -792,6 +926,11 @@ run_all_tests() {
     echo -e "  ${RED}Failed:${NC}  $redact_failed"
     echo -e "  ${YELLOW}Skipped:${NC} $redact_skipped"
     echo ""
+    echo -e "${CYAN}Graph Command (ERD in all formats):${NC}"
+    echo -e "  ${GREEN}Passed:${NC}  $graph_passed"
+    echo -e "  ${RED}Failed:${NC}  $graph_failed"
+    echo -e "  ${YELLOW}Skipped:${NC} $graph_skipped"
+    echo ""
     echo "Legend:"
     echo "  ✓ = Success / No issues"
     echo "  ⚠ = Warnings but no errors"
@@ -801,6 +940,7 @@ run_all_tests() {
     echo "  Nerr/Nwarn = N errors/warnings found"
     echo "  N/M = N files passed out of M total"
     echo "  dry/null/hash/fake/seed = redact strategy tests"
+    echo "  html/dot/mmd/json/cycles = graph format tests"
     echo ""
     
     if [[ $split_failed -gt 0 || $convert_failed -gt 0 ]]; then
