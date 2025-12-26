@@ -224,6 +224,11 @@ impl<'a> DumpLoader<'a> {
             result = Self::strip_postgres_syntax(&result);
         }
 
+        // Remove MSSQL-specific syntax
+        if dialect == SqlDialect::Mssql {
+            result = Self::strip_mssql_syntax(&result);
+        }
+
         Ok(result)
     }
 
@@ -242,6 +247,11 @@ impl<'a> DumpLoader<'a> {
         // Remove PostgreSQL schema prefix
         if dialect == SqlDialect::Postgres {
             result = Self::strip_schema_prefix(&result);
+        }
+
+        // Remove MSSQL schema prefix (dbo., etc.)
+        if dialect == SqlDialect::Mssql {
+            result = Self::strip_mssql_schema_prefix(&result);
         }
 
         Ok(result)
@@ -306,7 +316,7 @@ impl<'a> DumpLoader<'a> {
         result
     }
 
-    /// Convert identifier quoting (backticks to double quotes)
+    /// Convert identifier quoting (backticks/brackets to double quotes)
     fn convert_identifiers(stmt: &str, dialect: SqlDialect) -> String {
         match dialect {
             SqlDialect::MySql => {
@@ -328,6 +338,38 @@ impl<'a> DumpLoader<'a> {
                 }
                 result
             }
+            SqlDialect::Mssql => {
+                // Convert brackets to double quotes, strip N prefix from strings
+                let mut result = String::with_capacity(stmt.len());
+                let mut in_string = false;
+                let mut in_bracket = false;
+                let mut chars = stmt.chars().peekable();
+
+                while let Some(c) = chars.next() {
+                    if c == '\'' && !in_bracket {
+                        in_string = !in_string;
+                        result.push(c);
+                    } else if c == '[' && !in_string {
+                        in_bracket = true;
+                        result.push('"');
+                    } else if c == ']' && !in_string {
+                        // Handle ]] escape
+                        if chars.peek() == Some(&']') {
+                            chars.next();
+                            result.push(']');
+                        } else {
+                            in_bracket = false;
+                            result.push('"');
+                        }
+                    } else if c == 'N' && !in_string && !in_bracket && chars.peek() == Some(&'\'') {
+                        // Strip N prefix from N'string'
+                        // Don't push the N, the quote will be pushed in next iteration
+                    } else {
+                        result.push(c);
+                    }
+                }
+                result
+            }
             _ => stmt.to_string(),
         }
     }
@@ -337,8 +379,9 @@ impl<'a> DumpLoader<'a> {
         // Pattern to match column definitions with types
         // Handles: TYPE, TYPE(size), TYPE UNSIGNED, TYPE WITH TIME ZONE
         // IMPORTANT: Order matters - longer types first to avoid partial matches (INTEGER before INT)
+        // Includes MySQL, PostgreSQL, SQLite, and MSSQL types
         static RE_COLUMN_TYPE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\b(BIGSERIAL|SMALLSERIAL|SERIAL|BIGINT|SMALLINT|MEDIUMINT|TINYINT|INTEGER|INT|DOUBLE\s+PRECISION|DOUBLE|FLOAT|DECIMAL|NUMERIC|CHARACTER\s+VARYING|VARCHAR|CHAR|VARBINARY|BINARY|LONGTEXT|MEDIUMTEXT|TINYTEXT|TEXT|LONGBLOB|MEDIUMBLOB|TINYBLOB|BLOB|DATETIME|TIMESTAMPTZ|TIMESTAMP|TIMETZ|TIME|DATE|YEAR|ENUM|SET|JSONB|JSON|UUID|BYTEA|BOOLEAN|BOOL|BIT|REAL|MONEY|INTERVAL)(\s*\([^)]+\))?(\s+(?:UNSIGNED|WITH(?:OUT)?\s+TIME\s+ZONE))?").unwrap()
+            Regex::new(r"(?i)\b(BIGSERIAL|SMALLSERIAL|SERIAL|BIGINT|SMALLINT|MEDIUMINT|TINYINT|INTEGER|INT|DOUBLE\s+PRECISION|DOUBLE|FLOAT|DECIMAL|NUMERIC|CHARACTER\s+VARYING|NVARCHAR|NCHAR|VARCHAR|CHAR|VARBINARY|BINARY|LONGTEXT|MEDIUMTEXT|TINYTEXT|NTEXT|TEXT|LONGBLOB|MEDIUMBLOB|TINYBLOB|IMAGE|BLOB|DATETIME2|DATETIMEOFFSET|SMALLDATETIME|DATETIME|TIMESTAMPTZ|TIMESTAMP|TIMETZ|TIME|DATE|YEAR|ENUM|SET|JSONB|JSON|UUID|UNIQUEIDENTIFIER|BYTEA|BOOLEAN|BOOL|BIT|REAL|MONEY|SMALLMONEY|INTERVAL|ROWVERSION|XML|SQL_VARIANT)(\s*\([^)]+\))?(\s+(?:UNSIGNED|WITH(?:OUT)?\s+TIME\s+ZONE))?").unwrap()
         });
 
         RE_COLUMN_TYPE
@@ -453,6 +496,73 @@ impl<'a> DumpLoader<'a> {
         RE_SCHEMA.replace_all(stmt, "").to_string()
     }
 
+    /// Strip MSSQL schema prefix (dbo., etc.) for both CREATE TABLE and INSERT
+    fn strip_mssql_schema_prefix(stmt: &str) -> String {
+        // Remove schema prefix (dbo., schema.) - quoted or unquoted
+        static RE_SCHEMA: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(?i)"?(dbo|master|tempdb|model|msdb)"?\s*\.\s*"#).unwrap());
+        RE_SCHEMA.replace_all(stmt, "").to_string()
+    }
+
+    /// Strip MSSQL-specific syntax
+    fn strip_mssql_syntax(stmt: &str) -> String {
+        let mut result = Self::strip_mssql_schema_prefix(stmt);
+
+        // Remove IDENTITY clause and make the column nullable (so INSERTs without id work)
+        // Pattern matches: INT IDENTITY(1,1) NOT NULL -> INT
+        static RE_IDENTITY_NOT_NULL: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)\s*NOT\s+NULL").unwrap());
+        result = RE_IDENTITY_NOT_NULL.replace_all(&result, "").to_string();
+        
+        // Also handle IDENTITY without NOT NULL
+        static RE_IDENTITY: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
+        result = RE_IDENTITY.replace_all(&result, "").to_string();
+
+        // Remove CLUSTERED/NONCLUSTERED
+        static RE_CLUSTERED: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*(?:NON)?CLUSTERED\s*").unwrap());
+        result = RE_CLUSTERED.replace_all(&result, " ").to_string();
+
+        // Remove ON [PRIMARY] (filegroup)
+        static RE_FILEGROUP: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(?i)\s*ON\s*"?PRIMARY"?"#).unwrap());
+        result = RE_FILEGROUP.replace_all(&result, "").to_string();
+
+        // Remove PRIMARY KEY constraints (they make columns NOT NULL which breaks IDENTITY column INSERTs)
+        static RE_PK_CONSTRAINT: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+PRIMARY\s+KEY\s+\([^)]+\)"#).unwrap());
+        result = RE_PK_CONSTRAINT.replace_all(&result, "").to_string();
+
+        // Remove FOREIGN KEY constraints (analytics queries don't need FK enforcement)
+        static RE_FK_CONSTRAINT: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+[^\s(]+\s*\([^)]+\)"#).unwrap());
+        result = RE_FK_CONSTRAINT.replace_all(&result, "").to_string();
+
+        // Remove WITH clause for indexes
+        static RE_WITH: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\s*WITH\s*\([^)]+\)").unwrap()
+        });
+        result = RE_WITH.replace_all(&result, "").to_string();
+
+        // Remove TEXTIMAGE_ON
+        static RE_TEXTIMAGE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(?i)\s*TEXTIMAGE_ON\s*"?\w+"?"#).unwrap());
+        result = RE_TEXTIMAGE.replace_all(&result, "").to_string();
+
+        // Convert GETDATE() to CURRENT_TIMESTAMP
+        static RE_GETDATE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bGETDATE\s*\(\s*\)").unwrap());
+        result = RE_GETDATE.replace_all(&result, "CURRENT_TIMESTAMP").to_string();
+
+        // Convert NEWID() to gen_random_uuid()
+        static RE_NEWID: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bNEWID\s*\(\s*\)").unwrap());
+        result = RE_NEWID.replace_all(&result, "gen_random_uuid()").to_string();
+
+        result
+    }
+
     /// Count rows in an INSERT statement
     fn count_insert_rows(sql: &str) -> u64 {
         // Count VALUES clauses by counting opening parentheses after VALUES
@@ -538,9 +648,33 @@ impl<R: Read> StatementReader<R> {
     fn extract_statement(&mut self) -> Option<String> {
         let mut in_string = false;
         let mut in_dollar_quote = false;
+        let mut in_bracket = false;
         let mut escape_next = false;
         let mut chars = self.buffer.char_indices().peekable();
         let mut end_pos = None;
+
+        // For MSSQL, check for GO at start of line
+        if self.dialect == SqlDialect::Mssql {
+            if let Some(go_pos) = self.find_go_separator() {
+                let stmt = self.buffer[..go_pos].to_string();
+                // Skip past GO and any whitespace
+                let after_go = &self.buffer[go_pos..];
+                if let Some(line_end) = after_go.find('\n') {
+                    self.buffer = after_go[line_end + 1..].to_string();
+                } else {
+                    self.buffer.clear();
+                }
+                
+                let trimmed = stmt.trim();
+                if trimmed.is_empty()
+                    || trimmed.starts_with("--")
+                    || (trimmed.starts_with("/*") && !trimmed.contains("/*!"))
+                {
+                    return self.extract_statement();
+                }
+                return Some(stmt);
+            }
+        }
 
         while let Some((i, c)) = chars.next() {
             if escape_next {
@@ -552,8 +686,19 @@ impl<R: Read> StatementReader<R> {
                 '\\' if self.dialect == SqlDialect::MySql && in_string => {
                     escape_next = true;
                 }
-                '\'' if !in_dollar_quote => {
+                '\'' if !in_dollar_quote && !in_bracket => {
                     in_string = !in_string;
+                }
+                '[' if self.dialect == SqlDialect::Mssql && !in_string => {
+                    in_bracket = true;
+                }
+                ']' if self.dialect == SqlDialect::Mssql && !in_string => {
+                    // Handle ]] escape
+                    if chars.peek().map(|(_, c)| *c == ']').unwrap_or(false) {
+                        chars.next();
+                    } else {
+                        in_bracket = false;
+                    }
                 }
                 '$' if self.dialect == SqlDialect::Postgres && !in_string => {
                     // Check for dollar quote
@@ -562,7 +707,7 @@ impl<R: Read> StatementReader<R> {
                         chars.next();
                     }
                 }
-                ';' if !in_string && !in_dollar_quote => {
+                ';' if !in_string && !in_dollar_quote && !in_bracket => {
                     end_pos = Some(i + 1);
                     break;
                 }
@@ -587,6 +732,39 @@ impl<R: Read> StatementReader<R> {
         } else {
             None
         }
+    }
+
+    /// Find GO batch separator at start of line (MSSQL)
+    fn find_go_separator(&self) -> Option<usize> {
+        let mut in_string = false;
+        let mut in_bracket = false;
+        let mut line_start = 0;
+        
+        for (i, c) in self.buffer.char_indices() {
+            if c == '\'' && !in_bracket {
+                in_string = !in_string;
+            } else if c == '[' && !in_string {
+                in_bracket = true;
+            } else if c == ']' && !in_string {
+                in_bracket = false;
+            } else if c == '\n' {
+                line_start = i + 1;
+            } else if !in_string && !in_bracket && i == line_start {
+                // Check for GO at start of line
+                let rest = &self.buffer[i..];
+                if rest.len() >= 2 {
+                    let word = &rest[..2.min(rest.len())];
+                    if word.eq_ignore_ascii_case("GO") {
+                        // Make sure it's just GO (not GO_SOMETHING)
+                        let after_go = if rest.len() > 2 { rest.chars().nth(2) } else { None };
+                        if after_go.is_none() || after_go == Some('\n') || after_go == Some('\r') || after_go == Some(' ') || after_go.unwrap().is_ascii_digit() {
+                            return Some(i);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -633,5 +811,36 @@ mod tests {
         assert!(DumpLoader::looks_like_copy_data("1\tAlice\t2024-01-01"));
         assert!(!DumpLoader::looks_like_copy_data("SELECT * FROM users"));
         assert!(!DumpLoader::looks_like_copy_data("INSERT INTO t VALUES"));
+    }
+
+    #[test]
+    fn test_strip_mssql_syntax() {
+        let sql = r#"CREATE TABLE "users" (
+    "id" INTEGER NOT NULL,
+    "email" VARCHAR(255) NOT NULL
+)"#;
+        // The IDENTITY should have been stripped by strip_mssql_syntax
+        let result = DumpLoader::strip_mssql_syntax(sql);
+        assert!(!result.contains("IDENTITY"), "IDENTITY should be stripped");
+        
+        // Test with IDENTITY(1,1) NOT NULL
+        let sql_with_identity = r#"CREATE TABLE "users" (
+    "id" INTEGER IDENTITY(1,1) NOT NULL,
+    "email" VARCHAR(255) NOT NULL
+)"#;
+        let result2 = DumpLoader::strip_mssql_syntax(sql_with_identity);
+        assert!(!result2.contains("IDENTITY"), "IDENTITY should be stripped: {}", result2);
+        // Since we strip IDENTITY(1,1) NOT NULL, the column should become nullable
+        assert!(!result2.contains("IDENTITY(1,1) NOT NULL"), "Should strip full IDENTITY NOT NULL");
+    }
+
+    #[test]
+    fn test_convert_mssql_identifiers() {
+        let sql = "INSERT INTO [dbo].[users] ([id], [name]) VALUES (1, N'test')";
+        let result = DumpLoader::convert_identifiers(sql, SqlDialect::Mssql);
+        assert_eq!(
+            result,
+            "INSERT INTO \"dbo\".\"users\" (\"id\", \"name\") VALUES (1, 'test')"
+        );
     }
 }

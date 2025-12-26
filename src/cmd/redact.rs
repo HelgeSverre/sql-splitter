@@ -1,6 +1,6 @@
 //! CLI handler for the redact command.
 
-use crate::parser::SqlDialect;
+use crate::parser::{detect_dialect_from_file, SqlDialect};
 use crate::redactor::{RedactConfig, RedactStats, Redactor};
 use std::path::PathBuf;
 
@@ -37,8 +37,11 @@ pub fn run(
             _ => anyhow::bail!("Unknown dialect: {}. Use: mysql, postgres, sqlite, mssql", d),
         }
     } else {
-        // Auto-detect from file extension or content
-        SqlDialect::MySql // Default to MySQL
+        // Auto-detect from file content
+        match detect_dialect_from_file(&file) {
+            Ok(result) => result.dialect,
+            Err(_) => SqlDialect::MySql, // Default to MySQL if detection fails
+        }
     };
 
     // Build config from YAML file and/or CLI options

@@ -207,7 +207,20 @@ impl Splitter {
             }
 
             if !self.config.dry_run {
-                writer_pool.write_statement(&table_name, &stmt)?;
+                // For MSSQL, add semicolon if statement doesn't end with one
+                // (MSSQL uses GO as batch separator, but we need semicolons for re-parsing)
+                if self.config.dialect == SqlDialect::Mssql {
+                    let trimmed = stmt.iter().rev().find(|&&b| b != b'\n' && b != b'\r' && b != b' ' && b != b'\t');
+                    if trimmed != Some(&b';') {
+                        let mut stmt_with_semicolon = stmt.clone();
+                        stmt_with_semicolon.push(b';');
+                        writer_pool.write_statement(&table_name, &stmt_with_semicolon)?;
+                    } else {
+                        writer_pool.write_statement(&table_name, &stmt)?;
+                    }
+                } else {
+                    writer_pool.write_statement(&table_name, &stmt)?;
+                }
             }
 
             stats.statements_processed += 1;

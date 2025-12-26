@@ -23,6 +23,18 @@ pub struct ParsedCopyRow {
     pub fk_values: Vec<(FkRef, PkTuple)>,
     /// All column values (for data diff comparison)
     pub all_values: Vec<PkValue>,
+    /// Mapping from schema column index to value index (for finding specific columns)
+    pub column_map: Vec<Option<usize>>,
+}
+
+impl ParsedCopyRow {
+    /// Get the value for a specific schema column index
+    pub fn get_column_value(&self, schema_col_index: usize) -> Option<&PkValue> {
+        self.column_map
+            .get(schema_col_index)
+            .and_then(|v| *v)
+            .and_then(|val_idx| self.all_values.get(val_idx))
+    }
 }
 
 /// Parser for PostgreSQL COPY data blocks
@@ -106,11 +118,13 @@ impl<'a> CopyParser<'a> {
         // Split by tabs
         let values: Vec<CopyValue> = self.split_and_parse_values(line);
 
-        // Extract PK, FK, and all values if we have schema
-        let (pk, fk_values, all_values) = if let Some(schema) = self.table_schema {
-            self.extract_pk_fk(&values, schema)
+        // Extract PK, FK, all values, and column map if we have schema
+        let (pk, fk_values, all_values, column_map) = if let Some(schema) = self.table_schema {
+            let (pk, fk_values, all_values) = self.extract_pk_fk(&values, schema);
+            let column_map = self.build_column_map(schema);
+            (pk, fk_values, all_values, column_map)
         } else {
-            (None, Vec::new(), Vec::new())
+            (None, Vec::new(), Vec::new(), Vec::new())
         };
 
         Ok(Some(ParsedCopyRow {
@@ -118,7 +132,24 @@ impl<'a> CopyParser<'a> {
             pk,
             fk_values,
             all_values,
+            column_map,
         }))
+    }
+
+    /// Build a mapping from schema column index to value index
+    fn build_column_map(&self, schema: &TableSchema) -> Vec<Option<usize>> {
+        let mut map = vec![None; schema.columns.len()];
+
+        for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
+            if let Some(col_id) = col_id_opt {
+                let ordinal = col_id.0 as usize;
+                if ordinal < map.len() {
+                    map[ordinal] = Some(val_idx);
+                }
+            }
+        }
+
+        map
     }
 
     /// Split line by tabs and parse each value

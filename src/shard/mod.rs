@@ -781,17 +781,17 @@ fn should_include_row(
 ) -> bool {
     match classification {
         ShardTableClassification::TenantRoot => {
-            // Check tenant column value
+            // Check tenant column value using column_map for correct mapping
             if let Some(idx) = tenant_column_index {
                 match row {
                     UnifiedRow::Insert(r) => {
-                        if let Some(val) = extract_column_value(&r.raw, idx) {
-                            return &val == tenant_value;
+                        if let Some(val) = r.get_column_value(idx) {
+                            return val == tenant_value;
                         }
                     }
                     UnifiedRow::Copy(r) => {
-                        if let Some(val) = extract_copy_column_value(&r.raw, idx) {
-                            return &val == tenant_value;
+                        if let Some(val) = r.get_column_value(idx) {
+                            return val == tenant_value;
                         }
                     }
                 }

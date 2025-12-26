@@ -91,6 +91,19 @@ pub struct ParsedRow {
     pub fk_values: Vec<(FkRef, PkTuple)>,
     /// All column values (for data diff comparison)
     pub all_values: Vec<PkValue>,
+    /// Mapping from schema column index to value index (for finding specific columns)
+    /// If column_map[schema_col_idx] == Some(val_idx), then all_values[val_idx] is the value
+    pub column_map: Vec<Option<usize>>,
+}
+
+impl ParsedRow {
+    /// Get the value for a specific schema column index
+    pub fn get_column_value(&self, schema_col_index: usize) -> Option<&PkValue> {
+        self.column_map
+            .get(schema_col_index)
+            .and_then(|v| *v)
+            .and_then(|val_idx| self.all_values.get(val_idx))
+    }
 }
 
 /// Parser for MySQL INSERT statements
@@ -188,7 +201,13 @@ impl<'a> InsertParser<'a> {
                     self.column_order = cols
                         .iter()
                         .map(|c| {
-                            let name = c.trim().trim_matches('`').trim_matches('"');
+                            // Strip quotes: backticks (MySQL), double quotes (PG/SQLite), brackets (MSSQL)
+                            let name = c
+                                .trim()
+                                .trim_matches('`')
+                                .trim_matches('"')
+                                .trim_matches('[')
+                                .trim_matches(']');
                             schema.get_column_id(name)
                         })
                         .collect();
@@ -246,11 +265,13 @@ impl<'a> InsertParser<'a> {
         let end = self.pos;
         let raw = self.stmt[start..end].to_vec();
 
-        // Extract PK, FK, and all values if we have a schema
-        let (pk, fk_values, all_values) = if let Some(schema) = self.table_schema {
-            self.extract_pk_fk(&values, schema)
+        // Extract PK, FK, all values, and column map if we have a schema
+        let (pk, fk_values, all_values, column_map) = if let Some(schema) = self.table_schema {
+            let (pk, fk_values, all_values) = self.extract_pk_fk(&values, schema);
+            let column_map = self.build_column_map(schema);
+            (pk, fk_values, all_values, column_map)
         } else {
-            (None, Vec::new(), Vec::new())
+            (None, Vec::new(), Vec::new(), Vec::new())
         };
 
         Ok(Some(ParsedRow {
@@ -258,6 +279,7 @@ impl<'a> InsertParser<'a> {
             pk,
             fk_values,
             all_values,
+            column_map,
         }))
     }
 
@@ -280,8 +302,17 @@ impl<'a> InsertParser<'a> {
             }
         }
 
-        // String literal
+        // String literal (including MSSQL N'...' Unicode prefix)
         if b == b'\'' {
+            return self.parse_string_value();
+        }
+
+        // MSSQL N'...' Unicode string literal
+        if (b == b'N' || b == b'n')
+            && self.pos + 1 < self.stmt.len()
+            && self.stmt[self.pos + 1] == b'\''
+        {
+            self.pos += 1; // Skip the N prefix
             return self.parse_string_value();
         }
 
@@ -505,6 +536,24 @@ impl<'a> InsertParser<'a> {
         };
 
         (pk, fk_values, all_values)
+    }
+
+    /// Build a mapping from schema column index to value index
+    /// This allows finding a specific column's value by its schema position
+    fn build_column_map(&self, schema: &TableSchema) -> Vec<Option<usize>> {
+        // Create a map where map[schema_col_ordinal] = Some(value_index)
+        let mut map = vec![None; schema.columns.len()];
+
+        for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
+            if let Some(col_id) = col_id_opt {
+                let ordinal = col_id.0 as usize;
+                if ordinal < map.len() {
+                    map[ordinal] = Some(val_idx);
+                }
+            }
+        }
+
+        map
     }
 
     /// Convert a parsed value to a PkValue
