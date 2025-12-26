@@ -105,13 +105,13 @@ Add Microsoft SQL Server (MSSQL) / T-SQL as the fourth supported dialect with **
 
 | ID | Task | Effort | Status | Notes |
 |----|------|--------|--------|-------|
-| 3.1 | Wire MSSQL dialect to split command | 1h | 🔲 TODO | CLI + detection |
-| 3.2 | Handle GO batches in split routing | 2h | 🔲 TODO | Statement boundaries |
-| 3.3 | Split with `[schema].[table]` names | 1h | 🔲 TODO | Use last segment for file |
-| 3.4 | Wire MSSQL to merge command | 1h | 🔲 TODO | Output with brackets |
-| 3.5 | Wire MSSQL to analyze command | 1h | 🔲 TODO | Schema stats |
-| 3.6 | Parse IDENTITY columns in analyze | 1h | 🔲 TODO | Report auto-increment |
-| | **Phase 3 Total** | **7h** | | |
+| 3.1 | Wire MSSQL dialect to split command | 1h | ✅ DONE | CLI + detection |
+| 3.2 | Handle GO batches in split routing | 2h | ✅ DONE | Statement boundaries |
+| 3.3 | Split with `[schema].[table]` names | 1h | ✅ DONE | Use last segment for file |
+| 3.4 | Wire MSSQL to merge command | 1h | ✅ DONE | Output with brackets |
+| 3.5 | Wire MSSQL to analyze command | 1h | ✅ DONE | Schema stats |
+| 3.6 | Parse IDENTITY columns in analyze | 1h | ✅ DONE | Report auto-increment |
+| | **Phase 3 Total** | **7h** | ✅ DONE | |
 
 ### Phase 4: Schema Commands (graph, order, validate)
 
@@ -175,12 +175,12 @@ Add Microsoft SQL Server (MSSQL) / T-SQL as the fourth supported dialect with **
 |-------|-------|-----------|--------|--------|
 | 1. Core Infrastructure | 11 | 11 | 15h | ✅ DONE |
 | 2. Convert Command | 9 | 0 | 13h | 🔲 Not Started |
-| 3. Split/Merge/Analyze | 6 | 0 | 7h | 🔲 Not Started |
+| 3. Split/Merge/Analyze | 6 | 6 | 7h | ✅ DONE |
 | 4. Schema Commands | 6 | 0 | 8h | 🔲 Not Started |
 | 5. Data Commands | 6 | 0 | 8h | 🔲 Not Started |
 | 6. Query Command | 6 | 0 | 6h | 🔲 Not Started |
 | 7. Testing & Docs | 12 | 0 | 14h | 🔲 Not Started |
-| **TOTAL** | **56** | **11** | **71h** | **20%** |
+| **TOTAL** | **56** | **17** | **71h** | **30%** |
 
 ---
 
