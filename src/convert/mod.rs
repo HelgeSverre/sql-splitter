@@ -453,9 +453,25 @@ impl Converter {
                 // Backticks → double quotes
                 self.backticks_to_double_quotes(stmt)
             }
+            (SqlDialect::MySql, SqlDialect::Mssql) => {
+                // Backticks → square brackets
+                self.backticks_to_square_brackets(stmt)
+            }
             (SqlDialect::Postgres | SqlDialect::Sqlite, SqlDialect::MySql) => {
                 // Double quotes → backticks
                 self.double_quotes_to_backticks(stmt)
+            }
+            (SqlDialect::Postgres | SqlDialect::Sqlite, SqlDialect::Mssql) => {
+                // Double quotes → square brackets
+                self.double_quotes_to_square_brackets(stmt)
+            }
+            (SqlDialect::Mssql, SqlDialect::MySql) => {
+                // Square brackets → backticks
+                self.square_brackets_to_backticks(stmt)
+            }
+            (SqlDialect::Mssql, SqlDialect::Postgres | SqlDialect::Sqlite) => {
+                // Square brackets → double quotes
+                self.square_brackets_to_double_quotes(stmt)
             }
             _ => stmt.to_string(),
         }
@@ -495,6 +511,90 @@ impl Converter {
             } else if c == '"' && !in_string {
                 in_dquote = !in_dquote;
                 result.push('`');
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Convert backticks to square brackets (for MSSQL)
+    pub fn backticks_to_square_brackets(&self, stmt: &str) -> String {
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+        let mut in_backtick = false;
+
+        for c in stmt.chars() {
+            if c == '\'' && !in_backtick {
+                in_string = !in_string;
+                result.push(c);
+            } else if c == '`' && !in_string {
+                if !in_backtick {
+                    result.push('[');
+                } else {
+                    result.push(']');
+                }
+                in_backtick = !in_backtick;
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Convert double quotes to square brackets (for MSSQL)
+    pub fn double_quotes_to_square_brackets(&self, stmt: &str) -> String {
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+        let mut in_dquote = false;
+
+        for c in stmt.chars() {
+            if c == '\'' && !in_dquote {
+                in_string = !in_string;
+                result.push(c);
+            } else if c == '"' && !in_string {
+                if !in_dquote {
+                    result.push('[');
+                } else {
+                    result.push(']');
+                }
+                in_dquote = !in_dquote;
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Convert square brackets to backticks (from MSSQL to MySQL)
+    pub fn square_brackets_to_backticks(&self, stmt: &str) -> String {
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+
+        for c in stmt.chars() {
+            if c == '\'' {
+                in_string = !in_string;
+                result.push(c);
+            } else if !in_string && (c == '[' || c == ']') {
+                result.push('`');
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Convert square brackets to double quotes (from MSSQL to PostgreSQL/SQLite)
+    pub fn square_brackets_to_double_quotes(&self, stmt: &str) -> String {
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+
+        for c in stmt.chars() {
+            if c == '\'' {
+                in_string = !in_string;
+                result.push(c);
+            } else if !in_string && (c == '[' || c == ']') {
+                result.push('"');
             } else {
                 result.push(c);
             }
@@ -1018,6 +1118,11 @@ fn write_header(
         SqlDialect::MySql => {
             writeln!(writer, "SET NAMES utf8mb4;")?;
             writeln!(writer, "SET FOREIGN_KEY_CHECKS = 0;")?;
+        }
+        SqlDialect::Mssql => {
+            writeln!(writer, "SET ANSI_NULLS ON;")?;
+            writeln!(writer, "SET QUOTED_IDENTIFIER ON;")?;
+            writeln!(writer, "SET NOCOUNT ON;")?;
         }
     }
     writeln!(writer)?;

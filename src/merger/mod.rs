@@ -214,6 +214,11 @@ impl Merger {
             SqlDialect::Sqlite => {
                 writeln!(w, "PRAGMA foreign_keys = OFF;")?;
             }
+            SqlDialect::Mssql => {
+                writeln!(w, "SET ANSI_NULLS ON;")?;
+                writeln!(w, "SET QUOTED_IDENTIFIER ON;")?;
+                writeln!(w, "SET NOCOUNT ON;")?;
+            }
         }
         writeln!(w)?;
 
@@ -226,7 +231,7 @@ impl Merger {
             SqlDialect::MySql => {
                 writeln!(w, "SET FOREIGN_KEY_CHECKS = 1;")?;
             }
-            SqlDialect::Postgres | SqlDialect::Sqlite => {}
+            SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {}
         }
         Ok(())
     }
@@ -235,7 +240,7 @@ impl Merger {
         match self.config.dialect {
             SqlDialect::MySql => "START TRANSACTION;\n\n",
             SqlDialect::Postgres => "BEGIN;\n\n",
-            SqlDialect::Sqlite => "BEGIN TRANSACTION;\n\n",
+            SqlDialect::Sqlite | SqlDialect::Mssql => "BEGIN TRANSACTION;\n\n",
         }
     }
 }

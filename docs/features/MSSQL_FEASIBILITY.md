@@ -73,18 +73,18 @@ Add Microsoft SQL Server (MSSQL) / T-SQL as the fourth supported dialect with **
 
 | ID | Task | Effort | Status | Notes |
 |----|------|--------|--------|-------|
-| 1.1 | Add `SqlDialect::Mssql` enum variant | 0.5h | 🔲 TODO | src/parser/mod.rs |
-| 1.2 | Implement `FromStr` for MSSQL (mssql, sqlserver, sql_server) | 0.5h | 🔲 TODO | |
-| 1.3 | Update CLI help strings (all commands) | 1h | 🔲 TODO | "mysql, postgres, sqlite, mssql" |
-| 1.4 | Add MSSQL auto-detection markers | 2h | 🔲 TODO | SET ANSI_NULLS, GO, [brackets], IDENTITY |
-| 1.5 | Implement GO batch separator handling | 3h | 🔲 TODO | Line-based, not in strings |
-| 1.6 | Implement `[bracket]` identifier parsing | 2h | 🔲 TODO | Including `]]` escape |
-| 1.7 | Implement `N'unicode'` string literal support | 1.5h | 🔲 TODO | Treat as regular string |
-| 1.8 | Implement `0x` binary literal support | 1h | 🔲 TODO | Pass through |
-| 1.9 | Table name extraction for `[db].[schema].[table]` | 2h | 🔲 TODO | Return last segment |
-| 1.10 | Add BULK INSERT statement classification | 1h | 🔲 TODO | StatementType::Insert |
-| 1.11 | Preserve SET session statements | 0.5h | 🔲 TODO | StatementType::Unknown |
-| | **Phase 1 Total** | **15h** | | |
+| 1.1 | Add `SqlDialect::Mssql` enum variant | 0.5h | ✅ DONE | src/parser/mod.rs |
+| 1.2 | Implement `FromStr` for MSSQL (mssql, sqlserver, sql_server) | 0.5h | ✅ DONE | |
+| 1.3 | Update CLI help strings (all commands) | 1h | ✅ DONE | "mysql, postgres, sqlite, mssql" |
+| 1.4 | Add MSSQL auto-detection markers | 2h | ✅ DONE | SET ANSI_NULLS, GO, [brackets], IDENTITY |
+| 1.5 | Implement GO batch separator handling | 3h | ✅ DONE | Line-based, not in strings |
+| 1.6 | Implement `[bracket]` identifier parsing | 2h | ✅ DONE | Including `]]` escape |
+| 1.7 | Implement `N'unicode'` string literal support | 1.5h | ✅ DONE | Treat as regular string |
+| 1.8 | Implement `0x` binary literal support | 1h | ✅ DONE | Pass through |
+| 1.9 | Table name extraction for `[db].[schema].[table]` | 2h | ✅ DONE | Return last segment |
+| 1.10 | Add BULK INSERT statement classification | 1h | ✅ DONE | StatementType::Insert |
+| 1.11 | Preserve SET session statements | 0.5h | ✅ DONE | StatementType::Unknown |
+| | **Phase 1 Total** | **15h** | ✅ DONE | |
 
 ### Phase 2: Convert Command
 
@@ -173,14 +173,14 @@ Add Microsoft SQL Server (MSSQL) / T-SQL as the fourth supported dialect with **
 
 | Phase | Tasks | Completed | Effort | Status |
 |-------|-------|-----------|--------|--------|
-| 1. Core Infrastructure | 11 | 0 | 15h | 🔲 Not Started |
+| 1. Core Infrastructure | 11 | 11 | 15h | ✅ DONE |
 | 2. Convert Command | 9 | 0 | 13h | 🔲 Not Started |
 | 3. Split/Merge/Analyze | 6 | 0 | 7h | 🔲 Not Started |
 | 4. Schema Commands | 6 | 0 | 8h | 🔲 Not Started |
 | 5. Data Commands | 6 | 0 | 8h | 🔲 Not Started |
 | 6. Query Command | 6 | 0 | 6h | 🔲 Not Started |
 | 7. Testing & Docs | 12 | 0 | 14h | 🔲 Not Started |
-| **TOTAL** | **56** | **0** | **71h** | **0%** |
+| **TOTAL** | **56** | **11** | **71h** | **20%** |
 
 ---
 

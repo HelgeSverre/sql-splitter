@@ -33,7 +33,8 @@ pub fn run(
             "mysql" | "mariadb" => SqlDialect::MySql,
             "postgres" | "postgresql" => SqlDialect::Postgres,
             "sqlite" => SqlDialect::Sqlite,
-            _ => anyhow::bail!("Unknown dialect: {}. Use: mysql, postgres, sqlite", d),
+            "mssql" | "sqlserver" | "sql_server" | "tsql" => SqlDialect::Mssql,
+            _ => anyhow::bail!("Unknown dialect: {}. Use: mysql, postgres, sqlite, mssql", d),
         }
     } else {
         // Auto-detect from file extension or content

@@ -76,7 +76,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "output", value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
         output: PathBuf,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -124,7 +124,7 @@ pub enum Commands {
         #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         file: PathBuf,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -206,7 +206,7 @@ pub enum Commands {
         #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         output: Option<PathBuf>,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -290,7 +290,7 @@ pub enum Commands {
         #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         output: Option<PathBuf>,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -404,7 +404,7 @@ pub enum Commands {
         #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         file: PathBuf,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -458,7 +458,7 @@ pub enum Commands {
         #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         output: Option<PathBuf>,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -527,7 +527,7 @@ pub enum Commands {
         #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         output: Option<PathBuf>,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -617,7 +617,7 @@ pub enum Commands {
         #[arg(short, long, help_heading = OUTPUT_FORMAT)]
         format: Option<String>,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 
@@ -682,7 +682,7 @@ pub enum Commands {
         #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         output: Option<PathBuf>,
 
-        /// SQL dialect: mysql, postgres, sqlite (auto-detected if omitted)
+        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
         #[arg(short, long, help_heading = INPUT_OUTPUT)]
         dialect: Option<String>,
 

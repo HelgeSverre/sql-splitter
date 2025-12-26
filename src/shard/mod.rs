@@ -1018,6 +1018,7 @@ fn write_output(
         let quoted_name = match config.dialect {
             SqlDialect::MySql => format!("`{}`", table_name),
             SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", table_name),
+            SqlDialect::Mssql => format!("[{}]", table_name),
         };
 
         for chunk in runtime.selected_rows.chunks(CHUNK_SIZE) {
@@ -1115,6 +1116,11 @@ fn write_dialect_header<W: Write>(writer: &mut W, dialect: SqlDialect) -> std::i
         SqlDialect::Sqlite => {
             writeln!(writer, "PRAGMA foreign_keys = OFF;")?;
         }
+        SqlDialect::Mssql => {
+            writeln!(writer, "SET ANSI_NULLS ON;")?;
+            writeln!(writer, "SET QUOTED_IDENTIFIER ON;")?;
+            writeln!(writer, "SET NOCOUNT ON;")?;
+        }
     }
     writeln!(writer)?;
     Ok(())
@@ -1132,6 +1138,9 @@ fn write_dialect_footer<W: Write>(writer: &mut W, dialect: SqlDialect) -> std::i
         }
         SqlDialect::Sqlite => {
             writeln!(writer, "PRAGMA foreign_keys = ON;")?;
+        }
+        SqlDialect::Mssql => {
+            // No footer needed
         }
     }
     Ok(())
@@ -1180,7 +1189,7 @@ fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8> {
                 match b {
                     b'\'' => match dialect {
                         SqlDialect::MySql => result.extend_from_slice(b"\\'"),
-                        SqlDialect::Postgres | SqlDialect::Sqlite => {
+                        SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {
                             result.extend_from_slice(b"''")
                         }
                     },

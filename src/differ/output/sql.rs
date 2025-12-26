@@ -31,6 +31,7 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
         match dialect {
             SqlDialect::MySql => format!("`{}`", name),
             SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name),
+            SqlDialect::Mssql => format!("[{}]", name),
         }
     };
 
@@ -159,6 +160,15 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         modification.table_name, change.name
                     ));
                 }
+                SqlDialect::Mssql => {
+                    output.push_str(&format!(
+                        "ALTER TABLE {} ALTER COLUMN {} {}{};\n",
+                        quote(&modification.table_name),
+                        quote(&change.name),
+                        new_type,
+                        nullable
+                    ));
+                }
             }
         }
 
@@ -194,7 +204,7 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                             quote(name)
                         ));
                     }
-                    SqlDialect::Postgres => {
+                    SqlDialect::Postgres | SqlDialect::Mssql => {
                         output.push_str(&format!(
                             "ALTER TABLE {} DROP CONSTRAINT {};\n",
                             quote(&modification.table_name),
@@ -264,6 +274,13 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 SqlDialect::Postgres | SqlDialect::Sqlite => {
                     output.push_str(&format!("DROP INDEX IF EXISTS {};\n", quote(&idx.name)));
                 }
+                SqlDialect::Mssql => {
+                    output.push_str(&format!(
+                        "DROP INDEX {} ON {};\n",
+                        quote(&idx.name),
+                        quote(&modification.table_name)
+                    ));
+                }
             }
         }
 
@@ -303,7 +320,7 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         }
                     }
                 }
-                SqlDialect::Postgres => {
+                SqlDialect::Postgres | SqlDialect::Mssql => {
                     output.push_str(&format!(
                         "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}_pkey;\n",
                         quote(&modification.table_name),

@@ -390,6 +390,11 @@ fn write_header<W: Write>(w: &mut W, dialect: SqlDialect, table_count: usize) ->
         SqlDialect::Sqlite => {
             writeln!(w, "PRAGMA foreign_keys = OFF;")?;
         }
+        SqlDialect::Mssql => {
+            writeln!(w, "SET ANSI_NULLS ON;")?;
+            writeln!(w, "SET QUOTED_IDENTIFIER ON;")?;
+            writeln!(w, "SET NOCOUNT ON;")?;
+        }
     }
     writeln!(w)?;
 
@@ -405,6 +410,7 @@ fn count_header_bytes(dialect: SqlDialect, table_count: usize) -> usize {
         SqlDialect::MySql => "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS = 0;\n\n",
         SqlDialect::Postgres => "SET client_encoding = 'UTF8';\n\n",
         SqlDialect::Sqlite => "PRAGMA foreign_keys = OFF;\n\n",
+        SqlDialect::Mssql => "SET ANSI_NULLS ON;\nSET QUOTED_IDENTIFIER ON;\nSET NOCOUNT ON;\n\n",
     };
     base.len() + dialect_specific.len()
 }
@@ -421,6 +427,9 @@ fn write_footer<W: Write>(w: &mut W, dialect: SqlDialect) -> io::Result<()> {
         SqlDialect::Sqlite => {
             writeln!(w, "PRAGMA foreign_keys = ON;")?;
         }
+        SqlDialect::Mssql => {
+            // No footer needed
+        }
     }
     Ok(())
 }
@@ -430,11 +439,14 @@ fn transaction_start(dialect: SqlDialect) -> String {
         SqlDialect::MySql => "START TRANSACTION;\n\n".to_string(),
         SqlDialect::Postgres => "BEGIN;\n\n".to_string(),
         SqlDialect::Sqlite => "BEGIN TRANSACTION;\n\n".to_string(),
+        SqlDialect::Mssql => "BEGIN TRANSACTION;\n\n".to_string(),
     }
 }
 
 fn transaction_end(dialect: SqlDialect) -> String {
     match dialect {
-        SqlDialect::MySql | SqlDialect::Postgres | SqlDialect::Sqlite => "\nCOMMIT;\n".to_string(),
+        SqlDialect::MySql | SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {
+            "\nCOMMIT;\n".to_string()
+        }
     }
 }
