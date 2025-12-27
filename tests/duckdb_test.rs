@@ -3838,3 +3838,58 @@ INSERT INTO `failed_jobs` VALUES (1, 'abc-123', 'database', 'default', '{}', 'Er
     let result = engine.query("SELECT uuid FROM failed_jobs WHERE id = 1").unwrap();
     assert_eq!(result.rows[0][0], "abc-123");
 }
+
+
+#[test]
+fn test_sqlite_autoincrement_must_succeed() {
+    // SQLite AUTOINCREMENT should be stripped by the loader
+    let dump = r#"
+CREATE TABLE "users" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "name" TEXT NOT NULL,
+  "email" TEXT
+);
+
+INSERT INTO "users" VALUES (1, 'Alice', 'alice@example.com');
+INSERT INTO "users" VALUES (2, 'Bob', 'bob@example.com');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Sqlite),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 2, "Both rows must be inserted");
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+#[test]
+fn test_sqlite_without_rowid_must_succeed() {
+    // SQLite WITHOUT ROWID should be stripped
+    let dump = r#"
+CREATE TABLE "kv_store" (
+  "key" TEXT PRIMARY KEY,
+  "value" TEXT
+) WITHOUT ROWID;
+
+INSERT INTO "kv_store" VALUES ('foo', 'bar');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Sqlite),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+}
+

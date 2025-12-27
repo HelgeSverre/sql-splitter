@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.3] - 2025-12-27
+
+### Fixed
+
+- **SQLite AUTOINCREMENT stripping for DuckDB**: SQLite dumps with `AUTOINCREMENT` now import correctly
+  - Previously, tables with `INTEGER PRIMARY KEY AUTOINCREMENT` failed to create in DuckDB
+  - Now strips `AUTOINCREMENT`, `WITHOUT ROWID`, and `STRICT` table modifiers
+  - SQLite dumps now import all tables (was failing on most tables before)
+
+### Added
+
+- **New SQLite DuckDB tests**: Added 2 tests for SQLite-specific syntax stripping
+  - `test_sqlite_autoincrement_must_succeed` - Verifies AUTOINCREMENT is stripped
+  - `test_sqlite_without_rowid_must_succeed` - Verifies WITHOUT ROWID is stripped
+
 ## [1.12.2] - 2025-12-27
 
 ### Fixed

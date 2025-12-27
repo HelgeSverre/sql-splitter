@@ -517,6 +517,11 @@ impl<'a> DumpLoader<'a> {
             result = Self::strip_mssql_syntax(&result);
         }
 
+        // Remove SQLite-specific syntax
+        if dialect == SqlDialect::Sqlite {
+            result = Self::strip_sqlite_syntax(&result);
+        }
+
         Ok(result)
     }
 
@@ -906,6 +911,30 @@ impl<'a> DumpLoader<'a> {
         result = RE_NEWID
             .replace_all(&result, "gen_random_uuid()")
             .to_string();
+
+        result
+    }
+
+    /// Strip SQLite-specific syntax not supported by DuckDB
+    fn strip_sqlite_syntax(stmt: &str) -> String {
+        let mut result = stmt.to_string();
+
+        // Remove AUTOINCREMENT (DuckDB handles auto-increment via sequences)
+        // SQLite uses "INTEGER PRIMARY KEY AUTOINCREMENT"
+        result = result.replace(" AUTOINCREMENT", "");
+        result = result.replace(" autoincrement", "");
+
+        // Remove IF NOT EXISTS (DuckDB supports this but we want clean imports)
+        // Actually DuckDB does support IF NOT EXISTS, so leave it
+
+        // Remove STRICT table modifier (SQLite 3.37+)
+        static RE_STRICT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\)\s*STRICT\s*;").unwrap());
+        result = RE_STRICT.replace_all(&result, ");").to_string();
+
+        // Remove WITHOUT ROWID (SQLite optimization not needed for analytics)
+        static RE_WITHOUT_ROWID: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\)\s*WITHOUT\s+ROWID\s*;").unwrap());
+        result = RE_WITHOUT_ROWID.replace_all(&result, ");").to_string();
 
         result
     }
