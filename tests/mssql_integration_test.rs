@@ -2,9 +2,12 @@
 
 use sql_splitter::parser::{detect_dialect, DialectConfidence, Parser, SqlDialect, StatementType};
 use sql_splitter::splitter::Splitter;
+use sql_splitter::validate::{ValidateOptions, Validator};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
+use test_data_gen::{Generator, RenderConfig, Renderer, Scale};
 
 fn mssql_simple_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/static/mssql/simple.sql")
@@ -689,4 +692,229 @@ fn test_mssql_query_with_nvarchar() {
 
     // Should properly parse N'string' values
     assert!(!result.rows.is_empty(), "Query should return result");
+}
+
+// ============================================
+// Phase 7: Test Data Generator Integration Tests
+// ============================================
+
+fn create_temp_sql(content: &str) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    file.flush().unwrap();
+    file
+}
+
+/// Generate an MSSQL dump with test_data_gen
+fn generate_mssql_dump(seed: u64, scale: Scale) -> NamedTempFile {
+    let mut gen = Generator::new(seed, scale);
+    let data = gen.generate();
+    let renderer = Renderer::new(RenderConfig::mssql());
+    let output = renderer.render_to_string(&data).unwrap();
+    create_temp_sql(&output)
+}
+
+#[test]
+fn test_mssql_generator_small_scale() {
+    let file = generate_mssql_dump(42, Scale::Small);
+    let content = fs::read_to_string(file.path()).unwrap();
+
+    // Verify MSSQL-specific syntax
+    assert!(content.contains("SET ANSI_NULLS ON;"), "Should have MSSQL header");
+    assert!(content.contains("SET QUOTED_IDENTIFIER ON;"), "Should have MSSQL header");
+    assert!(content.contains("CREATE TABLE [tenants]"), "Should use bracket quoting");
+    assert!(content.contains("INSERT INTO [tenants]"), "Should use bracket quoting for inserts");
+    assert!(content.contains("INT IDENTITY(1,1) NOT NULL PRIMARY KEY"), "Should use IDENTITY");
+    assert!(content.contains("NVARCHAR"), "Should use NVARCHAR types");
+    assert!(content.contains("N'"), "Should use Unicode string literals");
+    assert!(content.contains("DATETIME2"), "Should use DATETIME2 for timestamps");
+    assert!(content.contains("BIT"), "Should use BIT for booleans");
+}
+
+#[test]
+fn test_mssql_generator_analyze() {
+    use sql_splitter::analyzer::Analyzer;
+
+    let file = generate_mssql_dump(42, Scale::Small);
+
+    let stats = Analyzer::new(file.path().to_path_buf())
+        .with_dialect(SqlDialect::Mssql)
+        .analyze()
+        .unwrap();
+
+    // Small scale should have: tenants, users, roles, permissions, categories, products,
+    // customers, orders, order_items, projects, tasks, folders, comments, etc.
+    assert!(stats.len() >= 10, "Should find at least 10 tables, found {}", stats.len());
+    
+    let table_names: Vec<String> = stats.iter().map(|s| s.table_name.clone()).collect();
+    assert!(table_names.contains(&"tenants".to_string()));
+    assert!(table_names.contains(&"users".to_string()));
+    assert!(table_names.contains(&"orders".to_string()));
+}
+
+#[test]
+fn test_mssql_generator_split() {
+    let file = generate_mssql_dump(42, Scale::Small);
+    let temp_dir = TempDir::new().unwrap();
+    let output_dir = temp_dir.path().to_path_buf();
+
+    let stats = Splitter::new(file.path().to_path_buf(), output_dir.clone())
+        .with_dialect(SqlDialect::Mssql)
+        .split()
+        .unwrap();
+
+    assert!(stats.tables_found >= 10, "Should find at least 10 tables");
+    assert!(output_dir.join("tenants.sql").exists());
+    assert!(output_dir.join("users.sql").exists());
+    assert!(output_dir.join("orders.sql").exists());
+}
+
+#[test]
+fn test_mssql_generator_validate() {
+    let file = generate_mssql_dump(42, Scale::Small);
+
+    let options = ValidateOptions {
+        path: file.path().to_path_buf(),
+        dialect: Some(SqlDialect::Mssql),
+        progress: false,
+        strict: false,
+        json: false,
+        max_rows_per_table: 1_000_000,
+        fk_checks_enabled: true,
+        max_pk_fk_keys: None,
+    };
+
+    let summary = Validator::new(options).validate().unwrap();
+
+    assert_eq!(summary.summary.errors, 0, "Should have no errors");
+    assert!(summary.summary.tables_scanned >= 10, "Should scan at least 10 tables");
+}
+
+#[test]
+fn test_mssql_generator_split_merge_roundtrip() {
+    use sql_splitter::merger::Merger;
+
+    let file = generate_mssql_dump(42, Scale::Small);
+    let split_dir = TempDir::new().unwrap();
+    let merged_file = NamedTempFile::new().unwrap();
+
+    // Split
+    let split_stats = Splitter::new(file.path().to_path_buf(), split_dir.path().to_path_buf())
+        .with_dialect(SqlDialect::Mssql)
+        .split()
+        .unwrap();
+
+    // Merge
+    let merge_stats = Merger::new(split_dir.path().to_path_buf(), Some(merged_file.path().to_path_buf()))
+        .with_dialect(SqlDialect::Mssql)
+        .merge()
+        .unwrap();
+
+    assert_eq!(split_stats.tables_found, merge_stats.tables_merged, 
+        "All tables should be merged back");
+
+    // Validate merged result
+    let options = ValidateOptions {
+        path: merged_file.path().to_path_buf(),
+        dialect: Some(SqlDialect::Mssql),
+        progress: false,
+        strict: false,
+        json: false,
+        max_rows_per_table: 1_000_000,
+        fk_checks_enabled: false, // FK checks may fail due to ordering
+        max_pk_fk_keys: None,
+    };
+
+    let summary = Validator::new(options).validate().unwrap();
+    assert_eq!(summary.summary.errors, 0, "Merged file should have no errors");
+}
+
+#[test]
+fn test_mssql_generator_sample_command() {
+    use sql_splitter::sample::{GlobalTableMode, SampleConfig, SampleMode};
+
+    let file = generate_mssql_dump(42, Scale::Small);
+    let temp_dir = TempDir::new().unwrap();
+    let output_file = temp_dir.path().join("sampled.sql");
+
+    let config = SampleConfig {
+        input: file.path().to_path_buf(),
+        output: Some(output_file.clone()),
+        dialect: SqlDialect::Mssql,
+        mode: SampleMode::Percent(50),
+        seed: 42,
+        preserve_relations: true,
+        progress: false,
+        tables_filter: None,
+        exclude: vec![],
+        root_tables: vec![],
+        include_global: GlobalTableMode::Lookups,
+        dry_run: false,
+        config_file: None,
+        max_total_rows: None,
+        strict_fk: false,
+        include_schema: true,
+    };
+
+    let stats = sql_splitter::sample::run(config).unwrap();
+
+    assert!(stats.total_rows_selected > 0, "Should sample some rows");
+    assert!(output_file.exists(), "Output file should exist");
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(content.contains("CREATE TABLE"), "Should include schema");
+    assert!(content.contains("INSERT INTO"), "Should include data");
+}
+
+#[test]
+fn test_mssql_generator_medium_scale() {
+    let file = generate_mssql_dump(42, Scale::Medium);
+    let content = fs::read_to_string(file.path()).unwrap();
+
+    // Medium scale should generate more data
+    let insert_count = content.matches("INSERT INTO").count();
+    assert!(insert_count >= 10, "Medium scale should have multiple INSERT statements, found {}", insert_count);
+}
+
+#[test]
+fn test_mssql_generator_deterministic() {
+    // Two generators with same seed should produce identical output
+    let file1 = generate_mssql_dump(12345, Scale::Small);
+    let file2 = generate_mssql_dump(12345, Scale::Small);
+
+    let content1 = fs::read_to_string(file1.path()).unwrap();
+    let content2 = fs::read_to_string(file2.path()).unwrap();
+
+    assert_eq!(content1, content2, "Same seed should produce identical output");
+
+    // Different seed should produce different output
+    let file3 = generate_mssql_dump(99999, Scale::Small);
+    let content3 = fs::read_to_string(file3.path()).unwrap();
+
+    assert_ne!(content1, content3, "Different seed should produce different output");
+}
+
+#[test]
+fn test_mssql_generator_production_style() {
+    // Test the production-style MSSQL output with GO separators, [dbo]. prefix, and named constraints
+    let mut gen = Generator::new(42, Scale::Small);
+    let data = gen.generate();
+    
+    let renderer = Renderer::new(RenderConfig::mssql_production());
+    let sql = renderer.render_to_string(&data).unwrap();
+
+    // Verify GO batch separators
+    assert!(sql.contains("GO\n"), "Should have GO batch separators");
+    assert!(sql.contains("SET ANSI_NULLS ON\nGO"), "Header should use GO separators");
+    
+    // Verify [dbo]. schema prefix
+    assert!(sql.contains("[dbo].[tenants]"), "Should have [dbo]. schema prefix on CREATE TABLE");
+    assert!(sql.contains("INSERT INTO [dbo].[tenants]"), "Should have [dbo]. schema prefix on INSERT");
+    
+    // Verify named CONSTRAINT syntax
+    assert!(sql.contains("CONSTRAINT [PK_tenants] PRIMARY KEY CLUSTERED"), 
+        "Should have named PK constraint");
+    
+    // Verify ON [PRIMARY] filegroup
+    assert!(sql.contains(") ON [PRIMARY];"), "Should have ON [PRIMARY] filegroup");
 }

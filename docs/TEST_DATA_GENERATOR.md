@@ -5,13 +5,13 @@
 
 ## Overview
 
-A Rust-based deterministic test data generator that creates realistic multi-tenant SQL dumps for integration testing. The generator defines a single logical schema and can emit MySQL, PostgreSQL, and SQLite dumps at various scales.
+A Rust-based deterministic test data generator that creates realistic multi-tenant SQL dumps for integration testing. The generator defines a single logical schema and can emit MySQL, PostgreSQL, SQLite, and MSSQL dumps at various scales.
 
 ## Goals
 
 1. **Realistic complexity** — Mirror production multi-tenant SaaS patterns
 2. **Full edge case coverage** — FK chains, self-refs, junctions, cycles
-3. **Dialect agnostic** — One schema, three SQL outputs
+3. **Dialect agnostic** — One schema, four SQL outputs
 4. **Reproducible** — Seed-based deterministic generation
 5. **Scalable** — Small (unit tests) to Large (benchmarks)
 6. **No real data exposure** — Synthetic names, no production schema
@@ -560,7 +560,7 @@ impl Value {
         match self {
             Value::Null => "NULL".to_string(),
             Value::Bool(b) => match dialect {
-                Dialect::MySql | Dialect::Sqlite => if *b { "1" } else { "0" }.to_string(),
+                Dialect::MySql | Dialect::Sqlite | Dialect::Mssql => if *b { "1" } else { "0" }.to_string(),
                 Dialect::Postgres => if *b { "TRUE" } else { "FALSE" }.to_string(),
             },
             Value::Int(i) => i.to_string(),
@@ -569,8 +569,12 @@ impl Value {
                 let escaped = match dialect {
                     Dialect::MySql => s.replace('\'', "\\'").replace('\\', "\\\\"),
                     Dialect::Postgres | Dialect::Sqlite => s.replace('\'', "''"),
+                    Dialect::Mssql => s.replace('\'', "''"),
                 };
-                format!("'{}'", escaped)
+                match dialect {
+                    Dialect::Mssql => format!("N'{}'", escaped),  // Unicode string literal
+                    _ => format!("'{}'", escaped),
+                }
             },
             Value::Timestamp(dt) => format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S")),
         }
@@ -662,6 +666,9 @@ cargo run -p test_data_gen -- --dialect postgres --scale small --seed 42 > fixtu
 # Generate large SQLite dump for benchmarking
 cargo run -p test_data_gen -- --dialect sqlite --scale large --seed 42 > fixtures/sqlite/large.sql
 
+# Generate MSSQL dump
+cargo run -p test_data_gen -- --dialect mssql --scale medium --seed 42 > fixtures/mssql/medium.sql
+
 # Custom scale
 cargo run -p test_data_gen -- --dialect mysql --tenants 100 --multiplier 2.0 --seed 42
 ```
@@ -670,7 +677,7 @@ cargo run -p test_data_gen -- --dialect mysql --tenants 100 --multiplier 2.0 --s
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--dialect` | Output dialect: mysql, postgres, sqlite | mysql |
+| `--dialect` | Output dialect: mysql, postgres, sqlite, mssql | mysql |
 | `--scale` | Size preset: small, medium, large | medium |
 | `--tenants` | Custom tenant count (overrides scale) | — |
 | `--multiplier` | Scale multiplier for rows | 1.0 |

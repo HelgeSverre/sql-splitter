@@ -296,13 +296,14 @@ impl Generator {
     pub fn generate(&mut self) -> GeneratedData {
         let mut ids = IdTracker::new();
         let mut tenant_mapping: HashMap<String, HashMap<i64, Vec<i64>>> = HashMap::new();
-        let mut tables = Vec::new();
 
         // Generate global tables first (no tenant association)
-        tables.push(self.generate_permissions(&mut ids));
-        tables.push(self.generate_roles_global(&mut ids));
-        tables.push(self.generate_role_permissions(&ids));
-        tables.push(self.generate_currencies(&mut ids));
+        let mut tables = vec![
+            self.generate_permissions(&mut ids),
+            self.generate_roles_global(&mut ids),
+            self.generate_role_permissions(&ids),
+            self.generate_currencies(&mut ids),
+        ];
 
         // Generate tenants
         tables.push(self.generate_tenants(&mut ids));
@@ -712,8 +713,8 @@ impl Generator {
         for &user_id in user_ids {
             // Each user gets 1-3 roles
             let role_count = self.fake.int_range(1, 3) as usize;
-            for i in 0..role_count.min(role_ids.len()) {
-                rows.push(vec![SqlValue::Int(user_id), SqlValue::Int(role_ids[i])]);
+            for &role_id in role_ids.iter().take(role_count) {
+                rows.push(vec![SqlValue::Int(user_id), SqlValue::Int(role_id)]);
             }
         }
 

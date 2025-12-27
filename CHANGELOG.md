@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.5] - 2025-12-27
+
+### Added
+
+- **MSSQL production-style output for test data generator**: New CLI flags for production-style MSSQL output
+  - `--go-separator`: Use GO batch separators instead of semicolons
+  - `--schema-prefix`: Use `[dbo].` schema prefix on all table references
+  - `--named-constraints`: Use named CONSTRAINT syntax (e.g., `CONSTRAINT [PK_users] PRIMARY KEY CLUSTERED`)
+  - `--mssql-production`: Enable all three options at once for production-like output
+  - `RenderConfig::mssql_production()` method for programmatic use
+
+- **9 new MSSQL generator integration tests**: Comprehensive tests for generated MSSQL fixtures
+  - Tests for analyze, split, validate, merge roundtrip, sample command
+  - Tests for deterministic generation and production-style output
+  - All 38 MSSQL integration tests now pass
+
+### Changed
+
+- **Updated TEST_DATA_GENERATOR.md documentation**: Added MSSQL dialect examples and updated dialect count
+
 ## [1.12.4] - 2025-12-27
 
 ### Added

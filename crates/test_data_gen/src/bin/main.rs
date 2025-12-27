@@ -62,6 +62,22 @@ struct Args {
     /// Skip foreign key constraints in simple mode
     #[arg(long)]
     no_fk: bool,
+
+    /// Use GO batch separators for MSSQL (production-style output)
+    #[arg(long)]
+    go_separator: bool,
+
+    /// Use [dbo]. schema prefix for MSSQL (production-style output)
+    #[arg(long)]
+    schema_prefix: bool,
+
+    /// Use named CONSTRAINT syntax for MSSQL (e.g., CONSTRAINT [PK_table])
+    #[arg(long)]
+    named_constraints: bool,
+
+    /// Enable all MSSQL production-style options (--go-separator --schema-prefix --named-constraints)
+    #[arg(long)]
+    mssql_production: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -91,6 +107,9 @@ fn run_streaming_mode(args: &Args, dialect: Dialect, rows: usize) -> anyhow::Res
         batch_size: args.batch_size,
         include_schema: !args.data_only,
         include_fk: !args.no_fk,
+        use_go_separator: args.go_separator || args.mssql_production,
+        use_schema_prefix: args.schema_prefix || args.mssql_production,
+        use_named_constraints: args.named_constraints || args.mssql_production,
     };
 
     let mut gen = StreamingGenerator::new(config);
@@ -120,6 +139,9 @@ fn run_schema_mode(args: &Args, dialect: Dialect) -> anyhow::Result<()> {
         seed: args.seed,
         batch_size: args.batch_size,
         include_schema: !args.data_only,
+        use_go_separator: args.go_separator || args.mssql_production,
+        use_schema_prefix: args.schema_prefix || args.mssql_production,
+        use_named_constraints: args.named_constraints || args.mssql_production,
     };
 
     let mut gen = MultiTenantGenerator::new(config);
