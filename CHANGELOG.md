@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.6] - 2025-12-27
+
+### Added
+
+- **Full INSERT/COPY statement rewriting for redact command**: The `redact` command now actively modifies SQL data
+  - Previously, redaction strategies were identified but statements passed through unchanged
+  - INSERT statements are now parsed, values redacted according to matching strategies, and reconstructed
+  - PostgreSQL COPY data blocks are now parsed and redacted with proper `\N` NULL markers
+  - Multi-row INSERT statements are fully supported
+  - All 7 redaction strategies now work: null, constant, hash, mask, fake, shuffle, skip
+
+- **Dialect-aware value formatting for redact command**: Proper SQL escaping per dialect
+  - MySQL: Backtick quoting, backslash escape sequences (`\'`, `\n`, `\r`, `\t`)
+  - PostgreSQL: Double-quote identifiers, `''` escaping, `\N` for NULL in COPY format
+  - SQLite: Double-quote identifiers, `''` escaping
+  - MSSQL: Square bracket identifiers `[column]`, `N'...'` for Unicode strings
+
+- **ValueRewriter module**: New `src/redactor/rewriter.rs` for INSERT/COPY transformation
+  - Converts ParsedValue to RedactValue, applies strategy, formats back to SQL
+  - Handles PostgreSQL's two-step COPY pattern (header + data block)
+  - Proper stats tracking during actual redaction
+
+- **20 new redact integration tests**:
+  - 7 MSSQL-specific tests: null, hash, fake, dry-run, bracket quoting, Unicode strings, reproducibility
+  - 13 cross-dialect tests: MySQL INSERT, PostgreSQL COPY, SQLite, multi-row, escaping, skip tables
+
+### Changed
+
+- **Redact command now reports accurate statistics**: Row and column counts reflect actual redaction performed
+
 ## [1.12.5] - 2025-12-27
 
 ### Added

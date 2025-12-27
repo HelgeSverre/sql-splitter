@@ -10,6 +10,7 @@
 mod config;
 mod config_generator;
 mod matcher;
+mod rewriter;
 pub mod strategy;
 
 pub use config::RedactConfig;
@@ -18,8 +19,10 @@ pub use config::RedactConfig;
 pub use config::{RedactConfigBuilder, RedactYamlConfig, Rule};
 pub use config_generator::generate_config;
 pub use matcher::ColumnMatcher;
+pub use rewriter::ValueRewriter;
 pub use strategy::StrategyKind;
 
+use crate::parser::postgres_copy::parse_copy_columns;
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::schema::{Schema, SchemaBuilder};
 use ahash::AHashMap;
@@ -55,7 +58,17 @@ pub struct Redactor {
     config: RedactConfig,
     schema: Schema,
     matcher: ColumnMatcher,
+    rewriter: ValueRewriter,
     stats: RedactStats,
+    /// Pending COPY header for PostgreSQL (header comes before data block)
+    pending_copy: Option<PendingCopy>,
+}
+
+/// Pending COPY statement awaiting data block
+struct PendingCopy {
+    header: Vec<u8>,
+    table_name: String,
+    columns: Vec<String>,
 }
 
 impl Redactor {
@@ -67,11 +80,16 @@ impl Redactor {
         // Build column matcher from config rules
         let matcher = ColumnMatcher::from_config(&config)?;
 
+        // Create value rewriter with seed for reproducibility
+        let rewriter = ValueRewriter::new(config.seed, config.dialect, config.locale.clone());
+
         Ok(Self {
             config,
             schema,
             matcher,
+            rewriter,
             stats: RedactStats::default(),
+            pending_copy: None,
         })
     }
 
@@ -164,12 +182,44 @@ impl Redactor {
                     self.redact_insert(&stmt, &table_name)?
                 }
                 StatementType::Copy if !table_name.is_empty() => {
+                    // PostgreSQL COPY: store header, wait for data block
+                    if self.config.dialect == SqlDialect::Postgres {
+                        let header_str = String::from_utf8_lossy(&stmt);
+                        let columns = parse_copy_columns(&header_str);
+                        self.pending_copy = Some(PendingCopy {
+                            header: stmt.clone(),
+                            table_name: table_name.clone(),
+                            columns,
+                        });
+                        // Don't output yet - wait for data block
+                        continue;
+                    }
                     self.redact_copy(&stmt, &table_name)?
                 }
-                _ => stmt,
+                StatementType::Unknown
+                    if self.config.dialect == SqlDialect::Postgres
+                        && self.pending_copy.is_some()
+                        && (stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n")) =>
+                {
+                    // This is the COPY data block
+                    self.redact_copy_data(&stmt)?
+                }
+                _ => {
+                    // If we have a pending COPY that wasn't followed by a data block,
+                    // output it as-is
+                    if let Some(pending) = self.pending_copy.take() {
+                        output.write_all(&pending.header)?;
+                    }
+                    stmt
+                }
             };
 
             output.write_all(&redacted)?;
+        }
+
+        // Handle any remaining pending COPY header at EOF
+        if let Some(pending) = self.pending_copy.take() {
+            output.write_all(&pending.header)?;
         }
 
         output.flush()?;
@@ -200,9 +250,30 @@ impl Redactor {
             return Ok(stmt.to_vec());
         }
 
-        // TODO: Implement actual INSERT rewriting in Phase 3
-        // For now, pass through
-        Ok(stmt.to_vec())
+        // Rewrite the INSERT statement with redacted values
+        let (redacted, rows_redacted, cols_redacted) =
+            self.rewriter.rewrite_insert(stmt, table_name, table, &strategies)?;
+
+        // Update stats
+        if rows_redacted > 0 {
+            self.stats.rows_redacted += rows_redacted;
+            self.stats.columns_redacted += cols_redacted;
+
+            // Find or create table stats entry
+            if let Some(ts) = self.stats.table_stats.iter_mut().find(|t| t.name == table_name) {
+                ts.rows_processed += rows_redacted;
+                ts.columns_redacted += cols_redacted;
+            } else {
+                self.stats.tables_processed += 1;
+                self.stats.table_stats.push(TableRedactStats {
+                    name: table_name.to_string(),
+                    rows_processed: rows_redacted,
+                    columns_redacted: cols_redacted,
+                });
+            }
+        }
+
+        Ok(redacted)
     }
 
     /// Redact a COPY statement (PostgreSQL)
@@ -229,9 +300,99 @@ impl Redactor {
             return Ok(stmt.to_vec());
         }
 
-        // TODO: Implement actual COPY rewriting in Phase 3
-        // For now, pass through
-        Ok(stmt.to_vec())
+        // Rewrite the COPY statement with redacted values
+        let (redacted, rows_redacted, cols_redacted) =
+            self.rewriter.rewrite_copy(stmt, table_name, table, &strategies)?;
+
+        // Update stats
+        if rows_redacted > 0 {
+            self.stats.rows_redacted += rows_redacted;
+            self.stats.columns_redacted += cols_redacted;
+
+            // Find or create table stats entry
+            if let Some(ts) = self.stats.table_stats.iter_mut().find(|t| t.name == table_name) {
+                ts.rows_processed += rows_redacted;
+                ts.columns_redacted += cols_redacted;
+            } else {
+                self.stats.tables_processed += 1;
+                self.stats.table_stats.push(TableRedactStats {
+                    name: table_name.to_string(),
+                    rows_processed: rows_redacted,
+                    columns_redacted: cols_redacted,
+                });
+            }
+        }
+
+        Ok(redacted)
+    }
+
+    /// Redact a PostgreSQL COPY data block (comes after the header)
+    fn redact_copy_data(&mut self, data_block: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let pending = self.pending_copy.take().ok_or_else(|| {
+            anyhow::anyhow!("COPY data block without pending header")
+        })?;
+
+        let table_name = &pending.table_name;
+
+        // Skip if table should be excluded
+        if self.should_skip_table(table_name) {
+            // Output header + data unchanged
+            let mut result = pending.header;
+            result.extend_from_slice(data_block);
+            return Ok(result);
+        }
+
+        // Get table schema
+        let Some(table) = self.schema.get_table(table_name) else {
+            self.stats.warnings.push(format!(
+                "No schema for table '{}', passing through unchanged",
+                table_name
+            ));
+            let mut result = pending.header;
+            result.extend_from_slice(data_block);
+            return Ok(result);
+        };
+
+        // Get strategies for each column
+        let strategies = self.matcher.get_strategies(table_name, table);
+
+        // If no columns need redaction, pass through
+        if strategies.iter().all(|s| matches!(s, StrategyKind::Skip)) {
+            let mut result = pending.header;
+            result.extend_from_slice(data_block);
+            return Ok(result);
+        }
+
+        // Rewrite the COPY data block with redacted values
+        let (redacted_data, rows_redacted, cols_redacted) =
+            self.rewriter.rewrite_copy_data(data_block, table, &strategies, &pending.columns)?;
+
+        // Update stats
+        if rows_redacted > 0 {
+            self.stats.rows_redacted += rows_redacted;
+            self.stats.columns_redacted += cols_redacted;
+
+            if let Some(ts) = self.stats.table_stats.iter_mut().find(|t| t.name == *table_name) {
+                ts.rows_processed += rows_redacted;
+                ts.columns_redacted += cols_redacted;
+            } else {
+                self.stats.tables_processed += 1;
+                self.stats.table_stats.push(TableRedactStats {
+                    name: table_name.to_string(),
+                    rows_processed: rows_redacted,
+                    columns_redacted: cols_redacted,
+                });
+            }
+        }
+
+        // Combine header + redacted data
+        // The header typically doesn't end with newline, so add one
+        let mut result = pending.header;
+        if !result.ends_with(b"\n") {
+            result.push(b'\n');
+        }
+        result.extend_from_slice(&redacted_data);
+        Ok(result)
     }
 
     /// Check if a table should be skipped

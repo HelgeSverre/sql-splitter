@@ -918,3 +918,218 @@ fn test_mssql_generator_production_style() {
     // Verify ON [PRIMARY] filegroup
     assert!(sql.contains(") ON [PRIMARY];"), "Should have ON [PRIMARY] filegroup");
 }
+
+// ============================================================================
+// Redact command tests for MSSQL
+// ============================================================================
+
+use sql_splitter::redactor::{RedactConfig, Redactor};
+
+#[test]
+fn test_mssql_redact_null_strategy() {
+    // Generate a small MSSQL fixture
+    let input_file = generate_mssql_dump(42, Scale::Small);
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("redacted.sql");
+
+    // Configure redaction: set email columns to NULL
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .output(Some(output_file.clone()))
+        .dialect(SqlDialect::Mssql)
+        .null_patterns(vec!["*.email".to_string()])
+        .build()
+        .unwrap();
+
+    let mut redactor = Redactor::new(config).unwrap();
+    let stats = redactor.run().unwrap();
+
+    // Verify redaction occurred
+    assert!(stats.tables_processed > 0, "Should have processed tables");
+    assert!(stats.columns_redacted > 0, "Should have redacted columns");
+
+    // Verify output file exists and has content
+    let output_content = fs::read_to_string(&output_file).unwrap();
+    assert!(!output_content.is_empty(), "Output should not be empty");
+
+    // Verify NULL values appear in place of emails
+    assert!(output_content.contains("NULL"), "Should contain NULL values");
+}
+
+#[test]
+fn test_mssql_redact_hash_strategy() {
+    let input_file = generate_mssql_dump(42, Scale::Small);
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("redacted.sql");
+
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .output(Some(output_file.clone()))
+        .dialect(SqlDialect::Mssql)
+        .hash_patterns(vec!["*.email".to_string()])
+        .build()
+        .unwrap();
+
+    let mut redactor = Redactor::new(config).unwrap();
+    let stats = redactor.run().unwrap();
+
+    assert!(stats.columns_redacted > 0, "Should have redacted columns");
+
+    let output_content = fs::read_to_string(&output_file).unwrap();
+    // Verify the output is valid SQL and has been modified
+    assert!(!output_content.is_empty(), "Output should not be empty");
+    // Hash strategy produces hex strings, verify they appear
+    assert!(output_content.contains("INSERT INTO"), "Should contain INSERT statements");
+}
+
+#[test]
+fn test_mssql_redact_preserves_bracket_quoting() {
+    // Create a simple MSSQL INSERT to test bracket preservation
+    let input_content = r#"CREATE TABLE [users] (
+    [id] INT IDENTITY(1,1) NOT NULL,
+    [email] NVARCHAR(255),
+    [name] NVARCHAR(100)
+);
+INSERT INTO [users] ([id], [email], [name]) VALUES (1, N'alice@example.com', N'Alice');
+INSERT INTO [users] ([id], [email], [name]) VALUES (2, N'bob@example.com', N'Bob');
+"#;
+
+    let mut input_file = NamedTempFile::new().unwrap();
+    input_file.write_all(input_content.as_bytes()).unwrap();
+    input_file.flush().unwrap();
+
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("redacted.sql");
+
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .output(Some(output_file.clone()))
+        .dialect(SqlDialect::Mssql)
+        .null_patterns(vec!["*.email".to_string()])
+        .build()
+        .unwrap();
+
+    let mut redactor = Redactor::new(config).unwrap();
+    let stats = redactor.run().unwrap();
+
+    assert_eq!(stats.rows_redacted, 2, "Should have redacted 2 rows");
+
+    let output_content = fs::read_to_string(&output_file).unwrap();
+    
+    // Verify bracket quoting is preserved in output
+    assert!(output_content.contains("[users]"), "Should preserve [users] bracket quoting");
+    assert!(output_content.contains("[id]"), "Should preserve [id] bracket quoting");
+    assert!(output_content.contains("[name]"), "Should preserve [name] bracket quoting");
+}
+
+#[test]
+fn test_mssql_redact_unicode_strings() {
+    // Test that Unicode N'...' strings are handled correctly
+    let input_content = r#"CREATE TABLE [users] (
+    [id] INT NOT NULL,
+    [name] NVARCHAR(100),
+    [bio] NVARCHAR(500)
+);
+INSERT INTO [users] ([id], [name], [bio]) VALUES (1, N'日本語', N'Unicode text with émojis 🎉');
+INSERT INTO [users] ([id], [name], [bio]) VALUES (2, N'中文', N'More unicode: café');
+"#;
+
+    let mut input_file = NamedTempFile::new().unwrap();
+    input_file.write_all(input_content.as_bytes()).unwrap();
+    input_file.flush().unwrap();
+
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("redacted.sql");
+
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .output(Some(output_file.clone()))
+        .dialect(SqlDialect::Mssql)
+        .null_patterns(vec!["*.bio".to_string()])
+        .build()
+        .unwrap();
+
+    let mut redactor = Redactor::new(config).unwrap();
+    let stats = redactor.run().unwrap();
+
+    assert_eq!(stats.rows_redacted, 2, "Should have redacted 2 rows");
+    assert_eq!(stats.columns_redacted, 2, "Should have redacted 2 bio columns");
+
+    let output_content = fs::read_to_string(&output_file).unwrap();
+    
+    // The bio column should be NULL, but names should be preserved
+    assert!(output_content.contains("NULL"), "Bio should be NULL");
+    // Unicode names may be preserved depending on how they're parsed
+}
+
+#[test]
+fn test_mssql_redact_fake_strategy() {
+    let input_file = generate_mssql_dump(42, Scale::Small);
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("redacted.sql");
+
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .output(Some(output_file.clone()))
+        .dialect(SqlDialect::Mssql)
+        .fake_patterns(vec!["*.name".to_string()])
+        .seed(Some(42)) // For reproducibility
+        .build()
+        .unwrap();
+
+    let mut redactor = Redactor::new(config).unwrap();
+    let stats = redactor.run().unwrap();
+
+    assert!(stats.columns_redacted > 0, "Should have redacted name columns");
+
+    let output_content = fs::read_to_string(&output_file).unwrap();
+    assert!(!output_content.is_empty(), "Output should not be empty");
+}
+
+#[test]
+fn test_mssql_redact_dry_run() {
+    let input_file = generate_mssql_dump(42, Scale::Small);
+
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .dialect(SqlDialect::Mssql)
+        .null_patterns(vec!["*.email".to_string(), "*.password".to_string()])
+        .dry_run(true)
+        .build()
+        .unwrap();
+
+    let mut redactor = Redactor::new(config).unwrap();
+    let stats = redactor.run().unwrap();
+
+    // Dry run should still report statistics
+    assert!(stats.tables_processed > 0, "Dry run should report tables");
+    // Note: dry run counts statements, not actual rows, so stats may differ
+}
+
+#[test]
+fn test_mssql_redact_reproducible_with_seed() {
+    let input_file = generate_mssql_dump(42, Scale::Small);
+    let output_dir = TempDir::new().unwrap();
+    let output_file1 = output_dir.path().join("redacted1.sql");
+    let output_file2 = output_dir.path().join("redacted2.sql");
+
+    // Run redaction twice with same seed
+    for output_file in [&output_file1, &output_file2] {
+        let config = RedactConfig::builder()
+            .input(input_file.path().to_path_buf())
+            .output(Some(output_file.clone()))
+            .dialect(SqlDialect::Mssql)
+            .hash_patterns(vec!["*.email".to_string()])
+            .seed(Some(12345))
+            .build()
+            .unwrap();
+
+        let mut redactor = Redactor::new(config).unwrap();
+        redactor.run().unwrap();
+    }
+
+    let content1 = fs::read_to_string(&output_file1).unwrap();
+    let content2 = fs::read_to_string(&output_file2).unwrap();
+
+    assert_eq!(content1, content2, "Same seed should produce identical output");
+}

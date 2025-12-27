@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "sql-splitter"
-version = "1.12.5"
+version = "1.12.6"
 edition = "2021"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "High-performance CLI tool for splitting large SQL dump files into individual table files"

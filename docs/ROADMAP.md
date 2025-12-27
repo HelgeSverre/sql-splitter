@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.12.3 (current)
+**Version**: 1.12.6 (current)
 **Last Updated**: 2025-12-27
-**Revision**: 3.4 — MySQL syntax stripping & SQLite AUTOINCREMENT fixes for query command
+**Revision**: 3.5 — Full INSERT/COPY rewriting for redact command, MSSQL enhancements
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
