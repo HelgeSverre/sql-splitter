@@ -1,6 +1,9 @@
 pub mod mysql_insert;
 pub mod postgres_copy;
 
+// Re-export types for bulk loading
+pub use mysql_insert::{parse_insert_for_bulk, ParsedValue};
+
 use once_cell::sync::Lazy;
 use regex::bytes::Regex;
 use std::io::{BufRead, BufReader, Read};

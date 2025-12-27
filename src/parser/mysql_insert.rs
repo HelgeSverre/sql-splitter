@@ -84,6 +84,8 @@ pub struct FkRef {
 pub struct ParsedRow {
     /// Raw bytes of the row value list: "(val1, val2, ...)"
     pub raw: Vec<u8>,
+    /// Parsed values for each column (for bulk loading)
+    pub values: Vec<ParsedValue>,
     /// Extracted primary key values (if table has PK and values are non-NULL)
     pub pk: Option<PkTuple>,
     /// Extracted foreign key values with their references
@@ -276,6 +278,7 @@ impl<'a> InsertParser<'a> {
 
         Ok(Some(ParsedRow {
             raw,
+            values,
             pk,
             fk_values,
             all_values,
@@ -591,14 +594,22 @@ impl<'a> InsertParser<'a> {
     }
 }
 
-/// Internal representation of a parsed value
+/// Parsed value from an INSERT statement
+///
+/// Used for bulk loading via DuckDB Appender and for PK/FK extraction.
 #[derive(Debug, Clone)]
-enum ParsedValue {
+pub enum ParsedValue {
+    /// NULL value
     Null,
+    /// Integer value (fits in i64)
     Integer(i64),
+    /// Big integer value (requires i128)
     BigInteger(i128),
+    /// String/text value (already unescaped)
     String { value: String },
+    /// Hex literal (0xABCD...)
     Hex(Vec<u8>),
+    /// Other value (decimals, floats, expressions) as raw bytes
     Other(Vec<u8>),
 }
 
@@ -615,4 +626,240 @@ pub fn parse_mysql_insert_rows(
 pub fn parse_mysql_insert_rows_raw(stmt: &[u8]) -> anyhow::Result<Vec<ParsedRow>> {
     let mut parser = InsertParser::new(stmt);
     parser.parse_rows()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_insert_for_bulk_simple() {
+        let sql = b"INSERT INTO users VALUES (1, 'Alice')";
+        let result = parse_insert_for_bulk(sql).unwrap();
+        assert_eq!(result.table, "users");
+        assert!(result.columns.is_none());
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_insert_for_bulk_with_columns() {
+        let sql = b"INSERT INTO users (name, id) VALUES ('Alice', 1)";
+        let result = parse_insert_for_bulk(sql).unwrap();
+        assert_eq!(result.table, "users");
+        assert_eq!(
+            result.columns,
+            Some(vec!["name".to_string(), "id".to_string()])
+        );
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_insert_for_bulk_mssql() {
+        let sql =
+            b"INSERT INTO [dbo].[users] ([email], [name]) VALUES (N'alice@example.com', N'Alice')";
+        let result = parse_insert_for_bulk(sql).unwrap();
+        assert_eq!(result.table, "users");
+        assert_eq!(
+            result.columns,
+            Some(vec!["email".to_string(), "name".to_string()])
+        );
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_insert_for_bulk_mysql() {
+        let sql = b"INSERT INTO `users` (`id`, `name`) VALUES (1, 'Bob')";
+        let result = parse_insert_for_bulk(sql).unwrap();
+        assert_eq!(result.table, "users");
+        assert_eq!(
+            result.columns,
+            Some(vec!["id".to_string(), "name".to_string()])
+        );
+        assert_eq!(result.rows.len(), 1);
+    }
+}
+
+/// Result of parsing INSERT values for bulk loading
+#[derive(Debug, Clone)]
+pub struct InsertValues {
+    /// Table name (without schema prefix or quotes)
+    pub table: String,
+    /// Column list if specified, None if using natural order
+    pub columns: Option<Vec<String>>,
+    /// Parsed rows with values
+    pub rows: Vec<Vec<ParsedValue>>,
+}
+
+/// Parse INSERT statement for bulk loading (extracts table, columns, and values)
+///
+/// This function extracts table name, optional column list, and all VALUES
+/// from an INSERT statement without requiring a schema. It's optimized for
+/// bulk loading into DuckDB via the Appender API.
+pub fn parse_insert_for_bulk(stmt: &[u8]) -> anyhow::Result<InsertValues> {
+    let stmt_str = String::from_utf8_lossy(stmt);
+    let upper = stmt_str.to_uppercase();
+
+    // Extract table name: INSERT INTO [schema.]table_name [(columns)] VALUES
+    let table = extract_insert_table_name(&stmt_str, &upper)?;
+
+    // Extract column list if present
+    let columns = extract_column_list(&stmt_str, &upper);
+
+    // Parse rows using the existing parser
+    let mut parser = InsertParser::new(stmt);
+    let parsed_rows = parser.parse_rows()?;
+
+    let rows = parsed_rows.into_iter().map(|r| r.values).collect();
+
+    Ok(InsertValues {
+        table,
+        columns,
+        rows,
+    })
+}
+
+/// Extract table name from INSERT statement
+fn extract_insert_table_name(stmt: &str, upper: &str) -> anyhow::Result<String> {
+    // Find "INSERT INTO" or "INSERT"
+    let start_pos = if let Some(pos) = upper.find("INSERT INTO") {
+        pos + 11 // Length of "INSERT INTO"
+    } else if let Some(pos) = upper.find("INSERT") {
+        pos + 6 // Length of "INSERT"
+    } else {
+        anyhow::bail!("Not an INSERT statement");
+    };
+
+    // Skip whitespace
+    let remaining = stmt[start_pos..].trim_start();
+
+    // Extract the full table reference (might be schema.table or just table)
+    let table_ref = extract_table_reference(remaining)?;
+
+    // Strip schema prefix if present
+    if let Some(dot_pos) = table_ref.rfind('.') {
+        let table_part = &table_ref[dot_pos + 1..];
+        Ok(strip_identifier_quotes(table_part))
+    } else {
+        Ok(strip_identifier_quotes(&table_ref))
+    }
+}
+
+/// Extract a full table reference (e.g., "[dbo].[users]" or "schema.table")
+fn extract_table_reference(s: &str) -> anyhow::Result<String> {
+    let s = s.trim();
+
+    if s.is_empty() {
+        anyhow::bail!("Empty table reference");
+    }
+
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        match c {
+            '[' => {
+                // MSSQL bracket quoting
+                chars.next();
+                result.push('[');
+                while let Some(&inner) = chars.peek() {
+                    chars.next();
+                    result.push(inner);
+                    if inner == ']' {
+                        break;
+                    }
+                }
+            }
+            '`' => {
+                // MySQL backtick quoting
+                chars.next();
+                result.push('`');
+                while let Some(&inner) = chars.peek() {
+                    chars.next();
+                    result.push(inner);
+                    if inner == '`' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                // PostgreSQL/SQLite double-quote
+                chars.next();
+                result.push('"');
+                while let Some(&inner) = chars.peek() {
+                    chars.next();
+                    result.push(inner);
+                    if inner == '"' {
+                        break;
+                    }
+                }
+            }
+            '.' => {
+                // Schema separator
+                chars.next();
+                result.push('.');
+            }
+            c if c.is_whitespace() || c == '(' || c == ',' => {
+                // End of table reference
+                break;
+            }
+            _ => {
+                // Regular identifier character
+                chars.next();
+                result.push(c);
+            }
+        }
+    }
+
+    if result.is_empty() {
+        anyhow::bail!("Empty table reference");
+    }
+
+    Ok(result)
+}
+
+/// Strip quotes from an identifier
+fn strip_identifier_quotes(s: &str) -> String {
+    s.trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_string()
+}
+
+/// Extract column list from INSERT statement if present
+fn extract_column_list(stmt: &str, upper: &str) -> Option<Vec<String>> {
+    // Find position of VALUES
+    let values_pos = upper.find("VALUES")?;
+    let before_values = &stmt[..values_pos];
+
+    // Find the last (...) before VALUES
+    let close_paren = before_values.rfind(')')?;
+    let open_paren = before_values[..close_paren].rfind('(')?;
+
+    let col_list = &before_values[open_paren + 1..close_paren];
+
+    // Check if this looks like a column list (not empty, no SQL keywords)
+    let upper_cols = col_list.to_uppercase();
+    if col_list.trim().is_empty() || upper_cols.contains("SELECT") || upper_cols.contains("VALUES")
+    {
+        return None;
+    }
+
+    let columns: Vec<String> = col_list
+        .split(',')
+        .map(|c| {
+            c.trim()
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches('[')
+                .trim_matches(']')
+                .to_string()
+        })
+        .collect();
+
+    if columns.is_empty() {
+        None
+    } else {
+        Some(columns)
+    }
 }

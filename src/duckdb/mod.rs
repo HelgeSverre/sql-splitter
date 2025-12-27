@@ -24,11 +24,15 @@
 //! println!("{}", QueryResultFormatter::format(&result, OutputFormat::Table));
 //! ```
 
+mod batch;
 mod cache;
 mod loader;
 mod output;
 mod types;
 
+// BatchManager is used internally by DumpLoader
+#[allow(unused_imports)]
+pub use batch::{flush_batch, BatchManager, InsertBatch, MAX_ROWS_PER_BATCH};
 pub use cache::CacheManager;
 pub use loader::DumpLoader;
 pub use output::{OutputFormat, QueryResultFormatter};

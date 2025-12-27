@@ -1,11 +1,18 @@
 //! CLI for generating test fixtures.
 //!
 //! Usage:
+//!   # Multi-tenant schema (existing behavior)
 //!   gen-fixtures --dialect mysql --scale small --seed 42 > fixtures/mysql/small.sql
+//!
+//!   # Simple uniform tables (streaming, low memory)
+//!   gen-fixtures --dialect mysql --rows 125000 --tables 10 > large.sql
 
 use clap::Parser;
-use std::io::{self, Write};
-use test_data_gen::{Dialect, Generator, RenderConfig, Renderer, Scale};
+use std::fs::File;
+use std::io::{self};
+use test_data_gen::{
+    Dialect, MultiTenantConfig, MultiTenantGenerator, Scale, StreamingConfig, StreamingGenerator,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "gen-fixtures")]
@@ -15,7 +22,8 @@ struct Args {
     #[arg(short, long, default_value = "mysql")]
     dialect: String,
 
-    /// Scale: small, medium, large
+    /// Scale preset: small, medium, large, xlarge (multi-tenant schema)
+    /// Ignored if --rows is specified
     #[arg(short, long, default_value = "small")]
     scale: String,
 
@@ -38,6 +46,22 @@ struct Args {
     /// Skip data, output schema only
     #[arg(long)]
     schema_only: bool,
+
+    /// Rows per table (enables simple streaming mode, ignores --scale)
+    #[arg(long)]
+    rows: Option<usize>,
+
+    /// Number of tables (only with --rows, default: 10)
+    #[arg(long, default_value = "10")]
+    tables: usize,
+
+    /// Batch size for INSERT statements (default: 100)
+    #[arg(long, default_value = "100")]
+    batch_size: usize,
+
+    /// Skip foreign key constraints in simple mode
+    #[arg(long)]
+    no_fk: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -47,78 +71,66 @@ fn main() -> anyhow::Result<()> {
         .dialect
         .parse()
         .map_err(|e: String| anyhow::anyhow!(e))?;
+
+    // If --rows is specified, use simple streaming mode
+    if let Some(rows) = args.rows {
+        return run_streaming_mode(&args, dialect, rows);
+    }
+
+    // Otherwise, use the multi-tenant schema generator
+    run_schema_mode(&args, dialect)
+}
+
+/// Simple streaming mode: uniform tables with specified row count
+fn run_streaming_mode(args: &Args, dialect: Dialect, rows: usize) -> anyhow::Result<()> {
+    let config = StreamingConfig {
+        dialect,
+        rows_per_table: rows,
+        num_tables: args.tables,
+        seed: args.seed,
+        batch_size: args.batch_size,
+        include_schema: !args.data_only,
+        include_fk: !args.no_fk,
+    };
+
+    let mut gen = StreamingGenerator::new(config);
+
+    if let Some(ref path) = args.output {
+        let file = File::create(path)?;
+        gen.generate(file)?;
+        eprintln!(
+            "Generated {} tables × {} rows to {}",
+            args.tables, rows, path
+        );
+    } else {
+        let stdout = io::stdout();
+        gen.generate(stdout.lock())?;
+    }
+
+    Ok(())
+}
+
+/// Multi-tenant schema mode (streaming for low memory)
+fn run_schema_mode(args: &Args, dialect: Dialect) -> anyhow::Result<()> {
     let scale: Scale = args.scale.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
-    // Generate data
-    let mut gen = Generator::new(args.seed, scale);
-    let data = gen.generate();
-
-    // Configure renderer
-    let config = match dialect {
-        Dialect::MySql => RenderConfig::mysql(),
-        Dialect::Postgres => {
-            if args.no_copy {
-                RenderConfig::postgres_inserts()
-            } else {
-                RenderConfig::postgres()
-            }
-        }
-        Dialect::Sqlite => RenderConfig::sqlite(),
-    };
-
-    let config = RenderConfig {
+    let config = MultiTenantConfig {
+        dialect,
+        scale,
+        seed: args.seed,
+        batch_size: args.batch_size,
         include_schema: !args.data_only,
-        ..config
     };
 
-    let renderer = Renderer::new(config);
+    let mut gen = MultiTenantGenerator::new(config);
 
-    // Render to output
-    if let Some(path) = args.output {
-        let file = std::fs::File::create(&path)?;
-        let mut writer = io::BufWriter::new(file);
-
-        if args.schema_only {
-            // For schema-only, we'd need to modify the renderer
-            // For now, just render with empty data
-            let schema_only_data = test_data_gen::GeneratedData {
-                tables: data
-                    .tables
-                    .iter()
-                    .map(|t| test_data_gen::TableData {
-                        table_name: t.table_name.clone(),
-                        columns: t.columns.clone(),
-                        rows: vec![],
-                    })
-                    .collect(),
-            };
-            renderer.render(&schema_only_data, &mut writer)?;
-        } else {
-            renderer.render(&data, &mut writer)?;
-        }
-
-        writer.flush()?;
+    if let Some(ref path) = args.output {
+        let file = File::create(path)?;
+        gen.generate(file)?;
         eprintln!("Generated {} to {}", scale_description(scale), path);
     } else {
         let stdout = io::stdout();
-        let mut writer = stdout.lock();
-
-        if args.schema_only {
-            let schema_only_data = test_data_gen::GeneratedData {
-                tables: data
-                    .tables
-                    .iter()
-                    .map(|t| test_data_gen::TableData {
-                        table_name: t.table_name.clone(),
-                        columns: t.columns.clone(),
-                        rows: vec![],
-                    })
-                    .collect(),
-            };
-            renderer.render(&schema_only_data, &mut writer)?;
-        } else {
-            renderer.render(&data, &mut writer)?;
-        }
+        gen.generate(stdout.lock())?;
     }
 
     Ok(())

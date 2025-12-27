@@ -23,7 +23,9 @@ pub mod fake;
 pub mod generator;
 pub mod renderer;
 pub mod schema;
+pub mod streaming;
 
 pub use generator::{GeneratedData, Generator, Scale, SqlValue, TableData};
 pub use renderer::{Dialect, RenderConfig, Renderer};
 pub use schema::{Column, FkAction, ForeignKey, Schema, SqlType, Table, TableRole};
+pub use streaming::{MultiTenantConfig, MultiTenantGenerator, StreamingConfig, StreamingGenerator};

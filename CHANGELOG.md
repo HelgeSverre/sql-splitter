@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.2] - 2025-12-27
+
+### Fixed
+
+- **MySQL syntax stripping for DuckDB**: Fixed comprehensive MySQL-specific syntax that was causing import failures
+  - **UNIQUE KEY constraints**: Now strips `UNIQUE KEY 'name' (col1, col2)` index definitions from CREATE TABLE
+  - **Regular indexes (KEY)**: Strips `KEY 'name' (col1, col2)`, `FULLTEXT KEY`, and `SPATIAL KEY` index definitions
+  - **GENERATED columns**: Strips `GENERATED ALWAYS AS (expr) STORED/VIRTUAL` computed columns
+  - **FOREIGN KEY constraints**: Strips FK constraints entirely (DuckDB enforces them which breaks batch loading)
+  - **Type conversion regex**: Fixed bug where column names containing type substrings (e.g., 'internal_note' matching 'INT') were incorrectly converted
+
+### Changed
+
+- **Improved real-world MySQL dump compatibility**: Verified against production dumps with complex schemas
+  - taskflow_production.sql (17MB, 62 tables) - 0 warnings, imports successfully
+  - db2sheets_prod.sql (17MB, 18 tables) - 0 warnings, imports successfully
+  - boatflow_latest_2.sql (128MB, 52 tables) - 4 warnings (data quality issues only: invalid `0000-00-00 00:00:00` timestamps)
+
+### Added
+
+- **New strict DuckDB tests**: Added 8 tests verifying MySQL syntax stripping works correctly
+  - `test_mysql_unique_key_constraint_strict` - Verifies UNIQUE KEY is stripped
+  - `test_mysql_key_index_constraint_strict` - Verifies KEY indexes are stripped
+  - `test_mysql_fulltext_key_constraint_strict` - Verifies FULLTEXT KEY is stripped
+  - `test_mysql_generated_column_strict` - Verifies GENERATED columns are stripped
+  - `test_mysql_foreign_key_constraint_strict` - Verifies FK constraints are stripped
+  - `test_mysql_combined_constraints_strict` - Verifies all constraints together
+  - `test_mysql_column_name_with_type_substring` - Verifies 'internal_note' isn't converted to 'BIGINTernal_note'
+  - `test_mysql_type_conversion_preserves_identifiers` - Ensures quoted identifiers are preserved
+
 ## [1.12.1] - 2025-12-27
 
 ### Fixed

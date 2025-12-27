@@ -133,6 +133,13 @@ if [[ ! -x "$BINARY" ]]; then
     cargo build --release --manifest-path "$PROJECT_ROOT/Cargo.toml"
 fi
 
+# Build generator
+GEN_BINARY="$PROJECT_ROOT/target/release/gen-fixtures"
+if [[ ! -x "$GEN_BINARY" ]]; then
+    echo "Building test data generator..."
+    cargo build --release -p test_data_gen --manifest-path "$PROJECT_ROOT/Cargo.toml"
+fi
+
 # Create directories
 mkdir -p "$FIXTURES_DIR" "$RESULTS_DIR"
 
@@ -148,7 +155,7 @@ get_file_size_mb() {
     echo "scale=2; $bytes / 1024 / 1024" | bc
 }
 
-# Generate test fixture using Python
+# Generate test fixture using Rust gen-fixtures (streaming mode)
 generate_fixture() {
     local dialect=$1
     local rows=$(get_size_rows "$SIZE")
@@ -162,105 +169,14 @@ generate_fixture() {
     
     echo "Generating $dialect fixture: $rows rows/table, $tables tables..." >&2
     
-    python3 - "$dialect" "$rows" "$tables" "$output_file" "$SEED" << 'PYTHON_SCRIPT'
-import sys
-import random
-
-dialect = sys.argv[1]
-rows_per_table = int(sys.argv[2])
-num_tables = int(sys.argv[3])
-output_file = sys.argv[4]
-seed = int(sys.argv[5])
-
-random.seed(seed)
-
-def quote_id(name, dialect):
-    if dialect == "mysql":
-        return f"`{name}`"
-    return f'"{name}"'
-
-def generate_string(length=20):
-    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
-    return ''.join(random.choice(chars) for _ in range(length))
-
-with open(output_file, 'w') as f:
-    if dialect == "mysql":
-        f.write("-- MySQL dump generated for profiling\n")
-        f.write("SET NAMES utf8mb4;\n")
-        f.write("SET FOREIGN_KEY_CHECKS = 0;\n\n")
-    elif dialect == "postgres":
-        f.write("-- PostgreSQL dump generated for profiling\n")
-        f.write("SET client_encoding = 'UTF8';\n\n")
-    else:
-        f.write("-- SQLite dump generated for profiling\n")
-        f.write("PRAGMA foreign_keys=OFF;\n\n")
+    "$GEN_BINARY" \
+        --dialect "$dialect" \
+        --rows "$rows" \
+        --tables "$tables" \
+        --seed "$SEED" \
+        --output "$output_file"
     
-    for t in range(num_tables):
-        table_name = f"table_{t:03d}"
-        q = lambda n: quote_id(n, dialect)
-        
-        f.write(f"DROP TABLE IF EXISTS {q(table_name)};\n")
-        f.write(f"CREATE TABLE {q(table_name)} (\n")
-        f.write(f"  {q('id')} INTEGER PRIMARY KEY,\n")
-        f.write(f"  {q('name')} VARCHAR(100),\n")
-        f.write(f"  {q('value')} INTEGER,\n")
-        f.write(f"  {q('description')} TEXT")
-        
-        if t > 0:
-            parent_table = f"table_{t-1:03d}"
-            f.write(f",\n  {q('parent_id')} INTEGER")
-            if dialect != "sqlite":
-                f.write(f",\n  FOREIGN KEY ({q('parent_id')}) REFERENCES {q(parent_table)}({q('id')})")
-        
-        f.write("\n);\n\n")
-        
-        batch_size = 100
-        for batch_start in range(0, rows_per_table, batch_size):
-            batch_end = min(batch_start + batch_size, rows_per_table)
-            
-            if dialect == "postgres":
-                cols = "id, name, value, description"
-                if t > 0:
-                    cols += ", parent_id"
-                f.write(f"COPY {q(table_name)} ({cols}) FROM stdin;\n")
-                for row_id in range(batch_start, batch_end):
-                    global_id = t * rows_per_table + row_id + 1
-                    name = generate_string(20).replace('\t', ' ')
-                    value = random.randint(1, 1000000)
-                    desc = generate_string(50).replace('\t', ' ')
-                    line = f"{global_id}\t{name}\t{value}\t{desc}"
-                    if t > 0:
-                        parent_id = random.randint(1, (t) * rows_per_table)
-                        line += f"\t{parent_id}"
-                    f.write(line + "\n")
-                f.write("\\.\n\n")
-            else:
-                cols = f"{q('id')}, {q('name')}, {q('value')}, {q('description')}"
-                if t > 0:
-                    cols += f", {q('parent_id')}"
-                
-                f.write(f"INSERT INTO {q(table_name)} ({cols}) VALUES\n")
-                values = []
-                for row_id in range(batch_start, batch_end):
-                    global_id = t * rows_per_table + row_id + 1
-                    name = generate_string(20).replace("'", "''")
-                    value = random.randint(1, 1000000)
-                    desc = generate_string(50).replace("'", "''")
-                    row = f"({global_id}, '{name}', {value}, '{desc}'"
-                    if t > 0:
-                        parent_id = random.randint(1, (t) * rows_per_table)
-                        row += f", {parent_id}"
-                    row += ")"
-                    values.append(row)
-                f.write(",\n".join(values) + ";\n\n")
-    
-    if dialect == "mysql":
-        f.write("SET FOREIGN_KEY_CHECKS = 1;\n")
-    elif dialect == "sqlite":
-        f.write("PRAGMA foreign_keys=ON;\n")
-
-print(output_file)
-PYTHON_SCRIPT
+    echo "$output_file"
 }
 
 # Run a single profile test

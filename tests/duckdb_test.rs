@@ -3612,3 +3612,229 @@ fn test_mssql_disk_mode() {
     let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
     assert_eq!(result.rows[0][0], "2");
 }
+
+// =============================================================================
+// MySQL Syntax Stripping Tests - 100% Success Required
+// =============================================================================
+
+#[test]
+fn test_mysql_unique_key_must_succeed() {
+    let dump = r#"
+CREATE TABLE `users` (
+    `id` INT PRIMARY KEY,
+    `email` VARCHAR(255),
+    UNIQUE KEY `email_unique` (`email`)
+);
+
+INSERT INTO `users` VALUES (1, 'test@example.com');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+#[test]
+fn test_mysql_key_index_must_succeed() {
+    let dump = r#"
+CREATE TABLE `orders` (
+    `id` INT PRIMARY KEY,
+    `user_id` INT,
+    `status` VARCHAR(50),
+    KEY `idx_user_id` (`user_id`),
+    KEY `idx_status` (`status`)
+);
+
+INSERT INTO `orders` VALUES (1, 100, 'pending');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT COUNT(*) FROM orders").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+#[test]
+fn test_mysql_fulltext_key_must_succeed() {
+    let dump = r#"
+CREATE TABLE `articles` (
+    `id` INT PRIMARY KEY,
+    `title` VARCHAR(255),
+    `body` TEXT,
+    FULLTEXT KEY `idx_search` (`title`, `body`)
+);
+
+INSERT INTO `articles` VALUES (1, 'Hello', 'World');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT COUNT(*) FROM articles").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+#[test]
+fn test_mysql_character_set_collate_must_succeed() {
+    let dump = r#"
+CREATE TABLE `users` (
+    `id` INT PRIMARY KEY,
+    `name` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+    `email` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL
+);
+
+INSERT INTO `users` VALUES (1, 'Alice', 'alice@example.com');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT name FROM users WHERE id = 1").unwrap();
+    assert_eq!(result.rows[0][0], "Alice");
+}
+
+#[test]
+fn test_mysql_generated_column_must_succeed() {
+    let dump = r#"
+CREATE TABLE `invoices` (
+    `id` INT PRIMARY KEY,
+    `date` DATE,
+    `due_days` INT NOT NULL,
+    `due_date` DATE GENERATED ALWAYS AS ((`date` + interval `due_days` day)) STORED
+);
+
+INSERT INTO `invoices` (`id`, `date`, `due_days`) VALUES (1, '2024-01-01', 30);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT COUNT(*) FROM invoices").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+#[test]
+fn test_mysql_fk_cascade_must_succeed() {
+    let dump = r#"
+CREATE TABLE `permissions` (
+    `id` INT PRIMARY KEY,
+    `name` VARCHAR(255)
+);
+
+CREATE TABLE `permission_user` (
+    `permission_id` INT NOT NULL,
+    `user_id` INT NOT NULL,
+    PRIMARY KEY (`permission_id`, `user_id`),
+    CONSTRAINT `fk_permission` FOREIGN KEY (`permission_id`) REFERENCES `permissions` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+INSERT INTO `permissions` VALUES (1, 'admin');
+INSERT INTO `permission_user` VALUES (1, 100);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 2, "Both tables must be created");
+    assert_eq!(stats.rows_inserted, 2, "Both rows must be inserted");
+
+    let result = engine.query("SELECT COUNT(*) FROM permission_user").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+#[test]
+fn test_mysql_complex_real_world_table_must_succeed() {
+    let dump = r#"
+CREATE TABLE `activity_log` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `log_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `description` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `subject_type` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `subject_id` bigint unsigned DEFAULT NULL,
+  `event` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `causer_type` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `causer_id` bigint unsigned DEFAULT NULL,
+  `properties` json DEFAULT NULL,
+  `batch_uuid` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `subject` (`subject_type`,`subject_id`),
+  KEY `causer` (`causer_type`,`causer_id`),
+  KEY `activity_log_log_name_index` (`log_name`)
+) ENGINE=InnoDB AUTO_INCREMENT=12345 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `activity_log` VALUES (1, 'default', 'created', 'App\\Models\\User', 1, 'created', NULL, NULL, '{}', NULL, '2024-01-01 00:00:00', '2024-01-01 00:00:00');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT description FROM activity_log WHERE id = 1").unwrap();
+    assert_eq!(result.rows[0][0], "created");
+}
+
+#[test]
+fn test_mysql_failed_jobs_table_must_succeed() {
+    let dump = r#"
+CREATE TABLE `failed_jobs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `uuid` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `connection` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `queue` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `payload` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `exception` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `failed_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `failed_jobs_uuid_unique` (`uuid`)
+) ENGINE=InnoDB AUTO_INCREMENT=74 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `failed_jobs` VALUES (1, 'abc-123', 'database', 'default', '{}', 'Error', '2024-01-01 00:00:00');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "Table must be created");
+    assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
+
+    let result = engine.query("SELECT uuid FROM failed_jobs WHERE id = 1").unwrap();
+    assert_eq!(result.rows[0][0], "abc-123");
+}

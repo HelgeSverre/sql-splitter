@@ -1,9 +1,12 @@
 //! SQL dump loader for importing dumps into DuckDB.
 
+use super::batch::{flush_batch, BatchManager, MAX_ROWS_PER_BATCH};
 use super::types::TypeConverter;
 use super::{ImportStats, QueryConfig};
 use crate::convert::copy_to_insert::{copy_to_inserts, parse_copy_header, CopyHeader};
-use crate::parser::{detect_dialect_from_file, Parser, SqlDialect, StatementType};
+use crate::parser::{
+    detect_dialect_from_file, parse_insert_for_bulk, Parser, SqlDialect, StatementType,
+};
 use crate::progress::ProgressReader;
 use crate::splitter::Compression;
 use anyhow::{Context, Result};
@@ -111,6 +114,9 @@ impl<'a> DumpLoader<'a> {
         // Track tables that failed (don't exist) to skip subsequent inserts
         let mut failed_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        // Batch manager for bulk INSERT loading via Appender API
+        let mut batch_mgr = BatchManager::new(MAX_ROWS_PER_BATCH);
+
         while let Some(stmt_result) = parser.next_statement() {
             let stmt = stmt_result?;
 
@@ -214,18 +220,33 @@ impl<'a> DumpLoader<'a> {
                     }
                 }
                 StatementType::Insert => {
-                    let duckdb_sql = self.convert_insert(&stmt, dialect)?;
-                    match self.conn.execute(&duckdb_sql, []) {
-                        Ok(_) => {
-                            stats.insert_statements += 1;
-                            stats.rows_inserted += Self::count_insert_rows(&duckdb_sql);
+                    // Try bulk loading via Appender API first
+                    if !self.try_queue_for_bulk(
+                        &stmt,
+                        dialect,
+                        &mut batch_mgr,
+                        stats,
+                        &mut failed_tables,
+                    ) {
+                        // Fallback to direct execution
+                        let duckdb_sql = self.convert_insert(&stmt, dialect)?;
+                        match self.conn.execute(&duckdb_sql, []) {
+                            Ok(_) => {
+                                stats.insert_statements += 1;
+                                stats.rows_inserted += Self::count_insert_rows(&duckdb_sql);
+                            }
+                            Err(e) => {
+                                stats
+                                    .warnings
+                                    .push(format!("Failed INSERT for {}: {}", table_name, e));
+                                stats.statements_skipped += 1;
+                            }
                         }
-                        Err(e) => {
-                            stats
-                                .warnings
-                                .push(format!("Failed INSERT for {}: {}", table_name, e));
-                            stats.statements_skipped += 1;
-                        }
+                    }
+
+                    // Flush any ready batches
+                    for mut batch in batch_mgr.get_ready_batches() {
+                        flush_batch(self.conn, &mut batch, stats, &mut failed_tables)?;
                     }
                 }
                 StatementType::Copy => {
@@ -278,6 +299,11 @@ impl<'a> DumpLoader<'a> {
             if !copy_batch_data.is_empty() {
                 self.process_copy_batch(header, &copy_batch_data, stats, &mut failed_tables);
             }
+        }
+
+        // Flush any remaining INSERT batches
+        for mut batch in batch_mgr.drain_all() {
+            flush_batch(self.conn, &mut batch, stats, &mut failed_tables)?;
         }
 
         Ok(())
@@ -340,6 +366,65 @@ impl<'a> DumpLoader<'a> {
             Ok(mut stmt) => stmt.exists([table]).unwrap_or(false),
             Err(_) => false,
         }
+    }
+
+    /// Try to queue an INSERT statement for bulk loading via Appender API.
+    /// Returns true if successfully queued, false if fallback to direct execution is needed.
+    fn try_queue_for_bulk(
+        &self,
+        stmt: &str,
+        dialect: SqlDialect,
+        batch_mgr: &mut BatchManager,
+        stats: &mut ImportStats,
+        failed_tables: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        // Quick filter: skip statements with complex clauses that Appender can't handle
+        let upper = stmt.to_uppercase();
+        if upper.contains("ON DUPLICATE KEY")
+            || upper.contains("ON CONFLICT")
+            || upper.contains("REPLACE")
+            || upper.contains("IGNORE")
+            || upper.contains("RETURNING")
+            || upper.contains("SELECT")
+        {
+            return false;
+        }
+
+        // Try to parse the INSERT statement
+        let parsed = match parse_insert_for_bulk(stmt.as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return false, // Parse failed, use fallback
+        };
+
+        // Skip tables we know don't exist
+        if failed_tables.contains(&parsed.table) {
+            return true; // Pretend we handled it to skip the statement
+        }
+
+        // Skip if no rows were parsed
+        if parsed.rows.is_empty() {
+            return false;
+        }
+
+        // Convert the statement for DuckDB (for fallback)
+        let duckdb_sql = match self.convert_insert(stmt, dialect) {
+            Ok(sql) => sql,
+            Err(_) => return false,
+        };
+
+        // Queue the rows
+        if let Some(mut batch) =
+            batch_mgr.queue_insert(&parsed.table, parsed.columns, parsed.rows, duckdb_sql)
+        {
+            // Batch is ready to flush
+            if let Err(e) = flush_batch(self.conn, &mut batch, stats, failed_tables) {
+                if stats.warnings.len() < 100 {
+                    stats.warnings.push(format!("Batch flush error: {}", e));
+                }
+            }
+        }
+
+        true
     }
 
     /// Skip a COPY data block without parsing/processing it
@@ -582,15 +667,39 @@ impl<'a> DumpLoader<'a> {
         // Pattern to match column definitions with types
         // Handles: TYPE, TYPE(size), TYPE UNSIGNED, TYPE WITH TIME ZONE
         // IMPORTANT: Order matters - longer types first to avoid partial matches (INTEGER before INT)
+        // IMPORTANT: Types must be preceded by quote/whitespace AND followed by whitespace/paren/comma (not a closing quote)
+        // This prevents matching "date" as DATE type (column names inside quotes)
         // Includes MySQL, PostgreSQL, SQLite, and MSSQL types
         static RE_COLUMN_TYPE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\b(BIGSERIAL|SMALLSERIAL|SERIAL|BIGINT|SMALLINT|MEDIUMINT|TINYINT|INTEGER|INT|DOUBLE\s+PRECISION|DOUBLE|FLOAT|DECIMAL|NUMERIC|CHARACTER\s+VARYING|NVARCHAR|NCHAR|VARCHAR|CHAR|VARBINARY|BINARY|LONGTEXT|MEDIUMTEXT|TINYTEXT|NTEXT|TEXT|LONGBLOB|MEDIUMBLOB|TINYBLOB|IMAGE|BLOB|DATETIME2|DATETIMEOFFSET|SMALLDATETIME|DATETIME|TIMESTAMPTZ|TIMESTAMP|TIMETZ|TIME|DATE|YEAR|ENUM|SET|JSONB|JSON|UUID|UNIQUEIDENTIFIER|BYTEA|BOOLEAN|BOOL|BIT|REAL|MONEY|SMALLMONEY|INTERVAL|ROWVERSION|XML|SQL_VARIANT)(\s*\([^)]+\))?(\s+(?:UNSIGNED|WITH(?:OUT)?\s+TIME\s+ZONE))?").unwrap()
+            Regex::new(r#"(?i)(["'`\]\s])\s*(BIGSERIAL|SMALLSERIAL|SERIAL|BIGINT|SMALLINT|MEDIUMINT|TINYINT|INTEGER|INT|DOUBLE\s+PRECISION|DOUBLE|FLOAT|DECIMAL|NUMERIC|CHARACTER\s+VARYING|NVARCHAR|NCHAR|VARCHAR|CHAR|VARBINARY|BINARY|LONGTEXT|MEDIUMTEXT|TINYTEXT|NTEXT|TEXT|LONGBLOB|MEDIUMBLOB|TINYBLOB|IMAGE|BLOB|DATETIME2|DATETIMEOFFSET|SMALLDATETIME|DATETIME|TIMESTAMPTZ|TIMESTAMP|TIMETZ|TIME|DATE|YEAR|ENUM|SET|JSONB|JSON|UUID|UNIQUEIDENTIFIER|BYTEA|BOOLEAN|BOOL|BIT|REAL|MONEY|SMALLMONEY|INTERVAL|ROWVERSION|XML|SQL_VARIANT)\b(\s*\([^)]+\))?(\s+(?:UNSIGNED|WITH(?:OUT)?\s+TIME\s+ZONE))?"#).unwrap()
         });
 
         RE_COLUMN_TYPE
             .replace_all(stmt, |caps: &regex::Captures| {
                 let full_match = caps.get(0).unwrap().as_str();
-                TypeConverter::convert(full_match)
+                let leading_char = caps.get(1).unwrap().as_str();
+                let type_part = caps.get(2).unwrap().as_str();
+                let size_part = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+                let suffix = caps.get(4).map(|m| m.as_str()).unwrap_or("");
+                
+                // Check if this looks like a quoted identifier (type is inside quotes)
+                // If leading char is a quote and the character before the match is also a quote, skip
+                let end_pos = caps.get(0).unwrap().end();
+                let stmt_bytes = stmt.as_bytes();
+                if end_pos < stmt_bytes.len() {
+                    let next_char = stmt_bytes[end_pos] as char;
+                    // If next character is a closing quote, this is a quoted identifier, not a type
+                    if next_char == '"' || next_char == '\'' || next_char == '`' {
+                        return full_match.to_string();
+                    }
+                }
+                
+                // Calculate the whitespace between leading char and type
+                let ws_len = full_match.len() - leading_char.len() - type_part.len() - size_part.len() - suffix.len();
+                let ws = &full_match[leading_char.len()..leading_char.len() + ws_len];
+                
+                let converted = TypeConverter::convert(&format!("{}{}{}", type_part, size_part, suffix));
+                format!("{}{}{}", leading_char, ws, converted)
             })
             .to_string()
     }
@@ -651,6 +760,37 @@ impl<'a> DumpLoader<'a> {
         static RE_ON_UPDATE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*ON\s+UPDATE\s+CURRENT_TIMESTAMP").unwrap());
         result = RE_ON_UPDATE.replace_all(&result, "").to_string();
+
+        // Remove UNIQUE KEY constraint lines: UNIQUE KEY `name` (`col1`, `col2`)
+        // Must handle both: ,UNIQUE KEY... at end of column list and UNIQUE KEY... on its own line
+        static RE_UNIQUE_KEY: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i),?\s*UNIQUE\s+KEY\s+[`"']?\w+[`"']?\s*\([^)]+\)"#).unwrap()
+        });
+        result = RE_UNIQUE_KEY.replace_all(&result, "").to_string();
+
+        // Remove KEY (index) constraint lines: KEY `name` (`col1`, `col2`)
+        // This handles regular indexes and FULLTEXT indexes, but NOT PRIMARY KEY or FOREIGN KEY
+        // We use a negative lookbehind pattern by only matching KEY that is preceded by comma or newline (not FOREIGN/PRIMARY)
+        static RE_KEY_INDEX: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i)(?:,\s*|\n\s*)(?:FULLTEXT\s+|SPATIAL\s+)?KEY\s+[`"']?\w+[`"']?\s*\([^)]+\)"#).unwrap()
+        });
+        result = RE_KEY_INDEX.replace_all(&result, "").to_string();
+
+        // Remove GENERATED ALWAYS AS columns entirely
+        // Match: `col` TYPE GENERATED ALWAYS AS (expr) STORED/VIRTUAL
+        // The expression can contain nested parentheses so we match one level deep
+        static RE_GENERATED_COL: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i),?\s*[`"']?\w+[`"']?\s+\w+\s+GENERATED\s+ALWAYS\s+AS\s*\((?:[^()]+|\([^()]*\))+\)\s*(?:STORED|VIRTUAL)?"#).unwrap()
+        });
+        result = RE_GENERATED_COL.replace_all(&result, "").to_string();
+
+        // Remove entire FOREIGN KEY constraints (DuckDB enforces them which causes issues with batch loading)
+        // Match: CONSTRAINT `name` FOREIGN KEY (...) REFERENCES ... [ON DELETE/UPDATE ...]
+        // or just: FOREIGN KEY (...) REFERENCES ... [ON DELETE/UPDATE ...]
+        static RE_FK_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i),?\s*(?:CONSTRAINT\s+[`"']?\w+[`"']?\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+[`"']?\w+[`"']?\s*\([^)]+\)(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT))*"#).unwrap()
+        });
+        result = RE_FK_CONSTRAINT.replace_all(&result, "").to_string();
 
         result
     }
