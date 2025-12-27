@@ -440,7 +440,25 @@ mod copy_to_insert_tests {
 
         let inserts = copy_to_inserts(&header, data, SqlDialect::Postgres);
         let sql = String::from_utf8_lossy(&inserts[0]);
-        assert!(sql.contains("\"public\".\"users\""));
+        // Note: public schema is stripped for DuckDB compatibility
+        assert!(sql.contains("\"users\""));
+        assert!(sql.contains("\"id\""));
+        assert!(sql.contains("\"name\""));
+    }
+
+    #[test]
+    fn test_copy_to_insert_postgres_custom_schema() {
+        // Non-standard schemas are preserved
+        let header = CopyHeader {
+            schema: Some("myschema".to_string()),
+            table: "users".to_string(),
+            columns: vec!["id".to_string()],
+        };
+        let data = b"1\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::Postgres);
+        let sql = String::from_utf8_lossy(&inserts[0]);
+        assert!(sql.contains("\"myschema\".\"users\""));
     }
 
     #[test]

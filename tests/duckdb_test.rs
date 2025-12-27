@@ -1570,6 +1570,801 @@ COPY test (id, value) FROM stdin;
 }
 
 // =============================================================================
+// PostgreSQL COPY Large Data Tests (Regression for hang issue)
+// =============================================================================
+
+/// Test that large COPY blocks don't cause the loader to hang.
+/// This is a regression test for a bug where StatementReader would buffer
+/// the entire COPY data block looking for a semicolon, causing memory bloat
+/// and hangs on large files.
+#[test]
+fn test_postgres_copy_large_block() {
+    // Generate a COPY block with 1000 rows
+    let mut dump = String::from(
+        r#"
+CREATE TABLE large_test (
+    id INTEGER,
+    name VARCHAR(100),
+    value DECIMAL(10,2)
+);
+
+COPY large_test (id, name, value) FROM stdin;
+"#,
+    );
+
+    for i in 1..=1000 {
+        dump.push_str(&format!("{}\tItem_{}\t{}.99\n", i, i, i % 100));
+    }
+    dump.push_str("\\.\n");
+
+    let (_temp_dir, dump_path) = create_test_dump(&dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM large_test").unwrap();
+    assert_eq!(result.rows[0][0], "1000");
+}
+
+/// Test multiple COPY blocks in sequence
+#[test]
+fn test_postgres_multiple_copy_blocks() {
+    let dump = r#"
+CREATE TABLE table_a (id INTEGER, name TEXT);
+CREATE TABLE table_b (id INTEGER, value INTEGER);
+
+COPY table_a (id, name) FROM stdin;
+1	Alice
+2	Bob
+3	Charlie
+\.
+
+COPY table_b (id, value) FROM stdin;
+1	100
+2	200
+3	300
+4	400
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 2);
+
+    let result_a = engine.query("SELECT COUNT(*) FROM table_a").unwrap();
+    assert_eq!(result_a.rows[0][0], "3");
+
+    let result_b = engine.query("SELECT COUNT(*) FROM table_b").unwrap();
+    assert_eq!(result_b.rows[0][0], "4");
+}
+
+/// Test COPY-only file (no CREATE TABLE - data only dump like pagila-data.sql)
+/// This tests the scenario where we have COPY statements but no tables exist.
+#[test]
+fn test_postgres_copy_only_no_tables() {
+    // This is a data-only dump - tables don't exist so we should get warnings
+    let dump = r#"
+COPY nonexistent_table (id, name) FROM stdin;
+1	Test
+2	Data
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    // Should complete without hanging, even though tables don't exist
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    // No tables created (since it's COPY, not CREATE TABLE)
+    assert_eq!(stats.tables_created, 0);
+    // Should have warnings about missing tables
+    assert!(!stats.warnings.is_empty() || stats.statements_skipped > 0);
+}
+
+/// Test COPY with special characters (tabs embedded in data)
+#[test]
+fn test_postgres_copy_special_chars() {
+    // Test with actual tab characters as column separators
+    // Row 3 has an embedded tab in the text value (two tabs total in the line)
+    let dump = r#"
+CREATE TABLE special_chars (
+    id INTEGER,
+    text_col TEXT
+);
+
+COPY special_chars (id, text_col) FROM stdin;
+1	HelloWorld
+2	SimpleText
+3	WithSpace Here
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM special_chars").unwrap();
+    assert_eq!(result.rows[0][0], "3");
+}
+
+/// Test that COPY followed by regular INSERT works correctly
+#[test]
+fn test_postgres_copy_then_insert() {
+    let dump = r#"
+CREATE TABLE mixed_data (id INTEGER, name TEXT);
+
+COPY mixed_data (id, name) FROM stdin;
+1	FromCopy1
+2	FromCopy2
+\.
+
+INSERT INTO mixed_data (id, name) VALUES (3, 'FromInsert');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM mixed_data").unwrap();
+    assert_eq!(result.rows[0][0], "3");
+}
+
+/// Test very large COPY block (10000 rows) - stress test for memory/performance
+#[test]
+fn test_postgres_copy_stress_10k_rows() {
+    let mut dump = String::from(
+        r#"
+CREATE TABLE stress_test (
+    id INTEGER,
+    col1 TEXT,
+    col2 TEXT,
+    col3 INTEGER
+);
+
+COPY stress_test (id, col1, col2, col3) FROM stdin;
+"#,
+    );
+
+    for i in 1..=10000 {
+        dump.push_str(&format!(
+            "{}\tvalue_{}\tdescription_for_item_{}\t{}\n",
+            i,
+            i,
+            i,
+            i * 10
+        ));
+    }
+    dump.push_str("\\.\n");
+
+    let (_temp_dir, dump_path) = create_test_dump(&dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    // This should complete in reasonable time, not hang
+    let start = std::time::Instant::now();
+    let stats = engine.import_dump(&dump_path).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM stress_test").unwrap();
+    assert_eq!(result.rows[0][0], "10000");
+
+    // Should complete in under 30 seconds (generous for slow CI)
+    assert!(
+        elapsed.as_secs() < 30,
+        "Import took too long: {:?}",
+        elapsed
+    );
+}
+
+// =============================================================================
+// PostgreSQL COPY Edge Cases (Regression Tests for pagila-like dumps)
+// =============================================================================
+
+/// Test COPY with schema prefix (public.table_name) - key fix for pagila dumps
+#[test]
+fn test_postgres_copy_with_schema_prefix() {
+    let dump = r#"
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(100)
+);
+
+COPY public.users (id, name) FROM stdin;
+1	Alice
+2	Bob
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+/// Test COPY preceded by comments (common in pg_dump output)
+#[test]
+fn test_postgres_copy_with_comments() {
+    let dump = r#"
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(100)
+);
+
+--
+-- Data for Name: products; Type: TABLE DATA; Schema: public
+--
+
+COPY products (id, name) FROM stdin;
+1	Widget
+2	Gadget
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM products").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+/// Test COPY with ONLY keyword (used for inherited tables in PostgreSQL)
+#[test]
+fn test_postgres_copy_only_keyword() {
+    let dump = r#"
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    event_name VARCHAR(100)
+);
+
+COPY ONLY events (id, event_name) FROM stdin;
+1	Login
+2	Logout
+3	Purchase
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT COUNT(*) FROM events").unwrap();
+    assert_eq!(result.rows[0][0], "3");
+}
+
+/// Test COPY with quoted identifiers
+#[test]
+fn test_postgres_copy_quoted_identifiers() {
+    let dump = r#"
+CREATE TABLE "Order" (
+    "Id" INTEGER PRIMARY KEY,
+    "CustomerName" VARCHAR(100)
+);
+
+COPY "Order" ("Id", "CustomerName") FROM stdin;
+1	John Doe
+2	Jane Smith
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query(r#"SELECT COUNT(*) FROM "Order""#).unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+/// Test COPY with empty values (empty string vs NULL)
+#[test]
+fn test_postgres_copy_empty_values() {
+    let dump = r#"
+CREATE TABLE strings (
+    id INTEGER,
+    val TEXT
+);
+
+COPY strings (id, val) FROM stdin;
+1	hello
+2	
+3	\N
+4	world
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT COUNT(*) FROM strings").unwrap();
+    assert_eq!(result.rows[0][0], "4");
+
+    // Verify NULL vs empty string
+    let result = engine
+        .query("SELECT COUNT(*) FROM strings WHERE val IS NULL")
+        .unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+/// Test COPY with many columns (wide tables like pagila.film)
+#[test]
+fn test_postgres_copy_wide_table() {
+    let dump = r#"
+CREATE TABLE film (
+    id INTEGER,
+    title VARCHAR(255),
+    description TEXT,
+    release_year INTEGER,
+    language_id INTEGER,
+    original_language_id INTEGER,
+    rental_duration INTEGER,
+    rental_rate DECIMAL(4,2),
+    length INTEGER,
+    replacement_cost DECIMAL(5,2),
+    rating VARCHAR(10)
+);
+
+COPY film (id, title, description, release_year, language_id, original_language_id, rental_duration, rental_rate, length, replacement_cost, rating) FROM stdin;
+1	Academy Dinosaur	A Epic Drama of a Feminist And a Mad Scientist	2006	1	\N	6	0.99	86	20.99	PG
+2	Ace Goldfinger	A Astounding Epistle of a Database Administrator	2006	1	\N	3	4.99	48	12.99	G
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT title FROM film WHERE id = 1").unwrap();
+    assert_eq!(result.rows[0][0], "Academy Dinosaur");
+}
+
+/// Test COPY with escape sequences in data
+#[test]
+fn test_postgres_copy_escape_sequences() {
+    let dump = r#"
+CREATE TABLE escapes (
+    id INTEGER,
+    content TEXT
+);
+
+COPY escapes (id, content) FROM stdin;
+1	Line1\nLine2
+2	Tab\there
+3	Backslash\\end
+4	Quote'here
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT COUNT(*) FROM escapes").unwrap();
+    assert_eq!(result.rows[0][0], "4");
+}
+
+/// Test COPY followed by more SQL statements
+#[test]
+fn test_postgres_copy_followed_by_statements() {
+    let dump = r#"
+CREATE TABLE a (id INTEGER);
+CREATE TABLE b (id INTEGER);
+
+COPY a (id) FROM stdin;
+1
+2
+\.
+
+INSERT INTO b VALUES (10);
+INSERT INTO b VALUES (20);
+
+CREATE TABLE c (id INTEGER);
+INSERT INTO c VALUES (100);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 3);
+
+    let result_a = engine.query("SELECT COUNT(*) FROM a").unwrap();
+    assert_eq!(result_a.rows[0][0], "2");
+
+    let result_b = engine.query("SELECT COUNT(*) FROM b").unwrap();
+    assert_eq!(result_b.rows[0][0], "2");
+
+    let result_c = engine.query("SELECT COUNT(*) FROM c").unwrap();
+    assert_eq!(result_c.rows[0][0], "1");
+}
+
+/// Test multiple COPY blocks with comments between them (pagila-like structure)
+#[test]
+fn test_postgres_multiple_copy_with_comments() {
+    let dump = r#"
+CREATE TABLE actor (id INTEGER, name VARCHAR(100));
+CREATE TABLE category (id INTEGER, name VARCHAR(100));
+
+--
+-- Data for Name: actor; Type: TABLE DATA; Schema: public
+--
+
+COPY actor (id, name) FROM stdin;
+1	Penelope
+2	Nick
+\.
+
+--
+-- Data for Name: category; Type: TABLE DATA; Schema: public
+--
+
+COPY category (id, name) FROM stdin;
+10	Action
+11	Animation
+12	Children
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 2);
+
+    let result_actor = engine.query("SELECT COUNT(*) FROM actor").unwrap();
+    assert_eq!(result_actor.rows[0][0], "2");
+
+    let result_category = engine.query("SELECT COUNT(*) FROM category").unwrap();
+    assert_eq!(result_category.rows[0][0], "3");
+}
+
+/// Test COPY with semicolons inside comments before it
+#[test]
+fn test_postgres_copy_semicolon_in_comment() {
+    let dump = r#"
+CREATE TABLE items (id INTEGER, name TEXT);
+
+-- Note: this is a comment; with a semicolon inside
+-- Another comment; also with semicolon
+
+COPY items (id, name) FROM stdin;
+1	First
+2	Second
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM items").unwrap();
+    assert_eq!(result.rows[0][0], "2");
+}
+
+/// Test COPY with block comments containing semicolons
+#[test]
+fn test_postgres_copy_block_comment_semicolon() {
+    let dump = r#"
+CREATE TABLE test (id INTEGER);
+
+/* This is a block comment;
+   with semicolons; inside;
+   on multiple lines */
+
+COPY test (id) FROM stdin;
+1
+2
+3
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT COUNT(*) FROM test").unwrap();
+    assert_eq!(result.rows[0][0], "3");
+}
+
+/// Test COPY with all-NULL row
+#[test]
+fn test_postgres_copy_all_null_row() {
+    let dump = r#"
+CREATE TABLE nullable (a TEXT, b TEXT, c TEXT);
+
+COPY nullable (a, b, c) FROM stdin;
+\N	\N	\N
+a	b	c
+\N	\N	\N
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT COUNT(*) FROM nullable").unwrap();
+    assert_eq!(result.rows[0][0], "3");
+}
+
+/// Test COPY with unicode data
+#[test]
+fn test_postgres_copy_unicode() {
+    let dump = r#"
+CREATE TABLE i18n (id INTEGER, text_val TEXT);
+
+COPY i18n (id, text_val) FROM stdin;
+1	Hello
+2	日本語
+3	Ελληνικά
+4	العربية
+5	🎉🚀
+\.
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    engine.import_dump(&dump_path).unwrap();
+
+    let result = engine.query("SELECT COUNT(*) FROM i18n").unwrap();
+    assert_eq!(result.rows[0][0], "5");
+
+    // Verify unicode was preserved
+    let result = engine
+        .query("SELECT text_val FROM i18n WHERE id = 2")
+        .unwrap();
+    assert!(result.rows[0][0].contains("日本語"));
+}
+
+// =============================================================================
+// Large Dump Stress Tests
+// =============================================================================
+
+/// Stress test: 50,000 rows via COPY
+#[test]
+fn test_postgres_copy_stress_50k_rows() {
+    let mut dump = String::from(
+        r#"
+CREATE TABLE big_table (
+    id INTEGER,
+    name VARCHAR(100),
+    value INTEGER
+);
+
+COPY big_table (id, name, value) FROM stdin;
+"#,
+    );
+
+    for i in 1..=50_000 {
+        dump.push_str(&format!("{}\tname_{}\t{}\n", i, i, i % 1000));
+    }
+    dump.push_str("\\.\n");
+
+    let (_temp_dir, dump_path) = create_test_dump(&dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    let start = std::time::Instant::now();
+    let stats = engine.import_dump(&dump_path).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM big_table").unwrap();
+    assert_eq!(result.rows[0][0], "50000");
+
+    // Should complete in reasonable time (30s is generous for CI)
+    assert!(
+        elapsed.as_secs() < 30,
+        "50k row import took too long: {:?}",
+        elapsed
+    );
+}
+
+/// Stress test: Multiple tables with COPY (simulating real pg_dump)
+#[test]
+fn test_postgres_multi_table_stress() {
+    let mut dump = String::new();
+
+    // Create 10 tables
+    for t in 1..=10 {
+        dump.push_str(&format!(
+            "CREATE TABLE table_{} (id INTEGER, val INTEGER);\n",
+            t
+        ));
+    }
+
+    // COPY 1000 rows into each table
+    for t in 1..=10 {
+        dump.push_str(&format!("\nCOPY table_{} (id, val) FROM stdin;\n", t));
+        for i in 1..=1000 {
+            dump.push_str(&format!("{}\t{}\n", i, i * t));
+        }
+        dump.push_str("\\.\n");
+    }
+
+    let (_temp_dir, dump_path) = create_test_dump(&dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    let start = std::time::Instant::now();
+    let stats = engine.import_dump(&dump_path).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(stats.tables_created, 10);
+
+    // Verify each table has 1000 rows
+    for t in 1..=10 {
+        let result = engine
+            .query(&format!("SELECT COUNT(*) FROM table_{}", t))
+            .unwrap();
+        assert_eq!(
+            result.rows[0][0], "1000",
+            "table_{} should have 1000 rows",
+            t
+        );
+    }
+
+    assert!(
+        elapsed.as_secs() < 30,
+        "Multi-table import took too long: {:?}",
+        elapsed
+    );
+}
+
+/// Stress test: INSERT statements (for comparison with COPY performance)
+#[test]
+fn test_mysql_insert_stress_10k_rows() {
+    let mut dump = String::from(
+        r#"
+CREATE TABLE insert_test (
+    id INT PRIMARY KEY,
+    name VARCHAR(100),
+    value INT
+);
+"#,
+    );
+
+    // Generate multi-value INSERTs (1000 rows per INSERT, 10 INSERTs = 10k rows)
+    for batch in 0..10 {
+        dump.push_str("INSERT INTO insert_test VALUES ");
+        for i in 0..1000 {
+            let id = batch * 1000 + i + 1;
+            if i > 0 {
+                dump.push_str(", ");
+            }
+            dump.push_str(&format!("({}, 'name_{}', {})", id, id, id % 100));
+        }
+        dump.push_str(";\n");
+    }
+
+    let (_temp_dir, dump_path) = create_test_dump(&dump);
+
+    let config = QueryConfig::default();
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    let start = std::time::Instant::now();
+    let stats = engine.import_dump(&dump_path).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(stats.tables_created, 1);
+
+    let result = engine.query("SELECT COUNT(*) FROM insert_test").unwrap();
+    assert_eq!(result.rows[0][0], "10000");
+
+    assert!(
+        elapsed.as_secs() < 30,
+        "10k INSERT import took too long: {:?}",
+        elapsed
+    );
+}
+
+// =============================================================================
 // Compressed File Tests
 // =============================================================================
 
@@ -2644,7 +3439,9 @@ INSERT INTO "sales" VALUES (4, 'B', 300.00);
     engine.import_dump(&dump_path).unwrap();
 
     let result = engine
-        .query("SELECT product, SUM(amount) as total FROM sales GROUP BY product ORDER BY total DESC")
+        .query(
+            "SELECT product, SUM(amount) as total FROM sales GROUP BY product ORDER BY total DESC",
+        )
         .unwrap();
     assert_eq!(result.rows.len(), 2);
     assert_eq!(result.rows[0][0], "B");
@@ -2773,7 +3570,9 @@ GO
     let mut engine = QueryEngine::new(&config).unwrap();
     engine.import_dump(&dump_path).unwrap();
 
-    let result = engine.query("SELECT name FROM products ORDER BY id").unwrap();
+    let result = engine
+        .query("SELECT name FROM products ORDER BY id")
+        .unwrap();
     assert_eq!(result.rows.len(), 2);
     // Verify Unicode was properly imported
     assert!(result.rows[0][0].contains("日本語"));

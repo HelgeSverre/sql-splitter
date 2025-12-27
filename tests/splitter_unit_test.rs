@@ -294,8 +294,8 @@ INSERT INTO "orders" ("id", "user_id") VALUES (1, 1);
     .unwrap();
 
     // Split
-    let splitter = Splitter::new(input_file.clone(), split_dir.clone())
-        .with_dialect(SqlDialect::Postgres);
+    let splitter =
+        Splitter::new(input_file.clone(), split_dir.clone()).with_dialect(SqlDialect::Postgres);
     let split_stats = splitter.split().unwrap();
     assert_eq!(split_stats.tables_found, 2);
 
@@ -340,8 +340,8 @@ INSERT INTO "orders" VALUES (1, 1);
     .unwrap();
 
     // Split
-    let splitter = Splitter::new(input_file.clone(), split_dir.clone())
-        .with_dialect(SqlDialect::Sqlite);
+    let splitter =
+        Splitter::new(input_file.clone(), split_dir.clone()).with_dialect(SqlDialect::Sqlite);
     let split_stats = splitter.split().unwrap();
     assert_eq!(split_stats.tables_found, 2);
 

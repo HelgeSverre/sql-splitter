@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] - 2025-12-27
+
+### Fixed
+
+- **PostgreSQL COPY performance**: Fixed severe performance regression in `query` command when processing PostgreSQL dumps with COPY data blocks
+  - Processing time for pagila-data.sql reduced from 15-27 seconds to ~0.03 seconds
+  - Full pagila dump now processes in ~1.9 seconds (previously could hang or take minutes)
+  - Root cause: Statement parser was not correctly handling COPY blocks preceded by comments, causing data accumulation issues
+
+- **Single-column COPY data**: Fixed bug where PostgreSQL COPY data with single columns (no tabs) was incorrectly identified as non-COPY data
+  - `looks_like_copy_data()` now correctly handles single-column tables
+  - Previously caused COPY data to be lost and subsequent SQL statements to fail
+
+- **COPY schema prefix handling**: Fixed "table does not exist" errors when COPY statements used schema-qualified names (`COPY public.tablename`)
+  - DuckDB tables are created without schema prefix, COPY now correctly strips `public.` prefix
+
+### Added
+
+- **Expanded test coverage**: Added 16 new PostgreSQL COPY edge case tests
+  - `test_postgres_copy_with_schema_prefix` - Tests `COPY public.tablename` pattern
+  - `test_postgres_copy_with_comments` - Tests COPY preceded by pg_dump-style comments
+  - `test_postgres_copy_only_keyword` - Tests `COPY ONLY` for inherited tables
+  - `test_postgres_copy_quoted_identifiers` - Tests quoted table/column names
+  - `test_postgres_copy_empty_values` - Tests empty strings vs NULL handling
+  - `test_postgres_copy_wide_table` - Tests many-column tables
+  - `test_postgres_copy_escape_sequences` - Tests `\n`, `\t`, `\\` handling
+  - `test_postgres_copy_followed_by_statements` - Tests COPY followed by regular SQL
+  - `test_postgres_copy_multiple_with_comments` - Tests multiple COPY blocks with comments
+  - `test_postgres_copy_semicolon_in_comment` - Tests semicolons in line comments
+  - `test_postgres_copy_block_comment_semicolon` - Tests semicolons in block comments
+  - `test_postgres_copy_all_null_row` - Tests rows with all NULL values
+  - `test_postgres_copy_unicode` - Tests unicode data preservation
+
+- **Stress tests**: Added large dump stress tests
+  - `test_postgres_copy_stress_50k_rows` - 50,000 row COPY import
+  - `test_postgres_multi_table_stress` - 10 tables × 1,000 rows each
+  - `test_mysql_insert_stress_10k_rows` - 10,000 rows via multi-value INSERTs
+
+- **Memory profiling**: Added `query` and `shard` commands to `scripts/profile-memory.sh`
+
+### Changed
+
+- **Documentation**: Updated AGENTS.md with latest profiling benchmarks and query performance by dialect
+
 ## [1.12.0] - 2025-12-26
 
 ### Added

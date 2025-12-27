@@ -1131,7 +1131,11 @@ GO
         .iter()
         .filter(|i| i.code == "DUPLICATE_PK")
         .collect();
-    assert_eq!(pk_issues.len(), 1, "MSSQL should detect duplicate composite PK");
+    assert_eq!(
+        pk_issues.len(),
+        1,
+        "MSSQL should detect duplicate composite PK"
+    );
 }
 
 #[test]

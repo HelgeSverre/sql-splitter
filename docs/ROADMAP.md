@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.12.0 (current)
-**Last Updated**: 2025-12-26
-**Revision**: 3.2 — Query command implemented with DuckDB integration
+**Version**: 1.12.1 (current)
+**Last Updated**: 2025-12-27
+**Revision**: 3.3 — PostgreSQL COPY performance fixes for query command
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 

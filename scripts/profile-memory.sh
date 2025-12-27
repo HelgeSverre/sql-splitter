@@ -310,6 +310,14 @@ run_profile() {
         order)
             cmd+=("$input_file" "--dialect" "$dialect" "--output" "$output_file")
             ;;
+        query)
+            # Query command: import dump and run a simple query
+            cmd+=("$input_file" "--dialect" "$dialect" "SELECT COUNT(*) FROM table_000")
+            ;;
+        shard)
+            # Shard command: shard by parent_id column on table_001
+            cmd+=("$input_file" "--dialect" "$dialect" "--output" "$output_dir" "--column" "table_001.parent_id")
+            ;;
     esac
     
     cmd+=("${extra_args[@]}")
@@ -376,6 +384,8 @@ run_all_profiles() {
     run_profile "graph" "$input_file" "$dialect" "--format" "json"
     run_profile "order" "$input_file" "$dialect"
     run_profile "order" "$input_file" "$dialect" "--dry-run"
+    run_profile "query" "$input_file" "$dialect"
+    run_profile "shard" "$input_file" "$dialect"
     
     # Convert only for mysql/postgres
     if [[ "$dialect" != "sqlite" ]]; then

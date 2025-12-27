@@ -280,14 +280,26 @@ impl TypeMapper {
         result = RE_FLOAT.replace_all(&result, "REAL").to_string();
 
         // Text types
-        result = RE_LONGTEXT.replace_all(&result, "NVARCHAR(MAX)").to_string();
-        result = RE_MEDIUMTEXT.replace_all(&result, "NVARCHAR(MAX)").to_string();
-        result = RE_TINYTEXT.replace_all(&result, "NVARCHAR(255)").to_string();
+        result = RE_LONGTEXT
+            .replace_all(&result, "NVARCHAR(MAX)")
+            .to_string();
+        result = RE_MEDIUMTEXT
+            .replace_all(&result, "NVARCHAR(MAX)")
+            .to_string();
+        result = RE_TINYTEXT
+            .replace_all(&result, "NVARCHAR(255)")
+            .to_string();
 
         // Binary types
-        result = RE_LONGBLOB.replace_all(&result, "VARBINARY(MAX)").to_string();
-        result = RE_MEDIUMBLOB.replace_all(&result, "VARBINARY(MAX)").to_string();
-        result = RE_TINYBLOB.replace_all(&result, "VARBINARY(255)").to_string();
+        result = RE_LONGBLOB
+            .replace_all(&result, "VARBINARY(MAX)")
+            .to_string();
+        result = RE_MEDIUMBLOB
+            .replace_all(&result, "VARBINARY(MAX)")
+            .to_string();
+        result = RE_TINYBLOB
+            .replace_all(&result, "VARBINARY(255)")
+            .to_string();
         result = RE_BLOB.replace_all(&result, "VARBINARY(MAX)").to_string();
 
         // Date/time types
@@ -330,7 +342,9 @@ impl TypeMapper {
         result = RE_BYTEA.replace_all(&result, "VARBINARY(MAX)").to_string();
 
         // DOUBLE PRECISION → FLOAT
-        result = RE_DOUBLE_PRECISION.replace_all(&result, "FLOAT").to_string();
+        result = RE_DOUBLE_PRECISION
+            .replace_all(&result, "FLOAT")
+            .to_string();
 
         // REAL stays REAL
 
@@ -338,7 +352,9 @@ impl TypeMapper {
         result = RE_BOOLEAN.replace_all(&result, "BIT").to_string();
 
         // TIMESTAMPTZ → DATETIMEOFFSET
-        result = RE_TIMESTAMPTZ.replace_all(&result, "DATETIMEOFFSET").to_string();
+        result = RE_TIMESTAMPTZ
+            .replace_all(&result, "DATETIMEOFFSET")
+            .to_string();
 
         // TIMESTAMP WITH TIME ZONE → DATETIMEOFFSET
         result = RE_TIMESTAMP_WITH_TZ
@@ -406,7 +422,9 @@ impl TypeMapper {
         result = RE_VARCHAR_MAX.replace_all(&result, "LONGTEXT").to_string();
 
         // VARBINARY(MAX) → LONGBLOB
-        result = RE_VARBINARY_MAX.replace_all(&result, "LONGBLOB").to_string();
+        result = RE_VARBINARY_MAX
+            .replace_all(&result, "LONGBLOB")
+            .to_string();
 
         // IMAGE → LONGBLOB
         result = RE_IMAGE.replace_all(&result, "LONGBLOB").to_string();
@@ -415,16 +433,22 @@ impl TypeMapper {
         result = RE_DATETIME2.replace_all(&result, "DATETIME(6)").to_string();
 
         // DATETIMEOFFSET → DATETIME
-        result = RE_DATETIMEOFFSET.replace_all(&result, "DATETIME").to_string();
+        result = RE_DATETIMEOFFSET
+            .replace_all(&result, "DATETIME")
+            .to_string();
 
         // SMALLDATETIME → DATETIME
-        result = RE_SMALLDATETIME.replace_all(&result, "DATETIME").to_string();
+        result = RE_SMALLDATETIME
+            .replace_all(&result, "DATETIME")
+            .to_string();
 
         // MONEY → DECIMAL(19,4)
         result = RE_MONEY.replace_all(&result, "DECIMAL(19,4)").to_string();
 
         // SMALLMONEY → DECIMAL(10,4)
-        result = RE_SMALLMONEY.replace_all(&result, "DECIMAL(10,4)").to_string();
+        result = RE_SMALLMONEY
+            .replace_all(&result, "DECIMAL(10,4)")
+            .to_string();
 
         // UNIQUEIDENTIFIER → VARCHAR(36)
         result = RE_UNIQUEIDENTIFIER
@@ -435,8 +459,12 @@ impl TypeMapper {
         result = RE_XML.replace_all(&result, "LONGTEXT").to_string();
 
         // ROWVERSION/MSSQL TIMESTAMP → BINARY(8)
-        result = RE_MSSQL_TIMESTAMP_BRACKETED.replace_all(&result, "BINARY(8)").to_string();
-        result = RE_ROWVERSION_ONLY.replace_all(&result, "BINARY(8)").to_string();
+        result = RE_MSSQL_TIMESTAMP_BRACKETED
+            .replace_all(&result, "BINARY(8)")
+            .to_string();
+        result = RE_ROWVERSION_ONLY
+            .replace_all(&result, "BINARY(8)")
+            .to_string();
 
         // Strip MSSQL-specific clauses
         result = RE_ON_PRIMARY.replace_all(&result, "").to_string();
@@ -455,10 +483,10 @@ impl TypeMapper {
         // IMPORTANT: Handle ROWVERSION first (before any TIMESTAMP conversion)
         // In MSSQL, TIMESTAMP is an alias for ROWVERSION (a binary type, not datetime!)
         // Use a more specific regex that matches MSSQL TIMESTAMP but not PostgreSQL TIMESTAMP
-        result = RE_MSSQL_TIMESTAMP_BRACKETED.replace_all(&result, "BYTEA").to_string();
-        result = RE_ROWVERSION_ONLY
+        result = RE_MSSQL_TIMESTAMP_BRACKETED
             .replace_all(&result, "BYTEA")
             .to_string();
+        result = RE_ROWVERSION_ONLY.replace_all(&result, "BYTEA").to_string();
 
         // BIT → BOOLEAN
         result = RE_BIT.replace_all(&result, "BOOLEAN").to_string();
@@ -494,16 +522,22 @@ impl TypeMapper {
         result = RE_DATETIME.replace_all(&result, "TIMESTAMP").to_string();
 
         // DATETIMEOFFSET → TIMESTAMPTZ
-        result = RE_DATETIMEOFFSET.replace_all(&result, "TIMESTAMPTZ").to_string();
+        result = RE_DATETIMEOFFSET
+            .replace_all(&result, "TIMESTAMPTZ")
+            .to_string();
 
         // SMALLDATETIME → TIMESTAMP
-        result = RE_SMALLDATETIME.replace_all(&result, "TIMESTAMP").to_string();
+        result = RE_SMALLDATETIME
+            .replace_all(&result, "TIMESTAMP")
+            .to_string();
 
         // MONEY → DECIMAL(19,4)
         result = RE_MONEY.replace_all(&result, "DECIMAL(19,4)").to_string();
 
         // SMALLMONEY → DECIMAL(10,4)
-        result = RE_SMALLMONEY.replace_all(&result, "DECIMAL(10,4)").to_string();
+        result = RE_SMALLMONEY
+            .replace_all(&result, "DECIMAL(10,4)")
+            .to_string();
 
         // UNIQUEIDENTIFIER → UUID
         result = RE_UNIQUEIDENTIFIER.replace_all(&result, "UUID").to_string();
@@ -511,7 +545,9 @@ impl TypeMapper {
         // XML → XML (PostgreSQL supports XML type)
 
         // FLOAT → DOUBLE PRECISION
-        result = RE_FLOAT.replace_all(&result, "DOUBLE PRECISION").to_string();
+        result = RE_FLOAT
+            .replace_all(&result, "DOUBLE PRECISION")
+            .to_string();
 
         // Strip MSSQL-specific clauses
         result = RE_ON_PRIMARY.replace_all(&result, "").to_string();
@@ -565,7 +601,9 @@ impl TypeMapper {
         result = RE_XML.replace_all(&result, "TEXT").to_string();
 
         // ROWVERSION/MSSQL TIMESTAMP → BLOB
-        result = RE_MSSQL_TIMESTAMP_BRACKETED.replace_all(&result, "BLOB").to_string();
+        result = RE_MSSQL_TIMESTAMP_BRACKETED
+            .replace_all(&result, "BLOB")
+            .to_string();
         result = RE_ROWVERSION_ONLY.replace_all(&result, "BLOB").to_string();
 
         // FLOAT → REAL
@@ -653,8 +691,7 @@ static RE_NVARCHAR_MAX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bNVARCHAR\s*\(\s*MAX\s*\)").unwrap());
 static RE_NVARCHAR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bNVARCHAR\s*(\(\s*\d+\s*\))").unwrap());
-static RE_NCHAR: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bNCHAR\s*(\(\s*\d+\s*\))").unwrap());
+static RE_NCHAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNCHAR\s*(\(\s*\d+\s*\))").unwrap());
 static RE_NTEXT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNTEXT\b").unwrap());
 static RE_VARCHAR_MAX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bVARCHAR\s*\(\s*MAX\s*\)").unwrap());
@@ -665,8 +702,7 @@ static RE_DATETIME2: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bDATETIME2\s*(\(\s*\d+\s*\))?").unwrap());
 static RE_DATETIMEOFFSET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bDATETIMEOFFSET\s*(\(\s*\d+\s*\))?").unwrap());
-static RE_SMALLDATETIME: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bSMALLDATETIME\b").unwrap());
+static RE_SMALLDATETIME: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bSMALLDATETIME\b").unwrap());
 static RE_MONEY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bMONEY\b").unwrap());
 static RE_SMALLMONEY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bSMALLMONEY\b").unwrap());
 static RE_UNIQUEIDENTIFIER: Lazy<Regex> =
@@ -677,12 +713,10 @@ static RE_XML: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bXML\b").unwrap());
 // because it would conflict with PostgreSQL TIMESTAMP result. So we rely on context.
 static RE_MSSQL_TIMESTAMP_BRACKETED: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\[\s*TIMESTAMP\s*\]").unwrap());
-static RE_ROWVERSION_ONLY: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bROWVERSION\b").unwrap());
+static RE_ROWVERSION_ONLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bROWVERSION\b").unwrap());
 
 // MSSQL-specific clauses to strip when converting to other dialects
 static RE_ON_PRIMARY: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\s*ON\s*\[\s*PRIMARY\s*\]").unwrap());
 static RE_CLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bCLUSTERED\s+").unwrap());
-static RE_NONCLUSTERED: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bNONCLUSTERED\s+").unwrap());
+static RE_NONCLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNONCLUSTERED\s+").unwrap());

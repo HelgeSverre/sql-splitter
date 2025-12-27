@@ -15,6 +15,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
+/// Maximum COPY rows to accumulate per batch before converting to INSERTs.
+/// This bounds memory usage while still enabling large batches for performance.
+const MAX_COPY_ROWS_PER_BATCH: usize = 10_000;
+
 /// Loads SQL dumps into a DuckDB database
 pub struct DumpLoader<'a> {
     conn: &'a Connection,
@@ -100,42 +104,92 @@ impl<'a> DumpLoader<'a> {
         let mut parser = StatementReader::new(reader, dialect);
         let mut pending_copy: Option<CopyHeader> = None;
 
+        // Batched COPY data accumulator
+        let mut copy_batch_data: Vec<u8> = Vec::new();
+        let mut copy_batch_rows: usize = 0;
+
+        // Track tables that failed (don't exist) to skip subsequent inserts
+        let mut failed_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         while let Some(stmt_result) = parser.next_statement() {
             let stmt = stmt_result?;
 
-            // Handle COPY data blocks
+            // Handle COPY data blocks with batching
             if let Some(ref header) = pending_copy {
-                if stmt.starts_with("\\.")
-                    || stmt.trim().is_empty()
-                    || Self::looks_like_copy_data(&stmt)
-                {
-                    // This is COPY data - convert to INSERTs
-                    if !stmt.starts_with("\\.") && !stmt.trim().is_empty() {
-                        let inserts =
-                            copy_to_inserts(header, stmt.as_bytes(), SqlDialect::Postgres);
-                        for insert in inserts {
-                            let insert_sql = String::from_utf8_lossy(&insert);
-                            if let Err(e) = self.conn.execute(&insert_sql, []) {
-                                stats.warnings.push(format!(
-                                    "Failed to insert COPY data for {}: {}",
-                                    header.table, e
-                                ));
-                            } else {
-                                stats.rows_inserted += Self::count_insert_rows(&insert_sql);
-                            }
-                        }
+                let trimmed = stmt.trim();
+
+                // End-of-COPY marker: "\."
+                if trimmed == "\\." {
+                    // Flush any remaining batched rows
+                    if !copy_batch_data.is_empty() {
+                        self.process_copy_batch(
+                            header,
+                            &copy_batch_data,
+                            stats,
+                            &mut failed_tables,
+                        );
+                        copy_batch_data.clear();
+                        copy_batch_rows = 0;
                     }
-                    if stmt.starts_with("\\.") {
-                        pending_copy = None;
+                    pending_copy = None;
+                    parser.set_copy_mode(false);
+                    continue;
+                }
+
+                // Empty/whitespace line inside COPY: skip
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Normal COPY data line - accumulate into batch
+                if Self::looks_like_copy_data(&stmt) {
+                    // Skip if we know this table doesn't exist
+                    if failed_tables.contains(&header.table) {
+                        continue;
+                    }
+
+                    copy_batch_data.extend_from_slice(stmt.as_bytes());
+                    copy_batch_data.push(b'\n');
+                    copy_batch_rows += 1;
+
+                    // Flush when batch gets large enough
+                    if copy_batch_rows >= MAX_COPY_ROWS_PER_BATCH {
+                        self.process_copy_batch(
+                            header,
+                            &copy_batch_data,
+                            stats,
+                            &mut failed_tables,
+                        );
+                        copy_batch_data.clear();
+                        copy_batch_rows = 0;
                     }
                     continue;
-                } else {
-                    pending_copy = None;
                 }
+
+                // Unexpected content inside COPY - flush and fall through to normal handling
+                if !copy_batch_data.is_empty() {
+                    self.process_copy_batch(header, &copy_batch_data, stats, &mut failed_tables);
+                    copy_batch_data.clear();
+                    copy_batch_rows = 0;
+                }
+                pending_copy = None;
+                parser.set_copy_mode(false);
+                // Fall through to normal statement handling
             }
 
-            let (stmt_type, table_name) =
+            let (mut stmt_type, table_name) =
                 Parser::<&[u8]>::parse_statement_with_dialect(stmt.as_bytes(), dialect);
+
+            // For Postgres, check if statement contains COPY ... FROM stdin (may be after comments)
+            if dialect == SqlDialect::Postgres && stmt_type == StatementType::Unknown {
+                let upper = stmt.to_uppercase();
+                if let Some(copy_pos) = upper.find("COPY ") {
+                    let after_copy = &upper[copy_pos..];
+                    if after_copy.contains("FROM STDIN") {
+                        stmt_type = StatementType::Copy;
+                    }
+                }
+            }
 
             // Filter tables if specified
             if let Some(ref tables) = self.config.tables {
@@ -175,9 +229,37 @@ impl<'a> DumpLoader<'a> {
                     }
                 }
                 StatementType::Copy => {
-                    // Parse COPY header and wait for data
+                    // Parse COPY header and start buffering data
                     if let Some(header) = parse_copy_header(&stmt) {
+                        // Check if table already known to be missing
+                        if failed_tables.contains(&header.table) {
+                            // Enter COPY mode to skip line-by-line, then exit
+                            parser.set_copy_mode(true);
+                            Self::skip_copy_block(&mut parser);
+                            parser.set_copy_mode(false);
+                            continue;
+                        }
+
+                        // Proactively check if table exists before buffering data
+                        if !self.table_exists(&header.table) {
+                            failed_tables.insert(header.table.clone());
+                            if stats.warnings.len() < 100 {
+                                stats.warnings.push(format!(
+                                    "Skipping COPY for non-existent table {}",
+                                    header.table
+                                ));
+                            }
+                            // Enter COPY mode to skip line-by-line, then exit
+                            parser.set_copy_mode(true);
+                            Self::skip_copy_block(&mut parser);
+                            parser.set_copy_mode(false);
+                            continue;
+                        }
+
+                        copy_batch_data.clear();
+                        copy_batch_rows = 0;
                         pending_copy = Some(header);
+                        parser.set_copy_mode(true);
                     }
                 }
                 StatementType::CreateIndex => {
@@ -191,18 +273,139 @@ impl<'a> DumpLoader<'a> {
             }
         }
 
+        // Flush any remaining COPY batch (handles truncated dumps)
+        if let Some(ref header) = pending_copy {
+            if !copy_batch_data.is_empty() {
+                self.process_copy_batch(header, &copy_batch_data, stats, &mut failed_tables);
+            }
+        }
+
         Ok(())
     }
 
-    /// Check if a line looks like COPY data (tab-separated values)
+    /// Process a batch of COPY data rows, converting them to INSERTs
+    fn process_copy_batch(
+        &self,
+        header: &CopyHeader,
+        batch_data: &[u8],
+        stats: &mut ImportStats,
+        failed_tables: &mut std::collections::HashSet<String>,
+    ) {
+        if batch_data.is_empty() {
+            return;
+        }
+
+        // Skip if we already know this table doesn't exist
+        if failed_tables.contains(&header.table) {
+            return;
+        }
+
+        let inserts = copy_to_inserts(header, batch_data, SqlDialect::Postgres);
+        for insert in inserts {
+            let insert_sql = String::from_utf8_lossy(&insert);
+            match self.conn.execute(&insert_sql, []) {
+                Ok(_) => {
+                    stats.rows_inserted += Self::count_insert_rows(&insert_sql);
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // If table doesn't exist, mark it and skip future inserts
+                    if err_str.contains("does not exist") {
+                        failed_tables.insert(header.table.clone());
+                        if stats.warnings.len() < 100 {
+                            stats.warnings.push(format!(
+                                "Table {} does not exist, skipping COPY data",
+                                header.table
+                            ));
+                        }
+                        return; // Skip rest of batch
+                    }
+                    // Limit warnings to avoid memory bloat on large failures
+                    if stats.warnings.len() < 100 {
+                        stats.warnings.push(format!(
+                            "Failed to insert COPY data for {}: {}",
+                            header.table, e
+                        ));
+                    }
+                    stats.statements_skipped += 1;
+                }
+            }
+        }
+    }
+
+    /// Check if a table exists in DuckDB
+    fn table_exists(&self, table: &str) -> bool {
+        let query = "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1";
+        match self.conn.prepare(query) {
+            Ok(mut stmt) => stmt.exists([table]).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Skip a COPY data block without parsing/processing it
+    fn skip_copy_block<R: Read>(parser: &mut StatementReader<R>) {
+        while let Some(Ok(line)) = parser.next_statement() {
+            if line.trim() == "\\." {
+                break;
+            }
+        }
+    }
+
+    /// Check if a line looks like COPY data (tab-separated values or single-column values)
     fn looks_like_copy_data(line: &str) -> bool {
-        // COPY data contains tabs and doesn't start with SQL keywords
-        line.contains('\t')
-            && !line.to_uppercase().starts_with("SELECT")
-            && !line.to_uppercase().starts_with("INSERT")
-            && !line.to_uppercase().starts_with("CREATE")
-            && !line.to_uppercase().starts_with("DROP")
-            && !line.to_uppercase().starts_with("ALTER")
+        let trimmed = line.trim();
+
+        // Empty line is not COPY data
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        // End-of-COPY marker
+        if trimmed == "\\." {
+            return false;
+        }
+
+        // Lines with tabs are definitely COPY data (multi-column)
+        // For single-column data, we need to check it doesn't look like SQL
+        let first_char = trimmed.chars().next().unwrap_or(' ');
+
+        // Quick check: if starts with common SQL keyword first char, verify it's not SQL
+        if matches!(
+            first_char,
+            'S' | 's'
+                | 'I'
+                | 'i'
+                | 'C'
+                | 'c'
+                | 'D'
+                | 'd'
+                | 'A'
+                | 'a'
+                | 'U'
+                | 'u'
+                | 'G'
+                | 'g'
+                | '-'
+                | '/'
+        ) {
+            let upper_prefix: String = trimmed.chars().take(7).collect::<String>().to_uppercase();
+            if upper_prefix.starts_with("SELECT")
+                || upper_prefix.starts_with("INSERT")
+                || upper_prefix.starts_with("CREATE")
+                || upper_prefix.starts_with("DROP")
+                || upper_prefix.starts_with("ALTER")
+                || upper_prefix.starts_with("UPDATE")
+                || upper_prefix.starts_with("GRANT")
+                || upper_prefix.starts_with("--")
+                || upper_prefix.starts_with("/*")
+            {
+                return false;
+            }
+        }
+
+        // If it contains a tab, it's multi-column COPY data
+        // If it doesn't contain a tab but passed the SQL check, it's single-column data
+        true
     }
 
     /// Convert a CREATE TABLE statement to DuckDB-compatible SQL
@@ -510,10 +713,11 @@ impl<'a> DumpLoader<'a> {
 
         // Remove IDENTITY clause and make the column nullable (so INSERTs without id work)
         // Pattern matches: INT IDENTITY(1,1) NOT NULL -> INT
-        static RE_IDENTITY_NOT_NULL: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)\s*NOT\s+NULL").unwrap());
+        static RE_IDENTITY_NOT_NULL: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)\s*NOT\s+NULL").unwrap()
+        });
         result = RE_IDENTITY_NOT_NULL.replace_all(&result, "").to_string();
-        
+
         // Also handle IDENTITY without NOT NULL
         static RE_IDENTITY: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
@@ -530,19 +734,19 @@ impl<'a> DumpLoader<'a> {
         result = RE_FILEGROUP.replace_all(&result, "").to_string();
 
         // Remove PRIMARY KEY constraints (they make columns NOT NULL which breaks IDENTITY column INSERTs)
-        static RE_PK_CONSTRAINT: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+PRIMARY\s+KEY\s+\([^)]+\)"#).unwrap());
+        static RE_PK_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+PRIMARY\s+KEY\s+\([^)]+\)"#).unwrap()
+        });
         result = RE_PK_CONSTRAINT.replace_all(&result, "").to_string();
 
         // Remove FOREIGN KEY constraints (analytics queries don't need FK enforcement)
-        static RE_FK_CONSTRAINT: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+[^\s(]+\s*\([^)]+\)"#).unwrap());
+        static RE_FK_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+[^\s(]+\s*\([^)]+\)"#).unwrap()
+        });
         result = RE_FK_CONSTRAINT.replace_all(&result, "").to_string();
 
         // Remove WITH clause for indexes
-        static RE_WITH: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\s*WITH\s*\([^)]+\)").unwrap()
-        });
+        static RE_WITH: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*WITH\s*\([^)]+\)").unwrap());
         result = RE_WITH.replace_all(&result, "").to_string();
 
         // Remove TEXTIMAGE_ON
@@ -553,12 +757,15 @@ impl<'a> DumpLoader<'a> {
         // Convert GETDATE() to CURRENT_TIMESTAMP
         static RE_GETDATE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\bGETDATE\s*\(\s*\)").unwrap());
-        result = RE_GETDATE.replace_all(&result, "CURRENT_TIMESTAMP").to_string();
+        result = RE_GETDATE
+            .replace_all(&result, "CURRENT_TIMESTAMP")
+            .to_string();
 
         // Convert NEWID() to gen_random_uuid()
-        static RE_NEWID: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\bNEWID\s*\(\s*\)").unwrap());
-        result = RE_NEWID.replace_all(&result, "gen_random_uuid()").to_string();
+        static RE_NEWID: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNEWID\s*\(\s*\)").unwrap());
+        result = RE_NEWID
+            .replace_all(&result, "gen_random_uuid()")
+            .to_string();
 
         result
     }
@@ -602,7 +809,11 @@ struct StatementReader<R> {
     reader: BufReader<R>,
     dialect: SqlDialect,
     buffer: String,
+    /// Position in buffer where unprocessed data starts (avoids O(n) shifts)
+    buffer_pos: usize,
     eof: bool,
+    /// Track if we're inside a PostgreSQL COPY data block
+    in_copy_mode: bool,
 }
 
 impl<R: Read> StatementReader<R> {
@@ -611,19 +822,81 @@ impl<R: Read> StatementReader<R> {
             reader,
             dialect,
             buffer: String::new(),
+            buffer_pos: 0,
             eof: false,
+            in_copy_mode: false,
         }
     }
 
+    /// Compact the buffer by removing already-processed data
+    /// Only called periodically to avoid O(n²) behavior
+    fn compact_buffer(&mut self) {
+        if self.buffer_pos > 0 {
+            self.buffer.drain(..self.buffer_pos);
+            self.buffer_pos = 0;
+        }
+    }
+
+    /// Get the unprocessed portion of the buffer
+    fn remaining_buffer(&self) -> &str {
+        &self.buffer[self.buffer_pos..]
+    }
+
+    /// Set COPY mode explicitly (called by DumpLoader when entering/exiting COPY blocks)
+    fn set_copy_mode(&mut self, enabled: bool) {
+        self.in_copy_mode = enabled;
+    }
+
+    /// Strip leading SQL comments (-- and /* */) from a string
+    fn strip_leading_sql_comments(s: &str) -> &str {
+        let mut result = s.trim();
+        loop {
+            // Skip -- line comments
+            if result.starts_with("--") {
+                if let Some(pos) = result.find('\n') {
+                    result = result[pos + 1..].trim();
+                    continue;
+                } else {
+                    return ""; // Only comment, no newline
+                }
+            }
+            // Skip /* */ block comments
+            if result.starts_with("/*") {
+                if let Some(pos) = result.find("*/") {
+                    result = result[pos + 2..].trim();
+                    continue;
+                } else {
+                    return ""; // Unclosed block comment
+                }
+            }
+            break;
+        }
+        result
+    }
+
     fn next_statement(&mut self) -> Option<Result<String>> {
-        if self.eof && self.buffer.is_empty() {
+        if self.eof && self.remaining_buffer().is_empty() {
             return None;
         }
 
         loop {
-            // Try to find a complete statement in the buffer
-            if let Some(stmt) = self.extract_statement() {
-                return Some(Ok(stmt));
+            // In COPY mode, return each line individually until we see \.
+            if self.in_copy_mode {
+                if let Some(line) = self.extract_copy_line() {
+                    return Some(Ok(line));
+                }
+            } else {
+                // Try to find a complete statement in the buffer
+                if let Some(stmt) = self.extract_statement() {
+                    // COPY mode is now managed explicitly by DumpLoader via set_copy_mode()
+                    return Some(Ok(stmt));
+                }
+            }
+
+            // Compact buffer periodically to prevent unbounded growth
+            // Only compact when processed portion is significant
+            if self.buffer_pos > 64 * 1024 {
+                self.compact_buffer();
             }
 
             // Read more data
@@ -631,8 +904,12 @@ impl<R: Read> StatementReader<R> {
             match self.reader.read_line(&mut line) {
                 Ok(0) => {
                     self.eof = true;
-                    if !self.buffer.trim().is_empty() {
-                        let stmt = std::mem::take(&mut self.buffer);
+                    self.in_copy_mode = false; // Reset on EOF
+                    let remaining = self.remaining_buffer().trim();
+                    if !remaining.is_empty() {
+                        let stmt = remaining.to_string();
+                        self.buffer.clear();
+                        self.buffer_pos = 0;
                         return Some(Ok(stmt));
                     }
                     return None;
@@ -645,26 +922,42 @@ impl<R: Read> StatementReader<R> {
         }
     }
 
+    /// Extract a single line from the buffer for COPY data mode
+    fn extract_copy_line(&mut self) -> Option<String> {
+        let remaining = self.remaining_buffer();
+        if let Some(newline_pos) = remaining.find('\n') {
+            let line = remaining[..newline_pos].to_string();
+            self.buffer_pos += newline_pos + 1;
+            // COPY mode is managed by DumpLoader via set_copy_mode(), not here
+            Some(line)
+        } else {
+            None
+        }
+    }
+
     fn extract_statement(&mut self) -> Option<String> {
+        let remaining = self.remaining_buffer();
         let mut in_string = false;
         let mut in_dollar_quote = false;
         let mut in_bracket = false;
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
         let mut escape_next = false;
-        let mut chars = self.buffer.char_indices().peekable();
+        let mut chars = remaining.char_indices().peekable();
         let mut end_pos = None;
 
         // For MSSQL, check for GO at start of line
         if self.dialect == SqlDialect::Mssql {
             if let Some(go_pos) = self.find_go_separator() {
-                let stmt = self.buffer[..go_pos].to_string();
+                let stmt = remaining[..go_pos].to_string();
                 // Skip past GO and any whitespace
-                let after_go = &self.buffer[go_pos..];
+                let after_go = &remaining[go_pos..];
                 if let Some(line_end) = after_go.find('\n') {
-                    self.buffer = after_go[line_end + 1..].to_string();
+                    self.buffer_pos += go_pos + line_end + 1;
                 } else {
-                    self.buffer.clear();
+                    self.buffer_pos = self.buffer.len();
                 }
-                
+
                 let trimmed = stmt.trim();
                 if trimmed.is_empty()
                     || trimmed.starts_with("--")
@@ -679,6 +972,23 @@ impl<R: Read> StatementReader<R> {
         while let Some((i, c)) = chars.next() {
             if escape_next {
                 escape_next = false;
+                continue;
+            }
+
+            // Handle line comments (-- to end of line)
+            if in_line_comment {
+                if c == '\n' {
+                    in_line_comment = false;
+                }
+                continue;
+            }
+
+            // Handle block comments (/* to */)
+            if in_block_comment {
+                if c == '*' && chars.peek().map(|(_, c)| *c == '/').unwrap_or(false) {
+                    chars.next();
+                    in_block_comment = false;
+                }
                 continue;
             }
 
@@ -707,6 +1017,20 @@ impl<R: Read> StatementReader<R> {
                         chars.next();
                     }
                 }
+                '-' if !in_string && !in_dollar_quote && !in_bracket => {
+                    // Check for -- line comment
+                    if chars.peek().map(|(_, c)| *c == '-').unwrap_or(false) {
+                        chars.next();
+                        in_line_comment = true;
+                    }
+                }
+                '/' if !in_string && !in_dollar_quote && !in_bracket => {
+                    // Check for /* block comment
+                    if chars.peek().map(|(_, c)| *c == '*').unwrap_or(false) {
+                        chars.next();
+                        in_block_comment = true;
+                    }
+                }
                 ';' if !in_string && !in_dollar_quote && !in_bracket => {
                     end_pos = Some(i + 1);
                     break;
@@ -716,16 +1040,31 @@ impl<R: Read> StatementReader<R> {
         }
 
         if let Some(pos) = end_pos {
-            let stmt = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos..].trim_start().to_string();
+            let stmt = remaining[..pos].to_string();
+            // Skip past the statement and any leading whitespace
+            let after_stmt = &remaining[pos..];
+            let trimmed_len = after_stmt.len() - after_stmt.trim_start().len();
+            self.buffer_pos += pos + trimmed_len;
 
             // Skip empty statements and comments
             let trimmed = stmt.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("--")
-                || (trimmed.starts_with("/*") && !trimmed.contains("/*!"))
-            {
+
+            // Strip leading comments from the statement before checking if it's just a comment
+            let stripped = Self::strip_leading_sql_comments(trimmed);
+            if stripped.is_empty() {
                 return self.extract_statement();
+            }
+
+            // Use the stripped version for further processing
+            let trimmed = stripped;
+
+            // For Postgres COPY statements, auto-enter copy mode
+            // This prevents accumulating COPY data while looking for the next semicolon
+            if self.dialect == SqlDialect::Postgres {
+                let upper = trimmed.to_uppercase();
+                if upper.ends_with("FROM STDIN;") && upper.contains("COPY ") {
+                    self.in_copy_mode = true;
+                }
             }
 
             Some(stmt)
@@ -736,11 +1075,12 @@ impl<R: Read> StatementReader<R> {
 
     /// Find GO batch separator at start of line (MSSQL)
     fn find_go_separator(&self) -> Option<usize> {
+        let remaining = self.remaining_buffer();
         let mut in_string = false;
         let mut in_bracket = false;
         let mut line_start = 0;
-        
-        for (i, c) in self.buffer.char_indices() {
+
+        for (i, c) in remaining.char_indices() {
             if c == '\'' && !in_bracket {
                 in_string = !in_string;
             } else if c == '[' && !in_string {
@@ -751,13 +1091,22 @@ impl<R: Read> StatementReader<R> {
                 line_start = i + 1;
             } else if !in_string && !in_bracket && i == line_start {
                 // Check for GO at start of line
-                let rest = &self.buffer[i..];
+                let rest = &remaining[i..];
                 if rest.len() >= 2 {
                     let word = &rest[..2.min(rest.len())];
                     if word.eq_ignore_ascii_case("GO") {
                         // Make sure it's just GO (not GO_SOMETHING)
-                        let after_go = if rest.len() > 2 { rest.chars().nth(2) } else { None };
-                        if after_go.is_none() || after_go == Some('\n') || after_go == Some('\r') || after_go == Some(' ') || after_go.unwrap().is_ascii_digit() {
+                        let after_go = if rest.len() > 2 {
+                            rest.chars().nth(2)
+                        } else {
+                            None
+                        };
+                        if after_go.is_none()
+                            || after_go == Some('\n')
+                            || after_go == Some('\r')
+                            || after_go == Some(' ')
+                            || after_go.unwrap().is_ascii_digit()
+                        {
                             return Some(i);
                         }
                     }
@@ -822,16 +1171,23 @@ mod tests {
         // The IDENTITY should have been stripped by strip_mssql_syntax
         let result = DumpLoader::strip_mssql_syntax(sql);
         assert!(!result.contains("IDENTITY"), "IDENTITY should be stripped");
-        
+
         // Test with IDENTITY(1,1) NOT NULL
         let sql_with_identity = r#"CREATE TABLE "users" (
     "id" INTEGER IDENTITY(1,1) NOT NULL,
     "email" VARCHAR(255) NOT NULL
 )"#;
         let result2 = DumpLoader::strip_mssql_syntax(sql_with_identity);
-        assert!(!result2.contains("IDENTITY"), "IDENTITY should be stripped: {}", result2);
+        assert!(
+            !result2.contains("IDENTITY"),
+            "IDENTITY should be stripped: {}",
+            result2
+        );
         // Since we strip IDENTITY(1,1) NOT NULL, the column should become nullable
-        assert!(!result2.contains("IDENTITY(1,1) NOT NULL"), "Should strip full IDENTITY NOT NULL");
+        assert!(
+            !result2.contains("IDENTITY(1,1) NOT NULL"),
+            "Should strip full IDENTITY NOT NULL"
+        );
     }
 
     #[test]

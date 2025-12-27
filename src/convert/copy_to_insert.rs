@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 /// Maximum rows per INSERT statement (for readability and transaction size)
-const MAX_ROWS_PER_INSERT: usize = 100;
+const MAX_ROWS_PER_INSERT: usize = 1000;
 
 /// Result of parsing a COPY header
 #[derive(Debug, Clone)]
@@ -113,6 +113,9 @@ pub fn copy_to_inserts(
     let table_ref = if let Some(ref schema) = header.schema {
         if target_dialect == crate::parser::SqlDialect::MySql {
             // MySQL: just use table name without schema
+            format!("{}{}{}", quote_char, header.table, quote_char)
+        } else if schema == "public" || schema == "pg_catalog" {
+            // Common PostgreSQL schemas - strip for DuckDB compatibility
             format!("{}{}{}", quote_char, header.table, quote_char)
         } else {
             format!(

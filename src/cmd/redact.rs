@@ -34,7 +34,10 @@ pub fn run(
             "postgres" | "postgresql" => SqlDialect::Postgres,
             "sqlite" => SqlDialect::Sqlite,
             "mssql" | "sqlserver" | "sql_server" | "tsql" => SqlDialect::Mssql,
-            _ => anyhow::bail!("Unknown dialect: {}. Use: mysql, postgres, sqlite, mssql", d),
+            _ => anyhow::bail!(
+                "Unknown dialect: {}. Use: mysql, postgres, sqlite, mssql",
+                d
+            ),
         }
     } else {
         // Auto-detect from file content

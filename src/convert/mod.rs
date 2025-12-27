@@ -750,17 +750,17 @@ impl Converter {
         use regex::Regex;
 
         // Match INT IDENTITY(1,1) and replace with SERIAL
-        static RE_BIGINT_IDENTITY: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\bBIGINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap()
-        });
-        static RE_INT_IDENTITY: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\bINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap()
-        });
+        static RE_BIGINT_IDENTITY: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bBIGINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
+        static RE_INT_IDENTITY: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\bINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
         static RE_SMALLINT_IDENTITY: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r"(?i)\bSMALLINT\s+IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap()
         });
 
-        let result = RE_BIGINT_IDENTITY.replace_all(stmt, "BIGSERIAL").to_string();
+        let result = RE_BIGINT_IDENTITY
+            .replace_all(stmt, "BIGSERIAL")
+            .to_string();
         let result = RE_INT_IDENTITY.replace_all(&result, "SERIAL").to_string();
         RE_SMALLINT_IDENTITY
             .replace_all(&result, "SMALLSERIAL")
@@ -991,8 +991,7 @@ impl Converter {
         use once_cell::sync::Lazy;
         use regex::Regex;
 
-        static RE_CLUSTERED: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\bCLUSTERED\s+").unwrap());
+        static RE_CLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bCLUSTERED\s+").unwrap());
         static RE_NONCLUSTERED: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\bNONCLUSTERED\s+").unwrap());
 
@@ -1007,8 +1006,7 @@ impl Converter {
 
         // Match N'...' unicode strings, being careful not to match inside strings
         // This is a simplified version that handles most cases
-        static RE_UNICODE_STRING: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\bN'").unwrap());
+        static RE_UNICODE_STRING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bN'").unwrap());
 
         RE_UNICODE_STRING.replace_all(stmt, "'").to_string()
     }
@@ -1020,9 +1018,8 @@ impl Converter {
 
         // Match [dbo].[table] or dbo.table and keep just [table] or table
         // We replace schema.table with just table, handling both bracketed and unbracketed forms
-        static RE_MSSQL_SCHEMA: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\[?dbo\]?\s*\.\s*").unwrap()
-        });
+        static RE_MSSQL_SCHEMA: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\[?dbo\]?\s*\.\s*").unwrap());
 
         RE_MSSQL_SCHEMA.replace_all(stmt, "").to_string()
     }

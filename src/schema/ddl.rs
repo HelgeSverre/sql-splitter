@@ -21,13 +21,17 @@ static CREATE_TABLE_NAME_RE: Lazy<Regex> = Lazy::new(|| {
 /// Regex to extract table name from ALTER TABLE
 /// Supports: `table` (MySQL), "table" (PostgreSQL), [table] (MSSQL), table (SQLite/unquoted), schema.table
 static ALTER_TABLE_NAME_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s]+)[\]`"]?"#).unwrap()
+    Regex::new(
+        r#"(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s]+)[\]`"]?"#,
+    )
+    .unwrap()
 });
 
 /// Regex for column definition
 /// Supports: `column` (MySQL), "column" (PostgreSQL), [column] (MSSQL), column (unquoted)
 static COLUMN_DEF_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"^\s*[\[`"]?([^\[\]`"\s,]+)[\]`"]?\s+(\w+(?:\([^)]+\))?(?:\s+unsigned)?)"#).unwrap()
+    Regex::new(r#"^\s*[\[`"]?([^\[\]`"\s,]+)[\]`"]?\s+(\w+(?:\([^)]+\))?(?:\s+unsigned)?)"#)
+        .unwrap()
 });
 
 /// Regex for PRIMARY KEY constraint

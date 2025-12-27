@@ -338,9 +338,8 @@ static CREATE_INDEX_RE: Lazy<Regex> =
 // MSSQL CREATE INDEX: extracts table from ON [schema].[table] or ON [table]
 // Matches: ON [table], ON [dbo].[table], ON [db].[dbo].[table]
 // Captures the last bracketed or unbracketed identifier before (
-static CREATE_INDEX_MSSQL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)ON\s+(?:\[?[^\[\]\s]+\]?\s*\.\s*)*\[([^\[\]]+)\]").unwrap()
-});
+static CREATE_INDEX_MSSQL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)ON\s+(?:\[?[^\[\]\s]+\]?\s*\.\s*)*\[([^\[\]]+)\]").unwrap());
 
 static ALTER_TABLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)ALTER\s+TABLE\s+`?([^\s`;]+)`?").unwrap());
@@ -662,7 +661,7 @@ impl<R: Read> Parser<R> {
                 } else if b == b'[' && !inside_single_quote {
                     inside_bracket_quote = true;
                 } else if b == b']' && inside_bracket_quote {
-                    // Check for escaped ]] 
+                    // Check for escaped ]]
                     if i + 1 < buf.len() && buf[i + 1] == b']' {
                         // Skip the escape sequence - consume one extra ]
                         continue;
@@ -686,7 +685,11 @@ impl<R: Read> Parser<R> {
                         // Remove the GO line from the buffer
                         self.stmt_buffer.truncate(line_start);
                         // Trim trailing whitespace from the statement
-                        while self.stmt_buffer.last().is_some_and(|&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t') {
+                        while self
+                            .stmt_buffer
+                            .last()
+                            .is_some_and(|&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
+                        {
                             self.stmt_buffer.pop();
                         }
                         // If we have content, return it
@@ -1023,7 +1026,7 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
             let b = stmt[i];
             if quote_char.is_some() {
                 if b == close_char {
-                    // For MSSQL, check for escaped ]] 
+                    // For MSSQL, check for escaped ]]
                     if dialect == SqlDialect::Mssql
                         && close_char == b']'
                         && i + 1 < stmt.len()

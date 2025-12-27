@@ -236,17 +236,36 @@ From GNU time output:
 - **Elapsed (wall clock) time**: Total execution time
 - **User time (seconds)**: CPU time in user mode
 
-### Example Output
+### Example Output (large size: ~125MB)
 
 ```
-Command      Dialect    File Size    Peak RSS    Wall Time   Extra Args
+Command      Dialect      File Size     Peak RSS   Wall Time  Extra Args
 ------------------------------------------------------------
-analyze      mysql        2.05 MB      6.50 MB     0:00.05
-split        mysql        2.05 MB      7.20 MB     0:00.08
-validate     mysql        2.05 MB     12.30 MB     0:00.15   --check-fk
-sample       mysql        2.05 MB      8.10 MB     0:00.12
-sample       mysql        2.05 MB      8.50 MB     0:00.14   --preserve-relations
+analyze      mysql        123.72 MB      6.85 MB     0:00.28
+split        mysql        123.72 MB      9.93 MB     0:00.31
+validate     mysql        123.72 MB     81.65 MB     0:01.50
+validate     mysql        123.72 MB      9.60 MB     0:00.28  --no-fk-checks
+sample       mysql        123.72 MB     15.90 MB     0:02.03
+diff         mysql        123.72 MB    131.48 MB     0:02.98
+redact       mysql        123.72 MB      9.09 MB     0:00.66
+graph        mysql        123.72 MB      8.59 MB     0:00.31
+order        mysql        123.72 MB    140.85 MB     0:00.41
+query        mysql        123.72 MB     99.89 MB     0:36.51
+shard        mysql        123.72 MB      5.65 MB     0:00.01
+convert      mysql        123.72 MB     12.26 MB     0:00.84
 ```
+
+### Query Command Performance by Dialect
+
+The `query` command shows significant performance differences based on dialect:
+
+| Dialect | File Size | Query Time | Peak RSS | Notes |
+|---------|-----------|------------|----------|-------|
+| PostgreSQL | 111 MB | 6.4s | 101 MB | Uses COPY (fast batch import) |
+| MySQL | 124 MB | 36.5s | 100 MB | Uses INSERT (row-by-row parsing) |
+| SQLite | 124 MB | 37.2s | 210 MB | Uses INSERT (row-by-row parsing) |
+
+PostgreSQL dumps are ~6x faster to query because COPY blocks are efficiently batched.
 
 ### Memory Optimization Guidelines
 
@@ -509,16 +528,24 @@ sql-splitter/
 
 ## Test Performance
 
+### Test Suite Overview
+
+The test suite includes 780+ tests across multiple test files:
+- `duckdb_test.rs`: 150 tests for DuckDB query functionality
+- Unit tests for parser, splitter, analyzer, converter, etc.
+- Integration tests for various commands
+
 ### cargo test vs cargo-nextest
 
-For this codebase, `cargo test` is faster than `cargo-nextest`:
+For this codebase, both runners perform similarly:
 
-| Runner | Wall Clock | CPU Time | Notes |
-|--------|------------|----------|-------|
-| `cargo test` | ~8s | ~38s | Default, runs tests in same process |
-| `cargo nextest run` | ~9s | ~80s | Per-test process isolation |
+| Runner | Wall Clock | CPU Usage | Notes |
+|--------|------------|-----------|-------|
+| `cargo test` | ~20s | 342% | Default, in-process parallelism |
+| `cargo nextest run` | ~19s | 755% | Per-test process isolation, better parallelism |
 
-**Recommendation:** Use `cargo test` for development. Consider `cargo nextest` only when:
-- You need better test failure diagnostics
+**Recommendation:** Use `cargo test` for development (simpler). Consider `cargo nextest` when:
+- You need better test failure diagnostics (clearer output)
 - You need test retries (`--retries`)
+- You want maximum parallelization on many-core machines
 - Tests have resource conflicts requiring process isolation

@@ -210,7 +210,10 @@ impl Splitter {
                 // For MSSQL, add semicolon if statement doesn't end with one
                 // (MSSQL uses GO as batch separator, but we need semicolons for re-parsing)
                 if self.config.dialect == SqlDialect::Mssql {
-                    let trimmed = stmt.iter().rev().find(|&&b| b != b'\n' && b != b'\r' && b != b' ' && b != b'\t');
+                    let trimmed = stmt
+                        .iter()
+                        .rev()
+                        .find(|&&b| b != b'\n' && b != b'\r' && b != b' ' && b != b'\t');
                     if trimmed != Some(&b';') {
                         let mut stmt_with_semicolon = stmt.clone();
                         stmt_with_semicolon.push(b';');

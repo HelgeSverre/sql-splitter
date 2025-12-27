@@ -826,8 +826,14 @@ GO
         result.contains("INTEGER") || result.contains("BIGINT"),
         "Should convert to INTEGER or BIGINT"
     );
-    assert!(result.contains("TEXT"), "Should convert NVARCHAR(MAX) to TEXT");
-    assert!(result.contains("BLOB"), "Should convert VARBINARY(MAX) to BLOB");
+    assert!(
+        result.contains("TEXT"),
+        "Should convert NVARCHAR(MAX) to TEXT"
+    );
+    assert!(
+        result.contains("BLOB"),
+        "Should convert VARBINARY(MAX) to BLOB"
+    );
 }
 
 // Other Dialects → MSSQL tests
