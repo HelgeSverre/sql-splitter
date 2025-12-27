@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.4] - 2025-12-27
+
+### Added
+
+- **MSSQL dialect support for test data generator**: The `gen-fixtures` CLI and `test_data_gen` crate now support MSSQL dialect
+  - Square bracket `[identifier]` quoting for table and column names
+  - `INT IDENTITY(1,1)` for auto-increment primary keys
+  - `NVARCHAR(n)` and `NVARCHAR(MAX)` for Unicode string columns
+  - `N'...'` prefix for Unicode string literals
+  - `DATETIME2` for timestamp columns
+  - `BIT` for boolean columns
+  - `DECIMAL(10,2)` for monetary values
+  - Proper `SET ANSI_NULLS ON`, `SET QUOTED_IDENTIFIER ON`, `SET NOCOUNT ON` header
+  - Both streaming mode (`--rows`) and multi-tenant schema mode (`--scale`) supported
+  - Usage: `gen-fixtures --dialect mssql --scale small`
+
 ## [1.12.3] - 2025-12-27
 
 ### Fixed

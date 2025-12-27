@@ -175,6 +175,21 @@ impl SqlValue {
             SqlValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
         }
     }
+
+    /// Format for MSSQL INSERT statement
+    pub fn to_mssql(&self) -> String {
+        match self {
+            SqlValue::Null => "NULL".to_string(),
+            SqlValue::Int(n) => n.to_string(),
+            SqlValue::Float(n) => format!("{:.2}", n),
+            SqlValue::String(s) => format!("N'{}'", escape_mssql_string(s)),
+            SqlValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        }
+    }
+}
+
+fn escape_mssql_string(s: &str) -> String {
+    s.replace('\'', "''")
 }
 
 fn escape_mysql_string(s: &str) -> String {

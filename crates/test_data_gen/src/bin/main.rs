@@ -18,7 +18,7 @@ use test_data_gen::{
 #[command(name = "gen-fixtures")]
 #[command(about = "Generate SQL test fixtures for sql-splitter", long_about = None)]
 struct Args {
-    /// SQL dialect: mysql, postgres, sqlite
+    /// SQL dialect: mysql, postgres, sqlite, mssql
     #[arg(short, long, default_value = "mysql")]
     dialect: String,
 
