@@ -21,9 +21,9 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 8. ✅ Redact — Data anonymization (v1.10.0)
 9. ✅ Graph — ERD generation and FK visualization (v1.11.0)
 10. ✅ Query — SQL analytics with DuckDB (v1.12.0)
+11. ✅ MSSQL — Fourth dialect support (SQL Server) (v1.12.x)
 
-**Next (v1.13+):**
-- v1.13.0: MSSQL — Fourth dialect support (SQL Server)
+**Next (v1.14+):**
 - v1.14.0: Migrate — Schema migration generation
 
 **Future (v2.x):**
@@ -437,29 +437,49 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.13+)
-
----
-
-### v1.13.0 — MSSQL Support
+### v1.12.x — MSSQL Support ✅ RELEASED
+**Released**: 2025-12-27  
 **Theme**: Fourth dialect (SQL Server)
 
-| Feature | Effort | Notes |
+| Feature | Status | Notes |
 |---------|--------|-------|
-| MSSQL dialect | ~40-50h | Full SQL Server support for all commands |
+| **MSSQL dialect** | ✅ Done | Full SQL Server support for all commands |
+| ├─ Parser support | ✅ Done | GO batches, square brackets, IDENTITY |
+| ├─ Schema parsing | ✅ Done | CLUSTERED/NONCLUSTERED, CONSTRAINT syntax |
+| ├─ Dialect detection | ✅ Done | Auto-detect from SET ANSI_NULLS, brackets, etc. |
+| ├─ Unicode strings | ✅ Done | N'...' handling |
+| └─ DuckDB integration | ✅ Done | IDENTITY stripping, type conversion |
+| **All commands** | ✅ Done | |
+| ├─ split | ✅ Done | Splits MSSQL dumps by table |
+| ├─ merge | ✅ Done | Merges with MSSQL headers |
+| ├─ analyze | ✅ Done | Statistics for MSSQL dumps |
+| ├─ sample | ✅ Done | FK-aware sampling |
+| ├─ shard | ✅ Done | Tenant extraction with auto-detect |
+| ├─ convert | ✅ Done | All 12 conversion pairs |
+| ├─ validate | ✅ Done | PK/FK validation |
+| ├─ diff | ✅ Done | Schema + data comparison |
+| ├─ redact | ✅ Done | Data anonymization |
+| ├─ graph | ✅ Done | ERD generation |
+| ├─ order | ✅ Done | Topological ordering |
+| └─ query | ✅ Done | DuckDB analytics |
+| **Testing** | ✅ Done | 29 MSSQL integration tests |
 
-**Features:**
+**Delivered:**
 - Parse MSSQL dumps (SSMS-generated scripts, sqlcmd, Azure Data Studio)
 - Convert to/from MySQL, PostgreSQL, SQLite (12 conversion pairs total)
 - Handle T-SQL syntax (GO batches, square brackets, IDENTITY)
 - Support unicode strings (N'...')
-- Full support in all commands: split, merge, analyze, sample, shard, convert, validate, diff, redact, graph, order, query
 - DuckDB query integration for MSSQL dumps
+- Static test fixtures in `tests/fixtures/static/mssql/`
 
-**Out of scope:**
+**Out of scope (not planned):**
 - bcp file parsing (binary format)
 - Native backups (.bak files)
 - DACPAC/BACPAC support
+
+---
+
+## Upcoming Features (v1.14+)
 
 ---
 
@@ -578,12 +598,12 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ### Upcoming Features (v1.13+)
 
-| Version | Features | Effort | Duration |
-|---------|----------|--------|----------|
-| v1.13.0 | MSSQL | ~40-50h | 2-3 weeks |
-| v1.14.0 | Migrate | ~40h | 2 weeks |
-| v2.0.0 | Parallel | ~60h | 3 weeks |
-| v2.1.0 | Infer | ~50h | 2-3 weeks |
+| Version | Features | Status |
+|---------|----------|--------|
+| v1.12.x | MSSQL | ✅ Released |
+| v1.14.0 | Migrate | Planned |
+| v2.0.0 | Parallel | Planned |
+| v2.1.0 | Infer | Planned |
 
 ---
 
@@ -649,6 +669,13 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
     - Interactive REPL with meta-commands
     - Persistent caching with 400x speedup
     - 674 total tests (119 DuckDB-specific)
+
+14. ✅ **v1.12.x — MSSQL** — Released
+    - Fourth dialect: SQL Server / T-SQL
+    - Full support in all 12 commands
+    - GO batch separator, bracket identifiers, IDENTITY
+    - Unicode strings (N'...'), CLUSTERED indexes
+    - 29 MSSQL integration tests
 
 ---
 
