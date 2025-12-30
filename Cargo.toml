@@ -42,7 +42,7 @@ fake = { version = "3.0", features = ["derive"] }
 sha2 = "0.10"
 hex = "0.4"
 duckdb = { version = "1.4", features = ["bundled"] }
-dirs = "5"
+dirs = "6"
 rustyline = "17"
 
 [dev-dependencies]
