@@ -44,13 +44,22 @@ INSERT INTO `users` (`id`, `email`, `password`, `name`) VALUES (2, 'bob@example.
     let stats = redactor.run().unwrap();
 
     assert_eq!(stats.rows_redacted, 2, "Should redact 2 rows");
-    assert_eq!(stats.columns_redacted, 2, "Should redact 2 password columns");
+    assert_eq!(
+        stats.columns_redacted, 2,
+        "Should redact 2 password columns"
+    );
 
     let output = fs::read_to_string(&output_file).unwrap();
     assert!(output.contains("NULL"), "Password should be NULL");
     // Original passwords should not appear in redacted output
-    assert!(!output.contains("secret123"), "Original password should not appear");
-    assert!(!output.contains("password456"), "Original password should not appear");
+    assert!(
+        !output.contains("secret123"),
+        "Original password should not appear"
+    );
+    assert!(
+        !output.contains("password456"),
+        "Original password should not appear"
+    );
 }
 
 #[test]
@@ -239,13 +248,22 @@ COPY users (id, email, password) FROM stdin;
     let stats = redactor.run().unwrap();
 
     assert_eq!(stats.rows_redacted, 2, "Should redact 2 COPY rows");
-    assert_eq!(stats.columns_redacted, 2, "Should redact 2 password columns");
+    assert_eq!(
+        stats.columns_redacted, 2,
+        "Should redact 2 password columns"
+    );
 
     let output = fs::read_to_string(&output_file).unwrap();
     // Passwords should be replaced with \N (NULL marker in COPY)
     assert!(output.contains("\\N"), "Password should be NULL marker \\N");
-    assert!(!output.contains("secret123"), "Original password should not appear");
-    assert!(!output.contains("password456"), "Original password should not appear");
+    assert!(
+        !output.contains("secret123"),
+        "Original password should not appear"
+    );
+    assert!(
+        !output.contains("password456"),
+        "Original password should not appear"
+    );
 }
 
 #[test]
@@ -362,7 +380,7 @@ INSERT INTO "users" ("id", "email", "password") VALUES (2, 'bob@test.org', 'pass
     let output = fs::read_to_string(&output_file).unwrap();
     assert!(output.contains("NULL"));
     assert!(!output.contains("secret"));
-    assert!(!output.contains("password'"));  // 'password' as literal
+    assert!(!output.contains("password'")); // 'password' as literal
 }
 
 // ============================================================================
@@ -400,7 +418,10 @@ INSERT INTO `users` VALUES (1, 'alice@example.com');
 
     assert!(stats.tables_processed > 0);
     // File should not be created in dry run mode
-    assert!(!output_file.exists(), "Dry run should not create output file");
+    assert!(
+        !output_file.exists(),
+        "Dry run should not create output file"
+    );
 }
 
 // ============================================================================
@@ -446,7 +467,10 @@ INSERT INTO `logs` VALUES (1, 'log@example.com');
 
     let output = fs::read_to_string(&output_file).unwrap();
     // logs email should be preserved (table was skipped)
-    assert!(output.contains("log@example.com"), "Skipped table data should be preserved");
+    assert!(
+        output.contains("log@example.com"),
+        "Skipped table data should be preserved"
+    );
 }
 
 // ============================================================================
@@ -485,7 +509,10 @@ INSERT INTO `users` VALUES (1, 'Original Name');
     assert_eq!(stats.rows_redacted, 1);
 
     let output = fs::read_to_string(&output_file).unwrap();
-    assert!(!output.contains("Original Name"), "Original name should be replaced");
+    assert!(
+        !output.contains("Original Name"),
+        "Original name should be replaced"
+    );
 }
 
 // ============================================================================
@@ -528,5 +555,8 @@ INSERT INTO `users` VALUES (2, 'bob@test.org');
     let content1 = fs::read_to_string(&output_file1).unwrap();
     let content2 = fs::read_to_string(&output_file2).unwrap();
 
-    assert_eq!(content1, content2, "Same seed should produce identical output");
+    assert_eq!(
+        content1, content2,
+        "Same seed should produce identical output"
+    );
 }

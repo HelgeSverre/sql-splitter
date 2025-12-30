@@ -686,7 +686,7 @@ impl<'a> DumpLoader<'a> {
                 let type_part = caps.get(2).unwrap().as_str();
                 let size_part = caps.get(3).map(|m| m.as_str()).unwrap_or("");
                 let suffix = caps.get(4).map(|m| m.as_str()).unwrap_or("");
-                
+
                 // Check if this looks like a quoted identifier (type is inside quotes)
                 // If leading char is a quote and the character before the match is also a quote, skip
                 let end_pos = caps.get(0).unwrap().end();
@@ -698,12 +698,17 @@ impl<'a> DumpLoader<'a> {
                         return full_match.to_string();
                     }
                 }
-                
+
                 // Calculate the whitespace between leading char and type
-                let ws_len = full_match.len() - leading_char.len() - type_part.len() - size_part.len() - suffix.len();
+                let ws_len = full_match.len()
+                    - leading_char.len()
+                    - type_part.len()
+                    - size_part.len()
+                    - suffix.len();
                 let ws = &full_match[leading_char.len()..leading_char.len() + ws_len];
-                
-                let converted = TypeConverter::convert(&format!("{}{}{}", type_part, size_part, suffix));
+
+                let converted =
+                    TypeConverter::convert(&format!("{}{}{}", type_part, size_part, suffix));
                 format!("{}{}{}", leading_char, ws, converted)
             })
             .to_string()
@@ -777,7 +782,10 @@ impl<'a> DumpLoader<'a> {
         // This handles regular indexes and FULLTEXT indexes, but NOT PRIMARY KEY or FOREIGN KEY
         // We use a negative lookbehind pattern by only matching KEY that is preceded by comma or newline (not FOREIGN/PRIMARY)
         static RE_KEY_INDEX: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r#"(?i)(?:,\s*|\n\s*)(?:FULLTEXT\s+|SPATIAL\s+)?KEY\s+[`"']?\w+[`"']?\s*\([^)]+\)"#).unwrap()
+            Regex::new(
+                r#"(?i)(?:,\s*|\n\s*)(?:FULLTEXT\s+|SPATIAL\s+)?KEY\s+[`"']?\w+[`"']?\s*\([^)]+\)"#,
+            )
+            .unwrap()
         });
         result = RE_KEY_INDEX.replace_all(&result, "").to_string();
 

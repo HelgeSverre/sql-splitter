@@ -3768,7 +3768,9 @@ INSERT INTO `permission_user` VALUES (1, 100);
     assert_eq!(stats.tables_created, 2, "Both tables must be created");
     assert_eq!(stats.rows_inserted, 2, "Both rows must be inserted");
 
-    let result = engine.query("SELECT COUNT(*) FROM permission_user").unwrap();
+    let result = engine
+        .query("SELECT COUNT(*) FROM permission_user")
+        .unwrap();
     assert_eq!(result.rows[0][0], "1");
 }
 
@@ -3805,7 +3807,9 @@ INSERT INTO `activity_log` VALUES (1, 'default', 'created', 'App\\Models\\User',
     assert_eq!(stats.tables_created, 1, "Table must be created");
     assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
 
-    let result = engine.query("SELECT description FROM activity_log WHERE id = 1").unwrap();
+    let result = engine
+        .query("SELECT description FROM activity_log WHERE id = 1")
+        .unwrap();
     assert_eq!(result.rows[0][0], "created");
 }
 
@@ -3835,10 +3839,11 @@ INSERT INTO `failed_jobs` VALUES (1, 'abc-123', 'database', 'default', '{}', 'Er
     assert_eq!(stats.tables_created, 1, "Table must be created");
     assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
 
-    let result = engine.query("SELECT uuid FROM failed_jobs WHERE id = 1").unwrap();
+    let result = engine
+        .query("SELECT uuid FROM failed_jobs WHERE id = 1")
+        .unwrap();
     assert_eq!(result.rows[0][0], "abc-123");
 }
-
 
 #[test]
 fn test_sqlite_autoincrement_must_succeed() {
@@ -3892,4 +3897,3 @@ INSERT INTO "kv_store" VALUES ('foo', 'bar');
     assert_eq!(stats.tables_created, 1, "Table must be created");
     assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
 }
-

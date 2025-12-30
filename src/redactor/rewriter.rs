@@ -31,7 +31,11 @@ impl ValueRewriter {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
-        Self { rng, dialect, locale }
+        Self {
+            rng,
+            dialect,
+            locale,
+        }
     }
 
     /// Rewrite an INSERT statement with redacted values
@@ -263,7 +267,11 @@ impl ValueRewriter {
     }
 
     /// Redact a COPY value and return the redacted bytes
-    fn redact_copy_value(&mut self, value: &CopyValueRef, strategy: &StrategyKind) -> (Vec<u8>, bool) {
+    fn redact_copy_value(
+        &mut self,
+        value: &CopyValueRef,
+        strategy: &StrategyKind,
+    ) -> (Vec<u8>, bool) {
         if matches!(strategy, StrategyKind::Skip) {
             let bytes = match value {
                 CopyValueRef::Null => b"\\N".to_vec(),
@@ -467,7 +475,8 @@ impl ValueRewriter {
                 MaskStrategy::new(pattern.clone()).apply(value, &mut self.rng)
             }
             StrategyKind::Fake { generator } => {
-                FakeStrategy::new(generator.clone(), self.locale.clone()).apply(value, &mut self.rng)
+                FakeStrategy::new(generator.clone(), self.locale.clone())
+                    .apply(value, &mut self.rng)
             }
             StrategyKind::Shuffle => {
                 // Shuffle is special - needs column-level state
@@ -589,11 +598,17 @@ mod tests {
         let stmt = b"INSERT INTO `users` (`id`, `email`, `name`) VALUES (1, 'alice@example.com', 'Alice');";
         let strategies = vec![
             StrategyKind::Skip, // id
-            StrategyKind::Hash { preserve_domain: true }, // email
-            StrategyKind::Fake { generator: "name".to_string() }, // name
+            StrategyKind::Hash {
+                preserve_domain: true,
+            }, // email
+            StrategyKind::Fake {
+                generator: "name".to_string(),
+            }, // name
         ];
 
-        let (result, rows, cols) = rewriter.rewrite_insert(stmt, "users", &schema, &strategies).unwrap();
+        let (result, rows, cols) = rewriter
+            .rewrite_insert(stmt, "users", &schema, &strategies)
+            .unwrap();
         let result_str = String::from_utf8_lossy(&result);
 
         assert!(result_str.contains("INSERT INTO `users`"));
@@ -614,7 +629,9 @@ mod tests {
             StrategyKind::Skip, // name
         ];
 
-        let (result, rows, cols) = rewriter.rewrite_insert(stmt, "users", &schema, &strategies).unwrap();
+        let (result, rows, cols) = rewriter
+            .rewrite_insert(stmt, "users", &schema, &strategies)
+            .unwrap();
         let result_str = String::from_utf8_lossy(&result);
 
         assert!(result_str.contains("INSERT INTO [users]"));

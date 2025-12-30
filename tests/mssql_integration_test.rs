@@ -720,14 +720,32 @@ fn test_mssql_generator_small_scale() {
     let content = fs::read_to_string(file.path()).unwrap();
 
     // Verify MSSQL-specific syntax
-    assert!(content.contains("SET ANSI_NULLS ON;"), "Should have MSSQL header");
-    assert!(content.contains("SET QUOTED_IDENTIFIER ON;"), "Should have MSSQL header");
-    assert!(content.contains("CREATE TABLE [tenants]"), "Should use bracket quoting");
-    assert!(content.contains("INSERT INTO [tenants]"), "Should use bracket quoting for inserts");
-    assert!(content.contains("INT IDENTITY(1,1) NOT NULL PRIMARY KEY"), "Should use IDENTITY");
+    assert!(
+        content.contains("SET ANSI_NULLS ON;"),
+        "Should have MSSQL header"
+    );
+    assert!(
+        content.contains("SET QUOTED_IDENTIFIER ON;"),
+        "Should have MSSQL header"
+    );
+    assert!(
+        content.contains("CREATE TABLE [tenants]"),
+        "Should use bracket quoting"
+    );
+    assert!(
+        content.contains("INSERT INTO [tenants]"),
+        "Should use bracket quoting for inserts"
+    );
+    assert!(
+        content.contains("INT IDENTITY(1,1) NOT NULL PRIMARY KEY"),
+        "Should use IDENTITY"
+    );
     assert!(content.contains("NVARCHAR"), "Should use NVARCHAR types");
     assert!(content.contains("N'"), "Should use Unicode string literals");
-    assert!(content.contains("DATETIME2"), "Should use DATETIME2 for timestamps");
+    assert!(
+        content.contains("DATETIME2"),
+        "Should use DATETIME2 for timestamps"
+    );
     assert!(content.contains("BIT"), "Should use BIT for booleans");
 }
 
@@ -744,8 +762,12 @@ fn test_mssql_generator_analyze() {
 
     // Small scale should have: tenants, users, roles, permissions, categories, products,
     // customers, orders, order_items, projects, tasks, folders, comments, etc.
-    assert!(stats.len() >= 10, "Should find at least 10 tables, found {}", stats.len());
-    
+    assert!(
+        stats.len() >= 10,
+        "Should find at least 10 tables, found {}",
+        stats.len()
+    );
+
     let table_names: Vec<String> = stats.iter().map(|s| s.table_name.clone()).collect();
     assert!(table_names.contains(&"tenants".to_string()));
     assert!(table_names.contains(&"users".to_string()));
@@ -787,7 +809,10 @@ fn test_mssql_generator_validate() {
     let summary = Validator::new(options).validate().unwrap();
 
     assert_eq!(summary.summary.errors, 0, "Should have no errors");
-    assert!(summary.summary.tables_scanned >= 10, "Should scan at least 10 tables");
+    assert!(
+        summary.summary.tables_scanned >= 10,
+        "Should scan at least 10 tables"
+    );
 }
 
 #[test]
@@ -805,13 +830,18 @@ fn test_mssql_generator_split_merge_roundtrip() {
         .unwrap();
 
     // Merge
-    let merge_stats = Merger::new(split_dir.path().to_path_buf(), Some(merged_file.path().to_path_buf()))
-        .with_dialect(SqlDialect::Mssql)
-        .merge()
-        .unwrap();
+    let merge_stats = Merger::new(
+        split_dir.path().to_path_buf(),
+        Some(merged_file.path().to_path_buf()),
+    )
+    .with_dialect(SqlDialect::Mssql)
+    .merge()
+    .unwrap();
 
-    assert_eq!(split_stats.tables_found, merge_stats.tables_merged, 
-        "All tables should be merged back");
+    assert_eq!(
+        split_stats.tables_found, merge_stats.tables_merged,
+        "All tables should be merged back"
+    );
 
     // Validate merged result
     let options = ValidateOptions {
@@ -826,7 +856,10 @@ fn test_mssql_generator_split_merge_roundtrip() {
     };
 
     let summary = Validator::new(options).validate().unwrap();
-    assert_eq!(summary.summary.errors, 0, "Merged file should have no errors");
+    assert_eq!(
+        summary.summary.errors, 0,
+        "Merged file should have no errors"
+    );
 }
 
 #[test]
@@ -873,7 +906,11 @@ fn test_mssql_generator_medium_scale() {
 
     // Medium scale should generate more data
     let insert_count = content.matches("INSERT INTO").count();
-    assert!(insert_count >= 10, "Medium scale should have multiple INSERT statements, found {}", insert_count);
+    assert!(
+        insert_count >= 10,
+        "Medium scale should have multiple INSERT statements, found {}",
+        insert_count
+    );
 }
 
 #[test]
@@ -885,13 +922,19 @@ fn test_mssql_generator_deterministic() {
     let content1 = fs::read_to_string(file1.path()).unwrap();
     let content2 = fs::read_to_string(file2.path()).unwrap();
 
-    assert_eq!(content1, content2, "Same seed should produce identical output");
+    assert_eq!(
+        content1, content2,
+        "Same seed should produce identical output"
+    );
 
     // Different seed should produce different output
     let file3 = generate_mssql_dump(99999, Scale::Small);
     let content3 = fs::read_to_string(file3.path()).unwrap();
 
-    assert_ne!(content1, content3, "Different seed should produce different output");
+    assert_ne!(
+        content1, content3,
+        "Different seed should produce different output"
+    );
 }
 
 #[test]
@@ -899,24 +942,38 @@ fn test_mssql_generator_production_style() {
     // Test the production-style MSSQL output with GO separators, [dbo]. prefix, and named constraints
     let mut gen = Generator::new(42, Scale::Small);
     let data = gen.generate();
-    
+
     let renderer = Renderer::new(RenderConfig::mssql_production());
     let sql = renderer.render_to_string(&data).unwrap();
 
     // Verify GO batch separators
     assert!(sql.contains("GO\n"), "Should have GO batch separators");
-    assert!(sql.contains("SET ANSI_NULLS ON\nGO"), "Header should use GO separators");
-    
+    assert!(
+        sql.contains("SET ANSI_NULLS ON\nGO"),
+        "Header should use GO separators"
+    );
+
     // Verify [dbo]. schema prefix
-    assert!(sql.contains("[dbo].[tenants]"), "Should have [dbo]. schema prefix on CREATE TABLE");
-    assert!(sql.contains("INSERT INTO [dbo].[tenants]"), "Should have [dbo]. schema prefix on INSERT");
-    
+    assert!(
+        sql.contains("[dbo].[tenants]"),
+        "Should have [dbo]. schema prefix on CREATE TABLE"
+    );
+    assert!(
+        sql.contains("INSERT INTO [dbo].[tenants]"),
+        "Should have [dbo]. schema prefix on INSERT"
+    );
+
     // Verify named CONSTRAINT syntax
-    assert!(sql.contains("CONSTRAINT [PK_tenants] PRIMARY KEY CLUSTERED"), 
-        "Should have named PK constraint");
-    
+    assert!(
+        sql.contains("CONSTRAINT [PK_tenants] PRIMARY KEY CLUSTERED"),
+        "Should have named PK constraint"
+    );
+
     // Verify ON [PRIMARY] filegroup
-    assert!(sql.contains(") ON [PRIMARY];"), "Should have ON [PRIMARY] filegroup");
+    assert!(
+        sql.contains(") ON [PRIMARY];"),
+        "Should have ON [PRIMARY] filegroup"
+    );
 }
 
 // ============================================================================
@@ -953,7 +1010,10 @@ fn test_mssql_redact_null_strategy() {
     assert!(!output_content.is_empty(), "Output should not be empty");
 
     // Verify NULL values appear in place of emails
-    assert!(output_content.contains("NULL"), "Should contain NULL values");
+    assert!(
+        output_content.contains("NULL"),
+        "Should contain NULL values"
+    );
 }
 
 #[test]
@@ -979,7 +1039,10 @@ fn test_mssql_redact_hash_strategy() {
     // Verify the output is valid SQL and has been modified
     assert!(!output_content.is_empty(), "Output should not be empty");
     // Hash strategy produces hex strings, verify they appear
-    assert!(output_content.contains("INSERT INTO"), "Should contain INSERT statements");
+    assert!(
+        output_content.contains("INSERT INTO"),
+        "Should contain INSERT statements"
+    );
 }
 
 #[test]
@@ -1015,11 +1078,20 @@ INSERT INTO [users] ([id], [email], [name]) VALUES (2, N'bob@example.com', N'Bob
     assert_eq!(stats.rows_redacted, 2, "Should have redacted 2 rows");
 
     let output_content = fs::read_to_string(&output_file).unwrap();
-    
+
     // Verify bracket quoting is preserved in output
-    assert!(output_content.contains("[users]"), "Should preserve [users] bracket quoting");
-    assert!(output_content.contains("[id]"), "Should preserve [id] bracket quoting");
-    assert!(output_content.contains("[name]"), "Should preserve [name] bracket quoting");
+    assert!(
+        output_content.contains("[users]"),
+        "Should preserve [users] bracket quoting"
+    );
+    assert!(
+        output_content.contains("[id]"),
+        "Should preserve [id] bracket quoting"
+    );
+    assert!(
+        output_content.contains("[name]"),
+        "Should preserve [name] bracket quoting"
+    );
 }
 
 #[test]
@@ -1053,10 +1125,13 @@ INSERT INTO [users] ([id], [name], [bio]) VALUES (2, N'中文', N'More unicode: 
     let stats = redactor.run().unwrap();
 
     assert_eq!(stats.rows_redacted, 2, "Should have redacted 2 rows");
-    assert_eq!(stats.columns_redacted, 2, "Should have redacted 2 bio columns");
+    assert_eq!(
+        stats.columns_redacted, 2,
+        "Should have redacted 2 bio columns"
+    );
 
     let output_content = fs::read_to_string(&output_file).unwrap();
-    
+
     // The bio column should be NULL, but names should be preserved
     assert!(output_content.contains("NULL"), "Bio should be NULL");
     // Unicode names may be preserved depending on how they're parsed
@@ -1080,7 +1155,10 @@ fn test_mssql_redact_fake_strategy() {
     let mut redactor = Redactor::new(config).unwrap();
     let stats = redactor.run().unwrap();
 
-    assert!(stats.columns_redacted > 0, "Should have redacted name columns");
+    assert!(
+        stats.columns_redacted > 0,
+        "Should have redacted name columns"
+    );
 
     let output_content = fs::read_to_string(&output_file).unwrap();
     assert!(!output_content.is_empty(), "Output should not be empty");
@@ -1131,5 +1209,8 @@ fn test_mssql_redact_reproducible_with_seed() {
     let content1 = fs::read_to_string(&output_file1).unwrap();
     let content2 = fs::read_to_string(&output_file2).unwrap();
 
-    assert_eq!(content1, content2, "Same seed should produce identical output");
+    assert_eq!(
+        content1, content2,
+        "Same seed should produce identical output"
+    );
 }

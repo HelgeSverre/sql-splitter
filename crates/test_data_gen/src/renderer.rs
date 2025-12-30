@@ -255,20 +255,20 @@ impl Renderer {
 
         // Check if we need named constraints (for MSSQL production style)
         let has_pk_column = table.columns.first().map(|c| c == "id").unwrap_or(false);
-        let use_constraint = self.config.use_named_constraints 
-            && self.config.dialect == Dialect::Mssql 
+        let use_constraint = self.config.use_named_constraints
+            && self.config.dialect == Dialect::Mssql
             && has_pk_column;
 
         for (i, (col_name, col_def)) in table.columns.iter().zip(col_defs.iter()).enumerate() {
             let is_last = i == table.columns.len() - 1;
-            
+
             // For MSSQL with named constraints, we need to strip inline PRIMARY KEY and add it as constraint
             let col_def_adjusted = if use_constraint && col_name == "id" {
                 col_def.replace(" PRIMARY KEY", "")
             } else {
                 col_def.clone()
             };
-            
+
             let comma = if !is_last || use_constraint { "," } else { "" };
             writeln!(
                 w,
@@ -287,14 +287,14 @@ impl Renderer {
         }
 
         write!(w, ")")?;
-        
+
         // MSSQL: add ON [PRIMARY] filegroup
         if self.config.dialect == Dialect::Mssql && self.config.use_schema_prefix {
             write!(w, " ON [PRIMARY]")?;
         }
-        
+
         writeln!(w, ";")?;
-        
+
         // Add GO separator for MSSQL
         if self.config.use_go_separator {
             writeln!(w, "GO")?;
@@ -468,7 +468,7 @@ impl Renderer {
                 let comma = if i < chunk.len() - 1 { "," } else { ";" };
                 writeln!(w, "({}){}", values, comma)?;
             }
-            
+
             // Add GO separator for MSSQL
             if self.config.use_go_separator {
                 writeln!(w, "GO")?;
@@ -496,7 +496,7 @@ impl Renderer {
                     .join(", "),
                 values
             )?;
-            
+
             // Add GO separator for MSSQL
             if self.config.use_go_separator {
                 writeln!(w, "GO")?;

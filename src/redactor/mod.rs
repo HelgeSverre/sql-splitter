@@ -252,7 +252,8 @@ impl Redactor {
 
         // Rewrite the INSERT statement with redacted values
         let (redacted, rows_redacted, cols_redacted) =
-            self.rewriter.rewrite_insert(stmt, table_name, table, &strategies)?;
+            self.rewriter
+                .rewrite_insert(stmt, table_name, table, &strategies)?;
 
         // Update stats
         if rows_redacted > 0 {
@@ -260,7 +261,12 @@ impl Redactor {
             self.stats.columns_redacted += cols_redacted;
 
             // Find or create table stats entry
-            if let Some(ts) = self.stats.table_stats.iter_mut().find(|t| t.name == table_name) {
+            if let Some(ts) = self
+                .stats
+                .table_stats
+                .iter_mut()
+                .find(|t| t.name == table_name)
+            {
                 ts.rows_processed += rows_redacted;
                 ts.columns_redacted += cols_redacted;
             } else {
@@ -302,7 +308,8 @@ impl Redactor {
 
         // Rewrite the COPY statement with redacted values
         let (redacted, rows_redacted, cols_redacted) =
-            self.rewriter.rewrite_copy(stmt, table_name, table, &strategies)?;
+            self.rewriter
+                .rewrite_copy(stmt, table_name, table, &strategies)?;
 
         // Update stats
         if rows_redacted > 0 {
@@ -310,7 +317,12 @@ impl Redactor {
             self.stats.columns_redacted += cols_redacted;
 
             // Find or create table stats entry
-            if let Some(ts) = self.stats.table_stats.iter_mut().find(|t| t.name == table_name) {
+            if let Some(ts) = self
+                .stats
+                .table_stats
+                .iter_mut()
+                .find(|t| t.name == table_name)
+            {
                 ts.rows_processed += rows_redacted;
                 ts.columns_redacted += cols_redacted;
             } else {
@@ -328,9 +340,10 @@ impl Redactor {
 
     /// Redact a PostgreSQL COPY data block (comes after the header)
     fn redact_copy_data(&mut self, data_block: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let pending = self.pending_copy.take().ok_or_else(|| {
-            anyhow::anyhow!("COPY data block without pending header")
-        })?;
+        let pending = self
+            .pending_copy
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("COPY data block without pending header"))?;
 
         let table_name = &pending.table_name;
 
@@ -365,14 +378,20 @@ impl Redactor {
 
         // Rewrite the COPY data block with redacted values
         let (redacted_data, rows_redacted, cols_redacted) =
-            self.rewriter.rewrite_copy_data(data_block, table, &strategies, &pending.columns)?;
+            self.rewriter
+                .rewrite_copy_data(data_block, table, &strategies, &pending.columns)?;
 
         // Update stats
         if rows_redacted > 0 {
             self.stats.rows_redacted += rows_redacted;
             self.stats.columns_redacted += cols_redacted;
 
-            if let Some(ts) = self.stats.table_stats.iter_mut().find(|t| t.name == *table_name) {
+            if let Some(ts) = self
+                .stats
+                .table_stats
+                .iter_mut()
+                .find(|t| t.name == *table_name)
+            {
                 ts.rows_processed += rows_redacted;
                 ts.columns_redacted += cols_redacted;
             } else {

@@ -6,8 +6,8 @@
 //! - MultiTenant: realistic multi-tenant schema with FK relationships
 
 use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 
@@ -140,21 +140,37 @@ impl StreamingGenerator {
         for t in 0..self.config.num_tables {
             let table_name = format!("table_{:03}", t);
 
-            writeln!(w, "DROP TABLE IF EXISTS {}{}{};", q_open, table_name, q_close)?;
+            writeln!(
+                w,
+                "DROP TABLE IF EXISTS {}{}{};",
+                q_open, table_name, q_close
+            )?;
             writeln!(w, "CREATE TABLE {}{}{} (", q_open, table_name, q_close)?;
 
             match self.config.dialect {
                 Dialect::MySql => {
-                    writeln!(w, "  {}id{} INT AUTO_INCREMENT PRIMARY KEY,", q_open, q_close)?;
+                    writeln!(
+                        w,
+                        "  {}id{} INT AUTO_INCREMENT PRIMARY KEY,",
+                        q_open, q_close
+                    )?;
                 }
                 Dialect::Postgres => {
                     writeln!(w, "  {}id{} SERIAL PRIMARY KEY,", q_open, q_close)?;
                 }
                 Dialect::Sqlite => {
-                    writeln!(w, "  {}id{} INTEGER PRIMARY KEY AUTOINCREMENT,", q_open, q_close)?;
+                    writeln!(
+                        w,
+                        "  {}id{} INTEGER PRIMARY KEY AUTOINCREMENT,",
+                        q_open, q_close
+                    )?;
                 }
                 Dialect::Mssql => {
-                    writeln!(w, "  {}id{} INT IDENTITY(1,1) NOT NULL PRIMARY KEY,", q_open, q_close)?;
+                    writeln!(
+                        w,
+                        "  {}id{} INT IDENTITY(1,1) NOT NULL PRIMARY KEY,",
+                        q_open, q_close
+                    )?;
                 }
             }
 
@@ -199,11 +215,19 @@ impl StreamingGenerator {
 
             // Write data in batches
             for batch_start in (0..self.config.rows_per_table).step_by(self.config.batch_size) {
-                let batch_end = (batch_start + self.config.batch_size).min(self.config.rows_per_table);
+                let batch_end =
+                    (batch_start + self.config.batch_size).min(self.config.rows_per_table);
 
                 match self.config.dialect {
                     Dialect::Postgres => {
-                        self.write_copy_batch(w, &table_name, t, batch_start, batch_end, has_parent)?;
+                        self.write_copy_batch(
+                            w,
+                            &table_name,
+                            t,
+                            batch_start,
+                            batch_end,
+                            has_parent,
+                        )?;
                     }
                     _ => {
                         self.write_insert_batch(
@@ -266,7 +290,9 @@ impl StreamingGenerator {
             let formatted_desc = self.format_string(&desc);
 
             if has_parent {
-                let parent_id = self.rng.gen_range(1..=(table_idx * self.config.rows_per_table));
+                let parent_id = self
+                    .rng
+                    .gen_range(1..=(table_idx * self.config.rows_per_table));
                 write!(
                     w,
                     "({}, {}, {}, {}, {})",
@@ -321,7 +347,9 @@ impl StreamingGenerator {
             let escaped_desc = self.escape_copy(&desc);
 
             if has_parent {
-                let parent_id = self.rng.gen_range(1..=(table_idx * self.config.rows_per_table));
+                let parent_id = self
+                    .rng
+                    .gen_range(1..=(table_idx * self.config.rows_per_table));
                 writeln!(
                     w,
                     "{}\t{}\t{}\t{}\t{}",
@@ -555,40 +583,54 @@ impl MultiTenantGenerator {
         for (table_name, columns, pk_def) in schemas {
             let table_ref = self.format_table_name(table_name);
             writeln!(w, "CREATE TABLE {} (", table_ref)?;
-            
+
             // Check if we should use named constraints
-            let has_id_col = columns.first().map(|(name, _)| *name == "id").unwrap_or(false);
-            let use_named_pk = self.config.use_named_constraints 
-                && self.config.dialect == Dialect::Mssql 
+            let has_id_col = columns
+                .first()
+                .map(|(name, _)| *name == "id")
+                .unwrap_or(false);
+            let use_named_pk = self.config.use_named_constraints
+                && self.config.dialect == Dialect::Mssql
                 && has_id_col;
 
             for (i, (col_name, col_type)) in columns.iter().enumerate() {
                 let is_last = i == columns.len() - 1;
-                
+
                 // For MSSQL with named constraints, strip inline PRIMARY KEY
                 let col_type_adj = if use_named_pk && *col_name == "id" {
                     col_type.replace(" PRIMARY KEY", "")
                 } else {
                     col_type.to_string()
                 };
-                
-                let comma = if !is_last || !pk_def.is_empty() || use_named_pk { "," } else { "" };
-                writeln!(w, "  {}{}{} {}{}", q_open, col_name, q_close, col_type_adj, comma)?;
+
+                let comma = if !is_last || !pk_def.is_empty() || use_named_pk {
+                    ","
+                } else {
+                    ""
+                };
+                writeln!(
+                    w,
+                    "  {}{}{} {}{}",
+                    q_open, col_name, q_close, col_type_adj, comma
+                )?;
             }
-            
+
             if use_named_pk {
-                writeln!(w, "  CONSTRAINT {}PK_{}{} PRIMARY KEY CLUSTERED ({}id{})", 
-                    q_open, table_name, q_close, q_open, q_close)?;
+                writeln!(
+                    w,
+                    "  CONSTRAINT {}PK_{}{} PRIMARY KEY CLUSTERED ({}id{})",
+                    q_open, table_name, q_close, q_open, q_close
+                )?;
             } else if !pk_def.is_empty() {
                 writeln!(w, "  {}", pk_def)?;
             }
-            
+
             write!(w, ")")?;
             if self.config.dialect == Dialect::Mssql && self.config.use_schema_prefix {
                 write!(w, " ON [PRIMARY]")?;
             }
             writeln!(w, ";")?;
-            
+
             if self.config.use_go_separator {
                 writeln!(w, "GO")?;
             }
@@ -609,7 +651,13 @@ impl MultiTenantGenerator {
     }
 
     #[allow(clippy::type_complexity)]
-    fn get_table_schemas(&self) -> Vec<(&'static str, Vec<(&'static str, &'static str)>, &'static str)> {
+    fn get_table_schemas(
+        &self,
+    ) -> Vec<(
+        &'static str,
+        Vec<(&'static str, &'static str)>,
+        &'static str,
+    )> {
         let int_pk = match self.config.dialect {
             Dialect::MySql => "INT AUTO_INCREMENT PRIMARY KEY",
             Dialect::Postgres => "SERIAL PRIMARY KEY",
@@ -641,31 +689,231 @@ impl MultiTenantGenerator {
             _ => "TEXT",
         };
 
-        let varchar_3 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(3)" } else { "VARCHAR(3)" };
-        let varchar_5 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(5)" } else { "VARCHAR(5)" };
-        let varchar_20 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(20)" } else { "VARCHAR(20)" };
-        let varchar_50 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(50)" } else { "VARCHAR(50)" };
-        let varchar_100 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(100)" } else { "VARCHAR(100)" };
-        let varchar_255 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(255)" } else { "VARCHAR(255)" };
-        let varchar_1000 = if self.config.dialect == Dialect::Mssql { "NVARCHAR(1000)" } else { "VARCHAR(1000)" };
+        let varchar_3 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(3)"
+        } else {
+            "VARCHAR(3)"
+        };
+        let varchar_5 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(5)"
+        } else {
+            "VARCHAR(5)"
+        };
+        let varchar_20 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(20)"
+        } else {
+            "VARCHAR(20)"
+        };
+        let varchar_50 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(50)"
+        } else {
+            "VARCHAR(50)"
+        };
+        let varchar_100 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(100)"
+        } else {
+            "VARCHAR(100)"
+        };
+        let varchar_255 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(255)"
+        } else {
+            "VARCHAR(255)"
+        };
+        let varchar_1000 = if self.config.dialect == Dialect::Mssql {
+            "NVARCHAR(1000)"
+        } else {
+            "VARCHAR(1000)"
+        };
 
         vec![
-            ("permissions", vec![("id", int_pk), ("name", varchar_100), ("description", text_type)], ""),
-            ("roles", vec![("id", int_pk), ("tenant_id", int_type), ("name", varchar_100), ("is_system", bool_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("role_permissions", vec![("role_id", int_type), ("permission_id", int_type)], "PRIMARY KEY (role_id, permission_id)"),
-            ("currencies", vec![("id", int_pk), ("code", varchar_3), ("name", varchar_50), ("symbol", varchar_5)], ""),
-            ("tenants", vec![("id", int_pk), ("name", varchar_255), ("slug", varchar_100), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("users", vec![("id", int_pk), ("tenant_id", int_type), ("email", varchar_255), ("name", varchar_255), ("role", varchar_50), ("active", bool_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("user_roles", vec![("user_id", int_type), ("role_id", int_type)], "PRIMARY KEY (user_id, role_id)"),
-            ("categories", vec![("id", int_pk), ("tenant_id", int_type), ("parent_id", int_type), ("name", varchar_100), ("level", int_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("products", vec![("id", int_pk), ("tenant_id", int_type), ("category_id", int_type), ("sku", varchar_50), ("name", varchar_255), ("price", decimal_type), ("active", bool_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("customers", vec![("id", int_pk), ("tenant_id", int_type), ("name", varchar_255), ("email", varchar_255), ("phone", varchar_50), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("orders", vec![("id", int_pk), ("tenant_id", int_type), ("customer_id", int_type), ("order_number", varchar_50), ("status", varchar_20), ("total", decimal_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("order_items", vec![("id", int_pk), ("order_id", int_type), ("product_id", int_type), ("quantity", int_type), ("unit_price", decimal_type)], ""),
-            ("projects", vec![("id", int_pk), ("tenant_id", int_type), ("owner_id", int_type), ("name", varchar_255), ("status", varchar_20), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("tasks", vec![("id", int_pk), ("tenant_id", int_type), ("project_id", int_type), ("assignee_id", int_type), ("title", varchar_255), ("priority", int_type), ("completed", bool_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("folders", vec![("id", int_pk), ("tenant_id", int_type), ("parent_id", int_type), ("name", varchar_255), ("path", varchar_1000), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
-            ("comments", vec![("id", int_pk), ("tenant_id", int_type), ("parent_id", int_type), ("user_id", int_type), ("commentable_type", varchar_50), ("commentable_id", int_type), ("body", text_type), ("created_at", datetime_type), ("updated_at", datetime_type)], ""),
+            (
+                "permissions",
+                vec![
+                    ("id", int_pk),
+                    ("name", varchar_100),
+                    ("description", text_type),
+                ],
+                "",
+            ),
+            (
+                "roles",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("name", varchar_100),
+                    ("is_system", bool_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "role_permissions",
+                vec![("role_id", int_type), ("permission_id", int_type)],
+                "PRIMARY KEY (role_id, permission_id)",
+            ),
+            (
+                "currencies",
+                vec![
+                    ("id", int_pk),
+                    ("code", varchar_3),
+                    ("name", varchar_50),
+                    ("symbol", varchar_5),
+                ],
+                "",
+            ),
+            (
+                "tenants",
+                vec![
+                    ("id", int_pk),
+                    ("name", varchar_255),
+                    ("slug", varchar_100),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "users",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("email", varchar_255),
+                    ("name", varchar_255),
+                    ("role", varchar_50),
+                    ("active", bool_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "user_roles",
+                vec![("user_id", int_type), ("role_id", int_type)],
+                "PRIMARY KEY (user_id, role_id)",
+            ),
+            (
+                "categories",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("parent_id", int_type),
+                    ("name", varchar_100),
+                    ("level", int_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "products",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("category_id", int_type),
+                    ("sku", varchar_50),
+                    ("name", varchar_255),
+                    ("price", decimal_type),
+                    ("active", bool_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "customers",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("name", varchar_255),
+                    ("email", varchar_255),
+                    ("phone", varchar_50),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "orders",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("customer_id", int_type),
+                    ("order_number", varchar_50),
+                    ("status", varchar_20),
+                    ("total", decimal_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "order_items",
+                vec![
+                    ("id", int_pk),
+                    ("order_id", int_type),
+                    ("product_id", int_type),
+                    ("quantity", int_type),
+                    ("unit_price", decimal_type),
+                ],
+                "",
+            ),
+            (
+                "projects",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("owner_id", int_type),
+                    ("name", varchar_255),
+                    ("status", varchar_20),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "tasks",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("project_id", int_type),
+                    ("assignee_id", int_type),
+                    ("title", varchar_255),
+                    ("priority", int_type),
+                    ("completed", bool_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "folders",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("parent_id", int_type),
+                    ("name", varchar_255),
+                    ("path", varchar_1000),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
+            (
+                "comments",
+                vec![
+                    ("id", int_pk),
+                    ("tenant_id", int_type),
+                    ("parent_id", int_type),
+                    ("user_id", int_type),
+                    ("commentable_type", varchar_50),
+                    ("commentable_id", int_type),
+                    ("body", text_type),
+                    ("created_at", datetime_type),
+                    ("updated_at", datetime_type),
+                ],
+                "",
+            ),
         ]
     }
 
@@ -703,17 +951,29 @@ impl MultiTenantGenerator {
 
     fn write_permissions<W: Write>(&mut self, w: &mut W) -> io::Result<()> {
         let perms = FakeData::<ChaCha8Rng>::all_permissions();
-        
+
         writeln!(w, "-- Table: permissions ({} rows)", perms.len())?;
-        writeln!(w, "INSERT INTO {} ({}, {}, {}) VALUES", 
-            self.quote_ident("permissions"), self.quote_ident("id"), 
-            self.quote_ident("name"), self.quote_ident("description"))?;
+        writeln!(
+            w,
+            "INSERT INTO {} ({}, {}, {}) VALUES",
+            self.quote_ident("permissions"),
+            self.quote_ident("id"),
+            self.quote_ident("name"),
+            self.quote_ident("description")
+        )?;
 
         for (i, name) in perms.iter().enumerate() {
             let id = self.ids.next_id("permissions");
             let desc = format!("Permission to {}", name.replace('.', " "));
             let comma = if i < perms.len() - 1 { "," } else { ";" };
-            writeln!(w, "({}, {}, {}){}", id, self.format_string(name), self.format_string(&desc), comma)?;
+            writeln!(
+                w,
+                "({}, {}, {}){}",
+                id,
+                self.format_string(name),
+                self.format_string(&desc),
+                comma
+            )?;
         }
         writeln!(w)?;
         Ok(())
@@ -721,21 +981,35 @@ impl MultiTenantGenerator {
 
     fn write_roles_global<W: Write>(&mut self, w: &mut W) -> io::Result<()> {
         let roles = FakeData::<ChaCha8Rng>::all_roles();
-        
+
         writeln!(w, "-- Table: roles ({} rows)", roles.len())?;
-        writeln!(w, "INSERT INTO {} ({}, {}, {}, {}, {}, {}) VALUES",
-            self.quote_ident("roles"), self.quote_ident("id"), self.quote_ident("tenant_id"),
-            self.quote_ident("name"), self.quote_ident("is_system"), 
-            self.quote_ident("created_at"), self.quote_ident("updated_at"))?;
+        writeln!(
+            w,
+            "INSERT INTO {} ({}, {}, {}, {}, {}, {}) VALUES",
+            self.quote_ident("roles"),
+            self.quote_ident("id"),
+            self.quote_ident("tenant_id"),
+            self.quote_ident("name"),
+            self.quote_ident("is_system"),
+            self.quote_ident("created_at"),
+            self.quote_ident("updated_at")
+        )?;
 
         for (i, name) in roles.iter().enumerate() {
             let id = self.ids.next_id("roles");
             let created = self.fake.datetime(2020, 2024);
             let bool_val = self.format_bool(true);
             let comma = if i < roles.len() - 1 { "," } else { ";" };
-            writeln!(w, "({}, NULL, {}, {}, {}, {}){}", 
-                id, self.format_string(name), bool_val, 
-                self.format_string(&created), self.format_string(&created), comma)?;
+            writeln!(
+                w,
+                "({}, NULL, {}, {}, {}, {}){}",
+                id,
+                self.format_string(name),
+                bool_val,
+                self.format_string(&created),
+                self.format_string(&created),
+                comma
+            )?;
         }
         writeln!(w)?;
         Ok(())
@@ -746,7 +1020,7 @@ impl MultiTenantGenerator {
         let perm_ids = self.ids.get_ids("permissions").to_vec();
 
         let mut rows = Vec::new();
-        
+
         // Admin role gets all permissions
         if let Some(&admin_role) = role_ids.first() {
             for &perm_id in &perm_ids {
@@ -766,9 +1040,13 @@ impl MultiTenantGenerator {
         }
 
         writeln!(w, "-- Table: role_permissions ({} rows)", rows.len())?;
-        writeln!(w, "INSERT INTO {} ({}, {}) VALUES",
-            self.quote_ident("role_permissions"), self.quote_ident("role_id"), 
-            self.quote_ident("permission_id"))?;
+        writeln!(
+            w,
+            "INSERT INTO {} ({}, {}) VALUES",
+            self.quote_ident("role_permissions"),
+            self.quote_ident("role_id"),
+            self.quote_ident("permission_id")
+        )?;
 
         for (i, (role_id, perm_id)) in rows.iter().enumerate() {
             let comma = if i < rows.len() - 1 { "," } else { ";" };
@@ -788,16 +1066,28 @@ impl MultiTenantGenerator {
         ];
 
         writeln!(w, "-- Table: currencies ({} rows)", currencies.len())?;
-        writeln!(w, "INSERT INTO {} ({}, {}, {}, {}) VALUES",
-            self.quote_ident("currencies"), self.quote_ident("id"), self.quote_ident("code"),
-            self.quote_ident("name"), self.quote_ident("symbol"))?;
+        writeln!(
+            w,
+            "INSERT INTO {} ({}, {}, {}, {}) VALUES",
+            self.quote_ident("currencies"),
+            self.quote_ident("id"),
+            self.quote_ident("code"),
+            self.quote_ident("name"),
+            self.quote_ident("symbol")
+        )?;
 
         for (i, (code, name, symbol)) in currencies.iter().enumerate() {
             let id = self.ids.next_id("currencies");
             let comma = if i < currencies.len() - 1 { "," } else { ";" };
-            writeln!(w, "({}, {}, {}, {}){}", 
-                id, self.format_string(code), self.format_string(name), 
-                self.format_string(symbol), comma)?;
+            writeln!(
+                w,
+                "({}, {}, {}, {}){}",
+                id,
+                self.format_string(code),
+                self.format_string(name),
+                self.format_string(symbol),
+                comma
+            )?;
         }
         writeln!(w)?;
         Ok(())
@@ -807,9 +1097,16 @@ impl MultiTenantGenerator {
         let count = self.config.scale.tenants();
 
         writeln!(w, "-- Table: tenants ({} rows)", count)?;
-        writeln!(w, "INSERT INTO {} ({}, {}, {}, {}, {}) VALUES",
-            self.quote_ident("tenants"), self.quote_ident("id"), self.quote_ident("name"),
-            self.quote_ident("slug"), self.quote_ident("created_at"), self.quote_ident("updated_at"))?;
+        writeln!(
+            w,
+            "INSERT INTO {} ({}, {}, {}, {}, {}) VALUES",
+            self.quote_ident("tenants"),
+            self.quote_ident("id"),
+            self.quote_ident("name"),
+            self.quote_ident("slug"),
+            self.quote_ident("created_at"),
+            self.quote_ident("updated_at")
+        )?;
 
         for i in 0..count {
             let id = self.ids.next_id("tenants");
@@ -817,9 +1114,16 @@ impl MultiTenantGenerator {
             let slug = self.fake.slug(&name);
             let created = self.fake.datetime(2020, 2024);
             let comma = if i < count - 1 { "," } else { ";" };
-            writeln!(w, "({}, {}, {}, {}, {}){}", 
-                id, self.format_string(&name), self.format_string(&slug), 
-                self.format_string(&created), self.format_string(&created), comma)?;
+            writeln!(
+                w,
+                "({}, {}, {}, {}, {}){}",
+                id,
+                self.format_string(&name),
+                self.format_string(&slug),
+                self.format_string(&created),
+                self.format_string(&created),
+                comma
+            )?;
         }
         writeln!(w)?;
         Ok(())
@@ -840,7 +1144,7 @@ impl MultiTenantGenerator {
             for _ in 0..users_per_tenant {
                 let id = self.ids.next_id("users");
                 user_ids_for_tenant.push(id);
-                
+
                 let first = self.fake.first_name();
                 let last = self.fake.last_name();
                 let email = self.fake.email(first, last, "example.com");
@@ -850,25 +1154,61 @@ impl MultiTenantGenerator {
                 let active = self.format_bool(is_active);
                 let created = self.fake.datetime(2020, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {}, {}, {})",
-                    id, tenant_id, self.format_string(&email), self.format_string(&name), 
-                    self.format_string(role), active, self.format_string(&created), 
-                    self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    self.format_string(&email),
+                    self.format_string(&name),
+                    self.format_string(role),
+                    active,
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "users", 
-                        &["id", "tenant_id", "email", "name", "role", "active", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "users",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "email",
+                            "name",
+                            "role",
+                            "active",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
 
-            self.tenant_ids.entry("users".to_string()).or_default().insert(tenant_id, user_ids_for_tenant);
+            self.tenant_ids
+                .entry("users".to_string())
+                .or_default()
+                .insert(tenant_id, user_ids_for_tenant);
         }
 
-        self.flush_batch(w, "users",
-            &["id", "tenant_id", "email", "name", "role", "active", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
-        
+        self.flush_batch(
+            w,
+            "users",
+            &[
+                "id",
+                "tenant_id",
+                "email",
+                "name",
+                "role",
+                "active",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
+
         writeln!(w)?;
         Ok(())
     }
@@ -884,7 +1224,8 @@ impl MultiTenantGenerator {
         for &tenant_id in tenant_ids {
             if let Some(user_ids) = self.tenant_ids.get("users").and_then(|m| m.get(&tenant_id)) {
                 for &user_id in user_ids {
-                    let role_id = role_ids[self.fake.int_range(0, (role_ids.len() - 1) as i64) as usize];
+                    let role_id =
+                        role_ids[self.fake.int_range(0, (role_ids.len() - 1) as i64) as usize];
                     rows.push((user_id, role_id));
                 }
             }
@@ -895,9 +1236,13 @@ impl MultiTenantGenerator {
         }
 
         writeln!(w, "-- Table: user_roles ({} rows)", rows.len())?;
-        writeln!(w, "INSERT INTO {} ({}, {}) VALUES",
-            self.quote_ident("user_roles"), self.quote_ident("user_id"), 
-            self.quote_ident("role_id"))?;
+        writeln!(
+            w,
+            "INSERT INTO {} ({}, {}) VALUES",
+            self.quote_ident("user_roles"),
+            self.quote_ident("user_id"),
+            self.quote_ident("role_id")
+        )?;
 
         for (i, (user_id, role_id)) in rows.iter().enumerate() {
             let comma = if i < rows.len() - 1 { "," } else { ";" };
@@ -934,23 +1279,57 @@ impl MultiTenantGenerator {
                 let level = if parent_id == "NULL" { 0 } else { 1 };
                 let created = self.fake.datetime(2020, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {}, {})",
-                    id, tenant_id, parent_id, self.format_string(name), level, 
-                    self.format_string(&created), self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    parent_id,
+                    self.format_string(name),
+                    level,
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "categories",
-                        &["id", "tenant_id", "parent_id", "name", "level", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "categories",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "parent_id",
+                            "name",
+                            "level",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
 
-            self.tenant_ids.entry("categories".to_string()).or_default().insert(tenant_id, cat_ids);
+            self.tenant_ids
+                .entry("categories".to_string())
+                .or_default()
+                .insert(tenant_id, cat_ids);
         }
 
-        self.flush_batch(w, "categories",
-            &["id", "tenant_id", "parent_id", "name", "level", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "categories",
+            &[
+                "id",
+                "tenant_id",
+                "parent_id",
+                "name",
+                "level",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -966,7 +1345,9 @@ impl MultiTenantGenerator {
         let mut first_batch = true;
 
         for &tenant_id in tenant_ids {
-            let cat_ids = self.tenant_ids.get("categories")
+            let cat_ids = self
+                .tenant_ids
+                .get("categories")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
@@ -989,23 +1370,63 @@ impl MultiTenantGenerator {
                 let active = self.format_bool(is_active);
                 let created = self.fake.datetime(2020, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {:.2}, {}, {}, {})",
-                    id, tenant_id, cat_id, self.format_string(&sku), self.format_string(&name),
-                    price, active, self.format_string(&created), self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {:.2}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    cat_id,
+                    self.format_string(&sku),
+                    self.format_string(&name),
+                    price,
+                    active,
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "products",
-                        &["id", "tenant_id", "category_id", "sku", "name", "price", "active", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "products",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "category_id",
+                            "sku",
+                            "name",
+                            "price",
+                            "active",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
 
-            self.tenant_ids.entry("products".to_string()).or_default().insert(tenant_id, prod_ids);
+            self.tenant_ids
+                .entry("products".to_string())
+                .or_default()
+                .insert(tenant_id, prod_ids);
         }
 
-        self.flush_batch(w, "products",
-            &["id", "tenant_id", "category_id", "sku", "name", "price", "active", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "products",
+            &[
+                "id",
+                "tenant_id",
+                "category_id",
+                "sku",
+                "name",
+                "price",
+                "active",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1035,24 +1456,57 @@ impl MultiTenantGenerator {
                 let phone = self.fake.phone();
                 let created = self.fake.datetime(2020, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {}, {})",
-                    id, tenant_id, self.format_string(&name), self.format_string(&email),
-                    self.format_string(&phone), self.format_string(&created), 
-                    self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    self.format_string(&name),
+                    self.format_string(&email),
+                    self.format_string(&phone),
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "customers",
-                        &["id", "tenant_id", "name", "email", "phone", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "customers",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "name",
+                            "email",
+                            "phone",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
 
-            self.tenant_ids.entry("customers".to_string()).or_default().insert(tenant_id, cust_ids);
+            self.tenant_ids
+                .entry("customers".to_string())
+                .or_default()
+                .insert(tenant_id, cust_ids);
         }
 
-        self.flush_batch(w, "customers",
-            &["id", "tenant_id", "name", "email", "phone", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "customers",
+            &[
+                "id",
+                "tenant_id",
+                "name",
+                "email",
+                "phone",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1068,7 +1522,9 @@ impl MultiTenantGenerator {
         let mut first_batch = true;
 
         for &tenant_id in tenant_ids {
-            let cust_ids = self.tenant_ids.get("customers")
+            let cust_ids = self
+                .tenant_ids
+                .get("customers")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
@@ -1081,7 +1537,8 @@ impl MultiTenantGenerator {
                 let cust_id = if cust_ids.is_empty() {
                     "NULL".to_string()
                 } else {
-                    cust_ids[self.fake.int_range(0, (cust_ids.len() - 1) as i64) as usize].to_string()
+                    cust_ids[self.fake.int_range(0, (cust_ids.len() - 1) as i64) as usize]
+                        .to_string()
                 };
 
                 let order_num = self.fake.order_number();
@@ -1089,42 +1546,81 @@ impl MultiTenantGenerator {
                 let total_amt = self.fake.price(20.0, 2000.0);
                 let created = self.fake.datetime(2023, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {:.2}, {}, {})",
-                    id, tenant_id, cust_id, self.format_string(&order_num), 
-                    self.format_string(status), total_amt, self.format_string(&created), 
-                    self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {:.2}, {}, {})",
+                    id,
+                    tenant_id,
+                    cust_id,
+                    self.format_string(&order_num),
+                    self.format_string(status),
+                    total_amt,
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "orders",
-                        &["id", "tenant_id", "customer_id", "order_number", "status", "total", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "orders",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "customer_id",
+                            "order_number",
+                            "status",
+                            "total",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
 
-            self.tenant_ids.entry("orders".to_string()).or_default().insert(tenant_id, order_ids);
+            self.tenant_ids
+                .entry("orders".to_string())
+                .or_default()
+                .insert(tenant_id, order_ids);
         }
 
-        self.flush_batch(w, "orders",
-            &["id", "tenant_id", "customer_id", "order_number", "status", "total", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "orders",
+            &[
+                "id",
+                "tenant_id",
+                "customer_id",
+                "order_number",
+                "status",
+                "total",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
     }
 
     fn write_order_items<W: Write>(&mut self, w: &mut W, tenant_ids: &[i64]) -> io::Result<()> {
-
         writeln!(w, "-- Table: order_items")?;
 
         let mut batch = Vec::new();
         let mut first_batch = true;
 
         for &tenant_id in tenant_ids {
-            let order_ids = self.tenant_ids.get("orders")
+            let order_ids = self
+                .tenant_ids
+                .get("orders")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
-            let prod_ids = self.tenant_ids.get("products")
+            let prod_ids = self
+                .tenant_ids
+                .get("products")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
@@ -1137,24 +1633,36 @@ impl MultiTenantGenerator {
                 let item_count = self.fake.int_range(1, 5) as usize;
                 for _ in 0..item_count {
                     let id = self.ids.next_id("order_items");
-                    let prod_id = prod_ids[self.fake.int_range(0, (prod_ids.len() - 1) as i64) as usize];
+                    let prod_id =
+                        prod_ids[self.fake.int_range(0, (prod_ids.len() - 1) as i64) as usize];
                     let qty = self.fake.int_range(1, 10);
                     let price = self.fake.price(5.0, 200.0);
 
-                    batch.push(format!("({}, {}, {}, {}, {:.2})", id, order_id, prod_id, qty, price));
+                    batch.push(format!(
+                        "({}, {}, {}, {}, {:.2})",
+                        id, order_id, prod_id, qty, price
+                    ));
 
                     if batch.len() >= self.config.batch_size {
-                        self.flush_batch(w, "order_items",
+                        self.flush_batch(
+                            w,
+                            "order_items",
                             &["id", "order_id", "product_id", "quantity", "unit_price"],
-                            &mut batch, &mut first_batch)?;
+                            &mut batch,
+                            &mut first_batch,
+                        )?;
                     }
                 }
             }
         }
 
-        self.flush_batch(w, "order_items",
+        self.flush_batch(
+            w,
+            "order_items",
             &["id", "order_id", "product_id", "quantity", "unit_price"],
-            &mut batch, &mut first_batch)?;
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1170,7 +1678,9 @@ impl MultiTenantGenerator {
         let mut first_batch = true;
 
         for &tenant_id in tenant_ids {
-            let user_ids = self.tenant_ids.get("users")
+            let user_ids = self
+                .tenant_ids
+                .get("users")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
@@ -1183,31 +1693,65 @@ impl MultiTenantGenerator {
                 let owner_id = if user_ids.is_empty() {
                     "NULL".to_string()
                 } else {
-                    user_ids[self.fake.int_range(0, (user_ids.len() - 1) as i64) as usize].to_string()
+                    user_ids[self.fake.int_range(0, (user_ids.len() - 1) as i64) as usize]
+                        .to_string()
                 };
 
                 let name = format!("Project {}", self.fake.product_name());
                 let status = self.fake.project_status();
                 let created = self.fake.datetime(2022, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {}, {})",
-                    id, tenant_id, owner_id, self.format_string(&name), 
-                    self.format_string(status), self.format_string(&created), 
-                    self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    owner_id,
+                    self.format_string(&name),
+                    self.format_string(status),
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "projects",
-                        &["id", "tenant_id", "owner_id", "name", "status", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "projects",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "owner_id",
+                            "name",
+                            "status",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
 
-            self.tenant_ids.entry("projects".to_string()).or_default().insert(tenant_id, proj_ids);
+            self.tenant_ids
+                .entry("projects".to_string())
+                .or_default()
+                .insert(tenant_id, proj_ids);
         }
 
-        self.flush_batch(w, "projects",
-            &["id", "tenant_id", "owner_id", "name", "status", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "projects",
+            &[
+                "id",
+                "tenant_id",
+                "owner_id",
+                "name",
+                "status",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1222,11 +1766,15 @@ impl MultiTenantGenerator {
         let mut first_batch = true;
 
         for &tenant_id in tenant_ids {
-            let proj_ids = self.tenant_ids.get("projects")
+            let proj_ids = self
+                .tenant_ids
+                .get("projects")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
-            let user_ids = self.tenant_ids.get("users")
+            let user_ids = self
+                .tenant_ids
+                .get("users")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
@@ -1237,10 +1785,12 @@ impl MultiTenantGenerator {
                     let id = self.ids.next_id("tasks");
                     task_ids.push(id);
 
-                    let assignee_id = if user_ids.is_empty() || self.fake.bool_with_probability(0.2) {
+                    let assignee_id = if user_ids.is_empty() || self.fake.bool_with_probability(0.2)
+                    {
                         "NULL".to_string()
                     } else {
-                        user_ids[self.fake.int_range(0, (user_ids.len() - 1) as i64) as usize].to_string()
+                        user_ids[self.fake.int_range(0, (user_ids.len() - 1) as i64) as usize]
+                            .to_string()
                     };
 
                     let title = self.fake.sentence(4);
@@ -1249,25 +1799,64 @@ impl MultiTenantGenerator {
                     let completed = self.format_bool(is_completed);
                     let created = self.fake.datetime(2023, 2024);
 
-                    batch.push(format!("({}, {}, {}, {}, {}, {}, {}, {}, {})",
-                        id, tenant_id, proj_id, assignee_id, self.format_string(&title),
-                        priority, completed, self.format_string(&created), 
-                        self.format_string(&created)));
+                    batch.push(format!(
+                        "({}, {}, {}, {}, {}, {}, {}, {}, {})",
+                        id,
+                        tenant_id,
+                        proj_id,
+                        assignee_id,
+                        self.format_string(&title),
+                        priority,
+                        completed,
+                        self.format_string(&created),
+                        self.format_string(&created)
+                    ));
 
                     if batch.len() >= self.config.batch_size {
-                        self.flush_batch(w, "tasks",
-                            &["id", "tenant_id", "project_id", "assignee_id", "title", "priority", "completed", "created_at", "updated_at"],
-                            &mut batch, &mut first_batch)?;
+                        self.flush_batch(
+                            w,
+                            "tasks",
+                            &[
+                                "id",
+                                "tenant_id",
+                                "project_id",
+                                "assignee_id",
+                                "title",
+                                "priority",
+                                "completed",
+                                "created_at",
+                                "updated_at",
+                            ],
+                            &mut batch,
+                            &mut first_batch,
+                        )?;
                     }
                 }
             }
 
-            self.tenant_ids.entry("tasks".to_string()).or_default().insert(tenant_id, task_ids);
+            self.tenant_ids
+                .entry("tasks".to_string())
+                .or_default()
+                .insert(tenant_id, task_ids);
         }
 
-        self.flush_batch(w, "tasks",
-            &["id", "tenant_id", "project_id", "assignee_id", "title", "priority", "completed", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "tasks",
+            &[
+                "id",
+                "tenant_id",
+                "project_id",
+                "assignee_id",
+                "title",
+                "priority",
+                "completed",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1300,22 +1889,52 @@ impl MultiTenantGenerator {
                 let path = format!("/{}", name);
                 let created = self.fake.datetime(2022, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {}, {})",
-                    id, tenant_id, parent_id, self.format_string(&name), 
-                    self.format_string(&path), self.format_string(&created), 
-                    self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    parent_id,
+                    self.format_string(&name),
+                    self.format_string(&path),
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "folders",
-                        &["id", "tenant_id", "parent_id", "name", "path", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "folders",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "parent_id",
+                            "name",
+                            "path",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
         }
 
-        self.flush_batch(w, "folders",
-            &["id", "tenant_id", "parent_id", "name", "path", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "folders",
+            &[
+                "id",
+                "tenant_id",
+                "parent_id",
+                "name",
+                "path",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1330,15 +1949,21 @@ impl MultiTenantGenerator {
         let mut first_batch = true;
 
         for &tenant_id in tenant_ids {
-            let user_ids = self.tenant_ids.get("users")
+            let user_ids = self
+                .tenant_ids
+                .get("users")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
-            let task_ids = self.tenant_ids.get("tasks")
+            let task_ids = self
+                .tenant_ids
+                .get("tasks")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
-            let proj_ids = self.tenant_ids.get("projects")
+            let proj_ids = self
+                .tenant_ids
+                .get("projects")
                 .and_then(|m| m.get(&tenant_id))
                 .cloned()
                 .unwrap_or_default();
@@ -1349,46 +1974,92 @@ impl MultiTenantGenerator {
                 let id = self.ids.next_id("comments");
                 comment_ids.push(id);
 
-                let parent_id = if i < 3 || comment_ids.len() <= 1 || self.fake.bool_with_probability(0.6) {
-                    "NULL".to_string()
-                } else {
-                    let parent_idx = self.fake.int_range(0, (comment_ids.len() - 2) as i64) as usize;
-                    comment_ids[parent_idx].to_string()
-                };
+                let parent_id =
+                    if i < 3 || comment_ids.len() <= 1 || self.fake.bool_with_probability(0.6) {
+                        "NULL".to_string()
+                    } else {
+                        let parent_idx =
+                            self.fake.int_range(0, (comment_ids.len() - 2) as i64) as usize;
+                        comment_ids[parent_idx].to_string()
+                    };
 
                 let user_id = if user_ids.is_empty() {
                     "NULL".to_string()
                 } else {
-                    user_ids[self.fake.int_range(0, (user_ids.len() - 1) as i64) as usize].to_string()
+                    user_ids[self.fake.int_range(0, (user_ids.len() - 1) as i64) as usize]
+                        .to_string()
                 };
 
-                let (commentable_type, commentable_id) = if self.fake.bool_with_probability(0.7) && !task_ids.is_empty() {
-                    ("task", task_ids[self.fake.int_range(0, (task_ids.len() - 1) as i64) as usize])
-                } else if !proj_ids.is_empty() {
-                    ("project", proj_ids[self.fake.int_range(0, (proj_ids.len() - 1) as i64) as usize])
-                } else {
-                    continue;
-                };
+                let (commentable_type, commentable_id) =
+                    if self.fake.bool_with_probability(0.7) && !task_ids.is_empty() {
+                        (
+                            "task",
+                            task_ids[self.fake.int_range(0, (task_ids.len() - 1) as i64) as usize],
+                        )
+                    } else if !proj_ids.is_empty() {
+                        (
+                            "project",
+                            proj_ids[self.fake.int_range(0, (proj_ids.len() - 1) as i64) as usize],
+                        )
+                    } else {
+                        continue;
+                    };
 
                 let body = self.fake.paragraph(2);
                 let created = self.fake.datetime(2023, 2024);
 
-                batch.push(format!("({}, {}, {}, {}, {}, {}, {}, {}, {})",
-                    id, tenant_id, parent_id, user_id, self.format_string(commentable_type), 
-                    commentable_id, self.format_string(&body), self.format_string(&created), 
-                    self.format_string(&created)));
+                batch.push(format!(
+                    "({}, {}, {}, {}, {}, {}, {}, {}, {})",
+                    id,
+                    tenant_id,
+                    parent_id,
+                    user_id,
+                    self.format_string(commentable_type),
+                    commentable_id,
+                    self.format_string(&body),
+                    self.format_string(&created),
+                    self.format_string(&created)
+                ));
 
                 if batch.len() >= self.config.batch_size {
-                    self.flush_batch(w, "comments",
-                        &["id", "tenant_id", "parent_id", "user_id", "commentable_type", "commentable_id", "body", "created_at", "updated_at"],
-                        &mut batch, &mut first_batch)?;
+                    self.flush_batch(
+                        w,
+                        "comments",
+                        &[
+                            "id",
+                            "tenant_id",
+                            "parent_id",
+                            "user_id",
+                            "commentable_type",
+                            "commentable_id",
+                            "body",
+                            "created_at",
+                            "updated_at",
+                        ],
+                        &mut batch,
+                        &mut first_batch,
+                    )?;
                 }
             }
         }
 
-        self.flush_batch(w, "comments",
-            &["id", "tenant_id", "parent_id", "user_id", "commentable_type", "commentable_id", "body", "created_at", "updated_at"],
-            &mut batch, &mut first_batch)?;
+        self.flush_batch(
+            w,
+            "comments",
+            &[
+                "id",
+                "tenant_id",
+                "parent_id",
+                "user_id",
+                "commentable_type",
+                "commentable_id",
+                "body",
+                "created_at",
+                "updated_at",
+            ],
+            &mut batch,
+            &mut first_batch,
+        )?;
 
         writeln!(w)?;
         Ok(())
@@ -1407,12 +2078,16 @@ impl MultiTenantGenerator {
             return Ok(());
         }
 
-        let cols_str = columns.iter().map(|c| self.quote_ident(c)).collect::<Vec<_>>().join(", ");
+        let cols_str = columns
+            .iter()
+            .map(|c| self.quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
         let table_ref = self.format_table_name(table_name);
 
         writeln!(w, "INSERT INTO {} ({}) VALUES", table_ref, cols_str)?;
         writeln!(w, "{};", batch.join(",\n"))?;
-        
+
         if self.config.use_go_separator {
             writeln!(w, "GO")?;
         }
@@ -1444,8 +2119,20 @@ impl MultiTenantGenerator {
 
     fn format_bool(&self, b: bool) -> &'static str {
         match self.config.dialect {
-            Dialect::MySql | Dialect::Sqlite | Dialect::Mssql => if b { "1" } else { "0" },
-            Dialect::Postgres => if b { "TRUE" } else { "FALSE" },
+            Dialect::MySql | Dialect::Sqlite | Dialect::Mssql => {
+                if b {
+                    "1"
+                } else {
+                    "0"
+                }
+            }
+            Dialect::Postgres => {
+                if b {
+                    "TRUE"
+                } else {
+                    "FALSE"
+                }
+            }
         }
     }
 
