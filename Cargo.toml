@@ -43,7 +43,7 @@ sha2 = "0.10"
 hex = "0.4"
 duckdb = { version = "1.4", features = ["bundled"] }
 dirs = "5"
-rustyline = "15"
+rustyline = "17"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
