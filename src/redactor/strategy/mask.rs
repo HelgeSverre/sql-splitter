@@ -40,7 +40,7 @@ impl MaskStrategy {
                     value_idx += 1;
                 }
                 '#' => {
-                    result.push(char::from_digit(rng.gen_range(0..10), 10).unwrap());
+                    result.push(char::from_digit(rng.random_range(0..10), 10).unwrap());
                     value_idx += 1;
                 }
                 c => {

@@ -67,36 +67,36 @@ impl FakeStrategy {
                     "Customer Support",
                     "Operations Manager",
                 ];
-                let idx = fake_rng.gen_range(0..titles.len());
+                let idx = fake_rng.random_range(0..titles.len());
                 titles[idx].to_string()
             }
 
             // Internet generators
             "url" => format!(
                 "https://example{}.com/{}",
-                fake_rng.gen_range(1..1000),
+                fake_rng.random_range(1..1000),
                 Word().fake_with_rng::<String, _>(&mut fake_rng)
             ),
             "ip" | "ip_address" | "ipv4" => {
                 format!(
                     "{}.{}.{}.{}",
-                    fake_rng.gen_range(1..255),
-                    fake_rng.gen_range(0..255),
-                    fake_rng.gen_range(0..255),
-                    fake_rng.gen_range(1..255)
+                    fake_rng.random_range(1..255),
+                    fake_rng.random_range(0..255),
+                    fake_rng.random_range(0..255),
+                    fake_rng.random_range(1..255)
                 )
             }
             "ipv6" => {
                 format!(
                     "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16),
-                    fake_rng.gen_range(0..0xFFFF_u16)
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16),
+                    fake_rng.random_range(0..0xFFFF_u16)
                 )
             }
 
@@ -104,37 +104,37 @@ impl FakeStrategy {
             "uuid" => {
                 format!(
                     "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-                    fake_rng.gen::<u32>(),
-                    fake_rng.gen::<u16>(),
-                    (fake_rng.gen::<u16>() & 0x0FFF) | 0x4000, // Version 4
-                    (fake_rng.gen::<u16>() & 0x3FFF) | 0x8000, // Variant
-                    fake_rng.gen::<u64>() & 0xFFFFFFFFFFFF_u64
+                    fake_rng.random::<u32>(),
+                    fake_rng.random::<u16>(),
+                    (fake_rng.random::<u16>() & 0x0FFF) | 0x4000, // Version 4
+                    (fake_rng.random::<u16>() & 0x3FFF) | 0x8000, // Variant
+                    fake_rng.random::<u64>() & 0xFFFFFFFFFFFF_u64
                 )
             }
 
             // Date/time generators
             "date" => {
-                let year = fake_rng.gen_range(1970..2024);
-                let month = fake_rng.gen_range(1..=12);
-                let day = fake_rng.gen_range(1..=28);
+                let year = fake_rng.random_range(1970..2024);
+                let month = fake_rng.random_range(1..=12);
+                let day = fake_rng.random_range(1..=28);
                 format!("{:04}-{:02}-{:02}", year, month, day)
             }
             "datetime" | "date_time" => {
-                let year = fake_rng.gen_range(1970..2024);
-                let month = fake_rng.gen_range(1..=12);
-                let day = fake_rng.gen_range(1..=28);
-                let hour = fake_rng.gen_range(0..24);
-                let minute = fake_rng.gen_range(0..60);
-                let second = fake_rng.gen_range(0..60);
+                let year = fake_rng.random_range(1970..2024);
+                let month = fake_rng.random_range(1..=12);
+                let day = fake_rng.random_range(1..=28);
+                let hour = fake_rng.random_range(0..24);
+                let minute = fake_rng.random_range(0..60);
+                let second = fake_rng.random_range(0..60);
                 format!(
                     "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
                     year, month, day, hour, minute, second
                 )
             }
             "time" => {
-                let hour = fake_rng.gen_range(0..24);
-                let minute = fake_rng.gen_range(0..60);
-                let second = fake_rng.gen_range(0..60);
+                let hour = fake_rng.random_range(0..24);
+                let minute = fake_rng.random_range(0..60);
+                let second = fake_rng.random_range(0..60);
                 format!("{:02}:{:02}:{:02}", hour, minute, second)
             }
 
@@ -143,22 +143,22 @@ impl FakeStrategy {
                 // Generate a fake credit card number (Luhn-valid would be complex, simplified)
                 format!(
                     "{:04}-{:04}-{:04}-{:04}",
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(1000..9999)
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(1000..9999)
                 )
             }
             "iban" => {
                 // Simplified IBAN (not valid, but looks realistic)
                 format!(
                     "DE{:02}{:04}{:04}{:04}{:04}{:02}",
-                    fake_rng.gen_range(10..99),
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(1000..9999),
-                    fake_rng.gen_range(10..99)
+                    fake_rng.random_range(10..99),
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(1000..9999),
+                    fake_rng.random_range(10..99)
                 )
             }
 
@@ -166,9 +166,9 @@ impl FakeStrategy {
             "ssn" => {
                 format!(
                     "{:03}-{:02}-{:04}",
-                    fake_rng.gen_range(100..999),
-                    fake_rng.gen_range(10..99),
-                    fake_rng.gen_range(1000..9999)
+                    fake_rng.random_range(100..999),
+                    fake_rng.random_range(10..99),
+                    fake_rng.random_range(1000..9999)
                 )
             }
 
@@ -178,7 +178,7 @@ impl FakeStrategy {
             "word" => Word().fake_with_rng(&mut fake_rng),
 
             // Default: return a generic fake string
-            _ => format!("FAKE_{}", fake_rng.gen_range(10000..99999)),
+            _ => format!("FAKE_{}", fake_rng.random_range(10000..99999)),
         }
     }
 }

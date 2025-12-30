@@ -42,7 +42,7 @@ impl<T> Reservoir<T> {
             self.items.push(item);
         } else {
             // Reservoir full - randomly replace
-            let j = self.rng.gen_range(0..self.count);
+            let j = self.rng.random_range(0..self.count);
             if j < self.capacity {
                 self.items[j] = item;
             }

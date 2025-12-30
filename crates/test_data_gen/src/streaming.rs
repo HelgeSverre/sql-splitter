@@ -283,7 +283,7 @@ impl StreamingGenerator {
         for row_idx in batch_start..batch_end {
             let global_id = table_idx * self.config.rows_per_table + row_idx + 1;
             let name = self.random_string(20);
-            let value = self.rng.gen_range(1..=1_000_000);
+            let value = self.rng.random_range(1..=1_000_000);
             let desc = self.random_string(50);
 
             let formatted_name = self.format_string(&name);
@@ -292,7 +292,7 @@ impl StreamingGenerator {
             if has_parent {
                 let parent_id = self
                     .rng
-                    .gen_range(1..=(table_idx * self.config.rows_per_table));
+                    .random_range(1..=(table_idx * self.config.rows_per_table));
                 write!(
                     w,
                     "({}, {}, {}, {}, {})",
@@ -339,7 +339,7 @@ impl StreamingGenerator {
         for row_idx in batch_start..batch_end {
             let global_id = table_idx * self.config.rows_per_table + row_idx + 1;
             let name = self.random_string(20);
-            let value = self.rng.gen_range(1..=1_000_000);
+            let value = self.rng.random_range(1..=1_000_000);
             let desc = self.random_string(50);
 
             // Escape for COPY format (tab-separated, backslash escapes)
@@ -349,7 +349,7 @@ impl StreamingGenerator {
             if has_parent {
                 let parent_id = self
                     .rng
-                    .gen_range(1..=(table_idx * self.config.rows_per_table));
+                    .random_range(1..=(table_idx * self.config.rows_per_table));
                 writeln!(
                     w,
                     "{}\t{}\t{}\t{}\t{}",
@@ -375,7 +375,7 @@ impl StreamingGenerator {
     fn random_string(&mut self, len: usize) -> String {
         (0..len)
             .map(|_| {
-                let idx = self.rng.gen_range(0..CHARS.len());
+                let idx = self.rng.random_range(0..CHARS.len());
                 CHARS[idx] as char
             })
             .collect()

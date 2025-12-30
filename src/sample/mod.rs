@@ -645,7 +645,7 @@ fn sample_table_streaming(
                             }
 
                             // Bernoulli sample
-                            if rng.gen::<f64>() < prob {
+                            if rng.random::<f64>() < prob {
                                 // Write to temp file
                                 if temp_writer.is_none() {
                                     temp_writer = Some(BufWriter::new(File::create(&temp_path)?));
@@ -699,7 +699,7 @@ fn sample_table_streaming(
                                     }
                                 }
 
-                                if rng.gen::<f64>() < prob {
+                                if rng.random::<f64>() < prob {
                                     if temp_writer.is_none() {
                                         temp_writer =
                                             Some(BufWriter::new(File::create(&temp_path)?));
@@ -725,7 +725,7 @@ fn sample_table_streaming(
             // Reservoir sampling: collect eligible row indices in first pass,
             // then write selected rows in second pass
             let mut reservoir: Reservoir<(u64, RowFormat, Option<u64>)> =
-                Reservoir::new(n, StdRng::from_rng(&mut *rng)?);
+                Reservoir::new(n, StdRng::from_rng(&mut *rng));
 
             // First pass: build reservoir of (row_index, format, pk_hash)
             let file = File::open(table_file)?;

@@ -220,12 +220,12 @@ impl<R: Rng> FakeData<R> {
 
     /// Generate a random first name
     pub fn first_name(&mut self) -> &'static str {
-        FIRST_NAMES[self.rng.gen_range(0..FIRST_NAMES.len())]
+        FIRST_NAMES[self.rng.random_range(0..FIRST_NAMES.len())]
     }
 
     /// Generate a random last name
     pub fn last_name(&mut self) -> &'static str {
-        LAST_NAMES[self.rng.gen_range(0..LAST_NAMES.len())]
+        LAST_NAMES[self.rng.random_range(0..LAST_NAMES.len())]
     }
 
     /// Generate a full name
@@ -235,7 +235,7 @@ impl<R: Rng> FakeData<R> {
 
     /// Generate an email address
     pub fn email(&mut self, first: &str, last: &str, domain: &str) -> String {
-        let num: u32 = self.rng.gen_range(1..1000);
+        let num: u32 = self.rng.random_range(1..1000);
         format!(
             "{}.{}{}@{}",
             first.to_lowercase(),
@@ -247,8 +247,8 @@ impl<R: Rng> FakeData<R> {
 
     /// Generate a company name
     pub fn company_name(&mut self) -> String {
-        let prefix = COMPANY_PREFIXES[self.rng.gen_range(0..COMPANY_PREFIXES.len())];
-        let suffix = COMPANY_SUFFIXES[self.rng.gen_range(0..COMPANY_SUFFIXES.len())];
+        let prefix = COMPANY_PREFIXES[self.rng.random_range(0..COMPANY_PREFIXES.len())];
+        let suffix = COMPANY_SUFFIXES[self.rng.random_range(0..COMPANY_SUFFIXES.len())];
         format!("{} {}", prefix, suffix)
     }
 
@@ -260,51 +260,51 @@ impl<R: Rng> FakeData<R> {
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '-')
             .collect::<String>();
-        let num: u32 = self.rng.gen_range(1..10000);
+        let num: u32 = self.rng.random_range(1..10000);
         format!("{}-{}", base, num)
     }
 
     /// Generate a product name
     pub fn product_name(&mut self) -> String {
-        let adj = PRODUCT_ADJECTIVES[self.rng.gen_range(0..PRODUCT_ADJECTIVES.len())];
-        let noun = PRODUCT_NOUNS[self.rng.gen_range(0..PRODUCT_NOUNS.len())];
+        let adj = PRODUCT_ADJECTIVES[self.rng.random_range(0..PRODUCT_ADJECTIVES.len())];
+        let noun = PRODUCT_NOUNS[self.rng.random_range(0..PRODUCT_NOUNS.len())];
         format!("{} {}", adj, noun)
     }
 
     /// Generate a SKU
     pub fn sku(&mut self) -> String {
         let prefix: String = (0..3)
-            .map(|_| self.rng.gen_range(b'A'..=b'Z') as char)
+            .map(|_| self.rng.random_range(b'A'..=b'Z') as char)
             .collect();
-        let num: u32 = self.rng.gen_range(10000..99999);
+        let num: u32 = self.rng.random_range(10000..99999);
         format!("{}-{}", prefix, num)
     }
 
     /// Generate a category name
     pub fn category(&mut self) -> &'static str {
-        CATEGORIES[self.rng.gen_range(0..CATEGORIES.len())]
+        CATEGORIES[self.rng.random_range(0..CATEGORIES.len())]
     }
 
     /// Generate a price
     pub fn price(&mut self, min: f64, max: f64) -> f64 {
-        let value = self.rng.gen_range(min..max);
+        let value = self.rng.random_range(min..max);
         (value * 100.0).round() / 100.0
     }
 
     /// Generate a random integer in range
     pub fn int_range(&mut self, min: i64, max: i64) -> i64 {
-        self.rng.gen_range(min..=max)
+        self.rng.random_range(min..=max)
     }
 
     /// Generate a boolean with given probability of true
     pub fn bool_with_probability(&mut self, probability: f64) -> bool {
-        self.rng.gen::<f64>() < probability
+        self.rng.random::<f64>() < probability
     }
 
     /// Generate lorem ipsum text
     pub fn lorem(&mut self, word_count: usize) -> String {
         (0..word_count)
-            .map(|_| LOREM_WORDS[self.rng.gen_range(0..LOREM_WORDS.len())])
+            .map(|_| LOREM_WORDS[self.rng.random_range(0..LOREM_WORDS.len())])
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -323,7 +323,7 @@ impl<R: Rng> FakeData<R> {
     pub fn paragraph(&mut self, sentence_count: usize) -> String {
         let mut sentences = Vec::with_capacity(sentence_count);
         for _ in 0..sentence_count {
-            let word_count = self.rng.gen_range(5..15);
+            let word_count = self.rng.random_range(5..15);
             sentences.push(self.sentence(word_count));
         }
         sentences.join(" ")
@@ -331,7 +331,7 @@ impl<R: Rng> FakeData<R> {
 
     /// Generate a role name
     pub fn role(&mut self) -> &'static str {
-        ROLES[self.rng.gen_range(0..ROLES.len())]
+        ROLES[self.rng.random_range(0..ROLES.len())]
     }
 
     /// Get all permission names
@@ -346,42 +346,42 @@ impl<R: Rng> FakeData<R> {
 
     /// Generate an order status
     pub fn order_status(&mut self) -> &'static str {
-        ORDER_STATUSES[self.rng.gen_range(0..ORDER_STATUSES.len())]
+        ORDER_STATUSES[self.rng.random_range(0..ORDER_STATUSES.len())]
     }
 
     /// Generate a project status
     pub fn project_status(&mut self) -> &'static str {
-        PROJECT_STATUSES[self.rng.gen_range(0..PROJECT_STATUSES.len())]
+        PROJECT_STATUSES[self.rng.random_range(0..PROJECT_STATUSES.len())]
     }
 
     /// Generate a task priority
     pub fn task_priority(&mut self) -> i32 {
-        TASK_PRIORITIES[self.rng.gen_range(0..TASK_PRIORITIES.len())]
+        TASK_PRIORITIES[self.rng.random_range(0..TASK_PRIORITIES.len())]
     }
 
     /// Generate an order number
     pub fn order_number(&mut self) -> String {
         let year = 2024;
-        let num: u32 = self.rng.gen_range(100000..999999);
+        let num: u32 = self.rng.random_range(100000..999999);
         format!("ORD-{}-{}", year, num)
     }
 
     /// Generate a phone number
     pub fn phone(&mut self) -> String {
-        let area: u32 = self.rng.gen_range(200..999);
-        let prefix: u32 = self.rng.gen_range(200..999);
-        let line: u32 = self.rng.gen_range(1000..9999);
+        let area: u32 = self.rng.random_range(200..999);
+        let prefix: u32 = self.rng.random_range(200..999);
+        let line: u32 = self.rng.random_range(1000..9999);
         format!("+1-{}-{}-{}", area, prefix, line)
     }
 
     /// Generate a datetime string (ISO 8601)
     pub fn datetime(&mut self, year_start: i32, year_end: i32) -> String {
-        let year = self.rng.gen_range(year_start..=year_end);
-        let month = self.rng.gen_range(1..=12);
-        let day = self.rng.gen_range(1..=28); // Safe for all months
-        let hour = self.rng.gen_range(0..24);
-        let minute = self.rng.gen_range(0..60);
-        let second = self.rng.gen_range(0..60);
+        let year = self.rng.random_range(year_start..=year_end);
+        let month = self.rng.random_range(1..=12);
+        let day = self.rng.random_range(1..=28); // Safe for all months
+        let hour = self.rng.random_range(0..24);
+        let minute = self.rng.random_range(0..60);
+        let second = self.rng.random_range(0..60);
         format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             year, month, day, hour, minute, second
@@ -390,20 +390,20 @@ impl<R: Rng> FakeData<R> {
 
     /// Generate a date string (ISO 8601)
     pub fn date(&mut self, year_start: i32, year_end: i32) -> String {
-        let year = self.rng.gen_range(year_start..=year_end);
-        let month = self.rng.gen_range(1..=12);
-        let day = self.rng.gen_range(1..=28);
+        let year = self.rng.random_range(year_start..=year_end);
+        let month = self.rng.random_range(1..=12);
+        let day = self.rng.random_range(1..=28);
         format!("{:04}-{:02}-{:02}", year, month, day)
     }
 
     /// Pick a random element from a slice
     pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
-        &items[self.rng.gen_range(0..items.len())]
+        &items[self.rng.random_range(0..items.len())]
     }
 
     /// Pick a random element from a non-empty Vec, returning the value
     pub fn pick_id(&mut self, ids: &[i64]) -> i64 {
-        ids[self.rng.gen_range(0..ids.len())]
+        ids[self.rng.random_range(0..ids.len())]
     }
 
     /// Generate a folder/file path segment
@@ -411,8 +411,8 @@ impl<R: Rng> FakeData<R> {
         let words = [
             "docs", "files", "images", "reports", "archive", "data", "tmp", "exports",
         ];
-        let word = words[self.rng.gen_range(0..words.len())];
-        let num: u32 = self.rng.gen_range(1..100);
+        let word = words[self.rng.random_range(0..words.len())];
+        let num: u32 = self.rng.random_range(1..100);
         format!("{}_{}", word, num)
     }
 }

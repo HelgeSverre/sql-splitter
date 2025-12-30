@@ -11,8 +11,8 @@ name = "gen-fixtures"
 path = "src/bin/main.rs"
 
 [dependencies]
-rand = "0.8"
-rand_chacha = "0.3"
+rand = "0.9"
+rand_chacha = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
