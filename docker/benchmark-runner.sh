@@ -9,6 +9,13 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Force C locale for consistent number formatting
+export LC_NUMERIC=C
+
+# Global for file size
+FILE_SIZE_BYTES=0
+FILE_SIZE_MB=0
+
 show_help() {
     cat << EOF
 SQL Splitter Benchmark Runner
@@ -31,25 +38,35 @@ Examples:
 EOF
 }
 
+# Get file size in bytes (cross-platform)
+get_file_size() {
+    local file="$1"
+    if [[ "$(uname)" == "Darwin" ]]; then
+        stat -f%z "$file" 2>/dev/null
+    else
+        stat -c%s "$file" 2>/dev/null
+    fi
+}
+
 list_tools() {
     echo -e "${BOLD}Available Tools:${NC}"
     echo ""
-    
+
     echo -n "  sql-splitter (Rust): "
     command -v sql-splitter &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-    
+
     echo -n "  mysqldumpsplitter.sh (Bash/awk): "
     [ -x /usr/local/bin/mysqldumpsplitter.sh ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-    
+
     echo -n "  mysql_splitdump.sh (csplit): "
     [ -x /usr/local/bin/mysql_splitdump.sh ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-    
+
     echo -n "  mysqldumpsplit-go (Go): "
     command -v mysqldumpsplit-go &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-    
+
     echo -n "  mysqldumpsplit (Node.js): "
     command -v mysqldumpsplit &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-    
+
     echo -n "  mysql-dump-split.rb (Ruby): "
     [ -x /usr/local/bin/mysql-dump-split.rb ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
 }
@@ -57,7 +74,7 @@ list_tools() {
 generate_test_data() {
     local size_mb=$1
     local file="/tmp/benchmark_${size_mb}mb.sql"
-    
+
     echo -e "${YELLOW}Generating ${size_mb}MB test data...${NC}" >&2
     python3 /usr/local/bin/generate-test-dump.py "$size_mb" -o "$file" >&2
     echo "$file"
@@ -68,12 +85,12 @@ test_tool() {
     local cmd="$2"
     local out_dir="$3"
     local timeout_sec="${4:-60}"
-    
+
     rm -rf "$out_dir" 2>/dev/null
     mkdir -p "$out_dir"
-    
+
     echo -n "  $name: "
-    
+
     if timeout "$timeout_sec" bash -c "$cmd" > /dev/null 2>&1; then
         local count=$(ls -1 "$out_dir" 2>/dev/null | wc -l | tr -d ' ')
         if [ "$count" -gt 0 ]; then
@@ -91,37 +108,37 @@ test_tool() {
 
 test_tools() {
     local sql_file="$1"
-    
+
     echo -e "${BOLD}Testing tools with: $sql_file${NC}"
     echo ""
-    
+
     rm -rf /tmp/test-* 2>/dev/null
     mkdir -p /tmp/test-rust /tmp/test-bash /tmp/test-csplit /tmp/test-go /tmp/test-node /tmp/test-ruby
-    
+
     test_tool "sql-splitter (Rust)" \
         "sql-splitter split '$sql_file' -o /tmp/test-rust" \
         "/tmp/test-rust"
-    
+
     test_tool "mysqldumpsplitter.sh (Bash)" \
         "bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none" \
         "/tmp/test-bash"
-    
+
     test_tool "mysql_splitdump.sh (csplit)" \
         "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'" \
         "/tmp/test-csplit"
-    
+
     if command -v mysqldumpsplit-go &>/dev/null; then
         test_tool "mysqldumpsplit-go (Go)" \
             "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" \
             "/tmp/test-go" 30 || true
     fi
-    
+
     if [ -x /usr/bin/mysqldumpsplit ]; then
         test_tool "mysqldumpsplit (Node.js)" \
             "timeout 60 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" \
             "/tmp/test-node" 60 || true
     fi
-    
+
     if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
         test_tool "mysql-dump-split.rb (Ruby)" \
             "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" \
@@ -129,14 +146,76 @@ test_tools() {
     fi
 }
 
+# Generate enhanced markdown table with memory, CPU, and throughput
+generate_enhanced_table() {
+    local json_file="$1"
+    local output_file="$2"
+
+    if ! command -v jq &>/dev/null; then
+        echo -e "${YELLOW}jq not found, skipping enhanced table${NC}"
+        return
+    fi
+
+    if [ ! -f "$json_file" ]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}Enhanced Results (with memory & CPU):${NC}"
+    echo ""
+
+    # Print console header
+    printf "  ${BOLD}%-25s %10s %10s %8s %10s${NC}\n" \
+        "Tool" "Time" "Memory" "CPU" "Throughput"
+    printf "  %-25s %10s %10s %8s %10s\n" \
+        "-------------------------" "----------" "----------" "--------" "----------"
+
+    # Create enhanced markdown table
+    cat > "$output_file" << 'EOF'
+| Tool | Mean Time | σ | Peak Memory | CPU Time | Throughput | Relative |
+|:-----|----------:|--:|------------:|---------:|-----------:|---------:|
+EOF
+
+    # Parse JSON and generate table rows (handle null memory_usage_byte)
+    local results=$(jq -r '.results | sort_by(.mean) | .[] | [.command, .mean, .stddev, (if .memory_usage_byte then (.memory_usage_byte | max) else 0 end), .user, .system] | @tsv' "$json_file")
+
+    # Get fastest time for relative calculation
+    local fastest=$(jq -r '.results | sort_by(.mean) | .[0].mean' "$json_file")
+
+    while IFS=$'\t' read -r command mean stddev memory_bytes user system; do
+        # Calculate metrics with proper formatting
+        local mean_ms=$(printf "%.1f" "$(echo "$mean * 1000" | bc -l)")
+        local stddev_ms=$(printf "%.1f" "$(echo "$stddev * 1000" | bc -l)")
+        local memory_mb=$(printf "%.1f" "$(echo "$memory_bytes / 1024 / 1024" | bc -l)")
+        local cpu_time=$(printf "%.2f" "$(echo "$user + $system" | bc -l)")
+        local throughput=$(printf "%.0f" "$(echo "$FILE_SIZE_MB / $mean" | bc -l)")
+        local relative=$(printf "%.2f" "$(echo "$mean / $fastest" | bc -l)")
+
+        # Format and append row to markdown
+        printf "| %s | %s ms | ±%s | %s MB | %ss | %s MB/s | %s |\n" \
+            "$command" "$mean_ms" "$stddev_ms" "$memory_mb" "$cpu_time" "$throughput" "$relative" >> "$output_file"
+
+        # Also print to console
+        printf "  %-25s %8s ms %8s MB %6ss %8s MB/s\n" \
+            "$command" "$mean_ms" "$memory_mb" "$cpu_time" "$throughput"
+    done <<< "$results"
+
+    echo ""
+    echo -e "${GREEN}Enhanced table saved:${NC} $output_file"
+}
+
 run_benchmark() {
     local sql_file="$1"
     local runs="$2"
     local warmup="$3"
     local export_file="$4"
-    
+
     local file_size=$(ls -lh "$sql_file" | awk '{print $5}')
-    
+
+    # Get file size for throughput calculation
+    FILE_SIZE_BYTES=$(get_file_size "$sql_file")
+    FILE_SIZE_MB=$(printf "%.2f" "$(echo "$FILE_SIZE_BYTES / 1024 / 1024" | bc -l)")
+
     echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}${BLUE}  SQL Splitter Benchmark${NC}"
     echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${NC}"
@@ -144,57 +223,57 @@ run_benchmark() {
     echo -e "File: ${GREEN}$sql_file${NC} ($file_size)"
     echo -e "Runs: $runs, Warmup: $warmup"
     echo ""
-    
+
     # Test which tools work first
     echo -e "${CYAN}Testing tools...${NC}"
     local working_tools=()
-    
+
     rm -rf /tmp/test-* 2>/dev/null
     mkdir -p /tmp/test-csplit
-    
+
     if test_tool "sql-splitter" "sql-splitter split '$sql_file' -o /tmp/test-rust" "/tmp/test-rust"; then
         working_tools+=("sql-splitter (Rust)|sql-splitter split '$sql_file' -o /tmp/bench-rust")
     fi
-    
+
     if test_tool "mysqldumpsplitter.sh" "bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none" "/tmp/test-bash"; then
         working_tools+=("mysqldumpsplitter (Bash)|bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/bench-bash --compression none")
     fi
-    
+
     mkdir -p /tmp/test-csplit
     if test_tool "mysql_splitdump.sh" "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'" "/tmp/test-csplit"; then
         working_tools+=("mysql_splitdump (csplit)|cd /tmp/bench-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'")
     fi
-    
+
     if command -v mysqldumpsplit-go &>/dev/null; then
         mkdir -p /tmp/test-go
         if test_tool "mysqldumpsplit-go" "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
             working_tools+=("mysqldumpsplit (Go)|mysqldumpsplit-go -i '$sql_file' -o /tmp/bench-go")
         fi
     fi
-    
+
     if [ -x /usr/bin/mysqldumpsplit ]; then
         mkdir -p /tmp/test-node
         if test_tool "mysqldumpsplit (Node.js)" "timeout 60 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" "/tmp/test-node"; then
             working_tools+=("mysqldumpsplit (Node.js)|/usr/bin/mysqldumpsplit -o /tmp/bench-node '$sql_file'")
         fi
     fi
-    
+
     if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
         mkdir -p /tmp/test-ruby
         if test_tool "mysql-dump-split.rb (Ruby)" "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" "/tmp/test-ruby/tables"; then
             working_tools+=("mysql-dump-split (Ruby)|cd /tmp/bench-ruby && ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'")
         fi
     fi
-    
+
     echo ""
     echo -e "${CYAN}Running benchmark with ${#working_tools[@]} working tools...${NC}"
     echo ""
-    
+
     if [ ${#working_tools[@]} -lt 2 ]; then
         echo -e "${RED}Not enough working tools for comparison${NC}"
         return 1
     fi
-    
+
     # Build hyperfine command
     local cmds=()
     for tool in "${working_tools[@]}"; do
@@ -202,20 +281,30 @@ run_benchmark() {
         local cmd="${tool#*|}"
         cmds+=("--command-name" "$name" "$cmd")
     done
-    
-    local export_arg=""
+
+    # Always export JSON for enhanced table
+    local json_file="/tmp/benchmark_results.json"
+    local export_args="--export-json $json_file"
+
     if [ -n "$export_file" ]; then
-        export_arg="--export-markdown $export_file --export-json ${export_file%.md}.json"
+        export_args="$export_args --export-markdown $export_file"
     fi
-    
+
     hyperfine \
         --warmup "$warmup" \
         --runs "$runs" \
         --ignore-failure \
         --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit /tmp/bench-ruby /tmp/bench-node' \
-        $export_arg \
+        $export_args \
         "${cmds[@]}"
-    
+
+    # Generate enhanced results table
+    local enhanced_file="${export_file%.md}_enhanced.md"
+    if [ -z "$export_file" ]; then
+        enhanced_file="/tmp/benchmark_enhanced.md"
+    fi
+    generate_enhanced_table "$json_file" "$enhanced_file"
+
     if [ -n "$export_file" ]; then
         echo ""
         echo -e "${GREEN}Results exported to: $export_file${NC}"

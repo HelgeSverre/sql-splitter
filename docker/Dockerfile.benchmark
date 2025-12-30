@@ -1,80 +1,55 @@
-# Benchmark environment for sql-splitter comparisons
-FROM debian:bookworm-slim
+# Multi-stage build for minimal benchmark container
+# Stage 1: Build sql-splitter (Rust)
+FROM rust:1.85-slim-bookworm AS rust-builder
 
-ARG RUST_VERSION=1.83.0
-ARG GO_VERSION=1.23.4
-ARG NODE_VERSION=18
-
+# Install build dependencies for DuckDB
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    build-essential \
-    git \
-    pkg-config \
-    python3 \
-    python3-pip \
-    hyperfine \
-    ruby \
-    gawk \
-    bc \
-    coreutils \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Install Go
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" | tar -C /usr/local -xz
-ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
-
-# Install Node.js
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
-    && apt-get install -y nodejs \
+    build-essential pkg-config cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-
-# Copy sql-splitter source and build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
 COPY crates ./crates
-RUN cargo build --release && cp target/release/sql-splitter /usr/local/bin/sql-splitter
+# Pin home crate to version compatible with Rust 1.85
+RUN cargo update home@0.5.12 --precise 0.5.9 && cargo build --release
 
-# ============================================================
-# Competitor Tools
-# ============================================================
-
-# 1. kedarvj/mysqldumpsplitter (Bash/awk) - Most popular shell-based tool
-RUN curl -sL "https://raw.githubusercontent.com/kedarvj/mysqldumpsplitter/master/mysqldumpsplitter.sh" \
-    -o /usr/local/bin/mysqldumpsplitter.sh && \
-    chmod +x /usr/local/bin/mysqldumpsplitter.sh
-
-# 2. jasny/mysql_splitdump.sh (csplit-based)
-RUN curl -sL "https://gist.githubusercontent.com/jasny/1608062/raw/mysql_splitdump.sh" \
-    -o /usr/local/bin/mysql_splitdump.sh && \
-    chmod +x /usr/local/bin/mysql_splitdump.sh
-
-# 3. mysqldumpsplit-go (patched fork that fixes deadlock with non-interleaved dumps)
+# Stage 2: Build mysqldumpsplit-go (Go)
+FROM golang:1.23-bookworm AS go-builder
+ENV GOTOOLCHAIN=auto
 RUN git clone --branch fix/handle-non-interleaved-dumps --depth 1 \
-    https://github.com/HelgeSverre/mysqldumpsplit.git /tmp/mysqldumpsplit-go && \
-    cd /tmp/mysqldumpsplit-go && go build -o /usr/local/bin/mysqldumpsplit-go . && \
-    rm -rf /tmp/mysqldumpsplit-go
+    https://github.com/HelgeSverre/mysqldumpsplit.git /build && \
+    cd /build && CGO_ENABLED=0 go build -ldflags="-s -w" -o /mysqldumpsplit-go .
 
-# 4. vekexasia/mysqldumpsplit (Node.js)
-RUN npm install -g mysqldumpsplit 2>/dev/null || \
-    echo "Warning: Node mysqldumpsplit not available on npm"
+# Stage 3: Final minimal runtime
+FROM debian:bookworm-slim
 
-# 5. davydmaker/sql-dump-splitter (Python)
-RUN pip3 install --break-system-packages sql-dump-splitter 2>/dev/null || \
-    echo "Warning: sql-dump-splitter not available on pip"
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    hyperfine \
+    ruby \
+    gawk \
+    bc \
+    jq \
+    python3 \
+    coreutils \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# 6. ripienaar/mysql-dump-split (Ruby)
-RUN curl -sL "https://raw.githubusercontent.com/ripienaar/mysql-dump-split/master/split-mysql-dump.rb" \
-    -o /usr/local/bin/mysql-dump-split.rb && \
-    chmod +x /usr/local/bin/mysql-dump-split.rb 2>/dev/null || \
-    echo "Warning: mysql-dump-split script not available"
+# Copy built binaries from builder stages
+COPY --from=rust-builder /build/target/release/sql-splitter /usr/local/bin/sql-splitter
+COPY --from=go-builder /mysqldumpsplit-go /usr/local/bin/mysqldumpsplit-go
+
+# Download shell-based competitor scripts (tiny, no build needed)
+RUN curl -sL "https://raw.githubusercontent.com/kedarvj/mysqldumpsplitter/master/mysqldumpsplitter.sh" \
+    -o /usr/local/bin/mysqldumpsplitter.sh && chmod +x /usr/local/bin/mysqldumpsplitter.sh && \
+    curl -sL "https://gist.githubusercontent.com/jasny/1608062/raw/mysql_splitdump.sh" \
+    -o /usr/local/bin/mysql_splitdump.sh && chmod +x /usr/local/bin/mysql_splitdump.sh && \
+    curl -sL "https://raw.githubusercontent.com/ripienaar/mysql-dump-split/master/split-mysql-dump.rb" \
+    -o /usr/local/bin/mysql-dump-split.rb && chmod +x /usr/local/bin/mysql-dump-split.rb
 
 WORKDIR /workspace
 
@@ -82,9 +57,6 @@ WORKDIR /workspace
 COPY docker/benchmark-runner.sh /usr/local/bin/benchmark-runner
 COPY scripts/generate-test-dump.py /usr/local/bin/generate-test-dump.py
 RUN chmod +x /usr/local/bin/benchmark-runner
-
-# Cleanup build artifacts
-RUN rm -rf /build /root/.cargo/registry /root/.cargo/git /root/go/pkg
 
 ENTRYPOINT ["benchmark-runner"]
 CMD ["--help"]
