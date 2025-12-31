@@ -32,7 +32,7 @@ xz2 = "0.1"
 zstd = "0.13"
 indicatif = "0.18"
 rand = "0.9"
-smallvec = "1.13"
+smallvec = { version = "1.13", features = ["union"] }
 chrono = "0.4"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
@@ -69,6 +69,14 @@ harness = false
 name = "convert_bench"
 harness = false
 
+[[bench]]
+name = "redact_bench"
+harness = false
+
+[[bench]]
+name = "sample_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
@@ -77,3 +85,9 @@ panic = "abort"
 debug = false
 incremental = false
 strip = true
+
+# Profile for flamegraph/samply profiling (release + debug symbols)
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
