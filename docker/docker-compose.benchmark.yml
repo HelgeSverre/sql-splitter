@@ -7,7 +7,7 @@ services:
       - ../tests/data:/data:ro
       - ../benchmark-results:/results
     tmpfs:
-      - /tmp:size=4G,mode=1777
+      - /tmp:size=16G,mode=1777
     working_dir: /workspace
     stdin_open: true
     tty: true

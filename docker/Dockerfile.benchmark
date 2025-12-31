@@ -15,41 +15,106 @@ COPY crates ./crates
 # Pin home crate to version compatible with Rust 1.85
 RUN cargo update home@0.5.12 --precise 0.5.9 && cargo build --release
 
-# Stage 2: Build mysqldumpsplit-go (Go)
+# Stage 2: Build multiple Go tools
 FROM golang:1.23-bookworm AS go-builder
 ENV GOTOOLCHAIN=auto
-RUN git clone --branch fix/handle-non-interleaved-dumps --depth 1 \
-    https://github.com/HelgeSverre/mysqldumpsplit.git /build && \
-    cd /build && CGO_ENABLED=0 go build -ldflags="-s -w" -o /mysqldumpsplit-go .
 
-# Stage 3: Final minimal runtime
+# Build mysqldumpsplit-go (HelgeSverre)
+RUN git clone --branch fix/handle-non-interleaved-dumps --depth 1 \
+    https://github.com/HelgeSverre/mysqldumpsplit.git /build-helgesverre && \
+    cd /build-helgesverre && CGO_ENABLED=0 go build -ldflags="-s -w" -o /mysqldumpsplit-go .
+
+# Build afrase/mysqldumpsplit (Go alternative)
+RUN git clone --depth 1 https://github.com/afrase/mysqldumpsplit.git /build-afrase && \
+    cd /build-afrase && CGO_ENABLED=0 go build -ldflags="-s -w" -o /mysqldumpsplit-afrase .
+
+# Stage 3: Build Node.js tools (requires Node 10 for gulp 3.x compatibility)
+FROM node:10-buster AS node-builder
+
+RUN git clone --depth 1 https://github.com/vekexasia/mysqldumpsplit.git /build-node && \
+    cd /build-node && npm install --ignore-scripts && \
+    ./node_modules/.bin/gulp && \
+    npm link
+
+# Stage 4: Build Python tools (with fallback for missing repos)
+FROM python:3.11-bookworm AS python-builder
+
+# Install Prometheus2677/sql-table-splitter (size-based splitting)
+RUN git clone --depth 1 https://github.com/Prometheus2677/sql-table-splitter.git /build-python-size 2>/dev/null && \
+    (cd /build-python-size && pip install -q --no-cache-dir -r requirements.txt 2>/dev/null || true) || \
+    mkdir -p /build-python-size
+
+# Install tkaratug/sql-splitter (query integrity focus)
+RUN git clone --depth 1 https://github.com/tkaratug/sql-splitter.git /build-python-tkaratug 2>/dev/null && \
+    (cd /build-python-tkaratug && pip install -q --no-cache-dir -r requirements.txt 2>/dev/null || true) || \
+    mkdir -p /build-python-tkaratug
+
+# Install inspaacademy/sql-dump-splitter (conditional splitting)
+RUN git clone --depth 1 https://github.com/inspaacademy/sql-dump-splitter.git /build-python-inspa 2>/dev/null && \
+    (cd /build-python-inspa && pip install -q --no-cache-dir -r requirements.txt 2>/dev/null || true) || \
+    mkdir -p /build-python-inspa
+
+# Stage 5: Final minimal runtime
 FROM debian:bookworm-slim
 
-# Install only runtime dependencies
+# Install runtime dependencies for all tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     hyperfine \
     ruby \
+    perl \
     gawk \
     bc \
     jq \
     python3 \
+    python3-pip \
+    nodejs \
+    npm \
+    golang-go \
     coreutils \
     ca-certificates \
     curl \
+    git \
+    build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
 # Copy built binaries from builder stages
 COPY --from=rust-builder /build/target/release/sql-splitter /usr/local/bin/sql-splitter
-COPY --from=go-builder /mysqldumpsplit-go /usr/local/bin/mysqldumpsplit-go
+COPY --from=go-builder /mysqldumpsplit-go /usr/local/bin/mysqldumpsplit-helgesverre
+COPY --from=go-builder /mysqldumpsplit-afrase /usr/local/bin/mysqldumpsplit-afrase
+COPY --from=node-builder /build-node /opt/mysqldumpsplit-node
+COPY --from=python-builder /build-python-* /opt/python-tools/
+
+# Create wrapper script for Node.js tool (entry point is dist/cli.js)
+RUN echo '#!/bin/bash\nnode /opt/mysqldumpsplit-node/dist/cli.js "$@"' > /usr/local/bin/mysqldumpsplit-node && \
+    chmod +x /usr/local/bin/mysqldumpsplit-node
+
+# Copy Python tools (if they exist)
+RUN for tool in sql-table-splitter.py splitter.py; do \
+        if [ -f /opt/python-tools/build-python-size/$tool ]; then \
+            cp /opt/python-tools/build-python-size/$tool /usr/local/bin/sql-table-splitter && chmod +x /usr/local/bin/sql-table-splitter; \
+        fi; \
+    done && \
+    for tool in splitter.py; do \
+        if [ -f /opt/python-tools/build-python-tkaratug/$tool ]; then \
+            cp /opt/python-tools/build-python-tkaratug/$tool /usr/local/bin/sql-splitter-tkaratug && chmod +x /usr/local/bin/sql-splitter-tkaratug; \
+        fi; \
+    done && \
+    for tool in splitter.py; do \
+        if [ -f /opt/python-tools/build-python-inspa/$tool ]; then \
+            cp /opt/python-tools/build-python-inspa/$tool /usr/local/bin/sql-dump-splitter && chmod +x /usr/local/bin/sql-dump-splitter; \
+        fi; \
+    done || true
 
 # Download shell-based competitor scripts (tiny, no build needed)
 RUN curl -sL "https://raw.githubusercontent.com/kedarvj/mysqldumpsplitter/master/mysqldumpsplitter.sh" \
-    -o /usr/local/bin/mysqldumpsplitter.sh && chmod +x /usr/local/bin/mysqldumpsplitter.sh && \
+    -o /usr/local/bin/mysqldumpsplitter-bash && chmod +x /usr/local/bin/mysqldumpsplitter-bash && \
     curl -sL "https://gist.githubusercontent.com/jasny/1608062/raw/mysql_splitdump.sh" \
-    -o /usr/local/bin/mysql_splitdump.sh && chmod +x /usr/local/bin/mysql_splitdump.sh && \
+    -o /usr/local/bin/mysql_splitdump && chmod +x /usr/local/bin/mysql_splitdump && \
     curl -sL "https://raw.githubusercontent.com/ripienaar/mysql-dump-split/master/split-mysql-dump.rb" \
-    -o /usr/local/bin/mysql-dump-split.rb && chmod +x /usr/local/bin/mysql-dump-split.rb
+    -o /usr/local/bin/mysql-dump-split && chmod +x /usr/local/bin/mysql-dump-split && \
+    curl -sL "https://raw.githubusercontent.com/wdelfuego/mysqldumpsplitter/main/mysqldump-split.cpp" \
+    -o /usr/local/bin/mysqldump-split.cpp
 
 WORKDIR /workspace
 

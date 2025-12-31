@@ -51,24 +51,37 @@ get_file_size() {
 list_tools() {
     echo -e "${BOLD}Available Tools:${NC}"
     echo ""
+    echo -e "${BOLD}Rust:${NC}"
+    echo -n "  sql-splitter: "
+    command -v sql-splitter &>/dev/null && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    
+    echo -e "${BOLD}Go:${NC}"
+    echo -n "  mysqldumpsplit-helgesverre: "
+    [ -x /usr/local/bin/mysqldumpsplit-helgesverre ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    echo -n "  mysqldumpsplit-afrase: "
+    [ -x /usr/local/bin/mysqldumpsplit-afrase ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 
-    echo -n "  sql-splitter (Rust): "
-    command -v sql-splitter &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    echo -e "${BOLD}Bash/Shell:${NC}"
+    echo -n "  mysqldumpsplitter-bash: "
+    [ -x /usr/local/bin/mysqldumpsplitter-bash ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    echo -n "  mysql_splitdump (csplit): "
+    [ -x /usr/local/bin/mysql_splitdump ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 
-    echo -n "  mysqldumpsplitter.sh (Bash/awk): "
-    [ -x /usr/local/bin/mysqldumpsplitter.sh ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    echo -e "${BOLD}Node.js:${NC}"
+    echo -n "  mysqldumpsplit-node: "
+    command -v mysqldumpsplit &>/dev/null && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 
-    echo -n "  mysql_splitdump.sh (csplit): "
-    [ -x /usr/local/bin/mysql_splitdump.sh ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    echo -e "${BOLD}Python:${NC}"
+    echo -n "  sql-table-splitter: "
+    [ -x /usr/local/bin/sql-table-splitter ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    echo -n "  sql-splitter-tkaratug: "
+    [ -x /usr/local/bin/sql-splitter-tkaratug ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    echo -n "  sql-dump-splitter: "
+    [ -x /usr/local/bin/sql-dump-splitter ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 
-    echo -n "  mysqldumpsplit-go (Go): "
-    command -v mysqldumpsplit-go &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-
-    echo -n "  mysqldumpsplit (Node.js): "
-    command -v mysqldumpsplit &>/dev/null && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
-
-    echo -n "  mysql-dump-split.rb (Ruby): "
-    [ -x /usr/local/bin/mysql-dump-split.rb ] && echo -e "${GREEN}installed${NC}" || echo -e "${RED}not found${NC}"
+    echo -e "${BOLD}Ruby:${NC}"
+    echo -n "  mysql-dump-split: "
+    [ -x /usr/local/bin/mysql-dump-split ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 }
 
 generate_test_data() {
@@ -119,12 +132,12 @@ test_tools() {
         "sql-splitter split '$sql_file' -o /tmp/test-rust" \
         "/tmp/test-rust"
 
-    test_tool "mysqldumpsplitter.sh (Bash)" \
-        "bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none" \
+    test_tool "mysqldumpsplitter (Bash)" \
+        "bash /usr/local/bin/mysqldumpsplitter-bash --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none --decompression none" \
         "/tmp/test-bash"
 
-    test_tool "mysql_splitdump.sh (csplit)" \
-        "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'" \
+    test_tool "mysql_splitdump (csplit)" \
+        "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump '$sql_file'" \
         "/tmp/test-csplit"
 
     if command -v mysqldumpsplit-go &>/dev/null; then
@@ -235,33 +248,33 @@ run_benchmark() {
         working_tools+=("sql-splitter (Rust)|sql-splitter split '$sql_file' -o /tmp/bench-rust")
     fi
 
-    if test_tool "mysqldumpsplitter.sh" "bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none" "/tmp/test-bash"; then
-        working_tools+=("mysqldumpsplitter (Bash)|bash /usr/local/bin/mysqldumpsplitter.sh --source '$sql_file' --extract ALLTABLES --output_dir /tmp/bench-bash --compression none")
+    if test_tool "mysqldumpsplitter (Bash)" "bash /usr/local/bin/mysqldumpsplitter-bash --source '$sql_file' --extract ALLTABLES --output_dir /tmp/test-bash --compression none --decompression none" "/tmp/test-bash"; then
+        working_tools+=("mysqldumpsplitter (Bash)|bash /usr/local/bin/mysqldumpsplitter-bash --source '$sql_file' --extract ALLTABLES --output_dir /tmp/bench-bash --compression none --decompression none")
     fi
 
     mkdir -p /tmp/test-csplit
-    if test_tool "mysql_splitdump.sh" "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'" "/tmp/test-csplit"; then
-        working_tools+=("mysql_splitdump (csplit)|cd /tmp/bench-csplit && bash /usr/local/bin/mysql_splitdump.sh '$sql_file'")
+    if test_tool "mysql_splitdump (csplit)" "cd /tmp/test-csplit && bash /usr/local/bin/mysql_splitdump '$sql_file'" "/tmp/test-csplit"; then
+        working_tools+=("mysql_splitdump (csplit)|cd /tmp/bench-csplit && bash /usr/local/bin/mysql_splitdump '$sql_file'")
     fi
 
-    if command -v mysqldumpsplit-go &>/dev/null; then
+    if [ -x /usr/local/bin/mysqldumpsplit-helgesverre ]; then
         mkdir -p /tmp/test-go
-        if test_tool "mysqldumpsplit-go" "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
-            working_tools+=("mysqldumpsplit (Go)|mysqldumpsplit-go -i '$sql_file' -o /tmp/bench-go")
+        if test_tool "mysqldumpsplit (Go)" "timeout 30 /usr/local/bin/mysqldumpsplit-helgesverre -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
+            working_tools+=("mysqldumpsplit (Go)|/usr/local/bin/mysqldumpsplit-helgesverre -i '$sql_file' -o /tmp/bench-go")
         fi
     fi
 
-    if [ -x /usr/bin/mysqldumpsplit ]; then
+    if [ -x /usr/local/bin/mysqldumpsplit-node ]; then
         mkdir -p /tmp/test-node
-        if test_tool "mysqldumpsplit (Node.js)" "timeout 60 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" "/tmp/test-node"; then
-            working_tools+=("mysqldumpsplit (Node.js)|/usr/bin/mysqldumpsplit -o /tmp/bench-node '$sql_file'")
+        if test_tool "mysqldumpsplit (Node.js)" "timeout 60 /usr/local/bin/mysqldumpsplit-node -o /tmp/test-node '$sql_file'" "/tmp/test-node"; then
+            working_tools+=("mysqldumpsplit (Node.js)|/usr/local/bin/mysqldumpsplit-node -o /tmp/bench-node '$sql_file'")
         fi
     fi
 
-    if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
+    if [ -x /usr/local/bin/mysql-dump-split ]; then
         mkdir -p /tmp/test-ruby
-        if test_tool "mysql-dump-split.rb (Ruby)" "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" "/tmp/test-ruby/tables"; then
-            working_tools+=("mysql-dump-split (Ruby)|cd /tmp/bench-ruby && ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'")
+        if test_tool "mysql-dump-split (Ruby)" "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split '$sql_file'" "/tmp/test-ruby/tables"; then
+            working_tools+=("mysql-dump-split (Ruby)|cd /tmp/bench-ruby && ruby /usr/local/bin/mysql-dump-split '$sql_file'")
         fi
     fi
 

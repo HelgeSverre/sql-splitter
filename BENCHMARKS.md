@@ -1,304 +1,133 @@
 # Benchmarks
 
-Comprehensive benchmarking for sql-splitter.
+Competitor benchmarking for sql-splitter using Docker for reproducible results.
 
-## Quick Comparison
+## Tools Tested
 
-### sql-splitter Performance
+| Tool | Language | GitHub Stars | URL | Notes |
+|------|----------|-------------|-----|-------|
+| **sql-splitter** | Rust | - | [HelgeSverre/sql-splitter](https://github.com/HelgeSverre/sql-splitter) | Multi-dialect, streaming I/O |
+| mysqldumpsplit | Go | ~40 | [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit) | Buffers in memory, has deadlock bug* |
+| mysqldumpsplitter | Bash/awk | 540+ | [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter) | Most popular shell-based tool |
+| mysql_splitdump | Bash/csplit | 93 | [jasny/mysql_splitdump.sh](https://gist.github.com/jasny/1608062) | Uses GNU coreutils csplit |
+| mysqldumpsplit | Node.js | 55 | [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit) | Requires Node 10 (gulp 3.x) |
+| mysql-dump-split | Ruby | 77 | [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split) | Archived project |
 
-| File Size | Time | Throughput | Tables |
-|-----------|------|------------|--------|
-| 10 MB     | 16 ms | 643 MB/s | 10 |
-| 100 MB    | 142 ms | 726 MB/s | 10 |
-| 1 GB      | 1.32 s | 783 MB/s | 10 |
-| 5 GB      | 8.5 s | 611 MB/s | 10 |
-| 10 GB     | 23.1 s | 445 MB/s | 281 |
+*\*Original Go tool has a deadlock bug with non-interleaved dumps; benchmarks use a [patched fork](https://github.com/HelgeSverre/mysqldumpsplit/tree/fix/handle-non-interleaved-dumps).*
 
-*Tested on Apple M2 Max, compiled with `-C target-cpu=native`*
+## How to Run Benchmarks
 
-### vs Competitor Tools
+Benchmarks run inside Docker for reproducibility across different machines.
 
-**200MB mysqldump file (Docker Linux arm64):**
+### Quick Start
 
-| Command | Mean | Relative |
-|:--------|-----:|:---------|
-| mysqldumpsplit (Go)* | 278 ms | 0.73x (faster) |
-| **sql-splitter** (Rust) | 382 ms | 1.00 |
-| mysql_splitdump (csplit) | 415 ms | 1.09x slower |
-| mysqldumpsplit (Node.js) | 582 ms | 1.52x slower |
-| mysql-dump-split (Ruby) | 1,759 ms | **4.61x slower** |
-| mysqldumpsplitter (Bash/awk) | 1,817 ms | **4.76x slower** |
+```bash
+# Build the Docker image (first time only)
+make docker-build
 
-**100MB mysqldump file (Docker Linux arm64):**
+# Run benchmark with generated 100MB test file
+make docker-bench
 
-| Command | Mean | Relative |
-|:--------|-----:|:---------|
-| mysqldumpsplit (Go)* | 141 ms | 0.76x (faster) |
-| **sql-splitter** (Rust) | 186 ms | 1.00 |
-| mysql_splitdump (csplit) | 211 ms | 1.13x slower |
-| mysqldumpsplit (Node.js) | 328 ms | 1.76x slower |
-| mysql-dump-split (Ruby) | 887 ms | **4.77x slower** |
-| mysqldumpsplitter (Bash/awk) | 892 ms | **4.80x slower** |
+# Run with custom size (e.g., 200MB)
+./docker/run-benchmark.sh --generate 200
+```
 
-*\*Go tool has a deadlock bug in the original; we used a [patched fork](https://github.com/HelgeSverre/mysqldumpsplit/tree/fix/handle-non-interleaved-dumps) for benchmarks.*
+### Options
 
-*Benchmarks run in Docker on Apple M2 Max (linux/arm64)*
+| Flag | Description |
+|------|-------------|
+| `--generate SIZE` | Generate test data of SIZE MB |
+| `--runs N` | Number of benchmark runs (default: 3) |
+| `--warmup N` | Warmup runs before timing (default: 1) |
+| `--export FILE` | Export results to markdown file |
+| `--list` | Show installed tools |
+| `--test` | Test which tools work with file |
 
-### Competitive Landscape
+---
 
-| Tool | Language | Stars | Speed | Notes |
-|------|----------|-------|-------|-------|
-| [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit)* | Go | ~40 | **Fastest** | Buffers in memory, high RAM usage |
-| **sql-splitter** | Rust | - | Fast | Multi-dialect, streaming I/O, low RAM |
-| [jasny/mysql_splitdump.sh](https://gist.github.com/jasny/1608062) | Bash/csplit | 93 | 1.1x slower | mysqldump only, needs GNU coreutils |
-| [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit) | Node.js | 55 | 1.5-1.8x slower | Requires Node.js 18 (bugs on v22) |
-| [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter) | Bash/awk | 540+ | 5x slower | mysqldump format only |
-| [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split) | Ruby | 77 | 5x slower | Archived project |
+## Results - 2024-12-31
 
-*\*Original Go tool has a deadlock bug; see [patched fork](https://github.com/HelgeSverre/mysqldumpsplit/tree/fix/handle-non-interleaved-dumps).*
+> **Hardware:** Apple M2 Max, 32GB RAM, Docker Desktop (linux/arm64)
 
-### Multi-Database Dialect Support
+### 100MB Generated Test File
 
-| Dialect | Flag | Dump Tool | COPY Support |
-|---------|------|-----------|--------------|
-| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump, mariadb-dump | N/A |
-| PostgreSQL | `--dialect=postgres` | pg_dump | ✅ COPY FROM stdin |
-| SQLite | `--dialect=sqlite` | sqlite3 .dump | N/A |
+| Tool | Mean | σ | Throughput | Relative |
+|:-----|-----:|--:|----------:|:---------|
+| mysqldumpsplit (Go)* | 145 ms | ±10 | 712 MB/s | 1.00 (fastest) |
+| **sql-splitter (Rust)** | 193 ms | ±7 | 535 MB/s | 1.33x slower |
+| mysql_splitdump (csplit) | 215 ms | ±6 | 481 MB/s | 1.48x slower |
+| mysqldumpsplit (Node.js) | 376 ms | ±14 | 275 MB/s | 2.59x slower |
+| mysql-dump-split (Ruby) | 838 ms | ±7 | 123 MB/s | **5.77x slower** |
+| mysqldumpsplitter (Bash) | 863 ms | ±27 | 120 MB/s | **5.94x slower** |
 
-### Format Compatibility
+*\*Go tool uses patched fork; original has deadlock bug.*
 
-This is the **key differentiator**. Most competitors only work with standard `mysqldump` output:
+### 1GB Generated Test File
 
-| Tool | MySQL | MariaDB | PostgreSQL | SQLite | TablePlus/DBeaver |
-|------|-------|---------|------------|--------|-------------------|
-| **sql-splitter** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| mysqldumpsplitter (Bash) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Other tools | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Tool | Mean | σ | Throughput | Relative |
+|:-----|-----:|--:|----------:|:---------|
+| mysqldumpsplit (Go)* | 1.29s | ±0.02 | 802 MB/s | 1.00 (fastest) |
+| **sql-splitter (Rust)** | 1.84s | ±0.07 | 563 MB/s | 1.42x slower |
+| mysql_splitdump (csplit) | 1.85s | ±0.02 | 558 MB/s | 1.44x slower |
+| mysqldumpsplit (Node.js) | 2.72s | ±0.01 | 381 MB/s | 2.11x slower |
+| mysqldumpsplitter (Bash) | 8.81s | ±0.02 | 118 MB/s | **6.82x slower** |
+| mysql-dump-split (Ruby) | 9.05s | ±0.31 | 114 MB/s | **7.01x slower** |
 
-**Why?** Competitor tools look for specific comment markers:
+### 5GB Stress Test (single run)
+
+| Tool | Time | Throughput | Relative |
+|:-----|-----:|----------:|:---------|
+| **sql-splitter (Rust)** | **18.4s** | **283 MB/s** | **1.00 (fastest)** |
+| mysqldumpsplit (Go)* | 27.1s | 191 MB/s | 1.47x slower |
+| mysqldumpsplit (Node.js) | 28.7s | 181 MB/s | 1.56x slower |
+| mysqldumpsplitter (Bash) | 55.5s | 94 MB/s | 3.02x slower |
+| mysql_splitdump (csplit) | 82.5s | 63 MB/s | 4.48x slower |
+| mysql-dump-split (Ruby) | 103s | 50 MB/s | 5.60x slower |
+
+**At 5GB, sql-splitter becomes the fastest tool** because the Go tool's memory-buffering strategy causes significant slowdown under memory pressure.
+
+---
+
+## Findings
+
+### Speed vs Memory Tradeoffs
+
+- **Go tool is fastest on small files** but buffers the entire file in memory. At 5GB+, it becomes slower than sql-splitter due to memory pressure.
+- **sql-splitter (Rust)** uses streaming I/O with fixed ~10-15MB memory regardless of file size. ~33% slower than Go at 100MB, but **47% faster at 5GB**.
+- **csplit** is surprisingly fast for a shell tool, but relies on GNU coreutils (not available on stock macOS).
+- **Node.js** is 2.5x slower than Go but still reasonable for JS-based workflows.
+- **Ruby/Bash/awk** are 6x slower—fine for one-off use but not for automation.
+
+### Format Compatibility (the real differentiator)
+
+All competitors **only work with standard mysqldump format** that includes comment markers like:
 ```sql
 -- Table structure for table `users`
 ```
 
-These markers are only present in standard `mysqldump` output. **sql-splitter** parses actual SQL statements (`CREATE TABLE`, `INSERT INTO`, `COPY`), making it compatible with any SQL file format.
+**sql-splitter parses actual SQL statements** (`CREATE TABLE`, `INSERT INTO`, `COPY`), so it works with:
+- TablePlus exports
+- DBeaver exports  
+- pg_dump (PostgreSQL)
+- sqlite3 .dump
+- Any valid SQL file
 
-### Key Findings
+Competitors produce **0 tables** on non-mysqldump files.
 
-- sql-splitter is the **fastest streaming tool** with low memory usage
-- Our patched Go tool is faster but buffers entire file in memory
-- sql-splitter is **1.1x faster** than csplit, **1.5-1.8x faster** than Node.js, **5x faster** than awk/Ruby
-- sql-splitter achieves **600-800 MB/s** throughput on synthetic files  
-- sql-splitter achieves **~450 MB/s** on real 10GB production dumps
-- sql-splitter is the **only multi-dialect tool** (MySQL, PostgreSQL, SQLite)
-- sql-splitter works with ANY SQL format (TablePlus, DBeaver, mysqldump, pg_dump, etc.)
+### Known Limitations
 
-## Real-World Benchmarks
+| Tool | Issue |
+|------|-------|
+| Go (afrase) | Deadlocks on files where all INSERTs for one table come before the next table |
+| Node.js (vekexasia) | Requires Node 10 (gulp 3.x incompatible with Node 12+) |
+| Ruby | Project archived, unmaintained |
+| Bash/awk | Slow, Unix-only |
+| csplit | Requires GNU coreutils |
+| sql-splitter | ~33% slower than memory-buffered Go |
 
-### TablePlus Format (non-mysqldump)
+### When to use sql-splitter
 
-| File | Size | Tables | Time | Throughput |
-|------|------|--------|------|------------|
-| boatflow_latest_2.sql | 122 MB | 53 | 1.03 s | 118 MB/s |
-| wip.sql | 633 MB | 16 | 5.45 s | 116 MB/s |
-
-*Competitor tools produce **0 tables** on these files because they're not standard mysqldump format.*
-
-### Running Benchmarks
-
-```bash
-# Full benchmark suite (generates 10MB, 100MB, 1GB, 5GB synthetic files)
-./scripts/run-benchmarks.sh
-
-# Generate a custom-sized test file
-python3 ./scripts/generate-test-dump.py 500 -o /tmp/test_500mb.sql
-
-# Benchmark on your own SQL dumps
-./scripts/benchmark-real-dumps.sh
-
-# Set custom real dump file
-REAL_DUMP=/path/to/dump.sql ./scripts/run-benchmarks.sh
-```
-
-## Running Benchmarks
-
-### Hyperfine (Recommended for CLI comparison)
-
-```bash
-# Benchmark with cleanup between runs
-hyperfine --warmup 1 --prepare 'rm -rf /tmp/bench-output' \
-  './target/release/sql-splitter split dump.sql -o /tmp/bench-output'
-
-# Export results
-hyperfine --export-markdown bench-results.md \
-  './target/release/sql-splitter split dump.sql -o /tmp/output'
-```
-
-### Make Targets
-
-```bash
-# Comprehensive benchmark against all competitor tools
-make bench-all
-
-# Quick benchmark with smaller test files
-make bench-quick
-
-# Benchmark only the Rust implementation
-make bench-rust-only
-
-# Benchmark with specific SQL file
-make bench-all FILE=/path/to/dump.sql
-
-# Docker-based reproducible benchmarks
-make bench-docker-build   # Build container once
-make bench-docker         # Run benchmarks in container
-```
-
-### Criterion Microbenchmarks
-
-```bash
-# All benchmarks
-cargo bench
-
-# Parser benchmarks (throughput, buffer sizes)
-make bench-parser
-
-# Writer benchmarks (pool, flush patterns)
-make bench-writer
-
-# End-to-end benchmarks
-make bench-e2e
-
-# Generate HTML report
-make bench-report
-# Opens: target/criterion/report/index.html
-```
-
-## Criterion Results
-
-### Parser Throughput (In-Memory)
-
-| Statements | Throughput |
-|------------|------------|
-| 1,000      | 600 MB/s   |
-| 10,000     | 608 MB/s   |
-| 50,000     | 597 MB/s   |
-
-### Buffer Size Comparison
-
-| Buffer Size | Throughput |
-|-------------|------------|
-| 16 KB       | 598 MB/s   |
-| 32 KB       | 602 MB/s   |
-| 64 KB       | 605 MB/s   |
-| 128 KB      | 605 MB/s   |
-| 256 KB      | 600 MB/s   |
-
-*64-128KB buffers are optimal for CPU cache utilization.*
-
-### End-to-End Split Performance
-
-| Configuration | Throughput |
-|---------------|------------|
-| 10 tables × 1000 rows | 282 MB/s |
-| 50 tables × 500 rows  | 244 MB/s |
-| 100 tables × 200 rows | 120 MB/s |
-
-*More tables = more file handles = slightly lower throughput.*
-
-### Statement Type Parsing
-
-| Statement Type | Time per Parse |
-|----------------|----------------|
-| CREATE TABLE   | ~45 ns         |
-| INSERT INTO    | ~40 ns         |
-| ALTER TABLE    | ~50 ns         |
-| DROP TABLE     | ~45 ns         |
-
-## Benchmark Suites
-
-| Suite | File | Description |
-|-------|------|-------------|
-| `parser_bench` | `benches/parser_bench.rs` | Parser throughput, buffer sizes, statement types, string handling |
-| `writer_bench` | `benches/writer_bench.rs` | Writer pool, table writer, flush patterns |
-| `e2e_bench` | `benches/e2e_bench.rs` | Full split/analyze operations |
-
-## Profiling
-
-### CPU Profiling with Flamegraph
-
-```bash
-# Install cargo-flamegraph
-cargo install flamegraph
-
-# Generate flamegraph
-make profile
-# or
-cargo flamegraph --bin sql-splitter -- split dump.sql -o /tmp/output
-```
-
-### Memory Profiling
-
-```bash
-# On macOS with Instruments
-xcrun xctrace record --template 'Allocations' --launch -- \
-  ./target/release/sql-splitter split dump.sql -o /tmp/output
-
-# On Linux with heaptrack
-heaptrack ./target/release/sql-splitter split dump.sql -o /tmp/output
-```
-
-## Reproducing Results
-
-### Prerequisites
-
-```bash
-# Build optimized binary
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-```
-
-### Test Files
-
-Generate test data of various sizes:
-
-```bash
-# Generate ~50MB test file
-python3 << 'PYTHON'
-import random
-tables = ['users', 'posts', 'comments', 'orders', 'products']
-with open('/tmp/test_50mb.sql', 'w') as f:
-    for table in tables:
-        f.write(f"CREATE TABLE {table} (id INT, data TEXT);\n")
-    for i in range(100000):
-        table = random.choice(tables)
-        data = "Lorem ipsum " * 10
-        f.write(f"INSERT INTO {table} VALUES ({i}, '{data}');\n")
-PYTHON
-```
-
-### Run Benchmark
-
-```bash
-# Using the benchmark script
-./scripts/benchmark.sh /tmp/test_50mb.sql
-
-# Using hyperfine
-hyperfine --warmup 2 --runs 5 \
-  --prepare 'rm -rf /tmp/output' \
-  './target/release/sql-splitter split /tmp/test_50mb.sql -o /tmp/output'
-```
-
-## Performance Optimizations
-
-1. **No GC pauses**: Rust's ownership model eliminates garbage collection overhead
-2. **Zero-copy parsing**: `fill_buf` + `consume` pattern avoids unnecessary copies
-3. **Faster hashing**: `ahash` is 2-3x faster than default SipHash
-4. **Better inlining**: LTO and monomorphization produce tighter code
-5. **CPU-native codegen**: `target-cpu=native` enables platform-specific optimizations
-
-## Hardware
-
-All benchmarks run on:
-- **CPU**: Apple M2 Max
-- **RAM**: 32 GB
-- **Storage**: NVMe SSD
-- **OS**: macOS Sonoma
+1. Non-mysqldump formats (TablePlus, DBeaver, pg_dump, sqlite)
+2. Large files (>1GB) where memory matters
+3. CI/CD pipelines needing consistent behavior
+4. Multi-dialect projects (MySQL + PostgreSQL + SQLite)
