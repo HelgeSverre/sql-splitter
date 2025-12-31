@@ -57,6 +57,27 @@ profile-mega: release
 profile-giga: release
     ./scripts/profile-memory.sh --size giga --output benchmark-results/profile-giga.txt
 
+# Build with profiling symbols (for flamegraph/samply)
+build-profiling:
+    cargo build --profile profiling
+
+# Generate flamegraph for split command
+flamegraph file: build-profiling
+    @mkdir -p benchmark-results
+    cargo flamegraph --profile profiling --bin sql-splitter -o benchmark-results/flamegraph-split.svg -- split {{ file }}
+
+# Profile split command with samply (opens Firefox Profiler)
+samply file: build-profiling
+    samply record ./target/profiling/sql-splitter split {{ file }}
+
+# Save criterion benchmark baseline
+bench-baseline name="main":
+    cargo bench -- --save-baseline {{ name }}
+
+# Compare current benchmarks against a saved baseline
+bench-compare baseline="main":
+    cargo bench -- --baseline {{ baseline }}
+
 # Format code
 fmt:
     cargo fmt
