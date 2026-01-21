@@ -16,7 +16,7 @@ hero:
       icon: external
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid } from "@astrojs/starlight/components";
 
 ## Why sql-splitter?
 
@@ -24,13 +24,16 @@ sql-splitter is a **dump-first, CLI-first** tool designed for automation and CI/
 
 <CardGrid stagger>
   <Card title="Blazing Fast" icon="rocket">
-    600+ MB/s throughput on modern hardware. 5x faster than shell-based alternatives.
+    600+ MB/s throughput on modern hardware. 5x faster than shell-based
+    alternatives.
   </Card>
   <Card title="Memory Efficient" icon="seti:db">
-    ~50MB constant memory usage. Handles files larger than RAM with streaming architecture.
+    ~50MB constant memory usage. Handles files larger than RAM with streaming
+    architecture.
   </Card>
   <Card title="Multi-Dialect" icon="puzzle">
-    MySQL, PostgreSQL, SQLite, and MSSQL support including `COPY FROM stdin` and `GO` batches.
+    MySQL, PostgreSQL, SQLite, and MSSQL support including `COPY FROM stdin` and
+    `GO` batches.
   </Card>
   <Card title="Compressed Files" icon="seti:zip">
     Automatic detection of gzip, bzip2, xz, and zstd compression.
@@ -39,17 +42,17 @@ sql-splitter is a **dump-first, CLI-first** tool designed for automation and CI/
 
 ## Commands Overview
 
-| Command | Purpose |
-|---------|---------|
-| [`split`](/commands/split) | Split dump into per-table SQL files |
-| [`merge`](/commands/merge) | Merge per-table files into single dump |
-| [`analyze`](/commands/analyze) | Read-only statistics about tables |
-| [`convert`](/commands/convert) | Transform between MySQL/PostgreSQL/SQLite/MSSQL |
-| [`validate`](/commands/validate) | Check syntax, encoding, PK/FK integrity |
-| [`sample`](/commands/sample) | Create reduced FK-consistent datasets |
-| [`shard`](/commands/shard) | Extract tenant-specific data |
-| [`diff`](/commands/diff) | Compare two SQL dumps for changes |
-| [`redact`](/commands/redact) | Anonymize PII in SQL dumps |
-| [`graph`](/commands/graph) | Generate ERD diagrams (HTML, DOT, Mermaid) |
-| [`order`](/commands/order) | Reorder dump in topological FK order |
-| [`query`](/commands/query) | Run SQL analytics on dumps with DuckDB |
+| Command                          | Purpose                                         |
+| -------------------------------- | ----------------------------------------------- |
+| [`split`](/commands/split)       | Split dump into per-table SQL files             |
+| [`merge`](/commands/merge)       | Merge per-table files into single dump          |
+| [`analyze`](/commands/analyze)   | Read-only statistics about tables               |
+| [`convert`](/commands/convert)   | Transform between MySQL/PostgreSQL/SQLite/MSSQL |
+| [`validate`](/commands/validate) | Check syntax, encoding, PK/FK integrity         |
+| [`sample`](/commands/sample)     | Create reduced FK-consistent datasets           |
+| [`shard`](/commands/shard)       | Extract tenant-specific data                    |
+| [`diff`](/commands/diff)         | Compare two SQL dumps for changes               |
+| [`redact`](/commands/redact)     | Anonymize PII in SQL dumps                      |
+| [`graph`](/commands/graph)       | Generate ERD diagrams (HTML, DOT, Mermaid)      |
+| [`order`](/commands/order)       | Reorder dump in topological FK order            |
+| [`query`](/commands/query)       | Run SQL analytics on dumps with DuckDB          |
