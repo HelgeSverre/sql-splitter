@@ -1,0 +1,97 @@
+---
+title: Website OG Images
+description: How OG (OpenGraph) images are generated for the documentation website
+---
+
+OG images are automatically generated for all documentation pages at build time.
+
+## Overview
+
+The website generates 49 OpenGraph images (1200x630px) for sharing on social media. Each image includes:
+
+- Category-coded accent strip (color varies by section)
+- Project logo (`;` + "sql-splitter")
+- Category label (Command, Guide, Reference, etc.)
+- Page title
+- Description from frontmatter
+
+## Category Colors
+
+| Section | Color | Hex |
+|---------|-------|-----|
+| Commands | Blue | `#58a6ff` |
+| Getting Started | Green | `#3fb950` |
+| Guides | Green | `#3fb950` |
+| Reference | Purple | `#d2a8ff` |
+| Advanced | Orange | `#ffa657` |
+| Contributing | Pink | `#f778ba` |
+| Tools | Blue | `#79c0ff` |
+| Roadmap | Purple | `#a371f7` |
+
+## Implementation
+
+OG images are generated using **Satori** (Vercel's JSX-to-SVG library) and converted to PNG with **@resvg/resvg-js**.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/pages/og/[...slug].ts` | Dynamic route that generates OG images for each doc |
+| `src/pages/og/satori-lib.mjs` | Satori template with category detection and styling |
+
+### Generation Process
+
+1. At build time, Astro fetches all docs from the `docs` content collection
+2. For each doc, `getStaticPaths()` creates a route at `/og/{slug}`
+3. The `GET` handler renders the Satori template to SVG
+4. Resvg converts SVG to PNG
+5. Images are saved to `dist/og/` (static output)
+
+### Example Output
+
+```bash
+dist/og/index                    # Homepage
+dist/og/commands/split           # split command page
+dist/og/getting-started/installation
+dist/og/guides/index
+dist/og/reference/dialects
+...
+```
+
+## Modifying the Template
+
+Edit `src/pages/og/satori-lib.mjs` to change the OG image design:
+
+```javascript
+export async function generateOgSvg({ title, description, slug }) {
+  // ... category detection and color assignment
+  
+  const element = {
+    type: 'div',
+    props: {
+      style: { /* Satori JSX element */ },
+      children: [/* ... */],
+    },
+  };
+  
+  return await satori(element, { width: 1200, height: 630, fonts: [...] });
+}
+```
+
+## Regenerating Images
+
+```bash
+cd website
+npm run build
+```
+
+OG images are rebuilt with every static build (not during dev mode).
+
+## Homepage Image
+
+The homepage uses a custom OG image at `og-image.png` in the website root. This file is manually created and copied to `dist/og/index` after build if it exists.
+
+To update the homepage OG image:
+1. Create/update `website/og-image.png` (1200x630px)
+2. Run `npm run build`
+3. The build script copies it to `dist/og/index`
