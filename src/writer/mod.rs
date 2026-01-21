@@ -37,6 +37,24 @@ impl TableWriter {
         Ok(())
     }
 
+    pub fn write_statement_with_suffix(
+        &mut self,
+        stmt: &[u8],
+        suffix: &[u8],
+    ) -> std::io::Result<()> {
+        self.writer.write_all(stmt)?;
+        self.writer.write_all(suffix)?;
+        self.writer.write_all(b"\n")?;
+
+        self.write_count += 1;
+        if self.write_count >= self.max_stmt_buffer {
+            self.write_count = 0;
+            self.writer.flush()?;
+        }
+
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.write_count = 0;
         self.writer.flush()
@@ -61,18 +79,32 @@ impl WriterPool {
     }
 
     pub fn get_writer(&mut self, table_name: &str) -> std::io::Result<&mut TableWriter> {
-        if !self.writers.contains_key(table_name) {
-            let filename = self.output_dir.join(format!("{}.sql", table_name));
-            let writer = TableWriter::new(&filename)?;
-            self.writers.insert(table_name.to_string(), writer);
-        }
+        use std::collections::hash_map::Entry;
 
-        Ok(self.writers.get_mut(table_name).unwrap())
+        // Use entry API to avoid separate contains_key + get_mut (eliminates unwrap)
+        match self.writers.entry(table_name.to_string()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let filename = self.output_dir.join(format!("{}.sql", table_name));
+                let writer = TableWriter::new(&filename)?;
+                Ok(entry.insert(writer))
+            }
+        }
     }
 
     pub fn write_statement(&mut self, table_name: &str, stmt: &[u8]) -> std::io::Result<()> {
         let writer = self.get_writer(table_name)?;
         writer.write_statement(stmt)
+    }
+
+    pub fn write_statement_with_suffix(
+        &mut self,
+        table_name: &str,
+        stmt: &[u8],
+        suffix: &[u8],
+    ) -> std::io::Result<()> {
+        let writer = self.get_writer(table_name)?;
+        writer.write_statement_with_suffix(stmt, suffix)
     }
 
     pub fn close_all(&mut self) -> std::io::Result<()> {
