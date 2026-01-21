@@ -438,9 +438,9 @@ impl Validator {
                 // Scale to first half: 0% to 50%
                 cb(bytes / 2)
             });
-            compression.wrap_reader(Box::new(progress_reader))
+            compression.wrap_reader(Box::new(progress_reader))?
         } else {
-            compression.wrap_reader(Box::new(file))
+            compression.wrap_reader(Box::new(file))?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
@@ -583,9 +583,9 @@ impl Validator {
                 // Scale to second half: 50% to 100%
                 cb(file_size / 2 + bytes / 2)
             });
-            compression.wrap_reader(Box::new(progress_reader))
+            compression.wrap_reader(Box::new(progress_reader))?
         } else {
-            compression.wrap_reader(Box::new(file))
+            compression.wrap_reader(Box::new(file))?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);

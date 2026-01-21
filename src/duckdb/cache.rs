@@ -257,12 +257,6 @@ impl CacheManager {
     }
 }
 
-impl Default for CacheManager {
-    fn default() -> Self {
-        Self::new().expect("Failed to create cache manager")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

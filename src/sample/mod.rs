@@ -388,7 +388,10 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
         total_selected += result.rows_selected;
 
         // Update runtime state and add PK hashes for FK checks by children
-        let runtime = runtimes.get_mut(table_id).unwrap();
+        // Safe: runtime existence was checked at loop start (line 323-326)
+        let runtime = runtimes
+            .get_mut(table_id)
+            .expect("runtime must exist - checked at loop start");
         runtime.rows_seen = result.rows_seen;
         runtime.rows_selected = result.rows_selected;
         runtime.fk_orphans = result.fk_orphans;
