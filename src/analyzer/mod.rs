@@ -56,7 +56,7 @@ impl Analyzer {
 
         // Detect and apply decompression
         let compression = Compression::from_path(&self.input_file);
-        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file));
+        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file))?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
@@ -86,7 +86,7 @@ impl Analyzer {
         // Detect and apply decompression
         let compression = Compression::from_path(&self.input_file);
         let progress_reader = ProgressReader::new(file, progress_fn);
-        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(progress_reader));
+        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(progress_reader))?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 

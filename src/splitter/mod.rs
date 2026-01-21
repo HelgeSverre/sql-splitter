@@ -2,6 +2,7 @@ use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, St
 use crate::progress::ProgressReader;
 use crate::writer::WriterPool;
 use ahash::AHashSet;
+use anyhow::Context;
 use serde::Serialize;
 use std::fs::File;
 use std::io::Read;
@@ -52,14 +53,17 @@ impl Compression {
     }
 
     /// Wrap a reader with the appropriate decompressor
-    pub fn wrap_reader<'a>(&self, reader: Box<dyn Read + 'a>) -> Box<dyn Read + 'a> {
-        match self {
+    pub fn wrap_reader<'a>(
+        &self,
+        reader: Box<dyn Read + 'a>,
+    ) -> std::io::Result<Box<dyn Read + 'a>> {
+        Ok(match self {
             Compression::None => reader,
             Compression::Gzip => Box::new(flate2::read::GzDecoder::new(reader)),
             Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(reader)),
             Compression::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
-            Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader).unwrap()),
-        }
+            Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
+        })
     }
 }
 
@@ -118,7 +122,8 @@ impl Splitter {
     }
 
     pub fn split(mut self) -> anyhow::Result<Stats> {
-        let file = File::open(&self.input_file)?;
+        let file = File::open(&self.input_file)
+            .with_context(|| format!("Failed to open input file: {:?}", self.input_file))?;
         let file_size = file.metadata()?.len();
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.config.dialect;
@@ -129,16 +134,30 @@ impl Splitter {
 
         let reader: Box<dyn Read> = if let Some(cb) = self.config.progress_fn.take() {
             let progress_reader = ProgressReader::new(file, cb);
-            compression.wrap_reader(Box::new(progress_reader))
+            compression
+                .wrap_reader(Box::new(progress_reader))
+                .with_context(|| {
+                    format!(
+                        "Failed to initialize {} decompression for {:?}",
+                        compression, self.input_file
+                    )
+                })?
         } else {
-            compression.wrap_reader(Box::new(file))
+            compression.wrap_reader(Box::new(file)).with_context(|| {
+                format!(
+                    "Failed to initialize {} decompression for {:?}",
+                    compression, self.input_file
+                )
+            })?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         let mut writer_pool = WriterPool::new(self.output_dir.clone());
         if !self.config.dry_run {
-            writer_pool.ensure_output_dir()?;
+            writer_pool.ensure_output_dir().with_context(|| {
+                format!("Failed to create output directory: {:?}", self.output_dir)
+            })?;
         }
 
         let mut tables_seen: AHashSet<String> = AHashSet::new();
@@ -165,8 +184,13 @@ impl Splitter {
             let is_copy_data = if stmt_type == StatementType::Unknown && last_copy_table.is_some() {
                 // Check if this looks like COPY data (ends with \.\n)
                 if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
-                    table_name = last_copy_table.take().unwrap();
-                    true
+                    // Safe: we just checked is_some() above
+                    if let Some(copy_table) = last_copy_table.take() {
+                        table_name = copy_table;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -209,21 +233,23 @@ impl Splitter {
             if !self.config.dry_run {
                 // For MSSQL, add semicolon if statement doesn't end with one
                 // (MSSQL uses GO as batch separator, but we need semicolons for re-parsing)
-                if self.config.dialect == SqlDialect::Mssql {
+                let write_result = if self.config.dialect == SqlDialect::Mssql {
                     let trimmed = stmt
                         .iter()
                         .rev()
                         .find(|&&b| b != b'\n' && b != b'\r' && b != b' ' && b != b'\t');
                     if trimmed != Some(&b';') {
-                        let mut stmt_with_semicolon = stmt.clone();
-                        stmt_with_semicolon.push(b';');
-                        writer_pool.write_statement(&table_name, &stmt_with_semicolon)?;
+                        // Write statement + semicolon without cloning
+                        writer_pool.write_statement_with_suffix(&table_name, &stmt, b";")
                     } else {
-                        writer_pool.write_statement(&table_name, &stmt)?;
+                        writer_pool.write_statement(&table_name, &stmt)
                     }
                 } else {
-                    writer_pool.write_statement(&table_name, &stmt)?;
-                }
+                    writer_pool.write_statement(&table_name, &stmt)
+                };
+                write_result.with_context(|| {
+                    format!("Failed to write statement to table file: {}", table_name)
+                })?;
             }
 
             stats.statements_processed += 1;

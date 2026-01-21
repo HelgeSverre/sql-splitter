@@ -352,7 +352,7 @@ fn resolve_dialect(
         None => {
             let result = if compression != Compression::None {
                 let file_handle = std::fs::File::open(file)?;
-                let mut reader = compression.wrap_reader(Box::new(file_handle));
+                let mut reader = compression.wrap_reader(Box::new(file_handle))?;
                 let mut header = vec![0u8; 8192];
                 let bytes_read = reader.read(&mut header)?;
                 header.truncate(bytes_read);

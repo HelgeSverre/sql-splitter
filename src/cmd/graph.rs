@@ -187,7 +187,7 @@ fn build_schema_graph_from_file(
 ) -> Result<SchemaGraph> {
     let file = File::open(path)?;
     let reader: Box<dyn Read> = if compression != Compression::None {
-        compression.wrap_reader(Box::new(file))
+        compression.wrap_reader(Box::new(file))?
     } else {
         Box::new(file)
     };
@@ -267,7 +267,7 @@ fn resolve_dialect(
         None => {
             let result = if compression != Compression::None {
                 let file_handle = File::open(file)?;
-                let mut reader = compression.wrap_reader(Box::new(file_handle));
+                let mut reader = compression.wrap_reader(Box::new(file_handle))?;
                 let mut header = vec![0u8; 8192];
                 let bytes_read = reader.read(&mut header)?;
                 header.truncate(bytes_read);
