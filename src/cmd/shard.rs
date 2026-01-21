@@ -2,12 +2,13 @@
 
 use crate::parser::SqlDialect;
 use crate::shard::{self, GlobalTableMode, ShardConfig, ShardStats, ShardTableClassification};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 
 /// JSON output for single-tenant shard command
-#[derive(Serialize)]
-struct ShardJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ShardJsonOutput {
     input_file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_file: Option<String>,
@@ -15,14 +16,14 @@ struct ShardJsonOutput {
     dry_run: bool,
     tenant: TenantInfo,
     statistics: ShardStatistics,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     tables: Vec<TableShardJson>,
 }
 
 /// JSON output for multi-tenant shard command
-#[derive(Serialize)]
-struct MultiShardJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MultiShardJsonOutput {
     input_file: String,
     output_dir: String,
     dialect: String,
@@ -31,21 +32,21 @@ struct MultiShardJsonOutput {
     shards: Vec<ShardResult>,
 }
 
-#[derive(Serialize)]
-struct TenantInfo {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct TenantInfo {
     column: String,
     value: String,
     auto_detected: bool,
 }
 
-#[derive(Serialize)]
-struct MultiTenantInfo {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MultiTenantInfo {
     column: String,
     values: Vec<String>,
 }
 
-#[derive(Serialize)]
-struct ShardStatistics {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ShardStatistics {
     tables_processed: usize,
     tables_with_data: usize,
     tables_skipped: usize,
@@ -55,22 +56,22 @@ struct ShardStatistics {
     fk_orphans_skipped: u64,
 }
 
-#[derive(Serialize)]
-struct MultiShardStatistics {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MultiShardStatistics {
     tenants_extracted: usize,
     total_rows_selected: u64,
 }
 
-#[derive(Serialize)]
-struct ShardResult {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ShardResult {
     tenant_value: String,
     output_file: String,
     rows_selected: u64,
     tables_with_data: usize,
 }
 
-#[derive(Serialize)]
-struct TableShardJson {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct TableShardJson {
     name: String,
     classification: String,
     rows_selected: u64,

@@ -1,30 +1,79 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Split Command Output",
-  "description": "JSON output from the split command which divides a SQL dump into individual table files",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SplitJsonOutput",
+  "description": "JSON output for single file split",
   "type": "object",
-  "required": ["input_file", "output_dir", "dialect", "dry_run", "statistics", "tables"],
+  "required": [
+    "dialect",
+    "dry_run",
+    "input_file",
+    "output_dir",
+    "statistics",
+    "tables"
+  ],
   "properties": {
-    "input_file": { "type": "string" },
-    "output_dir": { "type": "string" },
-    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
-    "dialect_confidence": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
-    "compression": { "type": ["string", "null"] },
-    "dry_run": { "type": "boolean" },
+    "compression": {
+      "type": ["string", "null"]
+    },
+    "dialect": {
+      "type": "string"
+    },
+    "dialect_confidence": {
+      "type": ["string", "null"]
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "input_file": {
+      "type": "string"
+    },
+    "output_dir": {
+      "type": "string"
+    },
     "statistics": {
-      "type": "object",
-      "required": ["tables_found", "statements_processed", "bytes_processed", "elapsed_secs"],
-      "properties": {
-        "tables_found": { "type": "integer", "minimum": 0 },
-        "statements_processed": { "type": "integer", "minimum": 0 },
-        "bytes_processed": { "type": "integer", "minimum": 0 },
-        "elapsed_secs": { "type": "number", "minimum": 0 },
-        "throughput_mb_per_sec": { "type": ["number", "null"] }
-      }
+      "$ref": "#/definitions/SplitStatistics"
     },
     "tables": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "SplitStatistics": {
+      "type": "object",
+      "required": [
+        "bytes_processed",
+        "elapsed_secs",
+        "statements_processed",
+        "tables_found"
+      ],
+      "properties": {
+        "bytes_processed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "elapsed_secs": {
+          "type": "number",
+          "format": "double"
+        },
+        "statements_processed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tables_found": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "throughput_mb_per_sec": {
+          "type": ["number", "null"],
+          "format": "double"
+        }
+      }
     }
   }
 }

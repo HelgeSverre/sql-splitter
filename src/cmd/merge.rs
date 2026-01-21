@@ -1,5 +1,6 @@
 use crate::parser::SqlDialect;
 use indicatif::{ProgressBar, ProgressStyle};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -29,8 +30,8 @@ pub struct MergeConfig {
 }
 
 /// JSON output for merge command
-#[derive(Serialize)]
-struct MergeJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MergeJsonOutput {
     input_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_file: Option<String>,
@@ -41,8 +42,8 @@ struct MergeJsonOutput {
     options: MergeOptions,
 }
 
-#[derive(Serialize)]
-struct MergeStatistics {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MergeStatistics {
     tables_merged: usize,
     bytes_written: u64,
     elapsed_secs: f64,
@@ -50,8 +51,8 @@ struct MergeStatistics {
     throughput_kb_per_sec: Option<f64>,
 }
 
-#[derive(Serialize)]
-struct MergeOptions {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MergeOptions {
     transaction: bool,
     header: bool,
 }

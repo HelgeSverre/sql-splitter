@@ -4,12 +4,13 @@ use crate::parser::SqlDialect;
 use crate::sample::{
     self, GlobalTableMode, SampleConfig, SampleMode, SampleStats, TableClassification,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 
 /// JSON output for sample command
-#[derive(Serialize)]
-struct SampleJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SampleJsonOutput {
     input_file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_file: Option<String>,
@@ -17,20 +18,20 @@ struct SampleJsonOutput {
     dry_run: bool,
     mode: SampleModeJson,
     statistics: SampleStatistics,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     tables: Vec<TableSampleJson>,
 }
 
-#[derive(Serialize)]
-struct SampleModeJson {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SampleModeJson {
     #[serde(rename = "type")]
     mode_type: String,
     value: u64,
 }
 
-#[derive(Serialize)]
-struct SampleStatistics {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SampleStatistics {
     tables_sampled: usize,
     tables_skipped: usize,
     rows_selected: u64,
@@ -39,8 +40,8 @@ struct SampleStatistics {
     fk_orphans_rejected: u64,
 }
 
-#[derive(Serialize)]
-struct TableSampleJson {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct TableSampleJson {
     name: String,
     classification: String,
     rows_selected: u64,

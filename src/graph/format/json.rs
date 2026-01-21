@@ -1,10 +1,11 @@
 //! JSON format output for ERD data.
 
 use crate::graph::view::GraphView;
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// JSON representation of the ERD
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ErdJson {
     pub tables: Vec<TableJson>,
     pub relationships: Vec<RelationshipJson>,
@@ -12,14 +13,14 @@ pub struct ErdJson {
 }
 
 /// JSON representation of a table with full column details
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct TableJson {
     pub name: String,
     pub columns: Vec<ColumnJson>,
 }
 
 /// JSON representation of a column
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ColumnJson {
     pub name: String,
     #[serde(rename = "type")]
@@ -34,7 +35,7 @@ pub struct ColumnJson {
 }
 
 /// JSON representation of a relationship
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct RelationshipJson {
     pub from_table: String,
     pub from_column: String,
@@ -44,7 +45,7 @@ pub struct RelationshipJson {
 }
 
 /// ERD statistics
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ErdStats {
     pub table_count: usize,
     pub column_count: usize,

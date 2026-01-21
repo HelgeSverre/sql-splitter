@@ -1,49 +1,134 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Sample Command Output",
-  "description": "JSON output from the sample command which extracts a representative subset of rows from a SQL dump",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SampleJsonOutput",
+  "description": "JSON output for sample command",
   "type": "object",
-  "required": ["input_file", "dialect", "dry_run", "mode", "statistics", "tables"],
+  "required": [
+    "dialect",
+    "dry_run",
+    "input_file",
+    "mode",
+    "statistics",
+    "tables"
+  ],
   "properties": {
-    "input_file": { "type": "string" },
-    "output_file": { "type": ["string", "null"] },
-    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
-    "dry_run": { "type": "boolean" },
+    "dialect": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "input_file": {
+      "type": "string"
+    },
     "mode": {
-      "type": "object",
-      "required": ["type", "value"],
-      "properties": {
-        "type": { "type": "string", "enum": ["percent", "rows"] },
-        "value": { "type": "integer", "minimum": 0 }
-      }
+      "$ref": "#/definitions/SampleModeJson"
+    },
+    "output_file": {
+      "type": ["string", "null"]
     },
     "statistics": {
-      "type": "object",
-      "required": ["tables_sampled", "tables_skipped", "rows_selected", "rows_total", "sample_rate_percent", "fk_orphans_rejected"],
-      "properties": {
-        "tables_sampled": { "type": "integer", "minimum": 0 },
-        "tables_skipped": { "type": "integer", "minimum": 0 },
-        "rows_selected": { "type": "integer", "minimum": 0 },
-        "rows_total": { "type": "integer", "minimum": 0 },
-        "sample_rate_percent": { "type": "number", "minimum": 0 },
-        "fk_orphans_rejected": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "items": { "type": "string" }
+      "$ref": "#/definitions/SampleStatistics"
     },
     "tables": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["name", "classification", "rows_selected", "rows_total", "sample_rate_percent"],
-        "properties": {
-          "name": { "type": "string" },
-          "classification": { "type": "string", "enum": ["root", "lookup", "system", "junction", "normal"] },
-          "rows_selected": { "type": "integer", "minimum": 0 },
-          "rows_total": { "type": "integer", "minimum": 0 },
-          "sample_rate_percent": { "type": "number", "minimum": 0 }
+        "$ref": "#/definitions/TableSampleJson"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "SampleModeJson": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SampleStatistics": {
+      "type": "object",
+      "required": [
+        "fk_orphans_rejected",
+        "rows_selected",
+        "rows_total",
+        "sample_rate_percent",
+        "tables_sampled",
+        "tables_skipped"
+      ],
+      "properties": {
+        "fk_orphans_rejected": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rows_selected": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rows_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "sample_rate_percent": {
+          "type": "number",
+          "format": "double"
+        },
+        "tables_sampled": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "tables_skipped": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TableSampleJson": {
+      "type": "object",
+      "required": [
+        "classification",
+        "name",
+        "rows_selected",
+        "rows_total",
+        "sample_rate_percent"
+      ],
+      "properties": {
+        "classification": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rows_selected": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rows_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "sample_rate_percent": {
+          "type": "number",
+          "format": "double"
         }
       }
     }

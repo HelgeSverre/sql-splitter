@@ -1,35 +1,100 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Analyze Command Output",
-  "description": "JSON output from sql-splitter analyze --json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AnalyzeJsonOutput",
+  "description": "JSON output for single file analyze",
   "type": "object",
-  "required": ["input_file", "dialect", "size_mb", "elapsed_secs", "summary", "tables"],
+  "required": [
+    "dialect",
+    "elapsed_secs",
+    "input_file",
+    "size_mb",
+    "summary",
+    "tables"
+  ],
   "properties": {
-    "input_file": { "type": "string" },
-    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
-    "size_mb": { "type": "number" },
-    "elapsed_secs": { "type": "number" },
+    "dialect": {
+      "type": "string"
+    },
+    "elapsed_secs": {
+      "type": "number",
+      "format": "double"
+    },
+    "input_file": {
+      "type": "string"
+    },
+    "size_mb": {
+      "type": "number",
+      "format": "double"
+    },
     "summary": {
-      "type": "object",
-      "required": ["total_tables", "total_inserts", "total_bytes"],
-      "properties": {
-        "total_tables": { "type": "integer", "minimum": 0 },
-        "total_inserts": { "type": "integer", "minimum": 0 },
-        "total_bytes": { "type": "integer", "minimum": 0 }
-      }
+      "$ref": "#/definitions/AnalyzeSummary"
     },
     "tables": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["name", "inserts", "creates", "statements", "bytes", "size_mb"],
-        "properties": {
-          "name": { "type": "string" },
-          "inserts": { "type": "integer", "minimum": 0 },
-          "creates": { "type": "integer", "minimum": 0 },
-          "statements": { "type": "integer", "minimum": 0 },
-          "bytes": { "type": "integer", "minimum": 0 },
-          "size_mb": { "type": "number", "minimum": 0 }
+        "$ref": "#/definitions/TableAnalysis"
+      }
+    }
+  },
+  "definitions": {
+    "AnalyzeSummary": {
+      "type": "object",
+      "required": ["total_bytes", "total_inserts", "total_tables"],
+      "properties": {
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "total_inserts": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "total_tables": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TableAnalysis": {
+      "type": "object",
+      "required": [
+        "bytes",
+        "creates",
+        "inserts",
+        "name",
+        "size_mb",
+        "statements"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "creates": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "inserts": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "size_mb": {
+          "type": "number",
+          "format": "double"
+        },
+        "statements": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       }
     }

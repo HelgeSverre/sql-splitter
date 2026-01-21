@@ -31,6 +31,7 @@ Run `make help` to see all available commands. Key commands:
 | `make website-deploy` | Deploy website to Vercel |
 | `make docker-bench` | Run benchmarks in Docker (generates 100MB test data) |
 | `make man` | Generate man pages in man/ directory |
+| `make schemas` | Generate JSON schemas from Rust types, validate, and copy to website |
 
 ### Building and Running
 

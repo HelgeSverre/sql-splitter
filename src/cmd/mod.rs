@@ -1,16 +1,16 @@
-mod analyze;
-mod convert;
+pub(crate) mod analyze;
+pub(crate) mod convert;
 mod diff;
 mod glob_util;
-mod graph;
-mod merge;
+pub(crate) mod graph;
+pub(crate) mod merge;
 mod order;
 mod query;
-mod redact;
-mod sample;
-mod shard;
-mod split;
-mod validate;
+pub(crate) mod redact;
+pub(crate) mod sample;
+pub(crate) mod shard;
+pub(crate) mod split;
+pub(crate) mod validate;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::{generate, Shell};
@@ -711,6 +711,26 @@ pub enum Commands {
   sql-splitter query --list-cache")]
     Query(query::QueryArgs),
 
+    /// Generate JSON schemas for --json output types (developer tool)
+    #[command(hide = true)]
+    Schema {
+        /// Output directory for schema files
+        #[arg(short, long, default_value = "schemas", value_hint = ValueHint::DirPath)]
+        output: PathBuf,
+
+        /// Generate schema for a specific command only
+        #[arg(short, long)]
+        command: Option<String>,
+
+        /// Print schemas to stdout instead of writing files
+        #[arg(long)]
+        stdout: bool,
+
+        /// List available schema names
+        #[arg(long)]
+        list: bool,
+    },
+
     /// Generate shell completion scripts
     #[command(after_help = "\x1b[1mInstallation:\x1b[0m
   Bash:
@@ -1036,6 +1056,12 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             reverse,
         } => order::run(file, output, dialect, check, dry_run, reverse),
         Commands::Query(args) => query::run(args),
+        Commands::Schema {
+            output,
+            command,
+            stdout,
+            list,
+        } => run_schema(output, command, stdout, list),
         Commands::Completions { shell } => {
             generate(
                 shell,
@@ -1046,4 +1072,55 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_schema(
+    output_dir: PathBuf,
+    command: Option<String>,
+    to_stdout: bool,
+    list: bool,
+) -> anyhow::Result<()> {
+    use crate::json_schema;
+    use std::fs;
+
+    let schemas = json_schema::all_schemas();
+
+    if list {
+        for name in schemas.keys() {
+            println!("{}", name);
+        }
+        return Ok(());
+    }
+
+    if let Some(cmd) = command {
+        let schema = schemas
+            .get(cmd.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Unknown command: {}. Use --list to see available schemas.", cmd))?;
+
+        let json = serde_json::to_string_pretty(schema)?;
+
+        if to_stdout {
+            println!("{}", json);
+        } else {
+            fs::create_dir_all(&output_dir)?;
+            let path = output_dir.join(format!("{}.schema.json", cmd));
+            fs::write(&path, json)?;
+            eprintln!("Wrote: {}", path.display());
+        }
+    } else if to_stdout {
+        for (name, schema) in &schemas {
+            let json = serde_json::to_string_pretty(schema)?;
+            println!("// {}.schema.json\n{}\n", name, json);
+        }
+    } else {
+        fs::create_dir_all(&output_dir)?;
+        for (name, schema) in &schemas {
+            let json = serde_json::to_string_pretty(schema)?;
+            let path = output_dir.join(format!("{}.schema.json", name));
+            fs::write(&path, json)?;
+            eprintln!("Wrote: {}", path.display());
+        }
+    }
+
+    Ok(())
 }

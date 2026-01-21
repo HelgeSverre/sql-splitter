@@ -1,6 +1,7 @@
 use crate::parser::{detect_dialect_from_file, ContentFilter, DialectConfidence, SqlDialect};
 use crate::splitter::{Compression, Splitter};
 use indicatif::{ProgressBar, ProgressStyle};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,8 +11,8 @@ use std::time::Instant;
 use super::glob_util::{expand_file_pattern, MultiFileResult};
 
 /// JSON output for single file split
-#[derive(Serialize)]
-struct SplitJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SplitJsonOutput {
     input_file: String,
     output_dir: String,
     dialect: String,
@@ -24,8 +25,8 @@ struct SplitJsonOutput {
     tables: Vec<String>,
 }
 
-#[derive(Serialize)]
-struct SplitStatistics {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SplitStatistics {
     tables_found: usize,
     statements_processed: u64,
     bytes_processed: u64,
@@ -35,8 +36,8 @@ struct SplitStatistics {
 }
 
 /// JSON output for multi-file split
-#[derive(Serialize)]
-struct MultiSplitJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MultiSplitJsonOutput {
     total_files: usize,
     succeeded: usize,
     failed: usize,
@@ -44,8 +45,8 @@ struct MultiSplitJsonOutput {
     results: Vec<SplitFileResult>,
 }
 
-#[derive(Serialize)]
-struct SplitFileResult {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SplitFileResult {
     file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     size_mb: Option<f64>,

@@ -3,10 +3,11 @@
 //! Tracks and reports unsupported features, lossy conversions,
 //! and other issues that arise during dialect conversion.
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Warning types that can occur during conversion
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConvertWarning {
     /// Feature not supported in target dialect

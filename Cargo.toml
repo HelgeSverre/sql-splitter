@@ -55,6 +55,7 @@ hex = "0.4"
 duckdb = { version = "1.4", features = ["bundled"] }
 dirs = "6"
 rustyline = "17"
+schemars = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

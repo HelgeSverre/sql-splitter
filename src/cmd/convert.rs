@@ -2,14 +2,15 @@
 
 use crate::convert::{self, ConvertConfig, ConvertStats};
 use crate::parser::SqlDialect;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 
 use super::glob_util::{expand_file_pattern, MultiFileResult};
 
 /// JSON output for single file convert
-#[derive(Serialize)]
-struct ConvertJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ConvertJsonOutput {
     input_file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_file: Option<String>,
@@ -19,14 +20,14 @@ struct ConvertJsonOutput {
     warnings: Vec<crate::convert::ConvertWarning>,
 }
 
-#[derive(Serialize)]
-struct ConversionInfo {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ConversionInfo {
     from: String,
     to: String,
 }
 
-#[derive(Serialize)]
-struct ConvertStatistics {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ConvertStatistics {
     statements_processed: u64,
     statements_converted: u64,
     statements_unchanged: u64,
@@ -34,8 +35,8 @@ struct ConvertStatistics {
 }
 
 /// JSON output for multi-file convert
-#[derive(Serialize)]
-struct MultiConvertJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MultiConvertJsonOutput {
     total_files: usize,
     succeeded: usize,
     failed: usize,
@@ -44,8 +45,8 @@ struct MultiConvertJsonOutput {
     results: Vec<ConvertFileResult>,
 }
 
-#[derive(Serialize)]
-struct AggregateConvertStats {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AggregateConvertStats {
     statements_processed: u64,
     statements_converted: u64,
     statements_unchanged: u64,
@@ -53,8 +54,8 @@ struct AggregateConvertStats {
     total_warnings: usize,
 }
 
-#[derive(Serialize)]
-struct ConvertFileResult {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ConvertFileResult {
     file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_file: Option<String>,

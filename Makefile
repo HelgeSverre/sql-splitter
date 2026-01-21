@@ -1,4 +1,4 @@
-.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all install-man docker-build docker-bench verify-realworld website-deploy man
+.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all install-man docker-build docker-bench verify-realworld website-deploy man schemas
 
 # Show available commands (default target)
 help:
@@ -24,6 +24,7 @@ help:
 	@echo "  make verify-realworld      - Verify against real-world SQL dumps from public sources"
 	@echo "  make website-deploy        - Deploy website to Vercel"
 	@echo "  make man                   - Generate man pages"
+	@echo "  make schemas               - Generate JSON schemas from Rust types"
 
 # Debug build
 build:
@@ -118,4 +119,20 @@ man:
 	@echo ""
 	@echo "Man pages generated in man/ directory"
 	@echo "Install with: sudo cp man/*.1 /usr/local/share/man/man1/"
+
+# Generate JSON schemas from Rust types, validate, and copy to website
+schemas: release
+	@echo "Generating JSON schemas from Rust types..."
+	./target/release/sql-splitter schema -o schemas/
+	@echo ""
+	@echo "Formatting schemas with prettier..."
+	npx prettier --write "schemas/*.schema.json" --log-level warn
+	@echo ""
+	@echo "Validating schemas against actual CLI output..."
+	cargo test --test json_schema_tests -- --quiet
+	@echo ""
+	@echo "Copying schemas to website..."
+	cp schemas/*.schema.json website/public/schemas/
+	@echo ""
+	@echo "✓ Schemas generated, formatted, validated, and copied to website/public/schemas/"
 

@@ -7,6 +7,7 @@ mod convert;
 mod differ;
 mod duckdb;
 mod graph;
+mod json_schema;
 mod merger;
 mod parser;
 mod pk;

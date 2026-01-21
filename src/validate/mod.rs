@@ -14,6 +14,7 @@ use crate::progress::ProgressReader;
 use crate::schema::{Schema, SchemaBuilder, TableId};
 use crate::splitter::Compression;
 use ahash::{AHashMap, AHashSet};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::fmt;
 use std::fs::File;
@@ -26,7 +27,7 @@ use std::sync::Arc;
 const MAX_ISSUES: usize = 1000;
 
 /// Issue severity level
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
@@ -45,7 +46,7 @@ impl fmt::Display for Severity {
 }
 
 /// Location in the SQL dump where an issue was found
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Location {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
@@ -88,7 +89,7 @@ impl Default for Location {
 }
 
 /// A validation issue found in the SQL dump
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ValidationIssue {
     pub code: &'static str,
     pub severity: Severity,
@@ -166,7 +167,7 @@ pub struct ValidateOptions {
 }
 
 /// Validation summary with collected issues
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ValidationSummary {
     pub dialect: String,
     pub issues: Vec<ValidationIssue>,
@@ -174,7 +175,7 @@ pub struct ValidationSummary {
     pub checks: CheckResults,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SummaryStats {
     pub errors: usize,
     pub warnings: usize,
@@ -183,7 +184,7 @@ pub struct SummaryStats {
     pub statements_scanned: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct CheckResults {
     pub syntax: CheckStatus,
     pub encoding: CheckStatus,
@@ -192,7 +193,7 @@ pub struct CheckResults {
     pub fk_integrity: CheckStatus,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckStatus {
     Ok,

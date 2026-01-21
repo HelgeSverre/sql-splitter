@@ -1,50 +1,131 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Shard Command Output",
-  "description": "JSON output from the shard command which extracts tenant-specific data from a multi-tenant SQL dump",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ShardJsonOutput",
+  "description": "JSON output for single-tenant shard command",
   "type": "object",
-  "required": ["input_file", "dialect", "dry_run", "tenant", "statistics", "tables"],
+  "required": [
+    "dialect",
+    "dry_run",
+    "input_file",
+    "statistics",
+    "tables",
+    "tenant"
+  ],
   "properties": {
-    "input_file": { "type": "string" },
-    "output_file": { "type": ["string", "null"] },
-    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
-    "dry_run": { "type": "boolean" },
-    "tenant": {
-      "type": "object",
-      "required": ["column", "value", "auto_detected"],
-      "properties": {
-        "column": { "type": "string" },
-        "value": { "type": "string" },
-        "auto_detected": { "type": "boolean" }
-      }
+    "dialect": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "input_file": {
+      "type": "string"
+    },
+    "output_file": {
+      "type": ["string", "null"]
     },
     "statistics": {
-      "type": "object",
-      "required": ["tables_processed", "tables_with_data", "tables_skipped", "rows_selected", "rows_total", "reduction_percent", "fk_orphans_skipped"],
-      "properties": {
-        "tables_processed": { "type": "integer", "minimum": 0 },
-        "tables_with_data": { "type": "integer", "minimum": 0 },
-        "tables_skipped": { "type": "integer", "minimum": 0 },
-        "rows_selected": { "type": "integer", "minimum": 0 },
-        "rows_total": { "type": "integer", "minimum": 0 },
-        "reduction_percent": { "type": "number", "minimum": 0 },
-        "fk_orphans_skipped": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "items": { "type": "string" }
+      "$ref": "#/definitions/ShardStatistics"
     },
     "tables": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["name", "classification", "rows_selected", "rows_total"],
-        "properties": {
-          "name": { "type": "string" },
-          "classification": { "type": "string", "enum": ["tenantroot", "tenantdependent", "junction", "lookup", "system", "unknown"] },
-          "rows_selected": { "type": "integer", "minimum": 0 },
-          "rows_total": { "type": "integer", "minimum": 0 }
+        "$ref": "#/definitions/TableShardJson"
+      }
+    },
+    "tenant": {
+      "$ref": "#/definitions/TenantInfo"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "ShardStatistics": {
+      "type": "object",
+      "required": [
+        "fk_orphans_skipped",
+        "reduction_percent",
+        "rows_selected",
+        "rows_total",
+        "tables_processed",
+        "tables_skipped",
+        "tables_with_data"
+      ],
+      "properties": {
+        "fk_orphans_skipped": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "reduction_percent": {
+          "type": "number",
+          "format": "double"
+        },
+        "rows_selected": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rows_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tables_processed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "tables_skipped": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "tables_with_data": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TableShardJson": {
+      "type": "object",
+      "required": ["classification", "name", "rows_selected", "rows_total"],
+      "properties": {
+        "classification": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rows_selected": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rows_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TenantInfo": {
+      "type": "object",
+      "required": ["auto_detected", "column", "value"],
+      "properties": {
+        "auto_detected": {
+          "type": "boolean"
+        },
+        "column": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
         }
       }
     }

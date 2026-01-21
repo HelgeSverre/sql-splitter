@@ -7,6 +7,7 @@ pub mod convert;
 pub mod differ;
 pub mod duckdb;
 pub mod graph;
+pub mod json_schema;
 pub mod merger;
 pub mod parser;
 pub mod pk;

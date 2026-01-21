@@ -1,34 +1,77 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Merge Command Output",
-  "description": "JSON output from the merge command which combines split table files back into a single SQL dump",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MergeJsonOutput",
+  "description": "JSON output for merge command",
   "type": "object",
-  "required": ["input_dir", "dialect", "dry_run", "statistics", "tables", "options"],
+  "required": [
+    "dialect",
+    "dry_run",
+    "input_dir",
+    "options",
+    "statistics",
+    "tables"
+  ],
   "properties": {
-    "input_dir": { "type": "string" },
-    "output_file": { "type": ["string", "null"] },
-    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
-    "dry_run": { "type": "boolean" },
+    "dialect": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "input_dir": {
+      "type": "string"
+    },
+    "options": {
+      "$ref": "#/definitions/MergeOptions"
+    },
+    "output_file": {
+      "type": ["string", "null"]
+    },
     "statistics": {
-      "type": "object",
-      "required": ["tables_merged", "bytes_written", "elapsed_secs"],
-      "properties": {
-        "tables_merged": { "type": "integer", "minimum": 0 },
-        "bytes_written": { "type": "integer", "minimum": 0 },
-        "elapsed_secs": { "type": "number", "minimum": 0 },
-        "throughput_kb_per_sec": { "type": ["number", "null"] }
-      }
+      "$ref": "#/definitions/MergeStatistics"
     },
     "tables": {
       "type": "array",
-      "items": { "type": "string" }
-    },
-    "options": {
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "MergeOptions": {
       "type": "object",
-      "required": ["transaction", "header"],
+      "required": ["header", "transaction"],
       "properties": {
-        "transaction": { "type": "boolean" },
-        "header": { "type": "boolean" }
+        "header": {
+          "type": "boolean"
+        },
+        "transaction": {
+          "type": "boolean"
+        }
+      }
+    },
+    "MergeStatistics": {
+      "type": "object",
+      "required": ["bytes_written", "elapsed_secs", "tables_merged"],
+      "properties": {
+        "bytes_written": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "elapsed_secs": {
+          "type": "number",
+          "format": "double"
+        },
+        "tables_merged": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "throughput_kb_per_sec": {
+          "type": ["number", "null"],
+          "format": "double"
+        }
       }
     }
   }

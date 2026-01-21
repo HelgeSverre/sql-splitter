@@ -26,12 +26,13 @@ use crate::parser::postgres_copy::parse_copy_columns;
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::schema::{Schema, SchemaBuilder};
 use ahash::AHashMap;
+use schemars::JsonSchema;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
 /// Statistics from redaction operation
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Default, serde::Serialize, JsonSchema)]
 pub struct RedactStats {
     /// Number of tables processed
     pub tables_processed: usize,
@@ -46,7 +47,7 @@ pub struct RedactStats {
 }
 
 /// Per-table redaction statistics
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
 pub struct TableRedactStats {
     pub name: String,
     pub rows_processed: u64,

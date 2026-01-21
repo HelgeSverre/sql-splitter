@@ -1,28 +1,69 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Redact Command Output",
-  "description": "JSON output from the redact command which masks or removes sensitive data from SQL dumps",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RedactStats",
+  "description": "Statistics from redaction operation",
   "type": "object",
-  "required": ["tables_processed", "rows_redacted", "columns_redacted", "table_stats", "warnings"],
+  "required": [
+    "columns_redacted",
+    "rows_redacted",
+    "table_stats",
+    "tables_processed",
+    "warnings"
+  ],
   "properties": {
-    "tables_processed": { "type": "integer", "minimum": 0 },
-    "rows_redacted": { "type": "integer", "minimum": 0 },
-    "columns_redacted": { "type": "integer", "minimum": 0 },
+    "columns_redacted": {
+      "description": "Number of columns redacted",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "rows_redacted": {
+      "description": "Number of rows redacted",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
     "table_stats": {
+      "description": "Per-table statistics",
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["name", "rows_processed", "columns_redacted"],
-        "properties": {
-          "name": { "type": "string" },
-          "rows_processed": { "type": "integer", "minimum": 0 },
-          "columns_redacted": { "type": "integer", "minimum": 0 }
-        }
+        "$ref": "#/definitions/TableRedactStats"
       }
     },
+    "tables_processed": {
+      "description": "Number of tables processed",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
     "warnings": {
+      "description": "Warning messages",
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "TableRedactStats": {
+      "description": "Per-table redaction statistics",
+      "type": "object",
+      "required": ["columns_redacted", "name", "rows_processed"],
+      "properties": {
+        "columns_redacted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "rows_processed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
     }
   }
 }

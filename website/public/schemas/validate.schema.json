@@ -1,68 +1,170 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Validate Command Output",
-  "description": "JSON output from sql-splitter validate --json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ValidationSummary",
+  "description": "Validation summary with collected issues",
   "type": "object",
-  "required": ["dialect", "issues", "summary", "checks"],
+  "required": ["checks", "dialect", "issues", "summary"],
   "properties": {
-    "dialect": { "$ref": "#/$defs/dialect" },
+    "checks": {
+      "$ref": "#/definitions/CheckResults"
+    },
+    "dialect": {
+      "type": "string"
+    },
     "issues": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["code", "severity", "message"],
-        "properties": {
-          "code": { "type": "string", "description": "Issue code identifier" },
-          "severity": { "type": "string", "enum": ["error", "warning", "info"] },
-          "message": { "type": "string", "description": "Human-readable issue description" },
-          "location": {
-            "type": "object",
-            "description": "Location where the issue was found (fields omitted when null)",
-            "properties": {
-              "table": { "type": "string" },
-              "statement_index": { "type": "integer", "minimum": 0 },
-              "approx_line": { "type": "integer", "minimum": 0 }
-            },
-            "additionalProperties": false
-          }
-        }
+        "$ref": "#/definitions/ValidationIssue"
       }
     },
     "summary": {
-      "type": "object",
-      "required": ["errors", "warnings", "info", "tables_scanned", "statements_scanned"],
-      "properties": {
-        "errors": { "type": "integer", "minimum": 0 },
-        "warnings": { "type": "integer", "minimum": 0 },
-        "info": { "type": "integer", "minimum": 0 },
-        "tables_scanned": { "type": "integer", "minimum": 0 },
-        "statements_scanned": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "checks": {
-      "type": "object",
-      "required": ["syntax", "encoding", "ddl_dml_consistency", "pk_duplicates", "fk_integrity"],
-      "properties": {
-        "syntax": { "$ref": "#/$defs/checkStatus" },
-        "encoding": { "$ref": "#/$defs/checkStatus" },
-        "ddl_dml_consistency": { "$ref": "#/$defs/checkStatus" },
-        "pk_duplicates": { "$ref": "#/$defs/checkStatus" },
-        "fk_integrity": { "$ref": "#/$defs/checkStatus" }
-      }
+      "$ref": "#/definitions/SummaryStats"
     }
   },
-  "$defs": {
-    "dialect": {
-      "type": "string",
-      "enum": ["mysql", "postgres", "sqlite", "mssql"],
-      "description": "SQL dialect"
+  "definitions": {
+    "CheckResults": {
+      "type": "object",
+      "required": [
+        "ddl_dml_consistency",
+        "encoding",
+        "fk_integrity",
+        "pk_duplicates",
+        "syntax"
+      ],
+      "properties": {
+        "ddl_dml_consistency": {
+          "$ref": "#/definitions/CheckStatus"
+        },
+        "encoding": {
+          "$ref": "#/definitions/CheckStatus"
+        },
+        "fk_integrity": {
+          "$ref": "#/definitions/CheckStatus"
+        },
+        "pk_duplicates": {
+          "$ref": "#/definitions/CheckStatus"
+        },
+        "syntax": {
+          "$ref": "#/definitions/CheckStatus"
+        }
+      }
     },
-    "checkStatus": {
+    "CheckStatus": {
       "oneOf": [
-        { "const": "ok" },
-        { "type": "object", "required": ["failed"], "properties": { "failed": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
-        { "type": "object", "required": ["skipped"], "properties": { "skipped": { "type": "string" } }, "additionalProperties": false }
+        {
+          "type": "string",
+          "enum": ["ok"]
+        },
+        {
+          "type": "object",
+          "required": ["failed"],
+          "properties": {
+            "failed": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["skipped"],
+          "properties": {
+            "skipped": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
       ]
+    },
+    "Location": {
+      "description": "Location in the SQL dump where an issue was found",
+      "type": "object",
+      "properties": {
+        "approx_line": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "statement_index": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "table": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "Severity": {
+      "description": "Issue severity level",
+      "type": "string",
+      "enum": ["error", "warning", "info"]
+    },
+    "SummaryStats": {
+      "type": "object",
+      "required": [
+        "errors",
+        "info",
+        "statements_scanned",
+        "tables_scanned",
+        "warnings"
+      ],
+      "properties": {
+        "errors": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "info": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "statements_scanned": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tables_scanned": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "warnings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ValidationIssue": {
+      "description": "A validation issue found in the SQL dump",
+      "type": "object",
+      "required": ["code", "message", "severity"],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Location"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
+        }
+      }
     }
   }
 }

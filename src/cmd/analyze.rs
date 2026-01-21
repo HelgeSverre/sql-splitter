@@ -2,6 +2,7 @@ use crate::analyzer::Analyzer;
 use crate::parser::{detect_dialect, detect_dialect_from_file, DialectConfidence, SqlDialect};
 use crate::splitter::Compression;
 use indicatif::{ProgressBar, ProgressStyle};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,8 +12,8 @@ use std::time::Instant;
 use super::glob_util::{expand_file_pattern, MultiFileResult};
 
 /// JSON output for single file analyze
-#[derive(Serialize)]
-struct AnalyzeJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AnalyzeJsonOutput {
     input_file: String,
     dialect: String,
     size_mb: f64,
@@ -21,15 +22,15 @@ struct AnalyzeJsonOutput {
     tables: Vec<TableAnalysis>,
 }
 
-#[derive(Serialize)]
-struct AnalyzeSummary {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AnalyzeSummary {
     total_tables: usize,
     total_inserts: u64,
     total_bytes: u64,
 }
 
-#[derive(Serialize)]
-struct TableAnalysis {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct TableAnalysis {
     name: String,
     inserts: u64,
     creates: u64,
@@ -39,8 +40,8 @@ struct TableAnalysis {
 }
 
 /// JSON output for multi-file analyze
-#[derive(Serialize)]
-struct MultiAnalyzeJsonOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MultiAnalyzeJsonOutput {
     total_files: usize,
     succeeded: usize,
     failed: usize,
@@ -48,8 +49,8 @@ struct MultiAnalyzeJsonOutput {
     results: Vec<AnalyzeFileResult>,
 }
 
-#[derive(Serialize)]
-struct AnalyzeFileResult {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AnalyzeFileResult {
     file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     size_mb: Option<f64>,
