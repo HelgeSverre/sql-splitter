@@ -33,8 +33,9 @@
   --color-border-light: #d0d7de;
 
   /* Fonts */
-  --font-display: 'Monda', system-ui, sans-serif;
-  --font-mono: 'SF Mono', ui-monospace, 'Cascadia Code', 'Roboto Mono', Menlo, monospace;
+  --font-display: "Monda", system-ui, sans-serif;
+  --font-mono:
+    "SF Mono", ui-monospace, "Cascadia Code", "Roboto Mono", Menlo, monospace;
 }
 
 /* Base styles for custom pages */
@@ -49,8 +50,13 @@ body {
 }
 
 /* Code highlighting */
-.sh-comment { color: #6e7681; font-style: italic; }
-.sh-tool { color: var(--color-cmd-split); }
+.sh-comment {
+  color: #6e7681;
+  font-style: italic;
+}
+.sh-tool {
+  color: var(--color-cmd-split);
+}
 
 /* Copy button animation */
 .copy-btn.copied {
