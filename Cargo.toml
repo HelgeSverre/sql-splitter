@@ -12,6 +12,17 @@ license = "MIT"
 repository = "https://github.com/helgesverre/sql-splitter"
 keywords = ["sql", "mysql", "dump", "split", "cli"]
 categories = ["command-line-utilities", "database"]
+exclude = [
+  "website/",
+  "docs/",
+  "scripts/",
+  "docker/",
+  "skills/",
+  "man/",
+  "tests/realworld/",
+  "tests/data/generated/",
+  "tests/fixtures/generated/",
+]
 
 [[bin]]
 name = "sql-splitter"

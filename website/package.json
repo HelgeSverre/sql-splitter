@@ -1,5 +1,26 @@
 {
+  "name": "sql-splitter-docs",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
   "dependencies": {
-    "playwright": "^1.57.0"
+    "@astrojs/sitemap": "^3.3.0",
+    "@astrojs/starlight": "^0.34.5",
+    "astro": "^5.8.0",
+    "astro-indexnow": "^2.0.0",
+    "astro-og-canvas": "^0.10.0",
+    "sharp": "^0.34.2",
+    "starlight-github-alerts": "^0.1.1",
+    "starlight-links-validator": "^0.19.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "tailwindcss": "^4.1.7"
   }
 }

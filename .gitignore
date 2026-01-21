@@ -35,4 +35,15 @@ flamegraph.svg
 # Generated man pages
 /man/
 
+# Website build artifacts
+/website/dist/
+/website/node_modules/
+/website/.astro/
+/website/.vercel/
+/website/screenshots/
+
+# Test output directories
+/test-fixtures/
+/test-output/
+
 linus-ignore-this-file.md
