@@ -117,12 +117,85 @@ install-man: man
 verify-realworld:
     cargo test --test realworld -- --ignored
 
-# Deploy website to Vercel
-website-deploy:
-    cd website && vc --prod
-
 # Generate man pages
 man:
     cargo run --example generate-man
     @echo ""
     @echo "Man pages generated in man/ directory"
+
+# [website] Build website for production
+website-build:
+    cd website && npm run build
+
+# [website] Start development server with hot reload
+website-dev:
+    cd website && npm run dev
+
+# [website] Preview production build locally
+website-preview:
+    cd website && npm run preview
+
+# [website] Deploy website to Vercel (production)
+website-deploy:
+    cd website && vc --prod
+
+# [website] Check Astro project (type checking, diagnostics)
+website-check:
+    cd website && npm run astro check
+
+# [website] Clean website build artifacts and caches
+website-clean:
+    cd website && rm -rf dist .astro node_modules/.cache
+
+# [website] Deep clean (including node_modules)
+website-clean-all:
+    cd website && rm -rf dist .astro node_modules
+
+# [website] Clean and rebuild website from scratch
+website-rebuild: website-clean
+    cd website && npm install && npm run build
+
+# [website] Install/update website dependencies
+website-install:
+    cd website && npm install
+
+# [website] Update website dependencies to latest versions
+website-update:
+    cd website && npm update
+
+# [website] Check for outdated website dependencies
+website-outdated:
+    cd website && npm outdated
+
+# [website] Audit website dependencies for vulnerabilities
+website-audit:
+    cd website && npm audit
+
+# [website] Fix website dependency vulnerabilities
+website-audit-fix:
+    cd website && npm audit fix
+
+# [website] Generate OG image
+website-og-image:
+    cd website && node generate-og-image.js
+
+# [website] Validate internal links (built into starlight-links-validator during build)
+website-validate-links: website-build
+    @echo "✓ Links validated during build via starlight-links-validator"
+
+# [website] List all available npm scripts
+website-scripts:
+    cd website && npm run
+
+# [website] Open website in browser (localhost:4321)
+website-open:
+    @echo "Opening http://localhost:4321"
+    @open http://localhost:4321 || xdg-open http://localhost:4321 || echo "Please open http://localhost:4321 in your browser"
+
+# [website] Full website maintenance (audit, clean, install, build, check)
+website-maintain: website-audit website-clean website-install website-build website-check
+    @echo "✓ Website maintenance complete"
+
+# [website] Quick CI checks (build + validation)
+website-ci: website-build
+    @echo "✓ Website CI checks passed"
