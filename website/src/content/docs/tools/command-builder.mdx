@@ -4,13 +4,14 @@ description: Interactive tool to construct sql-splitter commands
 tableOfContents: false
 ---
 
-import CommandBuilder from '../../../components/CommandBuilder.astro';
+import CommandBuilder from '../../../components/CommandBuilder.tsx';
+import '../../../styles/command-builder.css';
 
 <div class="cb-wide">
 
 Build sql-splitter commands interactively. Select a command and configure options to generate a ready-to-use command.
 
-<CommandBuilder />
+<CommandBuilder client:load />
 
 </div>
 

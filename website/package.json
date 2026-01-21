@@ -7,21 +7,27 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@astrojs/react": "^4.4.2",
     "@astrojs/sitemap": "^3.7.0",
     "@astrojs/starlight": "^0.34.8",
     "@fontsource/roboto": "^5.2.9",
     "@resvg/resvg-js": "^2.6.2",
     "astro": "^5.16.11",
     "astro-indexnow": "^2.0.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
     "satori": "^0.19.1",
     "sharp": "^0.34.5",
     "starlight-github-alerts": "^0.1.1",
     "starlight-links-validator": "^0.19.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@tailwindcss/vite": "^4.1.18",
     "tailwindcss": "^4.1.18"
   }

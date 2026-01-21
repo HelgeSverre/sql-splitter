@@ -1,6 +1,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import sitemap from '@astrojs/sitemap';
+import react from '@astrojs/react';
 import indexnow from 'astro-indexnow';
 import tailwindcss from '@tailwindcss/vite';
 import starlightLinksValidator from 'starlight-links-validator';
@@ -9,6 +10,7 @@ import starlightGitHubAlerts from 'starlight-github-alerts';
 export default defineConfig({
   site: 'https://sql-splitter.dev',
   integrations: [
+    react(),
     starlight({
       title: 'sql-splitter',
       lastUpdated: true,
