@@ -1,0 +1,152 @@
+---
+title: Dev Data Seeding
+description: Create anonymized development datasets
+---
+
+Create realistic but safe development datasets using sample and redact.
+
+## The Problem
+
+Production data is realistic but contains sensitive PII. Random test data lacks realistic relationships and edge cases.
+
+## The Solution
+
+1. **Sample** production data to reduce size
+2. **Redact** PII to anonymize
+3. **Validate** the result
+
+## Step-by-Step
+
+### 1. Analyze Production Dump
+
+```bash
+sql-splitter analyze prod.sql.gz --progress
+```
+
+Review table sizes to plan sampling.
+
+### 2. Sample with FK Preservation
+
+```bash
+sql-splitter sample prod.sql.gz \
+  -o sampled.sql \
+  --percent 10 \
+  --preserve-relations \
+  --seed 42 \
+  --progress
+```
+
+Key options:
+- `--preserve-relations`: Ensures FK integrity
+- `--seed 42`: Reproducible results
+
+### 3. Generate Redaction Config
+
+```bash
+sql-splitter redact sampled.sql \
+  --generate-config \
+  -o redact.yaml
+```
+
+Review and customize `redact.yaml`:
+
+```yaml
+seed: 12345
+locale: en
+
+rules:
+  - column: "*.email"
+    strategy: hash
+  - column: "*.name"
+    strategy: fake
+    generator: name
+  - column: "*.ssn"
+    strategy: null
+  - column: "*.phone"
+    strategy: fake
+    generator: phone
+  - column: "*.credit_card"
+    strategy: mask
+    pattern: "****-****-****-XXXX"
+
+skip_tables:
+  - schema_migrations
+  - ar_internal_metadata
+```
+
+### 4. Apply Redaction
+
+```bash
+sql-splitter redact sampled.sql \
+  -o dev.sql \
+  --config redact.yaml \
+  --progress
+```
+
+### 5. Validate Final Output
+
+```bash
+sql-splitter validate dev.sql --strict
+```
+
+## One-Liner Approach
+
+For quick anonymization without a config file:
+
+```bash
+sql-splitter sample prod.sql.gz --percent 10 --preserve-relations -o - | \
+  sql-splitter redact - \
+    --hash "*.email" \
+    --fake "*.name,*.phone" \
+    --null "*.ssn,*.password" \
+    -o dev.sql
+```
+
+## Choosing a Redaction Strategy
+
+| Data Type | Strategy | Why |
+|-----------|----------|-----|
+| Emails | `hash` | Preserves FK relationships (same input → same output) |
+| Names | `fake` | Realistic looking data |
+| SSN/Passwords | `null` | Remove entirely |
+| Credit Cards | `mask` | Keep format for testing |
+| Timestamps | `skip` | Usually not PII |
+
+## Reproducible Builds
+
+Use `--seed` for deterministic results:
+
+```bash
+# Same seed = same fake data every time
+sql-splitter sample prod.sql --percent 10 --seed 42 -o - | \
+  sql-splitter redact - --config redact.yaml --seed 42 -o dev.sql
+```
+
+## CI/CD Integration
+
+```yaml
+# .github/workflows/seed-dev.yml
+jobs:
+  seed-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download production backup
+        run: aws s3 cp s3://backups/prod.sql.gz .
+
+      - name: Create dev dataset
+        run: |
+          sql-splitter sample prod.sql.gz \
+            --percent 10 \
+            --preserve-relations \
+            --seed ${{ github.run_id }} \
+            -o - | \
+          sql-splitter redact - \
+            --config redact.yaml \
+            -o dev.sql
+
+      - name: Validate
+        run: sql-splitter validate dev.sql --strict
+
+      - name: Upload
+        run: aws s3 cp dev.sql s3://dev-data/
+```

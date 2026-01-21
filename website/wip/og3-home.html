@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1200, height=630">
+    <title>sql-splitter - SQL dump toolkit</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 1200px;
+            height: 630px;
+            background: #0d1117;
+            font-family: 'Monda', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #e6edf3;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 60px 80px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Grid pattern */
+        body::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(88, 166, 255, 0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(88, 166, 255, 0.025) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+        }
+
+        /* Gradient glow */
+        body::after {
+            content: '';
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(88, 166, 255, 0.06) 0%, transparent 60%);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+
+        .content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            z-index: 1;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            margin-bottom: 24px;
+        }
+
+        .logo-icon {
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 72px;
+            font-weight: 700;
+            color: #58a6ff;
+            filter: drop-shadow(0 0 20px rgba(88, 166, 255, 0.6));
+        }
+
+        .logo-text {
+            font-size: 56px;
+            font-weight: 700;
+            letter-spacing: -1.5px;
+            background: linear-gradient(135deg, #e6edf3 0%, #8b949e 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .tagline {
+            font-size: 26px;
+            color: #58a6ff;
+            margin-bottom: 16px;
+            font-weight: 500;
+        }
+
+        .description {
+            font-size: 20px;
+            color: #8b949e;
+            line-height: 1.6;
+            max-width: 800px;
+            margin-bottom: 40px;
+        }
+
+        .command-box {
+            display: inline-flex;
+            align-items: center;
+            gap: 0;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(88, 166, 255, 0.2);
+            border-radius: 10px;
+            padding: 4px;
+            box-shadow:
+                0 0 40px rgba(88, 166, 255, 0.1),
+                inset 0 0 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .command-box-inner {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 18px 28px;
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 20px;
+        }
+
+        .prompt {
+            color: #3fb950;
+            font-weight: 600;
+        }
+
+        .cmd {
+            color: #79c0ff;
+        }
+
+        .arg {
+            color: #ffa657;
+        }
+
+        .features {
+            display: flex;
+            gap: 30px;
+            margin-top: 40px;
+        }
+
+        .feature {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #6e7681;
+        }
+
+        .feature svg {
+            width: 18px;
+            height: 18px;
+            color: #3fb950;
+        }
+
+        .top-accent {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #58a6ff, #3fb950, #ffa657, #d2a8ff, #58a6ff);
+            background-size: 200% 100%;
+            animation: shimmer 4s linear infinite;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: 0% 0%; }
+            100% { background-position: 200% 0%; }
+        }
+
+        .badge {
+            position: absolute;
+            top: 30px;
+            right: 40px;
+            background: rgba(88, 166, 255, 0.1);
+            border: 1px solid rgba(88, 166, 255, 0.2);
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #58a6ff;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            z-index: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-accent"></div>
+    <div class="badge">v1.0</div>
+
+    <div class="content">
+        <div class="logo">
+            <span class="logo-icon">;</span>
+            <span class="logo-text">sql-splitter</span>
+        </div>
+        <p class="tagline">SQL dump toolkit at 600+ MB/s</p>
+        <p class="description">
+            Split, merge, convert, validate, sample, shard, diff, and redact SQL dump files.
+            MySQL, PostgreSQL, and SQLite. Written in Rust.
+        </p>
+        <div class="command-box">
+            <div class="command-box-inner">
+                <span class="prompt">$</span>
+                <span class="cmd">cargo</span>
+                <span class="arg">install sql-splitter</span>
+            </div>
+        </div>
+        <div class="features">
+            <div class="feature">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                Zero-copy streaming
+            </div>
+            <div class="feature">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                Multi-dialect support
+            </div>
+            <div class="feature">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                Open source
+            </div>
+        </div>
+    </div>
+</body>
+</html>

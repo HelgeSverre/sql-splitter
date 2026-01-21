@@ -1,0 +1,131 @@
+---
+title: Core Concepts
+description: Understanding dialects, streaming, and compression in sql-splitter
+---
+
+## SQL Dialects
+
+sql-splitter supports four SQL dialects:
+
+| Dialect | Tool | Features |
+|---------|------|----------|
+| **MySQL** | `mysqldump` | Default dialect, backtick quoting, `INSERT INTO` |
+| **PostgreSQL** | `pg_dump` | `COPY FROM stdin`, `$$` strings, `SET` commands |
+| **SQLite** | `.dump` | `INTEGER PRIMARY KEY`, `.schema` commands |
+| **MSSQL** | `sqlcmd` / SSMS | `GO` batch separators, `IDENTITY`, `nvarchar` |
+
+### Auto-Detection
+
+sql-splitter automatically detects the dialect by analyzing:
+
+- Keywords: `AUTO_INCREMENT` (MySQL), `SERIAL` (PostgreSQL), `GO` (MSSQL)
+- Quoting: Backticks (MySQL), double quotes (PostgreSQL/SQLite), brackets (MSSQL)
+- Session commands: `SET @` (MySQL), `SET client_encoding` (PostgreSQL)
+
+Override with `--dialect`:
+
+```bash
+sql-splitter split dump.sql --dialect=postgres
+```
+
+## Streaming Architecture
+
+sql-splitter uses a streaming architecture that:
+
+1. **Reads in chunks**: Fixed-size buffer reads, not full file loads
+2. **Processes line-by-line**: Statements are parsed as they're read
+3. **Writes immediately**: Output files are written in real-time
+
+This means:
+
+- **Constant memory**: ~50MB regardless of file size
+- **No file size limit**: Process 10GB+ dumps
+- **Fast startup**: No waiting to load the entire file
+
+## Compression
+
+sql-splitter automatically detects and decompresses:
+
+| Extension | Format | Notes |
+|-----------|--------|-------|
+| `.gz` | gzip | Most common |
+| `.bz2` | bzip2 | High compression |
+| `.xz` | xz/LZMA | Very high compression |
+| `.zst` | zstd | Fast compression |
+
+Pass compressed files directly:
+
+```bash
+sql-splitter split backup.sql.gz -o tables/
+sql-splitter analyze dump.sql.zst
+sql-splitter convert mysql.sql.bz2 --to postgres
+```
+
+## Glob Patterns
+
+Most commands accept glob patterns for batch operations:
+
+```bash
+# All SQL files in current directory
+sql-splitter validate "*.sql"
+
+# Recursive search
+sql-splitter analyze "backups/**/*.sql"
+
+# Specific patterns
+sql-splitter split "dumps/*.sql.gz" -o output/
+```
+
+Use `--fail-fast` to stop on first error:
+
+```bash
+sql-splitter validate "*.sql" --fail-fast
+```
+
+## JSON Output
+
+All commands support `--json` for machine-readable output:
+
+```bash
+sql-splitter analyze dump.sql --json | jq '.tables[].name'
+sql-splitter validate dump.sql --json | jq '.errors'
+```
+
+JSON output includes:
+- Input/output file paths
+- Processing statistics
+- Per-table breakdowns
+- Warnings and errors
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error (syntax, I/O, validation failure) |
+| 2 | Invalid arguments |
+
+Use in CI scripts:
+
+```bash
+sql-splitter validate dump.sql --strict || exit 1
+```
+
+## Statement Types
+
+sql-splitter recognizes these SQL statement types:
+
+**DDL (Schema)**:
+- `CREATE TABLE`
+- `CREATE INDEX`
+- `ALTER TABLE`
+- `DROP TABLE`
+
+**DML (Data)**:
+- `INSERT INTO`
+- `COPY ... FROM stdin` (PostgreSQL)
+
+**Control**:
+- Session settings (`SET`, `USE`)
+- Comments
+- Transaction markers

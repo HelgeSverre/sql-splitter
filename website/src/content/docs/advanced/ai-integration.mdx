@@ -1,0 +1,123 @@
+---
+title: AI Integration
+description: Using sql-splitter with AI agents and tools
+---
+
+sql-splitter is optimized for AI-driven workflows.
+
+## llms.txt
+
+sql-splitter includes an [llms.txt](https://sql-splitter.dev/llms.txt) file for AI agents:
+
+```
+https://sql-splitter.dev/llms.txt
+```
+
+This provides:
+
+- Complete command reference
+- Usage patterns
+- Error handling guidance
+
+AI agents can fetch this file to understand sql-splitter's capabilities.
+
+## Agent Skills
+
+sql-splitter provides an [Agent Skill](https://agentskills.io) for coding assistants.
+
+### Install in Claude Code
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.claude/skills/
+```
+
+### Install in Amp
+
+```bash
+amp skill add helgesverre/sql-splitter
+```
+
+### Install in VS Code / GitHub Copilot
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .github/skills/
+```
+
+### Install in Cursor
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .cursor/skills/
+```
+
+## JSON Output for Agents
+
+All commands support `--json` for machine-readable output:
+
+```bash
+sql-splitter analyze dump.sql --json
+```
+
+Agents can parse this structured output programmatically.
+
+## Automation-Friendly Design
+
+sql-splitter is designed for automation:
+
+- **Consistent exit codes**: 0 success, 1 error, 2 bad args
+- **JSON output**: Machine-readable for every command
+- **Glob patterns**: Process multiple files at once
+- **`--dry-run`**: Safe exploration
+- **`--fail-fast`**: Stop on first error
+- **Streaming I/O**: Composable with Unix tools
+
+## Example Agent Prompts
+
+### "Validate my SQL dumps"
+
+```
+Agent: I'll check your SQL dumps for issues.
+
+sql-splitter validate "dumps/*.sql" --strict --json
+
+Result: Found 3 issues in backup_2024.sql:
+- Line 42: Syntax error near 'CREAT'
+- Duplicate PK in users table
+- FK violation: orders.user_id references non-existent user
+```
+
+### "Convert MySQL to PostgreSQL"
+
+```
+Agent: I'll convert your MySQL dump to PostgreSQL.
+
+sql-splitter validate mysql_dump.sql --strict
+sql-splitter convert mysql_dump.sql --to postgres -o postgres_dump.sql --progress
+sql-splitter validate postgres_dump.sql --dialect postgres --strict
+
+Result: Conversion complete. 2 warnings about ENUM types
+that were converted to VARCHAR with CHECK constraints.
+```
+
+### "Create a safe dev dataset"
+
+```
+Agent: I'll create an anonymized sample for development.
+
+sql-splitter sample prod.sql --percent 10 --preserve-relations -o - | \
+  sql-splitter redact - --hash "*.email" --fake "*.name" --null "*.ssn" -o dev.sql
+
+sql-splitter validate dev.sql --strict
+
+Result: Created dev.sql with 10% of data, all PII anonymized.
+```
+
+## Best Practices for Agents
+
+1. **Always validate** before and after operations
+2. **Use `--json`** for parsing results
+3. **Use `--dry-run`** for exploration
+4. **Use `--progress`** for user feedback
+5. **Handle warnings** - check JSON for warning arrays

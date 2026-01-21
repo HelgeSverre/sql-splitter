@@ -1,0 +1,530 @@
+---
+title: JSON Output Reference
+description: Machine-readable JSON output formats and schemas for each command
+---
+
+Most commands support `--json` for machine-readable output. This page documents the JSON structure for each command.
+
+## General Notes
+
+- All commands output valid JSON to stdout
+- Use `jq` for parsing and filtering
+- The `query` command uses `--format json` instead of `--json`
+- Multi-file operations return aggregate results with a `results` array
+
+## JSON Schema Files
+
+Formal JSON Schema files (draft 2020-12) are available in the [schemas/](https://github.com/helgesverre/sql-splitter/tree/main/schemas) directory for validation and code generation:
+
+| Command | Schema File |
+|---------|-------------|
+| `analyze` | [analyze.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/analyze.schema.json) |
+| `validate` | [validate.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/validate.schema.json) |
+| `split` | [split.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/split.schema.json) |
+| `merge` | [merge.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/merge.schema.json) |
+| `sample` | [sample.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/sample.schema.json) |
+| `convert` | [convert.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/convert.schema.json) |
+| `redact` | [redact.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/redact.schema.json) |
+| `graph` | [graph.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/graph.schema.json) |
+| `shard` | [shard.schema.json](https://github.com/helgesverre/sql-splitter/blob/main/schemas/shard.schema.json) |
+
+## Common Fields
+
+### Dialect
+
+All commands include a `dialect` field:
+
+```json
+"dialect": "mysql" | "postgres" | "sqlite" | "mssql"
+```
+
+### Statistics
+
+Most commands include timing and throughput:
+
+```json
+"statistics": {
+  "elapsed_secs": 0.123,
+  "throughput_mb_per_sec": 456.78
+}
+```
+
+---
+
+## analyze
+
+```bash
+sql-splitter analyze dump.sql --json
+```
+
+```json
+{
+  "input_file": "dump.sql",
+  "dialect": "mysql",
+  "size_mb": 125.5,
+  "elapsed_secs": 0.28,
+  "summary": {
+    "total_tables": 15,
+    "total_inserts": 45000,
+    "total_bytes": 131596288
+  },
+  "tables": [
+    {
+      "name": "users",
+      "inserts": 1000,
+      "creates": 1,
+      "statements": 2,
+      "bytes": 125000,
+      "size_mb": 0.12
+    }
+  ]
+}
+```
+
+### Multi-file mode
+
+```bash
+sql-splitter analyze "*.sql" --json
+```
+
+```json
+{
+  "total_files": 3,
+  "elapsed_secs": 1.25,
+  "summary": {
+    "total_tables": 45,
+    "total_inserts": 150000,
+    "total_bytes": 524288000
+  },
+  "results": [
+    {
+      "input_file": "a.sql",
+      "dialect": "mysql",
+      "summary": { "total_tables": 15, "total_inserts": 50000, "total_bytes": 174762666 }
+    }
+  ]
+}
+```
+
+---
+
+## split
+
+```bash
+sql-splitter split dump.sql -o tables/ --json
+```
+
+```json
+{
+  "input_file": "dump.sql",
+  "output_dir": "tables/",
+  "dialect": "mysql",
+  "dialect_confidence": "high",
+  "compression": null,
+  "dry_run": false,
+  "statistics": {
+    "tables_found": 15,
+    "statements_processed": 45,
+    "bytes_processed": 131596288,
+    "elapsed_secs": 0.21,
+    "throughput_mb_per_sec": 625.5
+  },
+  "tables": ["users", "orders", "products"]
+}
+```
+
+---
+
+## merge
+
+```bash
+sql-splitter merge tables/ -o merged.sql --json
+```
+
+```json
+{
+  "input_dir": "tables/",
+  "output_file": "merged.sql",
+  "dialect": "mysql",
+  "dry_run": false,
+  "statistics": {
+    "tables_merged": 15,
+    "statements_written": 45,
+    "bytes_written": 131596288,
+    "elapsed_secs": 0.15
+  },
+  "tables": ["users", "orders", "products"]
+}
+```
+
+> **Note:** When output goes to stdout (no `-o`), JSON is written to stderr to avoid mixing with SQL output.
+
+---
+
+## validate
+
+```bash
+sql-splitter validate dump.sql --json
+```
+
+```json
+{
+  "dialect": "mysql",
+  "issues": [
+    {
+      "severity": "warning",
+      "code": "W002",
+      "message": "Table 'logs' has no primary key",
+      "location": {
+        "table": "logs",
+        "statement_index": 3,
+        "approx_line": 150
+      }
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "warnings": 1,
+    "info": 0,
+    "tables_scanned": 15,
+    "statements_scanned": 450
+  },
+  "checks": {
+    "syntax": "ok",
+    "encoding": "ok",
+    "ddl_dml_consistency": "ok",
+    "pk_duplicates": "ok",
+    "fk_integrity": "ok"
+  }
+}
+```
+
+### Check status values
+
+- `"ok"` - Check passed
+- `{"failed": 3}` - Check failed with count
+- `{"skipped": "reason"}` - Check was skipped
+
+### Multi-file mode
+
+```bash
+sql-splitter validate "*.sql" --json
+```
+
+```json
+{
+  "total_files": 5,
+  "passed": 4,
+  "failed": 1,
+  "elapsed_secs": 2.5,
+  "results": [
+    {
+      "file": "a.sql",
+      "dialect": "mysql",
+      "summary": { "errors": 0, "warnings": 0 }
+    }
+  ]
+}
+```
+
+---
+
+## sample
+
+```bash
+sql-splitter sample dump.sql --percent 10 -o dev.sql --json
+```
+
+```json
+{
+  "input_file": "dump.sql",
+  "output_file": "dev.sql",
+  "dialect": "mysql",
+  "dry_run": false,
+  "mode": {
+    "type": "percent",
+    "value": 10
+  },
+  "statistics": {
+    "tables_sampled": 15,
+    "tables_skipped": 0,
+    "rows_selected": 10500,
+    "rows_total": 100000,
+    "sample_rate_percent": 10.5,
+    "fk_orphans_rejected": 0
+  },
+  "tables": [
+    {
+      "name": "users",
+      "classification": "root",
+      "rows_selected": 100,
+      "rows_total": 1000,
+      "sample_rate_percent": 10.0
+    }
+  ]
+}
+```
+
+### Classification values
+
+- `root` - No foreign keys referencing other tables
+- `lookup` - Referenced by many tables, small row count
+- `system` - System/metadata tables
+- `junction` - Many-to-many junction tables
+- `normal` - Standard table with foreign keys
+
+---
+
+## shard
+
+```bash
+sql-splitter shard dump.sql --tenant-value 123 -o tenant.sql --json
+```
+
+```json
+{
+  "input_file": "dump.sql",
+  "output_file": "tenant.sql",
+  "dialect": "mysql",
+  "dry_run": false,
+  "tenant": {
+    "column": "company_id",
+    "value": "123",
+    "auto_detected": false
+  },
+  "statistics": {
+    "tables_processed": 12,
+    "tables_with_data": 10,
+    "tables_skipped": 2,
+    "rows_selected": 5000,
+    "rows_total": 100000,
+    "reduction_percent": 95.0,
+    "fk_orphans_skipped": 0
+  },
+  "tables": [
+    {
+      "name": "users",
+      "classification": "tenantroot",
+      "rows_selected": 50,
+      "rows_total": 1000
+    }
+  ]
+}
+```
+
+### Classification values
+
+- `tenantroot` - Contains the tenant column directly
+- `tenantdependent` - Linked to tenant via foreign keys
+- `junction` - Many-to-many junction tables
+- `lookup` - Shared lookup tables (all rows included)
+- `system` - System/metadata tables
+- `unknown` - Could not determine relationship
+
+---
+
+## convert
+
+```bash
+sql-splitter convert mysql.sql --to postgres -o pg.sql --json
+```
+
+```json
+{
+  "input_file": "mysql.sql",
+  "output_file": "pg.sql",
+  "conversion": {
+    "from": "auto",
+    "to": "postgres"
+  },
+  "dry_run": false,
+  "statistics": {
+    "statements_processed": 450,
+    "statements_converted": 45,
+    "statements_unchanged": 400,
+    "statements_skipped": 5
+  },
+  "warnings": [
+    {
+      "type": "unsupported_feature",
+      "feature": "ENUM type 'status'",
+      "suggestion": "Use VARCHAR with CHECK constraint"
+    },
+    {
+      "type": "lossy_conversion",
+      "from_type": "MEDIUMINT",
+      "to_type": "INTEGER",
+      "table": "users",
+      "column": "age"
+    }
+  ]
+}
+```
+
+### Warning types
+
+- `unsupported_feature` - Feature not available in target dialect
+- `lossy_conversion` - Data type conversion may lose precision
+- `skipped_statement` - Statement was skipped during conversion
+- `copy_not_converted` - PostgreSQL COPY statement needs manual conversion
+
+---
+
+## redact
+
+```bash
+sql-splitter redact dump.sql --hash "*.email" -o safe.sql --json
+```
+
+```json
+{
+  "tables_processed": 15,
+  "rows_redacted": 50000,
+  "columns_redacted": 8,
+  "table_stats": [
+    {
+      "name": "users",
+      "rows_processed": 1000,
+      "columns_redacted": 3
+    }
+  ],
+  "warnings": []
+}
+```
+
+---
+
+## graph
+
+```bash
+sql-splitter graph dump.sql --json
+```
+
+```json
+{
+  "tables": [
+    {
+      "name": "users",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INT",
+          "is_primary_key": true,
+          "is_foreign_key": false,
+          "is_nullable": false
+        },
+        {
+          "name": "email",
+          "type": "VARCHAR",
+          "is_primary_key": false,
+          "is_foreign_key": false,
+          "is_nullable": true
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "from_table": "orders",
+      "from_column": "user_id",
+      "to_table": "users",
+      "to_column": "id",
+      "cardinality": "ManyToOne"
+    }
+  ],
+  "stats": {
+    "table_count": 2,
+    "column_count": 5,
+    "relationship_count": 1
+  }
+}
+```
+
+---
+
+## query
+
+The `query` command uses `--format` instead of `--json`:
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users LIMIT 2" --format json
+```
+
+```json
+[
+  {"id": 1, "name": "Alice", "email": "alice@example.com"},
+  {"id": 2, "name": "Bob", "email": "bob@example.com"}
+]
+```
+
+### JSON Lines format
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users" --format jsonl
+```
+
+```
+{"id": 1, "name": "Alice", "email": "alice@example.com"}
+{"id": 2, "name": "Bob", "email": "bob@example.com"}
+```
+
+---
+
+## Parsing with jq
+
+```bash
+# Get table names from analyze
+sql-splitter analyze dump.sql --json | jq -r '.tables[].name'
+
+# Check if validation passed
+sql-splitter validate dump.sql --json | jq '.summary.errors == 0'
+
+# Get tables with most rows
+sql-splitter analyze dump.sql --json | jq '.tables | sort_by(-.inserts) | .[0:5]'
+
+# Filter failed validations in multi-file mode
+sql-splitter validate "*.sql" --json | jq '.results[] | select(.summary.errors > 0)'
+```
+
+## Parsing in Code
+
+### Python
+
+```python
+import subprocess
+import json
+
+result = subprocess.run(
+    ["sql-splitter", "analyze", "dump.sql", "--json"],
+    capture_output=True, text=True
+)
+data = json.loads(result.stdout)
+print(f"Found {data['summary']['total_tables']} tables")
+```
+
+### Node.js
+
+```javascript
+import { execSync } from 'child_process';
+
+const output = execSync('sql-splitter analyze dump.sql --json');
+const data = JSON.parse(output);
+console.log(`Found ${data.summary.total_tables} tables`);
+```
+
+## Schema Validation
+
+You can validate command output against schemas using any JSON Schema validator:
+
+```bash
+# Using ajv (Node.js)
+npm install -g ajv-cli
+sql-splitter analyze dump.sql --json > output.json
+ajv validate -s schemas/analyze.schema.json -d output.json
+```
+
+## See Also
+
+- [Exit Codes](/reference/exit-codes) - Exit code meanings
+- [Glob Patterns](/advanced/glob-patterns) - Multi-file processing
+- [AI Integration](/advanced/ai-integration/) - Machine-readable outputs for AI agents

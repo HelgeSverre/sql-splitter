@@ -1,0 +1,192 @@
+---
+title: Glob Patterns & Multi-File Mode
+description: Processing multiple files with glob patterns
+---
+
+Several commands support glob patterns for batch processing multiple files.
+
+## Supported Commands
+
+| Command | Glob Support | Output Behavior |
+|---------|--------------|-----------------|
+| `split` | ✅ | Creates subdirectory per input file |
+| `analyze` | ✅ | Aggregates results across all files |
+| `convert` | ✅ | Requires output directory |
+| `validate` | ✅ | Validates each file, aggregates results |
+
+## Basic Patterns
+
+```bash
+# All SQL files in current directory
+sql-splitter analyze "*.sql"
+
+# All SQL files in a directory
+sql-splitter validate "dumps/*.sql"
+
+# Recursive (all subdirectories)
+sql-splitter analyze "backups/**/*.sql"
+
+# Compressed files
+sql-splitter validate "dumps/*.sql.gz"
+```
+
+**Important:** Quote glob patterns to prevent shell expansion.
+
+## Pattern Syntax
+
+| Pattern | Matches |
+|---------|---------|
+| `*` | Any characters except `/` |
+| `**` | Any characters including `/` (recursive) |
+| `?` | Any single character |
+| `[abc]` | Any character in brackets |
+| `[a-z]` | Any character in range |
+
+## Examples
+
+```bash
+# All .sql files in dumps/
+sql-splitter analyze "dumps/*.sql"
+
+# All .sql and .sql.gz files recursively
+sql-splitter validate "backups/**/*.sql*"
+
+# Files starting with "prod_"
+sql-splitter analyze "prod_*.sql"
+
+# Files from 2024
+sql-splitter validate "backup_2024*.sql"
+```
+
+## --fail-fast Flag
+
+By default, glob processing continues even if one file fails. Use `--fail-fast` to stop on first error:
+
+```bash
+# Stop on first error
+sql-splitter validate "*.sql" --fail-fast
+
+# Continue despite errors (default)
+sql-splitter validate "*.sql"
+```
+
+## Output Behavior
+
+### analyze
+
+Outputs aggregate statistics across all files:
+
+```bash
+sql-splitter analyze "dumps/*.sql" --json
+```
+
+```json
+{
+  "files_processed": 5,
+  "total_tables": 42,
+  "total_rows": 150000,
+  "results": [
+    {"file": "dumps/users.sql", "tables": 1, "rows": 1000},
+    {"file": "dumps/orders.sql", "tables": 1, "rows": 50000}
+  ]
+}
+```
+
+### validate
+
+Reports validation status for each file:
+
+```bash
+sql-splitter validate "*.sql" --json
+```
+
+```json
+{
+  "total_files": 3,
+  "passed": 2,
+  "failed": 1,
+  "results": [
+    {"file": "a.sql", "summary": {"errors": 0, "warnings": 0}},
+    {"file": "b.sql", "summary": {"errors": 0, "warnings": 1}},
+    {"file": "c.sql", "summary": {"errors": 2, "warnings": 0}}
+  ]
+}
+```
+
+### split
+
+Creates a subdirectory for each input file:
+
+```bash
+sql-splitter split "dumps/*.sql" -o output/
+```
+
+```
+output/
+├── dump1/
+│   ├── users.sql
+│   └── orders.sql
+├── dump2/
+│   ├── users.sql
+│   └── products.sql
+```
+
+### convert
+
+Requires an output directory (not a file):
+
+```bash
+# Correct: output directory
+sql-splitter convert "*.sql" --to postgres -o converted/
+
+# Creates:
+# converted/
+# ├── file1.sql
+# ├── file2.sql
+```
+
+## Progress with Globs
+
+The `--progress` flag shows per-file and overall progress:
+
+```bash
+sql-splitter validate "backups/**/*.sql.gz" --progress
+```
+
+```
+[1/5] backups/2024/jan.sql.gz ✓
+[2/5] backups/2024/feb.sql.gz ✓
+[3/5] backups/2024/mar.sql.gz ⚠ 2 warnings
+[4/5] backups/2024/apr.sql.gz ✓
+[5/5] backups/2024/may.sql.gz ✗ 1 error
+
+Summary: 4 passed, 1 failed
+```
+
+## Parallel Processing
+
+For parallel processing of many files, use external tools:
+
+```bash
+# Process 4 files in parallel
+find dumps -name '*.sql.gz' -print0 | \
+  xargs -0 -n1 -P4 sql-splitter validate --strict
+```
+
+## CI/CD Usage
+
+```yaml
+# GitHub Actions example
+- name: Validate all SQL dumps
+  run: |
+    sql-splitter validate "migrations/*.sql" --strict --json > validation.json
+    if jq -e '.failed > 0' validation.json; then
+      echo "Validation failed"
+      exit 1
+    fi
+```
+
+## See Also
+
+- [Exit Codes](/reference/exit-codes) - Understanding exit codes for scripting
+- [Unix Piping](/advanced/piping) - Composing commands

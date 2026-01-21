@@ -1,0 +1,65 @@
+---
+title: Overview
+description: All sql-splitter commands at a glance
+---
+
+## Command Reference
+
+| Command | Purpose | Key Use Cases |
+|---------|---------|---------------|
+| [`split`](/commands/split) | Split dump into per-table SQL files | Work on individual tables, parallel processing |
+| [`merge`](/commands/merge) | Merge per-table files into single dump | Reassemble after editing, restore preparation |
+| [`analyze`](/commands/analyze) | Read-only statistics about tables | Planning, size estimation, table discovery |
+| [`convert`](/commands/convert) | Transform between MySQL/PostgreSQL/SQLite/MSSQL | Database migrations, environment portability |
+| [`validate`](/commands/validate) | Check syntax, encoding, PK/FK integrity | CI gates, backup verification, pre-restore checks |
+| [`sample`](/commands/sample) | Create reduced FK-consistent datasets | Dev/CI seeding, testing with realistic data |
+| [`shard`](/commands/shard) | Extract tenant-specific data | Multi-tenant isolation, tenant exports |
+| [`diff`](/commands/diff) | Compare two SQL dumps for changes | Schema migrations, change detection, auditing |
+| [`redact`](/commands/redact) | Anonymize PII in SQL dumps | GDPR compliance, dev data, safe sharing |
+| [`graph`](/commands/graph) | Generate ERD diagrams (HTML, DOT, Mermaid) | Schema visualization, documentation |
+| [`order`](/commands/order) | Reorder dump in topological FK order | Safe imports, cycle detection, DROP order |
+| [`query`](/commands/query) | Run SQL analytics on dumps with DuckDB | Ad-hoc queries, data exploration |
+| [`completions`](/commands/completions) | Generate shell completion scripts | CLI productivity |
+
+## Common Flags
+
+Most commands support these flags (availability varies):
+
+| Flag | Description | Available In |
+|------|-------------|--------------|
+| `-d, --dialect` | Override dialect auto-detection | Most commands (except `convert` which uses `--from/--to`) |
+| `-p, --progress` | Show progress bar | `split`, `analyze`, `merge`, `sample`, `shard`, `convert`, `validate`, `diff`, `redact`, `graph` |
+| `--dry-run` | Preview without writing output | `split`, `merge`, `sample`, `shard`, `convert`, `redact`, `order` |
+| `--json` | Machine-readable JSON output | `split`, `analyze`, `merge`, `sample`, `shard`, `convert`, `validate`, `redact`, `graph` |
+| `--fail-fast` | Stop on first error (for glob patterns) | `split`, `analyze`, `convert`, `validate` |
+
+## Command Aliases
+
+For faster typing, all commands have short aliases:
+
+| Command | Alias | Command | Alias |
+|---------|-------|---------|-------|
+| `split` | `sp` | `diff` | `df` |
+| `analyze` | `an` | `redact` | `rd` |
+| `merge` | `mg` | `graph` | `gr` |
+| `sample` | `sa` | `order` | `ord` |
+| `shard` | `sh` | `query` | `qy` |
+| `convert` | `cv` | | |
+| `validate` | `val` | | |
+
+## Decision Guide
+
+| Goal | Command(s) |
+|------|------------|
+| Check if dump is valid | `validate --strict` |
+| Understand dump contents | `analyze` |
+| Edit specific tables | `split` → edit → `merge` |
+| Create dev dataset | `sample --preserve-relations` |
+| Export tenant data | `shard --tenant-value` |
+| Convert MySQL → PostgreSQL | `convert --to postgres` |
+| Validate in CI | `validate "*.sql" --json` |
+| Compare two dumps | `diff old.sql new.sql` |
+| Anonymize PII | `redact` |
+| Visualize schema | `graph` |
+| Safe import order | `order` |
+| Query without restore | `query` |

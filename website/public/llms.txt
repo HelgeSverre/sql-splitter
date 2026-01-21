@@ -1,0 +1,797 @@
+# sql-splitter
+
+> High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
+> MySQL/PostgreSQL/SQLite/MSSQL, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
+> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 600+ MB/s throughput
+> and constant ~50MB memory usage.
+
+sql-splitter is a **dump-first** tool: it operates on SQL dump files on disk (optionally compressed) rather than live
+database connections. It is designed to be **safe to automate** in scripts, CI pipelines, and AI-driven workflows.
+
+## Installation
+
+### Quick Install (Recommended)
+
+```bash
+cargo install sql-splitter
+```
+
+Requires Rust/Cargo: https://rustup.rs/
+
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases):
+
+- `sql-splitter-linux-amd64.tar.gz` (Linux x86_64)
+- `sql-splitter-linux-arm64.tar.gz` (Linux ARM64)
+- `sql-splitter-darwin-amd64.tar.gz` (macOS Intel)
+- `sql-splitter-darwin-arm64.tar.gz` (macOS Apple Silicon)
+- `sql-splitter-windows-amd64.zip` (Windows x86_64)
+
+### Build from Source
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+make install  # Installs binary + shell completions + man pages
+```
+
+### Verify Installation
+
+```bash
+sql-splitter --version
+# sql-splitter 1.12.6
+```
+
+## Commands Overview
+
+| Command    | Purpose                                   | Key Use Cases                                     |
+|------------|-------------------------------------------|---------------------------------------------------|
+| `split`    | Split dump into per-table SQL files       | Work on individual tables, parallel processing    |
+| `merge`    | Merge per-table files into single dump    | Reassemble after editing, restore preparation     |
+| `analyze`  | Read-only statistics about tables         | Planning, size estimation, table discovery        |
+| `convert`  | Transform between MySQL/PostgreSQL/SQLite/MSSQL | Database migrations, environment portability   |
+| `validate` | Check syntax, encoding, PK/FK integrity   | CI gates, backup verification, pre-restore checks |
+| `sample`   | Create reduced FK-consistent datasets     | Dev/CI seeding, testing with realistic data       |
+| `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
+| `diff`     | Compare two SQL dumps for changes         | Schema migrations, change detection, auditing     |
+| `redact`   | Anonymize PII in SQL dumps                | GDPR compliance, dev data, safe sharing           |
+| `graph`    | Generate ERD diagrams (HTML, DOT, Mermaid)| Schema visualization, documentation, onboarding   |
+| `order`    | Reorder dump in topological FK order      | Safe imports, cycle detection, DROP order         |
+| `query`    | Run SQL analytics on dumps with DuckDB    | Ad-hoc queries, data exploration, export results  |
+
+## Universal Capabilities
+
+All commands support:
+
+- **Compressed input**: `.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst` (auto-detected)
+- **Glob patterns**: `*.sql`, `**/*.sql`, `backups/**/*.sql.gz`
+- **Common flags**:
+    - `--progress` / `-p`: Show progress bar
+    - `--dry-run`: Preview without writing output
+    - `--fail-fast`: Stop on first error (for glob patterns)
+    - `--json`: Machine-readable JSON output for automation
+- **Auto-dialect detection**: MySQL, PostgreSQL, SQLite, MSSQL (override with `--dialect`)
+
+## Decision Guide: Which Command to Use
+
+| Goal                                     | Command(s)                | Notes                                                       |
+|------------------------------------------|---------------------------|-------------------------------------------------------------|
+| Check if dump is valid before using      | `validate`                | Use `--strict` in CI to fail on warnings                    |
+| Understand dump contents (tables, sizes) | `analyze`                 | Fast read-only scan; plan sampling/sharding                 |
+| Edit specific tables inside a dump       | `split` → edit → `merge`  | Split, modify per-table files, merge back                   |
+| Create smaller realistic dev dataset     | `sample`                  | Preserves FK relationships; use with `--preserve-relations` |
+| Export one tenant's data                 | `shard`                   | Use `--tenant-value` and `--tenant-column`                  |
+| Convert MySQL dump to PostgreSQL         | `convert --to postgres`   | Validate before and after conversion                        |
+| Validate all dumps in CI pipeline        | `validate "*.sql" --json` | Parse JSON output with `jq` for automation                  |
+| Compare two dumps for changes            | `diff`                    | Schema + data comparison; outputs text, json, or sql        |
+| Anonymize sensitive data for dev/sharing | `redact`                  | Replace PII with fake/hashed values; YAML config or CLI     |
+| Visualize schema as ERD diagram          | `graph`                   | HTML, DOT, Mermaid, JSON; focus on table or detect cycles   |
+| Reorder dump for safe FK imports         | `order`                   | Topological sort; `--check` to detect cycles                |
+| Run ad-hoc SQL queries on dump           | `query`                   | Uses embedded DuckDB; outputs table, JSON, CSV              |
+
+---
+
+## Workflow 1: Database Migration (MySQL → PostgreSQL or MSSQL → MySQL)
+
+**Goal:** Safely move data between databases with integrity checks.
+
+```bash
+# 1. Validate source dump
+sql-splitter validate prod_mysql.sql.gz --strict --progress
+
+# 2. Analyze to understand scale
+sql-splitter analyze prod_mysql.sql.gz --progress
+
+# 3. Convert dialect (MySQL → PostgreSQL)
+sql-splitter convert prod_mysql.sql.gz --to postgres -o prod_postgres.sql --progress
+
+# 4. Or convert MSSQL → MySQL
+sql-splitter convert mssql_dump.sql --from mssql --to mysql -o mysql_dump.sql --progress
+
+# 5. Validate converted dump
+sql-splitter validate prod_postgres.sql --dialect=postgres --strict --progress
+
+# 6. (Optional) Stream directly into target database
+sql-splitter convert prod_mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+```
+
+**Supported conversion pairs (12 total):**
+- MySQL ↔ PostgreSQL (including COPY → INSERT)
+- MySQL ↔ SQLite
+- MySQL ↔ MSSQL
+- PostgreSQL ↔ SQLite
+- PostgreSQL ↔ MSSQL
+- SQLite ↔ MSSQL
+
+**When conversion fails:** Check for unsupported features (ENUM, triggers, BULK INSERT). Use `--strict` to see all warnings, or omit
+it for "best-effort" conversion.
+
+---
+
+## Workflow 2: Dev Environment Setup with Sampled Data
+
+**Goal:** Create a smaller but realistic dataset for local development or CI.
+
+```bash
+# 1. Analyze to see table sizes
+sql-splitter analyze dumps/prod.sql.zst --progress
+
+# 2. Sample with FK preservation (10% of rows)
+sql-splitter sample dumps/prod.sql.zst \
+  --output dev_sample.sql \
+  --percent 10 \
+  --preserve-relations \
+  --progress
+
+# 3. Or sample fixed row count per table
+sql-splitter sample dumps/prod.sql.zst \
+  --output dev_sample.sql \
+  --rows 1000 \
+  --preserve-relations \
+  --progress
+
+# 4. Restore to dev database
+psql "$DEV_DB" < dev_sample.sql
+# or
+mysql -u dev -p dev_db < dev_sample.sql
+```
+
+**Sampling options:**
+
+- `--percent N`: Sample N% of rows (1-100)
+- `--rows N`: Sample up to N rows per table
+- `--preserve-relations`: Maintain FK integrity (recommended)
+- `--tables users,orders`: Only sample specific tables
+- `--exclude logs,events`: Skip specific tables
+- `--seed 42`: Reproducible sampling
+
+---
+
+## Workflow 3: CI/CD Validation Pipeline
+
+**Goal:** Gate builds on dump integrity; fail fast on errors.
+
+```bash
+# Validate all dumps with JSON output for automation
+sql-splitter validate "dumps/*.sql.gz" --json --fail-fast --strict
+
+# Parse results with jq
+sql-splitter validate "dumps/*.sql.gz" --json --fail-fast \
+  | jq '.results[] | select(.passed == false)'
+
+# Simple CI gate
+set -euo pipefail
+sql-splitter validate "dumps/*.sql.gz" --strict --fail-fast --progress
+```
+
+**Validation checks include:**
+
+- SQL syntax validation
+- DDL/DML consistency (INSERTs reference existing tables)
+- UTF-8 encoding validation
+- Duplicate primary key detection
+- Foreign key referential integrity
+
+---
+
+## Workflow 4: JSON Output for Automation
+
+**Goal:** Use structured JSON output for scripting, CI/CD, and programmatic processing.
+
+All commands support `--json` for machine-readable output:
+
+```bash
+# Analyze with JSON output
+sql-splitter analyze dump.sql --json | jq '.summary.total_tables'
+
+# Split with JSON statistics
+sql-splitter split dump.sql -o tables/ --json | jq '.statistics.throughput_mb_per_sec'
+
+# Sample with JSON breakdown
+sql-splitter sample dump.sql --percent 10 --json | jq '.tables[] | {name, rows_selected}'
+
+# Convert with JSON warnings
+sql-splitter convert dump.sql --to postgres --json | jq '.warnings'
+
+# Shard with JSON tenant info
+sql-splitter shard dump.sql --tenant-value 42 --json | jq '.statistics.reduction_percent'
+
+# Merge with JSON statistics
+sql-splitter merge tables/ -o merged.sql --json | jq '.statistics.tables_merged'
+
+# Multi-file validation with aggregated JSON
+sql-splitter validate "dumps/*.sql" --json | jq '.results[] | select(.passed == false)'
+```
+
+**JSON output includes:**
+
+- Input/output file paths
+- Processing statistics (tables, rows, bytes, elapsed time)
+- Per-table breakdowns
+- Warnings and errors
+- Command-specific metadata (dialect, mode, tenant info)
+
+---
+
+## Workflow 5: Multi-Tenant Data Extraction
+
+**Goal:** Extract data for a specific tenant from a multi-tenant dump.
+
+```bash
+# 1. Analyze to identify tenant-related tables
+sql-splitter analyze multi_tenant.sql.gz --progress
+
+# 2. Extract single tenant
+sql-splitter shard multi_tenant.sql.gz \
+  --tenant-value 12345 \
+  --tenant-column tenant_id \
+  --output tenant_12345.sql \
+  --progress
+
+# 3. Extract multiple tenants to separate files
+sql-splitter shard multi_tenant.sql.gz \
+  --tenant-values "123,456,789" \
+  --tenant-column account_id \
+  --output shards/ \
+  --progress
+
+# 4. Further sample within a tenant
+sql-splitter sample tenant_12345.sql \
+  --output tenant_12345_sample.sql \
+  --rows 5000 \
+  --preserve-relations \
+  --progress
+```
+
+**Sharding options:**
+
+- `--tenant-column`: Column name for tenant ID (auto-detected if common names used)
+- `--tenant-value`: Single tenant to extract
+- `--tenant-values`: Comma-separated list for batch extraction
+- `--root-tables`: Explicit root tables containing tenant column
+- `--include-global`: How to handle lookup tables (none, lookups, all)
+
+---
+
+## Workflow 6: Per-Table Editing
+
+**Goal:** Edit specific tables within a large dump.
+
+```bash
+# 1. Split dump into per-table files
+sql-splitter split big_dump.sql --output tables/ --progress
+
+# 2. Edit specific tables
+# Now you have tables/users.sql, tables/orders.sql, etc.
+# Edit or process these files as needed
+
+# 3. Merge back into single dump
+sql-splitter merge tables/ --output updated_dump.sql --transaction
+
+# 4. Split only specific tables
+sql-splitter split big_dump.sql \
+  --output tables/ \
+  --tables users,orders,products \
+  --progress
+```
+
+**Split options:**
+
+- `--tables`: Only split specific tables (comma-separated)
+- `--schema-only`: Only DDL (CREATE TABLE, indexes)
+- `--data-only`: Only DML (INSERT, COPY statements)
+
+**Merge options:**
+
+- `--transaction`: Wrap output in BEGIN/COMMIT
+- `--exclude`: Skip specific tables when merging
+- `--no-header`: Omit header comments
+
+---
+
+## Workflow 7: Comparing SQL Dumps
+
+**Goal:** Detect schema and data changes between two SQL dump files.
+
+```bash
+# 1. Basic comparison (schema + data)
+sql-splitter diff old_dump.sql new_dump.sql
+
+# 2. Compare with output file
+sql-splitter diff old_dump.sql new_dump.sql --output diff_report.txt --progress
+
+# 3. Schema-only comparison (fast)
+sql-splitter diff old.sql new.sql --schema-only
+
+# 4. Data-only comparison (skip schema changes)
+sql-splitter diff old.sql new.sql --data-only
+
+# 5. JSON output for automation
+sql-splitter diff old.sql new.sql --format json --output diff.json
+
+# 6. Generate SQL migration script
+sql-splitter diff old.sql new.sql --format sql --output migration.sql
+
+# 7. Compare specific tables only
+sql-splitter diff old.sql new.sql --tables users,orders --progress
+
+# 8. Exclude certain tables from comparison
+sql-splitter diff old.sql new.sql --exclude logs,sessions --progress
+
+# 9. Compare compressed dumps
+sql-splitter diff old.sql.gz new.sql.zst --progress
+
+# 10. Show sample PK values for changes (verbose mode)
+sql-splitter diff old.sql new.sql --verbose
+
+# 11. Ignore timestamp columns in comparison
+sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at,*.created_at"
+
+# 12. Override primary key for tables without PK
+sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
+
+# 13. Compare tables without PK using all columns
+sql-splitter diff old.sql new.sql --allow-no-pk
+```
+
+**Diff output formats:**
+
+- `text` (default): Human-readable summary with sample PKs when --verbose
+- `json`: Structured output with warnings and sample PKs
+- `sql`: Migration script with ALTER TABLE, CREATE INDEX, DROP INDEX
+
+**What diff detects:**
+
+- **Schema changes**: Tables added/removed, columns added/removed/modified, PK changes, FK changes
+- **Index changes**: Indexes added/removed (inline and CREATE INDEX statements)
+- **Data changes**: Rows added/removed/modified per table (using PK-based comparison)
+- **Memory-bounded**: Uses 64-bit PK hashing with configurable limits (`--max-pk-entries`)
+
+**Diff options:**
+
+- `--schema-only`: Compare schema only, skip data
+- `--data-only`: Compare data only, skip schema
+- `--format <FORMAT>`: Output format: text, json, sql (default: text)
+- `--tables`: Only compare specific tables
+- `--exclude`: Exclude specific tables from comparison
+- `--max-pk-entries`: Maximum PK entries to track (default: 10M, ~160MB)
+- `--verbose`: Show sample PK values for added/removed/modified rows
+- `--primary-key`: Override PK for data comparison (format: `table:col1+col2`)
+- `--ignore-order`: Ignore column order differences in schema comparison
+- `--ignore-columns`: Ignore columns matching glob patterns (e.g., `*.updated_at`)
+- `--allow-no-pk`: Compare tables without PK using all columns as key
+
+---
+
+## Workflow 8: Data Anonymization for Dev/Testing
+
+**Goal:** Anonymize sensitive PII data for safe sharing, development, or demo environments.
+
+```bash
+# 1. Analyze dump to understand what data exists
+sql-splitter analyze prod_dump.sql --progress
+
+# 2. Generate redaction config by analyzing input file
+sql-splitter redact prod_dump.sql --generate-config -o redact.yaml
+
+# 3. Review and customize the generated config (edit redact.yaml)
+
+# 4. Apply redaction using config file
+sql-splitter redact prod_dump.sql -o safe_dump.sql --config redact.yaml --progress
+
+# 5. Validate the redacted output
+sql-splitter validate safe_dump.sql --strict --progress
+```
+
+**Quick inline redaction (no config file):**
+
+```bash
+# Set SSN columns to NULL, hash emails, generate fake names
+sql-splitter redact dump.sql -o safe.sql \
+  --null "*.ssn,*.tax_id" \
+  --hash "*.email" \
+  --fake "*.name,*.phone,*.address"
+
+# Reproducible redaction with seed
+sql-splitter redact dump.sql -o safe.sql \
+  --null "*.password" \
+  --hash "*.email" \
+  --seed 42
+
+# Preview without writing (dry-run)
+sql-splitter redact dump.sql --dry-run \
+  --null "*.ssn" \
+  --hash "*.email"
+```
+
+**Redaction strategies:**
+
+- `--null "pattern"`: Replace matching columns with NULL
+- `--hash "pattern"`: SHA256 hash (deterministic, preserves FK integrity)
+- `--fake "pattern"`: Generate realistic fake data (names, emails, phones, etc.)
+- `--mask "pattern=column"`: Partial masking (e.g., `****-XXXX=*.credit_card`)
+- `--constant "column=value"`: Replace with fixed value
+
+**YAML config format:**
+
+```yaml
+# redact.yaml
+seed: 12345  # Reproducible fake data
+locale: en   # Locale for fake data (en, de_de, fr_fr, etc.)
+
+defaults:
+  strategy: skip  # Default for unmatched columns
+
+rules:
+  - column: "*.ssn"
+    strategy: null
+  - column: "*.email"
+    strategy: hash
+    preserve_domain: true
+  - column: "*.name"
+    strategy: fake
+    generator: name
+  - column: "*.credit_card"
+    strategy: mask
+    pattern: "****-****-****-XXXX"
+  - column: "admins.email"
+    strategy: skip  # Don't redact admin emails
+
+skip_tables:
+  - schema_migrations
+  - ar_internal_metadata
+```
+
+**Fake data generators (25+):**
+
+| Generator | Example Output |
+|-----------|----------------|
+| `email` | `jessica.smith@example.com` |
+| `name` | `Robert Johnson` |
+| `first_name` | `Sarah` |
+| `last_name` | `Williams` |
+| `phone` | `+1 (555) 234-5678` |
+| `address` | `123 Oak Street, Springfield, IL 62701` |
+| `city` | `Portland` |
+| `zip` | `90210` |
+| `company` | `Acme Corporation` |
+| `ip` | `192.168.1.100` |
+| `uuid` | `550e8400-e29b-41d4-a716-446655440000` |
+| `date` | `1985-07-23` |
+| `credit_card` | `4532015112830366` |
+| `ssn` | `123-45-6789` |
+
+**Redact options:**
+
+- `-o, --output`: Output file (default: stdout)
+- `-c, --config`: YAML config file for redaction rules
+- `--generate-config`: Analyze input and generate annotated YAML config
+- `--null`, `--hash`, `--fake`, `--mask`, `--constant`: Inline strategy patterns
+- `--seed`: Random seed for reproducible redaction
+- `--locale`: Locale for fake data (en, de_de, fr_fr, zh_cn, ja_jp, etc.)
+- `-t, --tables`: Only redact specific tables
+- `-e, --exclude`: Exclude specific tables
+- `--strict`: Fail on warnings
+- `--dry-run`: Preview without writing files
+- `--json`: Output results as JSON
+- `--validate`: Validate config only, don't process
+
+---
+
+## Workflow 9: Schema Visualization and Import Order
+
+**Goal:** Generate ERD diagrams and ensure safe import order for dumps with FK dependencies.
+
+```bash
+# 1. Generate interactive HTML ERD
+sql-splitter graph dump.sql -o schema.html
+
+# 2. Generate Mermaid diagram (for documentation)
+sql-splitter graph dump.sql -o schema.mmd --format mermaid
+
+# 3. Generate DOT for Graphviz rendering
+sql-splitter graph dump.sql -o schema.dot
+dot -Tpng schema.dot -o schema.png
+
+# 4. Focus on specific table and its dependencies
+sql-splitter graph dump.sql --table orders --transitive -o orders.html
+
+# 5. Show only tables that depend on a given table
+sql-splitter graph dump.sql --table users --reverse -o users_dependents.html
+
+# 6. Detect circular FK dependencies
+sql-splitter graph dump.sql --cycles-only
+
+# 7. Check import order and detect cycles
+sql-splitter order dump.sql --check
+
+# 8. Rewrite dump in safe import order
+sql-splitter order dump.sql -o ordered.sql
+
+# 9. Reverse order for DROP operations
+sql-splitter order dump.sql --reverse -o drop_order.sql
+```
+
+**Graph options:**
+
+- `--format`: Output format: html, dot, mermaid, json (auto-detected from extension)
+- `--layout`: Layout direction: lr (left-right), tb (top-bottom)
+- `--tables`: Include only tables matching glob patterns
+- `--exclude`: Exclude tables matching glob patterns
+- `--table`: Focus on specific table
+- `--transitive`: Show all dependencies of focused table
+- `--reverse`: Show all tables that depend on focused table
+- `--cycles-only`: Only show tables in circular dependencies
+- `--render`: Render DOT to PNG/SVG/PDF using Graphviz
+
+**Order options:**
+
+- `--check`: Check for cycles without rewriting
+- `--dry-run`: Show order without writing
+- `--reverse`: Reverse order (children before parents, for DROP)
+
+---
+
+## Piping and Composition Patterns
+
+### Stream convert to database (no intermediate file)
+
+```bash
+sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+sql-splitter convert pg_dump.sql --to mysql -o - | mysql -u user -p db
+```
+
+### Compress on the fly
+
+```bash
+sql-splitter merge tables/ -o - | gzip -c > merged.sql.gz
+sql-splitter merge tables/ -o - | zstd -c > merged.sql.zst
+```
+
+### Parallel validation of many dumps
+
+```bash
+find backups -name '*.sql.gz' -print0 \
+  | xargs -0 -n1 -P4 sql-splitter validate --fail-fast --progress
+```
+
+### Combine with database tools
+
+```bash
+# Validate, convert, and restore in one pipeline
+sql-splitter validate source.sql --strict && \
+  sql-splitter convert source.sql --to postgres -o - | psql "$PG_CONN"
+```
+
+### Safe exploration with dry-run
+
+```bash
+# Preview split without writing
+sql-splitter split big_dump.sql --output tables/ --dry-run
+
+# Preview sharding
+sql-splitter shard multi_tenant.sql.gz \
+  --tenant-value 12345 \
+  --tenant-column tenant_id \
+  --output tenant/ \
+  --dry-run
+```
+
+---
+
+## Workflow 10: Analytics Queries on SQL Dumps
+
+**Goal:** Run ad-hoc SQL queries on dump files without restoring to a database.
+
+```bash
+# Execute a single query
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+
+# Query with JSON output
+sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100" -f json
+
+# Export results to CSV
+sql-splitter query dump.sql "SELECT id, name, email FROM users" -o users.csv -f csv
+
+# Start interactive REPL for exploration
+sql-splitter query dump.sql --interactive
+
+# Use disk mode for large dumps (>2GB)
+sql-splitter query huge.sql "SELECT ..." --disk
+
+# Cache imported database for repeated queries
+sql-splitter query dump.sql "SELECT ..." --cache
+
+# Import only specific tables
+sql-splitter query dump.sql "SELECT ..." --tables users,orders
+
+# Show query execution time
+sql-splitter query dump.sql "SELECT ..." --timing
+```
+
+**REPL commands (--interactive mode):**
+
+- `.tables` — List all tables
+- `.schema [table]` — Show schema (all tables or specific table)
+- `.describe <table>` — Describe a specific table's columns
+- `.format <fmt>` — Set output format (table, json, csv, tsv)
+- `.count <table>` — Count rows in a table
+- `.sample <table> [n]` — Show sample rows (default: 10)
+- `.export <file> <query>` — Export query results to file
+- `.exit` — Exit the REPL
+
+**Query output formats:**
+
+- `table`: ASCII table (default)
+- `json`: JSON array
+- `jsonl`: JSON lines (one object per line)
+- `csv`: Comma-separated values
+- `tsv`: Tab-separated values
+
+**Cache management:**
+
+```bash
+# List all cached databases
+sql-splitter query --list-cache
+
+# Clear all cached databases
+sql-splitter query --clear-cache
+```
+
+**Note:** Uses embedded DuckDB for analytics. Supports MySQL, PostgreSQL, SQLite, and MSSQL dumps with automatic type conversion.
+
+---
+
+## Error Handling for AI Agents
+
+### Dialect Issues
+
+If commands fail with syntax errors or unknown keywords:
+
+- Re-run with explicit `--dialect=postgres`, `--dialect=mysql`, or `--dialect=mssql`
+- For `convert`, use `--from` and `--to` explicitly
+- Check if dump was created with a different database version
+- For MSSQL dumps, ensure GO batch separators are on their own lines
+
+### Validation Failures
+
+- With `--json`, parse errors programmatically
+- Report specific tables and constraints to user
+- Suggest fixes: encoding issues, missing FKs, truncated dumps
+
+### Large File Handling
+
+- sql-splitter uses constant ~50MB memory regardless of file size
+- Downstream tools (psql, mysql) may be bottlenecks
+- Consider `sample` for testing before full operations
+
+### Glob Pattern Best Practices
+
+- In CI: Always use `--fail-fast` to stop on first error
+- For reports: Omit `--fail-fast` to gather complete results
+- Use `--json` output for programmatic parsing
+
+---
+
+## Documentation
+
+- [README.md](https://github.com/helgesverre/sql-splitter/blob/main/README.md): Installation and CLI reference
+- [BENCHMARKS.md](https://github.com/helgesverre/sql-splitter/blob/main/BENCHMARKS.md): Performance benchmarks
+- [CHANGELOG.md](https://github.com/helgesverre/sql-splitter/blob/main/CHANGELOG.md): Version history
+- [AGENTS.md](https://github.com/helgesverre/sql-splitter/blob/main/AGENTS.md): AI assistant guidance
+
+## Source Code
+
+- [src/cmd/](https://github.com/helgesverre/sql-splitter/tree/main/src/cmd): CLI commands implementation
+- [src/parser/](https://github.com/helgesverre/sql-splitter/tree/main/src/parser): Streaming SQL parser
+- [src/splitter/](https://github.com/helgesverre/sql-splitter/tree/main/src/splitter): Split orchestration
+- [src/merger/](https://github.com/helgesverre/sql-splitter/tree/main/src/merger): Merge orchestration
+- [src/analyzer/](https://github.com/helgesverre/sql-splitter/tree/main/src/analyzer): Statistical analysis
+- [src/convert/](https://github.com/helgesverre/sql-splitter/tree/main/src/convert): Dialect conversion
+- [src/validate/](https://github.com/helgesverre/sql-splitter/tree/main/src/validate): Dump validation
+- [src/sample/](https://github.com/helgesverre/sql-splitter/tree/main/src/sample): FK-aware sampling
+- [src/shard/](https://github.com/helgesverre/sql-splitter/tree/main/src/shard): Tenant extraction
+- [src/differ/](https://github.com/helgesverre/sql-splitter/tree/main/src/differ): Schema + data diffing
+- [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
+- [src/graph/](https://github.com/helgesverre/sql-splitter/tree/main/src/graph): ERD generation and graph analysis
+- [src/duckdb/](https://github.com/helgesverre/sql-splitter/tree/main/src/duckdb): DuckDB query engine integration
+
+## Agent Skill Installation
+
+sql-splitter includes an [Agent Skill](https://agentskills.io) for AI coding assistants. Install the skill in your
+preferred tool:
+
+### Amp
+
+```bash
+amp skill add helgesverre/sql-splitter
+```
+
+### Claude Code
+
+```bash
+# Clone and copy to Claude Code skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.claude/skills/
+```
+
+### VS Code / GitHub Copilot
+
+```bash
+# Copy to project's GitHub skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .github/skills/
+```
+
+### Cursor
+
+```bash
+# Copy to project's Cursor skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .cursor/skills/
+```
+
+### Goose
+
+```bash
+# Copy to Goose skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.config/goose/skills/
+```
+
+### Letta
+
+```bash
+# Copy to project's Letta skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter .skills/
+```
+
+### OpenCode
+
+```bash
+# Copy to OpenCode skills directory
+git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
+cp -r /tmp/sql-splitter/skills/sql-splitter ~/.opencode/skills/
+```
+
+### Universal Installer (via npx)
+
+```bash
+# Works with Claude Code, Cursor, Amp, VS Code, Goose, OpenCode
+npx ai-agent-skills install sql-splitter --agent claude
+npx ai-agent-skills install sql-splitter --agent cursor
+npx ai-agent-skills install sql-splitter --agent amp
+npx ai-agent-skills install sql-splitter --agent vscode
+npx ai-agent-skills install sql-splitter --agent goose
+npx ai-agent-skills install sql-splitter --agent opencode
+```
+
+## Optional
+
+- [LICENSE.md](https://github.com/helgesverre/sql-splitter/blob/main/LICENSE.md): MIT License
+- [docs/COMPETITIVE_ANALYSIS.md](https://github.com/helgesverre/sql-splitter/blob/main/docs/COMPETITIVE_ANALYSIS.md):
+  Comparison with other tools
+- [skills/sql-splitter/SKILL.md](https://github.com/helgesverre/sql-splitter/blob/main/skills/sql-splitter/SKILL.md):
+  Agent Skill definition

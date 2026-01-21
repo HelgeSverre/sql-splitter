@@ -1,0 +1,94 @@
+---
+title: split
+description: Split a SQL dump file into individual table files
+---
+
+Split a large SQL dump into separate files, one per table.
+
+**Alias:** `sp` (e.g., `sql-splitter sp dump.sql -o tables/`)
+
+## Usage
+
+```bash
+sql-splitter split <INPUT> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Basic split
+sql-splitter split database.sql --output=tables/
+
+# PostgreSQL dump
+sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
+
+# Split specific tables only
+sql-splitter split dump.sql --tables users,posts,orders
+
+# Schema only (CREATE TABLE, indexes)
+sql-splitter split dump.sql -o schema/ --schema-only
+
+# Data only (INSERT/COPY statements)
+sql-splitter split dump.sql -o data/ --data-only
+
+# Compressed input
+sql-splitter split backup.sql.gz -o tables/
+
+# Batch with glob patterns
+sql-splitter split "dumps/*.sql" -o output/ --fail-fast
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--output` | `-o` | Output directory | `output` |
+| `--dialect` | `-d` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--tables` | `-t` | Only split these tables (comma-separated) | all |
+| `--schema-only` | | Only DDL (CREATE TABLE, indexes) | false |
+| `--data-only` | | Only DML (INSERT, COPY) | false |
+| `--verbose` | `-v` | Show verbose output | false |
+| `--progress` | `-p` | Show progress bar | false |
+| `--dry-run` | | Preview without writing files | false |
+| `--fail-fast` | | Stop on first error (for glob patterns) | false |
+| `--json` | | Output results as JSON | false |
+
+## Output Structure
+
+```
+tables/
+├── users.sql        # CREATE TABLE + INSERT for users
+├── orders.sql       # CREATE TABLE + INSERT for orders
+├── products.sql     # CREATE TABLE + INSERT for products
+└── _global.sql      # Header statements, SET commands
+```
+
+## JSON Output
+
+```bash
+sql-splitter split dump.sql -o tables/ --json
+```
+
+```json
+{
+  "input": "dump.sql",
+  "output_dir": "tables/",
+  "tables": [
+    {"name": "users", "file": "tables/users.sql", "rows": 150, "bytes": 12345},
+    {"name": "orders", "file": "tables/orders.sql", "rows": 500, "bytes": 45678}
+  ],
+  "statistics": {
+    "total_tables": 2,
+    "total_rows": 650,
+    "total_bytes": 58023,
+    "elapsed_ms": 42,
+    "throughput_mb_per_sec": 612.5
+  }
+}
+```
+
+## See Also
+
+- [`merge`](/commands/merge) - Combine split files back into one dump
+- [`analyze`](/commands/analyze) - View statistics without splitting
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

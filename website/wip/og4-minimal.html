@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1200, height=630">
+    <title>sql-splitter - Page Title</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 1200px;
+            height: 630px;
+            background: #0a0a0a;
+            font-family: 'Monda', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #e6edf3;
+            display: flex;
+            align-items: center;
+            padding-left: 70px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Subtle texture */
+        body::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                radial-gradient(ellipse at top left, rgba(88, 166, 255, 0.04) 0%, transparent 50%),
+                radial-gradient(ellipse at bottom right, rgba(56, 139, 253, 0.04) 0%, transparent 50%);
+            pointer-events: none;
+        }
+
+        /* Left accent strip */
+        .accent-strip {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 6px;
+            background: linear-gradient(180deg, #58a6ff 0%, #3fb950 50%, #ffa657 100%);
+        }
+
+        .content {
+            display: flex;
+            align-items: center;
+            gap: 40px;
+            z-index: 1;
+        }
+
+        .logo {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            padding-right: 40px;
+            border-right: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .logo-icon {
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 56px;
+            font-weight: 700;
+            color: #58a6ff;
+            text-shadow: 0 0 30px rgba(88, 166, 255, 0.5);
+        }
+
+        .logo-text {
+            font-size: 14px;
+            font-weight: 600;
+            color: #6e7681;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .main-content {
+            flex: 1;
+        }
+
+        .page-type {
+            font-size: 12px;
+            font-weight: 600;
+            color: #58a6ff;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 16px;
+        }
+
+        .title {
+            font-size: 52px;
+            font-weight: 700;
+            letter-spacing: -1px;
+            line-height: 1.15;
+            margin-bottom: 16px;
+            color: #e6edf3;
+        }
+
+        .description {
+            font-size: 20px;
+            color: #8b949e;
+            line-height: 1.5;
+            max-width: 650px;
+        }
+
+        .meta {
+            display: flex;
+            gap: 24px;
+            margin-top: 28px;
+        }
+
+        .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #6e7681;
+        }
+
+        .meta-item svg {
+            width: 16px;
+            height: 16px;
+            color: #58a6ff;
+        }
+
+        /* Decorative circle */
+        .deco-circle {
+            position: absolute;
+            width: 300px;
+            height: 300px;
+            border: 1px solid rgba(88, 166, 255, 0.08);
+            border-radius: 50%;
+            bottom: -100px;
+            right: -50px;
+            pointer-events: none;
+        }
+
+        .deco-circle::after {
+            content: '';
+            position: absolute;
+            width: 200px;
+            height: 200px;
+            border: 1px solid rgba(88, 166, 255, 0.05);
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+    </style>
+</head>
+<body>
+    <div class="accent-strip"></div>
+    <div class="deco-circle"></div>
+
+    <div class="content">
+        <div class="logo">
+            <span class="logo-icon">;</span>
+            <span class="logo-text">sql-splitter</span>
+        </div>
+        <div class="main-content">
+            <p class="page-type">Reference</p>
+            <h1 class="title">Supported Dialects</h1>
+            <p class="description">MySQL, PostgreSQL, and SQLite dump formats are supported with automatic dialect detection.</p>
+            <div class="meta">
+                <div class="meta-item">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    3 min read
+                </div>
+                <div class="meta-item">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
+                    3 dialects
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,102 @@
+---
+title: merge
+description: Merge split SQL files back into a single dump
+---
+
+Combine per-table SQL files into a single dump file.
+
+**Alias:** `mg` (e.g., `sql-splitter mg tables/ -o restored.sql`)
+
+## Usage
+
+```bash
+sql-splitter merge <INPUT_DIR> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Basic merge
+sql-splitter merge tables/ -o restored.sql
+
+# Wrap in transaction
+sql-splitter merge tables/ -o restored.sql --transaction
+
+# Merge specific tables only
+sql-splitter merge tables/ -o partial.sql --tables users,orders
+
+# Exclude tables
+sql-splitter merge tables/ -o restored.sql --exclude logs,cache
+
+# Skip header comments
+sql-splitter merge tables/ -o restored.sql --no-header
+
+# Stream to stdout (omit -o to write to stdout)
+sql-splitter merge tables/ | gzip > merged.sql.gz
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--output` | `-o` | Output SQL file | stdout |
+| `--dialect` | `-d` | SQL dialect for headers/footers | `mysql` |
+| `--tables` | `-t` | Only merge these tables (comma-separated) | all |
+| `--exclude` | `-e` | Exclude these tables (comma-separated) | none |
+| `--transaction` | | Wrap in BEGIN/COMMIT transaction | false |
+| `--no-header` | | Skip header comments | false |
+| `--progress` | `-p` | Show progress bar | false |
+| `--dry-run` | | Preview without writing files | false |
+| `--json` | | Output results as JSON | false |
+
+## Transaction Wrapping
+
+Use `--transaction` for atomic restores:
+
+```bash
+sql-splitter merge tables/ -o restored.sql --transaction
+```
+
+Output:
+```sql
+BEGIN;
+-- users.sql
+CREATE TABLE users ...
+INSERT INTO users ...
+-- orders.sql
+CREATE TABLE orders ...
+INSERT INTO orders ...
+COMMIT;
+```
+
+## Piping to Database
+
+Stream directly to a database (omit `-o` to write to stdout):
+
+```bash
+sql-splitter merge tables/ | mysql -u user -p database
+sql-splitter merge tables/ | psql "$PG_CONN"
+```
+
+## JSON Output
+
+```bash
+sql-splitter merge tables/ -o merged.sql --json
+```
+
+```json
+{
+  "input_dir": "tables/",
+  "output": "merged.sql",
+  "statistics": {
+    "tables_merged": 4,
+    "total_bytes": 125000,
+    "elapsed_ms": 15
+  }
+}
+```
+
+## See Also
+
+- [`split`](/commands/split) - Split a dump into per-table files
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

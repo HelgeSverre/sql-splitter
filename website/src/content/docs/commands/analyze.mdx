@@ -1,0 +1,87 @@
+---
+title: analyze
+description: Analyze a SQL dump and display table statistics
+---
+
+Read-only analysis of SQL dump files to show table statistics.
+
+**Alias:** `an` (e.g., `sql-splitter an dump.sql`)
+
+## Usage
+
+```bash
+sql-splitter analyze <INPUT> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Basic analysis
+sql-splitter analyze database.sql
+
+# With progress bar
+sql-splitter analyze database.sql --progress
+
+# Batch analysis
+sql-splitter analyze "backups/**/*.sql" --fail-fast
+
+# JSON output
+sql-splitter analyze dump.sql --json
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--dialect` | `-d` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--progress` | `-p` | Show progress bar | false |
+| `--fail-fast` | | Stop on first error (for glob patterns) | false |
+| `--json` | | Output results as JSON | false |
+
+## Output
+
+```
+┌─────────────┬──────┬───────────┬─────────────┐
+│ Table       │ Rows │ Size (KB) │ Statements  │
+├─────────────┼──────┼───────────┼─────────────┤
+│ users       │ 150  │ 12.3      │ 2           │
+│ orders      │ 500  │ 45.2      │ 2           │
+│ products    │ 100  │ 8.1       │ 2           │
+│ order_items │ 1200 │ 89.4      │ 2           │
+└─────────────┴──────┴───────────┴─────────────┘
+
+Summary:
+  Tables: 4
+  Total rows: 1950
+  Total size: 155.0 KB
+  Dialect: mysql
+```
+
+## JSON Output
+
+```bash
+sql-splitter analyze dump.sql --json
+```
+
+```json
+{
+  "input": "dump.sql",
+  "dialect": "mysql",
+  "tables": [
+    {"name": "users", "rows": 150, "bytes": 12595, "statements": 2},
+    {"name": "orders", "rows": 500, "bytes": 46284, "statements": 2}
+  ],
+  "summary": {
+    "total_tables": 4,
+    "total_rows": 1950,
+    "total_bytes": 158720,
+    "elapsed_ms": 25
+  }
+}
+```
+
+## See Also
+
+- [`split`](/commands/split) - Split a dump into per-table files
+- [`validate`](/commands/validate) - Check dump integrity
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

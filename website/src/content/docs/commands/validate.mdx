@@ -1,0 +1,117 @@
+---
+title: validate
+description: Check SQL dump integrity with comprehensive validation
+---
+
+Validate SQL dump files for syntax errors, encoding issues, and referential integrity.
+
+**Alias:** `val` (e.g., `sql-splitter val dump.sql --strict`)
+
+## Usage
+
+```bash
+sql-splitter validate <INPUT> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Basic validation
+sql-splitter validate dump.sql
+
+# Strict mode (warnings = errors)
+sql-splitter validate dump.sql --strict
+
+# JSON output for CI
+sql-splitter validate dump.sql --json
+
+# Skip expensive PK/FK checks
+sql-splitter validate dump.sql --no-fk-checks
+
+# Batch validation
+sql-splitter validate "dumps/*.sql" --fail-fast
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--dialect` | `-d` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--strict` | | Treat warnings as errors (exit 1) | false |
+| `--json` | | Output results as JSON | false |
+| `--max-rows-per-table` | | Max rows per table for PK/FK checks (0 = unlimited) | 1,000,000 |
+| `--no-limit` | | Disable row limit for PK/FK checks | false |
+| `--no-fk-checks` | | Skip PK/FK data integrity checks | false |
+| `--progress` | `-p` | Show progress bar | false |
+| `--fail-fast` | | Stop on first error (for glob patterns) | false |
+
+## Validation Checks
+
+- **SQL syntax validation** - Parser errors
+- **DDL/DML consistency** - INSERTs reference existing tables
+- **Encoding validation** - UTF-8 compliance
+- **Duplicate primary key detection** - All dialects
+- **FK referential integrity** - All dialects
+
+## Output
+
+```
+✓ dump.sql is valid
+
+Warnings:
+  - Table 'logs' has no primary key
+  - Column 'users.email' allows NULL but has unique constraint
+```
+
+## JSON Output
+
+```bash
+sql-splitter validate dump.sql --json
+```
+
+```json
+{
+  "dialect": "mysql",
+  "issues": [
+    {
+      "severity": "warning",
+      "code": "W002",
+      "message": "Table 'logs' has no primary key",
+      "location": { "table": "logs", "statement_index": 3 }
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "warnings": 1,
+    "info": 0,
+    "tables_scanned": 5,
+    "statements_scanned": 150
+  },
+  "checks": {
+    "syntax": "ok",
+    "encoding": "ok",
+    "ddl_dml_consistency": "ok",
+    "pk_duplicates": "ok",
+    "fk_integrity": "ok"
+  }
+}
+```
+
+## CI Usage
+
+```bash
+# Simple CI gate
+sql-splitter validate dump.sql --strict || exit 1
+
+# Parse JSON with jq (check for errors)
+sql-splitter validate dump.sql --json | jq 'select(.summary.errors > 0)'
+
+# Multi-file validation returns aggregate with results array
+sql-splitter validate "*.sql" --json | jq '.results[] | select(.summary.errors > 0)'
+```
+
+## See Also
+
+- [`analyze`](/commands/analyze) - View table statistics
+- [`diff`](/commands/diff) - Compare two dumps
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

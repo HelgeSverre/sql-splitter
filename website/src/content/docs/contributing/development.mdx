@@ -1,0 +1,84 @@
+---
+title: Development
+description: Set up your development environment
+---
+
+## Prerequisites
+
+- Rust 1.70+ ([rustup.rs](https://rustup.rs))
+- Git
+
+## Clone and Build
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+cargo build
+```
+
+## Run Development Build
+
+```bash
+cargo run -- split test.sql -o output/
+```
+
+## Build Release
+
+```bash
+cargo build --release
+```
+
+The binary will be at `target/release/sql-splitter`.
+
+## Optimized Build
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+## Project Structure
+
+```
+sql-splitter/
+├── src/
+│   ├── main.rs          # Entry point
+│   ├── cmd/             # CLI commands
+│   │   ├── split.rs
+│   │   ├── merge.rs
+│   │   ├── analyze.rs
+│   │   └── ...
+│   ├── parser/          # SQL parser
+│   ├── splitter/        # Split logic
+│   ├── merger/          # Merge logic
+│   ├── analyzer/        # Analysis logic
+│   ├── convert/         # Dialect conversion
+│   ├── validate/        # Validation logic
+│   ├── sample/          # Sampling logic
+│   ├── shard/           # Sharding logic
+│   ├── differ/          # Diff logic
+│   ├── redactor/        # Redaction logic
+│   ├── graph/           # Graph/ERD logic
+│   ├── duckdb/          # DuckDB integration
+│   └── writer/          # Output writers
+├── tests/
+│   ├── fixtures/        # Test SQL files
+│   └── *.rs             # Test modules
+├── man/                 # Man pages
+├── website/             # Documentation site
+└── Cargo.toml
+```
+
+## Code Style
+
+- Use `cargo fmt` before committing
+- Run `cargo clippy` for lints
+- Follow Rust idioms
+
+## Make Commands
+
+```bash
+make build          # Build release
+make test           # Run tests
+make install        # Install binary + completions + man pages
+make clean          # Clean build artifacts
+```

@@ -1,0 +1,63 @@
+---
+title: Introduction
+description: Get started with sql-splitter, the high-performance SQL dump toolkit
+---
+
+sql-splitter is a command-line tool for working with SQL dump files. It's designed for:
+
+- **Automation**: JSON output, consistent exit codes, glob patterns
+- **CI/CD pipelines**: Validation, integrity checks, reproducible operations
+- **Large files**: Streaming architecture handles multi-GB dumps with constant memory
+- **Database migrations**: Convert between MySQL, PostgreSQL, SQLite, and MSSQL
+
+## What Can You Do?
+
+### Split & Merge
+Break large dumps into per-table files for easier editing, then reassemble them:
+
+```bash
+sql-splitter split dump.sql -o tables/
+# Edit individual table files...
+sql-splitter merge tables/ -o updated.sql
+```
+
+### Convert Between Dialects
+Migrate data between different databases:
+
+```bash
+sql-splitter convert mysql.sql --to postgres -o postgres.sql
+```
+
+### Create Dev Datasets
+Sample production data while preserving foreign key relationships:
+
+```bash
+sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations
+```
+
+### Validate Dumps
+Check integrity before restoring to production:
+
+```bash
+sql-splitter validate dump.sql --strict
+```
+
+### Anonymize Data
+Redact PII for safe sharing:
+
+```bash
+sql-splitter redact dump.sql -o safe.sql --hash "*.email" --fake "*.name"
+```
+
+### Query Without Restoring
+Run SQL queries directly on dump files using DuckDB:
+
+```bash
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+```
+
+## Next Steps
+
+- [Installation](/getting-started/installation) - Install sql-splitter
+- [Quick Start](/getting-started/quick-start) - Your first split → edit → merge workflow
+- [Concepts](/getting-started/concepts) - Understand dialects, streaming, and compression

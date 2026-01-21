@@ -1,0 +1,56 @@
+---
+// Custom site title with glowing semicolon logo and version badge
+const version = "1.12.6";
+---
+
+<a href="/" class="site-title-link">
+  <span class="logo-icon">;</span>
+  <span class="site-title-text">sql-splitter</span>
+  <span class="version-badge">v{version}</span>
+</a>
+
+<style>
+  .site-title-link {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    text-decoration: none;
+    color: var(--sl-color-text);
+    font-family: var(--sl-font);
+    font-weight: 700;
+    font-size: 1.125rem;
+  }
+
+  .logo-icon {
+    font-family: var(--sl-font-mono);
+    font-size: 1.5em;
+    font-weight: 700;
+    color: #58a6ff;
+  }
+
+  :root:not([data-theme='light']) .logo-icon {
+    text-shadow: 0 0 10px #58a6ff;
+  }
+
+  .site-title-text {
+    color: var(--sl-color-text);
+  }
+
+  .version-badge {
+    margin-left: 0.5rem;
+    padding: 0.15rem 0.45rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    font-family: var(--sl-font-mono);
+    color: var(--sl-color-gray-2);
+    background: var(--sl-color-gray-6);
+    border-radius: 999px;
+    letter-spacing: 0.02em;
+  }
+
+  @media (max-width: 600px) {
+    .version-badge {
+      display: none;
+    }
+  }
+</style>

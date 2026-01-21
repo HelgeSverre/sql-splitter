@@ -1,0 +1,143 @@
+---
+title: CI Validation
+description: Validate SQL dumps in CI/CD pipelines
+---
+
+Integrate sql-splitter validation into your CI/CD pipeline.
+
+## Basic CI Gate
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+sql-splitter validate "dumps/*.sql" --strict --fail-fast --progress
+```
+
+Exit codes:
+- `0`: All dumps valid
+- `1`: Validation errors or warnings (with `--strict`)
+
+## GitHub Actions
+
+```yaml
+# .github/workflows/validate-dumps.yml
+name: Validate SQL Dumps
+
+on:
+  push:
+    paths:
+      - 'dumps/**/*.sql'
+  pull_request:
+    paths:
+      - 'dumps/**/*.sql'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sql-splitter
+        run: cargo install sql-splitter
+
+      - name: Validate dumps
+        run: |
+          sql-splitter validate "dumps/**/*.sql" \
+            --strict \
+            --fail-fast \
+            --json > validation-results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-results
+          path: validation-results.json
+```
+
+## GitLab CI
+
+```yaml
+# .gitlab-ci.yml
+validate-dumps:
+  stage: test
+  image: rust:latest
+  before_script:
+    - cargo install sql-splitter
+  script:
+    - sql-splitter validate "dumps/**/*.sql" --strict --fail-fast
+  rules:
+    - changes:
+        - dumps/**/*.sql
+```
+
+## JSON Output for Reporting
+
+```bash
+sql-splitter validate "dumps/*.sql" --json | jq '.results[] | select(.passed == false)'
+```
+
+Example output:
+```json
+{
+  "file": "dumps/broken.sql",
+  "passed": false,
+  "errors": [
+    {
+      "type": "syntax_error",
+      "line": 42,
+      "message": "Unexpected token near 'CREAT'"
+    }
+  ],
+  "warnings": []
+}
+```
+
+## Parallel Validation
+
+For many dump files:
+
+```bash
+find dumps -name '*.sql.gz' -print0 | \
+  xargs -0 -n1 -P4 sql-splitter validate --strict
+```
+
+## Pre-commit Hook
+
+```bash
+#!/bin/bash
+# .git/hooks/pre-commit
+
+# Find staged SQL files
+staged_sql=$(git diff --cached --name-only --diff-filter=ACM | grep '\.sql$' || true)
+
+if [ -n "$staged_sql" ]; then
+  echo "Validating SQL files..."
+  echo "$staged_sql" | xargs sql-splitter validate --strict
+fi
+```
+
+## Validation in Docker
+
+```dockerfile
+FROM rust:latest as builder
+RUN cargo install sql-splitter
+
+FROM debian:bookworm-slim
+COPY --from=builder /usr/local/cargo/bin/sql-splitter /usr/local/bin/
+ENTRYPOINT ["sql-splitter"]
+```
+
+```bash
+docker build -t sql-splitter .
+docker run -v $(pwd):/data sql-splitter validate /data/dump.sql --strict
+```
+
+## Best Practices
+
+1. **Use `--strict`** - Treat warnings as errors
+2. **Use `--fail-fast`** - Stop on first error for faster feedback
+3. **Use `--json`** - Machine-readable output for reporting
+4. **Run on PRs** - Catch issues before merge
+5. **Cache the binary** - Speed up CI runs

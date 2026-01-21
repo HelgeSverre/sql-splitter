@@ -1,0 +1,144 @@
+---
+title: query
+description: Run SQL analytics on dump files using DuckDB
+---
+
+Execute SQL queries directly on dump files without restoring to a database, powered by DuckDB.
+
+**Alias:** `qy` (e.g., `sql-splitter qy dump.sql "SELECT COUNT(*) FROM users"`)
+
+## Usage
+
+```bash
+sql-splitter query <INPUT> [QUERY] [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Execute a single query
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+
+# Output as JSON
+sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100" -f json
+
+# Export to CSV
+sql-splitter query dump.sql "SELECT * FROM users LIMIT 10" -o results.csv -f csv
+
+# Interactive REPL session
+sql-splitter query dump.sql --interactive
+
+# Use disk mode for large files (>2GB)
+sql-splitter query huge.sql "SELECT ..." --disk
+
+# Cache for repeated queries
+sql-splitter query dump.sql "SELECT ..." --cache
+
+# Import only specific tables
+sql-splitter query dump.sql "SELECT ..." --tables users,orders
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--format` | `-f` | Output format: `table`, `json`, `jsonl`, `csv`, `tsv` | `table` |
+| `--output` | `-o` | Write output to file | stdout |
+| `--dialect` | `-d` | SQL dialect | auto-detect |
+| `--interactive` | `-i` | Start interactive REPL | false |
+| `--disk` | | Force disk-based storage (auto-enabled for large dumps) | false |
+| `--cache` | | Cache imported database for faster repeated queries | false |
+| `--tables` | | Only import specific tables (comma-separated) | all |
+| `--memory-limit` | | DuckDB memory limit (e.g., "4GB") | - |
+| `--timing` | | Show query execution time | false |
+| `--progress` | | Show import progress | false |
+| `--list-cache` | | List cached databases | - |
+| `--clear-cache` | | Clear all cached databases | - |
+
+**Note:** Use `--format json` or `--format jsonl` for JSON output (not `--json`).
+
+## Output Formats
+
+### Table (default)
+
+```
+┌────┬─────────┬─────────────────────┐
+│ id │ name    │ email               │
+├────┼─────────┼─────────────────────┤
+│ 1  │ Alice   │ alice@example.com   │
+│ 2  │ Bob     │ bob@example.com     │
+└────┴─────────┴─────────────────────┘
+```
+
+### JSON
+
+```json
+[
+  {"id": 1, "name": "Alice", "email": "alice@example.com"},
+  {"id": 2, "name": "Bob", "email": "bob@example.com"}
+]
+```
+
+### CSV
+
+```csv
+id,name,email
+1,Alice,alice@example.com
+2,Bob,bob@example.com
+```
+
+## Interactive REPL
+
+```bash
+sql-splitter query dump.sql --interactive
+```
+
+REPL commands:
+
+| Command | Description |
+|---------|-------------|
+| `.tables` | List all tables |
+| `.schema [table]` | Show schema |
+| `.describe <table>` | Describe table columns |
+| `.format <fmt>` | Set output format |
+| `.count <table>` | Count rows |
+| `.sample <table> [n]` | Show sample rows (default: 10) |
+| `.export <file> <query>` | Export query to file |
+| `.exit` | Exit REPL |
+
+## Caching
+
+Cache the imported database for faster repeated queries:
+
+```bash
+# First query imports and caches
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users" --cache
+
+# Subsequent queries use cache (400x faster)
+sql-splitter query dump.sql "SELECT * FROM users WHERE active = 1" --cache
+```
+
+Manage cache:
+
+```bash
+# List cached databases
+sql-splitter query --list-cache
+
+# Clear all caches
+sql-splitter query --clear-cache
+```
+
+## Large Files
+
+For dumps larger than available RAM:
+
+```bash
+sql-splitter query huge.sql "SELECT ..." --disk
+```
+
+Disk mode stores data in a temporary DuckDB file instead of memory.
+
+## See Also
+
+- [`analyze`](/commands/analyze) - Quick statistics without full import
+- [DuckDB SQL Reference](https://duckdb.org/docs/sql/introduction)

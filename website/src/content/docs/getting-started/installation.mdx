@@ -1,0 +1,85 @@
+---
+title: Installation
+description: Install sql-splitter via Cargo, pre-built binaries, or from source
+---
+
+## From crates.io (Recommended)
+
+If you have Rust installed:
+
+```bash
+cargo install sql-splitter
+```
+
+Don't have Rust? Install it from [rustup.rs](https://rustup.rs/).
+
+## Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases):
+
+| Platform | Download |
+|----------|----------|
+| Linux x86_64 | `sql-splitter-linux-amd64.tar.gz` |
+| Linux ARM64 | `sql-splitter-linux-arm64.tar.gz` |
+| macOS Intel | `sql-splitter-darwin-amd64.tar.gz` |
+| macOS Apple Silicon | `sql-splitter-darwin-arm64.tar.gz` |
+| Windows x86_64 | `sql-splitter-windows-amd64.zip` |
+
+## From Source
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+make install  # Installs binary + shell completions + man pages
+```
+
+## From GitHub
+
+```bash
+cargo install --git https://github.com/helgesverre/sql-splitter
+```
+
+## Optimized Build
+
+For maximum performance, build with CPU-specific optimizations:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+## Verify Installation
+
+```bash
+sql-splitter --version
+```
+
+This should output `sql-splitter` followed by the version number.
+
+## Shell Completions
+
+Shell completions are automatically installed with `make install`. For manual installation:
+
+```bash
+# Bash (user)
+sql-splitter completions bash >> ~/.bashrc
+
+# Zsh (oh-my-zsh)
+sql-splitter completions zsh > ~/.oh-my-zsh/completions/_sql-splitter
+
+# Fish
+sql-splitter completions fish > ~/.config/fish/completions/sql-splitter.fish
+```
+
+See the [completions command](/commands/completions/) for more options.
+
+## Man Pages
+
+View documentation with `man sql-splitter` or `man sql-splitter-diff`.
+
+For `cargo install` users, install man pages manually:
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+make install-man
+```

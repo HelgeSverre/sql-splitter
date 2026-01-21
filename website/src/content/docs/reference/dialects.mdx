@@ -1,0 +1,133 @@
+---
+title: SQL Dialects
+description: Supported SQL dialects and their features
+---
+
+sql-splitter supports four SQL dialects.
+
+## MySQL / MariaDB
+
+**Source**: `mysqldump`
+
+**Detection signals**:
+- `AUTO_INCREMENT`
+- Backtick quoting (`` `table` ``)
+- `SET @variable`
+- `ENGINE=InnoDB`
+
+**Features supported**:
+- `CREATE TABLE` with inline keys
+- `INSERT INTO` (single and multi-row)
+- `CREATE INDEX`
+- `ALTER TABLE`
+- Session commands (`SET`, `USE`)
+
+**Example**:
+```sql
+CREATE TABLE `users` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `name` VARCHAR(100) NOT NULL,
+  `email` VARCHAR(255),
+  INDEX `idx_email` (`email`)
+) ENGINE=InnoDB;
+
+INSERT INTO `users` VALUES (1, 'Alice', 'alice@example.com');
+```
+
+## PostgreSQL
+
+**Source**: `pg_dump` (plain text format)
+
+**Detection signals**:
+- `SERIAL` / `BIGSERIAL`
+- `COPY ... FROM stdin`
+- Double quote identifiers (`"table"`)
+- `SET client_encoding`
+
+**Features supported**:
+- `CREATE TABLE`
+- `COPY ... FROM stdin` (tab-separated data)
+- `INSERT INTO`
+- `CREATE INDEX`
+- `ALTER TABLE`
+- Sequences (`CREATE SEQUENCE`)
+
+**Example**:
+```sql
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  email VARCHAR(255)
+);
+
+COPY users (id, name, email) FROM stdin;
+1	Alice	alice@example.com
+2	Bob	bob@example.com
+\.
+```
+
+**Note**: Binary/custom `pg_dump` formats are not supported. Use `pg_dump -Fp` (plain).
+
+## SQLite
+
+**Source**: `.dump` command
+
+**Detection signals**:
+- `INTEGER PRIMARY KEY` (implies AUTOINCREMENT)
+- No quoting or double quotes
+- `PRAGMA` statements
+
+**Features supported**:
+- `CREATE TABLE`
+- `INSERT INTO`
+- `CREATE INDEX`
+- Pragma statements (preserved in `_global.sql`)
+
+**Example**:
+```sql
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT
+);
+
+INSERT INTO users VALUES (1, 'Alice', 'alice@example.com');
+```
+
+## MSSQL / T-SQL
+
+**Source**: `sqlcmd`, SSMS "Generate Scripts"
+
+**Detection signals**:
+- `GO` batch separator
+- `IDENTITY(1,1)`
+- Square bracket quoting (`[table]`)
+- `NVARCHAR`, `DATETIME2`
+
+**Features supported**:
+- `CREATE TABLE`
+- `INSERT INTO`
+- `CREATE INDEX`
+- `GO` batch handling
+
+**Example**:
+```sql
+CREATE TABLE [users] (
+  [id] INT IDENTITY(1,1) PRIMARY KEY,
+  [name] NVARCHAR(100) NOT NULL,
+  [email] NVARCHAR(255)
+);
+GO
+
+INSERT INTO [users] ([name], [email]) VALUES (N'Alice', N'alice@example.com');
+GO
+```
+
+## Auto-Detection
+
+sql-splitter analyzes the first ~1000 lines to detect the dialect. Override with `--dialect`:
+
+```bash
+sql-splitter split dump.sql --dialect=postgres
+sql-splitter convert dump.sql --from mysql --to postgres
+```

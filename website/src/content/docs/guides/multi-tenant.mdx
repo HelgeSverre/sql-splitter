@@ -1,0 +1,136 @@
+---
+title: Multi-Tenant Sharding
+description: Extract tenant-specific data from multi-tenant dumps
+---
+
+Extract data for specific tenants from multi-tenant SQL dumps.
+
+## Use Cases
+
+- **Tenant isolation**: Give customers their own data export
+- **Debugging**: Reproduce issues with specific tenant data
+- **Testing**: Create tenant-specific test fixtures
+- **Compliance**: Data portability requests
+
+## Basic Extraction
+
+```bash
+sql-splitter shard multi_tenant.sql \
+  --tenant-value 123 \
+  -o tenant_123.sql \
+  --progress
+```
+
+## How It Works
+
+1. Identifies tables with the tenant column
+2. Finds all rows matching the tenant value
+3. Follows foreign keys to include related data
+4. Outputs a complete, consistent dump for that tenant
+
+## Tenant Column Detection
+
+sql-splitter auto-detects common column names:
+
+- `tenant_id`
+- `company_id`
+- `account_id`
+- `org_id`
+- `organization_id`
+- `workspace_id`
+
+Override if needed:
+
+```bash
+sql-splitter shard dump.sql \
+  --tenant-column customer_id \
+  --tenant-value 42 \
+  -o tenant.sql
+```
+
+## Multiple Tenants
+
+Extract multiple tenants to separate files:
+
+```bash
+sql-splitter shard multi_tenant.sql \
+  --tenant-values "1,2,3" \
+  -o shards/ \
+  --progress
+```
+
+Creates:
+```
+shards/
+├── tenant_1.sql
+├── tenant_2.sql
+└── tenant_3.sql
+```
+
+## Handling Global Tables
+
+Multi-tenant apps often have shared/lookup tables. Control how they're handled:
+
+```bash
+# Include small lookup tables (default)
+sql-splitter shard dump.sql --tenant-value 123 --include-global lookups
+
+# Include all non-tenant tables
+sql-splitter shard dump.sql --tenant-value 123 --include-global all
+
+# Skip global tables entirely
+sql-splitter shard dump.sql --tenant-value 123 --include-global none
+```
+
+## Example Schema
+
+```sql
+-- Global tables (no tenant_id)
+CREATE TABLE countries (id INT PRIMARY KEY, name VARCHAR(100));
+CREATE TABLE currencies (id INT PRIMARY KEY, code VARCHAR(3));
+
+-- Tenant tables
+CREATE TABLE tenants (id INT PRIMARY KEY, name VARCHAR(100));
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  tenant_id INT REFERENCES tenants(id),
+  name VARCHAR(100)
+);
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  tenant_id INT REFERENCES tenants(id),
+  user_id INT REFERENCES users(id)
+);
+```
+
+Sharding for tenant 42:
+- Includes all `users` and `orders` where `tenant_id = 42`
+- Follows FK to include the `tenants` row
+- Includes `countries` and `currencies` (with `--include-global lookups`)
+
+## Combining with Sample
+
+For large tenants, combine with sampling:
+
+```bash
+# First shard
+sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql
+
+# Then sample
+sql-splitter sample tenant_123.sql \
+  -o tenant_123_sample.sql \
+  --percent 10 \
+  --preserve-relations
+```
+
+## Combining with Redact
+
+Anonymize after sharding:
+
+```bash
+sql-splitter shard dump.sql --tenant-value 123 -o - | \
+  sql-splitter redact - \
+    --hash "*.email" \
+    --fake "*.name" \
+    -o tenant_123_safe.sql
+```

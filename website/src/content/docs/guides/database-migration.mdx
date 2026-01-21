@@ -1,0 +1,131 @@
+---
+title: Database Migration
+description: Migrate between MySQL, PostgreSQL, SQLite, and MSSQL
+---
+
+This guide walks through migrating a database from one dialect to another using sql-splitter.
+
+## MySQL to PostgreSQL
+
+The most common migration path.
+
+### Step 1: Validate Source
+
+```bash
+sql-splitter validate prod_mysql.sql.gz --strict --progress
+```
+
+### Step 2: Analyze the Dump
+
+```bash
+sql-splitter analyze prod_mysql.sql.gz --progress
+```
+
+Review table sizes to estimate migration time.
+
+### Step 3: Convert
+
+```bash
+sql-splitter convert prod_mysql.sql.gz \
+  --to postgres \
+  -o prod_postgres.sql \
+  --progress
+```
+
+### Step 4: Validate Output
+
+```bash
+sql-splitter validate prod_postgres.sql \
+  --dialect=postgres \
+  --strict \
+  --progress
+```
+
+### Step 5: Import
+
+```bash
+psql "$PG_CONN" < prod_postgres.sql
+```
+
+Or stream directly:
+
+```bash
+sql-splitter convert prod_mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+```
+
+## Handling Conversion Warnings
+
+Not all features convert perfectly. Common warnings:
+
+### ENUM Types
+
+MySQL ENUMs don't exist in PostgreSQL. Options:
+1. Convert to VARCHAR with CHECK constraint (automatic)
+2. Create custom TYPE (manual)
+
+### Auto-Increment
+
+Conversion is automatic:
+- MySQL `AUTO_INCREMENT` → PostgreSQL `SERIAL`
+- PostgreSQL `SERIAL` → MySQL `AUTO_INCREMENT`
+
+### Session Commands
+
+MySQL-specific `SET` commands are stripped when converting to PostgreSQL.
+
+## MSSQL to MySQL
+
+```bash
+# Convert
+sql-splitter convert mssql_dump.sql \
+  --from mssql \
+  --to mysql \
+  -o mysql_dump.sql \
+  --progress
+
+# Validate
+sql-splitter validate mysql_dump.sql --dialect=mysql --strict
+```
+
+### MSSQL-Specific Handling
+
+- `GO` batch separators are removed
+- `IDENTITY` → `AUTO_INCREMENT`
+- `NVARCHAR` → `VARCHAR` (with CHARACTER SET utf8mb4)
+- `DATETIME2` → `DATETIME`
+
+## Best Practices
+
+1. **Always validate before and after** - Catch issues early
+2. **Use `--strict` for CI** - Don't ignore warnings
+3. **Test with a sample first** - Convert a small sample before full dump
+4. **Review warnings** - Some may require manual fixes
+
+## Troubleshooting
+
+### "Unsupported feature" warnings
+
+Use `--strict` to see all warnings, then address manually:
+
+```bash
+sql-splitter convert dump.sql --to postgres --strict 2>&1 | grep WARNING
+```
+
+### Encoding issues
+
+Ensure source dump is UTF-8:
+
+```bash
+file dump.sql
+# Should show: UTF-8 Unicode text
+```
+
+### Large file performance
+
+For multi-GB dumps:
+
+```bash
+sql-splitter convert big.sql.gz --to postgres -o - | psql "$PG_CONN"
+```
+
+This streams without writing an intermediate file.

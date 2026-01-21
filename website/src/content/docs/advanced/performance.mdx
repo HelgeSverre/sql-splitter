@@ -1,0 +1,106 @@
+---
+title: Performance
+description: Benchmarks and optimization tips
+---
+
+sql-splitter is designed for high throughput with minimal memory usage.
+
+## Benchmarks
+
+Tested on Apple M2 Max:
+
+| Metric | Value |
+|--------|-------|
+| Parser throughput | 600+ MB/s |
+| Memory usage | ~50 MB constant |
+| Cold start | ~5 ms |
+
+### Split Benchmark
+
+| File Size | Time | Throughput |
+|-----------|------|------------|
+| 100 MB | 0.16s | 625 MB/s |
+| 1 GB | 1.6s | 625 MB/s |
+| 10 GB | 16s | 625 MB/s |
+
+### vs. Shell Alternatives
+
+| Tool | Time (1 GB file) |
+|------|------------------|
+| sql-splitter | 1.6s |
+| awk-based | 8.5s |
+| Python script | 12s |
+
+sql-splitter is **5x faster** than shell-based alternatives.
+
+## Optimization Tips
+
+### Use Native CPU Optimizations
+
+Build with CPU-specific optimizations:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+### Compressed Input
+
+Compressed files can be faster than uncompressed when I/O is the bottleneck:
+
+```bash
+# Often faster than reading uncompressed
+sql-splitter split backup.sql.gz -o tables/
+```
+
+### Streaming to Database
+
+Avoid intermediate files when possible:
+
+```bash
+# Direct stream (no intermediate file)
+sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+
+# vs. intermediate file (slower)
+sql-splitter convert mysql.sql.gz --to postgres -o temp.sql
+psql "$PG_CONN" < temp.sql
+rm temp.sql
+```
+
+### Parallel Operations
+
+For many files, use parallel execution:
+
+```bash
+find dumps -name '*.sql.gz' -print0 | \
+  xargs -0 -n1 -P4 sql-splitter validate --strict
+```
+
+### Query Caching
+
+Cache imported databases for repeated queries:
+
+```bash
+# First query (slow - imports data)
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users" --cache
+
+# Second query (fast - uses cache)
+sql-splitter query dump.sql "SELECT * FROM users WHERE active = 1" --cache
+```
+
+### Disk Mode for Large Files
+
+For very large dumps:
+
+```bash
+sql-splitter query huge.sql "SELECT ..." --disk
+```
+
+## Memory Usage
+
+sql-splitter maintains constant ~50 MB memory regardless of file size:
+
+- **Streaming**: Reads in chunks, processes line-by-line
+- **Buffered I/O**: Uses 64 KB buffers
+- **No full load**: Never loads entire file into memory
+
+This means 10 GB files use the same memory as 10 MB files.

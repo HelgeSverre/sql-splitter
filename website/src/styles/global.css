@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+/* CLI Theme Colors */
+@theme {
+  --color-bg: #0a0a0a;
+  --color-surface: #111111;
+  --color-text: #e6edf3;
+  --color-text-muted: #8b949e;
+  --color-border: #27272a;
+  --color-code-bg: #0a0a0a;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79b8ff;
+
+  /* Command colors */
+  --color-cmd-split: #58a6ff;
+  --color-cmd-merge: #a371f7;
+  --color-cmd-analyze: #3fb950;
+  --color-cmd-validate: #3fb950;
+  --color-cmd-convert: #f78166;
+  --color-cmd-sample: #db61a2;
+  --color-cmd-shard: #a371f7;
+  --color-cmd-diff: #ffa657;
+  --color-cmd-redact: #ff7b72;
+  --color-cmd-graph: #7ee787;
+  --color-cmd-order: #79c0ff;
+  --color-cmd-query: #d2a8ff;
+
+  /* Light mode colors */
+  --color-bg-light: #ffffff;
+  --color-surface-light: #f6f8fa;
+  --color-text-light: #24292f;
+  --color-text-muted-light: #57606a;
+  --color-border-light: #d0d7de;
+
+  /* Fonts */
+  --font-display: 'Monda', system-ui, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, 'Cascadia Code', 'Roboto Mono', Menlo, monospace;
+}
+
+/* Base styles for custom pages */
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 100px;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Code highlighting */
+.sh-comment { color: #6e7681; font-style: italic; }
+.sh-tool { color: var(--color-cmd-split); }
+
+/* Copy button animation */
+.copy-btn.copied {
+  background: var(--color-cmd-validate);
+  color: var(--color-bg);
+  border-color: var(--color-cmd-validate);
+}

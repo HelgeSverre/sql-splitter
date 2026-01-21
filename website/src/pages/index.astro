@@ -1,0 +1,581 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="sql-splitter - High-Performance SQL Dump Toolkit in Rust">
+  <!-- Hero -->
+  <section class="hero">
+    <h1>
+      <span class="logo-icon">;</span>
+      sql-splitter
+    </h1>
+    <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
+    <p class="description">
+      Split, merge, convert, validate, sample, shard, diff, redact, and query SQL dump files.
+      MySQL, PostgreSQL, SQLite, and MSSQL. Written in Rust.
+    </p>
+    <div class="hero-actions">
+      <a href="/getting-started/" class="btn btn-primary">Get Started</a>
+      <a href="https://github.com/helgesverre/sql-splitter" class="btn btn-secondary" target="_blank">View on GitHub</a>
+    </div>
+  </section>
+
+  <!-- Why -->
+  <section class="why">
+    <h2>Why sql-splitter?</h2>
+    <p class="lead">
+      Working with large SQL dumps is painful. Importing a 10GB file takes forever,
+      and you often just need a few tables. sql-splitter lets you split the dump
+      into individual files so you can import only what you need.
+    </p>
+    <div class="benefits">
+      <div class="benefit">
+        <div class="benefit-icon">~</div>
+        <h3>Blazing Fast</h3>
+        <p>600+ MB/s throughput</p>
+      </div>
+      <div class="benefit">
+        <div class="benefit-icon">&lt;</div>
+        <h3>Memory Efficient</h3>
+        <p>~50MB constant usage</p>
+      </div>
+      <div class="benefit">
+        <div class="benefit-icon">*</div>
+        <h3>Multi-Dialect</h3>
+        <p>MySQL, PostgreSQL, SQLite, MSSQL</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Commands Overview -->
+  <section class="commands-overview">
+    <h2>12 Powerful Commands</h2>
+    <div class="command-grid">
+      <a href="/commands/split" class="command-card" data-cmd="split">
+        <span class="cmd-name">split</span>
+        <span class="cmd-desc">Split dump into per-table files</span>
+      </a>
+      <a href="/commands/merge" class="command-card" data-cmd="merge">
+        <span class="cmd-name">merge</span>
+        <span class="cmd-desc">Combine files back into one dump</span>
+      </a>
+      <a href="/commands/analyze" class="command-card" data-cmd="analyze">
+        <span class="cmd-name">analyze</span>
+        <span class="cmd-desc">View table statistics</span>
+      </a>
+      <a href="/commands/validate" class="command-card" data-cmd="validate">
+        <span class="cmd-name">validate</span>
+        <span class="cmd-desc">Check integrity and syntax</span>
+      </a>
+      <a href="/commands/convert" class="command-card" data-cmd="convert">
+        <span class="cmd-name">convert</span>
+        <span class="cmd-desc">Transform between dialects</span>
+      </a>
+      <a href="/commands/sample" class="command-card" data-cmd="sample">
+        <span class="cmd-name">sample</span>
+        <span class="cmd-desc">Create reduced datasets</span>
+      </a>
+      <a href="/commands/shard" class="command-card" data-cmd="shard">
+        <span class="cmd-name">shard</span>
+        <span class="cmd-desc">Extract tenant data</span>
+      </a>
+      <a href="/commands/diff" class="command-card" data-cmd="diff">
+        <span class="cmd-name">diff</span>
+        <span class="cmd-desc">Compare two dumps</span>
+      </a>
+      <a href="/commands/redact" class="command-card" data-cmd="redact">
+        <span class="cmd-name">redact</span>
+        <span class="cmd-desc">Anonymize PII data</span>
+      </a>
+      <a href="/commands/graph" class="command-card" data-cmd="graph">
+        <span class="cmd-name">graph</span>
+        <span class="cmd-desc">Generate ERD diagrams</span>
+      </a>
+      <a href="/commands/order" class="command-card" data-cmd="order">
+        <span class="cmd-name">order</span>
+        <span class="cmd-desc">Topological FK ordering</span>
+      </a>
+      <a href="/commands/query" class="command-card" data-cmd="query">
+        <span class="cmd-name">query</span>
+        <span class="cmd-desc">SQL analytics with DuckDB</span>
+      </a>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section class="quickstart">
+    <h2>Quick Start</h2>
+    <p class="lead">Get up and running in seconds.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-number">1</div>
+        <div class="step-content">
+          <h3>Install</h3>
+          <div class="code-block">
+            <pre><code>cargo install sql-splitter</code></pre>
+            <button class="copy-btn" data-copy="cargo install sql-splitter">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">2</div>
+        <div class="step-content">
+          <h3>Split your dump</h3>
+          <div class="code-block">
+            <pre><code><span class="sh-tool">sql-splitter</span> split database.sql --output=tables</code></pre>
+            <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">3</div>
+        <div class="step-content">
+          <h3>Work with individual tables</h3>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Each table gets its own .sql file</span>
+ls tables/
+<span class="sh-comment"># users.sql orders.sql products.sql ...</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Example Workflows -->
+  <section class="workflows">
+    <h2>Common Workflows</h2>
+
+    <div class="workflow">
+      <h3>Database Migration</h3>
+      <div class="code-block">
+        <pre><code><span class="sh-comment"># Convert MySQL to PostgreSQL</span>
+<span class="sh-tool">sql-splitter</span> convert mysql.sql --to postgres -o postgres.sql
+
+<span class="sh-comment"># Stream directly to database</span>
+<span class="sh-tool">sql-splitter</span> convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"</code></pre>
+        <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o postgres.sql">Copy</button>
+      </div>
+    </div>
+
+    <div class="workflow">
+      <h3>Create Dev Dataset</h3>
+      <div class="code-block">
+        <pre><code><span class="sh-comment"># Sample 10% with FK integrity preserved</span>
+<span class="sh-tool">sql-splitter</span> sample prod.sql -o dev.sql --percent 10 --preserve-relations
+
+<span class="sh-comment"># Anonymize sensitive data</span>
+<span class="sh-tool">sql-splitter</span> redact dev.sql -o safe.sql --hash "*.email" --fake "*.name"</code></pre>
+        <button class="copy-btn" data-copy="sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations">Copy</button>
+      </div>
+    </div>
+
+    <div class="workflow">
+      <h3>CI/CD Validation</h3>
+      <div class="code-block">
+        <pre><code><span class="sh-comment"># Validate all dumps with JSON output</span>
+<span class="sh-tool">sql-splitter</span> validate "dumps/*.sql" --strict --json --fail-fast</code></pre>
+        <button class="copy-btn" data-copy='sql-splitter validate "dumps/*.sql" --strict --json --fail-fast'>Copy</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta">
+    <h2>Ready to get started?</h2>
+    <div class="cta-actions">
+      <a href="/getting-started/" class="btn btn-primary">Read the Docs</a>
+      <a href="https://github.com/helgesverre/sql-splitter" class="btn btn-secondary" target="_blank">Star on GitHub</a>
+    </div>
+  </section>
+</BaseLayout>
+
+<script>
+  document.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const text = btn.getAttribute('data-copy');
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.classList.remove('copied');
+        }, 2000);
+      } catch (err) {
+        btn.textContent = 'Failed';
+        setTimeout(() => btn.textContent = 'Copy', 2000);
+      }
+    });
+  });
+</script>
+
+<style>
+  /* Hero */
+  .hero {
+    text-align: center;
+    padding: var(--space-xl) 0;
+  }
+
+  .hero h1 {
+    font-family: var(--font-display);
+    font-size: 2.5rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  .hero .logo-icon {
+    font-family: var(--font-mono);
+    font-size: 1.5em;
+    font-weight: 700;
+    color: var(--cmd-split);
+    text-shadow: 0 0 10px var(--cmd-split);
+  }
+
+  [data-theme="light"] .hero .logo-icon {
+    text-shadow: none;
+  }
+
+  .subtitle {
+    font-size: 1.25rem;
+    font-family: var(--font-mono);
+    color: var(--cmd-split);
+    margin-bottom: var(--space-xs);
+  }
+
+  .description {
+    max-width: 500px;
+    margin: 0 auto var(--space-md);
+    color: var(--color-text-muted);
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: var(--space-sm);
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  /* Buttons */
+  .btn {
+    display: inline-block;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-decoration: none;
+    border-radius: var(--radius);
+    transition: all 0.15s;
+  }
+
+  .btn-primary {
+    background: var(--cmd-split);
+    color: var(--color-bg);
+    box-shadow: 0 0 20px rgba(88, 166, 255, 0.3);
+  }
+
+  .btn-primary:hover {
+    background: var(--color-accent-hover);
+    box-shadow: 0 0 30px rgba(88, 166, 255, 0.5);
+    transform: translateY(-1px);
+    color: var(--color-bg);
+  }
+
+  [data-theme="light"] .btn-primary {
+    box-shadow: none;
+  }
+
+  [data-theme="light"] .btn-primary:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+  }
+
+  .btn-secondary:hover {
+    border-color: var(--cmd-split);
+    color: var(--cmd-split);
+  }
+
+  /* Why Section */
+  section {
+    margin-bottom: var(--space-xl);
+  }
+
+  section h2 {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: var(--space-sm);
+  }
+
+  .lead {
+    font-size: 1.1rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-md);
+  }
+
+  .benefits {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: var(--space-md);
+    margin-top: var(--space-md);
+  }
+
+  .benefit {
+    text-align: center;
+    padding: var(--space-md);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    transition: all 0.2s;
+  }
+
+  .benefit:hover {
+    border-color: var(--cmd-split);
+    box-shadow: 0 0 20px rgba(88, 166, 255, 0.1);
+  }
+
+  [data-theme="light"] .benefit:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  }
+
+  .benefit-icon {
+    font-family: var(--font-mono);
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: var(--space-xs);
+  }
+
+  .benefit:nth-child(1) .benefit-icon { color: var(--cmd-split); text-shadow: 0 0 10px var(--cmd-split); }
+  .benefit:nth-child(2) .benefit-icon { color: var(--cmd-validate); text-shadow: 0 0 10px var(--cmd-validate); }
+  .benefit:nth-child(3) .benefit-icon { color: var(--cmd-convert); text-shadow: 0 0 10px var(--cmd-convert); }
+
+  [data-theme="light"] .benefit-icon {
+    text-shadow: none;
+  }
+
+  .benefit h3 {
+    font-size: 1rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  .benefit p {
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  /* Commands Overview */
+  .command-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-sm);
+    margin-top: var(--space-md);
+  }
+
+  .command-card {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-sm);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    text-decoration: none;
+    transition: all 0.2s;
+  }
+
+  .command-card:hover {
+    border-color: var(--cmd-split);
+    transform: translateY(-2px);
+  }
+
+  .command-card .cmd-name {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .command-card[data-cmd="split"] .cmd-name { color: var(--cmd-split); }
+  .command-card[data-cmd="merge"] .cmd-name { color: var(--cmd-merge); }
+  .command-card[data-cmd="analyze"] .cmd-name { color: var(--cmd-analyze); }
+  .command-card[data-cmd="validate"] .cmd-name { color: var(--cmd-validate); }
+  .command-card[data-cmd="convert"] .cmd-name { color: var(--cmd-convert); }
+  .command-card[data-cmd="sample"] .cmd-name { color: var(--cmd-sample); }
+  .command-card[data-cmd="shard"] .cmd-name { color: var(--cmd-shard); }
+  .command-card[data-cmd="diff"] .cmd-name { color: var(--cmd-diff); }
+  .command-card[data-cmd="redact"] .cmd-name { color: var(--cmd-redact); }
+  .command-card[data-cmd="graph"] .cmd-name { color: var(--cmd-graph); }
+  .command-card[data-cmd="order"] .cmd-name { color: var(--cmd-order); }
+  .command-card[data-cmd="query"] .cmd-name { color: var(--cmd-query); }
+
+  .command-card .cmd-desc {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  /* Quick Start */
+  .steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+  }
+
+  .step {
+    display: flex;
+    gap: var(--space-sm);
+  }
+
+  .step-number {
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-surface);
+    color: var(--cmd-split);
+    border: 1px solid var(--cmd-split);
+    font-weight: 600;
+    font-size: 0.875rem;
+    border-radius: 50%;
+  }
+
+  .step-content {
+    flex: 1;
+  }
+
+  .step-content h3 {
+    font-size: 1rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  /* Code Blocks */
+  .code-block {
+    position: relative;
+    margin: var(--space-xs) 0 var(--space-sm);
+  }
+
+  .code-block pre {
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-sm);
+    padding-right: 4.5rem;
+    padding-top: 2.5rem;
+    overflow-x: auto;
+    position: relative;
+  }
+
+  .code-block pre::before {
+    content: '● ● ●';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 0.5rem var(--space-sm);
+    font-size: 0.6rem;
+    letter-spacing: 0.25rem;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .code-block code {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    color: var(--color-text);
+    background: none;
+    padding: 0;
+  }
+
+  .sh-comment { color: var(--syn-comment); font-style: italic; }
+  .sh-tool { color: var(--cmd-split); }
+
+  .copy-btn {
+    position: absolute;
+    top: calc(var(--space-xs) / 2);
+    right: var(--space-xs);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    font-family: var(--font-sans);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .copy-btn:hover {
+    border-color: var(--cmd-split);
+    color: var(--cmd-split);
+  }
+
+  .copy-btn.copied {
+    background: var(--cmd-validate);
+    color: var(--color-bg);
+    border-color: var(--cmd-validate);
+  }
+
+  /* Workflows */
+  .workflow {
+    margin-bottom: var(--space-lg);
+  }
+
+  .workflow h3 {
+    font-size: 1.1rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  /* CTA */
+  .cta {
+    text-align: center;
+    padding: var(--space-lg) 0;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .cta h2 {
+    margin-bottom: var(--space-md);
+  }
+
+  .cta-actions {
+    display: flex;
+    gap: var(--space-sm);
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .hero h1 {
+      font-size: 2rem;
+    }
+
+    .benefits {
+      grid-template-columns: 1fr;
+    }
+
+    .command-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .code-block pre {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+  }
+</style>

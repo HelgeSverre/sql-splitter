@@ -1,0 +1,115 @@
+---
+title: order
+description: Reorder SQL dump in topological FK order
+---
+
+Reorder SQL dump statements in topological order based on foreign key dependencies for safe imports.
+
+**Alias:** `ord` (e.g., `sql-splitter ord dump.sql -o ordered.sql`)
+
+## Usage
+
+```bash
+sql-splitter order <INPUT> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Rewrite in safe import order
+sql-splitter order dump.sql -o ordered.sql
+
+# Check for cycles without rewriting
+sql-splitter order dump.sql --check
+
+# Show order without writing
+sql-splitter order dump.sql --dry-run
+
+# Reverse order (for DROP operations)
+sql-splitter order dump.sql --reverse -o drop-order.sql
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--output` | `-o` | Output SQL file | stdout |
+| `--dialect` | `-d` | SQL dialect | auto-detect |
+| `--check` | | Check for cycles and report order (don't write) | false |
+| `--dry-run` | | Show topological order without writing | false |
+| `--reverse` | | Reverse order (children before parents, for DROP) | false |
+
+## How It Works
+
+1. Parses the dump to extract table definitions and foreign keys
+2. Builds a dependency graph
+3. Performs topological sort
+4. Rewrites dump with tables in dependency order
+
+## Import Order
+
+Tables are ordered so that:
+- Parent tables come before child tables
+- Referenced tables are created before referencing tables
+- Foreign key constraints can be satisfied during import
+
+```bash
+sql-splitter order dump.sql -o ordered.sql
+```
+
+Before:
+```sql
+CREATE TABLE orders (..., FOREIGN KEY (user_id) REFERENCES users(id));
+CREATE TABLE users (...);  -- Created after orders!
+```
+
+After:
+```sql
+CREATE TABLE users (...);  -- Now created first
+CREATE TABLE orders (..., FOREIGN KEY (user_id) REFERENCES users(id));
+```
+
+## DROP Order
+
+For dropping tables, use `--reverse` to get the opposite order:
+
+```bash
+sql-splitter order dump.sql --reverse -o drop-order.sql
+```
+
+This ensures child tables are dropped before parent tables.
+
+## Cycle Detection
+
+Use `--check` to detect circular dependencies:
+
+```bash
+sql-splitter order dump.sql --check
+```
+
+Output:
+```
+✓ No circular dependencies found
+
+Import order:
+  1. users
+  2. products
+  3. orders
+  4. order_items
+```
+
+If cycles exist:
+```
+⚠ Circular dependencies detected:
+  orders → payments → invoices → orders
+
+Cyclic tables will be appended at the end of the output.
+Consider using --check to identify cycles before importing.
+```
+
+**Note:** sql-splitter does not automatically add deferred constraints. For cyclic dependencies, you may need to manually disable FK checks during import or restructure your schema.
+
+## See Also
+
+- [`graph`](/commands/graph) - Visualize table relationships
+- [`validate`](/commands/validate) - Check dump integrity

@@ -1,0 +1,76 @@
+---
+title: Release Process
+description: How sql-splitter releases work
+---
+
+## Versioning
+
+sql-splitter uses [Semantic Versioning](https://semver.org/):
+
+- **MAJOR**: Breaking changes
+- **MINOR**: New features (backward compatible)
+- **PATCH**: Bug fixes
+
+## Release Checklist
+
+1. Update version in `Cargo.toml`
+2. Update `CHANGELOG.md`
+3. Run tests: `cargo test`
+4. Build: `cargo build --release`
+5. Create git tag: `git tag v1.2.3`
+6. Push: `git push && git push --tags`
+7. GitHub Actions builds and releases
+
+## GitHub Actions
+
+Releases are automated via GitHub Actions:
+
+1. Tag push triggers release workflow
+2. Builds for all platforms:
+   - Linux x86_64
+   - Linux ARM64
+   - macOS Intel
+   - macOS Apple Silicon
+   - Windows x86_64
+3. Creates GitHub Release with binaries
+4. Publishes to crates.io
+
+## Changelog Format
+
+```markdown
+## [1.2.3] - 2024-01-15
+
+### Added
+- New `query` command for SQL analytics (#123)
+
+### Changed
+- Improved COPY statement parsing (#124)
+
+### Fixed
+- Fixed crash on empty input files (#125)
+```
+
+## Pre-Release Testing
+
+Before tagging:
+
+```bash
+# Run all tests
+cargo test
+
+# Verify real-world dumps
+make verify-realworld
+
+# Build and test binary
+cargo build --release
+./target/release/sql-splitter --version
+./target/release/sql-splitter validate tests/fixtures/mysql/simple.sql
+```
+
+## Crates.io Publishing
+
+After tagging, maintainers publish to crates.io:
+
+```bash
+cargo publish
+```

@@ -1,0 +1,109 @@
+---
+title: convert
+description: Convert SQL dumps between MySQL, PostgreSQL, SQLite, and MSSQL
+---
+
+Transform SQL dumps between different database dialects.
+
+**Alias:** `cv` (e.g., `sql-splitter cv mysql.sql --to postgres -o pg.sql`)
+
+## Usage
+
+```bash
+sql-splitter convert <INPUT> --to <DIALECT> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# MySQL to PostgreSQL
+sql-splitter convert mysql.sql --to postgres -o pg.sql
+
+# PostgreSQL to MySQL (COPY → INSERT)
+sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
+
+# Auto-detect source, convert to SQLite
+sql-splitter convert dump.sql --to sqlite -o sqlite.sql
+
+# MSSQL to MySQL
+sql-splitter convert mssql.sql --from mssql --to mysql -o mysql.sql
+
+# Explicit source dialect
+sql-splitter convert dump.sql --from postgres --to mysql -o out.sql
+
+# Strict mode (fail on unsupported features)
+sql-splitter convert dump.sql --to postgres --strict
+
+# Stream to database
+sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--output` | `-o` | Output SQL file or directory | stdout |
+| `--from` | | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--to` | | Target dialect (required) | - |
+| `--strict` | | Fail on any unsupported feature | false |
+| `--progress` | `-p` | Show progress bar | false |
+| `--dry-run` | | Preview without writing files | false |
+| `--fail-fast` | | Stop on first error (for glob patterns) | false |
+| `--json` | | Output results as JSON | false |
+
+## Supported Conversions
+
+All 12 conversion pairs are supported:
+
+- MySQL ↔ PostgreSQL (including COPY → INSERT)
+- MySQL ↔ SQLite
+- MySQL ↔ MSSQL
+- PostgreSQL ↔ SQLite
+- PostgreSQL ↔ MSSQL
+- SQLite ↔ MSSQL
+
+## Type Mappings
+
+50+ data type mappings are handled automatically:
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `INT AUTO_INCREMENT` | `SERIAL` | `INTEGER PRIMARY KEY` | `INT IDENTITY` |
+| `TINYINT(1)` | `BOOLEAN` | `INTEGER` | `BIT` |
+| `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `NVARCHAR(n)` |
+| `DATETIME` | `TIMESTAMP` | `TEXT` | `DATETIME2` |
+| `TEXT` | `TEXT` | `TEXT` | `NVARCHAR(MAX)` |
+| `BLOB` | `BYTEA` | `BLOB` | `VARBINARY(MAX)` |
+
+## PostgreSQL COPY Conversion
+
+PostgreSQL's `COPY ... FROM stdin` format is converted to INSERT statements:
+
+```sql
+-- Input (PostgreSQL)
+COPY users (id, name) FROM stdin;
+1	Alice
+2	Bob
+\.
+
+-- Output (MySQL)
+INSERT INTO users (id, name) VALUES (1, 'Alice');
+INSERT INTO users (id, name) VALUES (2, 'Bob');
+```
+
+## Warnings
+
+Unsupported features generate warnings:
+
+- ENUM types (not directly portable)
+- Arrays (PostgreSQL-specific)
+- Triggers, stored procedures
+- Custom types
+
+Use `--strict` to fail on warnings.
+
+## See Also
+
+- [`validate`](/commands/validate) - Validate converted output
+- [Dialect Reference](/reference/dialects) - Detailed dialect information
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

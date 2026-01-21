@@ -1,0 +1,197 @@
+---
+title: Analytics Queries
+description: Query SQL dumps with DuckDB without restoring
+---
+
+Run SQL analytics directly on dump files using the embedded DuckDB engine.
+
+## Quick Start
+
+```bash
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
+```
+
+No database server needed. The dump is parsed and loaded into DuckDB for querying.
+
+## Interactive Mode
+
+```bash
+sql-splitter query dump.sql --interactive
+```
+
+REPL commands:
+
+```
+sql-splitter> .tables
+users
+orders
+products
+
+sql-splitter> .schema users
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name VARCHAR(100),
+  email VARCHAR(255)
+);
+
+sql-splitter> SELECT COUNT(*) FROM users;
+┌──────────┐
+│ count(*) │
+├──────────┤
+│ 1500     │
+└──────────┘
+
+sql-splitter> .sample orders 5
+┌────┬─────────┬────────┐
+│ id │ user_id │ total  │
+├────┼─────────┼────────┤
+│ 1  │ 42      │ 99.99  │
+│ 2  │ 17      │ 149.50 │
+...
+
+sql-splitter> .exit
+```
+
+## Output Formats
+
+### Table (default)
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users LIMIT 5"
+```
+
+### JSON
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users" -f json
+```
+
+```json
+[
+  {"id": 1, "name": "Alice", "email": "alice@example.com"},
+  {"id": 2, "name": "Bob", "email": "bob@example.com"}
+]
+```
+
+### CSV
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users" -f csv -o users.csv
+```
+
+### JSON Lines
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users" -f jsonl
+```
+
+## Common Analytics
+
+### Table sizes
+
+```bash
+sql-splitter query dump.sql "
+  SELECT 'users' as tbl, COUNT(*) as rows FROM users
+  UNION ALL
+  SELECT 'orders', COUNT(*) FROM orders
+  UNION ALL
+  SELECT 'products', COUNT(*) FROM products
+"
+```
+
+### Data quality checks
+
+```bash
+# Find duplicates
+sql-splitter query dump.sql "
+  SELECT email, COUNT(*) as cnt
+  FROM users
+  GROUP BY email
+  HAVING cnt > 1
+"
+
+# Find orphan records
+sql-splitter query dump.sql "
+  SELECT o.*
+  FROM orders o
+  LEFT JOIN users u ON o.user_id = u.id
+  WHERE u.id IS NULL
+"
+```
+
+### Export subsets
+
+```bash
+# Export active users to CSV
+sql-splitter query dump.sql \
+  "SELECT * FROM users WHERE active = 1" \
+  -f csv -o active_users.csv
+
+# Export high-value orders to JSON
+sql-splitter query dump.sql \
+  "SELECT * FROM orders WHERE total > 1000" \
+  -f json -o high_value.json
+```
+
+## Caching for Speed
+
+First query imports the dump (slow):
+
+```bash
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users" --cache
+# Importing dump... done (5.2s)
+# 1500
+```
+
+Subsequent queries use cache (fast):
+
+```bash
+sql-splitter query dump.sql "SELECT * FROM users WHERE active = 1" --cache
+# Using cached database
+# ...
+```
+
+Manage cache:
+
+```bash
+# List cached databases
+sql-splitter query --list-cache
+
+# Clear cache
+sql-splitter query --clear-cache
+```
+
+## Large Files
+
+For dumps larger than available RAM:
+
+```bash
+sql-splitter query huge.sql "SELECT ..." --disk
+```
+
+This stores data on disk instead of in memory.
+
+## DuckDB SQL Features
+
+DuckDB supports modern SQL features:
+
+```sql
+-- Window functions
+SELECT
+  id,
+  name,
+  SUM(total) OVER (PARTITION BY user_id ORDER BY created_at) as running_total
+FROM orders;
+
+-- CTEs
+WITH active_users AS (
+  SELECT * FROM users WHERE active = 1
+)
+SELECT * FROM orders WHERE user_id IN (SELECT id FROM active_users);
+
+-- QUALIFY
+SELECT * FROM orders
+QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC) = 1;
+```
+
+See [DuckDB SQL Reference](https://duckdb.org/docs/sql/introduction) for full documentation.

@@ -1,0 +1,91 @@
+---
+title: Overview
+description: How to contribute to sql-splitter
+---
+
+Thanks for your interest in contributing! This guide covers everything you need to get started.
+
+## Quick Links
+
+| Guide | Description |
+|-------|-------------|
+| [Development](/contributing/development) | Set up your dev environment |
+| [Testing](/contributing/testing) | Run and write tests |
+| [Benchmarking](/contributing/benchmarking) | Run performance benchmarks |
+| [Release Process](/contributing/release-process) | How releases work |
+
+## Pull Request Process
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Make your changes
+4. Run tests and linting:
+   ```bash
+   cargo fmt
+   cargo clippy
+   cargo test
+   ```
+5. Commit with a clear message
+6. Push and open a PR
+
+### PR Expectations
+
+- Describe what the PR does and why
+- Keep changes focused (one feature/fix per PR)
+- Update documentation if needed
+- Add tests for new functionality
+
+## Reporting Issues
+
+- Search existing issues first
+- Include reproduction steps for bugs
+- Include Rust version (`rustc --version`) and OS
+- Be specific about expected vs actual behavior
+
+## AI-Assisted Development
+
+AI coding assistants are encouraged for contributing to this project. Tools like [Amp Code](https://ampcode.com), [Claude Code](https://claude.ai/code), Cursor, and similar assistants can significantly accelerate development.
+
+### Quality Requirements
+
+AI-generated code must meet the same standards as human-written code:
+
+- **All tests must pass genuinely** - Tests verify actual behavior, not just compile
+- **No stubbed tests** - Never use `todo!()`, `unimplemented!()`, or hardcoded expected values to make tests pass artificially
+- **No skipped assertions** - Every test must assert meaningful behavior
+- **Review critically** - Understand and verify all generated code before committing
+
+### Feature Design Workflow
+
+For new features or significant changes:
+
+1. **Check existing designs** - Review `docs/features/` for related design docs
+2. **Write a design doc** - For new features, create `docs/features/FEATURE_NAME.md`
+3. **Implement in phases** - Break large features into phases as shown in the design doc
+4. **Test thoroughly** - Add tests that verify the design requirements
+5. **Reference in PR** - Link to the design doc in your pull request
+
+### Modes of Work
+
+When starting an AI session, consider which mode you're in:
+
+| Mode | Purpose | Example |
+|------|---------|---------|
+| **Build** | New functionality | "Implement sample command (Phase 1)" |
+| **Improve** | Refactor without changing behavior | "Extract sampler module" |
+| **Sweep** | Fix related bugs | "Fix all INSERT parsing edge cases" |
+
+This prevents scope creep and keeps AI contributions focused.
+
+## Code of Conduct
+
+Be respectful and constructive. We're all here to build something useful.
+
+- Be welcoming to newcomers
+- Accept constructive criticism gracefully
+- Focus on what's best for the project
+- Show empathy towards others
+
+## Questions?
+
+Open an issue or start a [discussion](https://github.com/helgesverre/sql-splitter/discussions).

@@ -1,0 +1,107 @@
+---
+title: Compression Support
+description: Supported compression formats for input files
+---
+
+sql-splitter automatically detects and decompresses compressed input files based on file extension.
+
+## Supported Formats
+
+| Format | Extension | Library |
+|--------|-----------|---------|
+| Gzip | `.gz` | flate2 |
+| Bzip2 | `.bz2` | bzip2 |
+| XZ/LZMA | `.xz` | xz2 |
+| Zstandard | `.zst` | zstd |
+
+## Usage
+
+Simply pass a compressed file—no flags needed:
+
+```bash
+# Gzip
+sql-splitter split backup.sql.gz -o tables/
+
+# Bzip2
+sql-splitter analyze database.sql.bz2
+
+# XZ
+sql-splitter validate dump.sql.xz
+
+# Zstandard
+sql-splitter convert mysql.sql.zst --to postgres -o pg.sql
+```
+
+## All Commands Support Compression
+
+Every command that accepts an input file supports compressed input:
+
+```bash
+sql-splitter split backup.sql.gz -o tables/
+sql-splitter analyze backup.sql.gz
+sql-splitter merge tables/ -o merged.sql  # Note: merge reads directory, not compressed file
+sql-splitter sample backup.sql.gz --percent 10 -o sample.sql
+sql-splitter shard backup.sql.gz --tenant-value 123 -o tenant.sql
+sql-splitter convert backup.sql.gz --to postgres -o pg.sql
+sql-splitter validate backup.sql.gz --strict
+sql-splitter diff old.sql.gz new.sql.gz
+sql-splitter redact backup.sql.gz --hash "*.email" -o safe.sql
+sql-splitter graph backup.sql.gz -o schema.html
+sql-splitter order backup.sql.gz -o ordered.sql
+sql-splitter query backup.sql.gz "SELECT COUNT(*) FROM users"
+```
+
+## Compression on Output
+
+sql-splitter does not compress output directly. Use pipes for compressed output:
+
+```bash
+# Gzip output
+sql-splitter merge tables/ | gzip > merged.sql.gz
+
+# Zstandard output (faster, better compression)
+sql-splitter sample dump.sql --percent 10 | zstd > sample.sql.zst
+
+# Bzip2 output
+sql-splitter convert mysql.sql --to postgres | bzip2 > pg.sql.bz2
+```
+
+## Performance Notes
+
+- **Gzip**: Good balance of speed and compression, widely supported
+- **Zstandard**: Fastest decompression, excellent compression ratio, recommended for large files
+- **XZ**: Best compression ratio but slower, good for archival
+- **Bzip2**: Moderate speed and compression, legacy format
+
+For best performance with very large dumps, Zstandard (`.zst`) is recommended:
+
+```bash
+# Compress with zstd for optimal speed
+zstd -T0 huge-dump.sql -o huge-dump.sql.zst
+
+# Process compressed file
+sql-splitter analyze huge-dump.sql.zst --progress
+```
+
+## Stdin with Compression
+
+When reading from stdin with `-`, you can decompress externally:
+
+```bash
+# Decompress with zcat and pipe
+zcat backup.sql.gz | sql-splitter analyze -
+
+# Or use process substitution
+sql-splitter analyze <(zcat backup.sql.gz)
+```
+
+However, passing the compressed file directly is simpler and handles buffering better:
+
+```bash
+sql-splitter analyze backup.sql.gz
+```
+
+## See Also
+
+- [Unix Piping](/advanced/piping) - Composing commands with pipes
+- [Performance](/advanced/performance) - Optimization tips

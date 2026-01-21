@@ -1,0 +1,111 @@
+---
+title: shard
+description: Extract tenant-specific data from multi-tenant dumps
+---
+
+Extract data for specific tenants from multi-tenant SQL dumps.
+
+**Alias:** `sh` (e.g., `sql-splitter sh dump.sql --tenant-value 123 -o tenant.sql`)
+
+> [!NOTE]
+> Requires one of: `--tenant-value` or `--tenant-values`
+
+## Usage
+
+```bash
+sql-splitter shard <INPUT> --tenant-value <VALUE> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Extract single tenant
+sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql
+
+# Auto-detect tenant column
+sql-splitter shard dump.sql --tenant-value 5 -o tenant.sql
+
+# Explicit tenant column
+sql-splitter shard dump.sql --tenant-column account_id --tenant-value 42 -o out.sql
+
+# Extract multiple tenants
+sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/
+
+# With progress
+sql-splitter shard dump.sql --tenant-value 123 -o tenant.sql --progress
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--output` | `-o` | Output SQL file or directory | stdout |
+| `--dialect` | `-d` | SQL dialect | auto-detect |
+| `--tenant-column` | | Column name for tenant identification | auto-detect |
+| `--tenant-value` | | Single tenant value to extract | - |
+| `--tenant-values` | | Multiple tenant values (comma-separated) | - |
+| `--root-tables` | | Explicit root tables with tenant column | auto |
+| `--include-global` | | Global table handling: `none`, `lookups`, `all` | `lookups` |
+| `--config` | `-c` | YAML config file for table classification | - |
+| `--max-selected-rows` | | Maximum rows to select | unlimited |
+| `--no-limit` | | Disable row limit | false |
+| `--strict-fk` | | Fail if any FK integrity issues | false |
+| `--no-schema` | | Exclude CREATE TABLE statements | false |
+| `--progress` | `-p` | Show progress bar | false |
+| `--dry-run` | | Preview without writing | false |
+| `--json` | | Output as JSON | false |
+
+## Tenant Column Detection
+
+sql-splitter auto-detects common tenant columns:
+
+- `tenant_id`
+- `company_id`
+- `account_id`
+- `org_id`
+- `organization_id`
+- `workspace_id`
+
+Override with `--tenant-column`:
+
+```bash
+sql-splitter shard dump.sql --tenant-column customer_id --tenant-value 42
+```
+
+## Multiple Tenants
+
+Extract multiple tenants to separate files:
+
+```bash
+sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/
+```
+
+Creates:
+```
+shards/
+├── tenant_1.sql
+├── tenant_2.sql
+└── tenant_3.sql
+```
+
+## Global Tables
+
+The `--include-global` option controls shared/lookup tables:
+
+- `none`: Skip global tables
+- `lookups`: Include small lookup tables (default)
+- `all`: Include all non-tenant tables
+
+## FK Traversal
+
+Sharding follows foreign key relationships:
+
+1. Finds rows matching tenant value in root tables
+2. Follows FKs to include related rows
+3. Ensures complete, consistent tenant slice
+
+## See Also
+
+- [`sample`](/commands/sample) - Create reduced datasets
+- [`split`](/commands/split) - Split by table
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

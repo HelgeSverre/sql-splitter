@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1200, height=630">
+    <title>sql-splitter split Command</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 1200px;
+            height: 630px;
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%);
+            font-family: 'Monda', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #e6edf3;
+            display: flex;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Animated grid background */
+        body::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(88, 166, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(88, 166, 255, 0.03) 1px, transparent 1px);
+            background-size: 30px 30px;
+            pointer-events: none;
+        }
+
+        /* Subtle glow orbs */
+        body::after {
+            content: '';
+            position: absolute;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, rgba(88, 166, 255, 0.08) 0%, transparent 70%);
+            top: -100px;
+            right: -100px;
+            pointer-events: none;
+        }
+
+        .left-panel {
+            flex: 1;
+            padding: 50px 60px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            z-index: 1;
+        }
+
+        .right-panel {
+            width: 380px;
+            background: rgba(255, 255, 255, 0.02);
+            border-left: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 50px 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            z-index: 1;
+        }
+
+        .category-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #58a6ff;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 24px;
+        }
+
+        .category-badge svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .command-name {
+            font-size: 64px;
+            font-weight: 700;
+            letter-spacing: -2px;
+            margin-bottom: 12px;
+            background: linear-gradient(135deg, #e6edf3 0%, #58a6ff 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .command-tagline {
+            font-size: 20px;
+            color: #8b949e;
+            margin-bottom: 32px;
+            line-height: 1.5;
+        }
+
+        .syntax-box {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 20px 24px;
+            margin-bottom: 28px;
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 16px;
+            line-height: 1.6;
+        }
+
+        .prompt { color: #3fb950; }
+        .cmd { color: #79c0ff; }
+        .arg { color: #ffa657; }
+        .opt { color: #d2a8ff; }
+
+        .flags-title {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: #6e7681;
+            margin-bottom: 14px;
+        }
+
+        .flags-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .flag-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(88, 166, 255, 0.1);
+            border: 1px solid rgba(88, 166, 255, 0.2);
+            border-radius: 20px;
+            padding: 8px 14px;
+            font-size: 14px;
+            font-family: "SF Mono", ui-monospace, monospace;
+        }
+
+        .flag-pill .flag { color: #79c0ff; }
+        .flag-pill .desc { color: #8b949e; font-family: 'Monda', sans-serif; font-weight: 400; }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 30px;
+        }
+
+        .mini-logo {
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 36px;
+            font-weight: 700;
+            color: #58a6ff;
+        }
+
+        .project-name {
+            font-size: 18px;
+            font-weight: 600;
+            color: #8b949e;
+        }
+
+        .example-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: #6e7681;
+            margin-bottom: 14px;
+        }
+
+        .example-code {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 14px;
+            line-height: 1.7;
+            color: #e6edf3;
+        }
+
+        .example-code .comment { color: #6e7681; }
+    </style>
+</head>
+<body>
+    <div class="left-panel">
+        <div class="category-badge">
+            <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.5 3.5a1.5 1.5 0 013 0V4a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-.5a1.5 1.5 0 010-3h.5a1 1 0 011 1V7a1 1 0 00-1-1h-3a1 1 0 01-1-1v-.5zM5 8a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H6a1 1 0 01-1-1V8z"/></svg>
+            Command
+        </div>
+        <h1 class="command-name">split</h1>
+        <p class="command-tagline">Split a SQL dump file into individual table files at 600+ MB/s</p>
+
+        <div class="syntax-box">
+            <span class="prompt">$</span> <span class="cmd">sql-splitter</span> <span class="opt">split</span> <span class="arg">&lt;INPUT&gt;</span> <span class="opt">[OPTIONS]</span>
+        </div>
+
+        <p class="flags-title">Key Options</p>
+        <div class="flags-grid">
+            <div class="flag-pill"><span class="flag">--output, -o</span> <span class="desc">Output directory</span></div>
+            <div class="flag-pill"><span class="flag">--dialect</span> <span class="desc">mysql | postgres | sqlite</span></div>
+            <div class="flag-pill"><span class="flag">--tables</span> <span class="desc">Filter specific tables</span></div>
+            <div class="flag-pill"><span class="flag">--schema-only</span> <span class="desc">DDL statements only</span></div>
+        </div>
+    </div>
+
+    <div class="right-panel">
+        <div class="logo-section">
+            <span class="mini-logo">;</span>
+            <span class="project-name">sql-splitter</span>
+        </div>
+        <p class="example-title">Example Output</p>
+        <div class="example-code">
+            <span class="comment"># Split database.sql into tables/</span><br>
+            $ sql-splitter split database.sql -o tables/<br><br>
+            <span class="comment"># Output structure:</span><br>
+            tables/<br>
+            ├── users.sql<br>
+            ├── orders.sql<br>
+            └── _global.sql
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,114 @@
+---
+title: Memory & Streaming
+description: How sql-splitter handles large files efficiently
+---
+
+sql-splitter uses a streaming architecture to handle files of any size with constant memory.
+
+## The Problem
+
+Traditional approaches load the entire file into memory:
+
+```python
+# DON'T DO THIS
+with open("dump.sql") as f:
+    content = f.read()  # Loads entire file
+    process(content)
+```
+
+For a 10 GB file, this uses 10+ GB of RAM.
+
+## The Solution: Streaming
+
+sql-splitter processes files incrementally:
+
+1. Read a chunk (64 KB default)
+2. Parse statements in the chunk
+3. Write output immediately
+4. Release memory
+5. Repeat
+
+Memory stays constant at ~50 MB regardless of file size.
+
+## How It Works
+
+### Input Streaming
+
+```
+File → [64 KB Buffer] → Parser → Statement
+```
+
+The parser maintains state across chunk boundaries, handling:
+- Multi-line strings
+- Escaped characters
+- Statement boundaries
+
+### Output Streaming
+
+```
+Statement → [64 KB Buffer] → File
+```
+
+Output is written immediately, not buffered in memory.
+
+### Compression Streaming
+
+Compressed files are decompressed on-the-fly:
+
+```
+compressed.sql.gz → [Decompressor] → [64 KB Buffer] → Parser
+```
+
+Only the decompression buffer exists in memory, not the full file.
+
+## Memory Profile
+
+| File Size | Memory Usage |
+|-----------|--------------|
+| 10 MB | ~50 MB |
+| 100 MB | ~50 MB |
+| 1 GB | ~50 MB |
+| 10 GB | ~50 MB |
+| 100 GB | ~50 MB |
+
+## Commands That Stream
+
+All commands use streaming:
+
+| Command | Streaming I/O |
+|---------|---------------|
+| `split` | Read → Write multiple files |
+| `merge` | Read multiple → Write one |
+| `analyze` | Read → Statistics in memory |
+| `convert` | Read → Transform → Write |
+| `validate` | Read → Validate → Report |
+| `sample` | Read → Filter → Write |
+| `shard` | Read → Filter → Write |
+| `diff` | Read both → Compare → Report |
+| `redact` | Read → Transform → Write |
+| `order` | Read → Reorder (memory for graph) |
+| `query` | Read → Import to DuckDB |
+
+## Exceptions
+
+A few operations require more memory:
+
+### FK Graph Building
+
+`order` and `graph` commands build an in-memory graph of table relationships. For schemas with thousands of tables, this can use more memory.
+
+### Query Import
+
+`query` imports data into DuckDB, which uses memory proportional to data size. Use `--disk` for large files:
+
+```bash
+sql-splitter query huge.sql "SELECT ..." --disk
+```
+
+### Diff Data Comparison
+
+`diff` with data comparison tracks primary keys in memory. Use `--max-pk-entries` to limit:
+
+```bash
+sql-splitter diff old.sql new.sql --max-pk-entries 1000000
+```

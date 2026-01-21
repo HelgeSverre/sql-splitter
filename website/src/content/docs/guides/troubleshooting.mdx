@@ -1,0 +1,338 @@
+---
+title: Troubleshooting
+description: Common errors and solutions
+---
+
+Solutions to common issues when using sql-splitter.
+
+## Installation Issues
+
+### "command not found: sql-splitter"
+
+The binary isn't in your PATH.
+
+**Cargo install location:**
+```bash
+# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Then reload
+source ~/.bashrc  # or ~/.zshrc
+```
+
+**Verify installation:**
+```bash
+which sql-splitter
+# Should output: /Users/you/.cargo/bin/sql-splitter
+```
+
+### Build fails with "linker cc not found"
+
+Missing C compiler on Linux.
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install build-essential
+
+# Fedora/RHEL
+sudo dnf install gcc
+
+# Then retry
+cargo install sql-splitter
+```
+
+### Build fails on Apple Silicon
+
+Ensure you have Xcode command line tools:
+
+```bash
+xcode-select --install
+```
+
+## Dialect Detection Issues
+
+### "Could not detect SQL dialect"
+
+sql-splitter analyzes the first ~1000 lines to detect the dialect. If your dump starts with generic SQL, detection may fail.
+
+**Solution:** Explicitly specify the dialect:
+
+```bash
+sql-splitter split dump.sql -o output/ --dialect mysql
+sql-splitter split dump.sql -o output/ --dialect postgres
+```
+
+### Wrong dialect detected
+
+If auto-detection picks the wrong dialect:
+
+```bash
+# Force specific dialect
+sql-splitter analyze dump.sql --dialect postgres
+
+# Check what was detected
+sql-splitter analyze dump.sql --json | jq '.dialect'
+```
+
+## Memory Issues
+
+### "memory allocation failed" or OOM killed
+
+This shouldn't happen with normal sql-splitter commands (they use ~50MB constant memory). If it does:
+
+1. **Check for memory-intensive commands:** `validate` and `diff` with FK checks can use more memory on very large files.
+
+2. **Disable FK checks for validation:**
+   ```bash
+   sql-splitter validate huge.sql --no-fk-checks
+   ```
+
+3. **Use disk mode for query:**
+   ```bash
+   sql-splitter query huge.sql "SELECT ..." --disk
+   ```
+
+4. **Limit rows per table:**
+   ```bash
+   sql-splitter validate huge.sql --max-rows-per-table 100000
+   ```
+
+## File Issues
+
+### "No such file or directory"
+
+```bash
+# Check file exists
+ls -la dump.sql
+
+# Use absolute path
+sql-splitter split /full/path/to/dump.sql -o output/
+
+# Check permissions
+chmod +r dump.sql
+```
+
+### "Permission denied" on output
+
+```bash
+# Check output directory is writable
+mkdir -p output/
+chmod +w output/
+
+# Or write to a different location
+sql-splitter split dump.sql -o ~/output/
+```
+
+### Compressed file not recognized
+
+Ensure the file extension matches the compression format:
+
+| Format | Extension |
+|--------|-----------|
+| Gzip | `.gz` |
+| Bzip2 | `.bz2` |
+| XZ | `.xz` |
+| Zstandard | `.zst` |
+
+```bash
+# Rename if needed
+mv dump.sql.gzip dump.sql.gz
+
+# Then process
+sql-splitter analyze dump.sql.gz
+```
+
+## Parsing Issues
+
+### "0 tables found"
+
+The dump file might not contain recognizable SQL statements.
+
+**Check file contents:**
+```bash
+head -100 dump.sql
+```
+
+**Common causes:**
+- Binary format (use `pg_dump -Fp` for plain text)
+- Non-SQL file
+- Empty file
+- Encoding issues (see below)
+
+### Encoding errors or garbled output
+
+sql-splitter expects UTF-8 encoding.
+
+**Convert encoding:**
+```bash
+# Check current encoding
+file dump.sql
+
+# Convert from Latin-1 to UTF-8
+iconv -f ISO-8859-1 -t UTF-8 dump.sql > dump-utf8.sql
+
+# Convert from Windows-1252
+iconv -f CP1252 -t UTF-8 dump.sql > dump-utf8.sql
+```
+
+### Statements split incorrectly
+
+Multi-line strings or unusual quoting can cause issues.
+
+**Workaround:** Try a different dialect:
+```bash
+# PostgreSQL uses different escaping than MySQL
+sql-splitter split dump.sql --dialect postgres
+```
+
+## Validation Issues
+
+### "Duplicate primary key" false positives
+
+If you're validating a dump with intentional duplicates (e.g., for testing):
+
+```bash
+# Skip PK/FK checks
+sql-splitter validate dump.sql --no-fk-checks
+```
+
+### Validation too slow
+
+PK/FK validation reads all data. Speed it up:
+
+```bash
+# Limit rows checked per table
+sql-splitter validate dump.sql --max-rows-per-table 10000
+
+# Skip FK checks entirely
+sql-splitter validate dump.sql --no-fk-checks
+```
+
+## Query Command Issues
+
+### "DuckDB error" or query fails
+
+**Common causes:**
+
+1. **SQL syntax:** DuckDB uses standard SQL, not MySQL/PostgreSQL extensions
+   ```sql
+   -- MySQL LIMIT with offset
+   SELECT * FROM users LIMIT 10, 5  -- Won't work
+   
+   -- Standard SQL
+   SELECT * FROM users LIMIT 5 OFFSET 10  -- Works
+   ```
+
+2. **Column name conflicts:** Use quotes for reserved words
+   ```sql
+   SELECT "order", "user" FROM orders
+   ```
+
+3. **Large file:** Use disk mode
+   ```bash
+   sql-splitter query huge.sql "SELECT ..." --disk
+   ```
+
+### Cache issues
+
+```bash
+# Clear corrupted cache
+sql-splitter query --clear-cache
+
+# List cached databases
+sql-splitter query --list-cache
+```
+
+## Convert Issues
+
+### "Unsupported feature" warnings
+
+Some SQL features don't have direct equivalents across dialects:
+
+- **ENUM types** → Converted to VARCHAR with CHECK constraint
+- **AUTO_INCREMENT** → Converted to SERIAL (PostgreSQL) or IDENTITY (MSSQL)
+- **Stored procedures** → Skipped (out of scope)
+
+Use `--strict` to fail on unsupported features instead of warning:
+```bash
+sql-splitter convert dump.sql --to postgres --strict
+```
+
+### COPY statements not converted
+
+PostgreSQL `COPY FROM stdin` is converted to INSERT statements:
+
+```bash
+# This works
+sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
+```
+
+If you see raw COPY blocks in output, ensure dialect was detected correctly:
+```bash
+sql-splitter convert pg_dump.sql --from postgres --to mysql -o mysql.sql
+```
+
+## Sample/Shard Issues
+
+### "No rows sampled" or empty output
+
+**Check that tables exist:**
+```bash
+sql-splitter analyze dump.sql --json | jq '.tables[].name'
+```
+
+**Ensure required flags are set:**
+```bash
+# sample requires --percent OR --rows
+sql-splitter sample dump.sql --percent 10 -o sample.sql
+
+# shard requires --tenant-value OR --tenant-values
+sql-splitter shard dump.sql --tenant-value 123 -o tenant.sql
+```
+
+### FK preservation issues
+
+If related rows are missing:
+
+```bash
+# Enable FK preservation
+sql-splitter sample dump.sql --percent 10 --preserve-relations -o sample.sql
+
+# Use strict mode to catch issues
+sql-splitter sample dump.sql --percent 10 --preserve-relations --strict-fk -o sample.sql
+```
+
+## Getting Help
+
+### Verbose output
+
+Most commands support `--progress` for visibility:
+
+```bash
+sql-splitter split dump.sql -o output/ --progress
+```
+
+### JSON for debugging
+
+Use `--json` for machine-readable output you can inspect:
+
+```bash
+sql-splitter analyze dump.sql --json | jq '.'
+```
+
+### Report bugs
+
+If you've found a bug:
+
+1. Check [existing issues](https://github.com/helgesverre/sql-splitter/issues)
+2. Create a [new issue](https://github.com/helgesverre/sql-splitter/issues/new) with:
+   - sql-splitter version (`sql-splitter --version`)
+   - OS and architecture
+   - Minimal reproduction steps
+   - Sample SQL (anonymized if needed)
+
+## See Also
+
+- [Exit Codes](/reference/exit-codes) - Understanding return codes
+- [Compression](/reference/compression) - Supported formats
+- [Dialects](/reference/dialects) - Dialect-specific information

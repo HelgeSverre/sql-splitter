@@ -1,0 +1,121 @@
+---
+title: Testing
+description: Running and writing tests
+---
+
+## Run Tests
+
+```bash
+# All tests
+cargo test
+
+# Specific test
+cargo test test_split_mysql
+
+# With output
+cargo test -- --nocapture
+```
+
+## Test Categories
+
+### Unit Tests
+
+In-module tests for specific functions:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_create_table() {
+        // ...
+    }
+}
+```
+
+### Integration Tests
+
+End-to-end tests in `tests/`:
+
+```rust
+// tests/split_tests.rs
+#[test]
+fn test_split_mysql_dump() {
+    let output = Command::new("./target/release/sql-splitter")
+        .args(["split", "tests/fixtures/mysql.sql", "-o", "output/"])
+        .output()
+        .expect("failed to execute");
+
+    assert!(output.status.success());
+}
+```
+
+### Real-World Verification
+
+Test against real SQL dumps:
+
+```bash
+make verify-realworld
+```
+
+## Test Fixtures
+
+Located in `tests/fixtures/`:
+
+```
+tests/fixtures/
+├── mysql/
+│   ├── simple.sql
+│   ├── multi_table.sql
+│   └── compressed.sql.gz
+├── postgres/
+│   ├── simple.sql
+│   └── with_copy.sql
+├── sqlite/
+│   └── simple.sql
+└── mssql/
+    └── simple.sql
+```
+
+## Writing Tests
+
+### Test a New Feature
+
+1. Create fixture files in `tests/fixtures/`
+2. Write unit tests in the module
+3. Write integration test in `tests/`
+4. Run `cargo test`
+
+### Test Fixture Example
+
+```sql
+-- tests/fixtures/mysql/my_feature.sql
+CREATE TABLE test (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100)
+);
+
+INSERT INTO test VALUES (1, 'Alice');
+INSERT INTO test VALUES (2, 'Bob');
+```
+
+### Test Code Example
+
+```rust
+#[test]
+fn test_my_feature() {
+    let result = my_function("tests/fixtures/mysql/my_feature.sql");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().table_count, 1);
+}
+```
+
+## Code Coverage
+
+```bash
+cargo install cargo-tarpaulin
+cargo tarpaulin --out Html
+```
+
+Open `tarpaulin-report.html` to view coverage.

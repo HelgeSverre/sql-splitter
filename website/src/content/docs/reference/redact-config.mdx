@@ -1,0 +1,251 @@
+---
+title: Redact Config
+description: YAML configuration format for data redaction
+---
+
+The redact command supports YAML configuration for complex redaction rules.
+
+## Basic Structure
+
+```yaml
+# Global settings
+seed: 12345
+locale: en
+
+# Default strategy for unmatched columns
+defaults:
+  strategy: skip
+
+# Column-specific rules
+rules:
+  - column: "*.email"
+    strategy: hash
+  - column: "*.name"
+    strategy: fake
+    generator: name
+
+# Tables to skip entirely
+skip_tables:
+  - schema_migrations
+  - ar_internal_metadata
+```
+
+## Global Settings
+
+### seed
+
+Random seed for reproducible fake data generation:
+
+```yaml
+seed: 12345
+```
+
+Same seed = same fake data on every run.
+
+### locale
+
+Locale for fake data generation:
+
+```yaml
+locale: en  # English (default)
+locale: de_de  # German
+locale: fr_fr  # French
+locale: ja_jp  # Japanese
+locale: zh_cn  # Chinese
+```
+
+## Rules
+
+Each rule matches columns and applies a strategy.
+
+### Column Patterns
+
+```yaml
+rules:
+  # All columns named 'email' in any table
+  - column: "*.email"
+
+  # Specific table.column
+  - column: "users.password"
+
+  # Wildcard in column name
+  - column: "*.ssn*"
+
+  # Multiple patterns (comma-separated)
+  - column: "*.phone,*.mobile,*.fax"
+```
+
+### Strategies
+
+#### null
+
+Replace with NULL:
+
+```yaml
+- column: "*.ssn"
+  strategy: null
+```
+
+#### constant
+
+Replace with a fixed value:
+
+```yaml
+- column: "*.status"
+  strategy: constant
+  value: "REDACTED"
+```
+
+#### hash
+
+SHA256 hash (deterministic):
+
+```yaml
+- column: "*.email"
+  strategy: hash
+```
+
+Same input always produces same hash, preserving FK relationships.
+
+#### fake
+
+Generate realistic fake data:
+
+```yaml
+- column: "*.name"
+  strategy: fake
+  generator: name
+```
+
+Available generators:
+
+| Generator | Example Output |
+|-----------|----------------|
+| `email` | `jessica.smith@example.com` |
+| `name` | `Robert Johnson` |
+| `first_name` | `Sarah` |
+| `last_name` | `Williams` |
+| `phone` | `+1 (555) 234-5678` |
+| `address` | `123 Oak Street, Springfield, IL` |
+| `city` | `Portland` |
+| `state` | `California` |
+| `zip` | `90210` |
+| `country` | `United States` |
+| `company` | `Acme Corporation` |
+| `job_title` | `Software Engineer` |
+| `username` | `jsmith42` |
+| `url` | `https://example.com/page` |
+| `ip` | `192.168.1.100` |
+| `ipv6` | `2001:db8::1` |
+| `uuid` | `550e8400-e29b-41d4-...` |
+| `date` | `1985-07-23` |
+| `datetime` | `2023-01-15 14:30:00` |
+| `credit_card` | `4532015112830366` |
+| `iban` | `DE89370400440532013000` |
+| `ssn` | `123-45-6789` |
+| `lorem` | `Lorem ipsum dolor sit...` |
+| `paragraph` | `Full paragraph of text...` |
+| `sentence` | `A complete sentence.` |
+
+#### mask
+
+Partial masking with pattern:
+
+```yaml
+- column: "*.credit_card"
+  strategy: mask
+  pattern: "****-****-****-XXXX"
+```
+
+Pattern symbols:
+- `*` - Replace with asterisk
+- `X` - Keep original character
+- `#` - Random digit
+
+Examples:
+- `****-****-****-XXXX` → `****-****-****-1234`
+- `XXX-XX-####` → `123-45-6789` (SSN with random last 4)
+- `***@XXXXX` → `***@gmail.com` (mask email prefix)
+
+#### shuffle
+
+Redistribute values within column:
+
+```yaml
+- column: "*.salary"
+  strategy: shuffle
+```
+
+Preserves distribution but breaks correlation with other columns.
+
+#### skip
+
+No redaction (passthrough):
+
+```yaml
+- column: "admins.email"
+  strategy: skip
+```
+
+## skip_tables
+
+Skip entire tables from redaction:
+
+```yaml
+skip_tables:
+  - schema_migrations
+  - ar_internal_metadata
+  - _global
+```
+
+## Complete Example
+
+```yaml
+seed: 42
+locale: en
+
+defaults:
+  strategy: skip
+
+rules:
+  # PII
+  - column: "*.email"
+    strategy: hash
+  - column: "*.name,*.first_name,*.last_name"
+    strategy: fake
+    generator: name
+  - column: "*.phone,*.mobile"
+    strategy: fake
+    generator: phone
+  - column: "*.ssn"
+    strategy: null
+  - column: "*.password"
+    strategy: constant
+    value: "$2a$10$REDACTED"
+
+  # Financial
+  - column: "*.credit_card"
+    strategy: mask
+    pattern: "****-****-****-XXXX"
+  - column: "*.salary"
+    strategy: shuffle
+
+  # Addresses
+  - column: "*.address,*.street"
+    strategy: fake
+    generator: address
+  - column: "*.city"
+    strategy: fake
+    generator: city
+  - column: "*.zip,*.postal_code"
+    strategy: fake
+    generator: zip
+
+  # Exceptions
+  - column: "admins.email"
+    strategy: skip
+
+skip_tables:
+  - schema_migrations
+  - ar_internal_metadata
+```

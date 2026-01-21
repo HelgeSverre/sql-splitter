@@ -1,0 +1,128 @@
+---
+title: Unix Piping
+description: Compose sql-splitter with Unix tools
+---
+
+sql-splitter follows Unix philosophy and works well in pipelines.
+
+## Standard I/O
+
+Omit `-o` to write to stdout, enabling pipes:
+
+```bash
+sql-splitter convert mysql.sql --to postgres | psql "$PG_CONN"
+```
+
+Read from stdin with `-`:
+
+```bash
+cat dump.sql | sql-splitter analyze -
+```
+
+**Note:** Most commands default to stdout when `-o` is not specified.
+
+## Pipeline Examples
+
+### Convert and Import
+
+```bash
+# MySQL to PostgreSQL, direct import
+sql-splitter convert mysql.sql.gz --to postgres | psql "$PG_CONN"
+
+# PostgreSQL to MySQL, direct import
+sql-splitter convert pg_dump.sql --to mysql | mysql -u user -p db
+```
+
+### Compress on the Fly
+
+```bash
+# Merge and compress (omit -o to write to stdout)
+sql-splitter merge tables/ | gzip > merged.sql.gz
+
+# Merge and compress with zstd
+sql-splitter merge tables/ | zstd > merged.sql.zst
+```
+
+### Filter and Process
+
+```bash
+# Sample, redact, and save
+sql-splitter sample prod.sql --percent 10 | \
+  sql-splitter redact - --hash "*.email" -o dev.sql
+```
+
+### Parallel Validation
+
+```bash
+# Validate many files in parallel
+find dumps -name '*.sql.gz' -print0 | \
+  xargs -0 -n1 -P4 sql-splitter validate --strict
+```
+
+### Decompress on the Fly
+
+```bash
+# Decompress, process, recompress
+zcat backup.sql.gz | \
+  sql-splitter convert - --to postgres | \
+  gzip > backup_pg.sql.gz
+```
+
+## Combining Commands
+
+### Full Dev Dataset Pipeline
+
+```bash
+sql-splitter sample prod.sql.gz --percent 10 --preserve-relations | \
+  sql-splitter redact - --hash "*.email" --fake "*.name" | \
+  sql-splitter validate - --strict && \
+  echo "Valid dev dataset created"
+```
+
+### Migration with Validation
+
+```bash
+# Validate, convert, validate, import
+sql-splitter validate source.sql --strict && \
+  sql-splitter convert source.sql --to postgres | \
+  sql-splitter validate - --dialect postgres --strict && \
+  sql-splitter convert source.sql --to postgres | \
+  psql "$PG_CONN"
+```
+
+## Exit Code Handling
+
+```bash
+# Stop on first failure
+set -e
+sql-splitter validate dump.sql --strict
+sql-splitter convert dump.sql --to postgres -o output.sql
+
+# Or explicit checking
+if sql-splitter validate dump.sql --strict; then
+  sql-splitter convert dump.sql --to postgres -o output.sql
+else
+  echo "Validation failed"
+  exit 1
+fi
+```
+
+## JSON Pipeline
+
+```bash
+# Extract specific info with jq
+sql-splitter analyze dump.sql --json | jq '.tables[].name'
+
+# Filter validation results
+sql-splitter validate "*.sql" --json | \
+  jq '.results[] | select(.passed == false)'
+```
+
+## Tee for Logging
+
+```bash
+# Process and log
+sql-splitter convert dump.sql --to postgres | \
+  tee conversion.log | \
+  psql "$PG_CONN"
+```

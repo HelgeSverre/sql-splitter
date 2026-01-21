@@ -1,0 +1,102 @@
+---
+title: Type Mappings
+description: Data type conversions between SQL dialects
+---
+
+sql-splitter handles 50+ data type mappings during conversion.
+
+## Numeric Types
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `TINYINT` | `SMALLINT` | `INTEGER` | `TINYINT` |
+| `SMALLINT` | `SMALLINT` | `INTEGER` | `SMALLINT` |
+| `MEDIUMINT` | `INTEGER` | `INTEGER` | `INT` |
+| `INT` | `INTEGER` | `INTEGER` | `INT` |
+| `BIGINT` | `BIGINT` | `INTEGER` | `BIGINT` |
+| `FLOAT` | `REAL` | `REAL` | `FLOAT` |
+| `DOUBLE` | `DOUBLE PRECISION` | `REAL` | `FLOAT` |
+| `DECIMAL(p,s)` | `DECIMAL(p,s)` | `REAL` | `DECIMAL(p,s)` |
+
+## String Types
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `CHAR(n)` | `CHAR(n)` | `TEXT` | `NCHAR(n)` |
+| `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `NVARCHAR(n)` |
+| `TEXT` | `TEXT` | `TEXT` | `NVARCHAR(MAX)` |
+| `MEDIUMTEXT` | `TEXT` | `TEXT` | `NVARCHAR(MAX)` |
+| `LONGTEXT` | `TEXT` | `TEXT` | `NVARCHAR(MAX)` |
+
+## Binary Types
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `BINARY(n)` | `BYTEA` | `BLOB` | `BINARY(n)` |
+| `VARBINARY(n)` | `BYTEA` | `BLOB` | `VARBINARY(n)` |
+| `BLOB` | `BYTEA` | `BLOB` | `VARBINARY(MAX)` |
+| `MEDIUMBLOB` | `BYTEA` | `BLOB` | `VARBINARY(MAX)` |
+| `LONGBLOB` | `BYTEA` | `BLOB` | `VARBINARY(MAX)` |
+
+## Date/Time Types
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `DATE` | `DATE` | `TEXT` | `DATE` |
+| `TIME` | `TIME` | `TEXT` | `TIME` |
+| `DATETIME` | `TIMESTAMP` | `TEXT` | `DATETIME2` |
+| `TIMESTAMP` | `TIMESTAMP` | `TEXT` | `DATETIME2` |
+| `YEAR` | `SMALLINT` | `INTEGER` | `SMALLINT` |
+
+## Boolean Types
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `TINYINT(1)` | `BOOLEAN` | `INTEGER` | `BIT` |
+| `BOOL` | `BOOLEAN` | `INTEGER` | `BIT` |
+
+## Auto-Increment
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `INT AUTO_INCREMENT` | `SERIAL` | `INTEGER PRIMARY KEY` | `INT IDENTITY(1,1)` |
+| `BIGINT AUTO_INCREMENT` | `BIGSERIAL` | `INTEGER PRIMARY KEY` | `BIGINT IDENTITY(1,1)` |
+
+## JSON Types
+
+| MySQL | PostgreSQL | SQLite | MSSQL |
+|-------|------------|--------|-------|
+| `JSON` | `JSONB` | `TEXT` | `NVARCHAR(MAX)` |
+
+## Special Types
+
+### ENUM (MySQL)
+
+MySQL ENUMs are converted to:
+- **PostgreSQL**: `VARCHAR(255)` with CHECK constraint
+- **SQLite**: `TEXT`
+- **MSSQL**: `NVARCHAR(255)`
+
+### UUID (PostgreSQL)
+
+PostgreSQL `UUID` is converted to:
+- **MySQL**: `CHAR(36)`
+- **SQLite**: `TEXT`
+- **MSSQL**: `UNIQUEIDENTIFIER`
+
+### Arrays (PostgreSQL)
+
+PostgreSQL arrays generate a warning and are converted to:
+- **MySQL**: `JSON`
+- **SQLite**: `TEXT`
+- **MSSQL**: `NVARCHAR(MAX)`
+
+## Unsupported Features
+
+These features generate warnings during conversion:
+
+- Custom types (`CREATE TYPE`)
+- Triggers (`CREATE TRIGGER`)
+- Stored procedures
+- Views with dialect-specific syntax
+- Partitioning

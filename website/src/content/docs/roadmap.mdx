@@ -1,0 +1,86 @@
+---
+title: Roadmap
+description: sql-splitter development roadmap and planned features
+---
+
+**Current Version**: 1.12.6
+
+## Completed Features
+
+All core features have been released:
+
+| Version | Feature | Status |
+|---------|---------|--------|
+| v1.4.0 | Test Data Generator + Merge | Released |
+| v1.5.0 | Sample (FK-aware sampling) | Released |
+| v1.6.0 | Shard (tenant extraction) | Released |
+| v1.7.0 | Convert (dialect conversion) | Released |
+| v1.8.x | Validate + Glob Patterns | Released |
+| v1.9.x | Diff (schema + data comparison) | Released |
+| v1.10.0 | Redact (data anonymization) | Released |
+| v1.11.0 | Graph + Order (ERD + FK ordering) | Released |
+| v1.12.0 | Query (DuckDB analytics) | Released |
+| v1.12.x | MSSQL Support (fourth dialect) | Released |
+
+## Upcoming Features
+
+### v1.14.0 — Migration Generation
+
+Generate ALTER statements from schema differences:
+
+```bash
+sql-splitter migrate old.sql new.sql -o migration.sql
+sql-splitter migrate old.sql new.sql --rollback -o rollback.sql
+```
+
+**Features:**
+- Generate migration scripts (ALTER TABLE, CREATE INDEX)
+- Multi-dialect migration output
+- Rollback script generation
+- Breaking change detection
+
+### v2.0.0 — Parallel Processing
+
+Multi-threaded performance:
+
+```bash
+sql-splitter split dump.sql -o tables/ --parallel 8
+sql-splitter convert dump.sql --parallel auto
+```
+
+**Targets:**
+- 4x speedup on 8-core systems
+- Linear scaling up to available cores
+- Memory-bounded parallel processing
+
+### v2.1.0 — Schema Inference
+
+Generate DDL from data-only dumps:
+
+```bash
+sql-splitter infer data-only.sql -o schema.sql
+sql-splitter infer data.csv --table users --dialect mysql
+```
+
+**Features:**
+- Type inference from INSERT values
+- Primary key detection
+- Index suggestion
+- FK inference (heuristic)
+
+## Non-Goals
+
+These features are explicitly out of scope:
+
+- **GUI interface** — CLI only
+- **Database connection** — File-based only
+- **Binary backup formats** — No .bak (MSSQL)
+- **Stored procedure conversion** — Too complex
+- **Real-time streaming** — Batch processing only
+- **Cloud storage integration** — Use pipes
+
+## Contributing
+
+Want to contribute to a roadmap feature? See [Contributing](/contributing/).
+
+For feature requests, open an issue on [GitHub](https://github.com/helgesverre/sql-splitter/issues).

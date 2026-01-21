@@ -1,0 +1,99 @@
+---
+title: sample
+description: Create reduced datasets with FK preservation
+---
+
+Create smaller test datasets while preserving foreign key relationships.
+
+**Alias:** `sa` (e.g., `sql-splitter sa dump.sql --percent 10 -o dev.sql`)
+
+> [!NOTE]
+> Requires one of: `--percent`, `--rows`, or `--config`
+
+## Usage
+
+```bash
+sql-splitter sample <INPUT> [OPTIONS]
+```
+
+## Examples
+
+```bash
+# Sample 10% of rows
+sql-splitter sample dump.sql -o sampled.sql --percent 10
+
+# Sample fixed rows per table
+sql-splitter sample dump.sql -o sampled.sql --rows 1000
+
+# Preserve FK relationships
+sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
+
+# Reproducible sampling with seed
+sql-splitter sample dump.sql -o dev.sql --percent 10 --seed 42
+
+# Sample specific tables only
+sql-splitter sample dump.sql -o dev.sql --percent 10 --tables users,orders
+
+# Exclude tables
+sql-splitter sample dump.sql -o dev.sql --percent 10 --exclude logs,events
+```
+
+## Options
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--output` | `-o` | Output SQL file | stdout |
+| `--dialect` | `-d` | SQL dialect | auto-detect |
+| `--percent` | | Sample percentage (1-100) | - |
+| `--rows` | | Sample fixed number of rows per table | - |
+| `--preserve-relations` | | Preserve FK relationships | false |
+| `--tables` | `-t` | Only sample these tables (comma-separated) | all |
+| `--exclude` | `-e` | Exclude these tables (comma-separated) | none |
+| `--root-tables` | | Explicit root tables for sampling | auto |
+| `--include-global` | | Global table handling: `none`, `lookups`, `all` | `lookups` |
+| `--seed` | | Random seed for reproducibility | random |
+| `--config` | `-c` | YAML config file for per-table settings | - |
+| `--max-total-rows` | | Maximum total rows to sample | unlimited |
+| `--no-limit` | | Disable row limit | false |
+| `--strict-fk` | | Fail if any FK integrity issues | false |
+| `--no-schema` | | Exclude CREATE TABLE statements | false |
+| `--progress` | `-p` | Show progress bar | false |
+| `--dry-run` | | Preview without writing | false |
+| `--json` | | Output as JSON | false |
+
+## FK Preservation
+
+With `--preserve-relations`, sql-splitter:
+
+1. Identifies root tables (no incoming FKs)
+2. Samples from root tables first
+3. Follows FKs to include referenced rows
+4. Ensures referential integrity
+
+```bash
+# This ensures if you sample an order, the user and products exist
+sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
+```
+
+## Reproducible Sampling
+
+Use `--seed` for deterministic results:
+
+```bash
+# Same seed = same sample every time
+sql-splitter sample dump.sql -o dev.sql --percent 10 --seed 42
+```
+
+## Global Tables
+
+The `--include-global` option controls lookup tables:
+
+- `none`: Skip global/lookup tables
+- `lookups`: Include small reference tables (default)
+- `all`: Include all tables
+
+## See Also
+
+- [`shard`](/commands/shard) - Extract tenant-specific data
+- [`redact`](/commands/redact) - Anonymize sampled data
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

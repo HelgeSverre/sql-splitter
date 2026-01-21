@@ -1,0 +1,97 @@
+---
+title: completions
+description: Generate shell completion scripts
+---
+
+Generate shell completion scripts for bash, zsh, fish, and PowerShell.
+
+## Usage
+
+```bash
+sql-splitter completions <SHELL>
+```
+
+## Supported Shells
+
+| Shell | Value |
+|-------|-------|
+| Bash | `bash` |
+| Zsh | `zsh` |
+| Fish | `fish` |
+| PowerShell | `powershell` |
+
+## Installation
+
+### Bash
+
+```bash
+# System-wide (requires sudo)
+sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
+
+# User-only
+sql-splitter completions bash >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Zsh
+
+```bash
+# Standard zsh
+sql-splitter completions zsh > "${fpath[1]}/_sql-splitter"
+
+# Oh-my-zsh
+sql-splitter completions zsh > ~/.oh-my-zsh/completions/_sql-splitter
+
+# Then reload
+source ~/.zshrc
+```
+
+### Fish
+
+```bash
+sql-splitter completions fish > ~/.config/fish/completions/sql-splitter.fish
+```
+
+### PowerShell
+
+```powershell
+sql-splitter completions powershell >> $PROFILE
+```
+
+## What Completions Provide
+
+Once installed, pressing `Tab` will autocomplete:
+
+- Command names (`split`, `analyze`, `merge`, etc.)
+- Command aliases (`sp`, `an`, `mg`, etc.)
+- Flag names (`--output`, `--dialect`, etc.)
+- Flag values (e.g., dialect options: `mysql`, `postgres`, `sqlite`, `mssql`)
+
+## Example
+
+```bash
+$ sql-splitter sp<TAB>
+$ sql-splitter split
+
+$ sql-splitter split dump.sql --dia<TAB>
+$ sql-splitter split dump.sql --dialect
+
+$ sql-splitter split dump.sql --dialect <TAB>
+mysql    postgres    sqlite    mssql
+```
+
+## Verification
+
+After installation, test completions:
+
+```bash
+# Type and press Tab
+sql-splitter <TAB>
+
+# Should show all commands:
+# analyze  completions  convert  diff  graph  merge  order  query  redact  sample  shard  split  validate
+```
+
+## See Also
+
+- [Installation](/getting-started/installation) - Initial setup

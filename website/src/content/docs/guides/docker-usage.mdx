@@ -1,0 +1,285 @@
+---
+title: Docker Usage
+description: Running sql-splitter in Docker containers
+---
+
+sql-splitter works seamlessly in Docker containers for CI/CD pipelines and reproducible environments.
+
+## Quick Start
+
+### Using Pre-built Image
+
+```bash
+# Pull and run (when available on Docker Hub)
+docker run --rm -v $(pwd):/data sql-splitter split /data/dump.sql -o /data/tables/
+```
+
+### Building Locally
+
+```bash
+# Clone and build
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+
+# Build optimized image
+docker build -t sql-splitter -f - . <<'EOF'
+FROM rust:1.75-slim AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+COPY --from=builder /app/target/release/sql-splitter /usr/local/bin/
+ENTRYPOINT ["sql-splitter"]
+EOF
+
+# Run
+docker run --rm -v $(pwd):/data sql-splitter analyze /data/dump.sql
+```
+
+## CI/CD Examples
+
+### GitHub Actions
+
+```yaml
+name: Validate SQL Dumps
+
+on:
+  push:
+    paths:
+      - 'migrations/*.sql'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install sql-splitter
+        run: cargo install sql-splitter
+        
+      - name: Validate migrations
+        run: sql-splitter validate "migrations/*.sql" --strict
+        
+      - name: Check for breaking changes
+        run: |
+          sql-splitter diff migrations/prev.sql migrations/current.sql \
+            --format json > diff.json
+          if jq -e '.schema.tables_removed | length > 0' diff.json; then
+            echo "Breaking change: tables removed"
+            exit 1
+          fi
+```
+
+### GitLab CI
+
+```yaml
+validate-sql:
+  image: rust:1.75-slim
+  before_script:
+    - cargo install sql-splitter
+  script:
+    - sql-splitter validate "dumps/*.sql" --strict --json > validation.json
+  artifacts:
+    paths:
+      - validation.json
+    when: always
+```
+
+### CircleCI
+
+```yaml
+version: 2.1
+
+jobs:
+  validate:
+    docker:
+      - image: rust:1.75-slim
+    steps:
+      - checkout
+      - run:
+          name: Install sql-splitter
+          command: cargo install sql-splitter
+      - run:
+          name: Validate SQL dumps
+          command: sql-splitter validate "*.sql" --strict
+```
+
+## Docker Compose
+
+### Development Database Seeding
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: app
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: mysqladmin ping -h localhost
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  seed:
+    image: rust:1.75-slim
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./dumps:/data
+    command: >
+      sh -c "
+        cargo install sql-splitter &&
+        sql-splitter sample /data/prod.sql.gz \
+          --percent 10 \
+          --preserve-relations \
+          -o /data/dev.sql &&
+        sql-splitter redact /data/dev.sql \
+          --hash '*.email' \
+          --fake '*.name' \
+          -o /data/safe.sql
+      "
+```
+
+### Multi-Tenant Extraction
+
+```yaml
+# Extract tenant data for isolated testing
+services:
+  extract-tenant:
+    build:
+      context: .
+      dockerfile: Dockerfile.sql-splitter
+    volumes:
+      - ./dumps:/data
+    command: >
+      shard /data/prod.sql
+        --tenant-column company_id
+        --tenant-values "1,2,3"
+        -o /data/tenants/
+```
+
+## Dockerfile Best Practices
+
+### Multi-stage Build (Smallest Image)
+
+```dockerfile
+# Build stage
+FROM rust:1.75-slim AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y pkg-config libssl-dev
+COPY . .
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/sql-splitter /usr/local/bin/
+ENTRYPOINT ["sql-splitter"]
+```
+
+### With Shell for Piping
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install from GitHub releases
+RUN curl -L https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-linux-amd64.tar.gz | \
+    tar xz -C /usr/local/bin/
+
+# Use shell entrypoint for piping support
+ENTRYPOINT ["/bin/sh", "-c"]
+```
+
+## Volume Mounting
+
+### Read-Only Input
+
+```bash
+# Mount input as read-only, output as read-write
+docker run --rm \
+  -v $(pwd)/input:/input:ro \
+  -v $(pwd)/output:/output \
+  sql-splitter split /input/dump.sql -o /output/tables/
+```
+
+### Working with Compressed Files
+
+```bash
+# Process compressed files (sql-splitter handles .gz, .bz2, .xz, .zst)
+docker run --rm \
+  -v $(pwd):/data \
+  sql-splitter analyze /data/backup.sql.gz --progress
+```
+
+## Performance Tips
+
+### Use Native CPU Features
+
+When building for your specific architecture:
+
+```dockerfile
+FROM rust:1.75-slim AS builder
+WORKDIR /app
+COPY . .
+ENV RUSTFLAGS="-C target-cpu=native"
+RUN cargo build --release
+```
+
+### Memory Limits
+
+sql-splitter uses ~50MB constant memory regardless of file size, so you can set conservative limits:
+
+```bash
+docker run --rm \
+  --memory=256m \
+  -v $(pwd):/data \
+  sql-splitter split /data/huge.sql.gz -o /data/tables/
+```
+
+### Parallel Processing
+
+For many files, run multiple containers:
+
+```bash
+# Process files in parallel using GNU parallel
+find dumps -name '*.sql.gz' | \
+  parallel -j4 docker run --rm -v $(pwd):/data sql-splitter validate /data/{}
+```
+
+## Troubleshooting
+
+### Permission Denied
+
+```bash
+# Run as current user
+docker run --rm \
+  --user $(id -u):$(id -g) \
+  -v $(pwd):/data \
+  sql-splitter split /data/dump.sql -o /data/output/
+```
+
+### File Not Found
+
+```bash
+# Ensure absolute paths inside container
+docker run --rm \
+  -v /absolute/path/to/dumps:/data \
+  sql-splitter analyze /data/dump.sql
+```
+
+## See Also
+
+- [CI Validation](/guides/ci-validation) - Automated validation workflows
+- [Compression](/reference/compression) - Supported compression formats
+- [Performance](/advanced/performance) - Optimization tips
