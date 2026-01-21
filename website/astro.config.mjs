@@ -37,7 +37,6 @@ export default defineConfig({
         },
         {
           label: 'Commands',
-          collapsed: true,
           autogenerate: { directory: 'commands' },
         },
         {
