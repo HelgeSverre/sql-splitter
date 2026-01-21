@@ -1,10 +1,10 @@
-import type { APIRoute } from 'astro';
+import type { APIRoute } from "astro";
 
 export const GET: APIRoute = () => {
   // In production, serve the actual sitemap-index.xml content
   // This avoids XML parse errors from HTML redirects
-  const siteUrl = 'https://sql-splitter.dev';
-  
+  const siteUrl = "https://sql-splitter.dev";
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <sitemap>
@@ -14,7 +14,7 @@ export const GET: APIRoute = () => {
 
   return new Response(xml, {
     headers: {
-      'Content-Type': 'application/xml',
+      "Content-Type": "application/xml",
     },
   });
 };
