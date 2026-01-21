@@ -10,7 +10,7 @@ import starlightGitHubAlerts from 'starlight-github-alerts';
 export default defineConfig({
   site: 'https://sql-splitter.dev',
   integrations: [
-    react(),
+    react({ jsxRuntime: 'classic' }),
     starlight({
       title: 'sql-splitter',
       lastUpdated: true,
@@ -20,7 +20,9 @@ export default defineConfig({
       pagination: true,
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
       plugins: [
-        starlightLinksValidator(),
+        starlightLinksValidator({
+          exclude: ['/schemas/', '/schemas/**'],
+        }),
         starlightGitHubAlerts(),
       ],
       logo: {
