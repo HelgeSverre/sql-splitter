@@ -1,5 +1,5 @@
 import satori from 'satori';
-import { Resvg } from '@resvg/resvg-js';
+import sharp from 'sharp';
 import { readFileSync } from 'fs';
 
 const FONT_400 = readFileSync('./node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff');
@@ -222,15 +222,7 @@ export async function generateOgSvg({ title, description, slug }) {
   return svg;
 }
 
-export function svgToPng(svg) {
-  const svgString = typeof svg === 'string' ? svg : String(svg);
-  
-  const resvg = new Resvg(svgString, {
-    fitTo: {
-      mode: 'width',
-      value: 1200,
-    },
-  });
-  const pngData = resvg.render();
-  return pngData.asPng();
+export async function svgToPng(svg) {
+  const svgBuffer = Buffer.from(typeof svg === 'string' ? svg : String(svg));
+  return await sharp(svgBuffer).png({ compressionLevel: 9 }).toBuffer();
 }

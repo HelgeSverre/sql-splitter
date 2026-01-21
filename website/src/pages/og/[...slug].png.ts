@@ -25,7 +25,7 @@ export async function GET({ props }) {
   const { title, description, slug } = props;
   
   const svg = await generateOgSvg({ title, description, slug });
-  const png = svgToPng(svg);
+  const png = await svgToPng(svg);
   
   return new Response(png, {
     headers: {
