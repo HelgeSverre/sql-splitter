@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Validate Command Output",
+  "description": "JSON output from sql-splitter validate --json",
+  "type": "object",
+  "required": ["dialect", "issues", "summary", "checks"],
+  "properties": {
+    "dialect": { "$ref": "#/$defs/dialect" },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": { "type": "string", "description": "Issue code identifier" },
+          "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+          "message": { "type": "string", "description": "Human-readable issue description" },
+          "location": {
+            "type": "object",
+            "description": "Location where the issue was found (fields omitted when null)",
+            "properties": {
+              "table": { "type": "string" },
+              "statement_index": { "type": "integer", "minimum": 0 },
+              "approx_line": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["errors", "warnings", "info", "tables_scanned", "statements_scanned"],
+      "properties": {
+        "errors": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "integer", "minimum": 0 },
+        "info": { "type": "integer", "minimum": 0 },
+        "tables_scanned": { "type": "integer", "minimum": 0 },
+        "statements_scanned": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "required": ["syntax", "encoding", "ddl_dml_consistency", "pk_duplicates", "fk_integrity"],
+      "properties": {
+        "syntax": { "$ref": "#/$defs/checkStatus" },
+        "encoding": { "$ref": "#/$defs/checkStatus" },
+        "ddl_dml_consistency": { "$ref": "#/$defs/checkStatus" },
+        "pk_duplicates": { "$ref": "#/$defs/checkStatus" },
+        "fk_integrity": { "$ref": "#/$defs/checkStatus" }
+      }
+    }
+  },
+  "$defs": {
+    "dialect": {
+      "type": "string",
+      "enum": ["mysql", "postgres", "sqlite", "mssql"],
+      "description": "SQL dialect"
+    },
+    "checkStatus": {
+      "oneOf": [
+        { "const": "ok" },
+        { "type": "object", "required": ["failed"], "properties": { "failed": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        { "type": "object", "required": ["skipped"], "properties": { "skipped": { "type": "string" } }, "additionalProperties": false }
+      ]
+    }
+  }
+}

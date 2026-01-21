@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Merge Command Output",
+  "description": "JSON output from the merge command which combines split table files back into a single SQL dump",
+  "type": "object",
+  "required": ["input_dir", "dialect", "dry_run", "statistics", "tables", "options"],
+  "properties": {
+    "input_dir": { "type": "string" },
+    "output_file": { "type": ["string", "null"] },
+    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
+    "dry_run": { "type": "boolean" },
+    "statistics": {
+      "type": "object",
+      "required": ["tables_merged", "bytes_written", "elapsed_secs"],
+      "properties": {
+        "tables_merged": { "type": "integer", "minimum": 0 },
+        "bytes_written": { "type": "integer", "minimum": 0 },
+        "elapsed_secs": { "type": "number", "minimum": 0 },
+        "throughput_kb_per_sec": { "type": ["number", "null"] }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "options": {
+      "type": "object",
+      "required": ["transaction", "header"],
+      "properties": {
+        "transaction": { "type": "boolean" },
+        "header": { "type": "boolean" }
+      }
+    }
+  }
+}

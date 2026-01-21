@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Split Command Output",
+  "description": "JSON output from the split command which divides a SQL dump into individual table files",
+  "type": "object",
+  "required": ["input_file", "output_dir", "dialect", "dry_run", "statistics", "tables"],
+  "properties": {
+    "input_file": { "type": "string" },
+    "output_dir": { "type": "string" },
+    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
+    "dialect_confidence": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
+    "compression": { "type": ["string", "null"] },
+    "dry_run": { "type": "boolean" },
+    "statistics": {
+      "type": "object",
+      "required": ["tables_found", "statements_processed", "bytes_processed", "elapsed_secs"],
+      "properties": {
+        "tables_found": { "type": "integer", "minimum": 0 },
+        "statements_processed": { "type": "integer", "minimum": 0 },
+        "bytes_processed": { "type": "integer", "minimum": 0 },
+        "elapsed_secs": { "type": "number", "minimum": 0 },
+        "throughput_mb_per_sec": { "type": ["number", "null"] }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
