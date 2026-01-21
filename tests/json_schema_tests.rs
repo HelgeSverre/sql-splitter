@@ -635,15 +635,7 @@ INSERT INTO users VALUES (2, 'Bob');
 #[test]
 fn test_all_schema_files_are_valid_json() {
     let schema_files = [
-        "analyze",
-        "validate",
-        "split",
-        "merge",
-        "sample",
-        "convert",
-        "redact",
-        "graph",
-        "shard",
+        "analyze", "validate", "split", "merge", "sample", "convert", "redact", "graph", "shard",
     ];
 
     for name in schema_files {
@@ -660,15 +652,7 @@ fn test_all_schema_files_are_valid_json() {
 #[test]
 fn test_all_schema_files_are_valid_json_schema() {
     let schema_files = [
-        "analyze",
-        "validate",
-        "split",
-        "merge",
-        "sample",
-        "convert",
-        "redact",
-        "graph",
-        "shard",
+        "analyze", "validate", "split", "merge", "sample", "convert", "redact", "graph", "shard",
     ];
 
     for name in schema_files {
@@ -679,12 +663,8 @@ fn test_all_schema_files_are_valid_json_schema() {
         let schema: Value = serde_json::from_str(&schema_str)
             .unwrap_or_else(|e| panic!("{} contains invalid JSON: {}", schema_path, e));
 
-        Validator::new(&schema).unwrap_or_else(|e| {
-            panic!(
-                "{} is not a valid JSON Schema: {}",
-                schema_path, e
-            )
-        });
+        Validator::new(&schema)
+            .unwrap_or_else(|e| panic!("{} is not a valid JSON Schema: {}", schema_path, e));
     }
 }
 
@@ -692,15 +672,7 @@ fn test_all_schema_files_are_valid_json_schema() {
 #[test]
 fn test_all_schema_files_have_metadata() {
     let schema_files = [
-        "analyze",
-        "validate",
-        "split",
-        "merge",
-        "sample",
-        "convert",
-        "redact",
-        "graph",
-        "shard",
+        "analyze", "validate", "split", "merge", "sample", "convert", "redact", "graph", "shard",
     ];
 
     for name in schema_files {

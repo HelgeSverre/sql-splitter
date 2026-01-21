@@ -12,10 +12,16 @@ pub fn all_schemas() -> BTreeMap<&'static str, RootSchema> {
     let mut schemas = BTreeMap::new();
 
     // analyze command
-    schemas.insert("analyze", schema_for!(crate::cmd::analyze::AnalyzeJsonOutput));
+    schemas.insert(
+        "analyze",
+        schema_for!(crate::cmd::analyze::AnalyzeJsonOutput),
+    );
 
     // convert command
-    schemas.insert("convert", schema_for!(crate::cmd::convert::ConvertJsonOutput));
+    schemas.insert(
+        "convert",
+        schema_for!(crate::cmd::convert::ConvertJsonOutput),
+    );
 
     // graph command (uses ErdJson from graph module)
     schemas.insert("graph", schema_for!(crate::graph::format::json::ErdJson));

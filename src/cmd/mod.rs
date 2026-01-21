@@ -1093,9 +1093,12 @@ fn run_schema(
     }
 
     if let Some(cmd) = command {
-        let schema = schemas
-            .get(cmd.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Unknown command: {}. Use --list to see available schemas.", cmd))?;
+        let schema = schemas.get(cmd.as_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown command: {}. Use --list to see available schemas.",
+                cmd
+            )
+        })?;
 
         let json = serde_json::to_string_pretty(schema)?;
 

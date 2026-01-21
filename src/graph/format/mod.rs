@@ -8,9 +8,9 @@ mod mermaid;
 pub use dot::to_dot;
 pub use html::to_html;
 pub use json::to_json;
-pub use mermaid::to_mermaid;
 #[allow(unused_imports)]
 pub use json::{ColumnJson, ErdJson, ErdStats, RelationshipJson, TableJson};
+pub use mermaid::to_mermaid;
 
 use std::fmt;
 use std::str::FromStr;
