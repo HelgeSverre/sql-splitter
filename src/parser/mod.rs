@@ -536,19 +536,33 @@ impl<R: Read> Parser<R> {
     fn is_copy_from_stdin(&self, stmt: &[u8]) -> bool {
         // Strip leading comments (pg_dump adds -- comments before COPY statements)
         let stmt = strip_leading_comments_and_whitespace(stmt);
-        if stmt.len() < 4 {
+        if stmt.len() < 15 {
+            // Minimum: "COPY x FROM STDIN" = 17 chars
             return false;
         }
 
-        // Take enough bytes to cover column lists - typical COPY statements are <500 bytes
-        let upper: Vec<u8> = stmt
-            .iter()
-            .take(500)
-            .map(|b| b.to_ascii_uppercase())
-            .collect();
-        upper.starts_with(b"COPY ")
-            && (upper.windows(10).any(|w| w == b"FROM STDIN")
-                || upper.windows(11).any(|w| w == b"FROM STDIN;"))
+        // Check prefix with stack-allocated buffer (avoid heap allocation)
+        let mut prefix = [0u8; 5];
+        for (i, &b) in stmt.iter().take(5).enumerate() {
+            prefix[i] = b.to_ascii_uppercase();
+        }
+        if &prefix != b"COPY " {
+            return false;
+        }
+
+        // Search for "FROM STDIN" case-insensitively without allocating
+        // Look within first 500 bytes (typical COPY statements are shorter)
+        let search_len = stmt.len().min(500);
+        for i in 0..search_len.saturating_sub(10) {
+            if stmt[i..i + 10]
+                .iter()
+                .zip(b"FROM STDIN".iter())
+                .all(|(&a, &b)| a.to_ascii_uppercase() == b)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Read PostgreSQL COPY data block until we see the terminator line (\.)
@@ -743,11 +757,13 @@ impl<R: Read> Parser<R> {
             return (StatementType::Unknown, String::new());
         }
 
-        let upper_prefix: Vec<u8> = stmt
-            .iter()
-            .take(25)
-            .map(|b| b.to_ascii_uppercase())
-            .collect();
+        // Use stack-allocated buffer to avoid heap allocation in hot path
+        let mut upper_prefix = [0u8; 25];
+        let prefix_len = stmt.len().min(25);
+        for (i, &b) in stmt.iter().take(prefix_len).enumerate() {
+            upper_prefix[i] = b.to_ascii_uppercase();
+        }
+        let upper_prefix = &upper_prefix[..prefix_len];
 
         // PostgreSQL COPY statement
         if upper_prefix.starts_with(b"COPY ") {
@@ -961,31 +977,38 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
         return None;
     }
 
-    // Check for IF NOT EXISTS or IF EXISTS
-    let upper_check: Vec<u8> = stmt[i..]
-        .iter()
-        .take(20)
-        .map(|b| b.to_ascii_uppercase())
-        .collect();
-    if upper_check.starts_with(b"IF NOT EXISTS") {
+    // Check for IF NOT EXISTS or IF EXISTS (stack-allocated to avoid heap allocation)
+    let mut upper_check = [0u8; 20];
+    let check_len = (stmt.len() - i).min(20);
+    for (idx, &b) in stmt[i..].iter().take(check_len).enumerate() {
+        upper_check[idx] = b.to_ascii_uppercase();
+    }
+    let upper_slice = &upper_check[..check_len];
+    if upper_slice.starts_with(b"IF NOT EXISTS") {
         i += 13; // Skip "IF NOT EXISTS"
         while i < stmt.len() && is_whitespace(stmt[i]) {
             i += 1;
         }
-    } else if upper_check.starts_with(b"IF EXISTS") {
+    } else if upper_slice.starts_with(b"IF EXISTS") {
         i += 9; // Skip "IF EXISTS"
         while i < stmt.len() && is_whitespace(stmt[i]) {
             i += 1;
         }
     }
 
-    // Check for ONLY (PostgreSQL)
-    let upper_check: Vec<u8> = stmt[i..]
-        .iter()
-        .take(10)
-        .map(|b| b.to_ascii_uppercase())
-        .collect();
-    if upper_check.starts_with(b"ONLY ") || upper_check.starts_with(b"ONLY\t") {
+    // Check for ONLY (PostgreSQL) - reuse first 10 bytes or re-check if position changed
+    let only_check = if i < stmt.len() {
+        let mut buf = [0u8; 10];
+        let len = (stmt.len() - i).min(10);
+        for (idx, &b) in stmt[i..].iter().take(len).enumerate() {
+            buf[idx] = b.to_ascii_uppercase();
+        }
+        (buf, len)
+    } else {
+        ([0u8; 10], 0)
+    };
+    let only_slice = &only_check.0[..only_check.1];
+    if only_slice.starts_with(b"ONLY ") || only_slice.starts_with(b"ONLY\t") {
         i += 4;
         while i < stmt.len() && is_whitespace(stmt[i]) {
             i += 1;
