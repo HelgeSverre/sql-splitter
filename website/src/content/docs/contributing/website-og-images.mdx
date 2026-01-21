@@ -36,25 +36,25 @@ OG images are generated using **Satori** (Vercel's JSX-to-SVG library) and conve
 
 | File | Purpose |
 |------|---------|
-| `src/pages/og/[...slug].ts` | Dynamic route that generates OG images for each doc |
+| `src/pages/og/[...slug].png.ts` | Dynamic route that generates OG images for each doc |
 | `src/pages/og/satori-lib.mjs` | Satori template with category detection and styling |
 
 ### Generation Process
 
 1. At build time, Astro fetches all docs from the `docs` content collection
-2. For each doc, `getStaticPaths()` creates a route at `/og/{slug}`
+2. For each doc, `getStaticPaths()` creates a route at `/og/{slug}.png`
 3. The `GET` handler renders the Satori template to SVG
 4. Resvg converts SVG to PNG
-5. Images are saved to `dist/og/` (static output)
+5. Images are saved to `dist/og/` with `.png` extension
 
 ### Example Output
 
 ```bash
-dist/og/index                    # Homepage
-dist/og/commands/split           # split command page
-dist/og/getting-started/installation
-dist/og/guides/index
-dist/og/reference/dialects
+dist/og/index.png                    # Homepage
+dist/og/commands/split.png           # split command page
+dist/og/getting-started/installation.png
+dist/og/guides.png                   # Section index pages
+dist/og/reference/dialects.png
 ...
 ```
 
@@ -89,9 +89,10 @@ OG images are rebuilt with every static build (not during dev mode).
 
 ## Homepage Image
 
-The homepage uses a custom OG image at `og-image.png` in the website root. This file is manually created and copied to `dist/og/index` after build if it exists.
+The homepage (`src/pages/index.astro`) uses a separate BaseLayout that references a static OG image at `/og-image.png`. This image should be placed in the `public/` directory.
 
-To update the homepage OG image:
-1. Create/update `website/og-image.png` (1200x630px)
-2. Run `npm run build`
-3. The build script copies it to `dist/og/index`
+To set up the homepage OG image:
+1. Create `website/public/og-image.png` (1200x630px)
+2. The file will be served at `https://sql-splitter.dev/og-image.png`
+
+Alternatively, you can update `src/layouts/BaseLayout.astro` to use the dynamically generated `/og/index.png` instead.

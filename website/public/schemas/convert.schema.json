@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Convert Command Output",
+  "description": "JSON output from sql-splitter convert --json",
+  "type": "object",
+  "required": ["input_file", "conversion", "dry_run", "statistics", "warnings"],
+  "properties": {
+    "input_file": { "type": "string" },
+    "output_file": { "type": "string", "description": "Output file path (omitted when writing to stdout)" },
+    "conversion": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": { 
+          "type": "string",
+          "description": "Source dialect ('auto' when auto-detected)"
+        },
+        "to": { "$ref": "#/$defs/dialect" }
+      }
+    },
+    "dry_run": { "type": "boolean" },
+    "statistics": {
+      "type": "object",
+      "required": ["statements_processed", "statements_converted", "statements_unchanged", "statements_skipped"],
+      "properties": {
+        "statements_processed": { "type": "integer", "minimum": 0 },
+        "statements_converted": { "type": "integer", "minimum": 0 },
+        "statements_unchanged": { "type": "integer", "minimum": 0 },
+        "statements_skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Conversion warnings (tagged enum with 'type' discriminator)",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["type", "feature"],
+            "properties": {
+              "type": { "const": "unsupported_feature" },
+              "feature": { "type": "string" },
+              "suggestion": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["type", "from_type", "to_type"],
+            "properties": {
+              "type": { "const": "lossy_conversion" },
+              "from_type": { "type": "string" },
+              "to_type": { "type": "string" },
+              "table": { "type": "string" },
+              "column": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["type", "reason", "statement_preview"],
+            "properties": {
+              "type": { "const": "skipped_statement" },
+              "reason": { "type": "string" },
+              "statement_preview": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["type", "table"],
+            "properties": {
+              "type": { "const": "copy_not_converted" },
+              "table": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "dialect": {
+      "type": "string",
+      "enum": ["mysql", "postgres", "sqlite", "mssql"],
+      "description": "SQL dialect"
+    }
+  }
+}

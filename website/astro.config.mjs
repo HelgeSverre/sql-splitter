@@ -10,13 +10,11 @@ import starlightGitHubAlerts from 'starlight-github-alerts';
 export default defineConfig({
   site: 'https://sql-splitter.dev',
   integrations: [
-    react({ jsxRuntime: 'classic' }),
+    react(),
     starlight({
       title: 'sql-splitter',
       lastUpdated: true,
-      editLink: {
-        baseUrl: 'https://github.com/helgesverre/sql-splitter/edit/main/website/'
-      },
+
       pagination: true,
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
       plugins: [
@@ -39,22 +37,27 @@ export default defineConfig({
         },
         {
           label: 'Commands',
+          collapsed: true,
           autogenerate: { directory: 'commands' },
         },
         {
-          label: 'Guides',
-          autogenerate: { directory: 'guides' },
+          label: 'Cookbook',
+          collapsed: true,
+          autogenerate: { directory: 'cookbook' },
         },
         {
           label: 'Reference',
+          collapsed: true,
           autogenerate: { directory: 'reference' },
         },
         {
           label: 'Advanced',
+          collapsed: true,
           autogenerate: { directory: 'advanced' },
         },
         {
           label: 'Contributing',
+          collapsed: true,
           autogenerate: { directory: 'contributing' },
         },
         { label: 'Roadmap', link: '/roadmap/' },

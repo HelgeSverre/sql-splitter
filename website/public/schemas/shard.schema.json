@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Shard Command Output",
+  "description": "JSON output from the shard command which extracts tenant-specific data from a multi-tenant SQL dump",
+  "type": "object",
+  "required": ["input_file", "dialect", "dry_run", "tenant", "statistics", "tables"],
+  "properties": {
+    "input_file": { "type": "string" },
+    "output_file": { "type": ["string", "null"] },
+    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
+    "dry_run": { "type": "boolean" },
+    "tenant": {
+      "type": "object",
+      "required": ["column", "value", "auto_detected"],
+      "properties": {
+        "column": { "type": "string" },
+        "value": { "type": "string" },
+        "auto_detected": { "type": "boolean" }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "required": ["tables_processed", "tables_with_data", "tables_skipped", "rows_selected", "rows_total", "reduction_percent", "fk_orphans_skipped"],
+      "properties": {
+        "tables_processed": { "type": "integer", "minimum": 0 },
+        "tables_with_data": { "type": "integer", "minimum": 0 },
+        "tables_skipped": { "type": "integer", "minimum": 0 },
+        "rows_selected": { "type": "integer", "minimum": 0 },
+        "rows_total": { "type": "integer", "minimum": 0 },
+        "reduction_percent": { "type": "number", "minimum": 0 },
+        "fk_orphans_skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "classification", "rows_selected", "rows_total"],
+        "properties": {
+          "name": { "type": "string" },
+          "classification": { "type": "string", "enum": ["tenantroot", "tenantdependent", "junction", "lookup", "system", "unknown"] },
+          "rows_selected": { "type": "integer", "minimum": 0 },
+          "rows_total": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

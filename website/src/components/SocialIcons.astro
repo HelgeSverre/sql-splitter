@@ -2,13 +2,6 @@
 import Default from '@astrojs/starlight/components/SocialIcons.astro'
 ---
 
-<a href="/tools/command-builder/" class="nav-link sl-flex">
-  <svg aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" viewBox="0 0 24 24">
-    <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
-  </svg>
-  <span>Builder</span>
-</a>
-
 <a href="https://crates.io/crates/sql-splitter" rel="me" class="sl-flex">
   <span class="sr-only">Crates.io</span>
   <svg aria-hidden="true" fill="currentColor" width="16" height="16" viewBox="0 0 24 24">
@@ -25,22 +18,5 @@ import Default from '@astrojs/starlight/components/SocialIcons.astro'
   a:hover {
     opacity: 0.66;
   }
-  .nav-link {
-    align-items: center;
-    gap: 0.375rem;
-    padding-inline-end: 0.75rem;
-    margin-inline-end: 0.5rem;
-    border-inline-end: 1px solid var(--sl-color-gray-5);
-    font-size: 0.875rem;
-    font-weight: 500;
-    text-decoration: none;
-  }
-  .nav-link span {
-    display: none;
-  }
-  @media (min-width: 50rem) {
-    .nav-link span {
-      display: inline;
-    }
-  }
+
 </style>

@@ -3,14 +3,16 @@ import { generateOgSvg, svgToPng } from './satori-lib.mjs';
 
 export async function getStaticPaths() {
   const docs = await getCollection('docs');
-  
+
   return docs.map((doc) => {
-    // Remove .mdx extension from slug for proper routing
-    const slug = doc.id.replace(/\.mdx$/, '');
-    
+    // Remove .mdx extension and /index suffix to match routeData.ts URL generation
+    const slug = doc.id
+      .replace(/\.mdx$/, '')
+      .replace(/\/index$/, '') || 'index';
+
     return {
       params: { slug },
-      props: { 
+      props: {
         title: doc.data.title,
         description: doc.data.description || 'sql-splitter documentation',
         slug,

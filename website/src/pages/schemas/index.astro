@@ -1,0 +1,84 @@
+---
+import { glob } from 'astro/loaders';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const schemasDir = path.join(process.cwd(), 'public/schemas');
+const files = fs.readdirSync(schemasDir).filter(f => f.endsWith('.schema.json')).sort();
+---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JSON Schemas - sql-splitter</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0a0a;
+      color: #e6edf3;
+      min-height: 100vh;
+      padding: 3rem 1.5rem;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: #58a6ff;
+    }
+    p {
+      color: #8b949e;
+      margin-bottom: 2rem;
+      font-size: 0.9375rem;
+    }
+    ul {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    a {
+      display: block;
+      padding: 0.75rem 1rem;
+      background: #161b22;
+      border: 1px solid #27272a;
+      border-radius: 6px;
+      color: #e6edf3;
+      text-decoration: none;
+      font-family: 'SF Mono', ui-monospace, monospace;
+      font-size: 0.875rem;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    a:hover {
+      border-color: #58a6ff;
+      background: #1c2128;
+    }
+    .back {
+      display: inline-block;
+      margin-top: 2rem;
+      color: #58a6ff;
+      text-decoration: none;
+      font-size: 0.875rem;
+    }
+    .back:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>JSON Schemas</h1>
+    <p>JSON output schemas for sql-splitter commands.</p>
+    <ul>
+      {files.map(file => (
+        <li><a href={`/schemas/${file}`}>{file}</a></li>
+      ))}
+    </ul>
+    <a href="/reference/json-output/" class="back">← Back to documentation</a>
+  </div>
+</body>
+</html>

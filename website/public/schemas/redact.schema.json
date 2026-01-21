@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Redact Command Output",
+  "description": "JSON output from the redact command which masks or removes sensitive data from SQL dumps",
+  "type": "object",
+  "required": ["tables_processed", "rows_redacted", "columns_redacted", "table_stats", "warnings"],
+  "properties": {
+    "tables_processed": { "type": "integer", "minimum": 0 },
+    "rows_redacted": { "type": "integer", "minimum": 0 },
+    "columns_redacted": { "type": "integer", "minimum": 0 },
+    "table_stats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "rows_processed", "columns_redacted"],
+        "properties": {
+          "name": { "type": "string" },
+          "rows_processed": { "type": "integer", "minimum": 0 },
+          "columns_redacted": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

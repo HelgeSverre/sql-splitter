@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Graph Command Output",
+  "description": "JSON output from the graph command which analyzes and outputs table relationships and foreign key dependencies",
+  "type": "object",
+  "required": ["tables", "relationships", "stats"],
+  "properties": {
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "columns"],
+        "properties": {
+          "name": { "type": "string" },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type", "is_primary_key", "is_foreign_key", "is_nullable"],
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "is_primary_key": { "type": "boolean" },
+                "is_foreign_key": { "type": "boolean" },
+                "is_nullable": { "type": "boolean" },
+                "references_table": { "type": ["string", "null"] },
+                "references_column": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from_table", "from_column", "to_table", "to_column", "cardinality"],
+        "properties": {
+          "from_table": { "type": "string" },
+          "from_column": { "type": "string" },
+          "to_table": { "type": "string" },
+          "to_column": { "type": "string" },
+          "cardinality": { "type": "string" }
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": ["table_count", "column_count", "relationship_count"],
+      "properties": {
+        "table_count": { "type": "integer", "minimum": 0 },
+        "column_count": { "type": "integer", "minimum": 0 },
+        "relationship_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

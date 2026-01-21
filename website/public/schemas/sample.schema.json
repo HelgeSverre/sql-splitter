@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sample Command Output",
+  "description": "JSON output from the sample command which extracts a representative subset of rows from a SQL dump",
+  "type": "object",
+  "required": ["input_file", "dialect", "dry_run", "mode", "statistics", "tables"],
+  "properties": {
+    "input_file": { "type": "string" },
+    "output_file": { "type": ["string", "null"] },
+    "dialect": { "type": "string", "enum": ["mysql", "postgres", "sqlite", "mssql"] },
+    "dry_run": { "type": "boolean" },
+    "mode": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "type": "string", "enum": ["percent", "rows"] },
+        "value": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "required": ["tables_sampled", "tables_skipped", "rows_selected", "rows_total", "sample_rate_percent", "fk_orphans_rejected"],
+      "properties": {
+        "tables_sampled": { "type": "integer", "minimum": 0 },
+        "tables_skipped": { "type": "integer", "minimum": 0 },
+        "rows_selected": { "type": "integer", "minimum": 0 },
+        "rows_total": { "type": "integer", "minimum": 0 },
+        "sample_rate_percent": { "type": "number", "minimum": 0 },
+        "fk_orphans_rejected": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "classification", "rows_selected", "rows_total", "sample_rate_percent"],
+        "properties": {
+          "name": { "type": "string" },
+          "classification": { "type": "string", "enum": ["root", "lookup", "system", "junction", "normal"] },
+          "rows_selected": { "type": "integer", "minimum": 0 },
+          "rows_total": { "type": "integer", "minimum": 0 },
+          "sample_rate_percent": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
