@@ -10,10 +10,10 @@ Future enhancements for the sql-splitter documentation website.
 - [ ] Great for showcasing capabilities without installation
 
 ### Command Builder
-- [x] Interactive form to construct sql-splitter commands ✅ *Implemented in `/tools/command-builder/`*
-- [x] Select command, options, and get copy-pasteable output ✅
-- [x] Easy/Pro mode toggle ✅
-- [x] Syntax highlighting in output ✅
+- [ ] Interactive form to construct sql-splitter commands
+- [ ] Select command, options, and get copy-pasteable output
+- [ ] Easy/Pro mode toggle
+- [ ] Syntax highlighting in output
 
 ## Content Enhancements
 
@@ -117,7 +117,7 @@ The following features are already part of the website:
 - ✅ **Sitemap**: Auto-generated sitemap-index.xml
 - ✅ **Custom theme**: Dark/light mode with synced toggle
 - ✅ **Social links**: GitHub, Crates.io in navigation
-- ✅ **Command Builder**: Interactive tool at `/tools/command-builder/`
+
 - ✅ **CI Validation Guide**: GitHub Actions examples
 - ✅ **Docker Guide**: Container usage documentation
 - ✅ **Ahrefs Analytics**: Tracking integrated
