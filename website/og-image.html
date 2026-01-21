@@ -1,129 +1,137 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=1200, height=630">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1200, height=630" />
     <title>sql-splitter OG Image</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
 
-        body {
-            width: 1200px;
-            height: 630px;
-            background: #0a0a0a;
-            font-family: 'Monda', -apple-system, BlinkMacSystemFont, sans-serif;
-            color: #e6edf3;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            padding: 60px 80px;
-            position: relative;
-            overflow: hidden;
-        }
+      body {
+        width: 1200px;
+        height: 630px;
+        background: #0a0a0a;
+        font-family:
+          "Monda",
+          -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        color: #e6edf3;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding: 60px 80px;
+        position: relative;
+        overflow: hidden;
+      }
 
-        /* Subtle grid background */
-        body::before {
-            content: '';
-            position: absolute;
-            inset: 0;
-            background-image:
-                linear-gradient(rgba(88, 166, 255, 0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(88, 166, 255, 0.03) 1px, transparent 1px);
-            background-size: 40px 40px;
-            pointer-events: none;
-        }
+      /* Subtle grid background */
+      body::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(88, 166, 255, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(88, 166, 255, 0.03) 1px, transparent 1px);
+        background-size: 40px 40px;
+        pointer-events: none;
+      }
 
-        .content {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            text-align: center;
-            z-index: 1;
-        }
+      .content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        z-index: 1;
+      }
 
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            margin-bottom: 20px;
-        }
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 20px;
+      }
 
-        .logo-icon {
-            font-family: "SF Mono", ui-monospace, monospace;
-            font-size: 80px;
-            font-weight: 700;
-            color: #58a6ff;
-            text-shadow:
-                0 0 20px rgba(88, 166, 255, 0.8),
-                0 0 40px rgba(88, 166, 255, 0.4),
-                0 0 60px rgba(88, 166, 255, 0.2);
-        }
+      .logo-icon {
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 80px;
+        font-weight: 700;
+        color: #58a6ff;
+        text-shadow:
+          0 0 20px rgba(88, 166, 255, 0.8),
+          0 0 40px rgba(88, 166, 255, 0.4),
+          0 0 60px rgba(88, 166, 255, 0.2);
+      }
 
-        .logo-text {
-            font-size: 64px;
-            font-weight: 700;
-            letter-spacing: -2px;
-        }
+      .logo-text {
+        font-size: 64px;
+        font-weight: 700;
+        letter-spacing: -2px;
+      }
 
-        .subtitle {
-            font-size: 28px;
-            color: #8b949e;
-            margin-bottom: 24px;
-        }
+      .subtitle {
+        font-size: 28px;
+        color: #8b949e;
+        margin-bottom: 24px;
+      }
 
-        .description {
-            font-size: 22px;
-            color: #8b949e;
-            line-height: 1.5;
-            max-width: 900px;
-        }
+      .description {
+        font-size: 22px;
+        color: #8b949e;
+        line-height: 1.5;
+        max-width: 900px;
+      }
 
-        .install-command {
-            margin-top: 40px;
-            font-family: "SF Mono", ui-monospace, monospace;
-            font-size: 22px;
-            padding: 16px 32px;
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: #e6edf3;
-        }
+      .install-command {
+        margin-top: 40px;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 22px;
+        padding: 16px 32px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #e6edf3;
+      }
 
-        .install-command .prompt {
-            color: #3fb950;
-        }
+      .install-command .prompt {
+        color: #3fb950;
+      }
 
-        .install-command .cmd {
-            color: #79c0ff;
-        }
+      .install-command .cmd {
+        color: #79c0ff;
+      }
 
-        .install-command .arg {
-            color: #ffa657;
-        }
+      .install-command .arg {
+        color: #ffa657;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <div class="content">
-        <div class="logo">
-            <span class="logo-icon">;</span>
-            <span class="logo-text">sql-splitter</span>
-        </div>
-        <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
-        <p class="description">
-            Split, merge, convert, validate, sample, shard, diff, and redact SQL dump files.
-            MySQL, PostgreSQL, and SQLite. Written in Rust.
-        </p>
-        <div class="install-command">
-            <span class="prompt">$</span> <span class="cmd">cargo</span> <span class="arg">install sql-splitter</span>
-        </div>
+      <div class="logo">
+        <span class="logo-icon">;</span>
+        <span class="logo-text">sql-splitter</span>
+      </div>
+      <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
+      <p class="description">
+        Split, merge, convert, validate, sample, shard, diff, and redact SQL
+        dump files. MySQL, PostgreSQL, and SQLite. Written in Rust.
+      </p>
+      <div class="install-command">
+        <span class="prompt">$</span> <span class="cmd">cargo</span>
+        <span class="arg">install sql-splitter</span>
+      </div>
     </div>
-</body>
+  </body>
 </html>

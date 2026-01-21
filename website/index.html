@@ -1,195 +1,273 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>sql-splitter - High-Performance SQL Dump Toolkit in Rust</title>
-    <meta name="description" content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files. MySQL, PostgreSQL, SQLite. Written in Rust.">
+    <meta
+      name="description"
+      content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files. MySQL, PostgreSQL, SQLite. Written in Rust."
+    />
 
     <!-- OpenGraph -->
-    <meta property="og:type" content="website">
-    <meta property="og:title" content="sql-splitter - High-Performance SQL Dump Toolkit in Rust">
-    <meta property="og:description" content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files.">
-    <meta property="og:url" content="https://sql-splitter.dev">
-    <meta property="og:image" content="https://sql-splitter.dev/og-image.png">
-    <meta property="og:image:width" content="1200">
-    <meta property="og:image:height" content="630">
-    <meta property="og:image:type" content="image/png">
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:title"
+      content="sql-splitter - High-Performance SQL Dump Toolkit in Rust"
+    />
+    <meta
+      property="og:description"
+      content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files."
+    />
+    <meta property="og:url" content="https://sql-splitter.dev" />
+    <meta property="og:image" content="https://sql-splitter.dev/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="image/png" />
 
     <!-- Twitter Card -->
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="sql-splitter - High-Performance SQL Dump Toolkit in Rust">
-    <meta name="twitter:description" content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s.">
-    <meta name="twitter:image" content="https://sql-splitter.dev/og-image.png">
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="sql-splitter - High-Performance SQL Dump Toolkit in Rust"
+    />
+    <meta
+      name="twitter:description"
+      content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s."
+    />
+    <meta
+      name="twitter:image"
+      content="https://sql-splitter.dev/og-image.png"
+    />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
-    <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="icon" type="image/x-icon" href="favicon.ico">
-    <link rel="apple-touch-icon" href="apple-touch-icon.png">
-</head>
-<body>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Monda:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  </head>
+  <body>
     <nav>
-        <div class="nav-content">
-            <a href="#" class="logo">
-                <span class="logo-icon">;</span>
-                sql-splitter
-            </a>
-            <div class="nav-links">
-                <a href="#install">Install</a>
-                <a href="#guide">Guide</a>
-                <a href="https://github.com/helgesverre/sql-splitter" target="_blank">GitHub</a>
-                <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
-                    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="5"/>
-                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-                    </svg>
-                    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                    </svg>
-                </button>
-            </div>
+      <div class="nav-content">
+        <a href="#" class="logo">
+          <span class="logo-icon">;</span>
+          sql-splitter
+        </a>
+        <div class="nav-links">
+          <a href="#install">Install</a>
+          <a href="#guide">Guide</a>
+          <a href="https://github.com/helgesverre/sql-splitter" target="_blank"
+            >GitHub</a
+          >
+          <button
+            class="theme-toggle"
+            onclick="toggleTheme()"
+            aria-label="Toggle theme"
+          >
+            <svg
+              class="icon-sun"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <circle cx="12" cy="12" r="5" />
+              <path
+                d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+              />
+            </svg>
+            <svg
+              class="icon-moon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
         </div>
+      </div>
     </nav>
 
     <main>
-        <!-- Hero -->
-        <section class="hero">
-            <h1>
-                <span class="logo-icon">;</span>
-                sql-splitter
-            </h1>
-            <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
-            <p class="description">
-                Split, merge, convert, validate, sample, shard, diff, redact, and query SQL dump files.
-                MySQL, PostgreSQL, and SQLite. Written in Rust.
-            </p>
-            <div class="hero-actions">
-                <a href="#install" class="btn btn-primary">Get Started</a>
-                <a href="https://github.com/helgesverre/sql-splitter" class="btn btn-secondary" target="_blank">View on GitHub</a>
-            </div>
-        </section>
+      <!-- Hero -->
+      <section class="hero">
+        <h1>
+          <span class="logo-icon">;</span>
+          sql-splitter
+        </h1>
+        <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
+        <p class="description">
+          Split, merge, convert, validate, sample, shard, diff, redact, and
+          query SQL dump files. MySQL, PostgreSQL, and SQLite. Written in Rust.
+        </p>
+        <div class="hero-actions">
+          <a href="#install" class="btn btn-primary">Get Started</a>
+          <a
+            href="https://github.com/helgesverre/sql-splitter"
+            class="btn btn-secondary"
+            target="_blank"
+            >View on GitHub</a
+          >
+        </div>
+      </section>
 
-        <!-- Why -->
-        <section class="why">
-            <h2>Why sql-splitter?</h2>
-            <p class="lead">
-                Working with large SQL dumps is painful. Importing a 10GB file takes forever,
-                and you often just need a few tables. sql-splitter lets you split the dump
-                into individual files so you can import only what you need.
-            </p>
-            <div class="benefits">
-                <div class="benefit">
-                    <div class="benefit-icon">~</div>
-                    <h3>Blazing Fast</h3>
-                    <p>600+ MB/s throughput</p>
-                </div>
-                <div class="benefit">
-                    <div class="benefit-icon">&lt;</div>
-                    <h3>Memory Efficient</h3>
-                    <p>~50MB constant usage</p>
-                </div>
-                <div class="benefit">
-                    <div class="benefit-icon">*</div>
-                    <h3>Multi-Dialect</h3>
-                    <p>MySQL, PostgreSQL, SQLite</p>
-                </div>
-            </div>
-        </section>
+      <!-- Why -->
+      <section class="why">
+        <h2>Why sql-splitter?</h2>
+        <p class="lead">
+          Working with large SQL dumps is painful. Importing a 10GB file takes
+          forever, and you often just need a few tables. sql-splitter lets you
+          split the dump into individual files so you can import only what you
+          need.
+        </p>
+        <div class="benefits">
+          <div class="benefit">
+            <div class="benefit-icon">~</div>
+            <h3>Blazing Fast</h3>
+            <p>600+ MB/s throughput</p>
+          </div>
+          <div class="benefit">
+            <div class="benefit-icon">&lt;</div>
+            <h3>Memory Efficient</h3>
+            <p>~50MB constant usage</p>
+          </div>
+          <div class="benefit">
+            <div class="benefit-icon">*</div>
+            <h3>Multi-Dialect</h3>
+            <p>MySQL, PostgreSQL, SQLite</p>
+          </div>
+        </div>
+      </section>
 
-        <!-- Quick Start -->
-        <section class="quickstart">
-            <h2>Quick Start</h2>
-            <p class="lead">Split a SQL file in seconds.</p>
+      <!-- Quick Start -->
+      <section class="quickstart">
+        <h2>Quick Start</h2>
+        <p class="lead">Split a SQL file in seconds.</p>
 
-            <div class="steps">
-                <div class="step">
-                    <div class="step-number">1</div>
-                    <div class="step-content">
-                        <h3>Build from source</h3>
-                        <div class="code-block">
-                            <pre><code>git clone https://github.com/helgesverre/sql-splitter.git
+        <div class="steps">
+          <div class="step">
+            <div class="step-number">1</div>
+            <div class="step-content">
+              <h3>Build from source</h3>
+              <div class="code-block">
+                <pre><code>git clone https://github.com/helgesverre/sql-splitter.git
 cd sql-splitter
 cargo build --release</code></pre>
-                            <button class="copy-btn" data-copy="git clone https://github.com/helgesverre/sql-splitter.git && cd sql-splitter && cargo build --release">Copy</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="step">
-                    <div class="step-number">2</div>
-                    <div class="step-content">
-                        <h3>Split your dump</h3>
-                        <div class="code-block">
-                            <pre><code>./target/release/<span class="sh-tool">sql-splitter</span> split database.sql --output=tables</code></pre>
-                            <button class="copy-btn" data-copy="./target/release/sql-splitter split database.sql --output=tables">Copy</button>
-                        </div>
-                    </div>
-                </div>
+                <button
+                  class="copy-btn"
+                  data-copy="git clone https://github.com/helgesverre/sql-splitter.git && cd sql-splitter && cargo build --release"
+                >
+                  Copy
+                </button>
+              </div>
             </div>
+          </div>
 
-            <p class="note">That's it! Each table gets its own .sql file in the output directory.</p>
-        </section>
-
-        <!-- Install -->
-        <section id="install" class="install">
-            <h2>Installation</h2>
-
-            <h3>From crates.io (Recommended)</h3>
-            <p>If you have Rust installed:</p>
-            <div class="code-block">
-                <pre><code>cargo install <span class="sh-tool">sql-splitter</span></code></pre>
-                <button class="copy-btn" data-copy="cargo install sql-splitter">Copy</button>
+          <div class="step">
+            <div class="step-number">2</div>
+            <div class="step-content">
+              <h3>Split your dump</h3>
+              <div class="code-block">
+                <pre><code>./target/release/<span class="sh-tool">sql-splitter</span> split database.sql --output=tables</code></pre>
+                <button
+                  class="copy-btn"
+                  data-copy="./target/release/sql-splitter split database.sql --output=tables"
+                >
+                  Copy
+                </button>
+              </div>
             </div>
+          </div>
+        </div>
 
-            <h3>From GitHub</h3>
-            <div class="code-block">
-                <pre><code>cargo install --git https://github.com/helgesverre/<span class="sh-tool">sql-splitter</span></code></pre>
-                <button class="copy-btn" data-copy="cargo install --git https://github.com/helgesverre/sql-splitter">Copy</button>
-            </div>
+        <p class="note">
+          That's it! Each table gets its own .sql file in the output directory.
+        </p>
+      </section>
 
-            <h3>Build from Source</h3>
-            <div class="code-block">
-                <pre><code>git clone https://github.com/helgesverre/<span class="sh-tool">sql-splitter</span>.git
+      <!-- Install -->
+      <section id="install" class="install">
+        <h2>Installation</h2>
+
+        <h3>From crates.io (Recommended)</h3>
+        <p>If you have Rust installed:</p>
+        <div class="code-block">
+          <pre><code>cargo install <span class="sh-tool">sql-splitter</span></code></pre>
+          <button class="copy-btn" data-copy="cargo install sql-splitter">
+            Copy
+          </button>
+        </div>
+
+        <h3>From GitHub</h3>
+        <div class="code-block">
+          <pre><code>cargo install --git https://github.com/helgesverre/<span class="sh-tool">sql-splitter</span></code></pre>
+          <button
+            class="copy-btn"
+            data-copy="cargo install --git https://github.com/helgesverre/sql-splitter"
+          >
+            Copy
+          </button>
+        </div>
+
+        <h3>Build from Source</h3>
+        <div class="code-block">
+          <pre><code>git clone https://github.com/helgesverre/<span class="sh-tool">sql-splitter</span>.git
 cd <span class="sh-tool">sql-splitter</span>
 cargo build --release
 sudo cp target/release/<span class="sh-tool">sql-splitter</span> /usr/local/bin/</code></pre>
-                <button class="copy-btn" data-copy="git clone https://github.com/helgesverre/sql-splitter.git
+          <button
+            class="copy-btn"
+            data-copy="git clone https://github.com/helgesverre/sql-splitter.git
 cd sql-splitter
 cargo build --release
-sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
-            </div>
+sudo cp target/release/sql-splitter /usr/local/bin/"
+          >
+            Copy
+          </button>
+        </div>
 
-            <h3>Optimized Build (Best Performance)</h3>
-            <p>Build with CPU-specific optimizations for maximum throughput:</p>
-            <div class="code-block">
-                <pre><code>RUSTFLAGS="-C target-cpu=native" cargo build --release</code></pre>
-                <button class="copy-btn" data-copy="RUSTFLAGS=&quot;-C target-cpu=native&quot; cargo build --release">Copy</button>
-            </div>
+        <h3>Optimized Build (Best Performance)</h3>
+        <p>Build with CPU-specific optimizations for maximum throughput:</p>
+        <div class="code-block">
+          <pre><code>RUSTFLAGS="-C target-cpu=native" cargo build --release</code></pre>
+          <button
+            class="copy-btn"
+            data-copy='RUSTFLAGS="-C target-cpu=native" cargo build --release'
+          >
+            Copy
+          </button>
+        </div>
 
-            <div class="verify">
-                <p>Verify installation:</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-tool">sql-splitter</span> --version</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter --version">Copy</button>
-                </div>
-            </div>
-        </section>
+        <div class="verify">
+          <p>Verify installation:</p>
+          <div class="code-block">
+            <pre><code><span class="sh-tool">sql-splitter</span> --version</code></pre>
+            <button class="copy-btn" data-copy="sql-splitter --version">
+              Copy
+            </button>
+          </div>
+        </div>
+      </section>
 
-        <!-- User Guide -->
-        <section id="guide" class="guide">
-            <h2>User Guide</h2>
+      <!-- User Guide -->
+      <section id="guide" class="guide">
+        <h2>User Guide</h2>
 
-            <!-- Commands -->
-            <article class="guide-section">
-                <h3>Commands</h3>
+        <!-- Commands -->
+        <article class="guide-section">
+          <h3>Commands</h3>
 
-                <h4 id="split">split</h4>
-                <p>Split a SQL dump file into individual table files.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># MySQL/MariaDB dump (default)</span>
+          <h4 id="split">split</h4>
+          <p>Split a SQL dump file into individual table files.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># MySQL/MariaDB dump (default)</span>
 <span class="sh-tool">sql-splitter</span> split database.sql --output=tables
 
 <span class="sh-comment"># PostgreSQL pg_dump</span>
@@ -209,13 +287,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Batch with glob patterns</span>
 <span class="sh-tool">sql-splitter</span> split "*.sql" -o output/ --fail-fast</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter split database.sql --output=tables">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter split database.sql --output=tables"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="merge">merge</h4>
-                <p>Merge split SQL files back into a single file.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Merge all tables</span>
+          <h4 id="merge">merge</h4>
+          <p>Merge split SQL files back into a single file.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Merge all tables</span>
 <span class="sh-tool">sql-splitter</span> merge tables/ -o restored.sql
 
 <span class="sh-comment"># Merge with transaction wrapper</span>
@@ -226,22 +309,32 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Exclude specific tables</span>
 <span class="sh-tool">sql-splitter</span> merge tables/ -o restored.sql --exclude=logs,cache</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter merge tables/ -o restored.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter merge tables/ -o restored.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="analyze">analyze</h4>
-                <p>Analyze a SQL file and display table statistics.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-tool">sql-splitter</span> analyze database.sql
+          <h4 id="analyze">analyze</h4>
+          <p>Analyze a SQL file and display table statistics.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-tool">sql-splitter</span> analyze database.sql
 <span class="sh-tool">sql-splitter</span> analyze database.sql --progress
 <span class="sh-tool">sql-splitter</span> analyze "**/*.sql" --fail-fast</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter analyze database.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter analyze database.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="validate">validate</h4>
-                <p>Check SQL dump integrity with comprehensive validation.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Basic validation</span>
+          <h4 id="validate">validate</h4>
+          <p>Check SQL dump integrity with comprehensive validation.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Basic validation</span>
 <span class="sh-tool">sql-splitter</span> validate dump.sql
 
 <span class="sh-comment"># Strict mode for CI (warnings = errors)</span>
@@ -252,13 +345,15 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Batch validation</span>
 <span class="sh-tool">sql-splitter</span> validate "*.sql" --fail-fast</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter validate dump.sql">Copy</button>
-                </div>
+            <button class="copy-btn" data-copy="sql-splitter validate dump.sql">
+              Copy
+            </button>
+          </div>
 
-                <h4 id="convert">convert</h4>
-                <p>Convert SQL dumps between MySQL, PostgreSQL, and SQLite.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># MySQL to PostgreSQL</span>
+          <h4 id="convert">convert</h4>
+          <p>Convert SQL dumps between MySQL, PostgreSQL, and SQLite.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># MySQL to PostgreSQL</span>
 <span class="sh-tool">sql-splitter</span> convert mysql.sql --to postgres -o pg.sql
 
 <span class="sh-comment"># PostgreSQL to MySQL (COPY → INSERT)</span>
@@ -275,13 +370,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Batch conversion</span>
 <span class="sh-tool">sql-splitter</span> convert "*.sql" --to postgres -o converted/</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="sample">sample</h4>
-                <p>Create reduced datasets with FK preservation.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Sample 10% of rows</span>
+          <h4 id="sample">sample</h4>
+          <p>Create reduced datasets with FK preservation.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Sample 10% of rows</span>
 <span class="sh-tool">sql-splitter</span> sample dump.sql -o sampled.sql --percent 10
 
 <span class="sh-comment"># Sample fixed rows per table</span>
@@ -292,13 +392,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Reproducible sampling with seed</span>
 <span class="sh-tool">sql-splitter</span> sample dump.sql -o dev.sql --percent 10 --seed 42</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter sample dump.sql -o sampled.sql --percent 10 --preserve-relations">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter sample dump.sql -o sampled.sql --percent 10 --preserve-relations"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="shard">shard</h4>
-                <p>Extract tenant-specific data from multi-tenant dumps.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Extract single tenant</span>
+          <h4 id="shard">shard</h4>
+          <p>Extract tenant-specific data from multi-tenant dumps.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Extract single tenant</span>
 <span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-value 123 -o tenant_123.sql
 
 <span class="sh-comment"># Auto-detect tenant column (tenant_id, company_id, etc.)</span>
@@ -309,13 +414,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Extract multiple tenants</span>
 <span class="sh-tool">sql-splitter</span> shard dump.sql --tenant-values "1,2,3" -o shards/</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="diff">diff</h4>
-                <p>Compare two SQL dumps for schema and data changes.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Full comparison (schema + data)</span>
+          <h4 id="diff">diff</h4>
+          <p>Compare two SQL dumps for schema and data changes.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Full comparison (schema + data)</span>
 <span class="sh-tool">sql-splitter</span> diff old.sql new.sql
 
 <span class="sh-comment"># Schema-only (fast)</span>
@@ -333,13 +443,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Ignore timestamp columns</span>
 <span class="sh-tool">sql-splitter</span> diff old.sql new.sql --ignore-columns "*.updated_at"</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter diff old.sql new.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter diff old.sql new.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="redact">redact</h4>
-                <p>Anonymize sensitive data (PII) in SQL dumps.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Using inline patterns</span>
+          <h4 id="redact">redact</h4>
+          <p>Anonymize sensitive data (PII) in SQL dumps.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Using inline patterns</span>
 <span class="sh-tool">sql-splitter</span> redact dump.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"
 
 <span class="sh-comment"># Using YAML config file</span>
@@ -356,13 +471,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Validate config only</span>
 <span class="sh-tool">sql-splitter</span> redact dump.sql --config redact.yaml --validate</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter redact dump.sql -o safe.sql --null &quot;*.ssn&quot; --hash &quot;*.email&quot; --fake &quot;*.name&quot;">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy='sql-splitter redact dump.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"'
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="graph">graph</h4>
-                <p>Generate Entity-Relationship Diagrams (ERD) from SQL dumps.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Interactive HTML (default)</span>
+          <h4 id="graph">graph</h4>
+          <p>Generate Entity-Relationship Diagrams (ERD) from SQL dumps.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Interactive HTML (default)</span>
 <span class="sh-tool">sql-splitter</span> graph dump.sql -o schema.html
 
 <span class="sh-comment"># Graphviz DOT format</span>
@@ -382,13 +502,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Focus on one table and its dependencies</span>
 <span class="sh-tool">sql-splitter</span> graph dump.sql --table orders --transitive</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter graph dump.sql -o schema.html">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter graph dump.sql -o schema.html"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="order">order</h4>
-                <p>Reorder SQL dump in topological FK order for safe imports.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Rewrite in safe import order</span>
+          <h4 id="order">order</h4>
+          <p>Reorder SQL dump in topological FK order for safe imports.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Rewrite in safe import order</span>
 <span class="sh-tool">sql-splitter</span> order dump.sql -o ordered.sql
 
 <span class="sh-comment"># Check for cycles without rewriting</span>
@@ -399,13 +524,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Reverse order (for DROP operations)</span>
 <span class="sh-tool">sql-splitter</span> order dump.sql --reverse -o drop-order.sql</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter order dump.sql -o ordered.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter order dump.sql -o ordered.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4 id="query">query</h4>
-                <p>Run SQL analytics on dump files using embedded DuckDB.</p>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Execute a single query</span>
+          <h4 id="query">query</h4>
+          <p>Run SQL analytics on dump files using embedded DuckDB.</p>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Execute a single query</span>
 <span class="sh-tool">sql-splitter</span> query dump.sql "SELECT COUNT(*) FROM users"
 
 <span class="sh-comment"># Output as JSON</span>
@@ -426,304 +556,943 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 <span class="sh-comment"># Cache management</span>
 <span class="sh-tool">sql-splitter</span> query --list-cache
 <span class="sh-tool">sql-splitter</span> query --clear-cache</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter query dump.sql &quot;SELECT COUNT(*) FROM users&quot;">Copy</button>
-                </div>
-            </article>
+            <button
+              class="copy-btn"
+              data-copy='sql-splitter query dump.sql "SELECT COUNT(*) FROM users"'
+            >
+              Copy
+            </button>
+          </div>
+        </article>
 
-            <!-- Split Options -->
-            <article class="guide-section">
-                <h3>Split Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output directory</td><td>output</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only split specific tables (comma-separated)</td><td>—</td></tr>
-                        <tr><td><code>--schema-only</code></td><td>—</td><td>Only DDL (CREATE TABLE, indexes)</td><td>false</td></tr>
-                        <tr><td><code>--data-only</code></td><td>—</td><td>Only DML (INSERT, COPY)</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
-                        <tr><td><code>--fail-fast</code></td><td>—</td><td>Stop on first error (glob)</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Input accepts glob patterns: <code>*.sql</code>, <code>dumps/**/*.sql</code></p>
-            </article>
+        <!-- Split Options -->
+        <article class="guide-section">
+          <h3>Split Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output directory</td>
+                <td>output</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td><code>-t</code></td>
+                <td>Only split specific tables (comma-separated)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--schema-only</code></td>
+                <td>—</td>
+                <td>Only DDL (CREATE TABLE, indexes)</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--data-only</code></td>
+                <td>—</td>
+                <td>Only DML (INSERT, COPY)</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Preview without writing</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--fail-fast</code></td>
+                <td>—</td>
+                <td>Stop on first error (glob)</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Input accepts glob patterns: <code>*.sql</code>,
+            <code>dumps/**/*.sql</code>
+          </p>
+        </article>
 
-            <!-- Merge Options -->
-            <article class="guide-section">
-                <h3>Merge Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect for headers/footers</td><td>mysql</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only merge specific tables</td><td>all</td></tr>
-                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables (comma-separated)</td><td>—</td></tr>
-                        <tr><td><code>--transaction</code></td><td>—</td><td>Wrap in BEGIN/COMMIT</td><td>false</td></tr>
-                        <tr><td><code>--no-header</code></td><td>—</td><td>Skip header comments</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
-                    </tbody>
-                </table>
-            </article>
+        <!-- Merge Options -->
+        <article class="guide-section">
+          <h3>Merge Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output SQL file</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect for headers/footers</td>
+                <td>mysql</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td><code>-t</code></td>
+                <td>Only merge specific tables</td>
+                <td>all</td>
+              </tr>
+              <tr>
+                <td><code>--exclude</code></td>
+                <td><code>-e</code></td>
+                <td>Exclude tables (comma-separated)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--transaction</code></td>
+                <td>—</td>
+                <td>Wrap in BEGIN/COMMIT</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--no-header</code></td>
+                <td>—</td>
+                <td>Skip header comments</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Preview without writing</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
 
-            <!-- Convert Options -->
-            <article class="guide-section">
-                <h3>Convert Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file or directory</td><td>stdout</td></tr>
-                        <tr><td><code>--from</code></td><td>—</td><td>Source dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--to</code></td><td>—</td><td>Target dialect (mysql, postgres, sqlite)</td><td>required</td></tr>
-                        <tr><td><code>--strict</code></td><td>—</td><td>Fail on unsupported features</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
-                        <tr><td><code>--fail-fast</code></td><td>—</td><td>Stop on first error (glob)</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Supports all 6 conversion pairs: MySQL ↔ PostgreSQL ↔ SQLite</p>
-            </article>
+        <!-- Convert Options -->
+        <article class="guide-section">
+          <h3>Convert Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output SQL file or directory</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--from</code></td>
+                <td>—</td>
+                <td>Source dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--to</code></td>
+                <td>—</td>
+                <td>Target dialect (mysql, postgres, sqlite)</td>
+                <td>required</td>
+              </tr>
+              <tr>
+                <td><code>--strict</code></td>
+                <td>—</td>
+                <td>Fail on unsupported features</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Preview without writing</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--fail-fast</code></td>
+                <td>—</td>
+                <td>Stop on first error (glob)</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Supports all 6 conversion pairs: MySQL ↔ PostgreSQL ↔ SQLite
+          </p>
+        </article>
 
-            <!-- Validate Options -->
-            <article class="guide-section">
-                <h3>Validate Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--dialect</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--strict</code></td><td>Treat warnings as errors (exit 1)</td><td>false</td></tr>
-                        <tr><td><code>--json</code></td><td>JSON output for CI/automation</td><td>false</td></tr>
-                        <tr><td><code>--max-rows-per-table</code></td><td>Row limit for PK/FK checks (0 = unlimited)</td><td>1M</td></tr>
-                        <tr><td><code>--no-limit</code></td><td>Disable row limit</td><td>false</td></tr>
-                        <tr><td><code>--no-fk-checks</code></td><td>Skip PK/FK data integrity checks</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--fail-fast</code></td><td>Stop on first error (glob)</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Input accepts glob patterns: <code>*.sql</code>, <code>dumps/**/*.sql</code></p>
-            </article>
+        <!-- Validate Options -->
+        <article class="guide-section">
+          <h3>Validate Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td>SQL dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--strict</code></td>
+                <td>Treat warnings as errors (exit 1)</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--json</code></td>
+                <td>JSON output for CI/automation</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--max-rows-per-table</code></td>
+                <td>Row limit for PK/FK checks (0 = unlimited)</td>
+                <td>1M</td>
+              </tr>
+              <tr>
+                <td><code>--no-limit</code></td>
+                <td>Disable row limit</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--no-fk-checks</code></td>
+                <td>Skip PK/FK data integrity checks</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--fail-fast</code></td>
+                <td>Stop on first error (glob)</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Input accepts glob patterns: <code>*.sql</code>,
+            <code>dumps/**/*.sql</code>
+          </p>
+        </article>
 
-            <!-- Sample Options -->
-            <article class="guide-section">
-                <h3>Sample Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--percent</code></td><td>—</td><td>Sample percentage (1-100)</td><td>—</td></tr>
-                        <tr><td><code>--rows</code></td><td>—</td><td>Fixed rows per table</td><td>—</td></tr>
-                        <tr><td><code>--preserve-relations</code></td><td>—</td><td>Maintain FK integrity</td><td>false</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only sample specific tables</td><td>all</td></tr>
-                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables</td><td>—</td></tr>
-                        <tr><td><code>--seed</code></td><td>—</td><td>Random seed for reproducibility</td><td>random</td></tr>
-                        <tr><td><code>--include-global</code></td><td>—</td><td>Lookup tables: none, lookups, all</td><td>lookups</td></tr>
-                        <tr><td><code>--config</code></td><td><code>-c</code></td><td>YAML config file</td><td>—</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Use <code>--percent</code> OR <code>--rows</code>, not both</p>
-            </article>
+        <!-- Sample Options -->
+        <article class="guide-section">
+          <h3>Sample Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output SQL file</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--percent</code></td>
+                <td>—</td>
+                <td>Sample percentage (1-100)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--rows</code></td>
+                <td>—</td>
+                <td>Fixed rows per table</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--preserve-relations</code></td>
+                <td>—</td>
+                <td>Maintain FK integrity</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td><code>-t</code></td>
+                <td>Only sample specific tables</td>
+                <td>all</td>
+              </tr>
+              <tr>
+                <td><code>--exclude</code></td>
+                <td><code>-e</code></td>
+                <td>Exclude tables</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--seed</code></td>
+                <td>—</td>
+                <td>Random seed for reproducibility</td>
+                <td>random</td>
+              </tr>
+              <tr>
+                <td><code>--include-global</code></td>
+                <td>—</td>
+                <td>Lookup tables: none, lookups, all</td>
+                <td>lookups</td>
+              </tr>
+              <tr>
+                <td><code>--config</code></td>
+                <td><code>-c</code></td>
+                <td>YAML config file</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Preview without writing</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Use <code>--percent</code> OR <code>--rows</code>, not both
+          </p>
+        </article>
 
-            <!-- Shard Options -->
-            <article class="guide-section">
-                <h3>Shard Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file or directory</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--tenant-column</code></td><td>—</td><td>Tenant column name</td><td>auto</td></tr>
-                        <tr><td><code>--tenant-value</code></td><td>—</td><td>Single tenant value to extract</td><td>—</td></tr>
-                        <tr><td><code>--tenant-values</code></td><td>—</td><td>Multiple tenants (comma-separated)</td><td>—</td></tr>
-                        <tr><td><code>--root-tables</code></td><td>—</td><td>Tables with tenant column</td><td>auto</td></tr>
-                        <tr><td><code>--include-global</code></td><td>—</td><td>Lookup tables: none, lookups, all</td><td>lookups</td></tr>
-                        <tr><td><code>--config</code></td><td><code>-c</code></td><td>YAML config file</td><td>—</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Auto-detects tenant columns: tenant_id, company_id, account_id, org_id, etc.</p>
-            </article>
+        <!-- Shard Options -->
+        <article class="guide-section">
+          <h3>Shard Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output SQL file or directory</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--tenant-column</code></td>
+                <td>—</td>
+                <td>Tenant column name</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--tenant-value</code></td>
+                <td>—</td>
+                <td>Single tenant value to extract</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--tenant-values</code></td>
+                <td>—</td>
+                <td>Multiple tenants (comma-separated)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--root-tables</code></td>
+                <td>—</td>
+                <td>Tables with tenant column</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--include-global</code></td>
+                <td>—</td>
+                <td>Lookup tables: none, lookups, all</td>
+                <td>lookups</td>
+              </tr>
+              <tr>
+                <td><code>--config</code></td>
+                <td><code>-c</code></td>
+                <td>YAML config file</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Preview without writing</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Auto-detects tenant columns: tenant_id, company_id, account_id,
+            org_id, etc.
+          </p>
+        </article>
 
-            <!-- Diff Options -->
-            <article class="guide-section">
-                <h3>Diff Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output file</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--schema-only</code></td><td>—</td><td>Compare schema only</td><td>false</td></tr>
-                        <tr><td><code>--data-only</code></td><td>—</td><td>Compare data only</td><td>false</td></tr>
-                        <tr><td><code>--format</code></td><td>—</td><td>Output format: text, json, sql</td><td>text</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only compare specific tables</td><td>all</td></tr>
-                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables</td><td>—</td></tr>
-                        <tr><td><code>--verbose</code></td><td><code>-v</code></td><td>Show sample PK values</td><td>false</td></tr>
-                        <tr><td><code>--ignore-columns</code></td><td>—</td><td>Ignore columns matching glob</td><td>—</td></tr>
-                        <tr><td><code>--primary-key</code></td><td>—</td><td>Override PK (table:col1+col2)</td><td>auto</td></tr>
-                        <tr><td><code>--max-pk-entries</code></td><td>—</td><td>Max PK entries to track</td><td>10M</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Detects: tables added/removed, columns changed, PK/FK/index changes, rows added/removed/modified</p>
-            </article>
+        <!-- Diff Options -->
+        <article class="guide-section">
+          <h3>Diff Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output file</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--schema-only</code></td>
+                <td>—</td>
+                <td>Compare schema only</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--data-only</code></td>
+                <td>—</td>
+                <td>Compare data only</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--format</code></td>
+                <td>—</td>
+                <td>Output format: text, json, sql</td>
+                <td>text</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td><code>-t</code></td>
+                <td>Only compare specific tables</td>
+                <td>all</td>
+              </tr>
+              <tr>
+                <td><code>--exclude</code></td>
+                <td><code>-e</code></td>
+                <td>Exclude tables</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--verbose</code></td>
+                <td><code>-v</code></td>
+                <td>Show sample PK values</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--ignore-columns</code></td>
+                <td>—</td>
+                <td>Ignore columns matching glob</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--primary-key</code></td>
+                <td>—</td>
+                <td>Override PK (table:col1+col2)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--max-pk-entries</code></td>
+                <td>—</td>
+                <td>Max PK entries to track</td>
+                <td>10M</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Detects: tables added/removed, columns changed, PK/FK/index changes,
+            rows added/removed/modified
+          </p>
+        </article>
 
-            <!-- Redact Options -->
-            <article class="guide-section">
-                <h3>Redact Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect (mysql, postgres, sqlite)</td><td>auto</td></tr>
-                        <tr><td><code>--config</code></td><td><code>-c</code></td><td>YAML config file</td><td>—</td></tr>
-                        <tr><td><code>--generate-config</code></td><td>—</td><td>Analyze input and generate YAML config</td><td>false</td></tr>
-                        <tr><td><code>--null</code></td><td>—</td><td>Columns to set to NULL (glob patterns)</td><td>—</td></tr>
-                        <tr><td><code>--hash</code></td><td>—</td><td>Columns to hash with SHA256</td><td>—</td></tr>
-                        <tr><td><code>--fake</code></td><td>—</td><td>Columns to replace with fake data</td><td>—</td></tr>
-                        <tr><td><code>--mask</code></td><td>—</td><td>Columns to mask (pattern=column)</td><td>—</td></tr>
-                        <tr><td><code>--constant</code></td><td>—</td><td>Column=value pairs</td><td>—</td></tr>
-                        <tr><td><code>--seed</code></td><td>—</td><td>Random seed for reproducibility</td><td>random</td></tr>
-                        <tr><td><code>--locale</code></td><td>—</td><td>Locale for fake data (en, de_de, etc.)</td><td>en</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Only redact specific tables</td><td>all</td></tr>
-                        <tr><td><code>--exclude</code></td><td><code>-x</code></td><td>Exclude tables</td><td>—</td></tr>
-                        <tr><td><code>--strict</code></td><td>—</td><td>Fail on warnings</td><td>false</td></tr>
-                        <tr><td><code>--validate</code></td><td>—</td><td>Validate config only</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td><code>-p</code></td><td>Show progress bar</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Preview without writing</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Strategies: null, hash, fake, mask, constant, shuffle, skip. 25+ fake generators available.</p>
-            </article>
+        <!-- Redact Options -->
+        <article class="guide-section">
+          <h3>Redact Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output SQL file</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect (mysql, postgres, sqlite)</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--config</code></td>
+                <td><code>-c</code></td>
+                <td>YAML config file</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--generate-config</code></td>
+                <td>—</td>
+                <td>Analyze input and generate YAML config</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--null</code></td>
+                <td>—</td>
+                <td>Columns to set to NULL (glob patterns)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--hash</code></td>
+                <td>—</td>
+                <td>Columns to hash with SHA256</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--fake</code></td>
+                <td>—</td>
+                <td>Columns to replace with fake data</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--mask</code></td>
+                <td>—</td>
+                <td>Columns to mask (pattern=column)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--constant</code></td>
+                <td>—</td>
+                <td>Column=value pairs</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--seed</code></td>
+                <td>—</td>
+                <td>Random seed for reproducibility</td>
+                <td>random</td>
+              </tr>
+              <tr>
+                <td><code>--locale</code></td>
+                <td>—</td>
+                <td>Locale for fake data (en, de_de, etc.)</td>
+                <td>en</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td><code>-t</code></td>
+                <td>Only redact specific tables</td>
+                <td>all</td>
+              </tr>
+              <tr>
+                <td><code>--exclude</code></td>
+                <td><code>-x</code></td>
+                <td>Exclude tables</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--strict</code></td>
+                <td>—</td>
+                <td>Fail on warnings</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--validate</code></td>
+                <td>—</td>
+                <td>Validate config only</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td><code>-p</code></td>
+                <td>Show progress bar</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Preview without writing</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Strategies: null, hash, fake, mask, constant, shuffle, skip. 25+
+            fake generators available.
+          </p>
+        </article>
 
-            <!-- Graph Options -->
-            <article class="guide-section">
-                <h3>Graph Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output file (html, dot, mmd, json)</td><td>stdout</td></tr>
-                        <tr><td><code>--format</code></td><td>—</td><td>Output format: html, dot, mermaid, json</td><td>auto</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect</td><td>auto</td></tr>
-                        <tr><td><code>--layout</code></td><td>—</td><td>Layout: lr (horizontal), tb (vertical)</td><td>lr</td></tr>
-                        <tr><td><code>--tables</code></td><td><code>-t</code></td><td>Include tables matching glob</td><td>all</td></tr>
-                        <tr><td><code>--exclude</code></td><td><code>-e</code></td><td>Exclude tables matching glob</td><td>—</td></tr>
-                        <tr><td><code>--table</code></td><td>—</td><td>Focus on specific table</td><td>—</td></tr>
-                        <tr><td><code>--transitive</code></td><td>—</td><td>Show dependencies of focused table</td><td>false</td></tr>
-                        <tr><td><code>--reverse</code></td><td>—</td><td>Show dependents of focused table</td><td>false</td></tr>
-                        <tr><td><code>--cycles-only</code></td><td>—</td><td>Only tables in circular dependencies</td><td>false</td></tr>
-                        <tr><td><code>--render</code></td><td>—</td><td>Render DOT to PNG/SVG/PDF</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">HTML output includes dark/light theme toggle and copy Mermaid button.</p>
-            </article>
+        <!-- Graph Options -->
+        <article class="guide-section">
+          <h3>Graph Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output file (html, dot, mmd, json)</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--format</code></td>
+                <td>—</td>
+                <td>Output format: html, dot, mermaid, json</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--layout</code></td>
+                <td>—</td>
+                <td>Layout: lr (horizontal), tb (vertical)</td>
+                <td>lr</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td><code>-t</code></td>
+                <td>Include tables matching glob</td>
+                <td>all</td>
+              </tr>
+              <tr>
+                <td><code>--exclude</code></td>
+                <td><code>-e</code></td>
+                <td>Exclude tables matching glob</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--table</code></td>
+                <td>—</td>
+                <td>Focus on specific table</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--transitive</code></td>
+                <td>—</td>
+                <td>Show dependencies of focused table</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--reverse</code></td>
+                <td>—</td>
+                <td>Show dependents of focused table</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--cycles-only</code></td>
+                <td>—</td>
+                <td>Only tables in circular dependencies</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--render</code></td>
+                <td>—</td>
+                <td>Render DOT to PNG/SVG/PDF</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            HTML output includes dark/light theme toggle and copy Mermaid
+            button.
+          </p>
+        </article>
 
-            <!-- Order Options -->
-            <article class="guide-section">
-                <h3>Order Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Output SQL file</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect</td><td>auto</td></tr>
-                        <tr><td><code>--check</code></td><td>—</td><td>Check for cycles, don't write</td><td>false</td></tr>
-                        <tr><td><code>--dry-run</code></td><td>—</td><td>Show order without writing</td><td>false</td></tr>
-                        <tr><td><code>--reverse</code></td><td>—</td><td>Reverse order (for DROP)</td><td>false</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">Use <code>--check</code> to detect circular FK dependencies before importing.</p>
-            </article>
+        <!-- Order Options -->
+        <article class="guide-section">
+          <h3>Order Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Output SQL file</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--check</code></td>
+                <td>—</td>
+                <td>Check for cycles, don't write</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--dry-run</code></td>
+                <td>—</td>
+                <td>Show order without writing</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--reverse</code></td>
+                <td>—</td>
+                <td>Reverse order (for DROP)</td>
+                <td>false</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Use <code>--check</code> to detect circular FK dependencies before
+            importing.
+          </p>
+        </article>
 
-            <!-- Query Options -->
-            <article class="guide-section">
-                <h3>Query Options</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Flag</th><th>Short</th><th>Description</th><th>Default</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>--format</code></td><td><code>-f</code></td><td>Output format: table, json, jsonl, csv, tsv</td><td>table</td></tr>
-                        <tr><td><code>--output</code></td><td><code>-o</code></td><td>Write results to file</td><td>stdout</td></tr>
-                        <tr><td><code>--dialect</code></td><td><code>-d</code></td><td>SQL dialect</td><td>auto</td></tr>
-                        <tr><td><code>--interactive</code></td><td><code>-i</code></td><td>Start REPL session</td><td>false</td></tr>
-                        <tr><td><code>--disk</code></td><td>—</td><td>Use disk storage (for &gt;2GB)</td><td>false</td></tr>
-                        <tr><td><code>--cache</code></td><td>—</td><td>Cache imported database</td><td>false</td></tr>
-                        <tr><td><code>--tables</code></td><td>—</td><td>Import specific tables only</td><td>all</td></tr>
-                        <tr><td><code>--memory-limit</code></td><td>—</td><td>DuckDB memory limit (e.g., 4GB)</td><td>—</td></tr>
-                        <tr><td><code>--timing</code></td><td>—</td><td>Show query execution time</td><td>false</td></tr>
-                        <tr><td><code>--progress</code></td><td>—</td><td>Show import progress</td><td>false</td></tr>
-                        <tr><td><code>--list-cache</code></td><td>—</td><td>List cached databases</td><td>—</td></tr>
-                        <tr><td><code>--clear-cache</code></td><td>—</td><td>Clear all cached databases</td><td>—</td></tr>
-                    </tbody>
-                </table>
-                <p class="note">REPL commands: .tables, .schema, .describe, .count, .sample, .format, .export</p>
-            </article>
+        <!-- Query Options -->
+        <article class="guide-section">
+          <h3>Query Options</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Short</th>
+                <th>Description</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>--format</code></td>
+                <td><code>-f</code></td>
+                <td>Output format: table, json, jsonl, csv, tsv</td>
+                <td>table</td>
+              </tr>
+              <tr>
+                <td><code>--output</code></td>
+                <td><code>-o</code></td>
+                <td>Write results to file</td>
+                <td>stdout</td>
+              </tr>
+              <tr>
+                <td><code>--dialect</code></td>
+                <td><code>-d</code></td>
+                <td>SQL dialect</td>
+                <td>auto</td>
+              </tr>
+              <tr>
+                <td><code>--interactive</code></td>
+                <td><code>-i</code></td>
+                <td>Start REPL session</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--disk</code></td>
+                <td>—</td>
+                <td>Use disk storage (for &gt;2GB)</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--cache</code></td>
+                <td>—</td>
+                <td>Cache imported database</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--tables</code></td>
+                <td>—</td>
+                <td>Import specific tables only</td>
+                <td>all</td>
+              </tr>
+              <tr>
+                <td><code>--memory-limit</code></td>
+                <td>—</td>
+                <td>DuckDB memory limit (e.g., 4GB)</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--timing</code></td>
+                <td>—</td>
+                <td>Show query execution time</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--progress</code></td>
+                <td>—</td>
+                <td>Show import progress</td>
+                <td>false</td>
+              </tr>
+              <tr>
+                <td><code>--list-cache</code></td>
+                <td>—</td>
+                <td>List cached databases</td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--clear-cache</code></td>
+                <td>—</td>
+                <td>Clear all cached databases</td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            REPL commands: .tables, .schema, .describe, .count, .sample,
+            .format, .export
+          </p>
+        </article>
 
-            <!-- Supported Statements -->
-            <article class="guide-section">
-                <h3>Supported Statement Types</h3>
-                <p>sql-splitter recognizes and routes these SQL statement types to their respective table files:</p>
-                <div class="two-col">
-                    <div>
-                        <ul>
-                            <li>CREATE TABLE</li>
-                            <li>INSERT INTO</li>
-                            <li>COPY ... FROM stdin (PostgreSQL)</li>
-                        </ul>
-                    </div>
-                    <div>
-                        <ul>
-                            <li>CREATE INDEX</li>
-                            <li>ALTER TABLE</li>
-                            <li>DROP TABLE</li>
-                        </ul>
-                    </div>
-                </div>
-                <p class="note">Compressed files supported: .gz, .bz2, .xz, .zst (auto-detected)</p>
-            </article>
+        <!-- Supported Statements -->
+        <article class="guide-section">
+          <h3>Supported Statement Types</h3>
+          <p>
+            sql-splitter recognizes and routes these SQL statement types to
+            their respective table files:
+          </p>
+          <div class="two-col">
+            <div>
+              <ul>
+                <li>CREATE TABLE</li>
+                <li>INSERT INTO</li>
+                <li>COPY ... FROM stdin (PostgreSQL)</li>
+              </ul>
+            </div>
+            <div>
+              <ul>
+                <li>CREATE INDEX</li>
+                <li>ALTER TABLE</li>
+                <li>DROP TABLE</li>
+              </ul>
+            </div>
+          </div>
+          <p class="note">
+            Compressed files supported: .gz, .bz2, .xz, .zst (auto-detected)
+          </p>
+        </article>
 
-            <!-- Examples -->
-            <article class="guide-section">
-                <h3>Common Workflows</h3>
+        <!-- Examples -->
+        <article class="guide-section">
+          <h3>Common Workflows</h3>
 
-                <h4>Split → Edit → Merge</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Split into per-table files</span>
+          <h4>Split → Edit → Merge</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Split into per-table files</span>
 <span class="sh-tool">sql-splitter</span> split dump.sql -o tables/ -p
 
 <span class="sh-comment"># Edit specific tables as needed...</span>
 
 <span class="sh-comment"># Merge back into single file</span>
 <span class="sh-tool">sql-splitter</span> merge tables/ -o updated.sql --transaction</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter split dump.sql -o tables/ -p">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter split dump.sql -o tables/ -p"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>MySQL to PostgreSQL Migration</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Validate source dump</span>
+          <h4>MySQL to PostgreSQL Migration</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Validate source dump</span>
 <span class="sh-tool">sql-splitter</span> validate mysql.sql --strict
 
 <span class="sh-comment"># Convert to PostgreSQL</span>
@@ -731,52 +1500,77 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Validate converted output</span>
 <span class="sh-tool">sql-splitter</span> validate pg.sql --dialect=postgres --strict</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql -p">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter convert mysql.sql --to postgres -o pg.sql -p"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>Create Dev Dataset</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Sample 10% with FK integrity</span>
+          <h4>Create Dev Dataset</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Sample 10% with FK integrity</span>
 <span class="sh-tool">sql-splitter</span> sample prod.sql -o dev.sql --percent 10 --preserve-relations
 
 <span class="sh-comment"># Or sample fixed row count</span>
 <span class="sh-tool">sql-splitter</span> sample prod.sql -o dev.sql --rows 1000 --preserve-relations --seed 42</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>Extract Tenant Data</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Extract single tenant</span>
+          <h4>Extract Tenant Data</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Extract single tenant</span>
 <span class="sh-tool">sql-splitter</span> shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql
 
 <span class="sh-comment"># Extract multiple tenants to separate files</span>
 <span class="sh-tool">sql-splitter</span> shard multi-tenant.sql --tenant-values "1,2,3" -o tenants/</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter shard multi-tenant.sql --tenant-value 123 -o tenant_123.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>CI Validation Pipeline</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Validate all dumps in CI</span>
+          <h4>CI Validation Pipeline</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Validate all dumps in CI</span>
 <span class="sh-tool">sql-splitter</span> validate "dumps/*.sql" --strict --json --fail-fast
 
 <span class="sh-comment"># Parse results with jq</span>
 <span class="sh-tool">sql-splitter</span> validate "*.sql" --json | jq '.results[] | select(.passed == false)'</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter validate &quot;dumps/*.sql&quot; --strict --json --fail-fast">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy='sql-splitter validate "dumps/*.sql" --strict --json --fail-fast'
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>Compare Dumps for Changes</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Full comparison</span>
+          <h4>Compare Dumps for Changes</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Full comparison</span>
 <span class="sh-tool">sql-splitter</span> diff old_backup.sql new_backup.sql -p
 
 <span class="sh-comment"># Generate migration script</span>
 <span class="sh-tool">sql-splitter</span> diff old.sql new.sql --format sql -o migration.sql</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter diff old.sql new.sql --format sql -o migration.sql">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter diff old.sql new.sql --format sql -o migration.sql"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>Anonymize for Dev Environment</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Generate redact config</span>
+          <h4>Anonymize for Dev Environment</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Generate redact config</span>
 <span class="sh-tool">sql-splitter</span> redact prod.sql --generate-config -o redact.yaml
 
 <span class="sh-comment"># Apply redaction</span>
@@ -784,12 +1578,17 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Quick inline redaction</span>
 <span class="sh-tool">sql-splitter</span> redact prod.sql -o safe.sql --null "*.ssn" --hash "*.email" --fake "*.name"</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter redact prod.sql -o dev.sql --null &quot;*.ssn&quot; --hash &quot;*.email&quot; --fake &quot;*.name&quot;">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy='sql-splitter redact prod.sql -o dev.sql --null "*.ssn" --hash "*.email" --fake "*.name"'
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>Visualize Schema</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Generate interactive ERD</span>
+          <h4>Visualize Schema</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Generate interactive ERD</span>
 <span class="sh-tool">sql-splitter</span> graph dump.sql -o schema.html
 
 <span class="sh-comment"># Focus on specific table's dependencies</span>
@@ -797,12 +1596,17 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Check import order and detect cycles</span>
 <span class="sh-tool">sql-splitter</span> order dump.sql --check</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter graph dump.sql -o schema.html">Copy</button>
-                </div>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter graph dump.sql -o schema.html"
+            >
+              Copy
+            </button>
+          </div>
 
-                <h4>Query Dump Data</h4>
-                <div class="code-block">
-                    <pre><code><span class="sh-comment"># Run ad-hoc analytics on dump</span>
+          <h4>Query Dump Data</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># Run ad-hoc analytics on dump</span>
 <span class="sh-tool">sql-splitter</span> query dump.sql "SELECT COUNT(*) FROM users"
 
 <span class="sh-comment"># Export results as CSV</span>
@@ -810,197 +1614,334 @@ sudo cp target/release/sql-splitter /usr/local/bin/">Copy</button>
 
 <span class="sh-comment"># Cache for 400x faster repeated queries</span>
 <span class="sh-tool">sql-splitter</span> query dump.sql "SELECT ..." --cache</code></pre>
-                    <button class="copy-btn" data-copy="sql-splitter query dump.sql &quot;SELECT COUNT(*) FROM users&quot;">Copy</button>
-                </div>
-            </article>
+            <button
+              class="copy-btn"
+              data-copy='sql-splitter query dump.sql "SELECT COUNT(*) FROM users"'
+            >
+              Copy
+            </button>
+          </div>
+        </article>
 
-            <!-- Performance -->
-            <article class="guide-section">
-                <h3>Performance</h3>
-                <p>Benchmarks on Apple M2 Max:</p>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Metric</th><th>Value</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td>Parser Throughput</td><td>600+ MB/s</td></tr>
-                        <tr><td>Memory Usage</td><td>~50 MB constant</td></tr>
-                        <tr><td>Cold Start</td><td>~5ms</td></tr>
-                        <tr><td>Compressed Files</td><td>gzip, bz2, xz, zstd</td></tr>
-                    </tbody>
-                </table>
+        <!-- Performance -->
+        <article class="guide-section">
+          <h3>Performance</h3>
+          <p>Benchmarks on Apple M2 Max:</p>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Parser Throughput</td>
+                <td>600+ MB/s</td>
+              </tr>
+              <tr>
+                <td>Memory Usage</td>
+                <td>~50 MB constant</td>
+              </tr>
+              <tr>
+                <td>Cold Start</td>
+                <td>~5ms</td>
+              </tr>
+              <tr>
+                <td>Compressed Files</td>
+                <td>gzip, bz2, xz, zstd</td>
+              </tr>
+            </tbody>
+          </table>
 
-                <p class="note">Actual performance depends on disk I/O speed and file complexity.</p>
-            </article>
+          <p class="note">
+            Actual performance depends on disk I/O speed and file complexity.
+          </p>
+        </article>
 
-            <!-- What Each Command Does -->
-            <article class="guide-section">
-                <h3>What Each Command Does</h3>
-                <table class="options-table">
-                    <thead>
-                        <tr><th>Command</th><th>Description</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td><code>split</code></td><td>Split a large SQL dump into separate files, one per table</td></tr>
-                        <tr><td><code>merge</code></td><td>Combine per-table SQL files back into a single dump</td></tr>
-                        <tr><td><code>analyze</code></td><td>Scan dumps and show per-table statistics (row counts, sizes)</td></tr>
-                        <tr><td><code>validate</code></td><td>Check dumps for syntax errors and PK/FK integrity issues</td></tr>
-                        <tr><td><code>convert</code></td><td>Convert dumps between MySQL, PostgreSQL, and SQLite</td></tr>
-                        <tr><td><code>sample</code></td><td>Create smaller test datasets while preserving FK relationships</td></tr>
-                        <tr><td><code>shard</code></td><td>Extract tenant-specific data from multi-tenant dumps</td></tr>
-                        <tr><td><code>diff</code></td><td>Compare two dumps for schema and data changes</td></tr>
-                        <tr><td><code>redact</code></td><td>Anonymize sensitive data (PII) for safe sharing</td></tr>
-                        <tr><td><code>graph</code></td><td>Generate ERD diagrams (HTML, DOT, Mermaid, JSON)</td></tr>
-                        <tr><td><code>order</code></td><td>Reorder dump in topological FK order for safe imports</td></tr>
-                        <tr><td><code>query</code></td><td>Run SQL analytics on dumps with embedded DuckDB</td></tr>
-                    </tbody>
-                </table>
-            </article>
+        <!-- What Each Command Does -->
+        <article class="guide-section">
+          <h3>What Each Command Does</h3>
+          <table class="options-table">
+            <thead>
+              <tr>
+                <th>Command</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>split</code></td>
+                <td>
+                  Split a large SQL dump into separate files, one per table
+                </td>
+              </tr>
+              <tr>
+                <td><code>merge</code></td>
+                <td>Combine per-table SQL files back into a single dump</td>
+              </tr>
+              <tr>
+                <td><code>analyze</code></td>
+                <td>
+                  Scan dumps and show per-table statistics (row counts, sizes)
+                </td>
+              </tr>
+              <tr>
+                <td><code>validate</code></td>
+                <td>
+                  Check dumps for syntax errors and PK/FK integrity issues
+                </td>
+              </tr>
+              <tr>
+                <td><code>convert</code></td>
+                <td>Convert dumps between MySQL, PostgreSQL, and SQLite</td>
+              </tr>
+              <tr>
+                <td><code>sample</code></td>
+                <td>
+                  Create smaller test datasets while preserving FK relationships
+                </td>
+              </tr>
+              <tr>
+                <td><code>shard</code></td>
+                <td>Extract tenant-specific data from multi-tenant dumps</td>
+              </tr>
+              <tr>
+                <td><code>diff</code></td>
+                <td>Compare two dumps for schema and data changes</td>
+              </tr>
+              <tr>
+                <td><code>redact</code></td>
+                <td>Anonymize sensitive data (PII) for safe sharing</td>
+              </tr>
+              <tr>
+                <td><code>graph</code></td>
+                <td>Generate ERD diagrams (HTML, DOT, Mermaid, JSON)</td>
+              </tr>
+              <tr>
+                <td><code>order</code></td>
+                <td>Reorder dump in topological FK order for safe imports</td>
+              </tr>
+              <tr>
+                <td><code>query</code></td>
+                <td>Run SQL analytics on dumps with embedded DuckDB</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
 
-            <!-- FAQ -->
-            <article class="guide-section">
-                <h3>FAQ</h3>
+        <!-- FAQ -->
+        <article class="guide-section">
+          <h3>FAQ</h3>
 
-                <details>
-                    <summary>Do I need a running database to use sql-splitter?</summary>
-                    <div class="details-content">
-                        <p>No. sql-splitter is file-based. It reads <code>.sql</code> files from disk and writes <code>.sql</code> files back. No database server required.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>Do I need a running database to use sql-splitter?</summary>
+            <div class="details-content">
+              <p>
+                No. sql-splitter is file-based. It reads <code>.sql</code> files
+                from disk and writes <code>.sql</code> files back. No database
+                server required.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Does it modify my source file?</summary>
-                    <div class="details-content">
-                        <p>No. All commands are read-only with respect to input files. They only write to the output paths you specify.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>Does it modify my source file?</summary>
+            <div class="details-content">
+              <p>
+                No. All commands are read-only with respect to input files. They
+                only write to the output paths you specify.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Can it handle dumps larger than RAM?</summary>
-                    <div class="details-content">
-                        <p>Yes. The core design is streaming: it reads input in fixed-size buffers and writes to buffered output files. Memory usage is constant regardless of file size, so 10GB+ dumps work fine.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>Can it handle dumps larger than RAM?</summary>
+            <div class="details-content">
+              <p>
+                Yes. The core design is streaming: it reads input in fixed-size
+                buffers and writes to buffered output files. Memory usage is
+                constant regardless of file size, so 10GB+ dumps work fine.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Which SQL dialects are supported?</summary>
-                    <div class="details-content">
-                        <p>MySQL/MariaDB (<code>mysqldump</code>), PostgreSQL (<code>pg_dump</code> plain-text), and SQLite (<code>.dump</code>). Binary dump formats are not supported.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>Which SQL dialects are supported?</summary>
+            <div class="details-content">
+              <p>
+                MySQL/MariaDB (<code>mysqldump</code>), PostgreSQL (<code
+                  >pg_dump</code
+                >
+                plain-text), and SQLite (<code>.dump</code>). Binary dump
+                formats are not supported.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>What compression formats work?</summary>
-                    <div class="details-content">
-                        <p>Compressed input is auto-detected: gzip (<code>.gz</code>), bzip2 (<code>.bz2</code>), xz (<code>.xz</code>), and zstd (<code>.zst</code>). Pass compressed files directly to any command.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>What compression formats work?</summary>
+            <div class="details-content">
+              <p>
+                Compressed input is auto-detected: gzip (<code>.gz</code>),
+                bzip2 (<code>.bz2</code>), xz (<code>.xz</code>), and zstd
+                (<code>.zst</code>). Pass compressed files directly to any
+                command.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>What's the difference between sample and shard?</summary>
-                    <div class="details-content">
-                        <p><code>sample</code> creates a smaller dataset (N rows or percentage) while preserving FK integrity. <code>shard</code> splits by tenant ID, producing one dump per tenant with all related rows.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>What's the difference between sample and shard?</summary>
+            <div class="details-content">
+              <p>
+                <code>sample</code> creates a smaller dataset (N rows or
+                percentage) while preserving FK integrity.
+                <code>shard</code> splits by tenant ID, producing one dump per
+                tenant with all related rows.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>How reliable is dialect conversion?</summary>
-                    <div class="details-content">
-                        <p>For typical schemas with common types, conversions import successfully. Advanced features (triggers, custom types, arrays) may need manual adjustments. Use <code>--strict</code> to fail on unsupported features.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>How reliable is dialect conversion?</summary>
+            <div class="details-content">
+              <p>
+                For typical schemas with common types, conversions import
+                successfully. Advanced features (triggers, custom types, arrays)
+                may need manual adjustments. Use <code>--strict</code> to fail
+                on unsupported features.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Does splitting and merging produce identical output?</summary>
-                    <div class="details-content">
-                        <p>No, sql-splitter aims for semantic equivalence, not byte-for-byte equality. Formatting may differ, but the schema and data import to the same database contents.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>
+              Does splitting and merging produce identical output?
+            </summary>
+            <div class="details-content">
+              <p>
+                No, sql-splitter aims for semantic equivalence, not
+                byte-for-byte equality. Formatting may differ, but the schema
+                and data import to the same database contents.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>How does validate check FK integrity without a database?</summary>
-                    <div class="details-content">
-                        <p>It parses <code>CREATE TABLE</code> to understand PKs and FKs, then scans INSERT/COPY data to detect duplicates and broken references. Use <code>--no-fk-checks</code> to skip expensive checks.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>
+              How does validate check FK integrity without a database?
+            </summary>
+            <div class="details-content">
+              <p>
+                It parses <code>CREATE TABLE</code> to understand PKs and FKs,
+                then scans INSERT/COPY data to detect duplicates and broken
+                references. Use <code>--no-fk-checks</code> to skip expensive
+                checks.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Does it use regex or a real parser?</summary>
-                    <div class="details-content">
-                        <p>A streaming SQL parser that tracks quotes, escaping, and multi-line strings. Regexes are used as fallback/optimization, not as the primary mechanism.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>Does it use regex or a real parser?</summary>
+            <div class="details-content">
+              <p>
+                A streaming SQL parser that tracks quotes, escaping, and
+                multi-line strings. Regexes are used as fallback/optimization,
+                not as the primary mechanism.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Can I run it in Docker or CI?</summary>
-                    <div class="details-content">
-                        <p>Yes. It's a single static binary with no runtime dependencies. Use <code>validate --strict --json</code> for machine-readable CI output.</p>
-                    </div>
-                </details>
+          <details>
+            <summary>Can I run it in Docker or CI?</summary>
+            <div class="details-content">
+              <p>
+                Yes. It's a single static binary with no runtime dependencies.
+                Use <code>validate --strict --json</code> for machine-readable
+                CI output.
+              </p>
+            </div>
+          </details>
 
-                <details>
-                    <summary>Why Rust?</summary>
-                    <div class="details-content">
-                        <p>Zero-cost abstractions, no garbage collection, and memory safety enable 600+ MB/s throughput with constant memory usage regardless of file size.</p>
-                    </div>
-                </details>
-            </article>
-        </section>
+          <details>
+            <summary>Why Rust?</summary>
+            <div class="details-content">
+              <p>
+                Zero-cost abstractions, no garbage collection, and memory safety
+                enable 600+ MB/s throughput with constant memory usage
+                regardless of file size.
+              </p>
+            </div>
+          </details>
+        </article>
+      </section>
     </main>
 
     <footer>
-        <p>
-            <a href="https://github.com/helgesverre/sql-splitter">GitHub</a>
-            <span class="sep">|</span>
-            <a href="https://github.com/helgesverre/sql-splitter/releases">Releases</a>
-            <span class="sep">|</span>
-            <a href="https://github.com/helgesverre/sql-splitter/blob/main/LICENSE.md">MIT License</a>
-            <span class="sep">|</span>
-            <a href="llms.txt">llms.txt</a>
-        </p>
-        <p class="credit">Built by <a href="https://github.com/helgesverre">Helge Sverre</a></p>
+      <p>
+        <a href="https://github.com/helgesverre/sql-splitter">GitHub</a>
+        <span class="sep">|</span>
+        <a href="https://github.com/helgesverre/sql-splitter/releases"
+          >Releases</a
+        >
+        <span class="sep">|</span>
+        <a
+          href="https://github.com/helgesverre/sql-splitter/blob/main/LICENSE.md"
+          >MIT License</a
+        >
+        <span class="sep">|</span>
+        <a href="llms.txt">llms.txt</a>
+      </p>
+      <p class="credit">
+        Built by <a href="https://github.com/helgesverre">Helge Sverre</a>
+      </p>
     </footer>
 
     <script>
-        // Theme management
-        function getPreferredTheme() {
-            const stored = localStorage.getItem('theme');
-            if (stored) return stored;
-            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }
+      // Theme management
+      function getPreferredTheme() {
+        const stored = localStorage.getItem("theme");
+        if (stored) return stored;
+        return window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+      }
 
-        function setTheme(theme) {
-            document.documentElement.setAttribute('data-theme', theme);
-            localStorage.setItem('theme', theme);
-        }
+      function setTheme(theme) {
+        document.documentElement.setAttribute("data-theme", theme);
+        localStorage.setItem("theme", theme);
+      }
 
-        function toggleTheme() {
-            const current = document.documentElement.getAttribute('data-theme') || getPreferredTheme();
-            setTheme(current === 'dark' ? 'light' : 'dark');
-        }
+      function toggleTheme() {
+        const current =
+          document.documentElement.getAttribute("data-theme") ||
+          getPreferredTheme();
+        setTheme(current === "dark" ? "light" : "dark");
+      }
 
-        // Initialize theme
-        setTheme(getPreferredTheme());
+      // Initialize theme
+      setTheme(getPreferredTheme());
 
-        // Copy button functionality
-        document.querySelectorAll('.copy-btn').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const text = btn.dataset.copy;
-                try {
-                    await navigator.clipboard.writeText(text);
-                    const original = btn.textContent;
-                    btn.textContent = 'Copied!';
-                    btn.classList.add('copied');
-                    setTimeout(() => {
-                        btn.textContent = original;
-                        btn.classList.remove('copied');
-                    }, 2000);
-                } catch (err) {
-                    btn.textContent = 'Failed';
-                    setTimeout(() => btn.textContent = 'Copy', 2000);
-                }
-            });
+      // Copy button functionality
+      document.querySelectorAll(".copy-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const text = btn.dataset.copy;
+          try {
+            await navigator.clipboard.writeText(text);
+            const original = btn.textContent;
+            btn.textContent = "Copied!";
+            btn.classList.add("copied");
+            setTimeout(() => {
+              btn.textContent = original;
+              btn.classList.remove("copied");
+            }, 2000);
+          } catch (err) {
+            btn.textContent = "Failed";
+            setTimeout(() => (btn.textContent = "Copy"), 2000);
+          }
         });
+      });
     </script>
-</body>
+  </body>
 </html>
