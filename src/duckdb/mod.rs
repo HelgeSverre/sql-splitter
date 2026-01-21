@@ -177,7 +177,11 @@ impl QueryEngine {
         let loader = DumpLoader::new(&self.conn, &self.config);
         let stats = loader.load(dump_path)?;
         self.import_stats = Some(stats);
-        Ok(self.import_stats.as_ref().unwrap())
+        // Safe: we just set import_stats to Some above
+        Ok(self
+            .import_stats
+            .as_ref()
+            .expect("import_stats was just set"))
     }
 
     /// Execute a query and return the results

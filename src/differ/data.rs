@@ -375,9 +375,9 @@ impl DataDiffer {
             let progress_reader = ProgressReader::new(file, move |bytes| {
                 cb(byte_offset + bytes, total_bytes);
             });
-            compression.wrap_reader(Box::new(progress_reader))
+            compression.wrap_reader(Box::new(progress_reader))?
         } else {
-            compression.wrap_reader(Box::new(file))
+            compression.wrap_reader(Box::new(file))?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
