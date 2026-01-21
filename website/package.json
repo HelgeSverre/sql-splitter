@@ -10,19 +10,19 @@
     "preview": "astro preview",
     "astro": "astro",
     "test": "playwright test",
+    "format": "bunx prettier . --write",
     "test:ui": "playwright test --ui",
-    "validate:schemas": "ajv compile -s 'public/schemas/*.schema.json' --spec=draft2020 -c ajv-formats"
+    "validate": "ajv compile -s 'public/schemas/*.schema.json' --spec=draft2020 -c ajv-formats"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",
     "@astrojs/sitemap": "^3.7.0",
     "@astrojs/starlight": "^0.34.8",
-    "@astrojs/starlight-docsearch": "^0.6.1",
     "@fontsource/roboto": "^5.2.9",
     "@resvg/resvg-js": "^2.6.2",
     "@types/react": "^18.3.27",
     "@types/react-dom": "^18.3.7",
-    "astro": "^5.16.11",
+    "astro": "^5.16.12",
     "astro-indexnow": "^2.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -6,7 +6,6 @@ import indexnow from "astro-indexnow";
 import tailwindcss from "@tailwindcss/vite";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightGitHubAlerts from "starlight-github-alerts";
-import starlightDocSearch from "@astrojs/starlight-docsearch";
 
 export default defineConfig({
   site: "https://sql-splitter.dev",
@@ -23,11 +22,6 @@ export default defineConfig({
           exclude: ["/schemas/", "/schemas/**"],
         }),
         starlightGitHubAlerts(),
-        // starlightDocSearch({
-        //     appId: 'M9I5L0EWZD',
-        //     apiKey: 'beabcc9047a947daff290e984d98a6a7',
-        //     indexName: 'docs',
-        // }),
       ],
       logo: {
         src: "./src/assets/logo.svg",

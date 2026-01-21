@@ -82,6 +82,10 @@ header.header {
   --ec-frm-frameBoxShdCssVal: none;
 }
 
+:root:not([data-theme="light"]) .expressive-code {
+  --ec-frm-trmBg: #121417;
+}
+
 .expressive-code .frame {
   border: 1px solid var(--sl-color-hairline);
   border-radius: var(--sl-border-radius-base);
