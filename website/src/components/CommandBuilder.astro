@@ -217,7 +217,7 @@ const groupedCommands = {
   </div>
 </div>
 
-<script>
+<script is:inline>
   function initCommandBuilder() {
     const root = document.getElementById('command-builder');
     if (!root || root.dataset.initialized === 'true') return;
@@ -225,8 +225,8 @@ const groupedCommands = {
 
     let currentCommand = 'split';
 
-    const $ = (id: string) => document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
-    const show = (id: string, visible: boolean) => {
+    const $ = (id) => document.getElementById(id);
+    const show = (id, visible) => {
       const el = $(id);
       if (el) el.style.display = visible ? '' : 'none';
     };
