@@ -16,15 +16,13 @@
       "type": "string"
     },
     "elapsed_secs": {
-      "type": "number",
-      "format": "double"
+      "type": "number"
     },
     "input_file": {
       "type": "string"
     },
     "size_mb": {
-      "type": "number",
-      "format": "double"
+      "type": "number"
     },
     "summary": {
       "$ref": "#/definitions/AnalyzeSummary"
@@ -43,17 +41,14 @@
       "properties": {
         "total_bytes": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "total_inserts": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "total_tables": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         }
       }
@@ -71,29 +66,24 @@
       "properties": {
         "bytes": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "creates": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "inserts": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "name": {
           "type": "string"
         },
         "size_mb": {
-          "type": "number",
-          "format": "double"
+          "type": "number"
         },
         "statements": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         }
       }

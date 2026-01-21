@@ -63,17 +63,14 @@
       "properties": {
         "column_count": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "relationship_count": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "table_count": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         }
       }

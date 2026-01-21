@@ -58,36 +58,29 @@
       "properties": {
         "fk_orphans_skipped": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "reduction_percent": {
-          "type": "number",
-          "format": "double"
+          "type": "number"
         },
         "rows_selected": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "rows_total": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "tables_processed": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "tables_skipped": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "tables_with_data": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         }
       }
@@ -104,12 +97,10 @@
         },
         "rows_selected": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "rows_total": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         }
       }

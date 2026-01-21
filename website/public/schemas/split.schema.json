@@ -52,26 +52,21 @@
       "properties": {
         "bytes_processed": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "elapsed_secs": {
-          "type": "number",
-          "format": "double"
+          "type": "number"
         },
         "statements_processed": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "tables_found": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "throughput_mb_per_sec": {
-          "type": ["number", "null"],
-          "format": "double"
+          "type": ["number", "null"]
         }
       }
     }

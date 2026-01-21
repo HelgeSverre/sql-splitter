@@ -53,7 +53,6 @@
         },
         "value": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         }
       }
@@ -71,31 +70,25 @@
       "properties": {
         "fk_orphans_rejected": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "rows_selected": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "rows_total": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "sample_rate_percent": {
-          "type": "number",
-          "format": "double"
+          "type": "number"
         },
         "tables_sampled": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "tables_skipped": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         }
       }
@@ -118,17 +111,14 @@
         },
         "rows_selected": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "rows_total": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "sample_rate_percent": {
-          "type": "number",
-          "format": "double"
+          "type": "number"
         }
       }
     }

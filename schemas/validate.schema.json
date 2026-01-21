@@ -61,7 +61,6 @@
           "properties": {
             "failed": {
               "type": "integer",
-              "format": "uint",
               "minimum": 0.0
             }
           },
@@ -85,12 +84,10 @@
       "properties": {
         "approx_line": {
           "type": ["integer", "null"],
-          "format": "uint64",
           "minimum": 0.0
         },
         "statement_index": {
           "type": ["integer", "null"],
-          "format": "uint64",
           "minimum": 0.0
         },
         "table": {
@@ -115,27 +112,22 @@
       "properties": {
         "errors": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "info": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "statements_scanned": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "tables_scanned": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         },
         "warnings": {
           "type": "integer",
-          "format": "uint",
           "minimum": 0.0
         }
       }

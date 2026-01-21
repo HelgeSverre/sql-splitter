@@ -14,13 +14,11 @@
     "columns_redacted": {
       "description": "Number of columns redacted",
       "type": "integer",
-      "format": "uint64",
       "minimum": 0.0
     },
     "rows_redacted": {
       "description": "Number of rows redacted",
       "type": "integer",
-      "format": "uint64",
       "minimum": 0.0
     },
     "table_stats": {
@@ -33,7 +31,6 @@
     "tables_processed": {
       "description": "Number of tables processed",
       "type": "integer",
-      "format": "uint",
       "minimum": 0.0
     },
     "warnings": {
@@ -52,7 +49,6 @@
       "properties": {
         "columns_redacted": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "name": {
@@ -60,7 +56,6 @@
         },
         "rows_processed": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         }
       }

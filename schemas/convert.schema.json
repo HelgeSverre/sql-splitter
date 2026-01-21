@@ -51,22 +51,18 @@
       "properties": {
         "statements_converted": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "statements_processed": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "statements_skipped": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         },
         "statements_unchanged": {
           "type": "integer",
-          "format": "uint64",
           "minimum": 0.0
         }
       }

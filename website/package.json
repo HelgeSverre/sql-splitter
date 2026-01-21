@@ -12,7 +12,7 @@
     "test": "playwright test",
     "format": "bunx prettier . --write",
     "test:ui": "playwright test --ui",
-    "validate": "ajv compile -s 'public/schemas/*.schema.json' --spec=draft2020 -c ajv-formats"
+    "validate": "ajv compile -s 'public/schemas/*.schema.json' --spec=draft7 -c ajv-formats"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",
