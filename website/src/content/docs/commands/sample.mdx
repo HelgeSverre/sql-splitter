@@ -40,26 +40,26 @@ sql-splitter sample dump.sql -o dev.sql --percent 10 --exclude logs,events
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output SQL file | stdout |
-| `--dialect` | `-d` | SQL dialect | auto-detect |
-| `--percent` | | Sample percentage (1-100) | - |
-| `--rows` | | Sample fixed number of rows per table | - |
-| `--preserve-relations` | | Preserve FK relationships | false |
-| `--tables` | `-t` | Only sample these tables (comma-separated) | all |
-| `--exclude` | `-e` | Exclude these tables (comma-separated) | none |
-| `--root-tables` | | Explicit root tables for sampling | auto |
-| `--include-global` | | Global table handling: `none`, `lookups`, `all` | `lookups` |
-| `--seed` | | Random seed for reproducibility | random |
-| `--config` | `-c` | YAML config file for per-table settings | - |
-| `--max-total-rows` | | Maximum total rows to sample | unlimited |
-| `--no-limit` | | Disable row limit | false |
-| `--strict-fk` | | Fail if any FK integrity issues | false |
-| `--no-schema` | | Exclude CREATE TABLE statements | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--dry-run` | | Preview without writing | false |
-| `--json` | | Output as JSON | false |
+| Flag                   | Short | Description                                     | Default     |
+| ---------------------- | ----- | ----------------------------------------------- | ----------- |
+| `--output`             | `-o`  | Output SQL file                                 | stdout      |
+| `--dialect`            | `-d`  | SQL dialect                                     | auto-detect |
+| `--percent`            |       | Sample percentage (1-100)                       | -           |
+| `--rows`               |       | Sample fixed number of rows per table           | -           |
+| `--preserve-relations` |       | Preserve FK relationships                       | false       |
+| `--tables`             | `-t`  | Only sample these tables (comma-separated)      | all         |
+| `--exclude`            | `-e`  | Exclude these tables (comma-separated)          | none        |
+| `--root-tables`        |       | Explicit root tables for sampling               | auto        |
+| `--include-global`     |       | Global table handling: `none`, `lookups`, `all` | `lookups`   |
+| `--seed`               |       | Random seed for reproducibility                 | random      |
+| `--config`             | `-c`  | YAML config file for per-table settings         | -           |
+| `--max-total-rows`     |       | Maximum total rows to sample                    | unlimited   |
+| `--no-limit`           |       | Disable row limit                               | false       |
+| `--strict-fk`          |       | Fail if any FK integrity issues                 | false       |
+| `--no-schema`          |       | Exclude CREATE TABLE statements                 | false       |
+| `--progress`           | `-p`  | Show progress bar                               | false       |
+| `--dry-run`            |       | Preview without writing                         | false       |
+| `--json`               |       | Output as JSON                                  | false       |
 
 ## FK Preservation
 

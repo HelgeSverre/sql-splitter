@@ -60,6 +60,7 @@ sql-splitter shard multi_tenant.sql \
 ```
 
 Creates:
+
 ```
 shards/
 ├── tenant_1.sql
@@ -104,6 +105,7 @@ CREATE TABLE orders (
 ```
 
 Sharding for tenant 42:
+
 - Includes all `users` and `orders` where `tenant_id = 42`
 - Follows FK to include the `tenants` row
 - Includes `countries` and `currencies` (with `--include-global lookups`)

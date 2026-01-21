@@ -34,16 +34,16 @@ sql-splitter validate "dumps/*.sql" --fail-fast
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--dialect` | `-d` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--strict` | | Treat warnings as errors (exit 1) | false |
-| `--json` | | Output results as JSON | false |
-| `--max-rows-per-table` | | Max rows per table for PK/FK checks (0 = unlimited) | 1,000,000 |
-| `--no-limit` | | Disable row limit for PK/FK checks | false |
-| `--no-fk-checks` | | Skip PK/FK data integrity checks | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--fail-fast` | | Stop on first error (for glob patterns) | false |
+| Flag                   | Short | Description                                         | Default     |
+| ---------------------- | ----- | --------------------------------------------------- | ----------- |
+| `--dialect`            | `-d`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--strict`             |       | Treat warnings as errors (exit 1)                   | false       |
+| `--json`               |       | Output results as JSON                              | false       |
+| `--max-rows-per-table` |       | Max rows per table for PK/FK checks (0 = unlimited) | 1,000,000   |
+| `--no-limit`           |       | Disable row limit for PK/FK checks                  | false       |
+| `--no-fk-checks`       |       | Skip PK/FK data integrity checks                    | false       |
+| `--progress`           | `-p`  | Show progress bar                                   | false       |
+| `--fail-fast`          |       | Stop on first error (for glob patterns)             | false       |
 
 ## Validation Checks
 

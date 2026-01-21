@@ -15,6 +15,7 @@ sql-splitter validate "dumps/*.sql" --strict --fail-fast --progress
 ```
 
 Exit codes:
+
 - `0`: All dumps valid
 - `1`: Validation errors or warnings (with `--strict`)
 
@@ -27,10 +28,10 @@ name: Validate SQL Dumps
 on:
   push:
     paths:
-      - 'dumps/**/*.sql'
+      - "dumps/**/*.sql"
   pull_request:
     paths:
-      - 'dumps/**/*.sql'
+      - "dumps/**/*.sql"
 
 jobs:
   validate:
@@ -79,6 +80,7 @@ sql-splitter validate "dumps/*.sql" --json | jq '.results[] | select(.passed == 
 ```
 
 Example output:
+
 ```json
 {
   "file": "dumps/broken.sql",

@@ -60,12 +60,14 @@ Not all features convert perfectly. Common warnings:
 ### ENUM Types
 
 MySQL ENUMs don't exist in PostgreSQL. Options:
+
 1. Convert to VARCHAR with CHECK constraint (automatic)
 2. Create custom TYPE (manual)
 
 ### Auto-Increment
 
 Conversion is automatic:
+
 - MySQL `AUTO_INCREMENT` → PostgreSQL `SERIAL`
 - PostgreSQL `SERIAL` → MySQL `AUTO_INCREMENT`
 

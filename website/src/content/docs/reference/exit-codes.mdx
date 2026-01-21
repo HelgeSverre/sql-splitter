@@ -7,11 +7,11 @@ sql-splitter uses standard Unix exit codes.
 
 ## Exit Codes
 
-| Code | Meaning | When |
-|------|---------|------|
-| `0` | Success | Command completed without errors |
-| `1` | Error | Runtime error (I/O, syntax, validation) |
-| `2` | Invalid arguments | Bad CLI arguments |
+| Code | Meaning           | When                                    |
+| ---- | ----------------- | --------------------------------------- |
+| `0`  | Success           | Command completed without errors        |
+| `1`  | Error             | Runtime error (I/O, syntax, validation) |
+| `2`  | Invalid arguments | Bad CLI arguments                       |
 
 ## Usage in Scripts
 
@@ -48,10 +48,12 @@ fi
 ## Validation Exit Codes
 
 With `--strict`:
+
 - Exit `0`: No errors AND no warnings
 - Exit `1`: Errors or warnings present
 
 Without `--strict`:
+
 - Exit `0`: No errors (warnings are ignored)
 - Exit `1`: Errors present
 

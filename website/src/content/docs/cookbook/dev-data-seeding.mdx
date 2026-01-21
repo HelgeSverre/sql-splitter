@@ -3,6 +3,8 @@ title: Dev Data Seeding
 description: Create anonymized development datasets
 ---
 
+import { Steps } from "@astrojs/starlight/components";
+
 Create realistic but safe development datasets using sample and redact.
 
 ## The Problem
@@ -17,77 +19,81 @@ Production data is realistic but contains sensitive PII. Random test data lacks 
 
 ## Step-by-Step
 
-### 1. Analyze Production Dump
+<Steps>
 
-```bash
-sql-splitter analyze prod.sql.gz --progress
-```
+1. **Analyze Production Dump**
 
-Review table sizes to plan sampling.
+   ```bash
+   sql-splitter analyze prod.sql.gz --progress
+   ```
 
-### 2. Sample with FK Preservation
+   Review table sizes to plan sampling.
 
-```bash
-sql-splitter sample prod.sql.gz \
-  -o sampled.sql \
-  --percent 10 \
-  --preserve-relations \
-  --seed 42 \
-  --progress
-```
+2. **Sample with FK Preservation**
 
-Key options:
-- `--preserve-relations`: Ensures FK integrity
-- `--seed 42`: Reproducible results
+   ```bash
+   sql-splitter sample prod.sql.gz \
+     -o sampled.sql \
+     --percent 10 \
+     --preserve-relations \
+     --seed 42 \
+     --progress
+   ```
 
-### 3. Generate Redaction Config
+   Key options:
+   - `--preserve-relations`: Ensures FK integrity
+   - `--seed 42`: Reproducible results
 
-```bash
-sql-splitter redact sampled.sql \
-  --generate-config \
-  -o redact.yaml
-```
+3. **Generate Redaction Config**
 
-Review and customize `redact.yaml`:
+   ```bash
+   sql-splitter redact sampled.sql \
+     --generate-config \
+     -o redact.yaml
+   ```
 
-```yaml
-seed: 12345
-locale: en
+   Review and customize `redact.yaml`:
 
-rules:
-  - column: "*.email"
-    strategy: hash
-  - column: "*.name"
-    strategy: fake
-    generator: name
-  - column: "*.ssn"
-    strategy: null
-  - column: "*.phone"
-    strategy: fake
-    generator: phone
-  - column: "*.credit_card"
-    strategy: mask
-    pattern: "****-****-****-XXXX"
+   ```yaml
+   seed: 12345
+   locale: en
 
-skip_tables:
-  - schema_migrations
-  - ar_internal_metadata
-```
+   rules:
+     - column: "*.email"
+       strategy: hash
+     - column: "*.name"
+       strategy: fake
+       generator: name
+     - column: "*.ssn"
+       strategy: null
+     - column: "*.phone"
+       strategy: fake
+       generator: phone
+     - column: "*.credit_card"
+       strategy: mask
+       pattern: "****-****-****-XXXX"
 
-### 4. Apply Redaction
+   skip_tables:
+     - schema_migrations
+     - ar_internal_metadata
+   ```
 
-```bash
-sql-splitter redact sampled.sql \
-  -o dev.sql \
-  --config redact.yaml \
-  --progress
-```
+4. **Apply Redaction**
 
-### 5. Validate Final Output
+   ```bash
+   sql-splitter redact sampled.sql \
+     -o dev.sql \
+     --config redact.yaml \
+     --progress
+   ```
 
-```bash
-sql-splitter validate dev.sql --strict
-```
+5. **Validate Final Output**
+
+   ```bash
+   sql-splitter validate dev.sql --strict
+   ```
+
+</Steps>
 
 ## One-Liner Approach
 
@@ -104,13 +110,13 @@ sql-splitter sample prod.sql.gz --percent 10 --preserve-relations -o - | \
 
 ## Choosing a Redaction Strategy
 
-| Data Type | Strategy | Why |
-|-----------|----------|-----|
-| Emails | `hash` | Preserves FK relationships (same input → same output) |
-| Names | `fake` | Realistic looking data |
-| SSN/Passwords | `null` | Remove entirely |
-| Credit Cards | `mask` | Keep format for testing |
-| Timestamps | `skip` | Usually not PII |
+| Data Type     | Strategy | Why                                                   |
+| ------------- | -------- | ----------------------------------------------------- |
+| Emails        | `hash`   | Preserves FK relationships (same input → same output) |
+| Names         | `fake`   | Realistic looking data                                |
+| SSN/Passwords | `null`   | Remove entirely                                       |
+| Credit Cards  | `mask`   | Keep format for testing                               |
+| Timestamps    | `skip`   | Usually not PII                                       |
 
 ## Reproducible Builds
 

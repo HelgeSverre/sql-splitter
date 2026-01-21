@@ -7,12 +7,12 @@ Several commands support glob patterns for batch processing multiple files.
 
 ## Supported Commands
 
-| Command | Glob Support | Output Behavior |
-|---------|--------------|-----------------|
-| `split` | ✅ | Creates subdirectory per input file |
-| `analyze` | ✅ | Aggregates results across all files |
-| `convert` | ✅ | Requires output directory |
-| `validate` | ✅ | Validates each file, aggregates results |
+| Command    | Glob Support | Output Behavior                         |
+| ---------- | ------------ | --------------------------------------- |
+| `split`    | ✅           | Creates subdirectory per input file     |
+| `analyze`  | ✅           | Aggregates results across all files     |
+| `convert`  | ✅           | Requires output directory               |
+| `validate` | ✅           | Validates each file, aggregates results |
 
 ## Basic Patterns
 
@@ -34,13 +34,13 @@ sql-splitter validate "dumps/*.sql.gz"
 
 ## Pattern Syntax
 
-| Pattern | Matches |
-|---------|---------|
-| `*` | Any characters except `/` |
-| `**` | Any characters including `/` (recursive) |
-| `?` | Any single character |
-| `[abc]` | Any character in brackets |
-| `[a-z]` | Any character in range |
+| Pattern | Matches                                  |
+| ------- | ---------------------------------------- |
+| `*`     | Any characters except `/`                |
+| `**`    | Any characters including `/` (recursive) |
+| `?`     | Any single character                     |
+| `[abc]` | Any character in brackets                |
+| `[a-z]` | Any character in range                   |
 
 ## Examples
 
@@ -86,8 +86,8 @@ sql-splitter analyze "dumps/*.sql" --json
   "total_tables": 42,
   "total_rows": 150000,
   "results": [
-    {"file": "dumps/users.sql", "tables": 1, "rows": 1000},
-    {"file": "dumps/orders.sql", "tables": 1, "rows": 50000}
+    { "file": "dumps/users.sql", "tables": 1, "rows": 1000 },
+    { "file": "dumps/orders.sql", "tables": 1, "rows": 50000 }
   ]
 }
 ```
@@ -106,9 +106,9 @@ sql-splitter validate "*.sql" --json
   "passed": 2,
   "failed": 1,
   "results": [
-    {"file": "a.sql", "summary": {"errors": 0, "warnings": 0}},
-    {"file": "b.sql", "summary": {"errors": 0, "warnings": 1}},
-    {"file": "c.sql", "summary": {"errors": 2, "warnings": 0}}
+    { "file": "a.sql", "summary": { "errors": 0, "warnings": 0 } },
+    { "file": "b.sql", "summary": { "errors": 0, "warnings": 1 } },
+    { "file": "c.sql", "summary": { "errors": 2, "warnings": 0 } }
   ]
 }
 ```

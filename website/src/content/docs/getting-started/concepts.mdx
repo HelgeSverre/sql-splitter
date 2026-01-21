@@ -7,12 +7,12 @@ description: Understanding dialects, streaming, and compression in sql-splitter
 
 sql-splitter supports four SQL dialects:
 
-| Dialect | Tool | Features |
-|---------|------|----------|
-| **MySQL** | `mysqldump` | Default dialect, backtick quoting, `INSERT INTO` |
-| **PostgreSQL** | `pg_dump` | `COPY FROM stdin`, `$$` strings, `SET` commands |
-| **SQLite** | `.dump` | `INTEGER PRIMARY KEY`, `.schema` commands |
-| **MSSQL** | `sqlcmd` / SSMS | `GO` batch separators, `IDENTITY`, `nvarchar` |
+| Dialect        | Tool            | Features                                         |
+| -------------- | --------------- | ------------------------------------------------ |
+| **MySQL**      | `mysqldump`     | Default dialect, backtick quoting, `INSERT INTO` |
+| **PostgreSQL** | `pg_dump`       | `COPY FROM stdin`, `$$` strings, `SET` commands  |
+| **SQLite**     | `.dump`         | `INTEGER PRIMARY KEY`, `.schema` commands        |
+| **MSSQL**      | `sqlcmd` / SSMS | `GO` batch separators, `IDENTITY`, `nvarchar`    |
 
 ### Auto-Detection
 
@@ -46,12 +46,12 @@ This means:
 
 sql-splitter automatically detects and decompresses:
 
-| Extension | Format | Notes |
-|-----------|--------|-------|
-| `.gz` | gzip | Most common |
-| `.bz2` | bzip2 | High compression |
-| `.xz` | xz/LZMA | Very high compression |
-| `.zst` | zstd | Fast compression |
+| Extension | Format  | Notes                 |
+| --------- | ------- | --------------------- |
+| `.gz`     | gzip    | Most common           |
+| `.bz2`    | bzip2   | High compression      |
+| `.xz`     | xz/LZMA | Very high compression |
+| `.zst`    | zstd    | Fast compression      |
 
 Pass compressed files directly:
 
@@ -92,6 +92,7 @@ sql-splitter validate dump.sql --json | jq '.errors'
 ```
 
 JSON output includes:
+
 - Input/output file paths
 - Processing statistics
 - Per-table breakdowns
@@ -99,11 +100,11 @@ JSON output includes:
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Error (syntax, I/O, validation failure) |
-| 2 | Invalid arguments |
+| Code | Meaning                                 |
+| ---- | --------------------------------------- |
+| 0    | Success                                 |
+| 1    | Error (syntax, I/O, validation failure) |
+| 2    | Invalid arguments                       |
 
 Use in CI scripts:
 
@@ -116,16 +117,19 @@ sql-splitter validate dump.sql --strict || exit 1
 sql-splitter recognizes these SQL statement types:
 
 **DDL (Schema)**:
+
 - `CREATE TABLE`
 - `CREATE INDEX`
 - `ALTER TABLE`
 - `DROP TABLE`
 
 **DML (Data)**:
+
 - `INSERT INTO`
 - `COPY ... FROM stdin` (PostgreSQL)
 
 **Control**:
+
 - Session settings (`SET`, `USE`)
 - Comments
 - Transaction markers

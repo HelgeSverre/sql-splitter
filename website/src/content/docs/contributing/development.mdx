@@ -3,6 +3,8 @@ title: Development
 description: Set up your development environment
 ---
 
+import { FileTree } from "@astrojs/starlight/components";
+
 ## Prerequisites
 
 - Rust 1.70+ ([rustup.rs](https://rustup.rs))
@@ -38,35 +40,37 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 ## Project Structure
 
-```
-sql-splitter/
-├── src/
-│   ├── main.rs          # Entry point
-│   ├── cmd/             # CLI commands
-│   │   ├── split.rs
-│   │   ├── merge.rs
-│   │   ├── analyze.rs
-│   │   └── ...
-│   ├── parser/          # SQL parser
-│   ├── splitter/        # Split logic
-│   ├── merger/          # Merge logic
-│   ├── analyzer/        # Analysis logic
-│   ├── convert/         # Dialect conversion
-│   ├── validate/        # Validation logic
-│   ├── sample/          # Sampling logic
-│   ├── shard/           # Sharding logic
-│   ├── differ/          # Diff logic
-│   ├── redactor/        # Redaction logic
-│   ├── graph/           # Graph/ERD logic
-│   ├── duckdb/          # DuckDB integration
-│   └── writer/          # Output writers
-├── tests/
-│   ├── fixtures/        # Test SQL files
-│   └── *.rs             # Test modules
-├── man/                 # Man pages
-├── website/             # Documentation site
-└── Cargo.toml
-```
+<FileTree>
+
+- sql-splitter/
+  - src/
+    - main.rs Entry point
+    - cmd/ CLI commands
+      - split.rs
+      - merge.rs
+      - analyze.rs
+      - ...
+    - parser/ SQL parser
+    - splitter/ Split logic
+    - merger/ Merge logic
+    - analyzer/ Analysis logic
+    - convert/ Dialect conversion
+    - validate/ Validation logic
+    - sample/ Sampling logic
+    - shard/ Sharding logic
+    - differ/ Diff logic
+    - redactor/ Redaction logic
+    - graph/ Graph/ERD logic
+    - duckdb/ DuckDB integration
+    - writer/ Output writers
+  - tests/
+    - fixtures/ Test SQL files
+    - \*.rs Test modules
+  - man/ Man pages
+  - website/ Documentation site
+  - Cargo.toml
+
+</FileTree>
 
 ## Code Style
 

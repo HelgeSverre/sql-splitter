@@ -43,28 +43,29 @@ sql-splitter graph dump.sql --table users --reverse
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output file (html, dot, mmd, json, png, svg, pdf) | stdout |
-| `--format` | | Output format: `html`, `dot`, `mermaid`, `json` | auto |
-| `--dialect` | `-d` | SQL dialect | auto-detect |
-| `--layout` | | Layout direction: `lr` (horizontal), `tb` (vertical) | `lr` |
-| `--tables` | `-t` | Include tables matching glob patterns | all |
-| `--exclude` | `-e` | Exclude tables matching glob patterns | none |
-| `--table` | | Focus on a specific table | - |
-| `--transitive` | | Show all dependencies of focused table | false |
-| `--reverse` | | Show all tables that depend on focused table | false |
-| `--max-depth` | | Limit traversal depth | unlimited |
-| `--cycles-only` | | Only show tables in circular dependencies | false |
-| `--render` | | Render DOT to PNG/SVG/PDF using Graphviz | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--json` | | Output as JSON | false |
+| Flag            | Short | Description                                          | Default     |
+| --------------- | ----- | ---------------------------------------------------- | ----------- |
+| `--output`      | `-o`  | Output file (html, dot, mmd, json, png, svg, pdf)    | stdout      |
+| `--format`      |       | Output format: `html`, `dot`, `mermaid`, `json`      | auto        |
+| `--dialect`     | `-d`  | SQL dialect                                          | auto-detect |
+| `--layout`      |       | Layout direction: `lr` (horizontal), `tb` (vertical) | `lr`        |
+| `--tables`      | `-t`  | Include tables matching glob patterns                | all         |
+| `--exclude`     | `-e`  | Exclude tables matching glob patterns                | none        |
+| `--table`       |       | Focus on a specific table                            | -           |
+| `--transitive`  |       | Show all dependencies of focused table               | false       |
+| `--reverse`     |       | Show all tables that depend on focused table         | false       |
+| `--max-depth`   |       | Limit traversal depth                                | unlimited   |
+| `--cycles-only` |       | Only show tables in circular dependencies            | false       |
+| `--render`      |       | Render DOT to PNG/SVG/PDF using Graphviz             | false       |
+| `--progress`    | `-p`  | Show progress bar                                    | false       |
+| `--json`        |       | Output as JSON                                       | false       |
 
 ## Output Formats
 
 ### HTML (default)
 
 Interactive diagram with:
+
 - Dark/light theme toggle
 - Pan and zoom
 - Click to highlight relationships
@@ -82,12 +83,14 @@ digraph schema {
 ```
 
 Render with Graphviz:
+
 ```bash
 sql-splitter graph dump.sql -o schema.dot
 dot -Tpng schema.dot -o schema.png
 ```
 
 Or use `--render`:
+
 ```bash
 sql-splitter graph dump.sql -o schema.png --render
 ```
@@ -111,6 +114,7 @@ erDiagram
 ### JSON
 
 Full schema details:
+
 ```json
 {
   "tables": [

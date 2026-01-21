@@ -12,6 +12,7 @@ Solutions to common issues when using sql-splitter.
 The binary isn't in your PATH.
 
 **Cargo install location:**
+
 ```bash
 # Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -21,6 +22,7 @@ source ~/.bashrc  # or ~/.zshrc
 ```
 
 **Verify installation:**
+
 ```bash
 which sql-splitter
 # Should output: /Users/you/.cargo/bin/sql-splitter
@@ -83,11 +85,13 @@ This shouldn't happen with normal sql-splitter commands (they use ~50MB constant
 1. **Check for memory-intensive commands:** `validate` and `diff` with FK checks can use more memory on very large files.
 
 2. **Disable FK checks for validation:**
+
    ```bash
    sql-splitter validate huge.sql --no-fk-checks
    ```
 
 3. **Use disk mode for query:**
+
    ```bash
    sql-splitter query huge.sql "SELECT ..." --disk
    ```
@@ -127,12 +131,12 @@ sql-splitter split dump.sql -o ~/output/
 
 Ensure the file extension matches the compression format:
 
-| Format | Extension |
-|--------|-----------|
-| Gzip | `.gz` |
-| Bzip2 | `.bz2` |
-| XZ | `.xz` |
-| Zstandard | `.zst` |
+| Format    | Extension |
+| --------- | --------- |
+| Gzip      | `.gz`     |
+| Bzip2     | `.bz2`    |
+| XZ        | `.xz`     |
+| Zstandard | `.zst`    |
 
 ```bash
 # Rename if needed
@@ -149,11 +153,13 @@ sql-splitter analyze dump.sql.gz
 The dump file might not contain recognizable SQL statements.
 
 **Check file contents:**
+
 ```bash
 head -100 dump.sql
 ```
 
 **Common causes:**
+
 - Binary format (use `pg_dump -Fp` for plain text)
 - Non-SQL file
 - Empty file
@@ -164,6 +170,7 @@ head -100 dump.sql
 sql-splitter expects UTF-8 encoding.
 
 **Convert encoding:**
+
 ```bash
 # Check current encoding
 file dump.sql
@@ -180,6 +187,7 @@ iconv -f CP1252 -t UTF-8 dump.sql > dump-utf8.sql
 Multi-line strings or unusual quoting can cause issues.
 
 **Workaround:** Try a different dialect:
+
 ```bash
 # PostgreSQL uses different escaping than MySQL
 sql-splitter split dump.sql --dialect postgres
@@ -215,15 +223,17 @@ sql-splitter validate dump.sql --no-fk-checks
 **Common causes:**
 
 1. **SQL syntax:** DuckDB uses standard SQL, not MySQL/PostgreSQL extensions
+
    ```sql
    -- MySQL LIMIT with offset
    SELECT * FROM users LIMIT 10, 5  -- Won't work
-   
+
    -- Standard SQL
    SELECT * FROM users LIMIT 5 OFFSET 10  -- Works
    ```
 
 2. **Column name conflicts:** Use quotes for reserved words
+
    ```sql
    SELECT "order", "user" FROM orders
    ```
@@ -254,6 +264,7 @@ Some SQL features don't have direct equivalents across dialects:
 - **Stored procedures** → Skipped (out of scope)
 
 Use `--strict` to fail on unsupported features instead of warning:
+
 ```bash
 sql-splitter convert dump.sql --to postgres --strict
 ```
@@ -268,6 +279,7 @@ sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
 ```
 
 If you see raw COPY blocks in output, ensure dialect was detected correctly:
+
 ```bash
 sql-splitter convert pg_dump.sql --from postgres --to mysql -o mysql.sql
 ```
@@ -277,11 +289,13 @@ sql-splitter convert pg_dump.sql --from postgres --to mysql -o mysql.sql
 ### "No rows sampled" or empty output
 
 **Check that tables exist:**
+
 ```bash
 sql-splitter analyze dump.sql --json | jq '.tables[].name'
 ```
 
 **Ensure required flags are set:**
+
 ```bash
 # sample requires --percent OR --rows
 sql-splitter sample dump.sql --percent 10 -o sample.sql

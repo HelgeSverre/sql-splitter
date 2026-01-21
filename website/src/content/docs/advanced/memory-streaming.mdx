@@ -39,6 +39,7 @@ File → [64 KB Buffer] → Parser → Statement
 ```
 
 The parser maintains state across chunk boundaries, handling:
+
 - Multi-line strings
 - Escaped characters
 - Statement boundaries
@@ -64,30 +65,30 @@ Only the decompression buffer exists in memory, not the full file.
 ## Memory Profile
 
 | File Size | Memory Usage |
-|-----------|--------------|
-| 10 MB | ~50 MB |
-| 100 MB | ~50 MB |
-| 1 GB | ~50 MB |
-| 10 GB | ~50 MB |
-| 100 GB | ~50 MB |
+| --------- | ------------ |
+| 10 MB     | ~50 MB       |
+| 100 MB    | ~50 MB       |
+| 1 GB      | ~50 MB       |
+| 10 GB     | ~50 MB       |
+| 100 GB    | ~50 MB       |
 
 ## Commands That Stream
 
 All commands use streaming:
 
-| Command | Streaming I/O |
-|---------|---------------|
-| `split` | Read → Write multiple files |
-| `merge` | Read multiple → Write one |
-| `analyze` | Read → Statistics in memory |
-| `convert` | Read → Transform → Write |
-| `validate` | Read → Validate → Report |
-| `sample` | Read → Filter → Write |
-| `shard` | Read → Filter → Write |
-| `diff` | Read both → Compare → Report |
-| `redact` | Read → Transform → Write |
-| `order` | Read → Reorder (memory for graph) |
-| `query` | Read → Import to DuckDB |
+| Command    | Streaming I/O                     |
+| ---------- | --------------------------------- |
+| `split`    | Read → Write multiple files       |
+| `merge`    | Read multiple → Write one         |
+| `analyze`  | Read → Statistics in memory       |
+| `convert`  | Read → Transform → Write          |
+| `validate` | Read → Validate → Report          |
+| `sample`   | Read → Filter → Write             |
+| `shard`    | Read → Filter → Write             |
+| `diff`     | Read both → Compare → Report      |
+| `redact`   | Read → Transform → Write          |
+| `order`    | Read → Reorder (memory for graph) |
+| `query`    | Read → Import to DuckDB           |
 
 ## Exceptions
 

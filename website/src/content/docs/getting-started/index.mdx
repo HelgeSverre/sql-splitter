@@ -13,6 +13,7 @@ sql-splitter is a command-line tool for working with SQL dump files. It's design
 ## What Can You Do?
 
 ### Split & Merge
+
 Break large dumps into per-table files for easier editing, then reassemble them:
 
 ```bash
@@ -22,6 +23,7 @@ sql-splitter merge tables/ -o updated.sql
 ```
 
 ### Convert Between Dialects
+
 Migrate data between different databases:
 
 ```bash
@@ -29,6 +31,7 @@ sql-splitter convert mysql.sql --to postgres -o postgres.sql
 ```
 
 ### Create Dev Datasets
+
 Sample production data while preserving foreign key relationships:
 
 ```bash
@@ -36,6 +39,7 @@ sql-splitter sample prod.sql -o dev.sql --percent 10 --preserve-relations
 ```
 
 ### Validate Dumps
+
 Check integrity before restoring to production:
 
 ```bash
@@ -43,6 +47,7 @@ sql-splitter validate dump.sql --strict
 ```
 
 ### Anonymize Data
+
 Redact PII for safe sharing:
 
 ```bash
@@ -50,6 +55,7 @@ sql-splitter redact dump.sql -o safe.sql --hash "*.email" --fake "*.name"
 ```
 
 ### Query Without Restoring
+
 Run SQL queries directly on dump files using DuckDB:
 
 ```bash

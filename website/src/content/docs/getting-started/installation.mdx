@@ -3,41 +3,44 @@ title: Installation
 description: Install sql-splitter via Cargo, pre-built binaries, or from source
 ---
 
-## From crates.io (Recommended)
+import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-If you have Rust installed:
+<Tabs>
+  <TabItem label="Cargo" icon="seti:rust">
+    If you have Rust installed:
 
-```bash
-cargo install sql-splitter
-```
+    ```bash
+    cargo install sql-splitter
+    ```
 
-Don't have Rust? Install it from [rustup.rs](https://rustup.rs/).
+    Don't have Rust? Install it from [rustup.rs](https://rustup.rs/).
 
-## Pre-built Binaries
+  </TabItem>
+  <TabItem label="Pre-built Binaries" icon="rocket">
+    Download from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases):
 
-Download from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases):
+    | Platform | Download |
+    |----------|----------|
+    | Linux x86_64 | `sql-splitter-linux-amd64.tar.gz` |
+    | Linux ARM64 | `sql-splitter-linux-arm64.tar.gz` |
+    | macOS Intel | `sql-splitter-darwin-amd64.tar.gz` |
+    | macOS Apple Silicon | `sql-splitter-darwin-arm64.tar.gz` |
+    | Windows x86_64 | `sql-splitter-windows-amd64.zip` |
 
-| Platform | Download |
-|----------|----------|
-| Linux x86_64 | `sql-splitter-linux-amd64.tar.gz` |
-| Linux ARM64 | `sql-splitter-linux-arm64.tar.gz` |
-| macOS Intel | `sql-splitter-darwin-amd64.tar.gz` |
-| macOS Apple Silicon | `sql-splitter-darwin-arm64.tar.gz` |
-| Windows x86_64 | `sql-splitter-windows-amd64.zip` |
-
-## From Source
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter
-cd sql-splitter
-make install  # Installs binary + shell completions + man pages
-```
-
-## From GitHub
-
-```bash
-cargo install --git https://github.com/helgesverre/sql-splitter
-```
+  </TabItem>
+  <TabItem label="From Source" icon="github">
+    ```bash
+    git clone https://github.com/helgesverre/sql-splitter
+    cd sql-splitter
+    make install  # Installs binary + shell completions + man pages
+    ```
+  </TabItem>
+  <TabItem label="From GitHub">
+    ```bash
+    cargo install --git https://github.com/helgesverre/sql-splitter
+    ```
+  </TabItem>
+</Tabs>
 
 ## Optimized Build
 

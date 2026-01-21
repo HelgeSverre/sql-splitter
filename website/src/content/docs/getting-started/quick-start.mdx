@@ -3,123 +3,131 @@ title: Quick Start
 description: Your first sql-splitter workflow - split, edit, merge
 ---
 
+import { Steps } from "@astrojs/starlight/components";
+
 This guide walks you through the most common sql-splitter workflow: splitting a dump into individual table files, editing them, and merging back.
 
 > [!TIP]
 > sql-splitter uses streaming I/O, handling files of any size with constant ~50MB memory.
 
-## 1. Split a Dump
+<Steps>
 
-Split a MySQL dump into per-table files:
+1. **Split a Dump**
 
-```bash
-sql-splitter split database.sql --output=tables/
-```
+   Split a MySQL dump into per-table files:
 
-Output:
-```
-tables/
-├── users.sql
-├── orders.sql
-├── products.sql
-├── order_items.sql
-└── _global.sql  # Header statements, settings
-```
+   ```bash
+   sql-splitter split database.sql --output=tables/
+   ```
 
-### Dialect Auto-Detection
+   Output:
 
-sql-splitter automatically detects MySQL, PostgreSQL, SQLite, and MSSQL dumps. Override with `--dialect`:
+   ```
+   tables/
+   ├── users.sql
+   ├── orders.sql
+   ├── products.sql
+   ├── order_items.sql
+   └── _global.sql  # Header statements, settings
+   ```
 
-```bash
-# PostgreSQL pg_dump
-sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
+   **Dialect Auto-Detection**
 
-# SQLite dump
-sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
+   sql-splitter automatically detects MySQL, PostgreSQL, SQLite, and MSSQL dumps. Override with `--dialect`:
 
-# MSSQL/T-SQL
-sql-splitter split mssql.sql -o tables/ --dialect=mssql
-```
+   ```bash
+   # PostgreSQL pg_dump
+   sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
 
-### Split Specific Tables
+   # SQLite dump
+   sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
 
-Only split the tables you need:
+   # MSSQL/T-SQL
+   sql-splitter split mssql.sql -o tables/ --dialect=mssql
+   ```
 
-```bash
-sql-splitter split dump.sql -o tables/ --tables users,orders
-```
+   **Split Specific Tables**
 
-### Schema vs Data
+   Only split the tables you need:
 
-Split only schema (DDL) or only data (DML):
+   ```bash
+   sql-splitter split dump.sql -o tables/ --tables users,orders
+   ```
 
-```bash
-# Schema only (CREATE TABLE, indexes)
-sql-splitter split dump.sql -o schema/ --schema-only
+   **Schema vs Data**
 
-# Data only (INSERT statements)
-sql-splitter split dump.sql -o data/ --data-only
-```
+   Split only schema (DDL) or only data (DML):
 
-## 2. Edit Individual Tables
+   ```bash
+   # Schema only (CREATE TABLE, indexes)
+   sql-splitter split dump.sql -o schema/ --schema-only
 
-Now you can:
-- Edit specific table files
-- Delete tables you don't need
-- Modify INSERT statements
-- Add or remove indexes
+   # Data only (INSERT statements)
+   sql-splitter split dump.sql -o data/ --data-only
+   ```
 
-## 3. Merge Back
+2. **Edit Individual Tables**
 
-Combine the per-table files back into a single dump:
+   Now you can:
+   - Edit specific table files
+   - Delete tables you don't need
+   - Modify INSERT statements
+   - Add or remove indexes
 
-```bash
-sql-splitter merge tables/ -o restored.sql
-```
+3. **Merge Back**
 
-### Wrap in Transaction
+   Combine the per-table files back into a single dump:
 
-For atomic restores:
+   ```bash
+   sql-splitter merge tables/ -o restored.sql
+   ```
 
-```bash
-sql-splitter merge tables/ -o restored.sql --transaction
-```
+   **Wrap in Transaction**
 
-### Merge Specific Tables
+   For atomic restores:
 
-Only merge certain tables:
+   ```bash
+   sql-splitter merge tables/ -o restored.sql --transaction
+   ```
 
-```bash
-sql-splitter merge tables/ -o partial.sql --tables users,orders
-```
+   **Merge Specific Tables**
 
-### Exclude Tables
+   Only merge certain tables:
 
-Skip certain tables when merging:
+   ```bash
+   sql-splitter merge tables/ -o partial.sql --tables users,orders
+   ```
 
-```bash
-sql-splitter merge tables/ -o restored.sql --exclude logs,cache
-```
+   **Exclude Tables**
 
-## 4. Verify the Result
+   Skip certain tables when merging:
 
-Analyze the merged file to verify:
+   ```bash
+   sql-splitter merge tables/ -o restored.sql --exclude logs,cache
+   ```
 
-```bash
-sql-splitter analyze restored.sql
-```
+4. **Verify the Result**
 
-Output:
-```
-┌─────────────┬──────┬───────────┬─────────────┐
-│ Table       │ Rows │ Size (KB) │ Statements  │
-├─────────────┼──────┼───────────┼─────────────┤
-│ users       │ 150  │ 12.3      │ 2           │
-│ orders      │ 500  │ 45.2      │ 2           │
-│ products    │ 100  │ 8.1       │ 2           │
-│ order_items │ 1200 │ 89.4      │ 2           │
-└─────────────┴──────┴───────────┴─────────────┘
-```
+   Analyze the merged file to verify:
+
+   ```bash
+   sql-splitter analyze restored.sql
+   ```
+
+   Output:
+
+   ```
+   ┌─────────────┬──────┬───────────┬─────────────┐
+   │ Table       │ Rows │ Size (KB) │ Statements  │
+   ├─────────────┼──────┼───────────┼─────────────┤
+   │ users       │ 150  │ 12.3      │ 2           │
+   │ orders      │ 500  │ 45.2      │ 2           │
+   │ products    │ 100  │ 8.1       │ 2           │
+   │ order_items │ 1200 │ 89.4      │ 2           │
+   └─────────────┴──────┴───────────┴─────────────┘
+   ```
+
+</Steps>
 
 ## Next Steps
 

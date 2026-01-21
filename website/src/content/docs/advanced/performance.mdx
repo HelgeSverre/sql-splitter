@@ -9,27 +9,27 @@ sql-splitter is designed for high throughput with minimal memory usage.
 
 Tested on Apple M2 Max:
 
-| Metric | Value |
-|--------|-------|
-| Parser throughput | 600+ MB/s |
-| Memory usage | ~50 MB constant |
-| Cold start | ~5 ms |
+| Metric            | Value           |
+| ----------------- | --------------- |
+| Parser throughput | 600+ MB/s       |
+| Memory usage      | ~50 MB constant |
+| Cold start        | ~5 ms           |
 
 ### Split Benchmark
 
-| File Size | Time | Throughput |
-|-----------|------|------------|
-| 100 MB | 0.16s | 625 MB/s |
-| 1 GB | 1.6s | 625 MB/s |
-| 10 GB | 16s | 625 MB/s |
+| File Size | Time  | Throughput |
+| --------- | ----- | ---------- |
+| 100 MB    | 0.16s | 625 MB/s   |
+| 1 GB      | 1.6s  | 625 MB/s   |
+| 10 GB     | 16s   | 625 MB/s   |
 
 ### vs. Shell Alternatives
 
-| Tool | Time (1 GB file) |
-|------|------------------|
-| sql-splitter | 1.6s |
-| awk-based | 8.5s |
-| Python script | 12s |
+| Tool          | Time (1 GB file) |
+| ------------- | ---------------- |
+| sql-splitter  | 1.6s             |
+| awk-based     | 8.5s             |
+| Python script | 12s              |
 
 sql-splitter is **5x faster** than shell-based alternatives.
 

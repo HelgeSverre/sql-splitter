@@ -31,12 +31,12 @@ sql-splitter analyze dump.sql --json
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--dialect` | `-d` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--progress` | `-p` | Show progress bar | false |
-| `--fail-fast` | | Stop on first error (for glob patterns) | false |
-| `--json` | | Output results as JSON | false |
+| Flag          | Short | Description                                         | Default     |
+| ------------- | ----- | --------------------------------------------------- | ----------- |
+| `--dialect`   | `-d`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--progress`  | `-p`  | Show progress bar                                   | false       |
+| `--fail-fast` |       | Stop on first error (for glob patterns)             | false       |
+| `--json`      |       | Output results as JSON                              | false       |
 
 ## Output
 
@@ -68,8 +68,8 @@ sql-splitter analyze dump.sql --json
   "input": "dump.sql",
   "dialect": "mysql",
   "tables": [
-    {"name": "users", "rows": 150, "bytes": 12595, "statements": 2},
-    {"name": "orders", "rows": 500, "bytes": 46284, "statements": 2}
+    { "name": "users", "rows": 150, "bytes": 12595, "statements": 2 },
+    { "name": "orders", "rows": 500, "bytes": 46284, "statements": 2 }
   ],
   "summary": {
     "total_tables": 4,

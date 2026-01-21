@@ -44,26 +44,27 @@ sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output file | stdout |
-| `--dialect` | `-d` | SQL dialect | auto-detect |
-| `--schema-only` | | Compare schema only | false |
-| `--data-only` | | Compare data only | false |
-| `--format` | `-f` | Output format: `text`, `json`, `sql` | `text` |
-| `--tables` | `-t` | Only compare these tables | all |
-| `--exclude` | `-e` | Exclude these tables | none |
-| `--max-pk-entries` | | Max PK entries to track | 10,000,000 |
-| `--verbose` | `-v` | Show sample PK values | false |
-| `--primary-key` | | Override PK (format: `table:col1+col2`) | auto |
-| `--ignore-order` | | Ignore column order differences | false |
-| `--ignore-columns` | | Ignore columns matching glob patterns | none |
-| `--allow-no-pk` | | Compare tables without PK using all columns | false |
-| `--progress` | `-p` | Show progress bar | false |
+| Flag               | Short | Description                                 | Default     |
+| ------------------ | ----- | ------------------------------------------- | ----------- |
+| `--output`         | `-o`  | Output file                                 | stdout      |
+| `--dialect`        | `-d`  | SQL dialect                                 | auto-detect |
+| `--schema-only`    |       | Compare schema only                         | false       |
+| `--data-only`      |       | Compare data only                           | false       |
+| `--format`         | `-f`  | Output format: `text`, `json`, `sql`        | `text`      |
+| `--tables`         | `-t`  | Only compare these tables                   | all         |
+| `--exclude`        | `-e`  | Exclude these tables                        | none        |
+| `--max-pk-entries` |       | Max PK entries to track                     | 10,000,000  |
+| `--verbose`        | `-v`  | Show sample PK values                       | false       |
+| `--primary-key`    |       | Override PK (format: `table:col1+col2`)     | auto        |
+| `--ignore-order`   |       | Ignore column order differences             | false       |
+| `--ignore-columns` |       | Ignore columns matching glob patterns       | none        |
+| `--allow-no-pk`    |       | Compare tables without PK using all columns | false       |
+| `--progress`       | `-p`  | Show progress bar                           | false       |
 
 ## What Diff Detects
 
 **Schema changes:**
+
 - Tables added/removed
 - Columns added/removed/modified (type, nullability)
 - Primary key changes
@@ -71,6 +72,7 @@ sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
 - Index changes (CREATE INDEX, inline INDEX/KEY)
 
 **Data changes:**
+
 - Rows added/removed/modified
 - Uses PK-based comparison for efficiency
 
@@ -100,14 +102,16 @@ Data Changes:
     "tables_removed": ["temp_data"],
     "tables_modified": {
       "users": {
-        "columns_added": [{"name": "phone", "type": "VARCHAR(20)"}],
-        "columns_modified": [{"name": "email", "old": "VARCHAR(100)", "new": "VARCHAR(255)"}]
+        "columns_added": [{ "name": "phone", "type": "VARCHAR(20)" }],
+        "columns_modified": [
+          { "name": "email", "old": "VARCHAR(100)", "new": "VARCHAR(255)" }
+        ]
       }
     }
   },
   "data": {
-    "users": {"added": 5, "removed": 2, "modified": 10},
-    "orders": {"added": 100, "removed": 0, "modified": 0}
+    "users": { "added": 5, "removed": 2, "modified": 10 },
+    "orders": { "added": 100, "removed": 0, "modified": 0 }
   }
 }
 ```

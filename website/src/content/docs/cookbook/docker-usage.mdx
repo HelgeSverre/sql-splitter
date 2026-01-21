@@ -3,6 +3,8 @@ title: Docker Usage
 description: Running sql-splitter in Docker containers
 ---
 
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
 sql-splitter works seamlessly in Docker containers for CI/CD pipelines and reproducible environments.
 
 ## Quick Start
@@ -39,71 +41,73 @@ docker run --rm -v $(pwd):/data sql-splitter analyze /data/dump.sql
 
 ## CI/CD Examples
 
-### GitHub Actions
+<Tabs>
+  <TabItem label="GitHub Actions" icon="github">
+    ```yaml
+    name: Validate SQL Dumps
 
-```yaml
-name: Validate SQL Dumps
+    on:
+      push:
+        paths:
+          - 'migrations/*.sql'
 
-on:
-  push:
-    paths:
-      - 'migrations/*.sql'
+    jobs:
+      validate:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
 
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install sql-splitter
-        run: cargo install sql-splitter
-        
-      - name: Validate migrations
-        run: sql-splitter validate "migrations/*.sql" --strict
-        
-      - name: Check for breaking changes
-        run: |
-          sql-splitter diff migrations/prev.sql migrations/current.sql \
-            --format json > diff.json
-          if jq -e '.schema.tables_removed | length > 0' diff.json; then
-            echo "Breaking change: tables removed"
-            exit 1
-          fi
-```
+          - name: Install sql-splitter
+            run: cargo install sql-splitter
 
-### GitLab CI
+          - name: Validate migrations
+            run: sql-splitter validate "migrations/*.sql" --strict
 
-```yaml
-validate-sql:
-  image: rust:1.75-slim
-  before_script:
-    - cargo install sql-splitter
-  script:
-    - sql-splitter validate "dumps/*.sql" --strict --json > validation.json
-  artifacts:
-    paths:
-      - validation.json
-    when: always
-```
+          - name: Check for breaking changes
+            run: |
+              sql-splitter diff migrations/prev.sql migrations/current.sql \
+                --format json > diff.json
+              if jq -e '.schema.tables_removed | length > 0' diff.json; then
+                echo "Breaking change: tables removed"
+                exit 1
+              fi
+    ```
 
-### CircleCI
+  </TabItem>
+  <TabItem label="GitLab CI" icon="gitlab">
+    ```yaml
+    validate-sql:
+      image: rust:1.75-slim
+      before_script:
+        - cargo install sql-splitter
+      script:
+        - sql-splitter validate "dumps/*.sql" --strict --json > validation.json
+      artifacts:
+        paths:
+          - validation.json
+        when: always
+    ```
+  </TabItem>
+  <TabItem label="CircleCI">
+    ```yaml
+    version: 2.1
 
-```yaml
-version: 2.1
+    jobs:
+      validate:
+        docker:
+          - image: rust:1.75-slim
+        steps:
+          - checkout
+          - run:
+              name: Install sql-splitter
+              command: cargo install sql-splitter
+          - run:
+              name: Validate SQL dumps
+              command: sql-splitter validate "*.sql" --strict
+    ```
 
-jobs:
-  validate:
-    docker:
-      - image: rust:1.75-slim
-    steps:
-      - checkout
-      - run:
-          name: Install sql-splitter
-          command: cargo install sql-splitter
-      - run:
-          name: Validate SQL dumps
-          command: sql-splitter validate "*.sql" --strict
-```
+  </TabItem>
+</Tabs>
 
 ## Docker Compose
 
@@ -111,7 +115,7 @@ jobs:
 
 ```yaml
 # docker-compose.yml
-version: '3.8'
+version: "3.8"
 
 services:
   db:

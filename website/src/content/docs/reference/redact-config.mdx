@@ -119,33 +119,33 @@ Generate realistic fake data:
 
 Available generators:
 
-| Generator | Example Output |
-|-----------|----------------|
-| `email` | `jessica.smith@example.com` |
-| `name` | `Robert Johnson` |
-| `first_name` | `Sarah` |
-| `last_name` | `Williams` |
-| `phone` | `+1 (555) 234-5678` |
-| `address` | `123 Oak Street, Springfield, IL` |
-| `city` | `Portland` |
-| `state` | `California` |
-| `zip` | `90210` |
-| `country` | `United States` |
-| `company` | `Acme Corporation` |
-| `job_title` | `Software Engineer` |
-| `username` | `jsmith42` |
-| `url` | `https://example.com/page` |
-| `ip` | `192.168.1.100` |
-| `ipv6` | `2001:db8::1` |
-| `uuid` | `550e8400-e29b-41d4-...` |
-| `date` | `1985-07-23` |
-| `datetime` | `2023-01-15 14:30:00` |
-| `credit_card` | `4532015112830366` |
-| `iban` | `DE89370400440532013000` |
-| `ssn` | `123-45-6789` |
-| `lorem` | `Lorem ipsum dolor sit...` |
-| `paragraph` | `Full paragraph of text...` |
-| `sentence` | `A complete sentence.` |
+| Generator     | Example Output                    |
+| ------------- | --------------------------------- |
+| `email`       | `jessica.smith@example.com`       |
+| `name`        | `Robert Johnson`                  |
+| `first_name`  | `Sarah`                           |
+| `last_name`   | `Williams`                        |
+| `phone`       | `+1 (555) 234-5678`               |
+| `address`     | `123 Oak Street, Springfield, IL` |
+| `city`        | `Portland`                        |
+| `state`       | `California`                      |
+| `zip`         | `90210`                           |
+| `country`     | `United States`                   |
+| `company`     | `Acme Corporation`                |
+| `job_title`   | `Software Engineer`               |
+| `username`    | `jsmith42`                        |
+| `url`         | `https://example.com/page`        |
+| `ip`          | `192.168.1.100`                   |
+| `ipv6`        | `2001:db8::1`                     |
+| `uuid`        | `550e8400-e29b-41d4-...`          |
+| `date`        | `1985-07-23`                      |
+| `datetime`    | `2023-01-15 14:30:00`             |
+| `credit_card` | `4532015112830366`                |
+| `iban`        | `DE89370400440532013000`          |
+| `ssn`         | `123-45-6789`                     |
+| `lorem`       | `Lorem ipsum dolor sit...`        |
+| `paragraph`   | `Full paragraph of text...`       |
+| `sentence`    | `A complete sentence.`            |
 
 #### mask
 
@@ -158,11 +158,13 @@ Partial masking with pattern:
 ```
 
 Pattern symbols:
+
 - `*` - Replace with asterisk
 - `X` - Keep original character
 - `#` - Random digit
 
 Examples:
+
 - `****-****-****-XXXX` → `****-****-****-1234`
 - `XXX-XX-####` → `123-45-6789` (SSN with random last 4)
 - `***@XXXXX` → `***@gmail.com` (mask email prefix)

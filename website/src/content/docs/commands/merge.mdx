@@ -37,17 +37,17 @@ sql-splitter merge tables/ | gzip > merged.sql.gz
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output SQL file | stdout |
-| `--dialect` | `-d` | SQL dialect for headers/footers | `mysql` |
-| `--tables` | `-t` | Only merge these tables (comma-separated) | all |
-| `--exclude` | `-e` | Exclude these tables (comma-separated) | none |
-| `--transaction` | | Wrap in BEGIN/COMMIT transaction | false |
-| `--no-header` | | Skip header comments | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--dry-run` | | Preview without writing files | false |
-| `--json` | | Output results as JSON | false |
+| Flag            | Short | Description                               | Default |
+| --------------- | ----- | ----------------------------------------- | ------- |
+| `--output`      | `-o`  | Output SQL file                           | stdout  |
+| `--dialect`     | `-d`  | SQL dialect for headers/footers           | `mysql` |
+| `--tables`      | `-t`  | Only merge these tables (comma-separated) | all     |
+| `--exclude`     | `-e`  | Exclude these tables (comma-separated)    | none    |
+| `--transaction` |       | Wrap in BEGIN/COMMIT transaction          | false   |
+| `--no-header`   |       | Skip header comments                      | false   |
+| `--progress`    | `-p`  | Show progress bar                         | false   |
+| `--dry-run`     |       | Preview without writing files             | false   |
+| `--json`        |       | Output results as JSON                    | false   |
 
 ## Transaction Wrapping
 
@@ -58,6 +58,7 @@ sql-splitter merge tables/ -o restored.sql --transaction
 ```
 
 Output:
+
 ```sql
 BEGIN;
 -- users.sql

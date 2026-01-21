@@ -17,16 +17,16 @@ The website generates 49 OpenGraph images (1200x630px) for sharing on social med
 
 ## Category Colors
 
-| Section | Color | Hex |
-|---------|-------|-----|
-| Commands | Blue | `#58a6ff` |
-| Getting Started | Green | `#3fb950` |
-| Guides | Green | `#3fb950` |
-| Reference | Purple | `#d2a8ff` |
-| Advanced | Orange | `#ffa657` |
-| Contributing | Pink | `#f778ba` |
-| Tools | Blue | `#79c0ff` |
-| Roadmap | Purple | `#a371f7` |
+| Section         | Color  | Hex       |
+| --------------- | ------ | --------- |
+| Commands        | Blue   | `#58a6ff` |
+| Getting Started | Green  | `#3fb950` |
+| Guides          | Green  | `#3fb950` |
+| Reference       | Purple | `#d2a8ff` |
+| Advanced        | Orange | `#ffa657` |
+| Contributing    | Pink   | `#f778ba` |
+| Tools           | Blue   | `#79c0ff` |
+| Roadmap         | Purple | `#a371f7` |
 
 ## Implementation
 
@@ -34,10 +34,10 @@ OG images are generated using **Satori** (Vercel's JSX-to-SVG library) and conve
 
 ### Key Files
 
-| File | Purpose |
-|------|---------|
+| File                            | Purpose                                             |
+| ------------------------------- | --------------------------------------------------- |
 | `src/pages/og/[...slug].png.ts` | Dynamic route that generates OG images for each doc |
-| `src/pages/og/satori-lib.mjs` | Satori template with category detection and styling |
+| `src/pages/og/satori-lib.mjs`   | Satori template with category detection and styling |
 
 ### Generation Process
 
@@ -65,7 +65,7 @@ Edit `src/pages/og/satori-lib.mjs` to change the OG image design:
 ```javascript
 export async function generateOgSvg({ title, description, slug }) {
   // ... category detection and color assignment
-  
+
   const element = {
     type: 'div',
     props: {
@@ -73,7 +73,7 @@ export async function generateOgSvg({ title, description, slug }) {
       children: [/* ... */],
     },
   };
-  
+
   return await satori(element, { width: 1200, height: 630, fonts: [...] });
 }
 ```
@@ -92,6 +92,7 @@ OG images are rebuilt with every static build (not during dev mode).
 The homepage (`src/pages/index.astro`) uses a separate BaseLayout that references a static OG image at `/og-image.png`. This image should be placed in the `public/` directory.
 
 To set up the homepage OG image:
+
 1. Create `website/public/og-image.png` (1200x630px)
 2. The file will be served at `https://sql-splitter.dev/og-image.png`
 

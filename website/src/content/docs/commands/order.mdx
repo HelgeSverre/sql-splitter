@@ -31,13 +31,13 @@ sql-splitter order dump.sql --reverse -o drop-order.sql
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output SQL file | stdout |
-| `--dialect` | `-d` | SQL dialect | auto-detect |
-| `--check` | | Check for cycles and report order (don't write) | false |
-| `--dry-run` | | Show topological order without writing | false |
-| `--reverse` | | Reverse order (children before parents, for DROP) | false |
+| Flag        | Short | Description                                       | Default     |
+| ----------- | ----- | ------------------------------------------------- | ----------- |
+| `--output`  | `-o`  | Output SQL file                                   | stdout      |
+| `--dialect` | `-d`  | SQL dialect                                       | auto-detect |
+| `--check`   |       | Check for cycles and report order (don't write)   | false       |
+| `--dry-run` |       | Show topological order without writing            | false       |
+| `--reverse` |       | Reverse order (children before parents, for DROP) | false       |
 
 ## How It Works
 
@@ -49,6 +49,7 @@ sql-splitter order dump.sql --reverse -o drop-order.sql
 ## Import Order
 
 Tables are ordered so that:
+
 - Parent tables come before child tables
 - Referenced tables are created before referencing tables
 - Foreign key constraints can be satisfied during import
@@ -58,12 +59,14 @@ sql-splitter order dump.sql -o ordered.sql
 ```
 
 Before:
+
 ```sql
 CREATE TABLE orders (..., FOREIGN KEY (user_id) REFERENCES users(id));
 CREATE TABLE users (...);  -- Created after orders!
 ```
 
 After:
+
 ```sql
 CREATE TABLE users (...);  -- Now created first
 CREATE TABLE orders (..., FOREIGN KEY (user_id) REFERENCES users(id));
@@ -88,6 +91,7 @@ sql-splitter order dump.sql --check
 ```
 
 Output:
+
 ```
 ✓ No circular dependencies found
 
@@ -99,6 +103,7 @@ Import order:
 ```
 
 If cycles exist:
+
 ```
 ⚠ Circular dependencies detected:
   orders → payments → invoices → orders

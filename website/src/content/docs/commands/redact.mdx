@@ -37,38 +37,38 @@ sql-splitter redact dump.sql --config redact.yaml --validate
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output SQL file | stdout |
-| `--dialect` | `-d` | SQL dialect | auto-detect |
-| `--config` | `-c` | YAML config file | - |
-| `--generate-config` | | Analyze input and generate YAML config | false |
-| `--null` | | Columns to set to NULL (glob patterns) | - |
-| `--hash` | | Columns to hash with SHA256 | - |
-| `--fake` | | Columns to replace with fake data | - |
-| `--mask` | | Columns to mask (format: `pattern=column`) | - |
-| `--constant` | | Column=value pairs | - |
-| `--seed` | | Random seed for reproducibility | random |
-| `--locale` | | Locale for fake data | `en` |
-| `--tables` | `-t` | Only redact specific tables | all |
-| `--exclude` | `-x` | Exclude specific tables | none |
-| `--strict` | | Fail on warnings | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--dry-run` | | Preview without writing | false |
-| `--json` | | Output as JSON | false |
-| `--validate` | | Validate config only | false |
+| Flag                | Short | Description                                | Default     |
+| ------------------- | ----- | ------------------------------------------ | ----------- |
+| `--output`          | `-o`  | Output SQL file                            | stdout      |
+| `--dialect`         | `-d`  | SQL dialect                                | auto-detect |
+| `--config`          | `-c`  | YAML config file                           | -           |
+| `--generate-config` |       | Analyze input and generate YAML config     | false       |
+| `--null`            |       | Columns to set to NULL (glob patterns)     | -           |
+| `--hash`            |       | Columns to hash with SHA256                | -           |
+| `--fake`            |       | Columns to replace with fake data          | -           |
+| `--mask`            |       | Columns to mask (format: `pattern=column`) | -           |
+| `--constant`        |       | Column=value pairs                         | -           |
+| `--seed`            |       | Random seed for reproducibility            | random      |
+| `--locale`          |       | Locale for fake data                       | `en`        |
+| `--tables`          | `-t`  | Only redact specific tables                | all         |
+| `--exclude`         | `-x`  | Exclude specific tables                    | none        |
+| `--strict`          |       | Fail on warnings                           | false       |
+| `--progress`        | `-p`  | Show progress bar                          | false       |
+| `--dry-run`         |       | Preview without writing                    | false       |
+| `--json`            |       | Output as JSON                             | false       |
+| `--validate`        |       | Validate config only                       | false       |
 
 ## Redaction Strategies
 
-| Strategy | Description | Use Case |
-|----------|-------------|----------|
-| `null` | Replace with NULL | Remove data entirely |
-| `hash` | SHA256 hash (deterministic) | Preserve FK relationships |
-| `fake` | Generate realistic fake data | Realistic test data |
-| `mask` | Partial masking | Credit cards, SSNs |
-| `constant` | Fixed value | Placeholder values |
-| `shuffle` | Redistribute values | Preserve distribution |
-| `skip` | No redaction | Passthrough |
+| Strategy   | Description                  | Use Case                  |
+| ---------- | ---------------------------- | ------------------------- |
+| `null`     | Replace with NULL            | Remove data entirely      |
+| `hash`     | SHA256 hash (deterministic)  | Preserve FK relationships |
+| `fake`     | Generate realistic fake data | Realistic test data       |
+| `mask`     | Partial masking              | Credit cards, SSNs        |
+| `constant` | Fixed value                  | Placeholder values        |
+| `shuffle`  | Redistribute values          | Preserve distribution     |
+| `skip`     | No redaction                 | Passthrough               |
 
 ## Mask Patterns
 
@@ -78,6 +78,7 @@ sql-splitter redact dump.sql -o safe.sql --mask "****-****-****-XXXX=*.credit_ca
 ```
 
 Pattern symbols:
+
 - `*` - Replace with asterisk
 - `X` - Keep original character
 - `#` - Random digit
@@ -86,21 +87,21 @@ Pattern symbols:
 
 25+ generators available:
 
-| Generator | Example Output |
-|-----------|----------------|
-| `email` | `jessica.smith@example.com` |
-| `name` | `Robert Johnson` |
-| `first_name` | `Sarah` |
-| `last_name` | `Williams` |
-| `phone` | `+1 (555) 234-5678` |
-| `address` | `123 Oak Street, Springfield, IL` |
-| `city` | `Portland` |
-| `company` | `Acme Corporation` |
-| `ip` | `192.168.1.100` |
-| `uuid` | `550e8400-e29b-41d4-...` |
-| `date` | `1985-07-23` |
-| `credit_card` | `4532015112830366` |
-| `ssn` | `123-45-6789` |
+| Generator     | Example Output                    |
+| ------------- | --------------------------------- |
+| `email`       | `jessica.smith@example.com`       |
+| `name`        | `Robert Johnson`                  |
+| `first_name`  | `Sarah`                           |
+| `last_name`   | `Williams`                        |
+| `phone`       | `+1 (555) 234-5678`               |
+| `address`     | `123 Oak Street, Springfield, IL` |
+| `city`        | `Portland`                        |
+| `company`     | `Acme Corporation`                |
+| `ip`          | `192.168.1.100`                   |
+| `uuid`        | `550e8400-e29b-41d4-...`          |
+| `date`        | `1985-07-23`                      |
+| `credit_card` | `4532015112830366`                |
+| `ssn`         | `123-45-6789`                     |
 
 ## YAML Config
 

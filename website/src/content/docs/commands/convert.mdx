@@ -40,16 +40,16 @@ sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output SQL file or directory | stdout |
-| `--from` | | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--to` | | Target dialect (required) | - |
-| `--strict` | | Fail on any unsupported feature | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--dry-run` | | Preview without writing files | false |
-| `--fail-fast` | | Stop on first error (for glob patterns) | false |
-| `--json` | | Output results as JSON | false |
+| Flag          | Short | Description                                            | Default     |
+| ------------- | ----- | ------------------------------------------------------ | ----------- |
+| `--output`    | `-o`  | Output SQL file or directory                           | stdout      |
+| `--from`      |       | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--to`        |       | Target dialect (required)                              | -           |
+| `--strict`    |       | Fail on any unsupported feature                        | false       |
+| `--progress`  | `-p`  | Show progress bar                                      | false       |
+| `--dry-run`   |       | Preview without writing files                          | false       |
+| `--fail-fast` |       | Stop on first error (for glob patterns)                | false       |
+| `--json`      |       | Output results as JSON                                 | false       |
 
 ## Supported Conversions
 
@@ -66,14 +66,14 @@ All 12 conversion pairs are supported:
 
 50+ data type mappings are handled automatically:
 
-| MySQL | PostgreSQL | SQLite | MSSQL |
-|-------|------------|--------|-------|
-| `INT AUTO_INCREMENT` | `SERIAL` | `INTEGER PRIMARY KEY` | `INT IDENTITY` |
-| `TINYINT(1)` | `BOOLEAN` | `INTEGER` | `BIT` |
-| `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `NVARCHAR(n)` |
-| `DATETIME` | `TIMESTAMP` | `TEXT` | `DATETIME2` |
-| `TEXT` | `TEXT` | `TEXT` | `NVARCHAR(MAX)` |
-| `BLOB` | `BYTEA` | `BLOB` | `VARBINARY(MAX)` |
+| MySQL                | PostgreSQL   | SQLite                | MSSQL            |
+| -------------------- | ------------ | --------------------- | ---------------- |
+| `INT AUTO_INCREMENT` | `SERIAL`     | `INTEGER PRIMARY KEY` | `INT IDENTITY`   |
+| `TINYINT(1)`         | `BOOLEAN`    | `INTEGER`             | `BIT`            |
+| `VARCHAR(n)`         | `VARCHAR(n)` | `TEXT`                | `NVARCHAR(n)`    |
+| `DATETIME`           | `TIMESTAMP`  | `TEXT`                | `DATETIME2`      |
+| `TEXT`               | `TEXT`       | `TEXT`                | `NVARCHAR(MAX)`  |
+| `BLOB`               | `BYTEA`      | `BLOB`                | `VARBINARY(MAX)` |
 
 ## PostgreSQL COPY Conversion
 

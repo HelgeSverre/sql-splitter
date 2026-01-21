@@ -37,23 +37,23 @@ sql-splitter shard dump.sql --tenant-value 123 -o tenant.sql --progress
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output SQL file or directory | stdout |
-| `--dialect` | `-d` | SQL dialect | auto-detect |
-| `--tenant-column` | | Column name for tenant identification | auto-detect |
-| `--tenant-value` | | Single tenant value to extract | - |
-| `--tenant-values` | | Multiple tenant values (comma-separated) | - |
-| `--root-tables` | | Explicit root tables with tenant column | auto |
-| `--include-global` | | Global table handling: `none`, `lookups`, `all` | `lookups` |
-| `--config` | `-c` | YAML config file for table classification | - |
-| `--max-selected-rows` | | Maximum rows to select | unlimited |
-| `--no-limit` | | Disable row limit | false |
-| `--strict-fk` | | Fail if any FK integrity issues | false |
-| `--no-schema` | | Exclude CREATE TABLE statements | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--dry-run` | | Preview without writing | false |
-| `--json` | | Output as JSON | false |
+| Flag                  | Short | Description                                     | Default     |
+| --------------------- | ----- | ----------------------------------------------- | ----------- |
+| `--output`            | `-o`  | Output SQL file or directory                    | stdout      |
+| `--dialect`           | `-d`  | SQL dialect                                     | auto-detect |
+| `--tenant-column`     |       | Column name for tenant identification           | auto-detect |
+| `--tenant-value`      |       | Single tenant value to extract                  | -           |
+| `--tenant-values`     |       | Multiple tenant values (comma-separated)        | -           |
+| `--root-tables`       |       | Explicit root tables with tenant column         | auto        |
+| `--include-global`    |       | Global table handling: `none`, `lookups`, `all` | `lookups`   |
+| `--config`            | `-c`  | YAML config file for table classification       | -           |
+| `--max-selected-rows` |       | Maximum rows to select                          | unlimited   |
+| `--no-limit`          |       | Disable row limit                               | false       |
+| `--strict-fk`         |       | Fail if any FK integrity issues                 | false       |
+| `--no-schema`         |       | Exclude CREATE TABLE statements                 | false       |
+| `--progress`          | `-p`  | Show progress bar                               | false       |
+| `--dry-run`           |       | Preview without writing                         | false       |
+| `--json`              |       | Output as JSON                                  | false       |
 
 ## Tenant Column Detection
 
@@ -81,6 +81,7 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/
 ```
 
 Creates:
+
 ```
 shards/
 ├── tenant_1.sql

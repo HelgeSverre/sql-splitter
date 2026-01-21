@@ -40,18 +40,18 @@ sql-splitter split "dumps/*.sql" -o output/ --fail-fast
 
 ## Options
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--output` | `-o` | Output directory | `output` |
-| `--dialect` | `-d` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--tables` | `-t` | Only split these tables (comma-separated) | all |
-| `--schema-only` | | Only DDL (CREATE TABLE, indexes) | false |
-| `--data-only` | | Only DML (INSERT, COPY) | false |
-| `--verbose` | `-v` | Show verbose output | false |
-| `--progress` | `-p` | Show progress bar | false |
-| `--dry-run` | | Preview without writing files | false |
-| `--fail-fast` | | Stop on first error (for glob patterns) | false |
-| `--json` | | Output results as JSON | false |
+| Flag            | Short | Description                                         | Default     |
+| --------------- | ----- | --------------------------------------------------- | ----------- |
+| `--output`      | `-o`  | Output directory                                    | `output`    |
+| `--dialect`     | `-d`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--tables`      | `-t`  | Only split these tables (comma-separated)           | all         |
+| `--schema-only` |       | Only DDL (CREATE TABLE, indexes)                    | false       |
+| `--data-only`   |       | Only DML (INSERT, COPY)                             | false       |
+| `--verbose`     | `-v`  | Show verbose output                                 | false       |
+| `--progress`    | `-p`  | Show progress bar                                   | false       |
+| `--dry-run`     |       | Preview without writing files                       | false       |
+| `--fail-fast`   |       | Stop on first error (for glob patterns)             | false       |
+| `--json`        |       | Output results as JSON                              | false       |
 
 ## Output Structure
 
@@ -74,8 +74,18 @@ sql-splitter split dump.sql -o tables/ --json
   "input": "dump.sql",
   "output_dir": "tables/",
   "tables": [
-    {"name": "users", "file": "tables/users.sql", "rows": 150, "bytes": 12345},
-    {"name": "orders", "file": "tables/orders.sql", "rows": 500, "bytes": 45678}
+    {
+      "name": "users",
+      "file": "tables/users.sql",
+      "rows": 150,
+      "bytes": 12345
+    },
+    {
+      "name": "orders",
+      "file": "tables/orders.sql",
+      "rows": 500,
+      "bytes": 45678
+    }
   ],
   "statistics": {
     "total_tables": 2,
