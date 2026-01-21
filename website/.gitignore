@@ -1,1 +1,29 @@
+# Environment
 .env*.local
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.astro/
+
+# Lockfiles (let Vercel generate its own for Linux compatibility)
+bun.lock
+yarn.lock
+package-lock.json
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Cache
+.vercel/
+.astro-indexnow-cache.json
+
+# Test
+test-results/
+playwright-report/
