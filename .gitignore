@@ -41,7 +41,10 @@ flamegraph.svg
 /website/.astro/
 /website/.vercel/
 /website/.env
+/website/.env.local
 /website/screenshots/
+/website/test-results/
+/website/.idea/
 
 # Test output directories
 /test-fixtures/
