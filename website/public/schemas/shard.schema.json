@@ -1,16 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ShardJsonOutput",
   "description": "JSON output for single-tenant shard command",
   "type": "object",
-  "required": [
-    "dialect",
-    "dry_run",
-    "input_file",
-    "statistics",
-    "tables",
-    "tenant"
-  ],
   "properties": {
     "dialect": {
       "type": "string"
@@ -22,19 +14,22 @@
       "type": "string"
     },
     "output_file": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "statistics": {
-      "$ref": "#/definitions/ShardStatistics"
+      "$ref": "#/$defs/ShardStatistics"
     },
     "tables": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/TableShardJson"
+        "$ref": "#/$defs/TableShardJson"
       }
     },
     "tenant": {
-      "$ref": "#/definitions/TenantInfo"
+      "$ref": "#/$defs/TenantInfo"
     },
     "warnings": {
       "type": "array",
@@ -43,51 +38,58 @@
       }
     }
   },
-  "definitions": {
+  "required": [
+    "input_file",
+    "dialect",
+    "dry_run",
+    "tenant",
+    "statistics",
+    "tables"
+  ],
+  "$defs": {
     "ShardStatistics": {
       "type": "object",
-      "required": [
-        "fk_orphans_skipped",
-        "reduction_percent",
-        "rows_selected",
-        "rows_total",
-        "tables_processed",
-        "tables_skipped",
-        "tables_with_data"
-      ],
       "properties": {
         "fk_orphans_skipped": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "reduction_percent": {
           "type": "number"
         },
         "rows_selected": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows_total": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tables_processed": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tables_skipped": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tables_with_data": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "tables_processed",
+        "tables_with_data",
+        "tables_skipped",
+        "rows_selected",
+        "rows_total",
+        "reduction_percent",
+        "fk_orphans_skipped"
+      ]
     },
     "TableShardJson": {
       "type": "object",
-      "required": ["classification", "name", "rows_selected", "rows_total"],
       "properties": {
         "classification": {
           "type": "string"
@@ -97,17 +99,22 @@
         },
         "rows_selected": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows_total": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "name",
+        "classification",
+        "rows_selected",
+        "rows_total"
+      ]
     },
     "TenantInfo": {
       "type": "object",
-      "required": ["auto_detected", "column", "value"],
       "properties": {
         "auto_detected": {
           "type": "boolean"
@@ -118,7 +125,12 @@
         "value": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "column",
+        "value",
+        "auto_detected"
+      ]
     }
   }
 }

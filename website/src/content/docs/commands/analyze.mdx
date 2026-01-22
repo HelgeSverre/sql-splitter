@@ -7,26 +7,34 @@ Read-only analysis of SQL dump files to show table statistics.
 
 **Alias:** `an` (e.g., `sql-splitter an dump.sql`)
 
+## When to Use This
+
+- **Quick inspection before splitting** — understand what's in a dump before running [`split`](/commands/split)
+- **Finding the largest tables** — identify which tables consume the most space in your dump
+- **Estimating backup sizes** — get byte-level breakdowns without extracting files
+- **Comparing dump sizes over time** — track table growth by analyzing dumps from different dates
+- **Scripted reporting** — use `--json` output for automated monitoring and dashboards
+
+## How It Works
+
+The `analyze` command performs a **single [streaming](/reference/glossary#streaming) pass** through the dump file, counting statements and rows without loading the entire file into memory.
+
+**What counts as a row:** Each value tuple in an `INSERT` statement. A multi-row insert like `INSERT INTO users VALUES (1, 'alice'), (2, 'bob')` counts as 2 rows.
+
+**What counts as a statement:** Any complete SQL statement associated with a table—`CREATE TABLE`, `INSERT`, `ALTER TABLE`, `CREATE INDEX`, `DROP TABLE`, and PostgreSQL `COPY` blocks.
+
+**What "Size" measures:** The total bytes of raw SQL statements attributed to each table in the dump file. This includes the statement text itself (e.g., the full `INSERT INTO...` line).
+
+**Memory usage:** ~7MB peak for typical dumps. The streaming architecture keeps memory constant regardless of file size.
+
+**Exit codes:**
+- `0` — Analysis completed successfully
+- `1` — Error reading file or parsing SQL
+
 ## Usage
 
 ```bash
 sql-splitter analyze <INPUT> [OPTIONS]
-```
-
-## Examples
-
-```bash
-# Basic analysis
-sql-splitter analyze database.sql
-
-# With progress bar
-sql-splitter analyze database.sql --progress
-
-# Batch analysis
-sql-splitter analyze "backups/**/*.sql" --fail-fast
-
-# JSON output
-sql-splitter analyze dump.sql --json
 ```
 
 ## Options
@@ -37,6 +45,36 @@ sql-splitter analyze dump.sql --json
 | `--progress`  | `-p`  | Show progress bar                                   | false       |
 | `--fail-fast` |       | Stop on first error (for glob patterns)             | false       |
 | `--json`      |       | Output results as JSON                              | false       |
+
+## Examples
+
+### Basic Analysis
+
+```bash
+sql-splitter analyze database.sql
+```
+
+### Large Files with Progress
+
+For dumps over 100MB, enable the progress bar to track completion:
+
+```bash
+sql-splitter analyze large-dump.sql --progress
+```
+
+### Batch Analysis
+
+Analyze multiple dumps using glob patterns:
+
+```bash
+sql-splitter analyze "backups/**/*.sql" --fail-fast
+```
+
+### JSON Output for Scripting
+
+```bash
+sql-splitter analyze dump.sql --json
+```
 
 ## Output
 
@@ -59,10 +97,6 @@ Summary:
 
 ## JSON Output
 
-```bash
-sql-splitter analyze dump.sql --json
-```
-
 ```json
 {
   "input": "dump.sql",
@@ -80,8 +114,69 @@ sql-splitter analyze dump.sql --json
 }
 ```
 
+## Composing with Other Tools
+
+### Find Tables Over a Certain Size
+
+Use `jq` to filter the JSON output:
+
+```bash
+sql-splitter analyze dump.sql --json | jq '.tables[] | select(.bytes > 1000000)'
+```
+
+### Get the Top 5 Largest Tables
+
+```bash
+sql-splitter analyze dump.sql --json | jq -r '.tables | sort_by(-.bytes) | .[0:5] | .[] | "\(.name): \(.bytes / 1024 | floor) KB"'
+```
+
+### Monitoring Script
+
+Track dump sizes over time:
+
+```bash
+#!/bin/bash
+DATE=$(date +%Y-%m-%d)
+sql-splitter analyze /backups/daily.sql --json | jq --arg date "$DATE" '{date: $date, total_bytes: .summary.total_bytes}' >> /var/log/dump-sizes.jsonl
+```
+
+### Compare Two Dumps
+
+```bash
+diff <(sql-splitter analyze old.sql --json | jq '.tables | sort_by(.name)') \
+     <(sql-splitter analyze new.sql --json | jq '.tables | sort_by(.name)')
+```
+
+## Troubleshooting
+
+### Row count seems wrong
+
+Multi-row `INSERT` statements count each value tuple separately. An insert like `INSERT INTO t VALUES (1), (2), (3)` counts as 3 rows, not 1. This matches the actual number of records being inserted.
+
+### Size doesn't match the file size
+
+The "Size" column only counts bytes from statements **attributed to specific tables**. Global statements like `SET` commands, comments, and file headers are not included in any table's size. The sum of table sizes will typically be less than the total file size.
+
+### Statement count is always 2 per table
+
+A typical `mysqldump` output includes one `CREATE TABLE` and one `INSERT` statement per table, resulting in 2 statements. If you see higher counts, your dump may include `ALTER TABLE`, `CREATE INDEX`, or multiple `INSERT` batches.
+
+### Analysis is slow on large files
+
+Enable `--progress` to see if the file is being read. For files over 1GB, expect ~1-2 seconds per 100MB. If significantly slower, check disk I/O or try decompressing the file first if it's compressed.
+
+### "Unknown dialect" errors
+
+Use `--dialect` to explicitly specify the SQL dialect when auto-detection fails:
+
+```bash
+sql-splitter analyze dump.sql --dialect postgres
+```
+
 ## See Also
 
-- [`split`](/commands/split) - Split a dump into per-table files
-- [`validate`](/commands/validate) - Check dump integrity
-- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [`split`](/commands/split) — Split a dump into per-table files
+- [`validate`](/commands/validate) — Check dump integrity
+- [`sample`](/commands/sample) — Extract a percentage of rows for testing
+- [JSON Output Schema](/reference/json-output/) — Schema for `--json` output
+- [Glossary](/reference/glossary) — Definitions for statement, row, and other terms

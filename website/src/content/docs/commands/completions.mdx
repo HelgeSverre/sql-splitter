@@ -5,6 +5,19 @@ description: Generate shell completion scripts
 
 Generate shell completion scripts for bash, zsh, fish, and PowerShell.
 
+## When to Use This
+
+- **First-time setup** — After installing sql-splitter, generate completions to enable tab completion
+- **After upgrading** — Regenerate completions when new commands or flags are added
+- **Setting up a new machine** — Include completion setup in your dotfiles or provisioning scripts
+- **Switching shells** — Generate completions for your new shell
+
+## How It Works
+
+The `completions` command uses [clap](https://docs.rs/clap/latest/clap/)'s built-in completion generator to produce shell-specific scripts. When loaded by your shell, these scripts intercept `Tab` key presses and provide context-aware suggestions for commands, flags, and flag values.
+
+Completions are generated at runtime based on the current version of sql-splitter, so they always reflect the available commands and options.
+
 ## Usage
 
 ```bash
@@ -22,40 +35,107 @@ sql-splitter completions <SHELL>
 
 ## Installation
 
+Once installed to the correct location, completions persist across shell restarts—no need to regenerate unless you upgrade sql-splitter.
+
+:::note
+If you installed sql-splitter via Homebrew or a package manager, completions may already be included. Test with `sql-splitter <TAB>` before manually installing.
+:::
+
 ### Bash
 
-```bash
-# System-wide (requires sudo)
-sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
+Bash supports two installation methods:
 
-# User-only
-sql-splitter completions bash >> ~/.bashrc
+**System-wide** (all users, requires sudo):
+```bash
+sudo sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
+```
+
+**User-only** (recommended):
+```bash
+# Create completions directory if needed
+mkdir -p ~/.bash_completion.d
+
+# Generate completions
+sql-splitter completions bash > ~/.bash_completion.d/sql-splitter
+
+# Add to .bashrc (one-time setup)
+echo 'source ~/.bash_completion.d/sql-splitter' >> ~/.bashrc
+
+# Reload current session
 source ~/.bashrc
 ```
 
 ### Zsh
 
+Zsh loads completions from directories in `$fpath`. Find your fpath locations:
+
 ```bash
-# Standard zsh
+echo $fpath | tr ' ' '\n'
+```
+
+**Standard installation:**
+```bash
+# Use the first writable fpath directory (usually ~/.zsh/completions or similar)
 sql-splitter completions zsh > "${fpath[1]}/_sql-splitter"
 
-# Oh-my-zsh
+# Rebuild completion cache and reload
+autoload -Uz compinit && compinit
+source ~/.zshrc
+```
+
+**Oh-My-Zsh:**
+```bash
+# Oh-My-Zsh includes ~/.oh-my-zsh/completions in fpath
+mkdir -p ~/.oh-my-zsh/completions
 sql-splitter completions zsh > ~/.oh-my-zsh/completions/_sql-splitter
 
-# Then reload
+# Reload
+source ~/.zshrc
+```
+
+**If you don't have a user fpath directory:**
+```bash
+# Create one and add to fpath in .zshrc
+mkdir -p ~/.zsh/completions
+echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+sql-splitter completions zsh > ~/.zsh/completions/_sql-splitter
 source ~/.zshrc
 ```
 
 ### Fish
 
+Fish has a dedicated completions directory that's automatically loaded:
+
 ```bash
+# Create directory if needed
+mkdir -p ~/.config/fish/completions
+
+# Generate completions (takes effect immediately in new shells)
 sql-splitter completions fish > ~/.config/fish/completions/sql-splitter.fish
 ```
 
+No reload required—Fish automatically picks up new completion files.
+
 ### PowerShell
 
+PowerShell loads completions from your profile script. Find your profile location:
+
 ```powershell
+echo $PROFILE
+# Typically: ~/.config/powershell/Microsoft.PowerShell_profile.ps1 (Linux/macOS)
+# Or: ~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1 (Windows)
+```
+
+**Install completions:**
+```powershell
+# Create profile if it doesn't exist
+if (!(Test-Path -Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force }
+
+# Append completions to profile
 sql-splitter completions powershell >> $PROFILE
+
+# Reload profile
+. $PROFILE
 ```
 
 ## What Completions Provide
@@ -90,6 +170,63 @@ sql-splitter <TAB>
 
 # Should show all commands:
 # analyze  completions  convert  diff  graph  merge  order  query  redact  sample  shard  split  validate
+```
+
+## Troubleshooting
+
+### Completions not working
+
+**Shell needs reload:** After installing completions, you must reload your shell configuration or open a new terminal:
+```bash
+# Bash
+source ~/.bashrc
+
+# Zsh
+source ~/.zshrc
+
+# Fish (usually automatic, but try)
+source ~/.config/fish/config.fish
+
+# PowerShell
+. $PROFILE
+```
+
+**Zsh fpath issues:** Ensure the completion file is in a directory listed in `$fpath` and the filename starts with `_`:
+```bash
+# Check if the file is in fpath
+echo $fpath | tr ' ' '\n' | xargs -I {} ls {}_sql-splitter 2>/dev/null
+
+# Rebuild completion cache
+rm -f ~/.zcompdump && compinit
+```
+
+### Completions outdated after upgrade
+
+When you upgrade sql-splitter, new commands or flags won't appear until you regenerate completions:
+
+```bash
+# Regenerate for your shell (example: zsh)
+sql-splitter completions zsh > ~/.oh-my-zsh/completions/_sql-splitter
+source ~/.zshrc
+```
+
+### Permission denied
+
+For system-wide installation, use `sudo`:
+```bash
+sudo sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
+```
+
+Or use user-only installation (recommended) which doesn't require elevated permissions.
+
+### PowerShell profile doesn't exist
+
+Create the profile file before appending:
+```powershell
+if (!(Test-Path -Path $PROFILE)) {
+    New-Item -ItemType File -Path $PROFILE -Force
+}
+sql-splitter completions powershell >> $PROFILE
 ```
 
 ## See Also

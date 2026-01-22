@@ -10,6 +10,40 @@ Create smaller test datasets while preserving foreign key relationships.
 > [!NOTE]
 > Requires one of: `--percent`, `--rows`, or `--config`
 
+## When to Use This
+
+- **Creating dev/test datasets** - Generate smaller databases for local development from production dumps
+- **Reducing CI test times** - Smaller datasets mean faster test runs without losing coverage
+- **Reproducing production bugs** - Extract a consistent slice of data that maintains relationships between tables
+- **Size-limited backups** - Create smaller backups for quick restores or archival purposes
+- **Demo environments** - Build realistic demo data that maintains [referential integrity](/reference/glossary#referential-integrity)
+
+Use [`shard`](/commands/shard) instead if you need to extract data for a specific tenant from a multi-tenant database.
+
+## How It Works
+
+The sample command operates in one of two modes:
+
+### Simple Random Sampling (default)
+
+Without `--preserve-relations`, each table is sampled independently using reservoir sampling. Rows are selected randomly based on `--percent` or `--rows`. This is fast but doesn't guarantee [foreign key](/reference/glossary#foreign-key-fk) relationships remain valid.
+
+### FK-Preserving Sampling (`--preserve-relations`)
+
+When FK preservation is enabled, the algorithm:
+
+1. **Splits the dump** into per-table files in a temp directory
+2. **Builds a [dependency graph](/reference/glossary#dependency-graph)** from CREATE TABLE and ALTER TABLE statements
+3. **Identifies [root tables](/reference/glossary#root-table)** - tables with no outgoing foreign keys (or explicitly specified via `--root-tables`)
+4. **Processes tables in [topological order](/reference/glossary#topological-order--topological-sort)** - parents before children
+5. **Samples root tables first** using the specified percentage or row count
+6. **Follows FK chains** - for each sampled row, tracks its [primary key](/reference/glossary#primary-key-pk) hash. When processing child tables, only rows whose FK values match a sampled parent's PK are eligible
+7. **Outputs a consistent dataset** where all FK relationships are satisfied
+
+**Memory usage**: PK values are stored as 64-bit hashes in a `HashSet` (8 bytes per row). For 10 million sampled rows across all tables, expect ~80MB of memory for PK tracking. Use `--max-total-rows` to cap memory growth.
+
+**Fractional rows**: When a percentage results in a fractional row count (e.g., 10% of 15 rows = 1.5), reservoir sampling naturally handles this—you'll get approximately the target percentage over many runs, or use `--seed` for deterministic results.
+
 ## Usage
 
 ```bash
@@ -18,24 +52,48 @@ sql-splitter sample <INPUT> [OPTIONS]
 
 ## Examples
 
+### Basic Sampling
+
 ```bash
-# Sample 10% of rows
+# Sample 10% of rows from each table
 sql-splitter sample dump.sql -o sampled.sql --percent 10
 
-# Sample fixed rows per table
+# Sample fixed number of rows per table
 sql-splitter sample dump.sql -o sampled.sql --rows 1000
+```
 
-# Preserve FK relationships
+### FK-Preserving Samples
+
+```bash
+# Preserve FK relationships - ensures if you sample an order, the user exists
 sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
 
-# Reproducible sampling with seed
+# Fail if any FK integrity issues are detected
+sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations --strict-fk
+```
+
+### Reproducible Sampling
+
+```bash
+# Same seed = identical sample every time (useful for CI/debugging)
 sql-splitter sample dump.sql -o dev.sql --percent 10 --seed 42
+```
 
-# Sample specific tables only
-sql-splitter sample dump.sql -o dev.sql --percent 10 --tables users,orders
+### Table Filtering
 
-# Exclude tables
-sql-splitter sample dump.sql -o dev.sql --percent 10 --exclude logs,events
+```bash
+# Sample only specific tables
+sql-splitter sample dump.sql -o dev.sql --percent 10 --tables users,orders,products
+
+# Exclude large or irrelevant tables
+sql-splitter sample dump.sql -o dev.sql --percent 10 --exclude logs,events,audit_trail
+```
+
+### Using YAML Config for Per-Table Settings
+
+```bash
+# Use a config file for complex sampling requirements
+sql-splitter sample dump.sql -o dev.sql --config sample.yaml
 ```
 
 ## Options
@@ -61,39 +119,188 @@ sql-splitter sample dump.sql -o dev.sql --percent 10 --exclude logs,events
 | `--dry-run`            |       | Preview without writing                         | false       |
 | `--json`               |       | Output as JSON                                  | false       |
 
-## FK Preservation
+## Root Tables and `--root-tables`
 
-With `--preserve-relations`, sql-splitter:
+[Root tables](/reference/glossary#root-table) are tables with no outgoing foreign keys—they don't reference other tables. The sample command auto-detects these as starting points for FK-preserving sampling.
 
-1. Identifies root tables (no incoming FKs)
-2. Samples from root tables first
-3. Follows FKs to include referenced rows
-4. Ensures referential integrity
-
-```bash
-# This ensures if you sample an order, the user and products exist
-sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations
-```
-
-## Reproducible Sampling
-
-Use `--seed` for deterministic results:
+Override auto-detection when:
+- Your FKs are implicit (not declared in the schema)
+- You want to start sampling from specific tables
+- Auto-detection picks the wrong tables
 
 ```bash
-# Same seed = same sample every time
-sql-splitter sample dump.sql -o dev.sql --percent 10 --seed 42
+# Explicitly specify which tables to start sampling from
+sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations --root-tables users,organizations
 ```
 
-## Global Tables
+## Global and Lookup Tables
 
-The `--include-global` option controls lookup tables:
+The `--include-global` option controls how lookup/reference tables are handled:
 
-- `none`: Skip global/lookup tables
-- `lookups`: Include small reference tables (default)
-- `all`: Include all tables
+| Value | Behavior |
+|-------|----------|
+| `none` | Skip global/lookup tables entirely |
+| `lookups` | Include small lookup tables in full (default) |
+| `all` | Include all global tables in full |
+
+**What counts as a lookup table?**
+
+Tables are auto-classified as lookups if they match common patterns:
+- `countries`, `states`, `provinces`, `cities`
+- `currencies`, `languages`, `timezones`
+- `permissions`, `roles`, `settings`
+
+You can override classification in a [YAML config file](#yaml-configuration-file).
+
+**System tables** (migrations, jobs, cache, sessions) are automatically skipped.
+
+## YAML Configuration File
+
+For complex sampling requirements, use a YAML config file:
+
+```yaml
+# sample.yaml
+default:
+  percent: 10
+
+classification:
+  # Include these tables fully
+  global:
+    - permissions
+    - roles
+  # Skip these tables
+  system:
+    - migrations
+    - failed_jobs
+    - telescope_entries
+  # Classify as lookup tables
+  lookup:
+    - currencies
+    - countries
+  # Explicitly mark as root tables
+  root:
+    - organizations
+
+tables:
+  users:
+    rows: 500      # Fixed row count for this table
+  posts:
+    percent: 5     # Different percentage for this table
+  sessions:
+    skip: true     # Skip entirely
+  audit_logs:
+    classification: system  # Override classification
+```
+
+Then run:
+
+```bash
+sql-splitter sample dump.sql -o dev.sql --config sample.yaml --preserve-relations
+```
+
+## Composing with Other Tools
+
+### Create anonymized dev database
+
+```bash
+# Sample 10% with FK preservation, then redact PII
+sql-splitter sample prod.sql --percent 10 --preserve-relations -o sampled.sql
+sql-splitter redact sampled.sql --config redact.yaml -o dev.sql
+```
+
+### Validate sampled output
+
+```bash
+# Ensure the sample maintains FK integrity
+sql-splitter sample dump.sql --percent 10 --preserve-relations -o dev.sql
+sql-splitter validate dev.sql --strict
+```
+
+### Visualize dependencies before sampling
+
+```bash
+# Understand the FK graph before deciding on root tables
+sql-splitter graph dump.sql --format mermaid -o schema.md
+sql-splitter sample dump.sql --percent 10 --preserve-relations --root-tables users,orgs -o dev.sql
+```
+
+### Sample then query
+
+```bash
+# Create sample, then run ad-hoc queries against it
+sql-splitter sample dump.sql --percent 5 --preserve-relations -o sample.sql
+sql-splitter query sample.sql "SELECT COUNT(*) FROM users"
+```
+
+## Troubleshooting
+
+### Sample is larger than expected
+
+**Cause**: FK preservation pulls in all related rows. If you sample 10% of orders, you get 100% of the users who placed those orders.
+
+**Solutions**:
+- Use `--max-total-rows` to cap the total: `--max-total-rows 100000`
+- Sample from tables higher in the dependency chain (use `--root-tables`)
+- Use `--dry-run` to preview sizes before sampling
+
+```bash
+# Preview what would be sampled
+sql-splitter sample dump.sql --percent 10 --preserve-relations --dry-run --json | jq '.table_stats'
+```
+
+### Missing related rows (broken FKs)
+
+**Cause**: Foreign keys weren't detected in the schema (implicit FKs, or defined in application code).
+
+**Solutions**:
+- Specify root tables explicitly: `--root-tables users,organizations`
+- Add FK constraints to your schema dump
+- Use `--strict-fk` to fail early when FK issues are detected
+
+### Out of memory
+
+**Cause**: `--preserve-relations` tracks all sampled PK values in memory (8 bytes per row).
+
+**Solutions**:
+- Reduce sample size: `--percent 1` instead of `--percent 10`
+- Use `--max-total-rows 500000` to cap memory usage
+- Disable FK preservation for very large dumps (accept potential broken FKs)
+- Sample fewer tables: `--tables critical_table1,critical_table2`
+
+### Non-deterministic results
+
+**Cause**: Without `--seed`, sampling uses a random seed each run.
+
+**Solution**: Add a fixed seed for reproducible results:
+
+```bash
+sql-splitter sample dump.sql --percent 10 --seed 42 -o dev.sql
+```
+
+### "Warning: Reached max_total_rows limit"
+
+**Cause**: The `--max-total-rows` guard stopped sampling to prevent runaway growth.
+
+**Solutions**:
+- Increase the limit if you have sufficient memory
+- Reduce `--percent` to sample fewer rows initially
+- Review which tables are pulling in the most related rows with `--dry-run --json`
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Error (I/O, parse error, FK integrity failure with `--strict-fk`) |
+| `2` | Invalid arguments |
+
+See [Exit Codes](/reference/exit-codes) for usage in scripts.
 
 ## See Also
 
 - [`shard`](/commands/shard) - Extract tenant-specific data
 - [`redact`](/commands/redact) - Anonymize sampled data
+- [`validate`](/commands/validate) - Verify FK integrity of sampled output
+- [`graph`](/commands/graph) - Visualize FK relationships before sampling
 - [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [Glossary](/reference/glossary) - Definitions of FK, PK, root table, etc.

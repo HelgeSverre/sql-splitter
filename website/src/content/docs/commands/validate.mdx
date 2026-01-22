@@ -3,9 +3,34 @@ title: validate
 description: Check SQL dump integrity with comprehensive validation
 ---
 
-Validate SQL dump files for syntax errors, encoding issues, and referential integrity.
+Validate SQL dump files for syntax errors, encoding issues, and [referential integrity](/reference/glossary#referential-integrity).
 
 **Alias:** `val` (e.g., `sql-splitter val dump.sql --strict`)
+
+## When to Use This
+
+- **Pre-restore verification** - Check dumps before importing to catch issues early
+- **CI/CD quality gates** - Block deployments if backups are malformed
+- **Backup integrity monitoring** - Verify automated backups haven't been corrupted
+- **Encoding issue detection** - Find invalid UTF-8 sequences that cause import failures
+- **Referential integrity auditing** - Detect orphaned [foreign key](/reference/glossary#foreign-key-fk) references and duplicate [primary keys](/reference/glossary#primary-key-pk)
+
+Use [`diff`](/commands/diff) instead if you need to compare two dumps for differences.
+
+## How It Works
+
+Validation runs in two passes:
+
+1. **Schema pass** - Parses the entire dump, validates SQL syntax, checks UTF-8 encoding, and builds a table registry. This pass is fast and [streams](/reference/glossary#streaming) through the file with constant memory (~10MB).
+
+2. **Data integrity pass** (optional) - If [PK](/reference/glossary#primary-key-pk)/[FK](/reference/glossary#foreign-key-fk) checks are enabled, a second pass tracks primary key values and verifies foreign key references. This uses a `PkHashSet` that stores 64-bit hashes of seen values—memory grows with row count (roughly 8 bytes per unique PK value).
+
+**Memory considerations:** For a table with 10 million rows, expect ~80MB memory for PK tracking. Use `--no-fk-checks` for large dumps to skip the data integrity pass entirely, or `--max-rows-per-table` to limit tracking per table.
+
+**Exit codes:**
+- `0` - Valid (no errors; warnings may exist)
+- `1` - Invalid (errors found, or warnings with `--strict`)
+- `2` - Runtime error (file not found, parse failure)
 
 ## Usage
 
@@ -15,21 +40,43 @@ sql-splitter validate <INPUT> [OPTIONS]
 
 ## Examples
 
+### Basic Validation
+
 ```bash
-# Basic validation
+# Validate a single dump
 sql-splitter validate dump.sql
 
-# Strict mode (warnings = errors)
+# Validate with progress bar (useful for large files)
+sql-splitter validate large-dump.sql --progress
+
+# Validate a PostgreSQL pg_dump file
+sql-splitter validate pg_dump.sql --dialect=postgres
+```
+
+### CI/CD Integration
+
+```bash
+# Strict mode - treat warnings as errors
 sql-splitter validate dump.sql --strict
 
-# JSON output for CI
+# JSON output for parsing in CI
 sql-splitter validate dump.sql --json
 
-# Skip expensive PK/FK checks
+# Fail fast on first error (for batch validation)
+sql-splitter validate "backups/*.sql" --fail-fast --strict
+```
+
+### Memory-Constrained Validation
+
+```bash
+# Skip PK/FK checks entirely (fastest, lowest memory)
 sql-splitter validate dump.sql --no-fk-checks
 
-# Batch validation
-sql-splitter validate "dumps/*.sql" --fail-fast
+# Limit rows checked per table (middle ground)
+sql-splitter validate dump.sql --max-rows-per-table 100000
+
+# No limit on rows (full check, highest memory)
+sql-splitter validate dump.sql --no-limit
 ```
 
 ## Options
@@ -47,11 +94,15 @@ sql-splitter validate "dumps/*.sql" --fail-fast
 
 ## Validation Checks
 
-- **SQL syntax validation** - Parser errors
-- **DDL/DML consistency** - INSERTs reference existing tables
-- **Encoding validation** - UTF-8 compliance
-- **Duplicate primary key detection** - All dialects
-- **FK referential integrity** - All dialects
+| Check | What It Detects | Memory Impact |
+|-------|-----------------|---------------|
+| **SQL syntax** | Malformed statements, unclosed strings, invalid keywords | None (streaming) |
+| **Encoding** | Invalid UTF-8 byte sequences, mixed encodings | None (streaming) |
+| **[DDL](/reference/glossary#ddl-data-definition-language)/[DML](/reference/glossary#dml-data-manipulation-language) consistency** | INSERT/COPY into non-existent tables, column count mismatches | Minimal (table registry) |
+| **Duplicate [PK](/reference/glossary#primary-key-pk)** | Multiple rows with the same primary key value | ~8 bytes per row |
+| **[FK](/reference/glossary#foreign-key-fk) referential integrity** | Foreign key values referencing non-existent parent rows | ~8 bytes per FK reference |
+
+The first three checks run during the schema pass. PK/FK checks require the data integrity pass and can be disabled with `--no-fk-checks`.
 
 ## Output
 
@@ -110,8 +161,111 @@ sql-splitter validate dump.sql --json | jq 'select(.summary.errors > 0)'
 sql-splitter validate "*.sql" --json | jq '.results[] | select(.summary.errors > 0)'
 ```
 
+## Composing with Other Tools
+
+### Validate Before Splitting
+
+Catch issues before investing time in splitting large dumps:
+
+```bash
+sql-splitter validate dump.sql --strict && \
+  sql-splitter split dump.sql -o tables/
+```
+
+### Validate After Converting Dialects
+
+Ensure dialect conversion produces valid output:
+
+```bash
+sql-splitter convert mysql.sql -o postgres.sql --to postgres
+sql-splitter validate postgres.sql --dialect=postgres --strict
+```
+
+### Validate in a Pipeline with analyze
+
+Check integrity and gather statistics in one pass:
+
+```bash
+for dump in backups/*.sql; do
+  echo "=== $dump ==="
+  sql-splitter validate "$dump" --no-fk-checks && \
+    sql-splitter analyze "$dump"
+done
+```
+
+### Pre-import Workflow
+
+Full validation pipeline before database restore:
+
+```bash
+sql-splitter validate dump.sql --strict --json > validation.json
+if [ $? -eq 0 ]; then
+  sql-splitter order dump.sql -o ordered.sql
+  mysql mydb < ordered.sql
+fi
+```
+
+## Troubleshooting
+
+### Out of memory during validation
+
+**Symptom:** Process killed or "memory allocation failed" error on large dumps.
+
+**Cause:** PK/FK integrity checks track hashes of all primary key values, which grows with row count.
+
+**Solutions:**
+1. Skip integrity checks entirely: `--no-fk-checks`
+2. Limit rows checked per table: `--max-rows-per-table 500000`
+3. Validate tables individually after splitting: `sql-splitter split` then validate each file
+
+### False positive FK errors
+
+**Symptom:** Validation reports missing FK references, but data imports successfully.
+
+**Cause:** The dump may define foreign keys before the referenced parent rows appear (common with [deferred constraints](/reference/glossary#deferred-constraints) or out-of-order dumps).
+
+**Solutions:**
+1. Reorder the dump first: [`sql-splitter order dump.sql -o ordered.sql`](/commands/order)
+2. Skip FK checks: `--no-fk-checks`
+3. If using PostgreSQL with deferred FKs, this is expected behavior—the database handles it at commit time
+
+### Encoding errors on valid files
+
+**Symptom:** UTF-8 encoding errors on files that open fine in editors.
+
+**Cause:** The file may use Latin-1, Windows-1252, or mixed encodings.
+
+**Solutions:**
+1. Convert to UTF-8: `iconv -f WINDOWS-1252 -t UTF-8 dump.sql > dump-utf8.sql`
+2. Check the original `mysqldump` charset: ensure `--default-character-set=utf8mb4`
+
+### Validation passes but import fails
+
+**Symptom:** No validation errors, but `mysql` or `psql` reports syntax errors.
+
+**Cause:** sql-splitter validates common SQL patterns but may not catch all dialect-specific edge cases.
+
+**Solutions:**
+1. Ensure correct dialect: `--dialect=postgres` for pg_dump files
+2. Check for dialect-specific syntax not yet supported
+3. Report the issue with a minimal reproduction
+
+### "Table has no primary key" warnings
+
+**Symptom:** Many warnings about tables without PKs.
+
+**Cause:** PK duplicate detection requires knowing the primary key. Tables without PKs can only have basic syntax/encoding checks.
+
+**Solutions:**
+1. This is informational—data integrity for these tables is skipped
+2. Use `--strict` only if you want to enforce PKs on all tables
+3. Consider adding PKs to these tables in your schema
+
 ## See Also
 
-- [`analyze`](/commands/analyze) - View table statistics
-- [`diff`](/commands/diff) - Compare two dumps
+- [`analyze`](/commands/analyze) - View table statistics without validation
+- [`diff`](/commands/diff) - Compare two dumps for differences
+- [`order`](/commands/order) - Reorder statements for FK-safe imports
 - [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [Memory & Streaming](/advanced/memory-streaming) - Detailed memory profiles per command
+- [Glossary](/reference/glossary) - Database terminology reference

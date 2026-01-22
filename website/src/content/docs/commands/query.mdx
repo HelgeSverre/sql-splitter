@@ -7,6 +7,38 @@ Execute SQL queries directly on dump files without restoring to a database, powe
 
 **Alias:** `qy` (e.g., `sql-splitter qy dump.sql "SELECT COUNT(*) FROM users"`)
 
+## When to Use This
+
+- **Quick data exploration** - Answer questions about a dump without spinning up a database
+- **Data validation** - Verify row counts, check for nulls, or validate business rules before restoring
+- **Extract subsets** - Pull specific records to CSV/JSON for analysis or reporting
+- **Schema investigation** - Explore table structures and relationships interactively
+- **CI pipelines** - Automate data quality checks on dump files
+
+Use [`analyze`](/commands/analyze) instead if you only need basic statistics (row counts, table sizes) - it's faster and doesn't require loading data.
+
+## How It Works
+
+The command parses your SQL dump, imports the schema and data into an in-memory DuckDB database, then executes your query.
+
+**Disk mode (`--disk`):** For dumps >2GB, use `--disk` to store data in a temporary file instead of RAM. The temp file is stored in your system's temp directory and **automatically deleted** when the command exits:
+
+| OS | Temp file location |
+|----|-------------------|
+| macOS | `/var/folders/.../sql-splitter-<pid>.duckdb` (via `$TMPDIR`) |
+| Linux | `/tmp/sql-splitter-<pid>.duckdb` |
+| Windows | `%TEMP%\sql-splitter-<pid>.duckdb` (e.g., `C:\Users\<user>\AppData\Local\Temp\...`) |
+
+**Caching (`--cache`):** Saves the imported database persistently for fast repeated queries. Cache files are stored in your platform's cache directory and **persist until you run `--clear-cache`**:
+
+| OS | Cache directory |
+|----|----------------|
+| macOS | `~/Library/Caches/sql-splitter/duckdb/` |
+| Linux | `~/.cache/sql-splitter/duckdb/` |
+| Windows | `%LOCALAPPDATA%\sql-splitter\duckdb\` (e.g., `C:\Users\<user>\AppData\Local\sql-splitter\duckdb\`) |
+
+Cache files are named `<hash>.duckdb` where the hash is based on the dump file's path, size, and modification time. If the source dump changes, a new cache is created automatically.
+
 ## Usage
 
 ```bash
@@ -15,27 +47,54 @@ sql-splitter query <INPUT> [QUERY] [OPTIONS]
 
 ## Examples
 
+### Basic Queries
+
 ```bash
-# Execute a single query
+# Count rows in a table
 sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 
-# Output as JSON
-sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100" -f json
+# Filter and inspect data
+sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 100"
 
-# Export to CSV
-sql-splitter query dump.sql "SELECT * FROM users LIMIT 10" -o results.csv -f csv
+# Join across tables
+sql-splitter query dump.sql "SELECT u.name, COUNT(o.id) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.name"
+```
 
-# Interactive REPL session
+### Exporting Results
+
+Use `-f` to choose the output format and `-o` to write to a file:
+
+```bash
+# Export to CSV for spreadsheet analysis
+sql-splitter query dump.sql "SELECT * FROM users" -o users.csv -f csv
+
+# Export to JSON for downstream tooling
+sql-splitter query dump.sql "SELECT * FROM orders WHERE status = 'pending'" -f json
+
+# Stream JSON Lines for large result sets (one JSON object per line)
+sql-splitter query dump.sql "SELECT * FROM events" -f jsonl
+```
+
+### Interactive Exploration
+
+When you don't know what you're looking for yet, use the REPL:
+
+```bash
 sql-splitter query dump.sql --interactive
+```
 
-# Use disk mode for large files (>2GB)
+### Performance Optimization
+
+```bash
+# Large dumps: use disk storage instead of RAM
 sql-splitter query huge.sql "SELECT ..." --disk
 
-# Cache for repeated queries
-sql-splitter query dump.sql "SELECT ..." --cache
+# Repeated queries: cache the imported database (400x faster on subsequent runs)
+sql-splitter query dump.sql "SELECT COUNT(*) FROM users" --cache
+sql-splitter query dump.sql "SELECT * FROM users WHERE active = 1" --cache  # Uses cache
 
-# Import only specific tables
-sql-splitter query dump.sql "SELECT ..." --tables users,orders
+# Import only tables you need (faster import, less memory)
+sql-splitter query dump.sql "SELECT * FROM orders" --tables orders,users
 ```
 
 ## Options
@@ -111,32 +170,84 @@ REPL commands:
 Cache the imported database for faster repeated queries:
 
 ```bash
-# First query imports and caches
+# First query imports and caches (~30s for large dump)
 sql-splitter query dump.sql "SELECT COUNT(*) FROM users" --cache
 
-# Subsequent queries use cache (400x faster)
+# Subsequent queries use cache (~0.1s - 400x faster)
 sql-splitter query dump.sql "SELECT * FROM users WHERE active = 1" --cache
 ```
 
 Manage cache:
 
 ```bash
-# List cached databases
+# List cached databases (shows path, size, source file)
 sql-splitter query --list-cache
 
-# Clear all caches
+# Clear all caches (reclaims disk space)
 sql-splitter query --clear-cache
 ```
 
+The cache is automatically invalidated when the source dump file changes (based on file size and modification time). To manually clear space, delete files from the cache directory (see [How It Works](#how-it-works) for paths).
+
 ## Large Files
 
-For dumps larger than available RAM:
+For dumps larger than available RAM (automatically enabled for files >2GB):
 
 ```bash
 sql-splitter query huge.sql "SELECT ..." --disk
 ```
 
-Disk mode stores data in a temporary DuckDB file instead of memory.
+Disk mode stores data in a temporary DuckDB file instead of memory. The temp file is automatically deleted when the command exits. If the command crashes or is killed, you may need to manually clean up orphaned files from your temp directory (see [How It Works](#how-it-works) for paths).
+
+## Composing with Other Tools
+
+Combine `query` with shell tools for powerful pipelines:
+
+```bash
+# Extract user emails and process with jq
+sql-splitter query dump.sql "SELECT email FROM users" -f json | jq -r '.[].email'
+
+# Find tables with orphaned foreign keys
+sql-splitter query dump.sql "SELECT * FROM orders WHERE user_id NOT IN (SELECT id FROM users)" -f csv
+
+# Quick row counts for all tables (combine with analyze for speed)
+sql-splitter analyze dump.sql --json | jq '.tables | to_entries[] | "\(.key): \(.value.rows)"'
+
+# Export and compress in one step
+sql-splitter query dump.sql "SELECT * FROM large_table" -f csv | gzip > export.csv.gz
+```
+
+## Troubleshooting
+
+### Query returns zero results
+
+- **Check table names** - Use `.tables` in interactive mode to list available tables
+- **Case sensitivity** - DuckDB is case-insensitive for identifiers, but string comparisons are case-sensitive
+- **Dialect mismatch** - If auto-detection fails, try `--dialect mysql` or `--dialect postgres`
+
+### Import is slow or runs out of memory
+
+- Use `--disk` for dumps larger than available RAM
+- Use `--tables` to import only the tables you need
+- Consider `--cache` if you'll run multiple queries
+
+### "Table not found" error
+
+The dump may use schema-qualified names. Try:
+```bash
+sql-splitter query dump.sql ".tables"  # List all tables
+sql-splitter query dump.sql "SELECT * FROM public.users"  # Use schema prefix
+```
+
+### Cache issues
+
+```bash
+# List cached databases to see what's stored
+sql-splitter query --list-cache
+
+# Clear cache if data has changed
+sql-splitter query --clear-cache
+```
 
 ## See Also
 

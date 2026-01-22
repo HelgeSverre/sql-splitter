@@ -7,6 +7,37 @@ Split a large SQL dump into separate files, one per table.
 
 **Alias:** `sp` (e.g., `sql-splitter sp dump.sql -o tables/`)
 
+## When to Use This
+
+- **Extract specific tables** — Pull out just the tables you need without loading the entire dump
+- **Enable parallel processing** — Split once, then process tables concurrently in separate jobs
+- **Debug specific tables** — Isolate a problematic table's [DDL](/reference/glossary#ddl-data-definition-language) and data for investigation
+- **Create partial backups** — Extract only customer-facing tables while ignoring analytics/logging tables
+- **Separate schema from data** — Use `--schema-only` for migrations, `--data-only` for data refreshes
+
+## How It Works
+
+The `split` command uses [streaming](/reference/glossary#streaming) to process dumps in a single pass with constant memory (~10MB). Here's what happens:
+
+1. **Read** — Statements are read using buffered I/O (64KB buffer for files under 1GB, 256KB for larger files)
+2. **Parse** — Each statement is identified and its target table extracted
+3. **Route** — Statements are written to the appropriate `<table>.sql` file via 256KB write buffers
+4. **Flush** — Buffers are flushed every 100 statements to balance memory and I/O
+
+### What Goes Where
+
+| Statement Type | Destination |
+|----------------|-------------|
+| `CREATE TABLE users` | `users.sql` |
+| `INSERT INTO users` | `users.sql` |
+| `CREATE INDEX ON users` | `users.sql` |
+| `ALTER TABLE users` | `users.sql` |
+| `COPY users FROM stdin` (PostgreSQL) | `users.sql` |
+| `SET`, `BEGIN`, `COMMIT`, header comments | `_global.sql` |
+| Unrecognized statements | `_global.sql` |
+
+Table names are sanitized for the filesystem: special characters become underscores, and names are lowercased.
+
 ## Usage
 
 ```bash
@@ -15,27 +46,56 @@ sql-splitter split <INPUT> [OPTIONS]
 
 ## Examples
 
+### Basic Splitting
+
 ```bash
-# Basic split
+# Split all tables to output/
 sql-splitter split database.sql --output=tables/
 
-# PostgreSQL dump
+# Preview what would be created (no files written)
+sql-splitter split database.sql --dry-run --verbose
+```
+
+### Working with Specific Dialects
+
+```bash
+# PostgreSQL pg_dump output
 sql-splitter split pg_dump.sql -o tables/ --dialect=postgres
 
-# Split specific tables only
-sql-splitter split dump.sql --tables users,posts,orders
+# SQLite .dump output
+sql-splitter split sqlite_dump.sql -o tables/ --dialect=sqlite
+```
 
-# Schema only (CREATE TABLE, indexes)
+### Extracting Specific Tables
+
+```bash
+# Only extract users and orders
+sql-splitter split dump.sql --tables users,orders -o subset/
+
+# Extract schema for all tables, data for just users
 sql-splitter split dump.sql -o schema/ --schema-only
+sql-splitter split dump.sql -o data/ --data-only --tables users
+```
 
-# Data only (INSERT/COPY statements)
-sql-splitter split dump.sql -o data/ --data-only
+### Compressed Input
 
-# Compressed input
+```bash
+# Automatically decompresses based on extension
 sql-splitter split backup.sql.gz -o tables/
+sql-splitter split backup.sql.zst -o tables/
+sql-splitter split backup.sql.xz -o tables/
+```
 
-# Batch with glob patterns
-sql-splitter split "dumps/*.sql" -o output/ --fail-fast
+See [Compression](/reference/compression) for all supported formats.
+
+### Batch Processing
+
+```bash
+# Split multiple dumps
+sql-splitter split "backups/*.sql" -o output/ --fail-fast
+
+# Process all dumps recursively
+sql-splitter split "dumps/**/*.sql.gz" -o tables/
 ```
 
 ## Options
@@ -45,8 +105,8 @@ sql-splitter split "dumps/*.sql" -o output/ --fail-fast
 | `--output`      | `-o`  | Output directory                                    | `output`    |
 | `--dialect`     | `-d`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `--tables`      | `-t`  | Only split these tables (comma-separated)           | all         |
-| `--schema-only` |       | Only DDL (CREATE TABLE, indexes)                    | false       |
-| `--data-only`   |       | Only DML (INSERT, COPY)                             | false       |
+| `--schema-only` |       | Only [DDL](/reference/glossary#ddl-data-definition-language) (CREATE TABLE, indexes) | false |
+| `--data-only`   |       | Only [DML](/reference/glossary#dml-data-manipulation-language) (INSERT, COPY) | false |
 | `--verbose`     | `-v`  | Show verbose output                                 | false       |
 | `--progress`    | `-p`  | Show progress bar                                   | false       |
 | `--dry-run`     |       | Preview without writing files                       | false       |
@@ -62,6 +122,12 @@ tables/
 ├── products.sql     # CREATE TABLE + INSERT for products
 └── _global.sql      # Header statements, SET commands
 ```
+
+The `_global.sql` file contains:
+- Session settings (`SET NAMES utf8mb4`, `SET FOREIGN_KEY_CHECKS=0`)
+- Transaction markers (`BEGIN`, `COMMIT`)
+- Header comments from the dump tool
+- Any statements that couldn't be associated with a specific table
 
 ## JSON Output
 
@@ -97,8 +163,127 @@ sql-splitter split dump.sql -o tables/ --json
 }
 ```
 
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Success — all files written |
+| `1`  | Error — I/O failure, parse error, or invalid input |
+| `2`  | Invalid arguments — bad CLI flags |
+
+See [Exit Codes](/reference/exit-codes) for scripting examples.
+
+## Composing with Other Tools
+
+### Split → Compress Individual Tables
+
+```bash
+# Split, then compress each table file
+sql-splitter split dump.sql -o tables/
+for f in tables/*.sql; do gzip "$f"; done
+```
+
+### Split → Query Specific Tables
+
+```bash
+# Extract users table, then query it
+sql-splitter split dump.sql --tables users -o tmp/
+sql-splitter query tmp/users.sql "SELECT * FROM users WHERE created_at > '2024-01-01'"
+```
+
+### Split → Parallel Import
+
+```bash
+# Split once, import tables in parallel
+sql-splitter split dump.sql -o tables/
+ls tables/*.sql | xargs -P4 -I{} mysql mydb < {}
+```
+
+### Analyze → Split Specific Tables
+
+```bash
+# Find largest tables, then extract just those
+sql-splitter analyze dump.sql --json | jq -r '.tables | sort_by(-.bytes) | .[0:3] | .[].name'
+# Output: orders, logs, events
+
+sql-splitter split dump.sql --tables orders,logs,events -o large_tables/
+```
+
+### Split → Merge Subset
+
+```bash
+# Extract all tables, merge back a subset in dependency order
+sql-splitter split dump.sql -o all/
+sql-splitter merge all/users.sql all/orders.sql all/order_items.sql -o subset.sql
+```
+
+## Troubleshooting
+
+### Table not appearing in output
+
+**Symptom:** You expect a table but it's not in the output directory.
+
+**Causes:**
+- The dump only contains [DDL](/reference/glossary#ddl-data-definition-language) (schema) or only [DML](/reference/glossary#dml-data-manipulation-language) (data), and you used the opposite `--schema-only` or `--data-only` flag
+- The table name in the dump differs from what you expect (check case sensitivity)
+- The table has no statements at all in the dump
+
+**Fix:** Run `sql-splitter analyze dump.sql` to see exactly which tables exist and what statements they have.
+
+### Empty output files
+
+**Symptom:** Table files are created but contain no data.
+
+**Causes:**
+- Using `--data-only` on a dump that only has `CREATE TABLE` statements
+- Using `--schema-only` on a data-only dump
+
+**Fix:** Remove the `--schema-only` or `--data-only` flag, or check your dump contains what you expect with [`analyze`](/commands/analyze).
+
+### Dialect detection failed
+
+**Symptom:** Error message about unable to detect dialect, or wrong SQL syntax in output.
+
+**Causes:**
+- The dump lacks dialect-specific markers (backticks for MySQL, `COPY` for PostgreSQL)
+- Mixed-dialect dump (manually edited)
+
+**Fix:** Explicitly specify the dialect: `--dialect=postgres` or `--dialect=mysql`.
+
+### How do I get compressed output?
+
+**Symptom:** You want `.sql.gz` files instead of `.sql`.
+
+sql-splitter writes uncompressed output. Pipe through compression after:
+
+```bash
+sql-splitter split dump.sql -o tables/
+gzip tables/*.sql
+```
+
+Or for a single compressed output, use [`merge`](/commands/merge) with compression:
+
+```bash
+sql-splitter split dump.sql -o tables/
+sql-splitter merge "tables/*.sql" -o combined.sql.gz
+```
+
+### Permission denied writing output
+
+**Symptom:** `Permission denied` error when writing to output directory.
+
+**Fix:** Ensure the output directory exists and is writable:
+
+```bash
+mkdir -p tables/
+sql-splitter split dump.sql -o tables/
+```
+
 ## See Also
 
-- [`merge`](/commands/merge) - Combine split files back into one dump
-- [`analyze`](/commands/analyze) - View statistics without splitting
-- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [`merge`](/commands/merge) — Combine split files back into one dump
+- [`analyze`](/commands/analyze) — View statistics without splitting
+- [`order`](/commands/order) — Reorder statements in [topological order](/reference/glossary#topological-order--topological-sort)
+- [Compression](/reference/compression) — Supported input compression formats
+- [Dialects](/reference/dialects) — Dialect-specific behavior
+- [JSON Output Schema](/reference/json-output/) — Schema for `--json` output

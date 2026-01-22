@@ -1,25 +1,23 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SplitJsonOutput",
   "description": "JSON output for single file split",
   "type": "object",
-  "required": [
-    "dialect",
-    "dry_run",
-    "input_file",
-    "output_dir",
-    "statistics",
-    "tables"
-  ],
   "properties": {
     "compression": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "dialect": {
       "type": "string"
     },
     "dialect_confidence": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "dry_run": {
       "type": "boolean"
@@ -31,7 +29,7 @@
       "type": "string"
     },
     "statistics": {
-      "$ref": "#/definitions/SplitStatistics"
+      "$ref": "#/$defs/SplitStatistics"
     },
     "tables": {
       "type": "array",
@@ -40,35 +38,46 @@
       }
     }
   },
-  "definitions": {
+  "required": [
+    "input_file",
+    "output_dir",
+    "dialect",
+    "dry_run",
+    "statistics",
+    "tables"
+  ],
+  "$defs": {
     "SplitStatistics": {
       "type": "object",
-      "required": [
-        "bytes_processed",
-        "elapsed_secs",
-        "statements_processed",
-        "tables_found"
-      ],
       "properties": {
         "bytes_processed": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "elapsed_secs": {
           "type": "number"
         },
         "statements_processed": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tables_found": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "throughput_mb_per_sec": {
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         }
-      }
+      },
+      "required": [
+        "tables_found",
+        "statements_processed",
+        "bytes_processed",
+        "elapsed_secs"
+      ]
     }
   }
 }

@@ -7,6 +7,41 @@ Combine per-table SQL files into a single dump file.
 
 **Alias:** `mg` (e.g., `sql-splitter mg tables/ -o restored.sql`)
 
+## When to Use This
+
+- **Reassembling after edits** - After using [`split`](/commands/split) to edit individual tables (e.g., with [`redact`](/commands/redact) or manual fixes), merge them back into a single deployable file
+- **Creating subset restores** - Build a dump containing only specific tables for partial database restores or testing
+- **Building migration files** - Combine schema/data for specific tables into a migration script for CI/CD deployment
+- **Streaming to databases** - Pipe merged output directly to `mysql` or `psql` for one-step restore
+- **Compressing output** - Pipe to `gzip` or `zstd` for compressed backups without intermediate files
+
+Use [`order`](/commands/order) first if you need foreign key-safe ordering—`merge` sorts alphabetically by filename, not by FK dependencies.
+
+## How It Works
+
+The merge process:
+
+1. **Discover files** - Scans the input directory for all `.sql` files
+2. **Filter** - Applies `--tables` (include) and `--exclude` filters
+3. **Sort** - Sorts files **alphabetically by table name** (e.g., `accounts.sql` → `users.sql` → `zones.sql`)
+4. **Stream** - Writes each file's contents sequentially with separator comments
+
+**What gets included:**
+- All `.sql` files in the directory (non-recursive)
+- Each file is prefixed with a separator comment: `-- Table: tablename`
+- Files are streamed line-by-line (memory-efficient for large dumps)
+
+**What does NOT happen:**
+- `_global.sql` is treated like any other table file (sorted alphabetically with `_` at the start)
+- No FK dependency ordering—files are merged alphabetically. Use [`order`](/commands/order) on the output if you need topological order.
+- No deduplication—if a table appears in multiple files, both are included
+
+**Dialect-specific behavior:**
+- MySQL: Adds `SET FOREIGN_KEY_CHECKS = 0;` header, `SET FOREIGN_KEY_CHECKS = 1;` footer
+- PostgreSQL: Adds `SET client_encoding = 'UTF8';` header
+- SQLite: Adds `PRAGMA foreign_keys = OFF;` header, `PRAGMA foreign_keys = ON;` footer
+- MS SQL: Adds `SET ANSI_NULLS ON;`, `SET QUOTED_IDENTIFIER ON;`, `SET NOCOUNT ON;` headers
+
 ## Usage
 
 ```bash
@@ -15,24 +50,64 @@ sql-splitter merge <INPUT_DIR> [OPTIONS]
 
 ## Examples
 
+### Basic Merge
+
 ```bash
-# Basic merge
+# Merge all tables from a directory
 sql-splitter merge tables/ -o restored.sql
 
-# Wrap in transaction
+# Preview what would be merged (no files written)
+sql-splitter merge tables/ --dry-run
+```
+
+### Creating Subset Restores
+
+```bash
+# Merge only specific tables
+sql-splitter merge tables/ -o users-data.sql --tables users,profiles,settings
+
+# Merge everything except large or sensitive tables
+sql-splitter merge tables/ -o partial.sql --exclude logs,audit_trail,sessions
+```
+
+### Atomic Restores with Transactions
+
+```bash
+# Wrap entire merge in a transaction
 sql-splitter merge tables/ -o restored.sql --transaction
+```
 
-# Merge specific tables only
-sql-splitter merge tables/ -o partial.sql --tables users,orders
+This produces a dump that either fully succeeds or fully rolls back on error.
 
-# Exclude tables
-sql-splitter merge tables/ -o restored.sql --exclude logs,cache
+### Streaming to Database
 
-# Skip header comments
-sql-splitter merge tables/ -o restored.sql --no-header
+```bash
+# MySQL: Pipe directly (omit -o to write to stdout)
+sql-splitter merge tables/ | mysql -u user -p database
 
-# Stream to stdout (omit -o to write to stdout)
+# PostgreSQL
+sql-splitter merge tables/ --dialect postgres | psql "$PG_CONN"
+
+# SQLite
+sql-splitter merge tables/ --dialect sqlite | sqlite3 mydb.sqlite
+```
+
+### Compressed Output
+
+```bash
+# Compress on the fly
 sql-splitter merge tables/ | gzip > merged.sql.gz
+sql-splitter merge tables/ | zstd > merged.sql.zst
+
+# With progress bar (written to stderr, doesn't interfere with pipe)
+sql-splitter merge tables/ --progress | gzip > merged.sql.gz
+```
+
+### Minimal Output (No Headers)
+
+```bash
+# Skip the generated header comments and dialect-specific SET statements
+sql-splitter merge tables/ -o raw.sql --no-header
 ```
 
 ## Options
@@ -57,26 +132,23 @@ Use `--transaction` for atomic restores:
 sql-splitter merge tables/ -o restored.sql --transaction
 ```
 
-Output:
+Output (dialect-aware):
 
 ```sql
-BEGIN;
--- users.sql
-CREATE TABLE users ...
-INSERT INTO users ...
--- orders.sql
-CREATE TABLE orders ...
-INSERT INTO orders ...
+-- MySQL
+START TRANSACTION;
+-- ... table contents ...
 COMMIT;
-```
 
-## Piping to Database
+-- PostgreSQL
+BEGIN;
+-- ... table contents ...
+COMMIT;
 
-Stream directly to a database (omit `-o` to write to stdout):
-
-```bash
-sql-splitter merge tables/ | mysql -u user -p database
-sql-splitter merge tables/ | psql "$PG_CONN"
+-- SQLite / MS SQL
+BEGIN TRANSACTION;
+-- ... table contents ...
+COMMIT;
 ```
 
 ## JSON Output
@@ -88,16 +160,163 @@ sql-splitter merge tables/ -o merged.sql --json
 ```json
 {
   "input_dir": "tables/",
-  "output": "merged.sql",
+  "output_file": "merged.sql",
+  "dialect": "mysql",
+  "dry_run": false,
   "statistics": {
     "tables_merged": 4,
-    "total_bytes": 125000,
-    "elapsed_ms": 15
+    "bytes_written": 125000,
+    "elapsed_secs": 0.015,
+    "throughput_kb_per_sec": 8138.02
+  },
+  "tables": ["orders", "products", "users", "zones"],
+  "options": {
+    "transaction": false,
+    "header": true
   }
 }
 ```
 
+When writing to stdout (no `-o`), JSON is printed to stderr to avoid mixing with SQL output.
+
+## Composing with Other Tools
+
+### FK-Safe Merge
+
+Merge then reorder for foreign key safety:
+
+```bash
+sql-splitter merge tables/ -o temp.sql
+sql-splitter order temp.sql -o ordered.sql
+```
+
+### Split → Edit → Merge Workflow
+
+```bash
+# Split the dump
+sql-splitter split dump.sql -o tables/
+
+# Redact sensitive data in specific tables
+sql-splitter redact tables/users.sql -o tables/users.sql -c redact.yaml
+
+# Merge back together
+sql-splitter merge tables/ -o sanitized.sql
+```
+
+### Merge Subset and Validate
+
+```bash
+# Create subset dump
+sql-splitter merge tables/ -o subset.sql --tables users,orders,products
+
+# Validate FK integrity of the subset
+sql-splitter validate subset.sql --check-fk
+```
+
+### CI/CD Pipeline Integration
+
+```bash
+# Generate deterministic output for diffing
+sql-splitter merge tables/ -o merged.sql
+sql-splitter order merged.sql -o ordered.sql
+git diff ordered.sql
+```
+
+## Troubleshooting
+
+### "No .sql files found in directory"
+
+The input path must be a directory containing `.sql` files:
+
+```bash
+# Wrong: pointing to a file
+sql-splitter merge backup.sql -o out.sql
+# Error: no .sql files found in directory: backup.sql
+
+# Correct: point to directory created by split
+sql-splitter merge tables/ -o out.sql
+```
+
+### Tables in Wrong Order for FK Constraints
+
+`merge` sorts files alphabetically, not by foreign key dependencies. If you get FK constraint errors during import:
+
+```bash
+# Option 1: Reorder after merging
+sql-splitter merge tables/ -o merged.sql
+sql-splitter order merged.sql -o ordered.sql
+
+# Option 2: Use dialect header which disables FK checks
+sql-splitter merge tables/ -o merged.sql --dialect mysql
+# Header includes: SET FOREIGN_KEY_CHECKS = 0;
+
+# Option 3: Disable FK checks manually during import
+mysql -e "SET FOREIGN_KEY_CHECKS=0; SOURCE merged.sql; SET FOREIGN_KEY_CHECKS=1;"
+```
+
+### Missing Tables in Output
+
+Check if tables were filtered out:
+
+```bash
+# Preview what will be merged
+sql-splitter merge tables/ --dry-run
+
+# Check if table files exist
+ls tables/*.sql
+```
+
+Tables might be excluded by `--exclude` or not matched by `--tables` filter. Filters are **case-insensitive**.
+
+### `_global.sql` Not at Start of Output
+
+`_global.sql` (created by [`split`](/commands/split) for header statements like `SET NAMES`) is sorted alphabetically with other files. Since `_` sorts before letters, it typically appears first. If you need specific ordering:
+
+```bash
+# Exclude _global from merge, prepend manually
+sql-splitter merge tables/ -o body.sql --exclude _global
+cat tables/_global.sql body.sql > complete.sql
+```
+
+### JSON Output Mixed with SQL
+
+When using `--json` without `-o`, both SQL and JSON would go to stdout. The command writes JSON to **stderr** instead:
+
+```bash
+# JSON goes to stderr, SQL goes to stdout
+sql-splitter merge tables/ --json > merged.sql 2> stats.json
+
+# Or capture just the SQL
+sql-splitter merge tables/ --json > merged.sql
+```
+
+### Out of Disk Space During Merge
+
+The merge streams data and uses 256KB write buffers. For very large merges:
+
+```bash
+# Check available space
+df -h .
+
+# Stream directly to compressed file (smaller output)
+sql-splitter merge tables/ | gzip > merged.sql.gz
+
+# Or pipe directly to database (no disk needed)
+sql-splitter merge tables/ | mysql -u user database
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Success |
+| `1`  | Error (no files found, write error, invalid directory) |
+
 ## See Also
 
-- [`split`](/commands/split) - Split a dump into per-table files
-- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [`split`](/commands/split) - Split a dump into per-table files (inverse of merge)
+- [`order`](/commands/order) - Reorder merged output for FK-safe imports
+- [`validate`](/commands/validate) - Check FK integrity after merging
+- [`redact`](/commands/redact) - Sanitize table data before merging
+- [JSON Output Schema](/reference/json-output/) - Full schema for `--json` output
+- [Glossary: Streaming](/reference/glossary#streaming) - How sql-splitter handles large files

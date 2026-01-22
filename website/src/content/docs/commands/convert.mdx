@@ -7,6 +7,24 @@ Transform SQL dumps between different database dialects.
 
 **Alias:** `cv` (e.g., `sql-splitter cv mysql.sql --to postgres -o pg.sql`)
 
+## When to Use This
+
+- **Database migration** - Moving from MySQL to PostgreSQL (or any other combination)
+- **Cross-platform development** - Convert production dumps to SQLite for local testing
+- **Cloud migration** - Transform on-premise SQL Server dumps for cloud PostgreSQL
+- **Tool compatibility** - Convert between dialects when tools only support specific formats
+
+Use [`validate`](/commands/validate) after conversion to verify the output is valid for your target database.
+
+## How It Works
+
+The converter parses the source dump, transforms DDL (CREATE TABLE, indexes, constraints) and DML (INSERT, COPY) statements to the target dialect. This includes:
+
+- **Identifier quoting** - Backticks (MySQL) ↔ double quotes (PostgreSQL/SQLite) ↔ brackets (MSSQL)
+- **Data types** - Maps 50+ types between dialects (e.g., `AUTO_INCREMENT` → `SERIAL`)
+- **Bulk import syntax** - Converts PostgreSQL `COPY ... FROM stdin` to INSERT statements for other dialects
+- **String escaping** - Adapts escape sequences between dialects
+
 ## Usage
 
 ```bash
@@ -15,27 +33,46 @@ sql-splitter convert <INPUT> --to <DIALECT> [OPTIONS]
 
 ## Examples
 
+### Basic Conversion
+
 ```bash
 # MySQL to PostgreSQL
 sql-splitter convert mysql.sql --to postgres -o pg.sql
 
-# PostgreSQL to MySQL (COPY → INSERT)
+# PostgreSQL to MySQL (COPY blocks become INSERT statements)
 sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
 
-# Auto-detect source, convert to SQLite
+# Any dialect to SQLite (great for local development)
 sql-splitter convert dump.sql --to sqlite -o sqlite.sql
+```
 
-# MSSQL to MySQL
-sql-splitter convert mssql.sql --from mssql --to mysql -o mysql.sql
+### Explicit Source Dialect
 
-# Explicit source dialect
-sql-splitter convert dump.sql --from postgres --to mysql -o out.sql
+Auto-detection works in most cases, but you can specify the source explicitly:
 
-# Strict mode (fail on unsupported features)
+```bash
+# When auto-detection fails or you want to be explicit
+sql-splitter convert dump.sql --from mssql --to mysql -o mysql.sql
+```
+
+### Strict Mode for CI/CD
+
+Use `--strict` to fail on any unsupported features instead of emitting warnings:
+
+```bash
 sql-splitter convert dump.sql --to postgres --strict
+```
 
-# Stream to database
+### Streaming Directly to Database
+
+Pipe the converted output directly into your database client:
+
+```bash
+# Convert and restore in one step
 sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+
+# Convert and load into SQLite
+sql-splitter convert pg_dump.sql --to sqlite -o - | sqlite3 dev.db
 ```
 
 ## Options
@@ -91,19 +128,73 @@ INSERT INTO users (id, name) VALUES (1, 'Alice');
 INSERT INTO users (id, name) VALUES (2, 'Bob');
 ```
 
-## Warnings
+## Warnings and Unsupported Features
 
-Unsupported features generate warnings:
+The conversion **continues successfully** even when encountering unsupported features - they generate warnings but don't stop the process.
 
-- ENUM types (not directly portable)
-- Arrays (PostgreSQL-specific)
-- Triggers, stored procedures
-- Custom types
+### Features that are converted with warnings
 
-Use `--strict` to fail on warnings.
+These types are converted to the closest equivalent, with a warning:
+
+| Feature | Converted To | Notes |
+|---------|--------------|-------|
+| MySQL `ENUM('a','b','c')` | `VARCHAR(255)` (PostgreSQL/MSSQL) or `TEXT` (SQLite) | Enum values are lost; consider adding CHECK constraints manually |
+| PostgreSQL arrays (`INT[]`) | `JSON` (MySQL), `TEXT` (SQLite), `NVARCHAR(MAX)` (MSSQL) | Data format preserved as JSON string |
+
+### Features that are skipped entirely
+
+These statements are **omitted from the output** (with a warning):
+
+- `CREATE TRIGGER` - Trigger syntax is too dialect-specific to convert
+- `CREATE PROCEDURE` / `CREATE FUNCTION` - Stored procedure logic cannot be automatically translated
+- `CREATE TYPE` - Custom types have no equivalent in most dialects
+- `CREATE DOMAIN` - PostgreSQL-specific
+- `CREATE EXTENSION` - PostgreSQL-specific
+- `CREATE SEQUENCE` - Skipped because `SERIAL`/`BIGSERIAL` columns are converted to `AUTO_INCREMENT`/`IDENTITY`, which handle sequencing automatically
+- `COMMENT ON` - Not supported in all dialects
+
+The command outputs a count of skipped statements at the end. Use `--strict` to fail instead of skipping.
+
+See [Type Mappings Reference](/reference/type-mappings) for the complete list of 50+ type conversions.
+
+## Troubleshooting
+
+### Conversion fails on specific statements
+
+If conversion fails completely (not just warnings), check:
+
+1. **Syntax errors in source dump** - Validate first: `sql-splitter validate dump.sql`
+2. **Wrong source dialect detected** - Specify explicitly: `--from mysql`
+3. **Malformed statements** - The error message includes the problematic statement
+
+### Output differs between runs
+
+The converter preserves statement order from the input. If your dump has non-deterministic ordering (e.g., `mysqldump` without `--order-by-primary`, or tables listed in different order each time):
+
+```bash
+# Sort the dump first for stable, reproducible output
+sql-splitter order dump.sql -o ordered.sql
+sql-splitter convert ordered.sql --to postgres -o pg.sql
+```
+
+This is especially important for CI where you want to detect actual changes, not ordering noise.
+
+### Wrong dialect auto-detected
+
+Force the source dialect explicitly:
+```bash
+sql-splitter convert ambiguous.sql --from mysql --to postgres -o pg.sql
+```
+
+### Converted dump fails to import
+
+1. **Validate the output**: `sql-splitter validate pg.sql --dialect postgres`
+2. **Check for unsupported features**: Re-run with `--strict` to see all warnings
+3. **Check type mappings**: See [Type Mappings Reference](/reference/type-mappings) for dialect-specific details
 
 ## See Also
 
 - [`validate`](/commands/validate) - Validate converted output
 - [Dialect Reference](/reference/dialects) - Detailed dialect information
+- [Type Mappings Reference](/reference/type-mappings) - Data type conversion details
 - [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

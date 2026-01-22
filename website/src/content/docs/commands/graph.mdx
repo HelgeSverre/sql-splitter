@@ -7,6 +7,25 @@ Generate Entity-Relationship Diagrams (ERD) in multiple formats.
 
 **Alias:** `gr` (e.g., `sql-splitter gr dump.sql -o schema.html`)
 
+## When to Use This
+
+- **Schema documentation** - Generate visual diagrams for documentation or onboarding
+- **Dependency analysis** - Understand which tables depend on which before refactoring
+- **Safe DROP planning** - See what depends on a table before dropping it
+- **Circular dependency detection** - Find problematic FK cycles that complicate migrations
+- **Impact assessment** - Before modifying a table, see all tables that reference it
+
+Use [`order`](/commands/order) if you need to reorder a dump for safe imports based on the dependency graph.
+
+## How It Works
+
+The graph command parses CREATE TABLE statements and foreign key definitions to build a dependency graph:
+
+- **Nodes** = Tables (with columns, types, and constraints)
+- **Edges** = Foreign key relationships (A → B means "A references B")
+
+The direction matters: if `orders.user_id` references `users.id`, the edge goes `orders → users`. This means you must create `users` before `orders`.
+
 ## Usage
 
 ```bash
@@ -15,30 +34,51 @@ sql-splitter graph <INPUT> [OPTIONS]
 
 ## Examples
 
+### Basic Diagram Generation
+
 ```bash
-# Interactive HTML (default)
+# Interactive HTML with pan/zoom (great for exploration)
 sql-splitter graph dump.sql -o schema.html
 
-# Graphviz DOT format
-sql-splitter graph dump.sql -o schema.dot
-
-# Mermaid erDiagram
+# Mermaid format (embeds in Markdown docs)
 sql-splitter graph dump.sql -o schema.mmd --format mermaid
 
-# JSON with full schema details
-sql-splitter graph dump.sql --json
+# Graphviz DOT (for custom rendering)
+sql-splitter graph dump.sql -o schema.dot
+```
 
-# Filter to specific tables
+### Focusing on Specific Tables
+
+For large schemas, focus on what matters:
+
+```bash
+# Show only user-related and order-related tables
 sql-splitter graph dump.sql --tables "user*,order*" --exclude "log*"
 
-# Show only circular dependencies
-sql-splitter graph dump.sql --cycles-only
-
-# Focus on one table's dependencies
+# Focus on one table and its dependencies (what it references)
 sql-splitter graph dump.sql --table orders --transitive
 
-# Show tables that depend on users
+# Focus on one table and its dependents (what references it)
 sql-splitter graph dump.sql --table users --reverse
+```
+
+### Finding Circular Dependencies
+
+Circular FKs complicate imports and migrations. Find them:
+
+```bash
+# Show only tables involved in cycles
+sql-splitter graph dump.sql --cycles-only
+```
+
+### Machine-Readable Output
+
+```bash
+# Full schema as JSON for tooling
+sql-splitter graph dump.sql --json
+
+# Pipe to jq for analysis
+sql-splitter graph dump.sql --json | jq '.relationships | length'
 ```
 
 ## Options
@@ -148,8 +188,56 @@ sql-splitter graph dump.sql --table users --reverse
 
 Shows `users` and all tables that reference it.
 
+## Troubleshooting
+
+### Graph is too large to read
+
+Large schemas produce cluttered diagrams. Focus your view:
+
+```bash
+# Limit to specific tables
+sql-splitter graph dump.sql --tables "core_*" --exclude "*_log,*_audit"
+
+# Focus on a single table's neighborhood
+sql-splitter graph dump.sql --table orders --transitive --max-depth 2
+
+# Use JSON and filter programmatically
+sql-splitter graph dump.sql --json | jq '.tables | map(select(.foreign_keys | length > 0))'
+```
+
+### Missing edges (FK relationships not shown)
+
+Foreign keys must be explicitly defined in CREATE TABLE statements. Implicit FKs (application-level only) won't appear.
+
+Check if FKs are defined:
+```bash
+sql-splitter graph dump.sql --json | jq '.relationships'
+```
+
+### Graphviz rendering fails
+
+Install Graphviz, then render manually or use `--render`:
+
+```bash
+# Install Graphviz
+brew install graphviz  # macOS
+apt install graphviz   # Ubuntu/Debian
+
+# Render DOT to PNG
+sql-splitter graph dump.sql -o schema.dot
+dot -Tpng schema.dot -o schema.png
+
+# Or use --render (requires Graphviz installed)
+sql-splitter graph dump.sql -o schema.png --render
+```
+
+### Wrong edge direction
+
+Remember: edges point from the **referencing** table to the **referenced** table. If `orders.user_id → users.id`, the edge goes `orders → users` (orders depends on users).
+
 ## See Also
 
 - [`order`](/commands/order) - Reorder dump for safe imports
 - [`analyze`](/commands/analyze) - View table statistics
+- [`validate`](/commands/validate) - Check FK integrity
 - [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

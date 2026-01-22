@@ -10,6 +10,26 @@ Extract data for specific tenants from multi-tenant SQL dumps.
 > [!NOTE]
 > Requires one of: `--tenant-value` or `--tenant-values`
 
+## When to Use This
+
+- **Tenant data export** - Extract a single customer's data for migration or analysis
+- **Development environments** - Create small, focused dev databases from a multi-tenant production dump
+- **Data isolation** - Separate tenant data for compliance, backup, or legal requirements
+- **Debugging** - Reproduce issues with a specific tenant's data without the full database
+
+Use [`sample`](/commands/sample) instead if you want a random subset of data across all tenants.
+
+## How It Works
+
+Sharding follows your database's foreign key relationships to extract complete, consistent data:
+
+1. **Identifies tenant column** - Auto-detects `tenant_id`, `company_id`, `org_id`, etc., or uses your explicit `--tenant-column`
+2. **Starts from root tables** - Tables with the tenant column that have no incoming foreign keys
+3. **Follows FK relationships** - Recursively includes all related rows that belong to the tenant
+4. **Includes lookup tables** - Optionally includes global/shared tables (countries, currencies, etc.)
+
+The result is a self-contained dump that maintains referential integrity.
+
 ## Usage
 
 ```bash
@@ -18,21 +38,50 @@ sql-splitter shard <INPUT> --tenant-value <VALUE> [OPTIONS]
 
 ## Examples
 
+### Single Tenant Extraction
+
 ```bash
-# Extract single tenant
+# Extract all data for tenant 123
 sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql
 
-# Auto-detect tenant column
-sql-splitter shard dump.sql --tenant-value 5 -o tenant.sql
-
-# Explicit tenant column
+# Specify the tenant column explicitly
 sql-splitter shard dump.sql --tenant-column account_id --tenant-value 42 -o out.sql
+```
 
-# Extract multiple tenants
+### Multiple Tenants
+
+Extract multiple tenants to separate files in one pass:
+
+```bash
 sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/
+```
 
-# With progress
-sql-splitter shard dump.sql --tenant-value 123 -o tenant.sql --progress
+This creates:
+```
+shards/
+├── tenant_1.sql
+├── tenant_2.sql
+└── tenant_3.sql
+```
+
+### Controlling Global Tables
+
+```bash
+# Include all shared/lookup tables (countries, currencies, config)
+sql-splitter shard dump.sql --tenant-value 123 --include-global all -o tenant.sql
+
+# Skip global tables entirely
+sql-splitter shard dump.sql --tenant-value 123 --include-global none -o tenant.sql
+
+# Only include small lookup tables (default behavior)
+sql-splitter shard dump.sql --tenant-value 123 --include-global lookups -o tenant.sql
+```
+
+### Preview Before Extracting
+
+```bash
+# See what would be extracted without writing files
+sql-splitter shard dump.sql --tenant-value 123 --dry-run
 ```
 
 ## Options
@@ -105,8 +154,51 @@ Sharding follows foreign key relationships:
 2. Follows FKs to include related rows
 3. Ensures complete, consistent tenant slice
 
+## Troubleshooting
+
+### "No tenant column found" error
+
+Auto-detection looks for common column names. Specify yours explicitly:
+
+```bash
+sql-splitter shard dump.sql --tenant-column customer_id --tenant-value 123 -o tenant.sql
+```
+
+### Missing related data in output
+
+Foreign key relationships might not be detected if:
+- They're not defined in the schema (implicit FKs)
+- The FK references a table that's excluded
+
+Use `--root-tables` to explicitly specify which tables have the tenant column:
+
+```bash
+sql-splitter shard dump.sql --tenant-value 123 --root-tables users,projects,teams -o tenant.sql
+```
+
+### Shard is larger than expected
+
+Check which global tables are being included:
+
+```bash
+# See what would be extracted
+sql-splitter shard dump.sql --tenant-value 123 --dry-run --json | jq '.tables'
+
+# Exclude large lookup tables
+sql-splitter shard dump.sql --tenant-value 123 --include-global none -o tenant.sql
+```
+
+### FK integrity warnings
+
+Some rows might reference data outside the tenant's scope. Options:
+
+1. **`--strict-fk`**: Fail immediately on any integrity issue
+2. **Review warnings**: Some cross-tenant references might be intentional (shared resources)
+3. **Include global tables**: `--include-global all` includes all referenced lookup data
+
 ## See Also
 
 - [`sample`](/commands/sample) - Create reduced datasets
 - [`split`](/commands/split) - Split by table
+- [`graph`](/commands/graph) - Visualize FK relationships before sharding
 - [JSON Output Schema](/reference/json-output/) - Schema for `--json` output

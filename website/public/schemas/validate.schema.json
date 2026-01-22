@@ -1,12 +1,11 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ValidationSummary",
   "description": "Validation summary with collected issues",
   "type": "object",
-  "required": ["checks", "dialect", "issues", "summary"],
   "properties": {
     "checks": {
-      "$ref": "#/definitions/CheckResults"
+      "$ref": "#/$defs/CheckResults"
     },
     "dialect": {
       "type": "string"
@@ -14,67 +13,79 @@
     "issues": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/ValidationIssue"
+        "$ref": "#/$defs/ValidationIssue"
       }
     },
     "summary": {
-      "$ref": "#/definitions/SummaryStats"
+      "$ref": "#/$defs/SummaryStats"
     }
   },
-  "definitions": {
+  "required": [
+    "dialect",
+    "issues",
+    "summary",
+    "checks"
+  ],
+  "$defs": {
     "CheckResults": {
       "type": "object",
-      "required": [
-        "ddl_dml_consistency",
-        "encoding",
-        "fk_integrity",
-        "pk_duplicates",
-        "syntax"
-      ],
       "properties": {
         "ddl_dml_consistency": {
-          "$ref": "#/definitions/CheckStatus"
+          "$ref": "#/$defs/CheckStatus"
         },
         "encoding": {
-          "$ref": "#/definitions/CheckStatus"
+          "$ref": "#/$defs/CheckStatus"
         },
         "fk_integrity": {
-          "$ref": "#/definitions/CheckStatus"
+          "$ref": "#/$defs/CheckStatus"
         },
         "pk_duplicates": {
-          "$ref": "#/definitions/CheckStatus"
+          "$ref": "#/$defs/CheckStatus"
         },
         "syntax": {
-          "$ref": "#/definitions/CheckStatus"
+          "$ref": "#/$defs/CheckStatus"
         }
-      }
+      },
+      "required": [
+        "syntax",
+        "encoding",
+        "ddl_dml_consistency",
+        "pk_duplicates",
+        "fk_integrity"
+      ]
     },
     "CheckStatus": {
       "oneOf": [
         {
           "type": "string",
-          "enum": ["ok"]
+          "enum": [
+            "ok"
+          ]
         },
         {
           "type": "object",
-          "required": ["failed"],
           "properties": {
             "failed": {
               "type": "integer",
-              "minimum": 0.0
+              "minimum": 0
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "failed"
+          ]
         },
         {
           "type": "object",
-          "required": ["skipped"],
           "properties": {
             "skipped": {
               "type": "string"
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "required": [
+            "skipped"
+          ]
         }
       ]
     },
@@ -83,59 +94,71 @@
       "type": "object",
       "properties": {
         "approx_line": {
-          "type": ["integer", "null"],
-          "minimum": 0.0
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
         },
         "statement_index": {
-          "type": ["integer", "null"],
-          "minimum": 0.0
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
         },
         "table": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
     "Severity": {
       "description": "Issue severity level",
       "type": "string",
-      "enum": ["error", "warning", "info"]
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
     },
     "SummaryStats": {
       "type": "object",
-      "required": [
-        "errors",
-        "info",
-        "statements_scanned",
-        "tables_scanned",
-        "warnings"
-      ],
       "properties": {
         "errors": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "info": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "statements_scanned": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tables_scanned": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "warnings": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "errors",
+        "warnings",
+        "info",
+        "tables_scanned",
+        "statements_scanned"
+      ]
     },
     "ValidationIssue": {
       "description": "A validation issue found in the SQL dump",
       "type": "object",
-      "required": ["code", "message", "severity"],
       "properties": {
         "code": {
           "type": "string"
@@ -143,7 +166,7 @@
         "location": {
           "anyOf": [
             {
-              "$ref": "#/definitions/Location"
+              "$ref": "#/$defs/Location"
             },
             {
               "type": "null"
@@ -154,9 +177,14 @@
           "type": "string"
         },
         "severity": {
-          "$ref": "#/definitions/Severity"
+          "$ref": "#/$defs/Severity"
         }
-      }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
     }
   }
 }

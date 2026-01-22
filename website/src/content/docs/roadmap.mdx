@@ -71,6 +71,30 @@ sql-splitter infer data.csv --table users --dialect mysql
 - Index suggestion
 - FK inference (heuristic)
 
+### v2.2.0 — Comment Conversion (MySQL ↔ PostgreSQL)
+
+Preserve table and column comments during dialect conversion:
+
+```bash
+# MySQL COMMENT 'text' → PostgreSQL COMMENT ON statements
+sql-splitter convert mysql.sql --to postgres -o pg.sql
+
+# PostgreSQL COMMENT ON → MySQL inline COMMENT clauses
+sql-splitter convert pg.sql --to mysql -o mysql.sql
+```
+
+**Implementation:**
+
+| Direction | Approach |
+|-----------|----------|
+| MySQL → PostgreSQL | Extract inline `COMMENT 'text'` from CREATE TABLE, emit `COMMENT ON COLUMN table.column IS 'text';` |
+| PostgreSQL → MySQL | Parse `COMMENT ON` statements, generate `ALTER TABLE ... MODIFY COLUMN ... COMMENT 'text'` |
+
+**Notes:**
+
+- SQLite and MSSQL don't support object comments, so comments are dropped when converting to these dialects
+- Table comments and column comments both supported
+
 ## Non-Goals
 
 These features are explicitly out of scope:

@@ -7,6 +7,36 @@ Replace sensitive data with anonymized values for safe sharing, development, or 
 
 **Alias:** `rd` (e.g., `sql-splitter rd dump.sql --hash "*.email" -o safe.sql`)
 
+## When to Use This
+
+- **GDPR/CCPA compliance** - Remove or anonymize [PII](/reference/glossary#pii-personally-identifiable-information) before sharing dumps with external parties
+- **Vendor data sharing** - Provide realistic data to contractors or consultants without exposing customer information
+- **Development environment seeding** - Create anonymized copies of production data for local development
+- **Testing data pipelines** - Validate ETL processes with structurally identical but safe data
+- **Compliance audits** - Demonstrate PII handling practices with sanitized sample exports
+
+Use [`sample`](/commands/sample) first if you also need to reduce the dataset size.
+
+## How It Works
+
+Redaction runs as a [streaming](/reference/glossary#streaming) single-pass operation:
+
+1. **Parse statements** - Reads each SQL statement (INSERT, COPY) from the input
+2. **Match columns** - Compares column names against your patterns (e.g., `*.email` matches `users.email`, `orders.customer_email`)
+3. **Apply strategy** - Transforms matching values using the specified strategy (null, hash, fake, mask, etc.)
+4. **Write output** - Emits transformed statements immediately (no buffering of entire file)
+
+**Memory characteristics:** Constant ~10MB regardless of file size. Only the current statement is held in memory.
+
+**Hashing behavior:** The `hash` strategy uses SHA-256 and is [deterministic](/reference/glossary#deterministic)—the same input value always produces the same hash. This preserves [foreign key](/reference/glossary#foreign-key-fk) relationships: if `users.email` and `audit_log.user_email` both contain `alice@example.com`, they both hash to the same value.
+
+**Fake data with `--seed`:** When using `fake` strategy, the same `--seed` value produces identical fake data across runs. The fake value is derived from the original value's hash, so `alice@example.com` always becomes the same fake email (e.g., `jessica.smith@example.com`) with a given seed.
+
+**Exit codes:**
+- `0` - Success
+- `1` - Validation errors or `--strict` mode warnings
+- `2` - Runtime error (file not found, parse failure)
+
 ## Usage
 
 ```bash
@@ -15,24 +45,58 @@ sql-splitter redact <INPUT> [OPTIONS]
 
 ## Examples
 
+### Basic Redaction with Inline Patterns
+
 ```bash
-# Using inline patterns
+# Hash emails, null SSNs, fake names
 sql-splitter redact dump.sql -o safe.sql \
   --null "*.ssn" \
   --hash "*.email" \
   --fake "*.name"
 
-# Using YAML config file
+# Mask credit cards (show last 4 digits)
+sql-splitter redact dump.sql -o safe.sql \
+  --mask "****-****-****-XXXX=*.credit_card"
+
+# Replace passwords with a constant value
+sql-splitter redact dump.sql -o safe.sql \
+  --constant "*.password=REDACTED"
+```
+
+### Using Configuration Files
+
+```bash
+# Use YAML config for complex rules
 sql-splitter redact dump.sql -o safe.sql --config redact.yaml
 
-# Generate config by analyzing input
+# Auto-generate config by analyzing column names
 sql-splitter redact dump.sql --generate-config -o redact.yaml
 
-# Reproducible redaction with seed
-sql-splitter redact dump.sql -o safe.sql --null "*.password" --seed 42
-
-# Validate config only
+# Validate config without processing
 sql-splitter redact dump.sql --config redact.yaml --validate
+```
+
+### Reproducible Redaction
+
+```bash
+# Same seed = identical fake data across runs
+sql-splitter redact dump.sql -o safe.sql --fake "*.name" --seed 42
+
+# Useful for CI: consistent test fixtures
+sql-splitter redact prod.sql -o fixtures/test-data.sql \
+  --config redact.yaml --seed 12345
+```
+
+### Targeting Specific Tables
+
+```bash
+# Only redact the users and orders tables
+sql-splitter redact dump.sql -o safe.sql \
+  --hash "*.email" --tables users,orders
+
+# Redact everything except audit_logs
+sql-splitter redact dump.sql -o safe.sql \
+  --hash "*.email" --exclude audit_logs
 ```
 
 ## Options
@@ -63,12 +127,26 @@ sql-splitter redact dump.sql --config redact.yaml --validate
 | Strategy   | Description                  | Use Case                  |
 | ---------- | ---------------------------- | ------------------------- |
 | `null`     | Replace with NULL            | Remove data entirely      |
-| `hash`     | SHA256 hash (deterministic)  | Preserve FK relationships |
+| `hash`     | SHA256 hash ([deterministic](/reference/glossary#deterministic))  | Preserve [FK](/reference/glossary#foreign-key-fk) relationships |
 | `fake`     | Generate realistic fake data | Realistic test data       |
 | `mask`     | Partial masking              | Credit cards, SSNs        |
 | `constant` | Fixed value                  | Placeholder values        |
 | `shuffle`  | Redistribute values          | Preserve distribution     |
 | `skip`     | No redaction                 | Passthrough               |
+
+## Column Pattern Matching
+
+Patterns use `table.column` format with `*` as a wildcard:
+
+| Pattern | Matches |
+| ------- | ------- |
+| `*.email` | `email` column in any table (`users.email`, `orders.contact_email`) |
+| `users.email` | Only the `email` column in the `users` table |
+| `users.*` | All columns in the `users` table |
+| `*.ssn` | Any column named `ssn` in any table |
+| `audit_*.created_by` | `created_by` in tables starting with `audit_` |
+
+Patterns are matched in order—first matching rule wins.
 
 ## Mask Patterns
 
@@ -103,6 +181,24 @@ Pattern symbols:
 | `credit_card` | `4532015112830366`                |
 | `ssn`         | `123-45-6789`                     |
 
+## Auto-Generating Configuration
+
+The `--generate-config` flag analyzes column names to detect common [PII](/reference/glossary#pii-personally-identifiable-information) patterns:
+
+```bash
+sql-splitter redact dump.sql --generate-config -o redact.yaml
+```
+
+**Detected patterns include:**
+- Email: `*email*`, `*e_mail*`
+- Phone: `*phone*`, `*mobile*`, `*tel*`
+- Names: `*name*`, `*first_name*`, `*last_name*`
+- Financial: `*ssn*`, `*social_security*`, `*credit_card*`, `*card_number*`
+- Addresses: `*address*`, `*street*`, `*zip*`, `*postal*`
+- Auth: `*password*`, `*secret*`, `*token*`
+
+Review and adjust the generated config before use—automated detection may miss custom column names or flag non-sensitive columns.
+
 ## YAML Config
 
 ```yaml
@@ -128,8 +224,118 @@ skip_tables:
   - schema_migrations
 ```
 
+## Composing with Other Tools
+
+### Sample Then Redact
+
+Reduce dataset size before anonymizing for faster processing:
+
+```bash
+sql-splitter sample prod.sql -o sampled.sql --percent 10 --preserve-relations
+sql-splitter redact sampled.sql -o dev.sql --config redact.yaml
+```
+
+### Validate After Redaction
+
+Ensure redacted output is valid SQL:
+
+```bash
+sql-splitter redact dump.sql -o safe.sql --config redact.yaml
+sql-splitter validate safe.sql --strict
+```
+
+### Full Dev Environment Pipeline
+
+Create a complete anonymized dev dataset:
+
+```bash
+# 1. Sample 5% with FK preservation
+sql-splitter sample prod.sql -o sampled.sql \
+  --percent 5 --preserve-relations --seed 42
+
+# 2. Redact PII
+sql-splitter redact sampled.sql -o dev.sql \
+  --config redact.yaml --seed 42
+
+# 3. Validate and reorder for clean import
+sql-splitter validate dev.sql --strict && \
+  sql-splitter order dev.sql -o dev-ordered.sql
+```
+
+### Convert and Redact for Different Environments
+
+```bash
+# Redact MySQL dump, convert to PostgreSQL for testing
+sql-splitter redact mysql.sql -o safe.sql --config redact.yaml
+sql-splitter convert safe.sql -o postgres.sql --to postgres
+```
+
+## Troubleshooting
+
+### Hashed values break foreign key relationships
+
+**Symptom:** FK errors when importing redacted dump; parent/child relationships are broken.
+
+**Cause:** Only one side of a relationship was hashed, or different patterns matched parent and child columns.
+
+**Solutions:**
+1. Ensure both sides use the same pattern: `--hash "*.user_id"` matches in all tables
+2. Use explicit patterns for both: `--hash "users.id" --hash "orders.user_id"`
+3. Verify with: `sql-splitter validate redacted.sql`
+
+### Fake data repeats or is inconsistent across runs
+
+**Symptom:** Different fake values each time you run redaction, or unexpected repetition.
+
+**Cause:** No `--seed` specified (random seed each run), or same original values produce same fake values (by design).
+
+**Solutions:**
+1. Use `--seed` for reproducible output: `--seed 42`
+2. Same original value → same fake value is intentional (preserves consistency)
+3. For truly random fake data each run, omit `--seed`
+
+### Column not being redacted
+
+**Symptom:** Sensitive data appears in output despite having a matching rule.
+
+**Cause:** Pattern doesn't match the actual table.column name, or an earlier rule with `skip` strategy matched first.
+
+**Solutions:**
+1. Check exact column names: `sql-splitter analyze dump.sql` shows all table/column names
+2. Use `--dry-run` to preview what would be redacted
+3. Remember patterns match in order—more specific patterns should come before `*.column` wildcards
+4. Verify pattern syntax: `users.email` not `users->email`
+
+### Config validation errors
+
+**Symptom:** "Invalid config" or "Unknown strategy" errors.
+
+**Cause:** YAML syntax errors, typos in strategy names, or invalid pattern format.
+
+**Solutions:**
+1. Validate before running: `--validate` flag
+2. Check strategy spelling: `null`, `hash`, `fake`, `mask`, `constant`, `shuffle`, `skip`
+3. Ensure patterns are quoted in YAML: `column: "*.email"` not `column: *.email`
+4. Use `--generate-config` as a starting template
+
+### "Unknown column" warnings
+
+**Symptom:** Warnings about rules that didn't match any columns.
+
+**Cause:** Pattern doesn't match any columns in the dump (typo or columns don't exist).
+
+**Solutions:**
+1. Run `sql-splitter analyze dump.sql` to see actual column names
+2. Use `--strict` to fail on unmatched rules (catches config errors early)
+3. Check for schema changes since config was created
+
 ## See Also
 
-- [`sample`](/commands/sample) - Create reduced datasets
-- [Redact Config Reference](/reference/redact-config)
+- [`sample`](/commands/sample) - Create reduced datasets before redacting
+- [`validate`](/commands/validate) - Verify redacted output integrity
+- [`analyze`](/commands/analyze) - List tables and columns for pattern planning
+- [`convert`](/commands/convert) - Convert redacted dumps to different dialects
+- [Redact Config Reference](/reference/redact-config) - Full YAML configuration options
 - [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [Memory & Streaming](/advanced/memory-streaming) - Detailed memory profiles per command
+- [Glossary](/reference/glossary) - PII, hashing, and streaming terminology

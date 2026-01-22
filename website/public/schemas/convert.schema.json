@@ -1,12 +1,11 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ConvertJsonOutput",
   "description": "JSON output for single file convert",
   "type": "object",
-  "required": ["conversion", "dry_run", "input_file", "statistics", "warnings"],
   "properties": {
     "conversion": {
-      "$ref": "#/definitions/ConversionInfo"
+      "$ref": "#/$defs/ConversionInfo"
     },
     "dry_run": {
       "type": "boolean"
@@ -15,22 +14,31 @@
       "type": "string"
     },
     "output_file": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "statistics": {
-      "$ref": "#/definitions/ConvertStatistics"
+      "$ref": "#/$defs/ConvertStatistics"
     },
     "warnings": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/ConvertWarning"
+        "$ref": "#/$defs/ConvertWarning"
       }
     }
   },
-  "definitions": {
+  "required": [
+    "input_file",
+    "conversion",
+    "dry_run",
+    "statistics",
+    "warnings"
+  ],
+  "$defs": {
     "ConversionInfo": {
       "type": "object",
-      "required": ["from", "to"],
       "properties": {
         "from": {
           "type": "string"
@@ -38,34 +46,38 @@
         "to": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
     },
     "ConvertStatistics": {
       "type": "object",
-      "required": [
-        "statements_converted",
-        "statements_processed",
-        "statements_skipped",
-        "statements_unchanged"
-      ],
       "properties": {
         "statements_converted": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "statements_processed": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "statements_skipped": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "statements_unchanged": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "statements_processed",
+        "statements_converted",
+        "statements_unchanged",
+        "statements_skipped"
+      ]
     },
     "ConvertWarning": {
       "description": "Warning types that can occur during conversion",
@@ -73,47 +85,62 @@
         {
           "description": "Feature not supported in target dialect",
           "type": "object",
-          "required": ["feature", "type"],
           "properties": {
             "feature": {
               "type": "string"
             },
             "suggestion": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "type": "string",
-              "enum": ["unsupported_feature"]
+              "const": "unsupported_feature"
             }
-          }
+          },
+          "required": [
+            "type",
+            "feature"
+          ]
         },
         {
           "description": "Data type conversion may lose precision",
           "type": "object",
-          "required": ["from_type", "to_type", "type"],
           "properties": {
             "column": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "from_type": {
               "type": "string"
             },
             "table": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "to_type": {
               "type": "string"
             },
             "type": {
               "type": "string",
-              "enum": ["lossy_conversion"]
+              "const": "lossy_conversion"
             }
-          }
+          },
+          "required": [
+            "type",
+            "from_type",
+            "to_type"
+          ]
         },
         {
           "description": "Statement was skipped",
           "type": "object",
-          "required": ["reason", "statement_preview", "type"],
           "properties": {
             "reason": {
               "type": "string"
@@ -123,23 +150,31 @@
             },
             "type": {
               "type": "string",
-              "enum": ["skipped_statement"]
+              "const": "skipped_statement"
             }
-          }
+          },
+          "required": [
+            "type",
+            "reason",
+            "statement_preview"
+          ]
         },
         {
           "description": "COPY statement needs conversion (PostgreSQL)",
           "type": "object",
-          "required": ["table", "type"],
           "properties": {
             "table": {
               "type": "string"
             },
             "type": {
               "type": "string",
-              "enum": ["copy_not_converted"]
+              "const": "copy_not_converted"
             }
-          }
+          },
+          "required": [
+            "type",
+            "table"
+          ]
         }
       ]
     }

@@ -7,6 +7,25 @@ Compare two SQL dump files to detect schema and data differences.
 
 **Alias:** `df` (e.g., `sql-splitter df old.sql new.sql`)
 
+## When to Use This
+
+- **Pre-deployment verification** - Compare production dump with staging to catch unexpected changes
+- **Migration validation** - Verify that a migration produces the expected schema changes
+- **Schema drift detection** - Detect when databases have diverged from each other
+- **Generate migration scripts** - Use `--format sql` to create migration DDL automatically
+- **Data auditing** - Track row additions, deletions, and modifications between snapshots
+
+Use [`validate`](/commands/validate) if you only need to check a single dump's integrity without comparison.
+
+## How It Works
+
+The diff command loads both dumps, extracts schema metadata (tables, columns, indexes, foreign keys), and compares them structurally. For data comparison, it uses primary keys to match rows efficiently - this means tables without primary keys require special handling (`--allow-no-pk`).
+
+**Exit codes:**
+- `0` - No differences found
+- `1` - Differences detected (useful for CI gates)
+- `2` - Error during comparison
+
 ## Usage
 
 ```bash
@@ -15,30 +34,61 @@ sql-splitter diff <OLD> <NEW> [OPTIONS]
 
 ## Examples
 
+### Basic Comparison
+
 ```bash
-# Full comparison (schema + data)
+# Compare two dumps (schema + data)
 sql-splitter diff old.sql new.sql
 
-# Schema-only (fast)
+# Schema-only comparison (faster, no data loading)
 sql-splitter diff old.sql new.sql --schema-only
 
-# Data-only
+# Data-only comparison (assumes schema is identical)
 sql-splitter diff old.sql new.sql --data-only
+```
 
-# Output formats
-sql-splitter diff old.sql new.sql --format json -o diff.json
+### Generating Migration Scripts
+
+The `--format sql` option generates runnable DDL to transform the old schema into the new:
+
+```bash
 sql-splitter diff old.sql new.sql --format sql -o migration.sql
+```
 
-# Compare specific tables
+This creates ALTER TABLE, CREATE TABLE, and DROP TABLE statements. Review before running in production.
+
+### CI/CD Integration
+
+```bash
+# Fail CI if any differences exist
+sql-splitter diff production.sql staging.sql --schema-only || exit 1
+
+# Export diff as JSON for further processing
+sql-splitter diff old.sql new.sql --format json -o diff.json
+```
+
+### Filtering and Noise Reduction
+
+```bash
+# Compare specific tables only
 sql-splitter diff old.sql new.sql --tables users,orders
 
-# Verbose with sample PK values
-sql-splitter diff old.sql new.sql --verbose
-
-# Ignore timestamp columns
+# Ignore auto-updated timestamp columns
 sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at,*.created_at"
 
-# Override primary key
+# Ignore column order differences (focus on types/constraints)
+sql-splitter diff old.sql new.sql --ignore-order
+```
+
+### Tables Without Primary Keys
+
+By default, tables without PKs are skipped for data comparison. Override this behavior:
+
+```bash
+# Use all columns as a composite key (slower but works)
+sql-splitter diff old.sql new.sql --allow-no-pk
+
+# Or specify a custom key for specific tables
 sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
 ```
 
@@ -132,7 +182,44 @@ CREATE TABLE audit_logs (
 DROP TABLE temp_data;
 ```
 
+## Troubleshooting
+
+### Diff reports many changes but I only reformatted
+
+Statement ordering and formatting differences can cause noise. Normalize both dumps first:
+
+```bash
+sql-splitter order old.sql -o old-sorted.sql
+sql-splitter order new.sql -o new-sorted.sql
+sql-splitter diff old-sorted.sql new-sorted.sql
+```
+
+See [`order`](/commands/order) for details on topological sorting and handling circular dependencies.
+
+### Diff is slow on large dumps
+
+- Use `--schema-only` if you only need DDL comparison
+- Use `--tables` to limit scope to specific tables
+- Use `--max-pk-entries` to limit row tracking for data comparison
+
+### Many "Table has no primary key" warnings
+
+Tables without primary keys can't be efficiently compared. Options:
+
+1. **Skip data comparison for those tables**: Default behavior, just note the warnings
+2. **Use `--allow-no-pk`**: Compare using all columns (slower, may have false positives)
+3. **Specify custom keys**: `--primary-key logs:timestamp+source_id`
+
+### Exit code is 1 but no output
+
+The exit code indicates differences were found. Use `--verbose` to see details:
+
+```bash
+sql-splitter diff old.sql new.sql --verbose
+```
+
 ## See Also
 
 - [`validate`](/commands/validate) - Validate dump integrity
 - [`convert`](/commands/convert) - Convert between dialects
+- [`order`](/commands/order) - Normalize statement order for stable diffs
