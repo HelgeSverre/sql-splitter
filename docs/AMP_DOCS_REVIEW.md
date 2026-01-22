@@ -15,16 +15,16 @@
 
 ## Inaccuracies (Fixed)
 
-| Page | Issue | Status |
-|------|-------|--------|
-| `commands/index.mdx` | "Universal Flags" claims all commands support flags that aren't universal | ✅ Fixed |
-| `commands/query.mdx` | `--tables` shown with `-t` short flag (doesn't exist) | ✅ Fixed |
-| `commands/query.mdx` | `--progress` shown with `-p` short flag (doesn't exist) | ✅ Fixed |
-| `commands/redact.mdx` | `--exclude` shown with `-e` short flag (should be `-x`) | ✅ Fixed |
-| `commands/diff.mdx` | `--format` missing `-f` short flag | ✅ Fixed |
-| `commands/order.mdx` | Claims cycles get "deferred FK constraints" (not implemented) | ✅ Fixed |
-| `commands/validate.mdx` | JSON output example doesn't match actual schema | ✅ Fixed |
-| `advanced/piping.mdx` | Shows `-o -` for stdout (not supported, should omit `-o`) | ✅ Fixed |
+| Page                    | Issue                                                                     | Status   |
+| ----------------------- | ------------------------------------------------------------------------- | -------- |
+| `commands/index.mdx`    | "Universal Flags" claims all commands support flags that aren't universal | ✅ Fixed |
+| `commands/query.mdx`    | `--tables` shown with `-t` short flag (doesn't exist)                     | ✅ Fixed |
+| `commands/query.mdx`    | `--progress` shown with `-p` short flag (doesn't exist)                   | ✅ Fixed |
+| `commands/redact.mdx`   | `--exclude` shown with `-e` short flag (should be `-x`)                   | ✅ Fixed |
+| `commands/diff.mdx`     | `--format` missing `-f` short flag                                        | ✅ Fixed |
+| `commands/order.mdx`    | Claims cycles get "deferred FK constraints" (not implemented)             | ✅ Fixed |
+| `commands/validate.mdx` | JSON output example doesn't match actual schema                           | ✅ Fixed |
+| `advanced/piping.mdx`   | Shows `-o -` for stdout (not supported, should omit `-o`)                 | ✅ Fixed |
 
 ---
 
