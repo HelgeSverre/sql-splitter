@@ -34,51 +34,51 @@ sql-splitter query dump.sql --table users --where "active = 1" --count
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output file path | stdout |
-| `-t, --table` | Table(s) to query (comma-separated) | all |
-| `-w, --where` | Filter condition | none |
-| `-c, --columns` | Columns to include (comma-separated) | all |
-| `--format` | Output format: `sql`, `csv`, `json` | sql |
-| `--count` | Only count matching rows | false |
-| `--limit` | Maximum rows to extract | unlimited |
-| `--offset` | Skip N rows before extracting | 0 |
-| `-d, --dialect` | SQL dialect | auto-detect |
-| `-p, --progress` | Show progress bar | false |
-| `--include-schema` | Include CREATE TABLE in output | false |
+| Flag               | Description                          | Default     |
+| ------------------ | ------------------------------------ | ----------- |
+| `-o, --output`     | Output file path                     | stdout      |
+| `-t, --table`      | Table(s) to query (comma-separated)  | all         |
+| `-w, --where`      | Filter condition                     | none        |
+| `-c, --columns`    | Columns to include (comma-separated) | all         |
+| `--format`         | Output format: `sql`, `csv`, `json`  | sql         |
+| `--count`          | Only count matching rows             | false       |
+| `--limit`          | Maximum rows to extract              | unlimited   |
+| `--offset`         | Skip N rows before extracting        | 0           |
+| `-d, --dialect`    | SQL dialect                          | auto-detect |
+| `-p, --progress`   | Show progress bar                    | false       |
+| `--include-schema` | Include CREATE TABLE in output       | false       |
 
 ## WHERE Clause Syntax
 
 ### Supported Operators
 
-| Operator | Example | Notes |
-|----------|---------|-------|
-| `=` | `status = 'active'` | Equality |
-| `!=`, `<>` | `status != 'deleted'` | Inequality |
-| `>`, `>=` | `age >= 18` | Greater than |
-| `<`, `<=` | `price < 100` | Less than |
-| `LIKE` | `email LIKE '%@gmail.com'` | Pattern match |
-| `NOT LIKE` | `name NOT LIKE 'test%'` | Negative pattern |
-| `IN` | `status IN ('active', 'pending')` | Set membership |
-| `NOT IN` | `id NOT IN (1, 2, 3)` | Set exclusion |
-| `IS NULL` | `deleted_at IS NULL` | Null check |
-| `IS NOT NULL` | `email IS NOT NULL` | Not null check |
-| `BETWEEN` | `age BETWEEN 18 AND 65` | Range |
-| `AND` | `a = 1 AND b = 2` | Logical AND |
-| `OR` | `a = 1 OR b = 2` | Logical OR |
-| `NOT` | `NOT active` | Logical NOT |
-| `()` | `(a = 1 OR b = 2) AND c = 3` | Grouping |
+| Operator      | Example                           | Notes            |
+| ------------- | --------------------------------- | ---------------- |
+| `=`           | `status = 'active'`               | Equality         |
+| `!=`, `<>`    | `status != 'deleted'`             | Inequality       |
+| `>`, `>=`     | `age >= 18`                       | Greater than     |
+| `<`, `<=`     | `price < 100`                     | Less than        |
+| `LIKE`        | `email LIKE '%@gmail.com'`        | Pattern match    |
+| `NOT LIKE`    | `name NOT LIKE 'test%'`           | Negative pattern |
+| `IN`          | `status IN ('active', 'pending')` | Set membership   |
+| `NOT IN`      | `id NOT IN (1, 2, 3)`             | Set exclusion    |
+| `IS NULL`     | `deleted_at IS NULL`              | Null check       |
+| `IS NOT NULL` | `email IS NOT NULL`               | Not null check   |
+| `BETWEEN`     | `age BETWEEN 18 AND 65`           | Range            |
+| `AND`         | `a = 1 AND b = 2`                 | Logical AND      |
+| `OR`          | `a = 1 OR b = 2`                  | Logical OR       |
+| `NOT`         | `NOT active`                      | Logical NOT      |
+| `()`          | `(a = 1 OR b = 2) AND c = 3`      | Grouping         |
 
 ### Data Types
 
-| Type | Example | Notes |
-|------|---------|-------|
-| String | `'value'` | Single quotes |
-| Number | `42`, `3.14` | Integer or float |
-| NULL | `NULL` | Case insensitive |
-| Boolean | `TRUE`, `FALSE`, `1`, `0` | Dialect-aware |
-| Date | `'2024-01-15'` | ISO format string |
+| Type    | Example                   | Notes             |
+| ------- | ------------------------- | ----------------- |
+| String  | `'value'`                 | Single quotes     |
+| Number  | `42`, `3.14`              | Integer or float  |
+| NULL    | `NULL`                    | Case insensitive  |
+| Boolean | `TRUE`, `FALSE`, `1`, `0` | Dialect-aware     |
+| Date    | `'2024-01-15'`            | ISO format string |
 
 ### Examples
 
@@ -115,6 +115,7 @@ sql-splitter query dump.sql --table users --columns "id,email AS user_email"
 ```
 
 **Output:**
+
 ```sql
 -- Original: INSERT INTO users (id, email, name, password, created_at) VALUES ...
 -- Projected:
@@ -148,8 +149,8 @@ id,email,name
 
 ```json
 [
-  {"id": 1, "email": "alice@example.com", "name": "Alice"},
-  {"id": 5, "email": "bob@example.com", "name": "Bob"}
+  { "id": 1, "email": "alice@example.com", "name": "Alice" },
+  { "id": 5, "email": "bob@example.com", "name": "Bob" }
 ]
 ```
 
@@ -237,6 +238,7 @@ INSERT INTO users (id, email, name) VALUES
 ```
 
 **Parsing steps:**
+
 1. Extract table name
 2. Extract column list
 3. Parse VALUES clause row by row
@@ -256,6 +258,7 @@ Input File → Statement Parser → INSERT Parser → Row Iterator
 ```
 
 **Key constraints:**
+
 - Never buffer entire file
 - Process one INSERT statement at a time
 - Evaluate rows within INSERT as streaming
@@ -307,6 +310,7 @@ INSERT INTO users VALUES (1, 'alice@example.com', 'Alice');
 ```
 
 Requires schema knowledge to map positions to column names. Options:
+
 - Error if `--columns` specified without column list in INSERT
 - Parse CREATE TABLE to build column map
 - Use positional indexing: `--where "$1 = 1"` (future)
@@ -315,11 +319,11 @@ Requires schema knowledge to map positions to column names. Options:
 
 ### Target Throughput
 
-| Scenario | Target |
-|----------|--------|
-| Full scan (no WHERE) | 300+ MB/s |
-| Simple WHERE | 200+ MB/s |
-| Complex WHERE | 100+ MB/s |
+| Scenario               | Target        |
+| ---------------------- | ------------- |
+| Full scan (no WHERE)   | 300+ MB/s     |
+| Simple WHERE           | 200+ MB/s     |
+| Complex WHERE          | 100+ MB/s     |
 | With column projection | Same as above |
 
 ### Optimizations
@@ -332,18 +336,21 @@ Requires schema knowledge to map positions to column names. Options:
 ## Testing Strategy
 
 ### Unit Tests
+
 - WHERE clause parser (all operators)
 - Expression evaluator (all types)
 - Column projector
 - Each output format
 
 ### Integration Tests
+
 - Real-world dump filtering
 - All three dialects
 - Large file streaming
 - Edge cases (NULLs, escaping, multi-line)
 
 ### Property Tests
+
 - Filtered output is valid SQL
 - Row count matches expectation
 - Column projection preserves data
@@ -393,19 +400,19 @@ sql-splitter query old_system.sql \
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| CLI and config | 2 hours |
-| WHERE clause parser | 6 hours |
-| Expression evaluator | 4 hours |
-| INSERT row parser | 6 hours |
-| Column projector | 2 hours |
-| SQL output writer | 2 hours |
-| CSV output writer | 2 hours |
-| JSON output writer | 2 hours |
-| Progress reporting | 1 hour |
-| Testing | 8 hours |
-| **Total** | **~35 hours** |
+| Component            | Effort        |
+| -------------------- | ------------- |
+| CLI and config       | 2 hours       |
+| WHERE clause parser  | 6 hours       |
+| Expression evaluator | 4 hours       |
+| INSERT row parser    | 6 hours       |
+| Column projector     | 2 hours       |
+| SQL output writer    | 2 hours       |
+| CSV output writer    | 2 hours       |
+| JSON output writer   | 2 hours       |
+| Progress reporting   | 1 hour        |
+| Testing              | 8 hours       |
+| **Total**            | **~35 hours** |
 
 ## Future Enhancements
 

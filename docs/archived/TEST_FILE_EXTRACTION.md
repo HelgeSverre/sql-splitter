@@ -9,22 +9,22 @@ All inline `#[cfg(test)] mod tests` blocks were extracted from source files into
 
 ## Final Test Distribution
 
-| Test File | Tests | Source |
-|-----------|-------|--------|
-| `tests/parser_edge_cases_test.rs` | 83 | Moved from `src/parser/edge_case_tests.rs` |
-| `tests/parser_unit_test.rs` | 41 | Extracted from `src/parser/mod.rs`, `mysql_insert.rs`, `postgres_copy.rs` |
-| `tests/convert_unit_test.rs` | 23 | Extracted from `src/convert/mod.rs`, `types.rs`, `copy_to_insert.rs`, `warnings.rs` |
-| `tests/schema_unit_test.rs` | 19 | Extracted from `src/schema/mod.rs`, `ddl.rs`, `graph.rs` |
-| `tests/sample_integration_test.rs` | 15 | Already in tests/ |
-| `tests/convert_integration_test.rs` | 15 | Already in tests/ |
-| `tests/sample_unit_test.rs` | 13 | Extracted from `src/sample/mod.rs`, `config.rs`, `reservoir.rs` |
-| `tests/splitter_unit_test.rs` | 7 | Extracted from `src/splitter/mod.rs` |
-| `tests/shard_unit_test.rs` | 7 | Extracted from `src/shard/mod.rs`, `config.rs` |
-| `tests/cmd_unit_test.rs` | 5 | Extracted from `src/cmd/merge.rs` |
-| `tests/merger_unit_test.rs` | 3 | Extracted from `src/merger/mod.rs` |
-| `tests/writer_unit_test.rs` | 2 | Extracted from `src/writer/mod.rs` |
-| `tests/analyzer_unit_test.rs` | 2 | Extracted from `src/analyzer/mod.rs` |
-| **Total** | **235** | |
+| Test File                           | Tests   | Source                                                                              |
+| ----------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `tests/parser_edge_cases_test.rs`   | 83      | Moved from `src/parser/edge_case_tests.rs`                                          |
+| `tests/parser_unit_test.rs`         | 41      | Extracted from `src/parser/mod.rs`, `mysql_insert.rs`, `postgres_copy.rs`           |
+| `tests/convert_unit_test.rs`        | 23      | Extracted from `src/convert/mod.rs`, `types.rs`, `copy_to_insert.rs`, `warnings.rs` |
+| `tests/schema_unit_test.rs`         | 19      | Extracted from `src/schema/mod.rs`, `ddl.rs`, `graph.rs`                            |
+| `tests/sample_integration_test.rs`  | 15      | Already in tests/                                                                   |
+| `tests/convert_integration_test.rs` | 15      | Already in tests/                                                                   |
+| `tests/sample_unit_test.rs`         | 13      | Extracted from `src/sample/mod.rs`, `config.rs`, `reservoir.rs`                     |
+| `tests/splitter_unit_test.rs`       | 7       | Extracted from `src/splitter/mod.rs`                                                |
+| `tests/shard_unit_test.rs`          | 7       | Extracted from `src/shard/mod.rs`, `config.rs`                                      |
+| `tests/cmd_unit_test.rs`            | 5       | Extracted from `src/cmd/merge.rs`                                                   |
+| `tests/merger_unit_test.rs`         | 3       | Extracted from `src/merger/mod.rs`                                                  |
+| `tests/writer_unit_test.rs`         | 2       | Extracted from `src/writer/mod.rs`                                                  |
+| `tests/analyzer_unit_test.rs`       | 2       | Extracted from `src/analyzer/mod.rs`                                                |
+| **Total**                           | **235** |                                                                                     |
 
 ## Results
 

@@ -37,22 +37,22 @@ sql-splitter redact dump.sql -o safe.sql --config redact.yaml --seed 42
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output file path | stdout |
-| `-c, --config` | YAML config file | none |
-| `--columns` | Columns to redact (glob pattern) | none |
-| `--hash` | Columns to hash (SHA256) | none |
-| `--fake` | Columns to replace with fake data | none |
-| `--null` | Columns to set to NULL | none |
-| `--mask` | Columns to partially mask | none |
-| `--constant` | Column=value pairs | none |
-| `--preview` | Show sample redactions | false |
-| `--validate` | Validate config only | false |
-| `--seed` | Random seed for reproducibility | random |
-| `-t, --table` | Only redact specific tables | all |
-| `-d, --dialect` | SQL dialect | auto-detect |
-| `-p, --progress` | Show progress bar | false |
+| Flag             | Description                       | Default     |
+| ---------------- | --------------------------------- | ----------- |
+| `-o, --output`   | Output file path                  | stdout      |
+| `-c, --config`   | YAML config file                  | none        |
+| `--columns`      | Columns to redact (glob pattern)  | none        |
+| `--hash`         | Columns to hash (SHA256)          | none        |
+| `--fake`         | Columns to replace with fake data | none        |
+| `--null`         | Columns to set to NULL            | none        |
+| `--mask`         | Columns to partially mask         | none        |
+| `--constant`     | Column=value pairs                | none        |
+| `--preview`      | Show sample redactions            | false       |
+| `--validate`     | Validate config only              | false       |
+| `--seed`         | Random seed for reproducibility   | random      |
+| `-t, --table`    | Only redact specific tables       | all         |
+| `-d, --dialect`  | SQL dialect                       | auto-detect |
+| `-p, --progress` | Show progress bar                 | false       |
 
 ## Configuration File
 
@@ -60,69 +60,69 @@ sql-splitter redact dump.sql -o safe.sql --config redact.yaml --seed 42
 
 ```yaml
 # Global settings
-seed: 12345  # For reproducible fake data
-locale: en_US  # For locale-specific fakes
+seed: 12345 # For reproducible fake data
+locale: en_US # For locale-specific fakes
 
 # Default strategy for unmatched sensitive columns
 defaults:
-  strategy: null  # null, hash, mask, skip
-  
+  strategy: null # null, hash, mask, skip
+
 # Column rules (processed in order, first match wins)
 rules:
   # Exact column match
   - column: users.ssn
     strategy: null
-    
+
   # Glob pattern matching
   - column: "*.email"
     strategy: fake_email
-    
+
   - column: "*.password"
     strategy: constant
     value: "$2b$10$REDACTED_PASSWORD_HASH"
-    
+
   - column: "*.phone"
     strategy: fake_phone
     format: "+1 (###) ###-####"
-    
+
   - column: "users.name"
     strategy: fake_name
-    
+
   - column: "*.first_name"
     strategy: fake_first_name
-    
+
   - column: "*.last_name"
     strategy: fake_last_name
-    
+
   - column: "*.address"
     strategy: fake_address
-    
+
   - column: "*.credit_card"
     strategy: mask
-    pattern: "****-****-****-XXXX"  # Keep last 4
-    
+    pattern: "****-****-****-XXXX" # Keep last 4
+
   - column: "*.ip_address"
     strategy: fake_ip
-    
+
   - column: "*.birth_date"
     strategy: fake_date
     min: "1950-01-01"
     max: "2005-12-31"
-    
+
   # Hash for referential integrity
   - column: "*.user_email"
     strategy: hash
-    preserve_domain: true  # user@gmail.com → a1b2c3@gmail.com
-    
+    preserve_domain: true # user@gmail.com → a1b2c3@gmail.com
+
   # Table-specific override
   - column: admins.email
-    strategy: skip  # Don't redact admin emails
+    strategy: skip # Don't redact admin emails
 
 # Tables to skip entirely
 skip_tables:
   - schema_migrations
   - ar_internal_metadata
-  
+
 # Tables to include (if set, only these are processed)
 # include_tables:
 #   - users
@@ -157,14 +157,15 @@ skip_tables:
 ```yaml
 - column: "*.email"
   strategy: hash
-  algorithm: sha256  # sha256, md5, xxhash
-  preserve_format: true  # Keep @domain.com
+  algorithm: sha256 # sha256, md5, xxhash
+  preserve_format: true # Keep @domain.com
 ```
 
 **Before:** `'john.doe@company.com'`  
 **After:** `'a1b2c3d4@company.com'`
 
 **Properties:**
+
 - Same input → same output (referential integrity)
 - One-way (can't reverse to original)
 - Optional format preservation
@@ -179,48 +180,49 @@ skip_tables:
 
 **Available fake strategies:**
 
-| Strategy | Example Output |
-|----------|----------------|
-| `fake_email` | `jessica.smith@example.com` |
-| `fake_name` | `Robert Johnson` |
-| `fake_first_name` | `Sarah` |
-| `fake_last_name` | `Williams` |
-| `fake_phone` | `+1 (555) 234-5678` |
-| `fake_address` | `123 Oak Street, Springfield, IL 62701` |
-| `fake_street` | `456 Maple Avenue` |
-| `fake_city` | `Portland` |
-| `fake_state` | `California` |
-| `fake_zip` | `90210` |
-| `fake_country` | `United States` |
-| `fake_company` | `Acme Corporation` |
-| `fake_job_title` | `Software Engineer` |
-| `fake_username` | `cooluser42` |
-| `fake_url` | `https://example.com/page` |
-| `fake_ip` | `192.168.1.100` |
-| `fake_ipv6` | `2001:db8::1` |
-| `fake_uuid` | `550e8400-e29b-41d4-a716-446655440000` |
-| `fake_date` | `1985-07-23` |
-| `fake_datetime` | `2024-03-15 14:30:00` |
-| `fake_credit_card` | `4532015112830366` |
-| `fake_iban` | `DE89370400440532013000` |
-| `fake_lorem` | `Lorem ipsum dolor sit amet...` |
+| Strategy           | Example Output                          |
+| ------------------ | --------------------------------------- |
+| `fake_email`       | `jessica.smith@example.com`             |
+| `fake_name`        | `Robert Johnson`                        |
+| `fake_first_name`  | `Sarah`                                 |
+| `fake_last_name`   | `Williams`                              |
+| `fake_phone`       | `+1 (555) 234-5678`                     |
+| `fake_address`     | `123 Oak Street, Springfield, IL 62701` |
+| `fake_street`      | `456 Maple Avenue`                      |
+| `fake_city`        | `Portland`                              |
+| `fake_state`       | `California`                            |
+| `fake_zip`         | `90210`                                 |
+| `fake_country`     | `United States`                         |
+| `fake_company`     | `Acme Corporation`                      |
+| `fake_job_title`   | `Software Engineer`                     |
+| `fake_username`    | `cooluser42`                            |
+| `fake_url`         | `https://example.com/page`              |
+| `fake_ip`          | `192.168.1.100`                         |
+| `fake_ipv6`        | `2001:db8::1`                           |
+| `fake_uuid`        | `550e8400-e29b-41d4-a716-446655440000`  |
+| `fake_date`        | `1985-07-23`                            |
+| `fake_datetime`    | `2024-03-15 14:30:00`                   |
+| `fake_credit_card` | `4532015112830366`                      |
+| `fake_iban`        | `DE89370400440532013000`                |
+| `fake_lorem`       | `Lorem ipsum dolor sit amet...`         |
 
 ### 5. `mask` — Partial Masking
 
 ```yaml
 - column: "*.credit_card"
   strategy: mask
-  pattern: "****-****-****-XXXX"  # X = keep original
-  
+  pattern: "****-****-****-XXXX" # X = keep original
+
 - column: "*.email"
   strategy: mask
-  pattern: "X***@XXXXX"  # Keep first char and domain
+  pattern: "X***@XXXXX" # Keep first char and domain
 ```
 
 **Before:** `'4532-0151-1283-0366'`  
 **After:** `'****-****-****-0366'`
 
 **Pattern syntax:**
+
 - `*` = replace with `*`
 - `X` = keep original character
 - `#` = replace with random digit
@@ -248,13 +250,13 @@ Explicitly skip redaction for specific columns.
 
 ### Glob Patterns
 
-| Pattern | Matches |
-|---------|---------|
-| `users.email` | Only `email` in `users` table |
-| `*.email` | `email` column in any table |
-| `users.*` | All columns in `users` table |
-| `*.*_email` | Columns ending in `_email` in any table |
-| `*.password*` | Columns containing `password` |
+| Pattern       | Matches                                 |
+| ------------- | --------------------------------------- |
+| `users.email` | Only `email` in `users` table           |
+| `*.email`     | `email` column in any table             |
+| `users.*`     | All columns in `users` table            |
+| `*.*_email`   | Columns ending in `_email` in any table |
+| `*.password*` | Columns containing `password`           |
 
 ### Match Order
 
@@ -262,9 +264,9 @@ Rules are evaluated in order; first match wins:
 
 ```yaml
 rules:
-  - column: admins.email    # Specific: skip
+  - column: admins.email # Specific: skip
     strategy: skip
-  - column: "*.email"       # General: hash
+  - column: "*.email" # General: hash
     strategy: hash
 ```
 
@@ -362,6 +364,7 @@ Input File → Statement Parser → INSERT Parser → Column Matcher
 ```
 
 **Key requirements:**
+
 - Stream processing (no full file in memory)
 - Parse INSERT, modify values, reserialize
 - Maintain SQL validity
@@ -405,6 +408,7 @@ Enables reproducible test data.
 If `users.email` is referenced by `orders.customer_email`:
 
 **Solution:** Use `hash` strategy for both:
+
 ```yaml
 - column: "*.email"
   strategy: hash
@@ -416,7 +420,8 @@ Same email → same hash, preserves referential integrity.
 
 Fake data might generate duplicates:
 
-**Solution:** 
+**Solution:**
+
 - Hash strategies are deterministic (no duplicates if input unique)
 - Fake strategies can append sequence number if needed
 - `--ensure-unique` flag for critical columns
@@ -424,6 +429,7 @@ Fake data might generate duplicates:
 ### 3. NULL Values
 
 Original NULL should remain NULL (don't generate fake):
+
 ```sql
 -- Original: INSERT INTO users (email) VALUES (NULL)
 -- Redacted: INSERT INTO users (email) VALUES (NULL)
@@ -434,6 +440,7 @@ Original NULL should remain NULL (don't generate fake):
 Fake phone in INT column:
 
 **Solution:** Type-aware generation
+
 - INT columns get numeric fakes
 - Validate strategy matches column type
 
@@ -450,6 +457,7 @@ Must redact each row independently.
 ### 6. Quoted Values & Escaping
 
 Must handle:
+
 - Single quotes in strings: `'O''Brien'`
 - Backslash escapes (MySQL): `'line1\nline2'`
 - Binary data: `X'48454C4C4F'`
@@ -469,6 +477,7 @@ Don't commit seed to version control for production use.
 ### 3. Audit Trail
 
 Log which columns were redacted:
+
 ```
 Redacted: users.email (1,234 values, strategy: hash)
 Redacted: users.ssn (1,234 values, strategy: null)
@@ -477,17 +486,18 @@ Redacted: users.ssn (1,234 values, strategy: null)
 ### 4. Validation
 
 `--validate` mode checks:
+
 - All sensitive column patterns have rules
 - No conflicting rules
 - Strategies compatible with column types
 
 ## Performance Targets
 
-| File Size | Target Time |
-|-----------|-------------|
-| 100 MB | < 5 seconds |
-| 1 GB | < 30 seconds |
-| 10 GB | < 5 minutes |
+| File Size | Target Time  |
+| --------- | ------------ |
+| 100 MB    | < 5 seconds  |
+| 1 GB      | < 30 seconds |
+| 10 GB     | < 5 minutes  |
 
 Bottleneck is typically fake data generation, not I/O.
 
@@ -501,22 +511,26 @@ Bottleneck is typically fake data generation, not I/O.
 ## Testing Strategy
 
 ### Unit Tests
+
 - Each redaction strategy
 - Pattern matching logic
 - Config parsing
 - Value extraction and replacement
 
 ### Integration Tests
+
 - Full file redaction
 - All dialects
 - Roundtrip: redact → import → verify no PII
 
 ### Property Tests
+
 - Output is valid SQL
 - Redacted values match strategy expectations
 - NULL handling correct
 
 ### Security Tests
+
 - No original PII in output
 - Hash collisions don't occur
 - Deterministic with seed
@@ -576,21 +590,21 @@ sql-splitter sample prod.sql --percent 5 | \
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| CLI and config parsing | 3 hours |
-| Pattern matcher | 3 hours |
-| INSERT parser/rebuilder | 6 hours |
-| Strategy: null, constant, skip | 2 hours |
-| Strategy: hash | 3 hours |
-| Strategy: mask | 3 hours |
-| Strategy: fake (all generators) | 8 hours |
-| Strategy: shuffle | 3 hours |
-| Locale support | 2 hours |
-| Seeded RNG | 2 hours |
-| Preview mode | 2 hours |
-| Testing | 8 hours |
-| **Total** | **~45 hours** |
+| Component                       | Effort        |
+| ------------------------------- | ------------- |
+| CLI and config parsing          | 3 hours       |
+| Pattern matcher                 | 3 hours       |
+| INSERT parser/rebuilder         | 6 hours       |
+| Strategy: null, constant, skip  | 2 hours       |
+| Strategy: hash                  | 3 hours       |
+| Strategy: mask                  | 3 hours       |
+| Strategy: fake (all generators) | 8 hours       |
+| Strategy: shuffle               | 3 hours       |
+| Locale support                  | 2 hours       |
+| Seeded RNG                      | 2 hours       |
+| Preview mode                    | 2 hours       |
+| Testing                         | 8 hours       |
+| **Total**                       | **~45 hours** |
 
 ## Future Enhancements
 

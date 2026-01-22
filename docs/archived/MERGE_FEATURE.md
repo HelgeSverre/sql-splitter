@@ -39,18 +39,18 @@ sql-splitter merge tables/ -o restored.sql --dialect postgres
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output SQL file path | `stdout` |
-| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
-| `-t, --tables` | Only merge these tables (comma-separated) | all |
-| `--exclude` | Exclude these tables (comma-separated) | none |
-| `--order` | Explicit table order (comma-separated) | alphabetical |
-| `--auto-order` | Analyze foreign keys and order dependencies | false |
-| `--transaction` | Wrap output in BEGIN/COMMIT transaction | false |
-| `--no-header` | Skip generating header comments | false |
-| `--progress` | Show progress bar | false |
-| `--dry-run` | List tables that would be merged | false |
+| Flag            | Description                                 | Default      |
+| --------------- | ------------------------------------------- | ------------ |
+| `-o, --output`  | Output SQL file path                        | `stdout`     |
+| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite`  | auto-detect  |
+| `-t, --tables`  | Only merge these tables (comma-separated)   | all          |
+| `--exclude`     | Exclude these tables (comma-separated)      | none         |
+| `--order`       | Explicit table order (comma-separated)      | alphabetical |
+| `--auto-order`  | Analyze foreign keys and order dependencies | false        |
+| `--transaction` | Wrap output in BEGIN/COMMIT transaction     | false        |
+| `--no-header`   | Skip generating header comments             | false        |
+| `--progress`    | Show progress bar                           | false        |
+| `--dry-run`     | List tables that would be merged            | false        |
 
 ## Output Format
 
@@ -245,12 +245,12 @@ Directory Scan → File Iterator → BufReader → Output BufWriter
 
 ## Timeline Estimate
 
-| Phase | Effort | Priority |
-|-------|--------|----------|
-| Phase 1: Basic Merge | 2-3 hours | High |
-| Phase 2: Ordering | 2 hours | Medium |
-| Phase 3: Dialect-Aware | 1-2 hours | Medium |
-| Phase 4: Advanced | 3-4 hours | Low |
+| Phase                  | Effort    | Priority |
+| ---------------------- | --------- | -------- |
+| Phase 1: Basic Merge   | 2-3 hours | High     |
+| Phase 2: Ordering      | 2 hours   | Medium   |
+| Phase 3: Dialect-Aware | 1-2 hours | Medium   |
+| Phase 4: Advanced      | 3-4 hours | Low      |
 
 **MVP (Phase 1)**: Ready in ~3 hours
 

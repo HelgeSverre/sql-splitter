@@ -12,37 +12,37 @@ The `diff` command compares two SQL dump files and shows schema and/or data diff
 
 ### v1.9.0 (Released)
 
-| Feature | Status |
-|---------|--------|
-| Schema comparison (tables, columns, PKs, FKs) | ✅ Done |
+| Feature                                              | Status  |
+| ---------------------------------------------------- | ------- |
+| Schema comparison (tables, columns, PKs, FKs)        | ✅ Done |
 | Data comparison (row counts: added/removed/modified) | ✅ Done |
-| Memory-bounded PK tracking | ✅ Done |
-| Output formats (text, json, sql) | ✅ Done |
-| Table filters (--tables, --exclude) | ✅ Done |
-| Modes (--schema-only, --data-only) | ✅ Done |
-| All 3 dialects (MySQL, PostgreSQL, SQLite) | ✅ Done |
-| PostgreSQL COPY data parsing | ✅ Done |
-| Compressed input (.gz, .bz2, .xz, .zst) | ✅ Done |
+| Memory-bounded PK tracking                           | ✅ Done |
+| Output formats (text, json, sql)                     | ✅ Done |
+| Table filters (--tables, --exclude)                  | ✅ Done |
+| Modes (--schema-only, --data-only)                   | ✅ Done |
+| All 3 dialects (MySQL, PostgreSQL, SQLite)           | ✅ Done |
+| PostgreSQL COPY data parsing                         | ✅ Done |
+| Compressed input (.gz, .bz2, .xz, .zst)              | ✅ Done |
 
 ### v1.9.1 (Released)
 
-| Feature | Status |
-|---------|--------|
+| Feature                            | Status  |
+| ---------------------------------- | ------- |
 | `--verbose` with sample collection | ✅ Done |
-| `--primary-key` override | ✅ Done |
-| `--ignore-order` for column order | ✅ Done |
-| Index diff (non-PK indexes) | ✅ Done |
-| `--ignore-columns` glob patterns | ✅ Done |
-| `--allow-no-pk` / warnings | ✅ Done |
+| `--primary-key` override           | ✅ Done |
+| `--ignore-order` for column order  | ✅ Done |
+| Index diff (non-PK indexes)        | ✅ Done |
+| `--ignore-columns` glob patterns   | ✅ Done |
+| `--allow-no-pk` / warnings         | ✅ Done |
 
 ### Deferred
 
-| Feature | Reason |
-|---------|--------|
-| Data migration SQL (INSERT/UPDATE/DELETE) | Requires full row storage |
-| Rename detection | Heuristic matching adds complexity |
-| External-sort for huge tables | Only needed for 100M+ row tables |
-| Three-way merge | Future scope |
+| Feature                                   | Reason                             |
+| ----------------------------------------- | ---------------------------------- |
+| Data migration SQL (INSERT/UPDATE/DELETE) | Requires full row storage          |
+| Rename detection                          | Heuristic matching adds complexity |
+| External-sort for huge tables             | Only needed for 100M+ row tables   |
+| Three-way merge                           | Future scope                       |
 
 ---
 
@@ -90,22 +90,22 @@ sql-splitter diff old.sql new.sql --allow-no-pk
 
 ## CLI Options
 
-| Flag | Description | Default | Status |
-|------|-------------|---------|--------|
-| `-o, --output` | Output file (default: stdout) | stdout | ✅ |
-| `-t, --tables` | Compare specific table(s) only | all | ✅ |
-| `--exclude` | Exclude tables from comparison | none | ✅ |
-| `--schema-only` | Compare schema only, ignore data | false | ✅ |
-| `--data-only` | Compare data only, ignore schema | false | ✅ |
-| `-f, --format` | Output format: `text`, `sql`, `json` | text | ✅ |
-| `-v, --verbose` | Show PK samples for changes | false | ✅ |
-| `--primary-key` | Override PK for data comparison | auto-detect | ✅ |
-| `-d, --dialect` | SQL dialect | auto-detect | ✅ |
-| `-p, --progress` | Show progress bar | false | ✅ |
-| `--max-pk-entries` | Max PK entries to track | 10000000 | ✅ |
-| `--ignore-order` | Ignore column order differences | false | ✅ |
-| `--ignore-columns` | Glob patterns for columns to ignore | none | ✅ |
-| `--allow-no-pk` | Don't skip tables without PK | false | ✅ |
+| Flag               | Description                          | Default     | Status |
+| ------------------ | ------------------------------------ | ----------- | ------ |
+| `-o, --output`     | Output file (default: stdout)        | stdout      | ✅     |
+| `-t, --tables`     | Compare specific table(s) only       | all         | ✅     |
+| `--exclude`        | Exclude tables from comparison       | none        | ✅     |
+| `--schema-only`    | Compare schema only, ignore data     | false       | ✅     |
+| `--data-only`      | Compare data only, ignore schema     | false       | ✅     |
+| `-f, --format`     | Output format: `text`, `sql`, `json` | text        | ✅     |
+| `-v, --verbose`    | Show PK samples for changes          | false       | ✅     |
+| `--primary-key`    | Override PK for data comparison      | auto-detect | ✅     |
+| `-d, --dialect`    | SQL dialect                          | auto-detect | ✅     |
+| `-p, --progress`   | Show progress bar                    | false       | ✅     |
+| `--max-pk-entries` | Max PK entries to track              | 10000000    | ✅     |
+| `--ignore-order`   | Ignore column order differences      | false       | ✅     |
+| `--ignore-columns` | Glob patterns for columns to ignore  | none        | ✅     |
+| `--allow-no-pk`    | Don't skip tables without PK         | false       | ✅     |
 
 ---
 
@@ -116,12 +116,14 @@ sql-splitter diff old.sql new.sql --allow-no-pk
 **Purpose:** Show actual PK values that were added/removed/modified, not just counts.
 
 **Behavior:**
+
 - Collects up to 100 sample PKs per category (added, removed, modified)
 - Only collects samples when `--verbose` flag is set
 - Samples are stored during scanning, formatted in output
 - Works with all output formats (text, json, sql)
 
 **Text Output Example:**
+
 ```
 Data Changes:
   Table 'users': +45 rows, -12 rows, ~89 modified
@@ -131,6 +133,7 @@ Data Changes:
 ```
 
 **JSON Output Example:**
+
 ```json
 {
   "data": {
@@ -147,6 +150,7 @@ Data Changes:
 ```
 
 **Implementation Notes:**
+
 - Store `Vec<String>` for each sample category (PK formatted as string)
 - Limit to `sample_size` (default 100) to bound memory
 - Composite PKs formatted as `(val1, val2)`
@@ -158,12 +162,14 @@ Data Changes:
 **Purpose:** Specify which column(s) to use as primary key for data comparison, overriding schema-detected PK.
 
 **Use Cases:**
+
 - Table has no PK defined but has a logical key (e.g., `email` is unique)
 - Table has composite PK but you want to compare by single column
 - Schema parsing missed the PK
 - Testing with different key strategies
 
 **Syntax:**
+
 ```bash
 # Single table override
 --primary-key users:email
@@ -176,12 +182,14 @@ Data Changes:
 ```
 
 **Behavior:**
+
 - Overrides apply only to specified tables
 - Tables not specified use schema-detected PK
 - Error if specified column doesn't exist in table
 - Composite keys use `+` separator
 
 **Implementation Notes:**
+
 - Parse into `HashMap<String, Vec<String>>` (table -> columns)
 - Apply in `DataDiffer` when determining PK columns
 - Validate column existence against schema
@@ -193,6 +201,7 @@ Data Changes:
 **Purpose:** Ignore column position changes when comparing schemas.
 
 **Problem:**
+
 ```sql
 -- Old: CREATE TABLE users (id INT, name VARCHAR, email VARCHAR)
 -- New: CREATE TABLE users (id INT, email VARCHAR, name VARCHAR)
@@ -202,11 +211,13 @@ Without `--ignore-order`: Reports as schema modification (columns reordered)
 With `--ignore-order`: No schema changes reported
 
 **Behavior:**
+
 - Affects schema comparison only, not data
 - Compares columns as sets, not ordered lists
 - Still detects added/removed/type-changed columns
 
 **Implementation Notes:**
+
 - In `compare_tables()`, compare column sets instead of ordered vectors
 - Add flag to `DiffConfig`
 - Simple change: use HashSet comparison for column names
@@ -220,6 +231,7 @@ With `--ignore-order`: No schema changes reported
 **Current State:** Only compares PK and FK changes.
 
 **Enhanced Comparison:**
+
 ```
 Schema Changes:
   ~ Table 'users':
@@ -230,12 +242,14 @@ Schema Changes:
 ```
 
 **Index Properties Compared:**
+
 - Index name
 - Column list (ordered)
 - Unique vs non-unique
 - Index type (BTREE, HASH, FULLTEXT, GIN, etc.) where detectable
 
 **SQL Statements Parsed:**
+
 ```sql
 -- Inline in CREATE TABLE
 CREATE TABLE users (
@@ -255,6 +269,7 @@ CREATE INDEX idx_users_search ON users USING gin (search_vector);
 ```
 
 **Implementation Notes:**
+
 - Extend `SchemaBuilder` to parse CREATE INDEX statements
 - Add `indexes: Vec<IndexDef>` to `TableSchema`
 - Add `IndexDef { name, columns, is_unique, index_type }`
@@ -267,12 +282,14 @@ CREATE INDEX idx_users_search ON users USING gin (search_vector);
 **Purpose:** Exclude certain columns from both schema and data comparison.
 
 **Use Cases:**
+
 - Ignore auto-updated timestamps: `--ignore-columns "*.updated_at,*.created_at"`
 - Ignore audit columns: `--ignore-columns "*.modified_by,*.version"`
 - Ignore specific table's column: `--ignore-columns "users.last_login"`
 - Ignore all columns with pattern: `--ignore-columns "*.*_hash"`
 
 **Syntax:**
+
 ```bash
 # Multiple patterns (comma-separated)
 --ignore-columns "*.updated_at,*.created_at,users.last_login"
@@ -285,15 +302,18 @@ audit_*.action   # Column 'action' in tables starting with audit_
 ```
 
 **Effect on Schema Comparison:**
+
 - Ignored columns not reported as added/removed/modified
 - If column is ignored, its type changes are also ignored
 
 **Effect on Data Comparison:**
+
 - When computing row digest, skip ignored columns
 - Two rows differing only in ignored columns are considered identical
 - PK columns cannot be ignored (error if attempted)
 
 **Implementation Notes:**
+
 - Use `glob` crate for pattern matching
 - Parse patterns into list at startup
 - Filter columns before comparison in schema diff
@@ -309,31 +329,39 @@ audit_*.action   # Column 'action' in tables starting with audit_
 **Current Behavior:** Tables without PK are silently skipped in data comparison.
 
 **Enhanced Behavior:**
+
 - Default: Warn about tables without PK, skip data comparison for them
 - `--allow-no-pk`: Use all columns as composite key (slow, may have issues)
 - Error if `--data-only` and all tables lack PK
 
 **Warning Output:**
+
 ```
 Warning: Table 'audit_logs' has no primary key, skipping data comparison
 Warning: Table 'temp_data' has no primary key, skipping data comparison
 ```
 
 **With `--allow-no-pk`:**
+
 ```
 Note: Table 'audit_logs' has no primary key, using all columns as key
 ```
 
 **JSON Output:**
+
 ```json
 {
   "warnings": [
-    {"table": "audit_logs", "message": "No primary key, data comparison skipped"}
+    {
+      "table": "audit_logs",
+      "message": "No primary key, data comparison skipped"
+    }
   ]
 }
 ```
 
 **Implementation Notes:**
+
 - Add warnings collection to `DiffResult`
 - In `DataDiffer`, emit warning when skipping table
 - With `--allow-no-pk`, use all column indices as PK
@@ -402,23 +430,29 @@ DROP INDEX `idx_users_legacy` ON `users`;
 ```json
 {
   "schema": {
-    "tables_added": [{
-      "name": "audit_logs",
-      "columns": [{"name": "id", "col_type": "INT", "is_primary_key": true}]
-    }],
+    "tables_added": [
+      {
+        "name": "audit_logs",
+        "columns": [{ "name": "id", "col_type": "INT", "is_primary_key": true }]
+      }
+    ],
     "tables_removed": ["legacy_data"],
-    "tables_modified": [{
-      "table_name": "users",
-      "columns_added": [{"name": "phone", "col_type": "VARCHAR(20)"}],
-      "columns_removed": [{"name": "fax", "col_type": "VARCHAR(20)"}],
-      "columns_modified": [{
-        "name": "email",
-        "old_type": "VARCHAR(100)",
-        "new_type": "VARCHAR(255)"
-      }],
-      "indexes_added": [{"name": "idx_users_phone", "columns": ["phone"]}],
-      "indexes_removed": []
-    }]
+    "tables_modified": [
+      {
+        "table_name": "users",
+        "columns_added": [{ "name": "phone", "col_type": "VARCHAR(20)" }],
+        "columns_removed": [{ "name": "fax", "col_type": "VARCHAR(20)" }],
+        "columns_modified": [
+          {
+            "name": "email",
+            "old_type": "VARCHAR(100)",
+            "new_type": "VARCHAR(255)"
+          }
+        ],
+        "indexes_added": [{ "name": "idx_users_phone", "columns": ["phone"] }],
+        "indexes_removed": []
+      }
+    ]
   },
   "data": {
     "users": {
@@ -433,7 +467,7 @@ DROP INDEX `idx_users_legacy` ON `users`;
     }
   },
   "warnings": [
-    {"table": "logs", "message": "No primary key, data comparison skipped"}
+    { "table": "logs", "message": "No primary key, data comparison skipped" }
   ],
   "summary": {
     "tables_added": 1,
@@ -454,29 +488,36 @@ DROP INDEX `idx_users_legacy` ON `users`;
 ### Schema Comparison
 
 #### Tables
+
 - **Added**: Table exists in new, not in old
 - **Removed**: Table exists in old, not in new
 - **Modified**: Same table name, different definition
 
 #### Columns
+
 Compare by column name within each table:
+
 - **Added**: Column in new, not in old
 - **Removed**: Column in old, not in new
 - **Modified**: Same name, different type/constraints
 
 **Attributes compared:**
+
 - Data type (including size)
 - NULL/NOT NULL
 - DEFAULT value (future)
 - AUTO_INCREMENT/SERIAL (future)
 
 #### Indexes
+
 Compare by index name:
+
 - **Added**: Index in new, not in old
 - **Removed**: Index in old, not in new
 - **Modified**: Same name, different columns or properties
 
 #### Constraints
+
 - PRIMARY KEY changes
 - FOREIGN KEY changes
 - UNIQUE constraints (via indexes)
@@ -494,6 +535,7 @@ Compare by index name:
 #### Row Matching
 
 Match rows by primary key value:
+
 ```
 Old: (1, 'alice@old.com', 'Alice')
 New: (1, 'alice@new.com', 'Alice Smith')
@@ -502,12 +544,12 @@ New: (1, 'alice@new.com', 'Alice Smith')
 
 #### Change Detection
 
-| Old | New | Result |
-|-----|-----|--------|
-| Row exists | Row exists, same digest | No change |
-| Row exists | Row exists, different digest | Modified |
-| Row exists | Row missing | Removed |
-| Row missing | Row exists | Added |
+| Old         | New                          | Result    |
+| ----------- | ---------------------------- | --------- |
+| Row exists  | Row exists, same digest      | No change |
+| Row exists  | Row exists, different digest | Modified  |
+| Row exists  | Row missing                  | Removed   |
+| Row missing | Row exists                   | Added     |
 
 ---
 
@@ -536,13 +578,14 @@ src/
 
 ### Memory Budget
 
-| Setting | Default | Rationale |
-|---------|---------|-----------|
-| `max_pk_entries_global` | 10M | ~160MB for PK+digest maps |
-| `max_pk_entries_per_table` | 5M | Prevent single table domination |
-| `sample_size` | 100 | Verbose mode sample limit |
+| Setting                    | Default | Rationale                       |
+| -------------------------- | ------- | ------------------------------- |
+| `max_pk_entries_global`    | 10M     | ~160MB for PK+digest maps       |
+| `max_pk_entries_per_table` | 5M      | Prevent single table domination |
+| `sample_size`              | 100     | Verbose mode sample limit       |
 
 **Memory Calculation:**
+
 - 16 bytes per entry (8-byte PkHash + 8-byte RowDigest)
 - 10M entries ≈ 160MB base + HashMap overhead (~2x) ≈ 320MB max
 
@@ -551,31 +594,39 @@ src/
 ## Edge Cases
 
 ### 1. Column Order Changes
+
 ```sql
 -- Old: (id, name, email)
 -- New: (id, email, name)
 ```
+
 With `--ignore-order`: No change
 Without: Currently reports as separate add/remove (should not report position changes)
 
 ### 2. Case Sensitivity
+
 - Table/column names compared case-insensitively
 
 ### 3. Renamed Tables/Columns
+
 Cannot auto-detect. Shows as remove + add.
 
 ### 4. No Primary Key
+
 - Default: Warn and skip data comparison
 - `--allow-no-pk`: Use all columns as key
 - `--primary-key table:col`: Use specified column
 
 ### 5. Large Tables
+
 Memory limits with `--max-pk-entries`. When exceeded:
+
 - Continue counting rows
 - Mark table as truncated
 - Report count-based estimates
 
 ### 6. Ignored Columns in PK
+
 Error if `--ignore-columns` would ignore a PK column.
 
 ---
@@ -583,6 +634,7 @@ Error if `--ignore-columns` would ignore a PK column.
 ## Testing Strategy
 
 ### Unit Tests
+
 - Schema parsing for each dialect
 - Column comparison logic
 - Index comparison logic
@@ -590,6 +642,7 @@ Error if `--ignore-columns` would ignore a PK column.
 - PK override parsing
 
 ### Integration Tests
+
 - All features across MySQL, PostgreSQL, SQLite
 - Verbose output with samples
 - Primary key override
@@ -599,6 +652,7 @@ Error if `--ignore-columns` would ignore a PK column.
 - No-PK table handling
 
 ### Edge Case Tests
+
 - Empty tables
 - Tables with no PK
 - Composite PKs
@@ -611,6 +665,7 @@ Error if `--ignore-columns` would ignore a PK column.
 ## Example Workflows
 
 ### 1. Pre-Deployment Review
+
 ```bash
 # Compare staging vs production schema, ignoring timestamps
 sql-splitter diff prod.sql staging.sql --schema-only --ignore-columns "*.updated_at"
@@ -620,18 +675,21 @@ sql-splitter diff prod.sql staging.sql --format sql -o migration.sql
 ```
 
 ### 2. Audit Data Changes
+
 ```bash
 # What changed between backups? Show sample PKs
 sql-splitter diff monday.sql friday.sql --data-only --verbose --format json
 ```
 
 ### 3. Compare Tables Without PK
+
 ```bash
 # Specify which column to use as key
 sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
 ```
 
 ### 4. Ignore Audit Columns
+
 ```bash
 # Compare data ignoring auto-updated fields
 sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at,*.modified_by,*.version"
@@ -641,16 +699,16 @@ sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at,*.modified_by,*
 
 ## Effort Estimates (v1.9.1 Features)
 
-| Feature | Effort |
-|---------|--------|
-| `--verbose` samples | 2h |
-| `--primary-key` override | 2h |
-| `--ignore-order` | 1h |
-| Index diff | 4h |
-| `--ignore-columns` glob | 3h |
-| `--allow-no-pk` | 1h |
-| Testing (all dialects) | 6h |
-| **Total** | **~19h** |
+| Feature                  | Effort   |
+| ------------------------ | -------- |
+| `--verbose` samples      | 2h       |
+| `--primary-key` override | 2h       |
+| `--ignore-order`         | 1h       |
+| Index diff               | 4h       |
+| `--ignore-columns` glob  | 3h       |
+| `--allow-no-pk`          | 1h       |
+| Testing (all dialects)   | 6h       |
+| **Total**                | **~19h** |
 
 ---
 

@@ -53,6 +53,7 @@ The convert command has been significantly improved with comprehensive PostgreSQ
 **Issue**: PostgreSQL COPY statements were not being converted to INSERT statements.
 
 **Fix**: Implemented full COPY → INSERT conversion:
+
 - Parses COPY header to extract table and column information
 - Parses tab-separated data block
 - Handles NULL markers (`\N`)
@@ -90,13 +91,13 @@ The convert command has been significantly improved with comprehensive PostgreSQ
 
 ### Low Priority (Rare in Practice)
 
-| Gap | Severity | Notes |
-|-----|----------|-------|
-| Array types | Low | Warning issued, no conversion |
-| EXCLUDE constraints | Low | Very rare in dumps |
-| Partial indexes | Low | `WHERE` clause in indexes |
-| Expression indexes | Low | Rare, would need parsing |
-| INTERVAL types | Low | PostgreSQL → MySQL |
+| Gap                 | Severity | Notes                         |
+| ------------------- | -------- | ----------------------------- |
+| Array types         | Low      | Warning issued, no conversion |
+| EXCLUDE constraints | Low      | Very rare in dumps            |
+| Partial indexes     | Low      | `WHERE` clause in indexes     |
+| Expression indexes  | Low      | Rare, would need parsing      |
+| INTERVAL types      | Low      | PostgreSQL → MySQL            |
 
 ---
 
@@ -104,35 +105,35 @@ The convert command has been significantly improved with comprehensive PostgreSQ
 
 ### MySQL → PostgreSQL (classicmodels.sql)
 
-| Metric | Before | After |
-|--------|--------|-------|
-| Statements converted | 1 | 26+ |
-| Block comments handled | ❌ | ✅ |
-| SMALLINT display width stripped | ❌ | ✅ |
+| Metric                          | Before | After |
+| ------------------------------- | ------ | ----- |
+| Statements converted            | 1      | 26+   |
+| Block comments handled          | ❌     | ✅    |
+| SMALLINT display width stripped | ❌     | ✅    |
 
 ### PostgreSQL → MySQL (pagila-schema.sql)
 
-| Metric | Before | After |
-|--------|--------|-------|
-| CREATE FUNCTION skipped | ❌ | ✅ |
-| CREATE DOMAIN skipped | ❌ | ✅ |
-| CREATE TYPE skipped | ❌ | ✅ |
-| CREATE SEQUENCE skipped | ❌ | ✅ |
-| OWNER TO filtered | ❌ | ✅ |
-| ::type casts stripped | ❌ | ✅ |
-| nextval() removed | ❌ | ✅ |
-| DEFAULT now() converted | ❌ | ✅ |
-| Schema prefix stripped | ❌ | ✅ |
-| TIMESTAMP WITH TIME ZONE | ❌ | ✅ |
+| Metric                   | Before | After |
+| ------------------------ | ------ | ----- |
+| CREATE FUNCTION skipped  | ❌     | ✅    |
+| CREATE DOMAIN skipped    | ❌     | ✅    |
+| CREATE TYPE skipped      | ❌     | ✅    |
+| CREATE SEQUENCE skipped  | ❌     | ✅    |
+| OWNER TO filtered        | ❌     | ✅    |
+| ::type casts stripped    | ❌     | ✅    |
+| nextval() removed        | ❌     | ✅    |
+| DEFAULT now() converted  | ❌     | ✅    |
+| Schema prefix stripped   | ❌     | ✅    |
+| TIMESTAMP WITH TIME ZONE | ❌     | ✅    |
 
 ### PostgreSQL → MySQL (pagila-data.sql)
 
-| Metric | Before | After |
-|--------|--------|-------|
-| COPY → INSERT | ❌ | ✅ |
-| NULL handling (\N) | ❌ | ✅ |
-| Escape sequences | ❌ | ✅ |
-| Batched inserts | N/A | ✅ (100 rows/INSERT) |
+| Metric             | Before | After                |
+| ------------------ | ------ | -------------------- |
+| COPY → INSERT      | ❌     | ✅                   |
+| NULL handling (\N) | ❌     | ✅                   |
+| Escape sequences   | ❌     | ✅                   |
+| Batched inserts    | N/A    | ✅ (100 rows/INSERT) |
 
 ---
 

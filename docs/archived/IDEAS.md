@@ -17,6 +17,7 @@ sql-splitter merge tables/ -o restored.sql --auto-order  # FK dependency orderin
 ```
 
 **Use cases:**
+
 - Reconstruct full dump after editing individual tables
 - Create partial dumps from subset of tables
 - Reorder tables for dependency-aware imports
@@ -39,12 +40,14 @@ sql-splitter query dump.sql --table orders --where "total > 1000 AND status = 'c
 ```
 
 **Key features:**
+
 - Stream processing (no full file load)
 - Support basic WHERE conditions (=, >, <, LIKE, IN, AND, OR)
 - Column projection (select subset of columns)
 - Output as SQL INSERT statements or CSV
 
 **Use cases:**
+
 - GDPR data extraction ("give me all data for user X")
 - Create development subsets from production dumps
 - Extract specific records for debugging
@@ -75,12 +78,14 @@ sql-splitter sample dump.sql -o dev.sql --percent 5 --seed 42
 ```
 
 **Key features:**
+
 - Percentage-based or fixed-count sampling
 - `--preserve-relations`: Follow FK references to maintain integrity
 - Deterministic sampling with `--seed`
 - Stratified sampling options
 
 **Use cases:**
+
 - Create lightweight dev/test databases
 - Generate CI test fixtures
 - Reduce dump size for local development
@@ -109,6 +114,7 @@ sql-splitter convert dump.sql -o converted.sql --to postgres
 ```
 
 **Key features:**
+
 - Identifier quoting conversion (backticks ↔ double quotes)
 - Data type mapping (AUTO_INCREMENT ↔ SERIAL, etc.)
 - Syntax transformation (LIMIT/OFFSET, boolean literals, etc.)
@@ -118,6 +124,7 @@ sql-splitter convert dump.sql -o converted.sql --to postgres
 **See:** [Detailed feasibility analysis](CONVERT_FEASIBILITY.md)
 
 **Use cases:**
+
 - Database migration between platforms
 - Import third-party dumps into different database
 - Standardize dump format across team
@@ -145,6 +152,7 @@ sql-splitter diff old.sql new.sql --schema-only
 ```
 
 **Key features:**
+
 - Schema diff: added/removed/modified tables, columns, indexes
 - Data diff: added/removed/modified rows (by primary key)
 - Generate ALTER TABLE statements for schema changes
@@ -152,11 +160,13 @@ sql-splitter diff old.sql new.sql --schema-only
 - Summary statistics
 
 **Output formats:**
+
 - Human-readable diff
 - SQL migration script
 - JSON for programmatic use
 
 **Use cases:**
+
 - Review changes before applying updates
 - Generate migration scripts
 - Audit data changes between backups
@@ -185,6 +195,7 @@ sql-splitter redact dump.sql -o safe.sql \
 ```
 
 **Config file example (redact.yaml):**
+
 ```yaml
 rules:
   - pattern: "*.email"
@@ -202,6 +213,7 @@ rules:
 ```
 
 **Strategies:**
+
 - `null` — Replace with NULL
 - `constant` — Replace with fixed value
 - `hash` — SHA256 hash (deterministic, preserves uniqueness)
@@ -210,6 +222,7 @@ rules:
 - `shuffle` — Randomly swap values within column
 
 **Use cases:**
+
 - Create shareable test/demo datasets
 - GDPR compliance for development environments
 - Security audits and penetration testing
@@ -221,14 +234,14 @@ rules:
 
 ## Priority Matrix
 
-| Feature | Value | Complexity | Recommendation |
-|---------|-------|------------|----------------|
-| Merge | High | Low | **Do first** |
-| Sample | High | Medium | Do second |
-| Redact | High | Medium-High | High value for enterprise |
-| Query | Medium | Medium-High | Nice to have |
-| Convert | Medium | High | Complex but unique |
-| Diff | Medium | High | Consider later |
+| Feature | Value  | Complexity  | Recommendation            |
+| ------- | ------ | ----------- | ------------------------- |
+| Merge   | High   | Low         | **Do first**              |
+| Sample  | High   | Medium      | Do second                 |
+| Redact  | High   | Medium-High | High value for enterprise |
+| Query   | Medium | Medium-High | Nice to have              |
+| Convert | Medium | High        | Complex but unique        |
+| Diff    | Medium | High        | Consider later            |
 
 ---
 

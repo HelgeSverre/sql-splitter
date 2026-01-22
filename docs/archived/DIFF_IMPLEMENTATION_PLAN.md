@@ -13,11 +13,13 @@ This document provides a concrete implementation plan for the `diff` command, bu
 The diff command compares two SQL dumps and reports schema + data differences.
 
 **v1.9.0 (Released):** Core functionality
+
 - Schema diff with migration SQL generation
 - Data summary (counts per table)
 - Memory-bounded operation
 
 **v1.9.1 (In Progress):** Enhanced features
+
 - Verbose mode with PK samples
 - Primary key override
 - Column order ignoring
@@ -29,17 +31,17 @@ The diff command compares two SQL dumps and reports schema + data differences.
 
 ## v1.9.0 Completed Scope
 
-| Component | Status |
-|-----------|--------|
-| Schema comparison (tables, columns, PKs, FKs) | ✅ Done |
-| Schema migration SQL (CREATE/DROP/ALTER) | ✅ Done |
-| Data row counts (added/removed/modified) | ✅ Done |
-| Memory-bounded PK tracking | ✅ Done |
-| All 3 dialects (MySQL, PostgreSQL, SQLite) | ✅ Done |
-| Output formats (text, json, sql) | ✅ Done |
+| Component                                                   | Status  |
+| ----------------------------------------------------------- | ------- |
+| Schema comparison (tables, columns, PKs, FKs)               | ✅ Done |
+| Schema migration SQL (CREATE/DROP/ALTER)                    | ✅ Done |
+| Data row counts (added/removed/modified)                    | ✅ Done |
+| Memory-bounded PK tracking                                  | ✅ Done |
+| All 3 dialects (MySQL, PostgreSQL, SQLite)                  | ✅ Done |
+| Output formats (text, json, sql)                            | ✅ Done |
 | CLI flags (--schema-only, --data-only, --tables, --exclude) | ✅ Done |
-| PostgreSQL COPY data parsing | ✅ Done |
-| Compressed input support | ✅ Done |
+| PostgreSQL COPY data parsing                                | ✅ Done |
+| Compressed input support                                    | ✅ Done |
 
 ---
 
@@ -74,6 +76,7 @@ pub struct TableDataDiff {
 ```
 
 **Sample Collection Logic:**
+
 - During `compute_diff()`, collect PKs when iterating through maps
 - Format PK as string: single value or `(val1, val2)` for composite
 - Limit to `sample_size` (default 100)
@@ -94,6 +97,7 @@ pub struct TableDataDiff {
 | 2.5 Tests | 0.5h | All dialects |
 
 **Parsing Logic:**
+
 ```rust
 // Parse "users:email,orders:id+user_id"
 fn parse_pk_overrides(s: &str) -> HashMap<String, Vec<String>> {
@@ -121,6 +125,7 @@ fn parse_pk_overrides(s: &str) -> HashMap<String, Vec<String>> {
 | 3.3 Tests | 0.4h | All dialects |
 
 **Current vs New Comparison:**
+
 ```rust
 // Current: ordered comparison detects position changes
 // New with --ignore-order: set comparison
@@ -153,6 +158,7 @@ fn compare_tables(old: &TableSchema, new: &TableSchema, ignore_order: bool) {
 | 4.6 Tests | 0.5h | All dialects |
 
 **Schema Types:**
+
 ```rust
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexDef {
@@ -164,6 +170,7 @@ pub struct IndexDef {
 ```
 
 **Parsing Patterns:**
+
 ```sql
 -- MySQL inline
 INDEX idx_name (col1, col2)
@@ -196,6 +203,7 @@ CREATE INDEX idx_name ON table USING gin (col1);
 | 5.6 Tests | 0.5h | All dialects |
 
 **Pattern Matching:**
+
 ```rust
 use glob::Pattern;
 
@@ -211,6 +219,7 @@ fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool
 ```
 
 **Data Comparison Changes:**
+
 - When building row digest, exclude ignored column values
 - When extracting PK, error if any PK column is ignored
 
@@ -229,6 +238,7 @@ fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool
 | 6.4 Tests | 0.25h | All dialects |
 
 **Warning Structure:**
+
 ```rust
 #[derive(Debug, Serialize)]
 pub struct Warning {
@@ -260,26 +270,26 @@ See "Test Plan" section below.
 
 Each feature must be tested across all 3 dialects where applicable:
 
-| Feature | MySQL | PostgreSQL | SQLite | Notes |
-|---------|-------|------------|--------|-------|
-| Verbose samples | ✅ | ✅ | ✅ | All dialects |
-| Verbose + COPY data | - | ✅ | - | PostgreSQL only |
-| PK override single col | ✅ | ✅ | ✅ | All dialects |
-| PK override composite | ✅ | ✅ | ✅ | All dialects |
-| PK override invalid col | ✅ | - | - | Error handling |
-| Ignore order - no change | ✅ | ✅ | ✅ | All dialects |
-| Ignore order - reordered | ✅ | ✅ | ✅ | All dialects |
-| Index diff - inline | ✅ | ✅ | ✅ | All dialects |
-| Index diff - CREATE INDEX | ✅ | ✅ | ✅ | All dialects |
-| Index diff - UNIQUE | ✅ | ✅ | ✅ | All dialects |
-| Index diff - type (GIN) | - | ✅ | - | PostgreSQL only |
-| Ignore columns - single | ✅ | ✅ | ✅ | All dialects |
-| Ignore columns - glob | ✅ | ✅ | ✅ | All dialects |
-| Ignore columns - PK error | ✅ | - | - | Error handling |
-| No-PK warning | ✅ | ✅ | ✅ | All dialects |
-| Allow-no-pk | ✅ | ✅ | ✅ | All dialects |
-| JSON output with new fields | ✅ | - | - | One dialect sufficient |
-| SQL output with indexes | ✅ | ✅ | - | MySQL + PostgreSQL |
+| Feature                     | MySQL | PostgreSQL | SQLite | Notes                  |
+| --------------------------- | ----- | ---------- | ------ | ---------------------- |
+| Verbose samples             | ✅    | ✅         | ✅     | All dialects           |
+| Verbose + COPY data         | -     | ✅         | -      | PostgreSQL only        |
+| PK override single col      | ✅    | ✅         | ✅     | All dialects           |
+| PK override composite       | ✅    | ✅         | ✅     | All dialects           |
+| PK override invalid col     | ✅    | -          | -      | Error handling         |
+| Ignore order - no change    | ✅    | ✅         | ✅     | All dialects           |
+| Ignore order - reordered    | ✅    | ✅         | ✅     | All dialects           |
+| Index diff - inline         | ✅    | ✅         | ✅     | All dialects           |
+| Index diff - CREATE INDEX   | ✅    | ✅         | ✅     | All dialects           |
+| Index diff - UNIQUE         | ✅    | ✅         | ✅     | All dialects           |
+| Index diff - type (GIN)     | -     | ✅         | -      | PostgreSQL only        |
+| Ignore columns - single     | ✅    | ✅         | ✅     | All dialects           |
+| Ignore columns - glob       | ✅    | ✅         | ✅     | All dialects           |
+| Ignore columns - PK error   | ✅    | -          | -      | Error handling         |
+| No-PK warning               | ✅    | ✅         | ✅     | All dialects           |
+| Allow-no-pk                 | ✅    | ✅         | ✅     | All dialects           |
+| JSON output with new fields | ✅    | -          | -      | One dialect sufficient |
+| SQL output with indexes     | ✅    | ✅         | -      | MySQL + PostgreSQL     |
 
 ### Integration Tests to Add
 
@@ -375,35 +385,35 @@ Each feature must be tested across all 3 dialects where applicable:
 
 ## File Changes Summary
 
-| File | Changes |
-|------|---------|
-| `src/cmd/diff.rs` | Add CLI args: `--verbose`, `--primary-key`, `--ignore-order`, `--ignore-columns`, `--allow-no-pk` |
-| `src/differ/mod.rs` | Add fields to DiffConfig, add warnings to DiffResult |
-| `src/differ/data.rs` | Sample collection, PK override, ignore columns in digest, no-PK handling |
-| `src/differ/schema.rs` | Index comparison, ignore order, ignore columns in schema diff |
-| `src/differ/output/text.rs` | Verbose samples, index changes, warnings |
-| `src/differ/output/json.rs` | Sample PKs, indexes, warnings |
-| `src/differ/output/sql.rs` | CREATE INDEX, DROP INDEX statements |
-| `src/schema/mod.rs` | Add `IndexDef`, add `indexes` to TableSchema |
-| `src/schema/ddl.rs` | Parse INDEX in CREATE TABLE, parse CREATE INDEX |
-| `Cargo.toml` | Add `glob` dependency |
-| `tests/diff_integration_test.rs` | ~40 new tests |
-| `tests/diff_unit_test.rs` | ~15 new tests |
+| File                             | Changes                                                                                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `src/cmd/diff.rs`                | Add CLI args: `--verbose`, `--primary-key`, `--ignore-order`, `--ignore-columns`, `--allow-no-pk` |
+| `src/differ/mod.rs`              | Add fields to DiffConfig, add warnings to DiffResult                                              |
+| `src/differ/data.rs`             | Sample collection, PK override, ignore columns in digest, no-PK handling                          |
+| `src/differ/schema.rs`           | Index comparison, ignore order, ignore columns in schema diff                                     |
+| `src/differ/output/text.rs`      | Verbose samples, index changes, warnings                                                          |
+| `src/differ/output/json.rs`      | Sample PKs, indexes, warnings                                                                     |
+| `src/differ/output/sql.rs`       | CREATE INDEX, DROP INDEX statements                                                               |
+| `src/schema/mod.rs`              | Add `IndexDef`, add `indexes` to TableSchema                                                      |
+| `src/schema/ddl.rs`              | Parse INDEX in CREATE TABLE, parse CREATE INDEX                                                   |
+| `Cargo.toml`                     | Add `glob` dependency                                                                             |
+| `tests/diff_integration_test.rs` | ~40 new tests                                                                                     |
+| `tests/diff_unit_test.rs`        | ~15 new tests                                                                                     |
 
 ---
 
 ## Effort Summary
 
-| Phase | Tasks | Effort |
-|-------|-------|--------|
-| Phase 1 | Verbose samples | 2h |
-| Phase 2 | PK override | 2h |
-| Phase 3 | Ignore order | 1h |
-| Phase 4 | Index diff | 4h |
-| Phase 5 | Ignore columns | 3h |
-| Phase 6 | No-PK handling | 1h |
-| Phase 7 | Testing | 6h |
-| **Total** | | **~19h** |
+| Phase     | Tasks           | Effort   |
+| --------- | --------------- | -------- |
+| Phase 1   | Verbose samples | 2h       |
+| Phase 2   | PK override     | 2h       |
+| Phase 3   | Ignore order    | 1h       |
+| Phase 4   | Index diff      | 4h       |
+| Phase 5   | Ignore columns  | 3h       |
+| Phase 6   | No-PK handling  | 1h       |
+| Phase 7   | Testing         | 6h       |
+| **Total** |                 | **~19h** |
 
 ---
 
@@ -423,20 +433,20 @@ Recommended order for incremental development:
 
 ## Dependencies
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `glob` | 0.3 | Pattern matching for `--ignore-columns` |
+| Crate  | Version | Purpose                                 |
+| ------ | ------- | --------------------------------------- |
+| `glob` | 0.3     | Pattern matching for `--ignore-columns` |
 
 ---
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
+| Risk                     | Mitigation                                       |
+| ------------------------ | ------------------------------------------------ |
 | Index parsing complexity | Start with common patterns, document limitations |
-| Glob pattern edge cases | Use well-tested `glob` crate |
-| Sample memory usage | Hard cap on sample count |
-| PK override validation | Validate columns exist before scanning |
+| Glob pattern edge cases  | Use well-tested `glob` crate                     |
+| Sample memory usage      | Hard cap on sample count                         |
+| PK override validation   | Validate columns exist before scanning           |
 
 ---
 

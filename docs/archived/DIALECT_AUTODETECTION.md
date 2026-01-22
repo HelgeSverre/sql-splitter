@@ -20,38 +20,39 @@ The detector reads the first 8KB of the file and uses a weighted scoring system 
 
 ### PostgreSQL Indicators
 
-| Marker | Confidence | Score |
-|--------|------------|-------|
-| `PostgreSQL database dump` | High | +10 |
-| `pg_dump` | High | +10 |
-| `COPY ... FROM stdin` | Medium | +5 |
-| `search_path` | Medium | +5 |
-| `$$` (dollar-quoting) | Low | +2 |
-| `CREATE EXTENSION` | Low | +2 |
+| Marker                     | Confidence | Score |
+| -------------------------- | ---------- | ----- |
+| `PostgreSQL database dump` | High       | +10   |
+| `pg_dump`                  | High       | +10   |
+| `COPY ... FROM stdin`      | Medium     | +5    |
+| `search_path`              | Medium     | +5    |
+| `$$` (dollar-quoting)      | Low        | +2    |
+| `CREATE EXTENSION`         | Low        | +2    |
 
 ### MySQL/MariaDB Indicators
 
-| Marker | Confidence | Score |
-|--------|------------|-------|
-| `MySQL dump` | High | +10 |
-| `MariaDB dump` | High | +10 |
-| `/*!40...` or `/*!50...` (conditional comments) | Medium | +5 |
-| `LOCK TABLES` | Medium | +5 |
-| Backtick character (`` ` ``) | Low | +2 |
+| Marker                                          | Confidence | Score |
+| ----------------------------------------------- | ---------- | ----- |
+| `MySQL dump`                                    | High       | +10   |
+| `MariaDB dump`                                  | High       | +10   |
+| `/*!40...` or `/*!50...` (conditional comments) | Medium     | +5    |
+| `LOCK TABLES`                                   | Medium     | +5    |
+| Backtick character (`` ` ``)                    | Low        | +2    |
 
 ### SQLite Indicators
 
-| Marker | Confidence | Score |
-|--------|------------|-------|
-| `SQLite` | High | +10 |
-| `PRAGMA` | Medium | +5 |
-| `BEGIN TRANSACTION` | Medium | +5 |
+| Marker              | Confidence | Score |
+| ------------------- | ---------- | ----- |
+| `SQLite`            | High       | +10   |
+| `PRAGMA`            | Medium     | +5    |
+| `BEGIN TRANSACTION` | Medium     | +5    |
 
 ## Scoring
 
 The dialect with the highest score wins. If no markers are found (score = 0), MySQL is used as the default since it's the most common format.
 
 Confidence levels reported to the user:
+
 - **High confidence**: Score ≥ 10
 - **Medium confidence**: Score ≥ 5
 - **Low confidence**: Score < 5

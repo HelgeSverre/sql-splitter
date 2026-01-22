@@ -15,14 +15,14 @@ Integrating DuckDB as an embedded query engine for sql-splitter is technically s
 
 ### Key Findings
 
-| Aspect | Assessment | Notes |
-|--------|------------|-------|
-| **Licensing** | ✅ MIT License | Fully compatible with sql-splitter's MIT license |
-| **Rust Bindings** | ✅ Excellent | Official crate, 811 GitHub stars, 1.1M+ downloads |
-| **Embedding** | ✅ Zero dependencies | `bundled` feature compiles DuckDB into binary |
-| **Binary Size Impact** | ⚠️ +15-25 MB | Significant but acceptable for the value |
-| **Build Time Impact** | ⚠️ +2-5 minutes | First build only, subsequent builds cached |
-| **Code Reuse** | ✅ Significant | 60-70% of convert infra can be reused |
+| Aspect                 | Assessment           | Notes                                             |
+| ---------------------- | -------------------- | ------------------------------------------------- |
+| **Licensing**          | ✅ MIT License       | Fully compatible with sql-splitter's MIT license  |
+| **Rust Bindings**      | ✅ Excellent         | Official crate, 811 GitHub stars, 1.1M+ downloads |
+| **Embedding**          | ✅ Zero dependencies | `bundled` feature compiles DuckDB into binary     |
+| **Binary Size Impact** | ⚠️ +15-25 MB         | Significant but acceptable for the value          |
+| **Build Time Impact**  | ⚠️ +2-5 minutes      | First build only, subsequent builds cached        |
+| **Code Reuse**         | ✅ Significant       | 60-70% of convert infra can be reused             |
 
 ---
 
@@ -52,38 +52,38 @@ use duckdb::{Connection, params, Result};
 fn query_dump() -> Result<()> {
     // In-memory database (ephemeral)
     let conn = Connection::open_in_memory()?;
-    
+
     // Or persistent file
     let conn = Connection::open("/path/to/cache.duckdb")?;
-    
+
     // Execute DDL
     conn.execute("CREATE TABLE users (id INT, name TEXT)", [])?;
-    
+
     // Bulk insert via Appender (fast!)
     let mut appender = conn.appender("users")?;
     appender.append_rows([[1, "Alice"], [2, "Bob"]])?;
-    
+
     // Query
     let mut stmt = conn.prepare("SELECT * FROM users WHERE id > ?")?;
     let rows = stmt.query_map(params![0], |row| {
         Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
     })?;
-    
+
     for row in rows {
         println!("{:?}", row?);
     }
-    
+
     Ok(())
 }
 ```
 
 ### Feature Flags We Need
 
-| Feature | Purpose | Impact |
-|---------|---------|--------|
+| Feature   | Purpose                    | Impact                                  |
+| --------- | -------------------------- | --------------------------------------- |
 | `bundled` | Compile DuckDB from source | Required for zero-dependency deployment |
-| `json` | JSON output format | Nice to have |
-| `parquet` | Parquet export (future) | For v1.12.x Parquet export |
+| `json`    | JSON output format         | Nice to have                            |
+| `parquet` | Parquet export (future)    | For v1.12.x Parquet export              |
 
 ---
 
@@ -99,14 +99,14 @@ Copyright 2021-2025 Stichting DuckDB Foundation
 
 **Implications for sql-splitter:**
 
-| Requirement | Satisfied? |
-|-------------|------------|
+| Requirement                        | Satisfied?                       |
+| ---------------------------------- | -------------------------------- |
 | Include copyright notice in binary | ✅ Yes (in LICENSE or --version) |
-| Include license text in docs | ✅ Yes |
-| Commercial use allowed | ✅ Yes |
-| Modification allowed | ✅ Yes |
-| Distribution allowed | ✅ Yes |
-| No liability clause | ✅ Acceptable |
+| Include license text in docs       | ✅ Yes                           |
+| Commercial use allowed             | ✅ Yes                           |
+| Modification allowed               | ✅ Yes                           |
+| Distribution allowed               | ✅ Yes                           |
+| No liability clause                | ✅ Acceptable                    |
 
 **Action Required**: Add DuckDB attribution to LICENSE file or `--version` output.
 
@@ -146,11 +146,11 @@ Copyright 2021-2025 Stichting DuckDB Foundation
 
 ### Operating Modes
 
-| Mode | Flag | Storage | Use Case |
-|------|------|---------|----------|
-| **In-memory** | (default) | RAM only | Quick one-off queries |
-| **Disk** | `--disk` | Temp file | Large dumps (>4GB) |
-| **Cached** | `--cache` | Persistent | Repeated queries on same dump |
+| Mode          | Flag      | Storage    | Use Case                      |
+| ------------- | --------- | ---------- | ----------------------------- |
+| **In-memory** | (default) | RAM only   | Quick one-off queries         |
+| **Disk**      | `--disk`  | Temp file  | Large dumps (>4GB)            |
+| **Cached**    | `--cache` | Persistent | Repeated queries on same dump |
 
 ### Memory Management
 
@@ -183,25 +183,25 @@ fn determine_mode(file_size: u64, explicit_mode: Option<Mode>) -> Mode {
 
 ### Existing Infrastructure to Reuse
 
-| Component | Location | Reuse for DuckDB |
-|-----------|----------|------------------|
-| SQL Parser | `src/parser/mod.rs` | ✅ Statement parsing, table extraction |
-| Dialect detection | `src/parser/mod.rs` | ✅ Auto-detect source dialect |
-| COPY→INSERT | `src/convert/copy_to_insert.rs` | ✅ PostgreSQL COPY handling |
-| Type mapping | `src/convert/types.rs` | ✅ Convert MySQL/PG types to DuckDB |
-| Progress tracking | `src/progress.rs` | ✅ Import progress bar |
-| Compression | `src/splitter/mod.rs` | ✅ Read .gz, .bz2, .xz, .zstd |
+| Component         | Location                        | Reuse for DuckDB                       |
+| ----------------- | ------------------------------- | -------------------------------------- |
+| SQL Parser        | `src/parser/mod.rs`             | ✅ Statement parsing, table extraction |
+| Dialect detection | `src/parser/mod.rs`             | ✅ Auto-detect source dialect          |
+| COPY→INSERT       | `src/convert/copy_to_insert.rs` | ✅ PostgreSQL COPY handling            |
+| Type mapping      | `src/convert/types.rs`          | ✅ Convert MySQL/PG types to DuckDB    |
+| Progress tracking | `src/progress.rs`               | ✅ Import progress bar                 |
+| Compression       | `src/splitter/mod.rs`           | ✅ Read .gz, .bz2, .xz, .zstd          |
 
 ### New Code Required
 
-| Component | Effort | Description |
-|-----------|--------|-------------|
-| DuckDB loader | 6-8h | Convert parsed statements to DuckDB |
-| Query executor | 3-4h | Run user query, handle results |
-| Output formatter | 3-4h | Table, JSON, CSV output |
-| CLI integration | 2-3h | Argument parsing, modes |
-| Cache manager | 3-4h | --cache flag implementation |
-| REPL mode | 4-6h | Interactive query session |
+| Component        | Effort | Description                         |
+| ---------------- | ------ | ----------------------------------- |
+| DuckDB loader    | 6-8h   | Convert parsed statements to DuckDB |
+| Query executor   | 3-4h   | Run user query, handle results      |
+| Output formatter | 3-4h   | Table, JSON, CSV output             |
+| CLI integration  | 2-3h   | Argument parsing, modes             |
+| Cache manager    | 3-4h   | --cache flag implementation         |
+| REPL mode        | 4-6h   | Interactive query session           |
 
 **Total new code: ~20-24 hours** (down from original 28h estimate)
 
@@ -221,27 +221,27 @@ fn to_duckdb_type(mysql_type: &str) -> &str {
         "FLOAT" => "FLOAT",
         "DOUBLE" => "DOUBLE",
         "DECIMAL" | "NUMERIC" => "DECIMAL",
-        
+
         // String
         "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => "VARCHAR",
-        
+
         // Date/Time
         "DATE" => "DATE",
         "TIME" => "TIME",
         "DATETIME" | "TIMESTAMP" => "TIMESTAMP",
-        
+
         // Binary
         "BLOB" | "BINARY" | "VARBINARY" => "BLOB",
-        
+
         // MySQL-specific
         "ENUM" => "VARCHAR",  // Warn: enum semantics lost
         "SET" => "VARCHAR",
-        
+
         // PostgreSQL-specific
         "SERIAL" => "INTEGER",
         "BIGSERIAL" => "BIGINT",
         "BYTEA" => "BLOB",
-        
+
         _ => mysql_type, // Pass through unknown types
     }
 }
@@ -257,10 +257,10 @@ fn to_duckdb_type(mysql_type: &str) -> &str {
 fn import_dump(conn: &Connection, dump_path: &Path) -> Result<ImportStats> {
     let mut parser = Parser::new(dump_path)?;
     let mut stats = ImportStats::default();
-    
+
     while let Some(stmt) = parser.next_statement()? {
         let (stmt_type, table) = Parser::parse_statement(&stmt);
-        
+
         match stmt_type {
             StatementType::CreateTable => {
                 let duckdb_sql = convert_create_table(&stmt)?;
@@ -284,7 +284,7 @@ fn import_dump(conn: &Connection, dump_path: &Path) -> Result<ImportStats> {
             _ => {} // Skip other statements
         }
     }
-    
+
     Ok(stats)
 }
 ```
@@ -296,11 +296,11 @@ For bulk data loading, DuckDB's Appender API is significantly faster:
 ```rust
 fn import_with_appender(conn: &Connection, table: &str, rows: Vec<Vec<Value>>) -> Result<()> {
     let mut appender = conn.appender(table)?;
-    
+
     for row in rows {
         appender.append_row(row.iter().map(|v| v.as_duckdb_value()))?;
     }
-    
+
     appender.flush()?;
     Ok(())
 }
@@ -323,10 +323,10 @@ $ ls -lh target/release/sql-splitter
 
 Based on libduckdb-sys and similar projects:
 
-| Component | Size Impact |
-|-----------|-------------|
-| DuckDB core (bundled) | +15-20 MB |
-| Rust bindings | +1-2 MB |
+| Component               | Size Impact  |
+| ----------------------- | ------------ |
+| DuckDB core (bundled)   | +15-20 MB    |
+| Rust bindings           | +1-2 MB      |
 | Extensions (if enabled) | +2-5 MB each |
 
 **Projected binary size: ~22-30 MB**
@@ -363,7 +363,7 @@ fn compute_cache_key(dump_path: &Path) -> String {
         metadata.len(),
         metadata.modified()?.duration_since(UNIX_EPOCH)?.as_secs()
     );
-    
+
     let mut hasher = Sha256::new();
     hasher.update(key_input.as_bytes());
     hex::encode(hasher.finalize())
@@ -376,7 +376,7 @@ fn compute_cache_key(dump_path: &Path) -> String {
 fn is_cache_valid(dump_path: &Path, cache_path: &Path) -> bool {
     let dump_mtime = fs::metadata(dump_path).ok()?.modified().ok()?;
     let cache_mtime = fs::metadata(cache_path).ok()?.modified().ok()?;
-    
+
     cache_mtime > dump_mtime
 }
 ```
@@ -442,7 +442,8 @@ Examples:
 
 ### 9.1 Quick Analytics Without Database Setup
 
-**Before**: 
+**Before**:
+
 ```bash
 # Need to restore dump to run analytics
 createdb tempdb
@@ -452,6 +453,7 @@ dropdb tempdb
 ```
 
 **After**:
+
 ```bash
 sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 ```
@@ -474,7 +476,7 @@ sql-splitter query dump.sql "SELECT * FROM users LIMIT 10"
 ```bash
 # Window functions
 sql-splitter query dump.sql "
-  SELECT 
+  SELECT
     user_id,
     order_total,
     SUM(order_total) OVER (PARTITION BY user_id) as lifetime_value
@@ -537,20 +539,20 @@ sql-splitter redact dump.sql --config redact.yaml | \
 
 ### Technical Risks
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| DuckDB type incompatibility | Medium | Medium | Comprehensive type mapping, skip unsupported |
-| Large dump OOM | Low | High | Auto disk mode for >2GB dumps |
-| Build time increase | High | Low | First build only, document in README |
-| Binary size concerns | Medium | Low | Optional feature flag |
+| Risk                        | Likelihood | Impact | Mitigation                                   |
+| --------------------------- | ---------- | ------ | -------------------------------------------- |
+| DuckDB type incompatibility | Medium     | Medium | Comprehensive type mapping, skip unsupported |
+| Large dump OOM              | Low        | High   | Auto disk mode for >2GB dumps                |
+| Build time increase         | High       | Low    | First build only, document in README         |
+| Binary size concerns        | Medium     | Low    | Optional feature flag                        |
 
 ### Operational Risks
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| DuckDB breaking changes | Low | Medium | Pin version, test on upgrades |
-| ICU extension missing | Medium | Low | Document, allow runtime load |
-| Cross-platform issues | Low | Low | Bundled feature handles this |
+| Risk                    | Likelihood | Impact | Mitigation                    |
+| ----------------------- | ---------- | ------ | ----------------------------- |
+| DuckDB breaking changes | Low        | Medium | Pin version, test on upgrades |
+| ICU extension missing   | Medium     | Low    | Document, allow runtime load  |
+| Cross-platform issues   | Low        | Low    | Bundled feature handles this  |
 
 ---
 
@@ -591,13 +593,13 @@ sql-splitter redact dump.sql --config redact.yaml | \
 
 **DuckDB integration is highly recommended** for sql-splitter v1.12.0:
 
-| Factor | Score | Notes |
-|--------|-------|-------|
-| Technical feasibility | ⭐⭐⭐⭐⭐ | Excellent Rust bindings, bundled option |
-| Licensing | ⭐⭐⭐⭐⭐ | MIT license, fully compatible |
-| Code reuse | ⭐⭐⭐⭐ | 60-70% of convert infrastructure reusable |
-| User value | ⭐⭐⭐⭐⭐ | Transforms sql-splitter into analytics platform |
-| Maintenance burden | ⭐⭐⭐⭐ | Official crate, stable API |
+| Factor                | Score      | Notes                                           |
+| --------------------- | ---------- | ----------------------------------------------- |
+| Technical feasibility | ⭐⭐⭐⭐⭐ | Excellent Rust bindings, bundled option         |
+| Licensing             | ⭐⭐⭐⭐⭐ | MIT license, fully compatible                   |
+| Code reuse            | ⭐⭐⭐⭐   | 60-70% of convert infrastructure reusable       |
+| User value            | ⭐⭐⭐⭐⭐ | Transforms sql-splitter into analytics platform |
+| Maintenance burden    | ⭐⭐⭐⭐   | Official crate, stable API                      |
 
 ### Next Steps
 
@@ -617,22 +619,26 @@ sql-splitter redact dump.sql --config redact.yaml | \
 ### Option 1: DuckDB (Recommended)
 
 **Pros:**
+
 - Full SQL support (JOINs, aggregations, window functions)
 - 100x faster than text processing
 - Excellent Rust bindings
 - Zero external dependencies with `bundled`
 
 **Cons:**
+
 - Binary size increase (~20 MB)
 - Build time increase (~3 min first build)
 
 ### Option 2: Custom Query Engine
 
 **Pros:**
+
 - No external dependencies
 - Full control
 
 **Cons:**
+
 - 100+ hours to implement basic SQL
 - Would never match DuckDB's features
 - Ongoing maintenance burden
@@ -640,10 +646,12 @@ sql-splitter redact dump.sql --config redact.yaml | \
 ### Option 3: Shell Out to DuckDB CLI
 
 **Pros:**
+
 - Simple implementation
 - Already tested
 
 **Cons:**
+
 - Requires DuckDB CLI installed
 - Awkward error handling
 - Data transfer overhead
@@ -673,22 +681,22 @@ impl QueryEngine {
             stats: ImportStats::default(),
         })
     }
-    
+
     pub fn new_from_file(path: &Path) -> DuckResult<Self> {
         Ok(Self {
             conn: Connection::open(path)?,
             stats: ImportStats::default(),
         })
     }
-    
+
     pub fn import_dump(&mut self, path: &Path, dialect: SqlDialect) -> anyhow::Result<&ImportStats> {
         let converter = Converter::new(dialect, SqlDialect::Postgres); // DuckDB is PG-compatible
-        
+
         let mut parser = Parser::new_with_dialect(path, dialect)?;
-        
+
         while let Some(stmt) = parser.next_statement()? {
             let (stmt_type, table) = Parser::parse_statement(&stmt);
-            
+
             match stmt_type {
                 StatementType::CreateTable => {
                     let converted = converter.convert_statement(&stmt)?;
@@ -709,14 +717,14 @@ impl QueryEngine {
                 _ => {} // Skip other statement types
             }
         }
-        
+
         Ok(&self.stats)
     }
-    
+
     pub fn query(&self, sql: &str) -> DuckResult<QueryResult> {
         let mut stmt = self.conn.prepare(sql)?;
         let column_names: Vec<String> = stmt.column_names();
-        
+
         let rows: Vec<Vec<duckdb::types::Value>> = stmt
             .query_map([], |row| {
                 let mut values = Vec::new();
@@ -726,7 +734,7 @@ impl QueryEngine {
                 Ok(values)
             })?
             .collect::<DuckResult<Vec<_>>>()?;
-        
+
         Ok(QueryResult { column_names, rows })
     }
 }

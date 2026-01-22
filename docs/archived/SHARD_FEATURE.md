@@ -9,6 +9,7 @@
 The `shard` command extracts tenant-specific data from multi-tenant SQL dumps. It resolves FK chains to include all data belonging to a tenant, even from tables that don't have a direct tenant column.
 
 This is a common need in multi-tenant SaaS applications where:
+
 - Most tables have a `company_id` or `tenant_id` column
 - Some tables (pivot/junction, child tables) don't have the tenant column directly
 - You need to extract one tenant's data for testing, debugging, or migration
@@ -19,21 +20,21 @@ This is a common need in multi-tenant SaaS applications where:
 
 Analysis of two production Laravel/MySQL multi-tenant applications revealed:
 
-| Metric | App 1 | App 2 |
-|--------|-------|-------|
-| Total tables | 52 | 125 |
-| Tables with `company_id` | 22 (42%) | 44 (35%) |
+| Metric                      | App 1    | App 2    |
+| --------------------------- | -------- | -------- |
+| Total tables                | 52       | 125      |
+| Tables with `company_id`    | 22 (42%) | 44 (35%) |
 | Tables without `company_id` | 30 (58%) | 81 (65%) |
 
 **Tables without direct tenant column fall into categories:**
 
-| Category | Examples | How to Handle |
-|----------|----------|---------------|
-| **Child tables** | `invoice_items` → `invoices` | Follow FK to tenant-owned parent |
-| **Junction/pivot** | `permission_role`, `role_user` | Include if either FK hits tenant data |
-| **Self-referential** | `comments.parent_id`, `folders.parent_id` | Closure over parent chain |
-| **Lookup/reference** | `permissions`, `roles`, `migrations` | Include fully or skip |
-| **System/framework** | `failed_jobs`, `job_batches`, `cache` | Skip by default |
+| Category             | Examples                                  | How to Handle                         |
+| -------------------- | ----------------------------------------- | ------------------------------------- |
+| **Child tables**     | `invoice_items` → `invoices`              | Follow FK to tenant-owned parent      |
+| **Junction/pivot**   | `permission_role`, `role_user`            | Include if either FK hits tenant data |
+| **Self-referential** | `comments.parent_id`, `folders.parent_id` | Closure over parent chain             |
+| **Lookup/reference** | `permissions`, `roles`, `migrations`      | Include fully or skip                 |
+| **System/framework** | `failed_jobs`, `job_batches`, `cache`     | Skip by default                       |
 
 ## Command Interface
 
@@ -78,22 +79,22 @@ sql-splitter shard dump.sql -o chunks/ \
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output file or directory | stdout |
-| `--tenant-column` | Column name for tenant key | auto-detect |
-| `--tenant-value` | Tenant key value to extract | required |
-| `--tenant-values` | Multiple tenant values (comma-separated) | — |
-| `--root-tables` | Explicit tenant root tables | auto-detect |
-| `--include-global` | Global table handling: `none`, `lookups`, `all` | lookups |
-| `-d, --dialect` | SQL dialect | auto-detect |
-| `-p, --progress` | Show progress bar | false |
-| `--dry-run` | Show statistics without writing | false |
-| `--config` | YAML config for table classification | — |
-| `--strict-fk` | Fail on FK integrity issues | false |
-| `--include-schema` | Include CREATE TABLE statements | true |
-| `--hash` | Use hash-based sharding | false |
-| `--partitions` | Number of hash partitions | — |
+| Flag               | Description                                     | Default     |
+| ------------------ | ----------------------------------------------- | ----------- |
+| `-o, --output`     | Output file or directory                        | stdout      |
+| `--tenant-column`  | Column name for tenant key                      | auto-detect |
+| `--tenant-value`   | Tenant key value to extract                     | required    |
+| `--tenant-values`  | Multiple tenant values (comma-separated)        | —           |
+| `--root-tables`    | Explicit tenant root tables                     | auto-detect |
+| `--include-global` | Global table handling: `none`, `lookups`, `all` | lookups     |
+| `-d, --dialect`    | SQL dialect                                     | auto-detect |
+| `-p, --progress`   | Show progress bar                               | false       |
+| `--dry-run`        | Show statistics without writing                 | false       |
+| `--config`         | YAML config for table classification            | —           |
+| `--strict-fk`      | Fail on FK integrity issues                     | false       |
+| `--include-schema` | Include CREATE TABLE statements                 | true        |
+| `--hash`           | Use hash-based sharding                         | false       |
+| `--partitions`     | Number of hash partitions                       | —           |
 
 ## How It Works
 
@@ -146,12 +147,12 @@ fn classify_table(
     if let Some(role) = config.table_role(&table.name) {
         return role;
     }
-    
+
     // 2. Check for tenant column
     if table.has_column(&config.tenant_column) {
         return TableClassification::TenantRoot;
     }
-    
+
     // 3. Check if reachable from tenant roots via FK chain
     if graph.is_reachable_from_tenant_roots(&table.name) {
         // Has FK path to a tenant table
@@ -160,18 +161,18 @@ fn classify_table(
         }
         return TableClassification::TenantDependent;
     }
-    
+
     // 4. Check for known system/framework patterns
     if is_system_table(&table.name) {
         return TableClassification::System;
     }
-    
+
     // 5. Default to lookup/global
     TableClassification::Lookup
 }
 
 fn is_system_table(name: &str) -> bool {
-    matches!(name, 
+    matches!(name,
         "migrations" | "failed_jobs" | "job_batches" | "jobs" |
         "password_resets" | "sessions" | "cache" | "cache_locks" |
         "telescope_entries" | "telescope_monitoring" |
@@ -191,6 +192,7 @@ invoice_items
 ```
 
 **Algorithm:**
+
 1. `invoices` is processed first (has `company_id`, is tenant-root)
 2. Selected invoice IDs are recorded: `{101, 205, 307, ...}`
 3. `invoice_items` is processed later (dependent table)
@@ -251,19 +253,19 @@ fn compute_self_referential_closure(
 ) -> PkSet {
     let mut selected = initial_pks.clone();
     let mut needed_parents: PkSet = collect_parent_refs(&selected, self_fk_column);
-    
+
     while !needed_parents.is_empty() {
         // Scan table file for rows with PK in needed_parents
         let newly_selected = scan_for_pks(table_data, &needed_parents);
-        
+
         // Add to selected set
         selected.extend(newly_selected.iter().cloned());
-        
+
         // Find their parents
         let new_parents = collect_parent_refs(&newly_selected, self_fk_column);
         needed_parents = new_parents.difference(&selected).cloned().collect();
     }
-    
+
     selected
 }
 ```
@@ -297,15 +299,15 @@ tables:
     role: system
   telescope_entries:
     role: system
-  
+
   # Lookup tables (include fully or skip)
   permissions:
     role: lookup
     include: true
   roles:
     role: lookup
-    include: true  # Note: roles might have company_id in some apps
-  
+    include: true # Note: roles might have company_id in some apps
+
   # Junction tables (explicit classification)
   permission_role:
     role: junction
@@ -313,13 +315,13 @@ tables:
     role: junction
   taggables:
     role: junction
-  
+
   # Large tables with special handling
   activity_log:
     role: tenant
     # Future: limit rows
     # max_rows: 1000
-  
+
   # Self-referential tables (auto-detected, but can be explicit)
   comments:
     self_fk: parent_id
@@ -327,7 +329,7 @@ tables:
     self_fk: parent_id
 
 # Global table handling
-include_global: lookups  # none | lookups | all
+include_global: lookups # none | lookups | all
 ```
 
 ---
@@ -337,11 +339,13 @@ include_global: lookups  # none | lookups | all
 ### MySQL / MariaDB
 
 **Characteristics:**
+
 - Backtick-quoted identifiers
 - Backslash escapes in strings
 - Multi-row INSERT: `INSERT INTO t VALUES (1,'a'), (2,'b'), ...`
 
 **Value parsing:**
+
 ```rust
 fn parse_mysql_insert_values(stmt: &[u8]) -> Vec<Row> {
     // Handle: strings with \' and \\, NULL, numbers, hex
@@ -353,12 +357,14 @@ fn parse_mysql_insert_values(stmt: &[u8]) -> Vec<Row> {
 ### PostgreSQL
 
 **Characteristics:**
+
 - Double-quote identifiers (optional)
 - `''` for escaped quotes in strings
 - COPY FROM stdin format (more common than INSERT)
 - Schema-qualified names: `public.users`
 
 **COPY parsing:**
+
 ```rust
 fn parse_postgres_copy_data(data: &[u8]) -> Vec<Row> {
     // Tab-separated values
@@ -372,6 +378,7 @@ fn parse_postgres_copy_data(data: &[u8]) -> Vec<Row> {
 ### SQLite
 
 **Characteristics:**
+
 - Double-quote or backtick identifiers
 - `''` for escaped quotes
 - INSERT statements (no COPY)
@@ -401,7 +408,7 @@ pub type PkSet = AHashSet<PkTuple>;
 pub struct ShardState {
     /// Only track PKs for tables that are FK targets
     selected_pks: HashMap<String, PkSet>,
-    
+
     /// Statistics
     stats: ShardStats,
 }
@@ -409,14 +416,15 @@ pub struct ShardState {
 
 ### Memory Budget
 
-| Scenario | Selected Rows | Memory |
-|----------|---------------|--------|
-| Small tenant | 10,000 | ~400 KB |
-| Medium tenant | 100,000 | ~4 MB |
-| Large tenant | 1,000,000 | ~40 MB |
-| Very large | 10,000,000 | ~400 MB |
+| Scenario      | Selected Rows | Memory  |
+| ------------- | ------------- | ------- |
+| Small tenant  | 10,000        | ~400 KB |
+| Medium tenant | 100,000       | ~4 MB   |
+| Large tenant  | 1,000,000     | ~40 MB  |
+| Very large    | 10,000,000    | ~400 MB |
 
 **Guardrails:**
+
 ```rust
 const DEFAULT_MAX_SELECTED_ROWS: usize = 10_000_000;
 
@@ -436,12 +444,12 @@ if total_selected > config.max_selected_rows {
 
 ### Targets
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Schema analysis | <5s for 100+ tables | Single pass, regex-based |
-| Internal split | 200+ MB/s | Reuses existing split logic |
-| Tenant selection | 100-150 MB/s | Row parsing overhead |
-| Memory | O(selected_rows) | Not O(file_size) |
+| Metric           | Target              | Notes                       |
+| ---------------- | ------------------- | --------------------------- |
+| Schema analysis  | <5s for 100+ tables | Single pass, regex-based    |
+| Internal split   | 200+ MB/s           | Reuses existing split logic |
+| Tenant selection | 100-150 MB/s        | Row parsing overhead        |
+| Memory           | O(selected_rows)    | Not O(file_size)            |
 
 ### Optimizations
 
@@ -454,6 +462,7 @@ if total_selected > config.max_selected_rows {
 ### Disk Usage
 
 Temp files use approximately the same space as the original dump:
+
 - 10 GB dump → ~10-12 GB temp files
 - Cleaned up automatically after completion
 
@@ -464,6 +473,7 @@ Temp files use approximately the same space as the original dump:
 ### 1. Tenant Owns Most Data
 
 If a single tenant owns 90% of the data:
+
 - PK sets will be large
 - Memory usage increases proportionally
 - Consider: Is sharding the right approach? Maybe just filter on import.
@@ -610,24 +620,24 @@ wait
 
 ## Implementation Effort
 
-| Component | Effort | Shared With |
-|-----------|--------|-------------|
-| CLI argument parsing | 2 hours | — |
-| Schema graph (FK parsing) | 6 hours | `sample --preserve-relations` |
-| Table classification | 3 hours | `sample` |
-| Internal split (temp files) | 2 hours | — |
-| PK tracking data structures | 2 hours | `sample` |
-| Row parsing (INSERT/COPY) | 4 hours | `sample` |
-| Tenant selection logic | 4 hours | — |
-| Junction table handling | 2 hours | `sample` |
-| Self-FK closure | 3 hours | `sample` |
-| Output generation | 2 hours | — |
-| Config file parsing | 2 hours | `sample` |
-| Progress reporting | 1 hour | Existing |
-| Multi-tenant sharding | 4 hours | — |
-| Hash-based sharding | 3 hours | — |
-| Testing | 8 hours | — |
-| **Total** | **~48 hours** | |
+| Component                   | Effort        | Shared With                   |
+| --------------------------- | ------------- | ----------------------------- |
+| CLI argument parsing        | 2 hours       | —                             |
+| Schema graph (FK parsing)   | 6 hours       | `sample --preserve-relations` |
+| Table classification        | 3 hours       | `sample`                      |
+| Internal split (temp files) | 2 hours       | —                             |
+| PK tracking data structures | 2 hours       | `sample`                      |
+| Row parsing (INSERT/COPY)   | 4 hours       | `sample`                      |
+| Tenant selection logic      | 4 hours       | —                             |
+| Junction table handling     | 2 hours       | `sample`                      |
+| Self-FK closure             | 3 hours       | `sample`                      |
+| Output generation           | 2 hours       | —                             |
+| Config file parsing         | 2 hours       | `sample`                      |
+| Progress reporting          | 1 hour        | Existing                      |
+| Multi-tenant sharding       | 4 hours       | —                             |
+| Hash-based sharding         | 3 hours       | —                             |
+| Testing                     | 8 hours       | —                             |
+| **Total**                   | **~48 hours** |                               |
 
 **Note:** ~20 hours of this is shared with `sample --preserve-relations`, so implementing both features reduces total effort.
 
@@ -646,13 +656,13 @@ wait
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| Tenant owns most data | Memory limit + clear error message |
-| Complex FK patterns | Conservative cycle handling + warnings |
-| Dialect variations | Comprehensive test fixtures for each dialect |
+| Risk                    | Mitigation                                     |
+| ----------------------- | ---------------------------------------------- |
+| Tenant owns most data   | Memory limit + clear error message             |
+| Complex FK patterns     | Conservative cycle handling + warnings         |
+| Dialect variations      | Comprehensive test fixtures for each dialect   |
 | Orphaned data in source | Detect and warn; `--strict-fk` for enforcement |
-| Very large dumps | Temp file approach keeps memory bounded |
+| Very large dumps        | Temp file approach keeps memory bounded        |
 
 ---
 

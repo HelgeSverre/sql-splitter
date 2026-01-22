@@ -11,6 +11,7 @@ The `graph` command generates Entity-Relationship Diagrams (ERD) from SQL dumps,
 ## Problem Statement
 
 Users need to:
+
 - **Understand complex schemas** — Visualize FK relationships between 100+ tables with full column details
 - **Find circular dependencies** — Identify FK cycles that complicate migrations
 - **Plan refactoring** — See impact of schema changes across related tables
@@ -71,38 +72,39 @@ sql-splitter order dump.sql --reverse -o drop_order.sql
 
 ### Graph Command
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output file (html, dot, mmd, json, png, svg, pdf) | stdout |
-| `--format` | Output format: `html`, `dot`, `mermaid`, `json` | auto-detect |
-| `-d, --dialect` | SQL dialect | auto-detect |
-| `--layout` | Layout direction: `lr` (left-right), `tb` (top-bottom) | lr |
-| `-t, --tables` | Include only tables matching glob patterns | all |
-| `-e, --exclude` | Exclude tables matching glob patterns | none |
-| `--table` | Focus on a specific table | all |
-| `--transitive` | Show all dependencies of focused table | false |
-| `--reverse` | Show all tables that depend on focused table | false |
-| `--max-depth` | Limit traversal depth | unlimited |
-| `--cycles-only` | Only show tables in circular dependencies | false |
-| `--render` | Render DOT to PNG/SVG/PDF using Graphviz | false |
-| `-p, --progress` | Show progress bar | false |
-| `--json` | Output as JSON | false |
+| Flag             | Description                                            | Default     |
+| ---------------- | ------------------------------------------------------ | ----------- |
+| `-o, --output`   | Output file (html, dot, mmd, json, png, svg, pdf)      | stdout      |
+| `--format`       | Output format: `html`, `dot`, `mermaid`, `json`        | auto-detect |
+| `-d, --dialect`  | SQL dialect                                            | auto-detect |
+| `--layout`       | Layout direction: `lr` (left-right), `tb` (top-bottom) | lr          |
+| `-t, --tables`   | Include only tables matching glob patterns             | all         |
+| `-e, --exclude`  | Exclude tables matching glob patterns                  | none        |
+| `--table`        | Focus on a specific table                              | all         |
+| `--transitive`   | Show all dependencies of focused table                 | false       |
+| `--reverse`      | Show all tables that depend on focused table           | false       |
+| `--max-depth`    | Limit traversal depth                                  | unlimited   |
+| `--cycles-only`  | Only show tables in circular dependencies              | false       |
+| `--render`       | Render DOT to PNG/SVG/PDF using Graphviz               | false       |
+| `-p, --progress` | Show progress bar                                      | false       |
+| `--json`         | Output as JSON                                         | false       |
 
 ### Order Command
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output SQL file | stdout |
-| `-d, --dialect` | SQL dialect | auto-detect |
-| `--check` | Check for cycles and report order (don't write) | false |
-| `--dry-run` | Show topological order without writing | false |
-| `--reverse` | Reverse order (children before parents, for DROP) | false |
+| Flag            | Description                                       | Default     |
+| --------------- | ------------------------------------------------- | ----------- |
+| `-o, --output`  | Output SQL file                                   | stdout      |
+| `-d, --dialect` | SQL dialect                                       | auto-detect |
+| `--check`       | Check for cycles and report order (don't write)   | false       |
+| `--dry-run`     | Show topological order without writing            | false       |
+| `--reverse`     | Reverse order (children before parents, for DROP) | false       |
 
 ## Output Formats
 
 ### 1. Interactive HTML (Default)
 
 Self-contained HTML file with:
+
 - **ERD visualization** using Mermaid erDiagram
 - **Dark/light mode toggle** with system preference detection
 - **Copy Mermaid button** to copy diagram code
@@ -111,6 +113,7 @@ Self-contained HTML file with:
 - **Statistics** showing table, column, and relationship counts
 
 Features:
+
 - No external dependencies after load (opens directly in browser)
 - Handles large schemas (tested with 281 tables, 3104 columns)
 - Increased `maxTextSize` limit (500KB) for large diagrams
@@ -265,12 +268,14 @@ pub enum Cardinality {
 ### Cycle Detection (Tarjan's SCC Algorithm)
 
 The implementation uses Tarjan's strongly connected components algorithm to detect:
+
 - Self-referencing tables (e.g., categories with parent_id)
 - Multi-table circular dependencies
 
 ### Topological Ordering
 
 The order command uses Kahn's algorithm for topological sorting:
+
 - Parents are output before children for safe FK imports
 - Reverse mode outputs children before parents for DROP operations
 - Detects and reports cycles that prevent valid ordering
@@ -278,6 +283,7 @@ The order command uses Kahn's algorithm for topological sorting:
 ## Performance
 
 Tested with large schemas:
+
 - **281 tables, 3104 columns**: Sub-second generation
 - **All formats**: Consistent performance
 - **Memory**: Proportional to schema size (not dump data size)
@@ -332,6 +338,7 @@ sql-splitter order dump.sql -o ordered.sql
 ## Testing
 
 The implementation includes:
+
 - Unit tests for each formatter (DOT, Mermaid, JSON, HTML)
 - Unit tests for cycle detection (self-refs, multi-table cycles)
 - Unit tests for GraphView filtering (include/exclude patterns)

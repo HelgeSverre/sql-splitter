@@ -13,9 +13,10 @@ This document provides a concrete implementation plan for the `redact` command.
 The redact command anonymizes sensitive data (PII) in SQL dumps by replacing real values with fake, hashed, masked, or shuffled alternatives. This enables safe sharing of production-like data for development, testing, and demos.
 
 **v1.10.0 Full Scope:**
+
 - Streaming redaction of MySQL/PostgreSQL INSERT statements
 - PostgreSQL COPY block redaction (in-place, maintaining COPY format)
-- All strategies: null, constant, hash, mask, shuffle, fake_*, skip
+- All strategies: null, constant, hash, mask, shuffle, fake\_\*, skip
 - Full fake data catalog (25+ generators)
 - Multi-locale support with fallback
 - YAML config with glob patterns + `--generate-config` for auto-generation
@@ -78,11 +79,11 @@ Input File → Statement Parser → Statement Router
 
 ### New Dependencies
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `fake` | 4 | Fake data generation (names, emails, phones, addresses, etc.) |
-| `sha2` | 0.10 | SHA256 hashing for hash strategy |
-| `hex` | 0.4 | Hex encoding for hash output |
+| Crate  | Version | Purpose                                                       |
+| ------ | ------- | ------------------------------------------------------------- |
+| `fake` | 4       | Fake data generation (names, emails, phones, addresses, etc.) |
+| `sha2` | 0.10    | SHA256 hashing for hash strategy                              |
+| `hex`  | 0.4     | Hex encoding for hash output                                  |
 
 ### Existing Dependencies (Reused)
 
@@ -91,7 +92,6 @@ Input File → Statement Parser → Statement Router
 - `rand` (0.8) — RNG with seeding
 - `ahash` — Fast HashMap for column lookups
 - `indicatif` — Progress bar (consistent with other commands)
-
 
 ---
 
@@ -211,7 +211,6 @@ pub struct RedactArgs {
 }
 ```
 
-
 ---
 
 ## Phase 1: Core Infrastructure (10h)
@@ -253,7 +252,7 @@ rules:
   # --- Email columns ---
   - column: "*.email"
     strategy: hash
-    preserve_domain: true  # user@gmail.com → a1b2c3@gmail.com
+    preserve_domain: true # user@gmail.com → a1b2c3@gmail.com
 
   # --- Password columns ---
   - column: "*.password"
@@ -297,7 +296,7 @@ rules:
   # --- Credit card with masking ---
   - column: "*.credit_card"
     strategy: mask
-    pattern: "****-****-****-XXXX"  # Keep last 4 digits
+    pattern: "****-****-****-XXXX" # Keep last 4 digits
 
   # --- IP addresses ---
   - column: "*.ip_address"
@@ -330,7 +329,7 @@ skip_tables:
 | Task | Effort | Description |
 |------|--------|-------------|
 | 1.2.1 Define ColumnPattern type | 0.5h | Parsed glob representation |
-| 1.2.2 Implement pattern compilation | 0.5h | Convert "*.email" to matcher |
+| 1.2.2 Implement pattern compilation | 0.5h | Convert "\*.email" to matcher |
 | 1.2.3 Build column→strategy map | 0.5h | Pre-compute for each table/column |
 | 1.2.4 Tests | 0.5h | Pattern matching edge cases |
 
@@ -388,7 +387,6 @@ pub enum FakeKind {
 }
 ```
 
-
 ---
 
 ## Phase 2: Strategy Implementations (14h)
@@ -396,6 +394,7 @@ pub enum FakeKind {
 ### 2.1 Simple Strategies (2h)
 
 **Null Strategy (0.5h):**
+
 ```rust
 pub struct NullStrategy;
 
@@ -407,6 +406,7 @@ impl Strategy for NullStrategy {
 ```
 
 **Constant Strategy (0.5h):**
+
 ```rust
 pub struct ConstantStrategy { value: String }
 
@@ -423,6 +423,7 @@ impl Strategy for ConstantStrategy {
 ```
 
 **Skip Strategy (0.5h):**
+
 ```rust
 pub struct SkipStrategy;
 
@@ -436,6 +437,7 @@ impl Strategy for SkipStrategy {
 ### 2.2 Hash Strategy (2h)
 
 **Features:**
+
 - SHA256 hashing (default)
 - Optional domain preservation for emails
 - Deterministic output (same input → same hash)
@@ -450,9 +452,9 @@ pub struct HashStrategy {
 impl Strategy for HashStrategy {
     fn apply(&mut self, value: &RedactValue) -> RedactValue {
         if value.is_null() { return value.clone(); }
-        
+
         let Some(s) = value.as_string() else { return value.clone(); };
-        
+
         let hashed = if self.preserve_domain && s.contains('@') {
             let parts: Vec<&str> = s.splitn(2, '@').collect();
             if parts.len() == 2 {
@@ -463,7 +465,7 @@ impl Strategy for HashStrategy {
         } else {
             self.hash_str(s)
         };
-        
+
         RedactValue::from_string(&hashed)
     }
 }
@@ -481,12 +483,14 @@ impl HashStrategy {
 ### 2.3 Mask Strategy (3h)
 
 **Pattern Syntax:**
+
 - `*` = replace with `*`
 - `X` = keep original character
 - `#` = replace with random digit
 - Any other char = literal
 
 **Examples:**
+
 - `****-****-****-XXXX` on `4532-0151-1283-0366` → `****-****-****-0366`
 - `X***@XXXXX` on `john@example.com` → `j***@examp`
 
@@ -499,15 +503,15 @@ pub struct MaskStrategy {
 impl Strategy for MaskStrategy {
     fn apply(&mut self, value: &RedactValue) -> RedactValue {
         if value.is_null() { return value.clone(); }
-        
+
         let Some(s) = value.as_string() else { return value.clone(); };
-        
+
         let chars: Vec<char> = s.chars().collect();
         let pattern_chars: Vec<char> = self.pattern.chars().collect();
-        
+
         let mut result = String::new();
         let mut input_idx = 0;
-        
+
         for p in &pattern_chars {
             match p {
                 '*' => result.push('*'),
@@ -527,7 +531,7 @@ impl Strategy for MaskStrategy {
                 }
             }
         }
-        
+
         RedactValue::from_string(&result)
     }
 }
@@ -536,6 +540,7 @@ impl Strategy for MaskStrategy {
 ### 2.4 Shuffle Strategy (3h)
 
 **Behavior:**
+
 - Collects all values for column during first pass
 - Redistributes randomly during output
 - Preserves NULL positions
@@ -553,14 +558,14 @@ impl ShuffleStrategy {
     pub fn new() -> Self {
         Self { values: vec![], shuffled: vec![], index: 0, initialized: false }
     }
-    
+
     /// Called during collection phase
     pub fn collect(&mut self, value: &RedactValue) {
         if !value.is_null() {
             self.values.push(value.clone());
         }
     }
-    
+
     /// Called to finalize and shuffle
     pub fn finalize(&mut self, rng: &mut StdRng) {
         self.shuffled = self.values.clone();
@@ -572,7 +577,7 @@ impl ShuffleStrategy {
 impl Strategy for ShuffleStrategy {
     fn apply(&mut self, value: &RedactValue) -> RedactValue {
         if value.is_null() { return value.clone(); }
-        
+
         if self.index < self.shuffled.len() {
             let result = self.shuffled[self.index].clone();
             self.index += 1;
@@ -585,6 +590,7 @@ impl Strategy for ShuffleStrategy {
 ```
 
 **Note:** Shuffle requires a two-phase approach:
+
 1. Collection phase: gather all non-NULL values
 2. Application phase: distribute shuffled values
 
@@ -594,31 +600,31 @@ This adds complexity to the rewriter but maintains correctness.
 
 **Supported Generators (25+):**
 
-| Generator | Output Example | Locale-aware |
-|-----------|----------------|--------------|
-| `fake_email` | `jessica.smith@example.com` | Yes |
-| `fake_name` | `Robert Johnson` | Yes |
-| `fake_first_name` | `Sarah` | Yes |
-| `fake_last_name` | `Williams` | Yes |
-| `fake_phone` | `+1 (555) 234-5678` | Yes |
-| `fake_address` | `123 Oak St, Springfield, IL 62701` | Yes |
-| `fake_street` | `456 Maple Avenue` | Yes |
-| `fake_city` | `Portland` | Yes |
-| `fake_state` | `California` | Yes |
-| `fake_zip` | `90210` | Yes |
-| `fake_country` | `United States` | Yes |
-| `fake_company` | `Acme Corporation` | Yes |
-| `fake_job_title` | `Software Engineer` | No |
-| `fake_username` | `cooluser42` | No |
-| `fake_url` | `https://example.com/page` | No |
-| `fake_ip` | `192.168.1.100` | No |
-| `fake_ipv6` | `2001:db8::1` | No |
-| `fake_uuid` | `550e8400-e29b-...` | No |
-| `fake_date` | `1985-07-23` | No |
-| `fake_datetime` | `2024-03-15 14:30:00` | No |
-| `fake_credit_card` | `4532015112830366` | No |
-| `fake_iban` | `DE89370400440532013000` | Yes |
-| `fake_lorem` | `Lorem ipsum dolor...` | No |
+| Generator          | Output Example                      | Locale-aware |
+| ------------------ | ----------------------------------- | ------------ |
+| `fake_email`       | `jessica.smith@example.com`         | Yes          |
+| `fake_name`        | `Robert Johnson`                    | Yes          |
+| `fake_first_name`  | `Sarah`                             | Yes          |
+| `fake_last_name`   | `Williams`                          | Yes          |
+| `fake_phone`       | `+1 (555) 234-5678`                 | Yes          |
+| `fake_address`     | `123 Oak St, Springfield, IL 62701` | Yes          |
+| `fake_street`      | `456 Maple Avenue`                  | Yes          |
+| `fake_city`        | `Portland`                          | Yes          |
+| `fake_state`       | `California`                        | Yes          |
+| `fake_zip`         | `90210`                             | Yes          |
+| `fake_country`     | `United States`                     | Yes          |
+| `fake_company`     | `Acme Corporation`                  | Yes          |
+| `fake_job_title`   | `Software Engineer`                 | No           |
+| `fake_username`    | `cooluser42`                        | No           |
+| `fake_url`         | `https://example.com/page`          | No           |
+| `fake_ip`          | `192.168.1.100`                     | No           |
+| `fake_ipv6`        | `2001:db8::1`                       | No           |
+| `fake_uuid`        | `550e8400-e29b-...`                 | No           |
+| `fake_date`        | `1985-07-23`                        | No           |
+| `fake_datetime`    | `2024-03-15 14:30:00`               | No           |
+| `fake_credit_card` | `4532015112830366`                  | No           |
+| `fake_iban`        | `DE89370400440532013000`            | Yes          |
+| `fake_lorem`       | `Lorem ipsum dolor...`              | No           |
 
 **Locale Implementation:**
 
@@ -637,8 +643,8 @@ pub enum SupportedLocale {
 }
 
 impl FakeStrategy {
-    pub fn new(kind: FakeKind, locale_str: &str, rng: &mut StdRng, strict: bool) 
-        -> anyhow::Result<Self> 
+    pub fn new(kind: FakeKind, locale_str: &str, rng: &mut StdRng, strict: bool)
+        -> anyhow::Result<Self>
     {
         let locale = match locale_str.to_lowercase().as_str() {
             "en" | "en_us" => SupportedLocale::En,
@@ -657,7 +663,7 @@ impl FakeStrategy {
                 SupportedLocale::En
             }
         };
-        
+
         let seed: u64 = rng.gen();
         Ok(Self {
             kind,
@@ -665,7 +671,7 @@ impl FakeStrategy {
             rng: StdRng::seed_from_u64(seed),
         })
     }
-    
+
     fn generate(&mut self) -> String {
         // Dispatch based on kind and locale
         match (&self.kind, &self.locale) {
@@ -687,7 +693,6 @@ impl FakeStrategy {
     }
 }
 ```
-
 
 ---
 
@@ -712,7 +717,7 @@ impl SchemaLookup {
     pub fn from_schema_graph(graph: &SchemaGraph) -> Self {
         // Convert SchemaGraph tables to lookup-optimized structure
     }
-    
+
     pub fn get(&self, table: &str) -> Option<&TableColumns> {
         self.tables.get(&table.to_lowercase())
     }
@@ -740,10 +745,10 @@ pub fn rewrite_insert(
     // 1. Find VALUES keyword position
     let values_pos = find_values_keyword(stmt)?;
     let header = &stmt[..values_pos + 6]; // Include "VALUES"
-    
+
     // 2. Parse rows
     let rows = parse_insert_values(&stmt[values_pos..], schema, dialect)?;
-    
+
     // 3. Apply strategies to each row
     let redacted_rows: Vec<Vec<RedactValue>> = rows.iter()
         .map(|row| {
@@ -752,12 +757,12 @@ pub fn rewrite_insert(
                 .collect()
         })
         .collect();
-    
+
     // 4. Rebuild statement
     let mut output = Vec::with_capacity(stmt.len());
     output.extend_from_slice(header);
     output.push(b'\n');
-    
+
     for (i, row) in redacted_rows.iter().enumerate() {
         if i > 0 { output.extend_from_slice(b",\n"); }
         output.push(b'(');
@@ -768,7 +773,7 @@ pub fn rewrite_insert(
         output.push(b')');
     }
     output.extend_from_slice(b";\n");
-    
+
     Ok(output)
 }
 ```
@@ -778,6 +783,7 @@ pub fn rewrite_insert(
 **Key Challenge:** Maintain COPY format while redacting values in-place.
 
 **COPY Format:**
+
 ```sql
 COPY users (id, email, name) FROM stdin;
 1	alice@example.com	Alice Smith
@@ -786,6 +792,7 @@ COPY users (id, email, name) FROM stdin;
 ```
 
 **Approach:**
+
 1. Parse COPY header for table name and column list
 2. Parse each data line as tab-separated values
 3. Apply strategies to each value
@@ -801,33 +808,33 @@ pub fn rewrite_copy_block(
     strategies: &mut [Box<dyn Strategy>],
 ) -> anyhow::Result<Vec<u8>> {
     let mut output = Vec::new();
-    
+
     // 1. Write header unchanged
     output.extend_from_slice(header);
     output.push(b'\n');
-    
+
     // 2. Parse column order from COPY header
     let copy_columns = parse_copy_columns(header)?;
     let column_map = map_copy_to_schema(&copy_columns, schema);
-    
+
     // 3. Process each data line
     for line in data_lines {
         let values = parse_copy_line(line)?;  // Tab-split
         let mut redacted_values: Vec<Vec<u8>> = Vec::new();
-        
+
         for (i, val) in values.iter().enumerate() {
             let strategy_idx = column_map.get(i);
             let redact_val = parse_copy_value(val)?;  // Handle \N, escapes
-            
+
             let new_val = if let Some(idx) = strategy_idx {
                 strategies[*idx].apply(&redact_val)
             } else {
                 redact_val
             };
-            
+
             redacted_values.push(serialize_copy_value(&new_val)?);
         }
-        
+
         // Join with tabs
         for (i, val) in redacted_values.iter().enumerate() {
             if i > 0 { output.push(b'\t'); }
@@ -835,15 +842,16 @@ pub fn rewrite_copy_block(
         }
         output.push(b'\n');
     }
-    
+
     // 4. Write terminator
     output.extend_from_slice(b"\\.\n");
-    
+
     Ok(output)
 }
 ```
 
 **COPY Value Handling:**
+
 - `\N` → NULL
 - `\t` → tab (escaped)
 - `\n` → newline (escaped)
@@ -868,35 +876,34 @@ pub struct Redactor {
 impl Redactor {
     pub fn redact_statement(&mut self, stmt: &[u8]) -> anyhow::Result<Vec<u8>> {
         let (stmt_type, table_name) = Parser::parse_statement_with_dialect(stmt, self.dialect);
-        
+
         match stmt_type {
             StatementType::Insert => self.redact_insert(stmt, table_name.as_deref()),
             StatementType::Copy => self.redact_copy(stmt, table_name.as_deref()),
             _ => Ok(stmt.to_vec()),
         }
     }
-    
+
     fn redact_insert(&mut self, stmt: &[u8], table: Option<&str>) -> anyhow::Result<Vec<u8>> {
         let table = table.unwrap_or("");
         if self.should_skip_table(table) {
             return Ok(stmt.to_vec());
         }
-        
+
         let Some(schema) = self.schema.get(table) else {
             self.stats.warnings.push(format!("No schema for table '{}', skipping", table));
             return Ok(stmt.to_vec());
         };
-        
+
         let mut strategies = self.create_strategies_for_table(table, &schema.columns)?;
         rewrite_insert(stmt, table, schema, &mut strategies, self.dialect)
     }
-    
+
     fn redact_copy(&mut self, stmt: &[u8], table: Option<&str>) -> anyhow::Result<Vec<u8>> {
         // Similar to redact_insert but uses COPY rewriter
     }
 }
 ```
-
 
 ---
 
@@ -908,23 +915,23 @@ impl Redactor {
 
 **PII Detection Patterns:**
 
-| Pattern | Suggested Strategy | Confidence |
-|---------|-------------------|------------|
-| `*email*` | hash (preserve_domain) | High |
-| `*password*`, `*passwd*` | constant | High |
-| `*ssn*`, `*social_security*` | null | High |
-| `*tax_id*`, `*tin*` | null | High |
-| `*phone*`, `*mobile*`, `*cell*` | fake_phone | High |
-| `*name*` (not `*username*`) | fake_name | Medium |
-| `*first_name*`, `*fname*` | fake_first_name | High |
-| `*last_name*`, `*lname*`, `*surname*` | fake_last_name | High |
-| `*address*`, `*street*` | fake_address | Medium |
-| `*city*` | fake_city | Medium |
-| `*zip*`, `*postal*` | fake_zip | Medium |
-| `*credit_card*`, `*cc_*` | mask (****-****-****-XXXX) | High |
-| `*ip_address*`, `*ip_addr*` | fake_ip | Medium |
-| `*birth*`, `*dob*` | fake_date | Medium |
-| `*company*`, `*organization*` | fake_company | Low |
+| Pattern                               | Suggested Strategy                 | Confidence |
+| ------------------------------------- | ---------------------------------- | ---------- |
+| `*email*`                             | hash (preserve_domain)             | High       |
+| `*password*`, `*passwd*`              | constant                           | High       |
+| `*ssn*`, `*social_security*`          | null                               | High       |
+| `*tax_id*`, `*tin*`                   | null                               | High       |
+| `*phone*`, `*mobile*`, `*cell*`       | fake_phone                         | High       |
+| `*name*` (not `*username*`)           | fake_name                          | Medium     |
+| `*first_name*`, `*fname*`             | fake_first_name                    | High       |
+| `*last_name*`, `*lname*`, `*surname*` | fake_last_name                     | High       |
+| `*address*`, `*street*`               | fake_address                       | Medium     |
+| `*city*`                              | fake_city                          | Medium     |
+| `*zip*`, `*postal*`                   | fake_zip                           | Medium     |
+| `*credit_card*`, `*cc_*`              | mask (\***\*-\*\***-\*\*\*\*-XXXX) | High       |
+| `*ip_address*`, `*ip_addr*`           | fake_ip                            | Medium     |
+| `*birth*`, `*dob*`                    | fake_date                          | Medium     |
+| `*company*`, `*organization*`         | fake_company                       | Low        |
 
 ```rust
 pub struct ColumnAnalysis {
@@ -949,10 +956,10 @@ pub fn analyze_for_config(
 ) -> anyhow::Result<Vec<ColumnAnalysis>> {
     // 1. Build schema
     let schema = build_schema_from_file(input, dialect)?;
-    
+
     // 2. Sample a few values per column (for context)
     let samples = sample_column_values(input, &schema, dialect, 3)?;
-    
+
     // 3. Apply pattern matching
     let mut analyses = Vec::new();
     for (table_name, table_schema) in &schema.tables {
@@ -961,7 +968,7 @@ pub fn analyze_for_config(
             analyses.push(analysis);
         }
     }
-    
+
     Ok(analyses)
 }
 ```
@@ -976,7 +983,7 @@ pub fn generate_config_yaml(
     output: &Path,
 ) -> anyhow::Result<()> {
     let mut yaml = String::new();
-    
+
     // Header
     yaml.push_str("# sql-splitter redact configuration\n");
     yaml.push_str("# Generated by: sql-splitter redact <input> --generate-config\n");
@@ -984,33 +991,33 @@ pub fn generate_config_yaml(
     yaml.push_str("# Review and modify this file before running redaction.\n");
     yaml.push_str("# See: https://github.com/helgesverre/sql-splitter#redact-config\n");
     yaml.push_str("\n");
-    
+
     // Seed
     yaml.push_str("# Random seed for reproducible redaction (optional)\n");
     yaml.push_str("# seed: 12345\n\n");
-    
+
     // Locale
     yaml.push_str("# Locale for fake data generation\n");
     yaml.push_str("# Supported: en, de_de, fr_fr, zh_cn, zh_tw, ja_jp, pt_br, ar_sa\n");
     yaml.push_str("locale: en\n\n");
-    
+
     // Defaults
     yaml.push_str("# Default strategy for columns not matching any rule\n");
     yaml.push_str("defaults:\n");
     yaml.push_str("  strategy: skip\n\n");
-    
+
     // Rules - grouped by table
     yaml.push_str("# Redaction rules (processed in order, first match wins)\n");
     yaml.push_str("rules:\n");
-    
+
     let mut by_table: BTreeMap<&str, Vec<&ColumnAnalysis>> = BTreeMap::new();
     for analysis in analyses {
         by_table.entry(&analysis.table).or_default().push(analysis);
     }
-    
+
     for (table, columns) in by_table {
         yaml.push_str(&format!("\n  # --- Table: {} ---\n", table));
-        
+
         for col in columns {
             if let Some(strategy) = &col.suggested_strategy {
                 let confidence_note = match col.confidence {
@@ -1019,10 +1026,10 @@ pub fn generate_config_yaml(
                     Confidence::Low => "  # Low confidence - review",
                     Confidence::None => continue,
                 };
-                
+
                 yaml.push_str(&format!("  - column: \"{}.{}\"\n", table, col.column));
                 yaml.push_str(&format!("    strategy: {}\n", strategy.to_yaml_str()));
-                
+
                 // Add strategy-specific params
                 match strategy {
                     StrategyKind::Hash { preserve_domain, .. } if *preserve_domain => {
@@ -1036,30 +1043,29 @@ pub fn generate_config_yaml(
                     }
                     _ => {}
                 }
-                
+
                 if !confidence_note.is_empty() {
                     yaml.push_str(&format!("    {}\n", confidence_note));
                 }
             } else {
                 // Columns without suggestion - comment out
-                yaml.push_str(&format!("  # - column: \"{}.{}\"  # No PII detected\n", 
+                yaml.push_str(&format!("  # - column: \"{}.{}\"  # No PII detected\n",
                     table, col.column));
                 yaml.push_str(&format!("  #   strategy: skip\n"));
             }
         }
     }
-    
+
     // Skip tables
     yaml.push_str("\n# Tables to skip entirely (no redaction applied)\n");
     yaml.push_str("skip_tables:\n");
     yaml.push_str("  # - schema_migrations\n");
     yaml.push_str("  # - ar_internal_metadata\n");
-    
+
     std::fs::write(output, yaml)?;
     Ok(())
 }
 ```
-
 
 ---
 
@@ -1078,10 +1084,10 @@ pub fn run(config: RedactConfig) -> anyhow::Result<RedactStats> {
         generate_config_yaml(&analyses, output)?;
         return Ok(RedactStats::config_generated(output));
     }
-    
+
     // 2. Detect dialect
     let dialect = detect_dialect(&config.input, config.dialect.as_deref())?;
-    
+
     // 3. Build schema (pass 1)
     let file_size = std::fs::metadata(&config.input)?.len();
     let progress = if config.progress && !config.json {
@@ -1089,22 +1095,22 @@ pub fn run(config: RedactConfig) -> anyhow::Result<RedactStats> {
     } else {
         None
     };
-    
+
     let temp_dir = tempfile::tempdir()?;
     let schema = build_schema_with_progress(&config.input, temp_dir.path(), dialect, &progress)?;
-    
+
     if let Some(pb) = &progress {
         pb.finish_with_message("Schema built");
     }
-    
+
     // 4. Compile rules
     let matcher = ColumnMatcher::from_config(&config)?;
-    
+
     // 5. Validate rules against schema
     if config.validate {
         return validate_config(&config, &schema, &matcher);
     }
-    
+
     // 6. Handle shuffle strategy (requires collection pass)
     let has_shuffle = matcher.has_shuffle_strategies();
     let shuffle_data = if has_shuffle {
@@ -1112,13 +1118,13 @@ pub fn run(config: RedactConfig) -> anyhow::Result<RedactStats> {
     } else {
         AHashMap::new()
     };
-    
+
     // 7. Create RNG
     let mut rng = match config.seed {
         Some(seed) => StdRng::seed_from_u64(seed),
         None => StdRng::from_entropy(),
     };
-    
+
     // 8. Create redactor
     let mut redactor = Redactor::new(
         dialect,
@@ -1131,26 +1137,26 @@ pub fn run(config: RedactConfig) -> anyhow::Result<RedactStats> {
         config.skip_tables.clone(),
         shuffle_data,
     )?;
-    
+
     // 9. Progress bar for main pass
     let progress = if config.progress && !config.json {
         Some(create_progress_bar(file_size, "Redacting"))
     } else {
         None
     };
-    
+
     // 10. Stream and redact (pass 2 or 3)
     let input = open_file_with_compression(&config.input)?;
     let mut output = create_output_writer(&config.output)?;
     let mut parser = Parser::with_dialect(input, dialect);
-    
+
     let mut bytes_processed = 0u64;
     while let Some(stmt) = parser.next_statement()? {
         if let Some(pb) = &progress {
             bytes_processed += stmt.len() as u64;
             pb.set_position(bytes_processed);
         }
-        
+
         if config.dry_run {
             redactor.stats.record_statement(&stmt)?;
         } else {
@@ -1158,13 +1164,13 @@ pub fn run(config: RedactConfig) -> anyhow::Result<RedactStats> {
             output.write_all(&redacted)?;
         }
     }
-    
+
     output.flush()?;
-    
+
     if let Some(pb) = &progress {
         pb.finish_with_message("Done");
     }
-    
+
     Ok(redactor.stats)
 }
 ```
@@ -1191,6 +1197,7 @@ pub fn create_progress_bar(total_bytes: u64, message: &str) -> ProgressBar {
 ```
 
 **Progress phases:**
+
 1. "Building schema" - during schema extraction
 2. "Collecting shuffle data" - if shuffle strategy used
 3. "Redacting" - main processing pass
@@ -1205,7 +1212,7 @@ pub struct RedactStats {
     pub output_file: Option<String>,
     pub dialect: String,
     pub mode: String,  // "redact", "generate-config", "validate", "dry-run"
-    
+
     pub statements_processed: u64,
     pub inserts_redacted: u64,
     pub copy_blocks_redacted: u64,
@@ -1213,16 +1220,16 @@ pub struct RedactStats {
     pub bytes_input: u64,
     pub bytes_output: u64,
     pub elapsed_secs: f64,
-    
+
     pub tables_processed: Vec<String>,
     pub tables_skipped: Vec<String>,
-    
+
     pub columns_redacted: HashMap<String, ColumnStats>,
-    
+
     pub strategies_used: HashMap<String, u64>,
     pub locale: String,
     pub seed: Option<u64>,
-    
+
     pub warnings: Vec<String>,
 }
 
@@ -1262,7 +1269,6 @@ impl RedactStats {
     }
 }
 ```
-
 
 ---
 
@@ -1431,7 +1437,6 @@ impl RedactStats {
 #[test] fn test_redact_output_importable() { }
 ```
 
-
 ---
 
 ## Phase 7: Documentation (6h)
@@ -1443,38 +1448,38 @@ Add comprehensive Redact section to README.md:
 ```markdown
 ### Redact Options
 
-| Flag                  | Description                                        | Default     |
-|-----------------------|----------------------------------------------------|-------------|
-| `-o, --output`        | Output file (default: stdout)                      | stdout      |
-| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`         | auto-detect |
-| `-c, --config`        | YAML config file for redaction rules               | —           |
-| `--generate-config`   | Analyze input and generate annotated YAML config   | —           |
-| `--null`              | Columns to set to NULL (glob patterns)             | —           |
-| `--hash`              | Columns to hash with SHA256 (glob patterns)        | —           |
-| `--fake`              | Columns for fake data (glob patterns)              | —           |
-| `--mask`              | Columns to mask (format: `pattern=column`)         | —           |
-| `--constant`          | Column=value pairs for constant replacement        | —           |
-| `--seed`              | Random seed for reproducibility                    | random      |
-| `--locale`            | Locale for fake data (en, de_de, fr_fr, etc.)      | en          |
-| `-t, --tables`        | Only redact specific tables                        | all         |
-| `-e, --exclude`       | Exclude specific tables                            | —           |
-| `--strict`            | Fail on warnings (unsupported locale, etc.)        | —           |
-| `-p, --progress`      | Show progress bar                                  | —           |
-| `--dry-run`           | Preview without writing                            | —           |
-| `--json`              | Output results as JSON                             | —           |
-| `--validate`          | Validate config only                               | —           |
+| Flag                | Description                                      | Default     |
+| ------------------- | ------------------------------------------------ | ----------- |
+| `-o, --output`      | Output file (default: stdout)                    | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`       | auto-detect |
+| `-c, --config`      | YAML config file for redaction rules             | —           |
+| `--generate-config` | Analyze input and generate annotated YAML config | —           |
+| `--null`            | Columns to set to NULL (glob patterns)           | —           |
+| `--hash`            | Columns to hash with SHA256 (glob patterns)      | —           |
+| `--fake`            | Columns for fake data (glob patterns)            | —           |
+| `--mask`            | Columns to mask (format: `pattern=column`)       | —           |
+| `--constant`        | Column=value pairs for constant replacement      | —           |
+| `--seed`            | Random seed for reproducibility                  | random      |
+| `--locale`          | Locale for fake data (en, de_de, fr_fr, etc.)    | en          |
+| `-t, --tables`      | Only redact specific tables                      | all         |
+| `-e, --exclude`     | Exclude specific tables                          | —           |
+| `--strict`          | Fail on warnings (unsupported locale, etc.)      | —           |
+| `-p, --progress`    | Show progress bar                                | —           |
+| `--dry-run`         | Preview without writing                          | —           |
+| `--json`            | Output results as JSON                           | —           |
+| `--validate`        | Validate config only                             | —           |
 
 **Redaction Strategies:**
 
-| Strategy | Description | Example |
-|----------|-------------|---------|
-| `null` | Replace with NULL | `'john@example.com'` → `NULL` |
-| `constant` | Replace with fixed value | `'secret'` → `'REDACTED'` |
-| `hash` | SHA256 hash (deterministic) | `'john@example.com'` → `'a1b2c3d4@example.com'` |
-| `mask` | Pattern-based masking | `'4532-0151-1283-0366'` → `'****-****-****-0366'` |
-| `shuffle` | Redistribute within column | Random swap preserving distribution |
-| `fake_*` | Generate fake data | `'John Doe'` → `'Alice Smith'` |
-| `skip` | Keep original value | No change |
+| Strategy   | Description                 | Example                                           |
+| ---------- | --------------------------- | ------------------------------------------------- |
+| `null`     | Replace with NULL           | `'john@example.com'` → `NULL`                     |
+| `constant` | Replace with fixed value    | `'secret'` → `'REDACTED'`                         |
+| `hash`     | SHA256 hash (deterministic) | `'john@example.com'` → `'a1b2c3d4@example.com'`   |
+| `mask`     | Pattern-based masking       | `'4532-0151-1283-0366'` → `'****-****-****-0366'` |
+| `shuffle`  | Redistribute within column  | Random swap preserving distribution               |
+| `fake_*`   | Generate fake data          | `'John Doe'` → `'Alice Smith'`                    |
+| `skip`     | Keep original value         | No change                                         |
 
 **Mask Pattern Syntax:**
 
@@ -1500,6 +1505,7 @@ Falls back to `en` with warning if locale not available. Use `--strict` to fail 
 ### 7.2 Man Page Content (2h)
 
 Ensure man page includes:
+
 - Full option descriptions
 - Strategy documentation
 - YAML config format
@@ -1516,38 +1522,43 @@ Add comprehensive redact workflow and reference:
 **Goal:** Create safe, anonymized copies of production data for dev/testing.
 
 \`\`\`bash
+
 # 1. Generate config by analyzing input
+
 sql-splitter redact prod.sql.gz --generate-config -o redact.yaml
 
 # 2. Review and edit generated config
+
 # (Config includes detected PII with suggested strategies)
 
 # 3. Run redaction with config
+
 sql-splitter redact prod.sql.gz -o safe.sql --config redact.yaml --progress
 
 # 4. Reproducible redaction with seed
+
 sql-splitter redact prod.sql.gz -o safe.sql --config redact.yaml --seed 42
 
 # 5. Quick inline redaction
+
 sql-splitter redact dump.sql -o safe.sql \
-  --null "*.ssn,*.tax_id" \
-  --hash "*.email" \
-  --fake "*.name,*.phone" \
-  --mask "****-****-****-XXXX=*.credit_card"
+ --null "_.ssn,_.tax*id" \
+ --hash "*.email" \
+ --fake "_.name,_.phone" \
+ --mask "\***\*-\*\***-\*\*\*\*-XXXX=\_.credit_card"
 \`\`\`
 
 **Redaction strategies:**
 
-| Strategy | Use Case | Preserves Referential Integrity |
-|----------|----------|--------------------------------|
-| `hash` | Emails, usernames | Yes (same input → same output) |
-| `fake_*` | Names, addresses | No (random each time unless seeded) |
-| `null` | SSN, passwords | N/A (removes data) |
-| `mask` | Credit cards, phones | Partial (keeps last N chars) |
-| `shuffle` | Salaries, scores | Yes (redistributes within column) |
-| `constant` | Passwords | N/A (fixed replacement) |
+| Strategy   | Use Case             | Preserves Referential Integrity     |
+| ---------- | -------------------- | ----------------------------------- |
+| `hash`     | Emails, usernames    | Yes (same input → same output)      |
+| `fake_*`   | Names, addresses     | No (random each time unless seeded) |
+| `null`     | SSN, passwords       | N/A (removes data)                  |
+| `mask`     | Credit cards, phones | Partial (keeps last N chars)        |
+| `shuffle`  | Salaries, scores     | Yes (redistributes within column)   |
+| `constant` | Passwords            | N/A (fixed replacement)             |
 ```
-
 
 ---
 
@@ -1559,13 +1570,13 @@ sql-splitter redact dump.sql -o safe.sql \
 
 **Test Cases:**
 
-| Test | Input Size | Expected Peak RSS | Notes |
-|------|------------|-------------------|-------|
-| Small file (no shuffle) | 10 MB | < 100 MB | Baseline |
-| Medium file (no shuffle) | 100 MB | < 150 MB | Streaming works |
-| Large file (no shuffle) | 1 GB | < 200 MB | Constant memory |
-| Medium file (with shuffle) | 100 MB | TBD | Shuffle collects values |
-| Large file (with shuffle) | 1 GB | TBD | May need chunking |
+| Test                       | Input Size | Expected Peak RSS | Notes                   |
+| -------------------------- | ---------- | ----------------- | ----------------------- |
+| Small file (no shuffle)    | 10 MB      | < 100 MB          | Baseline                |
+| Medium file (no shuffle)   | 100 MB     | < 150 MB          | Streaming works         |
+| Large file (no shuffle)    | 1 GB       | < 200 MB          | Constant memory         |
+| Medium file (with shuffle) | 100 MB     | TBD               | Shuffle collects values |
+| Large file (with shuffle)  | 1 GB       | TBD               | May need chunking       |
 
 **Profiling Commands:**
 
@@ -1581,6 +1592,7 @@ sql-splitter redact dump.sql -o safe.sql \
 **Shuffle Strategy Optimization:**
 
 If profiling shows excessive memory for shuffle:
+
 1. Implement chunked shuffle (50k row sliding window)
 2. Add `--max-shuffle-rows` flag with default
 3. Document limitation
@@ -1591,14 +1603,14 @@ If profiling shows excessive memory for shuffle:
 
 **Benchmark Matrix:**
 
-| Scenario | Target MB/s | Notes |
-|----------|-------------|-------|
-| Skip only (baseline) | 400+ | Near-passthrough |
-| Null strategy | 300+ | Simple replacement |
-| Hash strategy | 200+ | SHA256 overhead |
-| Fake strategy | 100+ | Fake generation overhead |
-| Mask strategy | 250+ | Pattern processing |
-| Mixed strategies | 150+ | Real-world scenario |
+| Scenario             | Target MB/s | Notes                    |
+| -------------------- | ----------- | ------------------------ |
+| Skip only (baseline) | 400+        | Near-passthrough         |
+| Null strategy        | 300+        | Simple replacement       |
+| Hash strategy        | 200+        | SHA256 overhead          |
+| Fake strategy        | 100+        | Fake generation overhead |
+| Mask strategy        | 250+        | Pattern processing       |
+| Mixed strategies     | 150+        | Real-world scenario      |
 
 **Benchmark Commands:**
 
@@ -1611,6 +1623,7 @@ time sql-splitter redact large.sql -o /dev/null --null "*.email"
 ```
 
 **Optimization Targets:**
+
 - Pre-compile patterns once
 - Reuse strategy instances per column
 - Batch fake generation where possible
@@ -1620,17 +1633,17 @@ time sql-splitter redact large.sql -o /dev/null --null "*.email"
 
 ## Effort Summary
 
-| Phase | Description | Effort |
-|-------|-------------|--------|
-| Phase 1 | Core Infrastructure (CLI, config, matcher, types) | 10h |
-| Phase 2 | Strategy Implementations (all 7 strategies) | 14h |
-| Phase 3 | Statement Rewriting (INSERT + COPY) | 16h |
-| Phase 4 | Config Generation (--generate-config) | 6h |
-| Phase 5 | Integration, Progress & Output | 8h |
-| Phase 6 | Testing (unit + integration) | 10h |
-| Phase 7 | Documentation (README, man, llms.txt) | 6h |
-| Phase 8 | Profiling and Optimization | 4h |
-| **Total** | | **~74h** |
+| Phase     | Description                                       | Effort   |
+| --------- | ------------------------------------------------- | -------- |
+| Phase 1   | Core Infrastructure (CLI, config, matcher, types) | 10h      |
+| Phase 2   | Strategy Implementations (all 7 strategies)       | 14h      |
+| Phase 3   | Statement Rewriting (INSERT + COPY)               | 16h      |
+| Phase 4   | Config Generation (--generate-config)             | 6h       |
+| Phase 5   | Integration, Progress & Output                    | 8h       |
+| Phase 6   | Testing (unit + integration)                      | 10h      |
+| Phase 7   | Documentation (README, man, llms.txt)             | 6h       |
+| Phase 8   | Profiling and Optimization                        | 4h       |
+| **Total** |                                                   | **~74h** |
 
 ---
 
@@ -1639,22 +1652,26 @@ time sql-splitter redact large.sql -o /dev/null --null "*.email"
 Recommended order for incremental development:
 
 ### Week 1: Core Foundation
+
 1. **Phase 1.1-1.3**: CLI types, config, matcher, strategy types (10h)
 2. **Phase 2.1**: Simple strategies (null, constant, skip) (2h)
 3. **Phase 3.4**: Redactor core skeleton (2h)
 
 ### Week 2: Strategy Implementation
+
 4. **Phase 2.2**: Hash strategy (2h)
 5. **Phase 2.3**: Mask strategy (3h)
 6. **Phase 2.5**: Fake strategy with locales (4h)
 7. **Phase 3.2**: INSERT rewriting (5h)
 
 ### Week 3: COPY & Shuffle
+
 8. **Phase 3.3**: PostgreSQL COPY rewriting (7h)
 9. **Phase 2.4**: Shuffle strategy (3h)
 10. **Phase 5.1-5.3**: Integration, progress, stats (8h)
 
 ### Week 4: Config Gen, Testing, Docs
+
 11. **Phase 4**: Config generation (6h)
 12. **Phase 6**: Testing (10h) — ongoing throughout
 13. **Phase 7**: Documentation (6h)
@@ -1664,20 +1681,20 @@ Recommended order for incremental development:
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| COPY parsing edge cases | Reuse existing `parse_postgres_copy_rows`, add tests |
-| Shuffle memory for huge tables | Profile early, implement chunking if needed |
-| Fake crate locale gaps | Fallback to `en` with warning |
-| Complex mask patterns | Comprehensive pattern tests |
-| String escaping bugs | Roundtrip validation tests |
-| Performance regression | Benchmark suite, compare to other commands |
+| Risk                           | Mitigation                                           |
+| ------------------------------ | ---------------------------------------------------- |
+| COPY parsing edge cases        | Reuse existing `parse_postgres_copy_rows`, add tests |
+| Shuffle memory for huge tables | Profile early, implement chunking if needed          |
+| Fake crate locale gaps         | Fallback to `en` with warning                        |
+| Complex mask patterns          | Comprehensive pattern tests                          |
+| String escaping bugs           | Roundtrip validation tests                           |
+| Performance regression         | Benchmark suite, compare to other commands           |
 
 ---
 
 ## Success Criteria
 
-1. ✅ All 7 strategies work correctly (null, constant, hash, mask, shuffle, fake_*, skip)
+1. ✅ All 7 strategies work correctly (null, constant, hash, mask, shuffle, fake\_\*, skip)
 2. ✅ PostgreSQL COPY blocks redacted in-place
 3. ✅ `--generate-config` produces usable annotated YAML
 4. ✅ YAML config with all options documented
@@ -1702,12 +1719,12 @@ Recommended order for incremental development:
 # ============================================================
 # sql-splitter redact configuration
 # ============================================================
-# 
+#
 # This file defines redaction rules for anonymizing SQL dumps.
-# 
+#
 # Usage:
 #   sql-splitter redact dump.sql -o safe.sql --config redact.yaml
-# 
+#
 # Generate from input:
 #   sql-splitter redact dump.sql --generate-config -o redact.yaml
 # ============================================================
@@ -1732,7 +1749,7 @@ seed: 12345
 #   ja_jp   - Japanese
 #   pt_br   - Brazilian Portuguese
 #   ar_sa   - Arabic
-# 
+#
 # If locale not available for a generator, falls back to 'en' with warning.
 # Use --strict to fail instead of falling back.
 locale: en
@@ -1747,17 +1764,17 @@ defaults:
 # ------------------------------------------------------------
 # Redaction Rules
 # ------------------------------------------------------------
-# 
+#
 # Rules are processed in order - first match wins.
 # Use specific rules before general patterns.
-# 
+#
 # Column patterns:
 #   "users.email"      - Exact match: email column in users table
 #   "*.email"          - Any table, email column
 #   "users.*"          - All columns in users table
 #   "*.*_email"        - Columns ending in _email in any table
 #   "*.password*"      - Columns containing 'password'
-# 
+#
 # Available strategies:
 #   null         - Replace with NULL
 #   constant     - Replace with fixed value (requires: value)
@@ -1766,7 +1783,7 @@ defaults:
 #   shuffle      - Redistribute values within column
 #   fake_*       - Generate fake data (see generator list below)
 #   skip         - Keep original value
-# 
+#
 # Fake generators:
 #   fake_email, fake_name, fake_first_name, fake_last_name,
 #   fake_phone, fake_address, fake_street, fake_city, fake_state,
@@ -1776,108 +1793,104 @@ defaults:
 
 rules:
   # === High-sensitivity columns (null or constant) ===
-  
+
   - column: "*.ssn"
     strategy: null
     # Social Security Numbers - remove entirely
-    
+
   - column: "*.tax_id"
     strategy: null
     # Tax IDs - remove entirely
-    
+
   - column: "*.password"
     strategy: constant
     value: "$2b$10$REDACTED_PASSWORD_HASH"
     # Passwords - replace with valid bcrypt hash
-    
+
   - column: "*.password_hash"
     strategy: constant
     value: "$2b$10$REDACTED_PASSWORD_HASH"
-    
+
   # === Email columns (hash to preserve FK relationships) ===
-  
   - column: "*.email"
     strategy: hash
     preserve_domain: true
     # john@gmail.com → a1b2c3d4@gmail.com
     # Deterministic: same email always gets same hash
-    
+
   # === Name columns (fake for realism) ===
-  
+
   - column: "*.first_name"
     strategy: fake_first_name
-    
+
   - column: "*.last_name"
     strategy: fake_last_name
-    
+
   - column: "*.name"
     strategy: fake_name
     # Full name generator
-    
+
   # === Contact information ===
-  
+
   - column: "*.phone"
     strategy: fake_phone
-    
+
   - column: "*.mobile"
     strategy: fake_phone
-    
+
   - column: "*.address"
     strategy: fake_address
-    
+
   - column: "*.street"
     strategy: fake_street
-    
+
   - column: "*.city"
     strategy: fake_city
-    
+
   - column: "*.zip"
     strategy: fake_zip
-    
+
   - column: "*.postal_code"
     strategy: fake_zip
-    
+
   # === Financial data (mask to preserve format) ===
-  
   - column: "*.credit_card"
     strategy: mask
     pattern: "****-****-****-XXXX"
     # 4532-0151-1283-0366 → ****-****-****-0366
     # Pattern: * = mask, X = keep, # = random digit
-    
+
   - column: "*.iban"
     strategy: fake_iban
-    
+
   # === IP addresses ===
-  
+
   - column: "*.ip_address"
     strategy: fake_ip
-    
+
   - column: "*.ip"
     strategy: fake_ip
-    
+
   # === Dates ===
-  
+
   - column: "*.birth_date"
     strategy: fake_date
     min: "1950-01-01"
     max: "2005-12-31"
-    
+
   - column: "*.dob"
     strategy: fake_date
     min: "1950-01-01"
     max: "2005-12-31"
-    
+
   # === Salary/numeric shuffling ===
-  
   - column: "employees.salary"
     strategy: shuffle
     # Redistributes values within column
     # Preserves statistical distribution
     # Breaks row-level correlation
-    
+
   # === Specific overrides (before general patterns) ===
-  
   - column: "admins.email"
     strategy: skip
     # Keep admin emails intact
@@ -1911,4 +1924,3 @@ skip_tables:
 - [src/parser/mysql_insert.rs](../../src/parser/mysql_insert.rs) — INSERT parsing
 - [src/parser/postgres_copy.rs](../../src/parser/postgres_copy.rs) — COPY parsing
 - [src/schema/mod.rs](../../src/schema/mod.rs) — Schema parsing
-

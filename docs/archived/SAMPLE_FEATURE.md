@@ -44,23 +44,23 @@ sql-splitter sample dump.sql --percent 10 --dry-run
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output SQL file path | stdout |
-| `--percent` | Sample percentage (1-100) | — |
-| `--rows` | Fixed row count per table | — |
-| `--preserve-relations` | Maintain foreign key integrity via FK chain resolution | false |
-| `--root-tables` | Explicit root tables for sampling (comma-separated) | auto-detect |
-| `--include-global` | How to handle global/lookup tables: `none`, `lookups`, `all` | lookups |
-| `--tables` | Only sample these tables (comma-separated) | all |
-| `--exclude` | Exclude these tables (comma-separated) | none |
-| `--seed` | Random seed for reproducibility | random |
-| `--config` | YAML config for per-table settings | — |
-| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite` | auto-detect |
-| `-p, --progress` | Show progress bar | false |
-| `--dry-run` | Show statistics without writing | false |
-| `--include-schema` | Include CREATE TABLE statements | true |
-| `--strict-fk` | Fail if any FK integrity issues detected | false |
+| Flag                   | Description                                                  | Default     |
+| ---------------------- | ------------------------------------------------------------ | ----------- |
+| `-o, --output`         | Output SQL file path                                         | stdout      |
+| `--percent`            | Sample percentage (1-100)                                    | —           |
+| `--rows`               | Fixed row count per table                                    | —           |
+| `--preserve-relations` | Maintain foreign key integrity via FK chain resolution       | false       |
+| `--root-tables`        | Explicit root tables for sampling (comma-separated)          | auto-detect |
+| `--include-global`     | How to handle global/lookup tables: `none`, `lookups`, `all` | lookups     |
+| `--tables`             | Only sample these tables (comma-separated)                   | all         |
+| `--exclude`            | Exclude these tables (comma-separated)                       | none        |
+| `--seed`               | Random seed for reproducibility                              | random      |
+| `--config`             | YAML config for per-table settings                           | —           |
+| `-d, --dialect`        | SQL dialect: `mysql`, `postgres`, `sqlite`                   | auto-detect |
+| `-p, --progress`       | Show progress bar                                            | false       |
+| `--dry-run`            | Show statistics without writing                              | false       |
+| `--include-schema`     | Include CREATE TABLE statements                              | true        |
+| `--strict-fk`          | Fail if any FK integrity issues detected                     | false       |
 
 ## Sampling Modes
 
@@ -73,6 +73,7 @@ sql-splitter sample dump.sql -o dev.sql --percent 10
 ```
 
 **Behavior:**
+
 - Each table gets ~10% of its rows
 - Minimum 1 row per table (if table has data)
 - Random selection using reservoir sampling
@@ -86,6 +87,7 @@ sql-splitter sample dump.sql -o dev.sql --rows 1000
 ```
 
 **Behavior:**
+
 - Each table gets up to 1000 rows
 - Tables with fewer rows get all rows
 - Random selection
@@ -99,6 +101,7 @@ sql-splitter sample dump.sql -o dev.sql --rows 100 --preserve-relations
 ```
 
 **What it does:**
+
 - Parses CREATE TABLE statements to build FK dependency graph
 - Samples from "root" tables first
 - Automatically includes all referenced parent rows
@@ -106,6 +109,7 @@ sql-splitter sample dump.sql -o dev.sql --rows 100 --preserve-relations
 - Result: A consistent subset with no broken foreign key references
 
 **Example FK chain resolution:**
+
 ```
 orders (100 rows sampled)
   └── users (referenced user_id values automatically included)
@@ -149,19 +153,19 @@ classification:
 tables:
   users:
     rows: 500
-    
+
   posts:
     percent: 5
-    
+
   comments:
     percent: 2
-    
+
   sessions:
     skip: true
-    
+
   audit_logs:
     skip: true
-    
+
   products:
     rows: 100
     # Future: conditional sampling
@@ -186,6 +190,7 @@ invoice_items → invoices → customers → companies
 ```
 
 Simple random sampling breaks these relationships:
+
 - Sampled `invoice_items` may reference `invoices` that weren't sampled
 - Import fails with FK constraint violations
 - Manual fixing is tedious and error-prone
@@ -193,6 +198,7 @@ Simple random sampling breaks these relationships:
 ### The Solution: FK Chain Resolution
 
 Build a dependency graph from schema DDL and use it to:
+
 1. Determine sampling order (topological sort)
 2. Track which PK values have been selected
 3. Automatically include referenced rows
@@ -224,13 +230,13 @@ Phase 2: Dependency-Ordered Selection
 
 ### Table Classification
 
-| Classification | Description | Sampling Behavior |
-|---------------|-------------|-------------------|
-| **Root** | Has no FK dependencies OR explicitly specified | Sample directly, seed for FK chain |
-| **Dependent** | References root/dependent tables via FK | Include if FK points to selected row |
-| **Junction** | Only FKs + maybe PK (pivot tables) | Include if any FK hits selected row |
-| **Lookup** | Global reference data (countries, currencies) | Include fully with `--include-global lookups` |
-| **System** | Framework tables (migrations, jobs) | Skip by default |
+| Classification | Description                                    | Sampling Behavior                             |
+| -------------- | ---------------------------------------------- | --------------------------------------------- |
+| **Root**       | Has no FK dependencies OR explicitly specified | Sample directly, seed for FK chain            |
+| **Dependent**  | References root/dependent tables via FK        | Include if FK points to selected row          |
+| **Junction**   | Only FKs + maybe PK (pivot tables)             | Include if any FK hits selected row           |
+| **Lookup**     | Global reference data (countries, currencies)  | Include fully with `--include-global lookups` |
+| **System**     | Framework tables (migrations, jobs)            | Skip by default                               |
 
 ### PK Tracking Data Structure
 
@@ -253,7 +259,7 @@ type PkSet = AHashSet<PkTuple>;
 struct SamplingState {
     /// Selected PKs per table (only for tables that are FK targets)
     selected_pks: HashMap<String, PkSet>,
-    
+
     /// Statistics
     rows_selected: HashMap<String, u64>,
     rows_scanned: HashMap<String, u64>,
@@ -261,6 +267,7 @@ struct SamplingState {
 ```
 
 **Memory considerations:**
+
 - Only track PKs for tables that are FK targets
 - Most PKs are integers (~8-16 bytes each)
 - 1 million selected rows ≈ 20-40 MB
@@ -282,11 +289,12 @@ CREATE TABLE `invoice_items` (
 ) ENGINE=InnoDB;
 
 -- Or via ALTER TABLE
-ALTER TABLE `invoice_items` 
+ALTER TABLE `invoice_items`
   ADD CONSTRAINT `fk_invoice` FOREIGN KEY (`invoice_id`) REFERENCES `invoices` (`id`);
 ```
 
 **Parsing notes:**
+
 - Backtick-quoted identifiers
 - Inline or ALTER TABLE constraints
 - Named constraints with `CONSTRAINT name`
@@ -303,11 +311,12 @@ CREATE TABLE invoice_items (
 );
 
 -- Or via ALTER TABLE
-ALTER TABLE invoice_items 
+ALTER TABLE invoice_items
   ADD CONSTRAINT fk_invoice FOREIGN KEY (invoice_id) REFERENCES invoices(id);
 ```
 
 **Parsing notes:**
+
 - Double-quote identifiers (optional)
 - Inline `REFERENCES table(col)` shorthand
 - Schema-qualified names: `schema.table`
@@ -325,6 +334,7 @@ CREATE TABLE invoice_items (
 ```
 
 **Parsing notes:**
+
 - Double-quote or backtick identifiers
 - No named constraints (anonymous)
 - No ALTER TABLE ADD CONSTRAINT (FKs must be inline)
@@ -358,6 +368,7 @@ static ALTER_FK_RE: Lazy<Regex> = Lazy::new(|| {
 **Detection:** Use Tarjan's algorithm to find strongly connected components (SCCs).
 
 **Handling:**
+
 - If SCC size = 1 with self-FK: Special self-referential handling
 - If SCC size > 1: Process all tables in cycle as a unit
 
@@ -374,6 +385,7 @@ fn handle_cycle(tables: &[String], state: &mut SamplingState) {
 **Example:** `comments.parent_id → comments.id`
 
 For self-referential tables:
+
 1. Sample base rows normally
 2. Compute ancestor closure (include parents of selected rows)
 3. May require multiple passes over the table's temp file
@@ -413,6 +425,7 @@ CREATE TABLE permission_role (
 ```
 
 **Handling:**
+
 - Detect: Table with only FK columns + composite PK
 - Include row if ANY FK points to a selected row
 - Don't require ALL FKs to match (would be too restrictive)
@@ -466,6 +479,7 @@ INSERT INTO `users` (`id`, `name`, `company_id`) VALUES
 ```
 
 **Parser approach:**
+
 1. Extract column list (if present) to map indices
 2. Parse each `(...)` value tuple
 3. Handle: strings with escapes, NULLs, numeric types
@@ -490,6 +504,7 @@ COPY public.users (id, name, company_id) FROM stdin;
 ```
 
 **Parser approach:**
+
 1. Extract column list from COPY header
 2. Split data block by newlines
 3. Split each line by `\t`
@@ -597,10 +612,10 @@ impl<T> ReservoirSampler<T> {
             rng,
         }
     }
-    
+
     pub fn add(&mut self, item: T) {
         self.count += 1;
-        
+
         if self.reservoir.len() < self.sample_size {
             self.reservoir.push(item);
         } else {
@@ -611,11 +626,11 @@ impl<T> ReservoirSampler<T> {
             }
         }
     }
-    
+
     pub fn total_seen(&self) -> usize {
         self.count
     }
-    
+
     pub fn finish(self) -> Vec<T> {
         self.reservoir
     }
@@ -634,7 +649,7 @@ impl<T> ReservoirSampler<T> {
 -- Mode: 10% per table, preserve-relations
 -- Seed: 42
 -- Dialect: mysql
--- 
+--
 -- Statistics:
 --   Tables sampled: 45
 --   Tables skipped: 7 (system/excluded)
@@ -679,11 +694,11 @@ INSERT INTO `orders` VALUES
 
 ### Targets
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Throughput | 150-200 MB/s | Slower than split due to parsing overhead |
-| Memory | O(selected_rows) | PK tracking for FK targets only |
-| Startup | <100ms | Schema analysis phase |
+| Metric     | Target           | Notes                                     |
+| ---------- | ---------------- | ----------------------------------------- |
+| Throughput | 150-200 MB/s     | Slower than split due to parsing overhead |
+| Memory     | O(selected_rows) | PK tracking for FK targets only           |
+| Startup    | <100ms           | Schema analysis phase                     |
 
 ### Optimizations
 
@@ -700,7 +715,7 @@ const DEFAULT_MAX_SELECTED_ROWS: usize = 10_000_000;  // ~200MB for int PKs
 const PK_MEMORY_WARNING_THRESHOLD: usize = 5_000_000;
 
 if selected_pks.len() > PK_MEMORY_WARNING_THRESHOLD {
-    eprintln!("⚠️ Large selection: {} PKs tracked, memory usage may be high", 
+    eprintln!("⚠️ Large selection: {} PKs tracked, memory usage may be high",
               selected_pks.len());
 }
 ```
@@ -801,14 +816,14 @@ classification:
 
 tables:
   users:
-    rows: 100  # Always need some users
-  
+    rows: 100 # Always need some users
+
   analytics_events:
-    percent: 0.1  # Huge table, minimal sample
-    
+    percent: 0.1 # Huge table, minimal sample
+
   reference_data:
-    percent: 100  # Keep all lookup data
-    
+    percent: 100 # Keep all lookup data
+
   temp_tables:
     skip: true
 ```
@@ -821,23 +836,23 @@ sql-splitter sample prod.sql -o team-dev.sql --config team-sample.yaml --preserv
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| CLI and config parsing | 2 hours |
-| Reservoir sampling | 2 hours |
-| Basic percentage/row sampling | 3 hours |
-| Schema graph + FK parsing (shared with shard) | 6 hours |
-| Table classification logic | 2 hours |
-| INSERT row parsing (MySQL) | 3 hours |
-| COPY data parsing (PostgreSQL) | 2 hours |
-| Dependency-ordered processing | 4 hours |
-| PK tracking + FK membership checks | 3 hours |
-| Cycle handling (self-FK, SCCs) | 3 hours |
-| Output generation | 2 hours |
-| YAML config support | 2 hours |
-| Progress reporting | 1 hour |
-| Testing (comprehensive) | 8 hours |
-| **Total** | **~43 hours** |
+| Component                                     | Effort        |
+| --------------------------------------------- | ------------- |
+| CLI and config parsing                        | 2 hours       |
+| Reservoir sampling                            | 2 hours       |
+| Basic percentage/row sampling                 | 3 hours       |
+| Schema graph + FK parsing (shared with shard) | 6 hours       |
+| Table classification logic                    | 2 hours       |
+| INSERT row parsing (MySQL)                    | 3 hours       |
+| COPY data parsing (PostgreSQL)                | 2 hours       |
+| Dependency-ordered processing                 | 4 hours       |
+| PK tracking + FK membership checks            | 3 hours       |
+| Cycle handling (self-FK, SCCs)                | 3 hours       |
+| Output generation                             | 2 hours       |
+| YAML config support                           | 2 hours       |
+| Progress reporting                            | 1 hour        |
+| Testing (comprehensive)                       | 8 hours       |
+| **Total**                                     | **~43 hours** |
 
 **Note:** The schema graph and FK parsing components are shared with the `shard` command, reducing overall implementation effort when both features are built.
 
