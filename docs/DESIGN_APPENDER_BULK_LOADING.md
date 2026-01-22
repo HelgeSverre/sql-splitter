@@ -13,21 +13,21 @@ The feature was implemented using a batched SQL approach rather than DuckDB's Ap
 
 #### Large Dataset Benchmarks (124MB / 1.25M rows)
 
-| Dialect | File Size | Before | After | Improvement |
-|---------|-----------|--------|-------|-------------|
-| MySQL | 124 MB | 36.5s | 22.78s | **1.6x faster** |
-| PostgreSQL | 111 MB | 6.4s | 6.41s | Same (already optimized) |
-| SQLite | 124 MB | 37.2s | 43.53s | Slight regression* |
+| Dialect    | File Size | Before | After  | Improvement              |
+| ---------- | --------- | ------ | ------ | ------------------------ |
+| MySQL      | 124 MB    | 36.5s  | 22.78s | **1.6x faster**          |
+| PostgreSQL | 111 MB    | 6.4s   | 6.41s  | Same (already optimized) |
+| SQLite     | 124 MB    | 37.2s  | 43.53s | Slight regression\*      |
 
-*SQLite regression under investigation - may be related to row counting differences.
+\*SQLite regression under investigation - may be related to row counting differences.
 
 #### Medium Dataset Benchmarks (25MB / 250k rows)
 
-| Dialect | File Size | Query Time | Peak RSS |
-|---------|-----------|------------|----------|
-| MySQL | 24.47 MB | 6.11s | 170 MB |
-| PostgreSQL | 21.85 MB | 1.31s | 70 MB |
-| SQLite | 24.47 MB | 8.51s | 170 MB |
+| Dialect    | File Size | Query Time | Peak RSS |
+| ---------- | --------- | ---------- | -------- |
+| MySQL      | 24.47 MB  | 6.11s      | 170 MB   |
+| PostgreSQL | 21.85 MB  | 1.31s      | 70 MB    |
+| SQLite     | 24.47 MB  | 8.51s      | 170 MB   |
 
 #### Key Improvements
 
@@ -46,8 +46,9 @@ Comprehensive MySQL-specific syntax is now stripped during DuckDB import:
 - **Type conversion**: Fixed regex to avoid matching type keywords in column names (e.g., 'internal_note' vs 'INT')
 
 Verified against real-world production dumps:
+
 - taskflow_production.sql (17MB, 62 tables) - 0 warnings
-- db2sheets_prod.sql (17MB, 18 tables) - 0 warnings  
+- db2sheets_prod.sql (17MB, 18 tables) - 0 warnings
 - boatflow_latest_2.sql (128MB, 52 tables) - 4 warnings (data quality issues only)
 
 ## Executive Summary
@@ -58,11 +59,11 @@ This document describes a refactoring of the DuckDB `query` command loader to us
 
 ### Current Performance Gap
 
-| Dialect | File Size | Query Time | Peak RSS | Notes |
-|---------|-----------|------------|----------|-------|
-| PostgreSQL | 111 MB | 6.4s | 101 MB | Uses COPY (fast batch import) |
-| MySQL | 124 MB | 36.5s | 100 MB | Uses INSERT (row-by-row parsing) |
-| SQLite | 124 MB | 37.2s | 210 MB | Uses INSERT (row-by-row parsing) |
+| Dialect    | File Size | Query Time | Peak RSS | Notes                            |
+| ---------- | --------- | ---------- | -------- | -------------------------------- |
+| PostgreSQL | 111 MB    | 6.4s       | 101 MB   | Uses COPY (fast batch import)    |
+| MySQL      | 124 MB    | 36.5s      | 100 MB   | Uses INSERT (row-by-row parsing) |
+| SQLite     | 124 MB    | 37.2s      | 210 MB   | Uses INSERT (row-by-row parsing) |
 
 PostgreSQL dumps are **~6x faster** because COPY blocks are batched, while MySQL/SQLite/MSSQL INSERTs are executed one statement at a time via `conn.execute()`.
 
@@ -81,6 +82,7 @@ StatementType::Insert => {
 ```
 
 This results in:
+
 - Per-statement SQL parsing overhead in DuckDB
 - Per-statement transaction overhead (autocommit)
 - No batching of rows across statements
@@ -151,7 +153,7 @@ struct BatchManager {
 }
 
 impl BatchManager {
-    fn queue_insert(&mut self, table: &str, columns: Option<Vec<String>>, 
+    fn queue_insert(&mut self, table: &str, columns: Option<Vec<String>>,
                     rows: Vec<Vec<ParsedValue>>, original_sql: String) -> Option<InsertBatch>;
     fn flush_all(&mut self, conn: &Connection, stats: &mut ImportStats) -> Result<()>;
 }
@@ -164,7 +166,7 @@ Modified `load_statements` flow:
 ```rust
 fn load_statements(&self, ...) -> Result<()> {
     let mut batch_mgr = BatchManager::new(10_000);
-    
+
     while let Some(stmt) = parser.next_statement() {
         match stmt_type {
             StatementType::Insert => {
@@ -173,14 +175,14 @@ fn load_statements(&self, ...) -> Result<()> {
                     // Fallback to current behavior
                     self.execute_insert_statement(&stmt, stats)?;
                 }
-                
+
                 // Flush if batch is full
                 batch_mgr.flush_ready_batches(&self.conn, stats)?;
             }
             // ... other statement types unchanged
         }
     }
-    
+
     // Final flush
     batch_mgr.flush_all(&self.conn, stats)?;
 }
@@ -193,7 +195,7 @@ Critical for handling constraint violations without data loss:
 ```rust
 fn flush_batch(conn: &Connection, batch: &InsertBatch, stats: &mut ImportStats) -> Result<()> {
     conn.execute("BEGIN TRANSACTION", [])?;
-    
+
     let appender = match conn.appender(&batch.table) {
         Ok(app) => app,
         Err(_) => {
@@ -201,7 +203,7 @@ fn flush_batch(conn: &Connection, batch: &InsertBatch, stats: &mut ImportStats) 
             return fallback_execute(conn, batch, stats);
         }
     };
-    
+
     for row in &batch.rows {
         let params = map_values_to_params(row);
         if appender.append_row(params).is_err() {
@@ -210,7 +212,7 @@ fn flush_batch(conn: &Connection, batch: &InsertBatch, stats: &mut ImportStats) 
             return fallback_execute(conn, batch, stats);
         }
     }
-    
+
     drop(appender);
     match conn.execute("COMMIT", []) {
         Ok(_) => {
@@ -222,7 +224,7 @@ fn flush_batch(conn: &Connection, batch: &InsertBatch, stats: &mut ImportStats) 
             fallback_execute(conn, batch, stats)?;
         }
     }
-    
+
     Ok(())
 }
 ```
@@ -256,11 +258,13 @@ fn map_values_to_params(row: &[ParsedValue]) -> Vec<duckdb::types::Value> {
 ### 1. Tree-sitter for SQL Parsing
 
 **Pros:**
+
 - Incremental parsing (sub-millisecond updates)
 - Proper AST with full syntax coverage
 - Used in production at GitHub
 
 **Cons:**
+
 - Requires native C bindings or WebAssembly
 - 8MB+ library size for SQL grammar
 - Overkill for our use case (just extracting VALUES)
@@ -271,11 +275,13 @@ fn map_values_to_params(row: &[ParsedValue]) -> Vec<duckdb::types::Value> {
 ### 2. sqlparser-rs
 
 **Pros:**
+
 - Pure Rust, no native dependencies
 - Complete SQL AST for multiple dialects
 - Handles complex expressions, subqueries
 
 **Cons:**
+
 - 3.3x slower than hand-written parser (per benchmarks)
 - Heavy allocation overhead for large dumps
 - Over-parses (we only need VALUES, not full AST)
@@ -351,13 +357,13 @@ fn map_values_to_params(row: &[ParsedValue]) -> Vec<duckdb::types::Value> {
 
 ## Risks and Mitigations
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| InsertParser fails on edge cases | Medium | Fallback to per-statement execution |
-| Appender constraint errors | High | Transactional rollback + fallback |
-| Column order mismatches | Medium | Only use Appender for simple column lists |
-| Memory spike from large batches | Low | Cap at 10,000 rows per batch |
-| Performance regression | Medium | Extensive benchmarking before merge |
+| Risk                             | Impact | Mitigation                                |
+| -------------------------------- | ------ | ----------------------------------------- |
+| InsertParser fails on edge cases | Medium | Fallback to per-statement execution       |
+| Appender constraint errors       | High   | Transactional rollback + fallback         |
+| Column order mismatches          | Medium | Only use Appender for simple column lists |
+| Memory spike from large batches  | Low    | Cap at 10,000 rows per batch              |
+| Performance regression           | Medium | Extensive benchmarking before merge       |
 
 ## Success Metrics
 

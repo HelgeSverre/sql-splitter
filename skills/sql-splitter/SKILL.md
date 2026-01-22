@@ -18,6 +18,7 @@ This skill helps you use `sql-splitter` to manipulate SQL dump files safely and 
 ## When to Use This Skill
 
 Use `sql-splitter` when:
+
 - The user mentions **SQL dump files** (`.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`)
 - The user wants to migrate, restore, or work with database dump files
 - The user needs to validate, analyze, split, merge, convert, sample, shard, or **query** dumps
@@ -27,6 +28,7 @@ Use `sql-splitter` when:
 ## When NOT to Use This Skill
 
 Do **not** use `sql-splitter` when:
+
 - Running complex ad-hoc SQL queries against a live database (use `psql`/`mysql`/`sqlcmd` directly)
 - No dump file exists; only a running database is available
 - The user needs interactive data editing rather than dump manipulation
@@ -38,6 +40,7 @@ Do **not** use `sql-splitter` when:
 ## Command Reference
 
 ### split
+
 Split a dump into per-table files.
 
 ```bash
@@ -48,6 +51,7 @@ sql-splitter split dump.sql --data-only --output data/
 ```
 
 ### merge
+
 Merge per-table files back into a single dump.
 
 ```bash
@@ -57,6 +61,7 @@ sql-splitter merge tables/ --exclude logs,cache --output restored.sql
 ```
 
 ### analyze
+
 Get statistics about a dump (read-only).
 
 ```bash
@@ -65,6 +70,7 @@ sql-splitter analyze "dumps/*.sql" --fail-fast
 ```
 
 ### convert
+
 Convert between MySQL, PostgreSQL, SQLite, and MSSQL (12 conversion pairs).
 
 ```bash
@@ -77,6 +83,7 @@ sql-splitter convert mysql.sql --to postgres --output - | psql "$PG_CONN"
 ```
 
 ### validate
+
 Check dump integrity (syntax, encoding, PK/FK).
 
 ```bash
@@ -86,6 +93,7 @@ sql-splitter validate dump.sql --no-fk-checks --progress
 ```
 
 ### sample
+
 Create reduced datasets with FK preservation.
 
 ```bash
@@ -96,6 +104,7 @@ sql-splitter sample dump.sql --output sampled.sql --percent 10 --seed 42
 ```
 
 ### shard
+
 Extract tenant-specific data.
 
 ```bash
@@ -104,6 +113,7 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" --tenant-column account_id -
 ```
 
 ### diff
+
 Compare two SQL dumps for schema and data changes.
 
 ```bash
@@ -120,6 +130,7 @@ sql-splitter diff old.sql new.sql --allow-no-pk                       # Tables w
 ```
 
 ### redact
+
 Anonymize PII in SQL dumps by replacing sensitive data with fake, hashed, or null values.
 
 ```bash
@@ -146,6 +157,7 @@ sql-splitter redact dump.sql --output safe.sql --fake "*.name" --locale de_de
 ```
 
 **Strategies:**
+
 - `--null "pattern"`: Replace with NULL
 - `--hash "pattern"`: SHA256 hash (deterministic, preserves FK integrity)
 - `--fake "pattern"`: Generate realistic fake data
@@ -155,6 +167,7 @@ sql-splitter redact dump.sql --output safe.sql --fake "*.name" --locale de_de
 **Fake generators:** email, name, first_name, last_name, phone, address, city, zip, company, ip, uuid, date, credit_card, ssn, lorem, and more.
 
 ### graph
+
 Generate Entity-Relationship Diagrams (ERD) from SQL dumps.
 
 ```bash
@@ -184,6 +197,7 @@ sql-splitter graph dump.sql --table users --reverse
 ```
 
 ### order
+
 Reorder SQL dump in topological FK order for safe imports.
 
 ```bash
@@ -198,6 +212,7 @@ sql-splitter order dump.sql --reverse --output drop_order.sql
 ```
 
 ### query
+
 Run SQL analytics on dump files using embedded DuckDB (no database required).
 
 ```bash
@@ -229,6 +244,7 @@ sql-splitter query --clear-cache
 ```
 
 **REPL commands:**
+
 - `.tables` - List all tables
 - `.schema [table]` - Show schema
 - `.describe <table>` - Describe table
@@ -247,6 +263,7 @@ sql-splitter query --clear-cache
 Before using any dump from an external source:
 
 1. **Validate integrity**
+
    ```bash
    sql-splitter validate path/to/dump.sql.gz --strict --progress
    ```
@@ -267,11 +284,13 @@ Before using any dump from an external source:
 For migrating between MySQL, PostgreSQL, SQLite, and MSSQL (12 conversion pairs):
 
 1. **Validate source**
+
    ```bash
    sql-splitter validate source.sql.gz --strict --progress
    ```
 
 2. **Convert dialect**
+
    ```bash
    sql-splitter convert source.sql.gz --to postgres --output target.sql --strict
    # or for MSSQL
@@ -279,6 +298,7 @@ For migrating between MySQL, PostgreSQL, SQLite, and MSSQL (12 conversion pairs)
    ```
 
 3. **Validate converted output**
+
    ```bash
    sql-splitter validate target.sql --dialect=postgres --strict
    ```
@@ -293,11 +313,13 @@ For migrating between MySQL, PostgreSQL, SQLite, and MSSQL (12 conversion pairs)
 For creating smaller realistic data for development:
 
 1. **Analyze to understand sizes**
+
    ```bash
    sql-splitter analyze prod.sql.zst --progress
    ```
 
 2. **Sample with FK preservation**
+
    ```bash
    sql-splitter sample prod.sql.zst \
      --output dev_seed.sql \
@@ -320,6 +342,7 @@ sql-splitter validate "dumps/*.sql.gz" --json --fail-fast --strict
 ```
 
 Parse with jq:
+
 ```bash
 sql-splitter validate "dumps/*.sql.gz" --json --fail-fast \
   | jq '.results[] | select(.passed == false)'
@@ -330,6 +353,7 @@ sql-splitter validate "dumps/*.sql.gz" --json --fail-fast \
 When the user needs to edit specific tables:
 
 1. **Split**
+
    ```bash
    sql-splitter split dump.sql --output tables/ --progress
    ```
@@ -361,16 +385,19 @@ For multi-tenant databases:
 For detecting schema or data changes between two versions:
 
 1. **Full comparison (schema + data)**
+
    ```bash
    sql-splitter diff old_dump.sql new_dump.sql --progress
    ```
 
 2. **Schema-only comparison** (fast, no data parsing)
+
    ```bash
    sql-splitter diff old.sql new.sql --schema-only
    ```
 
 3. **Generate migration script**
+
    ```bash
    sql-splitter diff old.sql new.sql --format sql --output migration.sql
    ```
@@ -385,6 +412,7 @@ For detecting schema or data changes between two versions:
 For creating safe development/testing datasets:
 
 1. **Generate redaction config by analyzing dump**
+
    ```bash
    sql-splitter redact dump.sql --generate-config --output redact.yaml
    ```
@@ -392,11 +420,13 @@ For creating safe development/testing datasets:
 2. **Review and customize** the generated config
 
 3. **Apply redaction**
+
    ```bash
    sql-splitter redact dump.sql --output safe.sql --config redact.yaml --progress
    ```
 
 4. **Or use inline patterns for quick redaction**
+
    ```bash
    sql-splitter redact dump.sql --output safe.sql \
      --null "*.ssn,*.tax_id" \
@@ -414,22 +444,25 @@ For creating safe development/testing datasets:
 For understanding complex database schemas:
 
 1. **Generate interactive ERD**
+
    ```bash
    sql-splitter graph dump.sql --output schema.html
    # Opens in browser with dark/light mode, zoom/pan
    ```
 
 2. **For documentation (Mermaid)**
+
    ```bash
    sql-splitter graph dump.sql --output docs/schema.mmd --format mermaid
    # Paste into GitHub/GitLab/Notion
    ```
 
 3. **Focus on specific area**
+
    ```bash
    # What does orders depend on?
    sql-splitter graph dump.sql --table orders --transitive --output orders.html
-   
+
    # What depends on users?
    sql-splitter graph dump.sql --table users --reverse --output users_deps.html
    ```
@@ -444,11 +477,13 @@ For understanding complex database schemas:
 For ensuring FK constraints don't fail during restore:
 
 1. **Check for cycles**
+
    ```bash
    sql-splitter order dump.sql --check
    ```
 
 2. **Reorder if needed**
+
    ```bash
    sql-splitter order dump.sql --output ordered.sql
    ```
@@ -463,11 +498,13 @@ For ensuring FK constraints don't fail during restore:
 For running SQL queries on dump files without loading into a database:
 
 1. **Quick exploratory query**
+
    ```bash
    sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
    ```
 
 2. **Interactive exploration (REPL)**
+
    ```bash
    sql-splitter query dump.sql --interactive
    # sql> .tables
@@ -476,15 +513,17 @@ For running SQL queries on dump files without loading into a database:
    ```
 
 3. **Export analysis results**
+
    ```bash
    sql-splitter query dump.sql "SELECT * FROM orders WHERE total > 1000" -f csv -o big_orders.csv
    ```
 
 4. **Repeated queries with caching** (400x speedup)
+
    ```bash
    # First run imports and caches
    sql-splitter query dump.sql "SELECT COUNT(*) FROM orders" --cache
-   
+
    # Subsequent runs use cache
    sql-splitter query dump.sql "SELECT SUM(total) FROM orders" --cache
    ```
@@ -505,20 +544,22 @@ For running SQL queries on dump files without loading into a database:
 
 ## Common Flag Combinations
 
-| Goal | Flags |
-|------|-------|
-| CI validation | `--strict --fail-fast --json` |
-| Safe exploration | `--dry-run --progress` |
-| Reproducible sampling | `--seed 42 --preserve-relations` |
-| Fast progress feedback | `--progress` |
-| Compressed output | Pipe to `gzip -c` or `zstd -c` |
+| Goal                   | Flags                            |
+| ---------------------- | -------------------------------- |
+| CI validation          | `--strict --fail-fast --json`    |
+| Safe exploration       | `--dry-run --progress`           |
+| Reproducible sampling  | `--seed 42 --preserve-relations` |
+| Fast progress feedback | `--progress`                     |
+| Compressed output      | Pipe to `gzip -c` or `zstd -c`   |
 
 ---
 
 ## Error Handling
 
 ### Dialect Detection Issues
+
 If auto-detection fails, specify explicitly:
+
 ```bash
 sql-splitter validate dump.sql --dialect=postgres
 sql-splitter validate mssql_dump.sql --dialect=mssql
@@ -527,11 +568,13 @@ sql-splitter convert dump.sql --from mssql --to mysql --output out.sql
 ```
 
 ### Validation Failures
+
 - Parse `--json` output for specific errors
 - Check for encoding issues, missing FKs, duplicate PKs
 - Use `--no-fk-checks` to skip expensive integrity checks
 
 ### Large Files
+
 - sql-splitter uses constant ~50MB memory
 - Downstream tools may be bottlenecks
 - Test with `sample` before full operations

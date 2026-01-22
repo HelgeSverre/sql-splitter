@@ -37,6 +37,7 @@ Or download pre-built binaries from [GitHub Releases](https://github.com/helgesv
 After installation, view documentation with `man sql-splitter` or `man sql-splitter-diff`.
 
 For `cargo install` users, install man pages manually:
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
@@ -194,7 +195,7 @@ sql-splitter is a **dump-first, CLI-first** tool designed for automation and CI/
 **What it's optimized for**
 
 | Strength                       | Description                                                                        |
-|--------------------------------|------------------------------------------------------------------------------------|
+| ------------------------------ | ---------------------------------------------------------------------------------- |
 | **One tool for the workflow**  | Split → sample → shard → convert → merge in a single binary                        |
 | **Works on dump files**        | No running database or JDBC connection needed (unlike mydumper, Jailer, Condenser) |
 | **Streaming architecture**     | 10GB+ dumps with constant memory, 600+ MB/s throughput                             |
@@ -214,24 +215,24 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 
 ### Split Options
 
-| Flag             | Description                                | Default     |
-|------------------|--------------------------------------------|-------------|
-| `-o, --output`   | Output directory                           | `output`    |
+| Flag             | Description                                         | Default     |
+| ---------------- | --------------------------------------------------- | ----------- |
+| `-o, --output`   | Output directory                                    | `output`    |
 | `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `-t, --tables`   | Only split these tables (comma-separated)  | —           |
-| `-p, --progress` | Show progress bar                          | —           |
-| `--dry-run`      | Preview without writing files              | —           |
-| `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)  | —           |
-| `--data-only`    | Only DML statements (INSERT, COPY)         | —           |
-| `--fail-fast`    | Stop on first error (for glob patterns)    | —           |
-| `--json`         | Output results as JSON                     | —           |
+| `-t, --tables`   | Only split these tables (comma-separated)           | —           |
+| `-p, --progress` | Show progress bar                                   | —           |
+| `--dry-run`      | Preview without writing files                       | —           |
+| `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)           | —           |
+| `--data-only`    | Only DML statements (INSERT, COPY)                  | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)             | —           |
+| `--json`         | Output results as JSON                              | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Merge Options
 
 | Flag             | Description                               | Default |
-|------------------|-------------------------------------------|---------|
+| ---------------- | ----------------------------------------- | ------- |
 | `-o, --output`   | Output SQL file                           | stdout  |
 | `-d, --dialect`  | SQL dialect for headers/footers           | `mysql` |
 | `-t, --tables`   | Only merge these tables (comma-separated) | all     |
@@ -245,7 +246,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 ### Analyze Options
 
 | Flag             | Description                                         | Default     |
-|------------------|-----------------------------------------------------|-------------|
+| ---------------- | --------------------------------------------------- | ----------- |
 | `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `-p, --progress` | Show progress bar                                   | —           |
 | `--fail-fast`    | Stop on first error (for glob patterns)             | —           |
@@ -255,16 +256,16 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Convert Options
 
-| Flag             | Description                                              | Default     |
-|------------------|----------------------------------------------------------|-------------|
-| `-o, --output`   | Output SQL file or directory (required for glob)         | stdout      |
-| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql`   | auto-detect |
-| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`, `mssql`   | required    |
-| `--strict`       | Fail on any unsupported feature                          | —           |
-| `-p, --progress` | Show progress bar                                        | —           |
-| `--dry-run`      | Preview without writing files                            | —           |
-| `--fail-fast`    | Stop on first error (for glob patterns)                  | —           |
-| `--json`         | Output results as JSON                                   | —           |
+| Flag             | Description                                            | Default     |
+| ---------------- | ------------------------------------------------------ | ----------- |
+| `-o, --output`   | Output SQL file or directory (required for glob)       | stdout      |
+| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`, `mssql` | required    |
+| `--strict`       | Fail on any unsupported feature                        | —           |
+| `-p, --progress` | Show progress bar                                      | —           |
+| `--dry-run`      | Preview without writing files                          | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)                | —           |
+| `--json`         | Output results as JSON                                 | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
@@ -287,16 +288,16 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Validate Options
 
-| Flag                   | Description                                        | Default     |
-|------------------------|----------------------------------------------------|-------------|
+| Flag                   | Description                                         | Default     |
+| ---------------------- | --------------------------------------------------- | ----------- |
 | `-d, --dialect`        | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--strict`             | Treat warnings as errors (exit 1)                  | —           |
-| `--json`               | Output results as JSON                             | —           |
-| `--max-rows-per-table` | Max rows per table for PK/FK checks (0 = no limit) | 1,000,000   |
-| `--no-limit`           | Disable row limit for PK/FK checks                 | —           |
-| `--no-fk-checks`       | Skip PK/FK data integrity checks                   | —           |
-| `-p, --progress`       | Show progress bar                                  | —           |
-| `--fail-fast`          | Stop on first error (for glob patterns)            | —           |
+| `--strict`             | Treat warnings as errors (exit 1)                   | —           |
+| `--json`               | Output results as JSON                              | —           |
+| `--max-rows-per-table` | Max rows per table for PK/FK checks (0 = no limit)  | 1,000,000   |
+| `--no-limit`           | Disable row limit for PK/FK checks                  | —           |
+| `--no-fk-checks`       | Skip PK/FK data integrity checks                    | —           |
+| `-p, --progress`       | Show progress bar                                   | —           |
+| `--fail-fast`          | Stop on first error (for glob patterns)             | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
@@ -310,65 +311,65 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Sample Options
 
-| Flag                  | Description                                        | Default     |
-|-----------------------|----------------------------------------------------|-------------|
-| `-o, --output`        | Output SQL file                                    | stdout      |
-| `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--percent`           | Sample percentage (1-100)                          | —           |
-| `--rows`              | Sample fixed number of rows per table              | —           |
-| `--preserve-relations`| Preserve FK relationships                          | —           |
-| `-t, --tables`        | Only sample these tables (comma-separated)         | all         |
-| `-e, --exclude`       | Exclude these tables (comma-separated)             | —           |
-| `--root-tables`       | Explicit root tables for sampling                  | —           |
-| `--include-global`    | Global table handling: `none`, `lookups`, `all`    | `lookups`   |
-| `--seed`              | Random seed for reproducibility                    | random      |
-| `-c, --config`        | YAML config file for per-table settings            | —           |
-| `--max-total-rows`    | Maximum total rows to sample (0 = no limit)        | —           |
-| `--no-limit`          | Disable row limit                                  | —           |
-| `--strict-fk`         | Fail if any FK integrity issues detected           | —           |
-| `--no-schema`         | Exclude CREATE TABLE statements from output        | —           |
-| `-p, --progress`      | Show progress bar                                  | —           |
-| `--dry-run`           | Preview without writing files                      | —           |
-| `--json`              | Output results as JSON                             | —           |
+| Flag                   | Description                                         | Default     |
+| ---------------------- | --------------------------------------------------- | ----------- |
+| `-o, --output`         | Output SQL file                                     | stdout      |
+| `-d, --dialect`        | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--percent`            | Sample percentage (1-100)                           | —           |
+| `--rows`               | Sample fixed number of rows per table               | —           |
+| `--preserve-relations` | Preserve FK relationships                           | —           |
+| `-t, --tables`         | Only sample these tables (comma-separated)          | all         |
+| `-e, --exclude`        | Exclude these tables (comma-separated)              | —           |
+| `--root-tables`        | Explicit root tables for sampling                   | —           |
+| `--include-global`     | Global table handling: `none`, `lookups`, `all`     | `lookups`   |
+| `--seed`               | Random seed for reproducibility                     | random      |
+| `-c, --config`         | YAML config file for per-table settings             | —           |
+| `--max-total-rows`     | Maximum total rows to sample (0 = no limit)         | —           |
+| `--no-limit`           | Disable row limit                                   | —           |
+| `--strict-fk`          | Fail if any FK integrity issues detected            | —           |
+| `--no-schema`          | Exclude CREATE TABLE statements from output         | —           |
+| `-p, --progress`       | Show progress bar                                   | —           |
+| `--dry-run`            | Preview without writing files                       | —           |
+| `--json`               | Output results as JSON                              | —           |
 
 ### Shard Options
 
-| Flag                  | Description                                        | Default     |
-|-----------------------|----------------------------------------------------|-------------|
-| `-o, --output`        | Output SQL file or directory                       | stdout      |
+| Flag                  | Description                                         | Default     |
+| --------------------- | --------------------------------------------------- | ----------- |
+| `-o, --output`        | Output SQL file or directory                        | stdout      |
 | `-d, --dialect`       | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--tenant-column`     | Column name for tenant identification              | auto-detect |
-| `--tenant-value`      | Single tenant value to extract                     | —           |
-| `--tenant-values`     | Multiple tenant values (comma-separated)           | —           |
-| `--root-tables`       | Explicit root tables with tenant column            | —           |
-| `--include-global`    | Global table handling: `none`, `lookups`, `all`    | `lookups`   |
-| `-c, --config`        | YAML config file for table classification          | —           |
-| `--max-selected-rows` | Maximum rows to select (0 = no limit)              | —           |
-| `--no-limit`          | Disable row limit                                  | —           |
-| `--strict-fk`         | Fail if any FK integrity issues detected           | —           |
-| `--no-schema`         | Exclude CREATE TABLE statements from output        | —           |
-| `-p, --progress`      | Show progress bar                                  | —           |
-| `--dry-run`           | Preview without writing files                      | —           |
-| `--json`              | Output results as JSON                             | —           |
+| `--tenant-column`     | Column name for tenant identification               | auto-detect |
+| `--tenant-value`      | Single tenant value to extract                      | —           |
+| `--tenant-values`     | Multiple tenant values (comma-separated)            | —           |
+| `--root-tables`       | Explicit root tables with tenant column             | —           |
+| `--include-global`    | Global table handling: `none`, `lookups`, `all`     | `lookups`   |
+| `-c, --config`        | YAML config file for table classification           | —           |
+| `--max-selected-rows` | Maximum rows to select (0 = no limit)               | —           |
+| `--no-limit`          | Disable row limit                                   | —           |
+| `--strict-fk`         | Fail if any FK integrity issues detected            | —           |
+| `--no-schema`         | Exclude CREATE TABLE statements from output         | —           |
+| `-p, --progress`      | Show progress bar                                   | —           |
+| `--dry-run`           | Preview without writing files                       | —           |
+| `--json`              | Output results as JSON                              | —           |
 
 ### Diff Options
 
-| Flag                | Description                                                | Default     |
-|---------------------|------------------------------------------------------------|-------------|
-| `-o, --output`      | Output file (default: stdout)                              | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
-| `--schema-only`     | Compare schema only, skip data                             | —           |
-| `--data-only`       | Compare data only, skip schema                             | —           |
-| `--format`          | Output format: `text`, `json`, `sql`                       | `text`      |
-| `-t, --tables`      | Only compare these tables (comma-separated)                | all         |
-| `-e, --exclude`     | Exclude these tables (comma-separated)                     | —           |
-| `--max-pk-entries`  | Max PK entries to track (0 = no limit)                     | 10,000,000  |
-| `-v, --verbose`     | Show sample PK values for added/removed/modified rows      | —           |
-| `--primary-key`     | Override PK for tables (format: `table:col1+col2`)         | auto-detect |
-| `--ignore-order`    | Ignore column order differences in schema comparison       | —           |
-| `--ignore-columns`  | Ignore columns matching glob patterns (e.g., `*.updated_at`) | —         |
-| `--allow-no-pk`     | Compare tables without PK using all columns as key         | —           |
-| `-p, --progress`    | Show progress bar                                          | —           |
+| Flag               | Description                                                  | Default     |
+| ------------------ | ------------------------------------------------------------ | ----------- |
+| `-o, --output`     | Output file (default: stdout)                                | stdout      |
+| `-d, --dialect`    | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`          | auto-detect |
+| `--schema-only`    | Compare schema only, skip data                               | —           |
+| `--data-only`      | Compare data only, skip schema                               | —           |
+| `--format`         | Output format: `text`, `json`, `sql`                         | `text`      |
+| `-t, --tables`     | Only compare these tables (comma-separated)                  | all         |
+| `-e, --exclude`    | Exclude these tables (comma-separated)                       | —           |
+| `--max-pk-entries` | Max PK entries to track (0 = no limit)                       | 10,000,000  |
+| `-v, --verbose`    | Show sample PK values for added/removed/modified rows        | —           |
+| `--primary-key`    | Override PK for tables (format: `table:col1+col2`)           | auto-detect |
+| `--ignore-order`   | Ignore column order differences in schema comparison         | —           |
+| `--ignore-columns` | Ignore columns matching glob patterns (e.g., `*.updated_at`) | —           |
+| `--allow-no-pk`    | Compare tables without PK using all columns as key           | —           |
+| `-p, --progress`   | Show progress bar                                            | —           |
 
 **What diff detects:**
 
@@ -386,22 +387,22 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Graph Options
 
-| Flag                | Description                                                | Default     |
-|---------------------|------------------------------------------------------------|-------------|
-| `-o, --output`      | Output file (html, dot, mmd, json, png, svg, pdf)          | stdout      |
-| `--format`          | Output format: `html`, `dot`, `mermaid`, `json`            | auto-detect |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
-| `--layout`          | Layout direction: `lr` (left-right), `tb` (top-bottom)     | `lr`        |
-| `-t, --tables`      | Only include tables matching glob patterns                 | all         |
-| `-e, --exclude`     | Exclude tables matching glob patterns                      | —           |
-| `--table`           | Focus on a specific table                                  | —           |
-| `--transitive`      | Show all dependencies of focused table                     | —           |
-| `--reverse`         | Show all tables that depend on focused table               | —           |
-| `--max-depth`       | Limit traversal depth                                      | unlimited   |
-| `--cycles-only`     | Only show tables in circular dependencies                  | —           |
-| `--render`          | Render DOT to PNG/SVG/PDF using Graphviz                   | —           |
-| `-p, --progress`    | Show progress bar                                          | —           |
-| `--json`            | Output as JSON                                             | —           |
+| Flag             | Description                                            | Default     |
+| ---------------- | ------------------------------------------------------ | ----------- |
+| `-o, --output`   | Output file (html, dot, mmd, json, png, svg, pdf)      | stdout      |
+| `--format`       | Output format: `html`, `dot`, `mermaid`, `json`        | auto-detect |
+| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`    | auto-detect |
+| `--layout`       | Layout direction: `lr` (left-right), `tb` (top-bottom) | `lr`        |
+| `-t, --tables`   | Only include tables matching glob patterns             | all         |
+| `-e, --exclude`  | Exclude tables matching glob patterns                  | —           |
+| `--table`        | Focus on a specific table                              | —           |
+| `--transitive`   | Show all dependencies of focused table                 | —           |
+| `--reverse`      | Show all tables that depend on focused table           | —           |
+| `--max-depth`    | Limit traversal depth                                  | unlimited   |
+| `--cycles-only`  | Only show tables in circular dependencies              | —           |
+| `--render`       | Render DOT to PNG/SVG/PDF using Graphviz               | —           |
+| `-p, --progress` | Show progress bar                                      | —           |
+| `--json`         | Output as JSON                                         | —           |
 
 **Output formats:**
 
@@ -413,36 +414,36 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Order Options
 
-| Flag                | Description                                                | Default     |
-|---------------------|------------------------------------------------------------|-------------|
-| `-o, --output`      | Output SQL file                                            | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
-| `--check`           | Check for cycles and report order (don't write)            | —           |
-| `--dry-run`         | Show topological order without writing                     | —           |
-| `--reverse`         | Reverse order (children before parents, for DROP)          | —           |
+| Flag            | Description                                         | Default     |
+| --------------- | --------------------------------------------------- | ----------- |
+| `-o, --output`  | Output SQL file                                     | stdout      |
+| `-d, --dialect` | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--check`       | Check for cycles and report order (don't write)     | —           |
+| `--dry-run`     | Show topological order without writing              | —           |
+| `--reverse`     | Reverse order (children before parents, for DROP)   | —           |
 
 ### Redact Options
 
-| Flag                | Description                                                | Default     |
-|---------------------|------------------------------------------------------------|-------------|
-| `-o, --output`      | Output SQL file                                            | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
-| `-c, --config`      | YAML config file for redaction rules                       | —           |
-| `--generate-config` | Analyze input and generate annotated YAML config           | —           |
-| `--null`            | Columns to set to NULL (glob patterns, comma-separated)    | —           |
-| `--hash`            | Columns to hash with SHA256 (glob patterns)                | —           |
-| `--fake`            | Columns to replace with fake data (glob patterns)          | —           |
-| `--mask`            | Columns to partially mask (format: `pattern=column`)       | —           |
-| `--constant`        | Column=value pairs for constant replacement                | —           |
-| `--seed`            | Random seed for reproducible redaction                     | random      |
-| `--locale`          | Locale for fake data (en, de_de, fr_fr, etc.)              | `en`        |
-| `-t, --tables`      | Only redact specific tables (comma-separated)              | all         |
-| `-e, --exclude`     | Exclude specific tables (comma-separated)                  | —           |
-| `--strict`          | Fail on warnings (e.g., unsupported locale)                | —           |
-| `-p, --progress`    | Show progress bar                                          | —           |
-| `--dry-run`         | Preview without writing files                              | —           |
-| `--json`            | Output results as JSON                                     | —           |
-| `--validate`        | Validate config only, don't process                        | —           |
+| Flag                | Description                                             | Default     |
+| ------------------- | ------------------------------------------------------- | ----------- |
+| `-o, --output`      | Output SQL file                                         | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`     | auto-detect |
+| `-c, --config`      | YAML config file for redaction rules                    | —           |
+| `--generate-config` | Analyze input and generate annotated YAML config        | —           |
+| `--null`            | Columns to set to NULL (glob patterns, comma-separated) | —           |
+| `--hash`            | Columns to hash with SHA256 (glob patterns)             | —           |
+| `--fake`            | Columns to replace with fake data (glob patterns)       | —           |
+| `--mask`            | Columns to partially mask (format: `pattern=column`)    | —           |
+| `--constant`        | Column=value pairs for constant replacement             | —           |
+| `--seed`            | Random seed for reproducible redaction                  | random      |
+| `--locale`          | Locale for fake data (en, de_de, fr_fr, etc.)           | `en`        |
+| `-t, --tables`      | Only redact specific tables (comma-separated)           | all         |
+| `-e, --exclude`     | Exclude specific tables (comma-separated)               | —           |
+| `--strict`          | Fail on warnings (e.g., unsupported locale)             | —           |
+| `-p, --progress`    | Show progress bar                                       | —           |
+| `--dry-run`         | Preview without writing files                           | —           |
+| `--json`            | Output results as JSON                                  | —           |
+| `--validate`        | Validate config only, don't process                     | —           |
 
 **Redaction strategies:**
 
@@ -460,20 +461,20 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Query Options
 
-| Flag                | Description                                                | Default     |
-|---------------------|------------------------------------------------------------|-------------|
-| `-f, --format`      | Output format: `table`, `json`, `jsonl`, `csv`, `tsv`      | `table`     |
-| `-o, --output`      | Write output to file instead of stdout                     | stdout      |
-| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`        | auto-detect |
-| `-i, --interactive` | Start interactive REPL session                             | —           |
-| `--disk`            | Use disk-based storage (for large dumps >2GB)              | auto        |
-| `--cache`           | Cache imported database for repeated queries               | —           |
-| `-t, --tables`      | Only import specific tables (comma-separated)              | all         |
-| `--memory-limit`    | Memory limit for DuckDB (e.g., "4GB")                      | —           |
-| `--timing`          | Show query execution time                                  | —           |
-| `-p, --progress`    | Show import progress                                       | —           |
-| `--list-cache`      | List cached databases                                      | —           |
-| `--clear-cache`     | Clear all cached databases                                 | —           |
+| Flag                | Description                                           | Default     |
+| ------------------- | ----------------------------------------------------- | ----------- |
+| `-f, --format`      | Output format: `table`, `json`, `jsonl`, `csv`, `tsv` | `table`     |
+| `-o, --output`      | Write output to file instead of stdout                | stdout      |
+| `-d, --dialect`     | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`   | auto-detect |
+| `-i, --interactive` | Start interactive REPL session                        | —           |
+| `--disk`            | Use disk-based storage (for large dumps >2GB)         | auto        |
+| `--cache`           | Cache imported database for repeated queries          | —           |
+| `-t, --tables`      | Only import specific tables (comma-separated)         | all         |
+| `--memory-limit`    | Memory limit for DuckDB (e.g., "4GB")                 | —           |
+| `--timing`          | Show query execution time                             | —           |
+| `-p, --progress`    | Show import progress                                  | —           |
+| `--list-cache`      | List cached databases                                 | —           |
+| `--clear-cache`     | Clear all cached databases                            | —           |
 
 **REPL commands:**
 
@@ -508,6 +509,7 @@ sql-splitter includes documentation optimized for AI agents:
 - **[Agent Skill](skills/sql-splitter/SKILL.md)** - Claude Code / Amp skill for automatic tool discovery
 
 Install the skill in Claude Code / Amp:
+
 ```bash
 amp skill add helgesverre/sql-splitter
 ```

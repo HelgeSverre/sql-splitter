@@ -16,6 +16,7 @@
 ### 1. DuckDB Integration ⭐⭐⭐⭐⭐
 
 **What is DuckDB?**
+
 - In-process analytical SQL database
 - Zero-config, single file
 - Reads CSV, Parquet, JSON directly
@@ -37,6 +38,7 @@ sql-splitter query dump.sql --engine duckdb \
 ```
 
 **Implementation:**
+
 ```rust
 pub fn query_with_duckdb(dump: &Path, sql: &str) -> Result<Vec<Row>> {
     // Create temp DuckDB database
@@ -57,6 +59,7 @@ pub fn query_with_duckdb(dump: &Path, sql: &str) -> Result<Vec<Row>> {
 ```
 
 **Benefits:**
+
 - ✅ Full SQL analytics without database setup
 - ✅ Aggregations, JOINs, window functions
 - ✅ 100x faster than naive row filtering
@@ -89,6 +92,7 @@ duckdb -c "SELECT * FROM 'data/*.parquet' WHERE created_at > '2024-01-01'"
 ### 2. Atlas Integration (Schema Management) ⭐⭐⭐⭐⭐
 
 **What is Atlas?**
+
 - Schema-as-code tool (like Terraform for databases)
 - Declarative schema definitions (HCL)
 - Drift detection, migration planning
@@ -127,6 +131,7 @@ atlas schema diff --from file://old.hcl --to file://new.hcl
 ```
 
 **Benefits:**
+
 - ✅ Version control for schemas
 - ✅ GitOps workflows
 - ✅ Atlas ecosystem (drift detection, planning)
@@ -150,6 +155,7 @@ atlas schema apply --to file://schema.hcl --dev-url "docker://mysql" --format sq
 ### 3. Great Expectations Integration (Data Quality) ⭐⭐⭐⭐
 
 **What is Great Expectations?**
+
 - Data quality testing framework
 - Expectations = assertions about data
 - Generates validation reports
@@ -185,12 +191,14 @@ great_expectations suite edit expectations.json
 ```
 
 **Auto-generate expectations based on:**
+
 - NOT NULL constraints → `expect_column_values_to_not_be_null`
 - Data patterns → `expect_column_values_to_match_regex`
 - Value ranges → `expect_column_values_to_be_between`
 - FK constraints → `expect_column_values_to_be_in_set`
 
 **Benefits:**
+
 - ✅ Bootstrap data quality testing
 - ✅ Leverage GE's rich validation library
 - ✅ Production monitoring integration
@@ -202,6 +210,7 @@ great_expectations suite edit expectations.json
 ### 4. Liquibase/Flyway Integration (Migrations) ⭐⭐⭐⭐
 
 **What are they?**
+
 - Database migration tools
 - Version-controlled changesets
 - Industry standard (especially Java ecosystem)
@@ -233,11 +242,13 @@ liquibase update --changelog-file changelog.xml
 ```
 
 **Formats:**
+
 - Liquibase XML/YAML/JSON
 - Flyway SQL migrations
 - Alembic Python migrations
 
 **Benefits:**
+
 - ✅ Integrate with existing CI/CD pipelines
 - ✅ Leverage migration rollback features
 - ✅ Team familiarity with Liquibase/Flyway
@@ -249,6 +260,7 @@ liquibase update --changelog-file changelog.xml
 ### 5. tbls Integration (Documentation) ⭐⭐⭐⭐
 
 **What is tbls?**
+
 - Database documentation generator
 - Markdown docs, ER diagrams
 - Works on live databases
@@ -327,6 +339,7 @@ sql-splitter diagram dump.sql --watch
 ### 7. pgBadger/pt-query-digest (Query Analysis) ⭐⭐⭐
 
 **What are they?**
+
 - Parse slow query logs
 - Generate performance reports
 - Identify optimization opportunities
@@ -359,6 +372,7 @@ CREATE INDEX idx_orders_user_created ON orders(user_id, created_at);
 ### 8. SchemaSpy Integration (Visualization) ⭐⭐⭐
 
 **What is SchemaSpy?**
+
 - Generates HTML schema documentation
 - ER diagrams, table relationships
 - Requires JDBC connection
@@ -379,6 +393,7 @@ sql-splitter browse dump.sql
 ```
 
 **Tech stack:**
+
 - Static HTML + JavaScript (no server needed)
 - Embedded in binary (single-file deployment)
 - D3.js or Cytoscape.js for graph visualization
@@ -415,6 +430,7 @@ providers:
 ### 10. Airbyte/Meltano Connector ⭐⭐⭐⭐
 
 **What are they?**
+
 - Data pipeline platforms
 - ELT (Extract, Load, Transform)
 - 300+ connectors
@@ -429,21 +445,20 @@ providers:
   "name": "SQL Dump",
   "protocol_version": "0.2.0",
   "supported_destination_sync_modes": ["overwrite", "append"],
-  "spec": {
-    "properties": {
-      "dump_path": {
-        "type": "string",
-        "description": "Path to SQL dump file"
-      },
-      "dialect": {
-        "enum": ["mysql", "postgres", "sqlite"]
-      }
-    }
-  }
+  "spec":
+    {
+      "properties":
+        {
+          "dump_path":
+            { "type": "string", "description": "Path to SQL dump file" },
+          "dialect": { "enum": ["mysql", "postgres", "sqlite"] },
+        },
+    },
 }
 ```
 
 **Use case:**
+
 ```bash
 # Extract from SQL dump → Load to Snowflake
 airbyte sync --source sql-dump --destination snowflake
@@ -452,6 +467,7 @@ airbyte sync --source sql-dump --destination snowflake
 ```
 
 **Benefits:**
+
 - ✅ SQL dumps as ELT source
 - ✅ Access to 300+ destinations
 - ✅ Scheduled sync
@@ -465,6 +481,7 @@ airbyte sync --source sql-dump --destination snowflake
 ### 11. Supabase/PlanetScale/Neon Integration ⭐⭐⭐⭐
 
 **What are they?**
+
 - Modern database platforms
 - Serverless/edge databases
 - Developer-friendly APIs
@@ -487,6 +504,7 @@ Dashboard: https://app.supabase.com/project/my-project
 ```
 
 **Platforms:**
+
 - Supabase (Postgres)
 - PlanetScale (MySQL)
 - Neon (Postgres)
@@ -574,6 +592,7 @@ sql-splitter analyze dump.sql --metrics-export datadog
 ### 14. dbt Integration ⭐⭐⭐⭐⭐
 
 **What is dbt?**
+
 - SQL-based data transformation
 - Testing framework
 - Documentation
@@ -613,11 +632,13 @@ models:
 ```
 
 **Generated dbt tests based on constraints:**
+
 - PRIMARY KEY → `unique` + `not_null` tests
 - FOREIGN KEY → `relationships` tests
 - NOT NULL → `not_null` tests
 
 **Benefits:**
+
 - ✅ Bootstrap dbt project from existing schema
 - ✅ Automatic test generation
 - ✅ Leverage dbt's ecosystem
@@ -679,11 +700,13 @@ pub fn query_with_duckdb(dump: &Path, sql: &str) -> Result<String> {
 ```
 
 **Pros:**
+
 - ✅ Quick to implement
 - ✅ Leverage existing tools
 - ✅ No reimplementation
 
 **Cons:**
+
 - ❌ External dependency required
 - ❌ Less control over behavior
 
@@ -712,11 +735,13 @@ pub fn query_with_duckdb_lib(dump: &Path, sql: &str) -> Result<Vec<Row>> {
 ```
 
 **Pros:**
+
 - ✅ No external binary required
 - ✅ Better error handling
 - ✅ Embedded in sql-splitter binary
 
 **Cons:**
+
 - ❌ More implementation work
 - ❌ Need to keep bindings updated
 
@@ -753,26 +778,32 @@ pub async fn deploy_to_supabase(
 ## Recommended Integration Roadmap
 
 ### v1.16 — Query & Analytics
+
 - **DuckDB integration** (16h) — Query engine for dumps
 - **Parquet export** (12h) — Bridge to modern data stack
 
 ### v1.17 — Schema Management
+
 - **Atlas HCL export** (20h) — Schema-as-code
 - **Liquibase changelog generation** (24h) — Migration tool integration
 
 ### v1.18 — Data Quality
+
 - **Great Expectations integration** (16h) — Bootstrap testing
 
 ### v1.19 — Documentation
+
 - **Self-contained schema browser** (32h) — Interactive docs
 - **tbls format export** (20h) — Compatibility
 
 ### v2.2 — Platform Integrations
+
 - **dbt project generation** (28h) — Data transformation
 - **GitHub Action** (12h) — CI/CD
 - **Airbyte connector** (24h) — ELT pipelines
 
 ### v2.3 — Cloud Deployment
+
 - **Supabase deployment** (20h) — Instant database provisioning
 - **Terraform provider** (32h) — IaC integration
 
@@ -808,6 +839,7 @@ pub async fn deploy_to_supabase(
 - ❌ **Engine:** Reimplement DuckDB query optimizer
 
 **Example:**
+
 - Don't build: Query optimization engine
 - Do build: Import dump → DuckDB → export results
 - Provide: Simple CLI that hides complexity
@@ -826,6 +858,7 @@ pub async fn deploy_to_supabase(
 4. **Maintenance:** Integration is stable, low maintenance
 
 **Example:**
+
 ```bash
 # Without sql-splitter:
 mysqldump > dump.sql

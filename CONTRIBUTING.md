@@ -5,6 +5,7 @@ Thanks for your interest in contributing! This document covers everything you ne
 ## Development Setup
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/helgesverre/sql-splitter.git
    cd sql-splitter
@@ -12,6 +13,7 @@ Thanks for your interest in contributing! This document covers everything you ne
 
 2. **Install Rust 1.70+**
    - All platforms: [rustup.rs](https://rustup.rs/)
+
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
@@ -56,11 +58,11 @@ For new features or significant changes, follow this workflow:
 
 When starting an AI session, consider which mode you're in:
 
-| Mode | Purpose | Example |
-|------|---------|---------|
-| **Build** | New functionality | "Implement sample command (Phase 1)" |
-| **Improve** | Refactor without changing behavior | "Extract sampler module" |
-| **Sweep** | Fix related bugs | "Fix all INSERT parsing edge cases" |
+| Mode        | Purpose                            | Example                              |
+| ----------- | ---------------------------------- | ------------------------------------ |
+| **Build**   | New functionality                  | "Implement sample command (Phase 1)" |
+| **Improve** | Refactor without changing behavior | "Extract sampler module"             |
+| **Sweep**   | Fix related bugs                   | "Fix all INSERT parsing edge cases"  |
 
 This prevents scope creep and keeps AI contributions focused.
 

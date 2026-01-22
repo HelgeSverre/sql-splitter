@@ -14,12 +14,14 @@ If you discover a security vulnerability, please report it privately:
 **Email:** helge.sverre@gmail.com
 
 **Please include:**
+
 - Description of the vulnerability
 - Steps to reproduce
 - Potential impact
 - Any suggested fixes (optional)
 
 **Do not:**
+
 - Open a public GitHub issue for security vulnerabilities
 - Disclose the vulnerability publicly before it's fixed
 
@@ -32,9 +34,11 @@ If you discover a security vulnerability, please report it privately:
 ## Scope
 
 This policy applies to:
+
 - The sql-splitter CLI tool
 - Code in the main repository
 
 Out of scope:
+
 - Third-party dependencies (report to their maintainers)
 - Issues in forks or unofficial distributions

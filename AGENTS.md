@@ -12,26 +12,26 @@ High-performance CLI tool written in Rust for splitting large SQL dump files int
 
 Run `make help` to see all available commands. Key commands:
 
-| Command | Description |
-|---------|-------------|
-| `make build` | Debug build |
-| `make release` | Release build |
-| `make native` | Optimized build for current CPU (best performance) |
-| `make test` | Run all tests |
-| `make bench` | Run criterion benchmarks |
-| `make profile` | Memory profile all commands (medium dataset) |
-| `make profile-large` | Memory profile with large dataset (~250MB) |
-| `make profile-mega` | Stress test profile (~2GB: 100 tables × 100k rows) |
-| `make fmt` | Format code |
-| `make check` | Check code without building |
-| `make clippy` | Run clippy lints |
-| `make clean` | Clean build artifacts |
-| `make install` | Install locally (binary + shell completions) |
-| `make verify-realworld` | Verify against real-world SQL dumps |
-| `make website-deploy` | Deploy website to Vercel |
-| `make docker-bench` | Run benchmarks in Docker (generates 100MB test data) |
-| `make man` | Generate man pages in man/ directory |
-| `make schemas` | Generate JSON schemas from Rust types, validate, and copy to website |
+| Command                 | Description                                                          |
+| ----------------------- | -------------------------------------------------------------------- |
+| `make build`            | Debug build                                                          |
+| `make release`          | Release build                                                        |
+| `make native`           | Optimized build for current CPU (best performance)                   |
+| `make test`             | Run all tests                                                        |
+| `make bench`            | Run criterion benchmarks                                             |
+| `make profile`          | Memory profile all commands (medium dataset)                         |
+| `make profile-large`    | Memory profile with large dataset (~250MB)                           |
+| `make profile-mega`     | Stress test profile (~2GB: 100 tables × 100k rows)                   |
+| `make fmt`              | Format code                                                          |
+| `make check`            | Check code without building                                          |
+| `make clippy`           | Run clippy lints                                                     |
+| `make clean`            | Clean build artifacts                                                |
+| `make install`          | Install locally (binary + shell completions)                         |
+| `make verify-realworld` | Verify against real-world SQL dumps                                  |
+| `make website-deploy`   | Deploy website to Vercel                                             |
+| `make docker-bench`     | Run benchmarks in Docker (generates 100MB test data)                 |
+| `make man`              | Generate man pages in man/ directory                                 |
+| `make schemas`          | Generate JSON schemas from Rust types, validate, and copy to website |
 
 ### Building and Running
 
@@ -87,11 +87,11 @@ cargo fmt
 
 ### Supported Dialects
 
-| Dialect | Flag | Dump Tool | Key Features |
-|---------|------|-----------|--------------|
-| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump | Backtick quoting, backslash escapes |
-| PostgreSQL | `--dialect=postgres` | pg_dump | Double-quote identifiers, COPY FROM stdin, dollar-quoting |
-| SQLite | `--dialect=sqlite` | sqlite3 .dump | Double-quote identifiers |
+| Dialect       | Flag                        | Dump Tool     | Key Features                                              |
+| ------------- | --------------------------- | ------------- | --------------------------------------------------------- |
+| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump     | Backtick quoting, backslash escapes                       |
+| PostgreSQL    | `--dialect=postgres`        | pg_dump       | Double-quote identifiers, COPY FROM stdin, dollar-quoting |
+| SQLite        | `--dialect=sqlite`          | sqlite3 .dump | Double-quote identifiers                                  |
 
 ## Architecture
 
@@ -112,6 +112,7 @@ BufReader (fill_buf) → Parser (Streaming) → WriterPool (BufWriter) → Table
 - Pre-compiled static regexes via `once_cell::Lazy`
 
 Key functions:
+
 - `read_statement()`: Reads complete SQL statement (handles strings, escaping)
 - `parse_statement()`: Identifies statement type and extracts table name
 - `determine_buffer_size()`: Selects optimal buffer size based on file size
@@ -233,6 +234,7 @@ Size configurations:
 ### Key Metrics
 
 From GNU time output:
+
 - **Maximum resident set size (kbytes)**: Peak memory usage
 - **Elapsed (wall clock) time**: Total execution time
 - **User time (seconds)**: CPU time in user mode
@@ -260,17 +262,18 @@ convert      mysql        123.72 MB     12.26 MB     0:00.84
 
 The `query` command shows significant performance differences based on dialect:
 
-| Dialect | File Size | Query Time | Peak RSS | Notes |
-|---------|-----------|------------|----------|-------|
-| PostgreSQL | 111 MB | 6.4s | 101 MB | Uses COPY (fast batch import) |
-| MySQL | 124 MB | 36.5s | 100 MB | Uses INSERT (row-by-row parsing) |
-| SQLite | 124 MB | 37.2s | 210 MB | Uses INSERT (row-by-row parsing) |
+| Dialect    | File Size | Query Time | Peak RSS | Notes                            |
+| ---------- | --------- | ---------- | -------- | -------------------------------- |
+| PostgreSQL | 111 MB    | 6.4s       | 101 MB   | Uses COPY (fast batch import)    |
+| MySQL      | 124 MB    | 36.5s      | 100 MB   | Uses INSERT (row-by-row parsing) |
+| SQLite     | 124 MB    | 37.2s      | 210 MB   | Uses INSERT (row-by-row parsing) |
 
 PostgreSQL dumps are ~6x faster to query because COPY blocks are efficiently batched.
 
 ### Memory Optimization Guidelines
 
 When optimizing for memory:
+
 1. Use streaming/chunked processing instead of loading all data
 2. Use hash-based sets (`PkHashSet` with 64-bit hashes) instead of storing full values
 3. Write intermediate results to temp files instead of accumulating in memory
@@ -311,6 +314,7 @@ cargo fmt --check
 ### 2. Update Version
 
 1. Update version in `Cargo.toml`:
+
    ```toml
    version = "X.Y.Z"
    ```
@@ -351,6 +355,7 @@ gh release create vX.Y.Z \
 ```
 
 Or manually at: https://github.com/HelgeSverre/sql-splitter/releases/new
+
 - Select the tag `vX.Y.Z`
 - Title: `vX.Y.Z`
 - Description: Copy relevant section from CHANGELOG.md
@@ -360,11 +365,13 @@ Or manually at: https://github.com/HelgeSverre/sql-splitter/releases/new
 **crates.io publishing is automatic** when you push a new tag. The GitHub Action workflow handles this.
 
 **Setup requirement**: Add the `CARGO_REGISTRY_TOKEN` secret to your GitHub repository:
+
 1. Go to https://crates.io/settings/tokens and create a new token
 2. Go to GitHub repo → Settings → Secrets and variables → Actions
 3. Add new secret: `CARGO_REGISTRY_TOKEN` with your crates.io token
 
 Manual publish (if needed):
+
 ```bash
 cargo publish --dry-run  # Test first
 cargo publish            # Publish
@@ -380,6 +387,7 @@ cargo publish            # Publish
 ### Versioning Guidelines
 
 Follow [Semantic Versioning](https://semver.org/):
+
 - **MAJOR** (X.0.0): Breaking changes to CLI interface or output format
 - **MINOR** (0.X.0): New features, new dialects, new commands
 - **PATCH** (0.0.X): Bug fixes, performance improvements, documentation
@@ -404,6 +412,7 @@ The file `website/llms.txt` provides LLM-friendly documentation following the [l
 ### When to Update llms.txt
 
 Update `website/llms.txt` when:
+
 - Adding new CLI commands or subcommands
 - Adding/changing command-line flags or options
 - Adding support for new SQL dialects
@@ -415,12 +424,14 @@ Update `website/llms.txt` when:
 ### llms.txt Format Requirements
 
 The file must follow this structure (in order):
+
 1. **H1 header**: Project name (`# sql-splitter`)
 2. **Blockquote**: Brief summary with key capabilities
 3. **Body sections**: Detailed info (no H2 headers yet)
 4. **H2 sections**: File lists with URLs to documentation/source
 
 Key guidelines:
+
 - Keep content concise and actionable for LLMs
 - Include complete CLI examples with common flags
 - Document all supported options in tables
@@ -435,10 +446,12 @@ When adding a new `--format` flag:
 ## Commands
 
 ### split
+
 ...
 Options:
-- `--format <FORMAT>`: Output format: sql, json (default: sql)  # ADD THIS
-...
+
+- `--format <FORMAT>`: Output format: sql, json (default: sql) # ADD THIS
+  ...
 ```
 
 ## Agent Skills
@@ -452,6 +465,7 @@ Agent Skills are supported by: Amp, Claude Code, VS Code / GitHub Copilot, Curso
 ### When to Update SKILL.md
 
 Update `skills/sql-splitter/SKILL.md` when:
+
 - Adding new CLI commands
 - Changing command patterns or workflows
 - Adding new flags that affect common usage patterns
@@ -460,10 +474,12 @@ Update `skills/sql-splitter/SKILL.md` when:
 ### SKILL.md Format Requirements
 
 The file follows the Agent Skills specification:
+
 1. **YAML frontmatter**: name, description, license, compatibility
 2. **Markdown body**: Step-by-step instructions, patterns, and examples
 
 Key guidelines:
+
 - Focus on **when to use** vs **when not to use**
 - Provide step-by-step patterns for common workflows
 - Include error handling guidance
@@ -472,47 +488,55 @@ Key guidelines:
 ### Installing the Skill
 
 **Amp:**
+
 ```bash
 amp skill add helgesverre/sql-splitter
 ```
 
 **Claude Code:**
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
 cp -r /tmp/sql-splitter/skills/sql-splitter ~/.claude/skills/
 ```
 
 **VS Code / GitHub Copilot:**
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
 cp -r /tmp/sql-splitter/skills/sql-splitter .github/skills/
 ```
 
 **Cursor:**
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
 cp -r /tmp/sql-splitter/skills/sql-splitter .cursor/skills/
 ```
 
 **Goose:**
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
 cp -r /tmp/sql-splitter/skills/sql-splitter ~/.config/goose/skills/
 ```
 
 **Letta:**
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
 cp -r /tmp/sql-splitter/skills/sql-splitter .skills/
 ```
 
 **OpenCode:**
+
 ```bash
 git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
 cp -r /tmp/sql-splitter/skills/sql-splitter ~/.opencode/skills/
 ```
 
 **Universal Installer (via npx):**
+
 ```bash
 npx ai-agent-skills install sql-splitter --agent <agent>
 # Supported agents: claude, cursor, amp, vscode, goose, opencode
@@ -532,6 +556,7 @@ sql-splitter/
 ### Test Suite Overview
 
 The test suite includes 780+ tests across multiple test files:
+
 - `duckdb_test.rs`: 150 tests for DuckDB query functionality
 - Unit tests for parser, splitter, analyzer, converter, etc.
 - Integration tests for various commands
@@ -540,12 +565,13 @@ The test suite includes 780+ tests across multiple test files:
 
 For this codebase, both runners perform similarly:
 
-| Runner | Wall Clock | CPU Usage | Notes |
-|--------|------------|-----------|-------|
-| `cargo test` | ~20s | 342% | Default, in-process parallelism |
-| `cargo nextest run` | ~19s | 755% | Per-test process isolation, better parallelism |
+| Runner              | Wall Clock | CPU Usage | Notes                                          |
+| ------------------- | ---------- | --------- | ---------------------------------------------- |
+| `cargo test`        | ~20s       | 342%      | Default, in-process parallelism                |
+| `cargo nextest run` | ~19s       | 755%      | Per-test process isolation, better parallelism |
 
 **Recommendation:** Use `cargo test` for development (simpler). Consider `cargo nextest` when:
+
 - You need better test failure diagnostics (clearer output)
 - You need test retries (`--retries`)
 - You want maximum parallelization on many-core machines

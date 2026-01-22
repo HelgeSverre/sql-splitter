@@ -19,11 +19,13 @@ This document consolidates the strategic plan for integrating sql-splitter with 
 ### Market Positioning
 
 **Before Integrations**:
+
 - Niche tool for dump manipulation
 - Limited to split/merge/convert operations
 - Standalone utility
 
 **After Integrations**:
+
 - **Essential bridge** between legacy & modern data stacks
 - **Force multiplier** for data teams (10x faster bootstrapping)
 - **Hub** connecting dumps to entire data ecosystem
@@ -34,12 +36,12 @@ This document consolidates the strategic plan for integrating sql-splitter with 
 
 ### Tier 1 Integrations (Completed Design)
 
-| Integration | Effort | Value | Status | Version |
-|-------------|--------|-------|--------|---------|
-| **DuckDB** | 16h | 🔥 Game-changer | Designed | v1.16.0 |
-| **Great Expectations** | 16h | ⭐ High impact | Designed | v1.17.0 |
-| **Atlas** | 20h | ⭐ High impact | Designed | v1.18.0 |
-| **dbt** | 28h | 🔥 Game-changer | Designed | v1.19.0 |
+| Integration            | Effort | Value           | Status   | Version |
+| ---------------------- | ------ | --------------- | -------- | ------- |
+| **DuckDB**             | 16h    | 🔥 Game-changer | Designed | v1.16.0 |
+| **Great Expectations** | 16h    | ⭐ High impact  | Designed | v1.17.0 |
+| **Atlas**              | 20h    | ⭐ High impact  | Designed | v1.18.0 |
+| **dbt**                | 28h    | 🔥 Game-changer | Designed | v1.19.0 |
 
 **Total Phase 1 Effort**: 80 hours (~2 sprints)
 
@@ -92,12 +94,12 @@ sql-splitter export dump.sql --format parquet -o data/
 
 ### Performance Impact
 
-| Operation | Without DuckDB | With DuckDB | Speedup |
-|-----------|---------------|-------------|---------|
-| COUNT(*) on 1GB dump | 30s (grep/wc) | 0.1s | **300x** |
-| Aggregations | Impossible | 0.3s | **∞** |
-| JOINs | Impossible | 0.5s | **∞** |
-| Complex WHERE | 60s+ | 0.2s | **300x** |
+| Operation             | Without DuckDB | With DuckDB | Speedup  |
+| --------------------- | -------------- | ----------- | -------- |
+| COUNT(\*) on 1GB dump | 30s (grep/wc)  | 0.1s        | **300x** |
+| Aggregations          | Impossible     | 0.3s        | **∞**    |
+| JOINs                 | Impossible     | 0.5s        | **∞**    |
+| Complex WHERE         | 60s+           | 0.2s        | **300x** |
 
 ### Strategic Value
 
@@ -140,13 +142,13 @@ sql-splitter gx-docs gx/ --open
 
 ### Auto-Generated Tests
 
-| SQL Constraint | GX Expectation | Benefit |
-|----------------|----------------|---------|
-| PRIMARY KEY | `expect_column_values_to_be_unique` | Catch duplicates |
-| NOT NULL | `expect_column_values_to_not_be_null` | Find missing data |
-| FOREIGN KEY | Custom FK validation | Detect orphaned records |
-| ENUM | `expect_column_values_to_be_in_set` | Flag invalid values |
-| CHECK (age >= 18) | `expect_column_values_to_be_between` | Find outliers |
+| SQL Constraint    | GX Expectation                        | Benefit                 |
+| ----------------- | ------------------------------------- | ----------------------- |
+| PRIMARY KEY       | `expect_column_values_to_be_unique`   | Catch duplicates        |
+| NOT NULL          | `expect_column_values_to_not_be_null` | Find missing data       |
+| FOREIGN KEY       | Custom FK validation                  | Detect orphaned records |
+| ENUM              | `expect_column_values_to_be_in_set`   | Flag invalid values     |
+| CHECK (age >= 18) | `expect_column_values_to_be_between`  | Find outliers           |
 
 ### Strategic Value
 
@@ -191,6 +193,7 @@ sql-splitter atlas-generate schema.hcl -o data.sql --rows 10000
 ### SQL → HCL Example
 
 **Before (SQL)**:
+
 ```sql
 CREATE TABLE users (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -200,6 +203,7 @@ CREATE TABLE users (
 ```
 
 **After (Atlas HCL)**:
+
 ```hcl
 table "users" {
   column "id" { type = int, auto_increment = true }
@@ -259,13 +263,13 @@ dbt docs generate  # ✓ Full documentation
 
 ### Auto-Generated Components
 
-| Component | Generated From | Count (100 tables) | Manual Effort Saved |
-|-----------|----------------|-------------------|---------------------|
-| Source configs | CREATE TABLE | 100 sources | 8 hours |
-| Staging models | Table columns | 100 models | 12 hours |
-| Tests | PK/FK/CHECK | 300+ tests | 16 hours |
-| Docs | SQL comments | 100 descriptions | 4 hours |
-| **Total** | | | **40+ hours** |
+| Component      | Generated From | Count (100 tables) | Manual Effort Saved |
+| -------------- | -------------- | ------------------ | ------------------- |
+| Source configs | CREATE TABLE   | 100 sources        | 8 hours             |
+| Staging models | Table columns  | 100 models         | 12 hours            |
+| Tests          | PK/FK/CHECK    | 300+ tests         | 16 hours            |
+| Docs           | SQL comments   | 100 descriptions   | 4 hours             |
+| **Total**      |                |                    | **40+ hours**       |
 
 ### Strategic Value
 
@@ -289,6 +293,7 @@ These integrations combine to enable **end-to-end workflows** that were previous
 **Goal**: Migrate 10-year-old MySQL database to modern analytics platform.
 
 **Before sql-splitter**:
+
 - 3-4 weeks of manual work
 - Schema reverse engineering
 - YAML writing
@@ -296,6 +301,7 @@ These integrations combine to enable **end-to-end workflows** that were previous
 - Documentation
 
 **With sql-splitter** (1 day):
+
 ```bash
 # 1. Export production dump
 mysqldump prod > prod_dump.sql
@@ -449,24 +455,27 @@ psql staging < synthetic.sql
 
 **Timeline**: 2 months (80 hours)
 
-| Version | Feature | Effort | Priority |
-|---------|---------|--------|----------|
-| v1.16.0 | DuckDB Integration | 16h | Critical |
-| v1.17.0 | Great Expectations Integration | 16h | High |
-| v1.18.0 | Atlas Integration | 20h | High |
-| v1.19.0 | dbt Integration | 28h | Critical |
+| Version | Feature                        | Effort | Priority |
+| ------- | ------------------------------ | ------ | -------- |
+| v1.16.0 | DuckDB Integration             | 16h    | Critical |
+| v1.17.0 | Great Expectations Integration | 16h    | High     |
+| v1.18.0 | Atlas Integration              | 20h    | High     |
+| v1.19.0 | dbt Integration                | 28h    | Critical |
 
 **Success Criteria**:
+
 - All 4 integrations shipped and documented
 - Example workflows published
 - Community feedback gathered
 
 **Risks**:
+
 - Integration complexity underestimated
 - External tool version compatibility issues
 - User adoption slower than expected
 
 **Mitigation**:
+
 - Start with DuckDB (highest impact, lowest risk)
 - Build buffer time into sprint planning
 - Early beta testing with friendly users
@@ -477,13 +486,14 @@ psql staging < synthetic.sql
 
 **Timeline**: 2 months (60 hours)
 
-| Version | Enhancement | Effort |
-|---------|-------------|--------|
-| v1.20.0 | DuckDB Parquet export + caching | 12h |
-| v1.21.0 | GX native validator + suite diffing | 16h |
-| v1.22.0 | Atlas bidirectional sync + dbt incremental models | 32h |
+| Version | Enhancement                                       | Effort |
+| ------- | ------------------------------------------------- | ------ |
+| v1.20.0 | DuckDB Parquet export + caching                   | 12h    |
+| v1.21.0 | GX native validator + suite diffing               | 16h    |
+| v1.22.0 | Atlas bidirectional sync + dbt incremental models | 32h    |
 
 **Goals**:
+
 - Polish integration rough edges
 - Add advanced features based on feedback
 - Improve performance and UX
@@ -494,15 +504,16 @@ psql staging < synthetic.sql
 
 **Future Integrations** (Tier 2):
 
-| Integration | Value | Effort | Notes |
-|-------------|-------|--------|-------|
-| **Liquibase/Flyway** | Migration versioning | 24h | Complements Atlas |
-| **Airbyte/Fivetran** | Cloud data pipeline integration | 20h | Export → data warehouse |
-| **Datadog/New Relic** | Observability | 16h | Dump metrics tracking |
-| **Supabase/PlanetScale** | Instant cloud DB | 20h | Deploy dump to cloud |
-| **Apache Superset** | Visualization | 12h | Query dumps with BI tool |
+| Integration              | Value                           | Effort | Notes                    |
+| ------------------------ | ------------------------------- | ------ | ------------------------ |
+| **Liquibase/Flyway**     | Migration versioning            | 24h    | Complements Atlas        |
+| **Airbyte/Fivetran**     | Cloud data pipeline integration | 20h    | Export → data warehouse  |
+| **Datadog/New Relic**    | Observability                   | 16h    | Dump metrics tracking    |
+| **Supabase/PlanetScale** | Instant cloud DB                | 20h    | Deploy dump to cloud     |
+| **Apache Superset**      | Visualization                   | 12h    | Query dumps with BI tool |
 
 **Selection Criteria**:
+
 - User demand (surveys, feature requests)
 - Competitive advantage
 - Ecosystem momentum
@@ -516,6 +527,7 @@ psql staging < synthetic.sql
 **Current users**: DevOps, DBAs, backend engineers (~5k segment)
 
 **Post-integrations users**:
+
 - **Analytics engineers** (dbt integration) → +50k segment
 - **Data scientists** (DuckDB queries, Parquet export) → +30k segment
 - **Data quality engineers** (GX integration) → +10k segment
@@ -530,6 +542,7 @@ psql staging < synthetic.sql
 #### Before Integrations
 
 **Competitors**: Limited to dump manipulation tools
+
 - `mysqldump`, `pg_dump`: Database-specific, basic
 - `mydumper`, `pg_restore`: Faster but still limited
 - **sql-splitter advantage**: Multi-dialect, advanced features
@@ -539,6 +552,7 @@ psql staging < synthetic.sql
 #### After Integrations
 
 **Competitors**: Entire data platform category
+
 - **vs dbt**: Bootstrap tool (complementary, not competitive)
 - **vs Atlas**: Dump adapter (Atlas only works with live DBs)
 - **vs Great Expectations**: Test generator (GX validates, we generate)
@@ -551,6 +565,7 @@ psql staging < synthetic.sql
 > **"The only tool that turns static SQL dumps into modern data infrastructure."**
 
 No competitor offers:
+
 - Query dumps without import (DuckDB)
 - Auto-generate GX suites from dumps
 - Dump → Atlas HCL conversion
@@ -584,6 +599,7 @@ No competitor offers:
    - Compliance reporting (SOC2, GDPR)
 
 **Estimated ARR** (conservative):
+
 - 100 SaaS customers × $49 × 12 = $58,800
 - 20 Enterprise customers × $499 × 12 = $119,760
 - 5 Managed customers × $2,000 × 12 = $120,000
@@ -668,31 +684,31 @@ impl IntegrationRegistry {
 
 ### Adoption Metrics (6 months post-launch)
 
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| GitHub Stars | +5,000 | Star growth rate |
-| Downloads | 50k/month | Cargo/Homebrew stats |
-| Integration Usage | 60% | Telemetry (opt-in) |
-| dbt Projects Generated | 1,000+ | Command usage tracking |
-| DuckDB Queries | 10,000+ | Command usage tracking |
+| Metric                 | Target    | Measurement            |
+| ---------------------- | --------- | ---------------------- |
+| GitHub Stars           | +5,000    | Star growth rate       |
+| Downloads              | 50k/month | Cargo/Homebrew stats   |
+| Integration Usage      | 60%       | Telemetry (opt-in)     |
+| dbt Projects Generated | 1,000+    | Command usage tracking |
+| DuckDB Queries         | 10,000+   | Command usage tracking |
 
 ### Quality Metrics
 
-| Metric | Target |
-|--------|--------|
-| Integration Test Coverage | 90%+ |
-| Documentation Completeness | 100% |
-| Example Workflows | 10+ |
+| Metric                      | Target                              |
+| --------------------------- | ----------------------------------- |
+| Integration Test Coverage   | 90%+                                |
+| Documentation Completeness  | 100%                                |
+| Example Workflows           | 10+                                 |
 | External Tool Compatibility | MySQL 5.7+, Postgres 11+, SQLite 3+ |
 
 ### Community Metrics
 
-| Metric | Target |
-|--------|--------|
-| Blog Posts / Tutorials | 20+ |
-| Conference Talks | 3+ (dbt Coalesce, DataEngConf) |
-| Integration Requests | 50+ (shows demand) |
-| Contributors | 30+ (healthy ecosystem) |
+| Metric                 | Target                         |
+| ---------------------- | ------------------------------ |
+| Blog Posts / Tutorials | 20+                            |
+| Conference Talks       | 3+ (dbt Coalesce, DataEngConf) |
+| Integration Requests   | 50+ (shows demand)             |
+| Contributors           | 30+ (healthy ecosystem)        |
 
 ---
 
@@ -755,6 +771,7 @@ The four-integration strategy (**DuckDB, Great Expectations, Atlas, dbt**) trans
 ---
 
 _For detailed implementation plans, see individual deep dive documents:_
+
 - 📄 [DuckDB Integration Deep Dive](features/DUCKDB_INTEGRATION_DEEP_DIVE.md)
 - 📄 [Great Expectations Integration Deep Dive](features/GREAT_EXPECTATIONS_INTEGRATION_DEEP_DIVE.md)
 - 📄 [Atlas Integration Deep Dive](features/ATLAS_INTEGRATION_DEEP_DIVE.md)
