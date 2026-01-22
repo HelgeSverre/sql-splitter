@@ -10,21 +10,22 @@
 
 ### Key Characteristics
 
-| Feature | DuckDB | SQLite | PostgreSQL |
-|---------|--------|--------|------------|
-| **Type** | Analytical (OLAP) | Transactional (OLTP) | Transactional |
-| **Speed** | Very fast for analytics | Slow for aggregations | Medium |
-| **Setup** | Zero (embedded) | Zero (embedded) | Database server |
-| **File format** | Single file | Single file | Multiple files |
-| **Read CSV/Parquet** | Native | No | Extensions |
-| **Parallelism** | Yes | Limited | Yes |
-| **Window functions** | Excellent | Limited | Good |
+| Feature              | DuckDB                  | SQLite                | PostgreSQL      |
+| -------------------- | ----------------------- | --------------------- | --------------- |
+| **Type**             | Analytical (OLAP)       | Transactional (OLTP)  | Transactional   |
+| **Speed**            | Very fast for analytics | Slow for aggregations | Medium          |
+| **Setup**            | Zero (embedded)         | Zero (embedded)       | Database server |
+| **File format**      | Single file             | Single file           | Multiple files  |
+| **Read CSV/Parquet** | Native                  | No                    | Extensions      |
+| **Parallelism**      | Yes                     | Limited               | Yes             |
+| **Window functions** | Excellent               | Limited               | Good            |
 
 ### Why DuckDB is Perfect for sql-splitter
 
 **Problem:** Users want to query SQL dumps without setting up a database
 
 **Current workarounds:**
+
 ```bash
 # Option 1: Manual database setup (slow)
 createdb tempdb
@@ -37,6 +38,7 @@ grep "INSERT INTO users" dump.sql | wc -l
 ```
 
 **With DuckDB:**
+
 ```bash
 # One command, instant results
 sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
@@ -66,11 +68,13 @@ sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 ```
 
 **Pros:**
+
 - ✅ Simple implementation
 - ✅ Full SQL support
 - ✅ DuckDB's optimizer
 
 **Cons:**
+
 - ❌ Import overhead for one-off queries
 - ❌ Temp file creation
 
@@ -97,10 +101,12 @@ sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 ```
 
 **Pros:**
+
 - ✅ First query imports, subsequent queries instant
 - ✅ Multiple queries reuse same DuckDB file
 
 **Cons:**
+
 - ❌ Cache invalidation complexity
 - ❌ Disk space usage
 
@@ -349,6 +355,7 @@ impl DuckDBQueryEngine {
 ```
 
 **Usage:**
+
 ```bash
 # Only import 'users' table, ignore rest
 sql-splitter query dump.sql \
@@ -457,13 +464,13 @@ sql-splitter query prod.sql "
 
 ### Benchmark: 1GB Dump, 10 Tables, 10M Rows
 
-| Operation | Naive Approach | DuckDB | Speedup |
-|-----------|----------------|--------|---------|
-| **Import** | N/A | 8 seconds | - |
-| **COUNT(*)** | 30s (grep/wc) | 0.1s | 300x |
-| **Aggregation** | Impossible | 0.3s | ∞ |
-| **JOIN** | Impossible | 0.5s | ∞ |
-| **Window function** | Impossible | 0.8s | ∞ |
+| Operation           | Naive Approach | DuckDB    | Speedup |
+| ------------------- | -------------- | --------- | ------- |
+| **Import**          | N/A            | 8 seconds | -       |
+| **COUNT(\*)**       | 30s (grep/wc)  | 0.1s      | 300x    |
+| **Aggregation**     | Impossible     | 0.3s      | ∞       |
+| **JOIN**            | Impossible     | 0.5s      | ∞       |
+| **Window function** | Impossible     | 0.8s      | ∞       |
 
 ### Memory Usage
 
@@ -473,6 +480,7 @@ sql-splitter query prod.sql "
 ```
 
 **Mitigation:** Offer disk-based mode for large dumps
+
 ```bash
 sql-splitter query huge.sql --disk-mode "SELECT ..."
 ```
@@ -482,6 +490,7 @@ sql-splitter query huge.sql --disk-mode "SELECT ..."
 ## Parquet Export Integration
 
 **Why Parquet?**
+
 - Columnar format (fast analytics)
 - Compressed (5-10x smaller than SQL)
 - Industry standard (Spark, Snowflake, BigQuery)
@@ -536,6 +545,7 @@ python -c "import pandas as pd; df = pd.read_parquet('data/users.parquet')"
 ```
 
 **Benefits:**
+
 - ✅ 10x smaller files
 - ✅ Compatible with modern data stack
 - ✅ Faster than SQL for analytics
@@ -549,6 +559,7 @@ python -c "import pandas as pd; df = pd.read_parquet('data/users.parquet')"
 **Problem:** MySQL `AUTO_INCREMENT` vs DuckDB `SERIAL`
 
 **Solution:** Type mapping layer
+
 ```rust
 fn map_type_to_duckdb(dialect: SqlDialect, type_name: &str) -> &str {
     match (dialect, type_name) {
@@ -565,6 +576,7 @@ fn map_type_to_duckdb(dialect: SqlDialect, type_name: &str) -> &str {
 **Problem:** 100GB dump won't fit in memory
 
 **Solution:** Chunked import
+
 ```rust
 impl DuckDBQueryEngine {
     pub fn import_large_dump(&self, path: &Path) -> Result<()> {
@@ -601,6 +613,7 @@ impl DuckDBQueryEngine {
 **Problem:** PostgreSQL COPY format is complex
 
 **Solution:** Reuse existing COPY parser from convert command
+
 ```rust
 impl DuckDBQueryEngine {
     fn convert_copy_to_duckdb(&self, copy: CopyStatement) -> Result<()> {
@@ -627,6 +640,7 @@ impl DuckDBQueryEngine {
 **Problem:** Stored procedures, triggers, views
 
 **Solution:** Skip and warn
+
 ```rust
 fn import_dump_with_warnings(&self, path: &Path) -> Result<ImportStats> {
     let mut stats = ImportStats::default();
@@ -815,25 +829,25 @@ sql-splitter query prod.sql \
 
 ## Effort Breakdown
 
-| Task | Hours |
-|------|-------|
-| DuckDB Rust bindings setup | 2h |
-| Type conversion (MySQL/Postgres → DuckDB) | 3h |
-| COPY statement handling | 2h |
-| CLI integration | 2h |
-| Output formatting (table, JSON, CSV) | 2h |
-| Testing with real dumps | 3h |
-| Documentation | 2h |
-| **Total: Query Engine** | **16h** |
-| | |
-| Parquet export implementation | 4h |
-| CLI for export command | 2h |
-| Multi-table export | 2h |
-| Testing | 2h |
-| Documentation | 2h |
-| **Total: Parquet Export** | **12h** |
-| | |
-| **Grand Total** | **28h** |
+| Task                                      | Hours   |
+| ----------------------------------------- | ------- |
+| DuckDB Rust bindings setup                | 2h      |
+| Type conversion (MySQL/Postgres → DuckDB) | 3h      |
+| COPY statement handling                   | 2h      |
+| CLI integration                           | 2h      |
+| Output formatting (table, JSON, CSV)      | 2h      |
+| Testing with real dumps                   | 3h      |
+| Documentation                             | 2h      |
+| **Total: Query Engine**                   | **16h** |
+|                                           |         |
+| Parquet export implementation             | 4h      |
+| CLI for export command                    | 2h      |
+| Multi-table export                        | 2h      |
+| Testing                                   | 2h      |
+| Documentation                             | 2h      |
+| **Total: Parquet Export**                 | **12h** |
+|                                           |         |
+| **Grand Total**                           | **28h** |
 
 ---
 
@@ -850,6 +864,7 @@ sql-splitter query prod.sql \
 **This single integration** transforms sql-splitter from a dump processor to a **dump analytics platform**.
 
 **Expected user impact:**
+
 - "I can finally query production dumps locally!"
 - "No more waiting for database restore to run analytics"
 - "Parquet export makes sql-splitter my dump → data lake bridge"

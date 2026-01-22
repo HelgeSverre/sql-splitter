@@ -5,17 +5,17 @@
 
 ## Executive Summary
 
-| Command | CPU-Bound? | Parallelizable? | Expected Speedup | Complexity | Priority |
-|---------|------------|-----------------|------------------|------------|----------|
-| **Convert** | ✅ Yes | ✅ Easy | 4-6x | Low | **High** |
-| **Redact** | ✅ Yes | ✅ Easy | 3-5x | Low | **High** |
-| **Validate** | ✅ Yes | ✅ Medium | 5-8x | Medium | **High** |
-| **Split** | ⚠️ Mixed | ✅ Medium | 3-4x | Medium | **Medium** |
-| **Diff** | ✅ Yes | ✅ Medium | 4-6x | Medium | **Medium** |
-| **Sample** | ❌ No | ⚠️ Hard | 1-2x | High | **Low** |
-| **Shard** | ❌ No | ⚠️ Hard | 1-2x | High | **Low** |
-| **Merge** | ❌ No | ✅ Easy | 4-8x | Low | **Medium** |
-| **Analyze** | ❌ No | ⚠️ Limited | 1-2x | Medium | **Low** |
+| Command      | CPU-Bound? | Parallelizable? | Expected Speedup | Complexity | Priority   |
+| ------------ | ---------- | --------------- | ---------------- | ---------- | ---------- |
+| **Convert**  | ✅ Yes     | ✅ Easy         | 4-6x             | Low        | **High**   |
+| **Redact**   | ✅ Yes     | ✅ Easy         | 3-5x             | Low        | **High**   |
+| **Validate** | ✅ Yes     | ✅ Medium       | 5-8x             | Medium     | **High**   |
+| **Split**    | ⚠️ Mixed   | ✅ Medium       | 3-4x             | Medium     | **Medium** |
+| **Diff**     | ✅ Yes     | ✅ Medium       | 4-6x             | Medium     | **Medium** |
+| **Sample**   | ❌ No      | ⚠️ Hard         | 1-2x             | High       | **Low**    |
+| **Shard**    | ❌ No      | ⚠️ Hard         | 1-2x             | High       | **Low**    |
+| **Merge**    | ❌ No      | ✅ Easy         | 4-8x             | Low        | **Medium** |
+| **Analyze**  | ❌ No      | ⚠️ Limited      | 1-2x             | Medium     | **Low**    |
 
 ---
 
@@ -39,6 +39,7 @@ pub fn convert(input: &Path, dialect: SqlDialect) -> Result<()> {
 ### Why It's CPU-Bound
 
 **Type conversion operations:**
+
 ```rust
 // Each conversion is computational
 "VARCHAR(255)" → "TEXT"               // String matching
@@ -48,6 +49,7 @@ pub fn convert(input: &Path, dialect: SqlDialect) -> Result<()> {
 ```
 
 **Benchmark:**
+
 - I/O: 600 MB/s (disk read)
 - Parsing: 800 MB/s
 - **Type conversion: 400 MB/s ← Bottleneck!**
@@ -88,9 +90,11 @@ pub fn convert_parallel(input: &Path, dialect: SqlDialect, threads: usize)
 ### Challenges
 
 #### 1. Order Preservation
+
 **Problem:** Output must match input order for correctness
 
 **Solution:** Use sequenced chunks
+
 ```rust
 struct SequencedChunk {
     sequence: usize,
@@ -114,6 +118,7 @@ while let Some((seq, converted)) = receiver.recv() {
 #### 2. COPY Block Handling
 
 **Problem:** COPY blocks are special:
+
 ```sql
 COPY users FROM stdin;
 1	alice@example.com	Alice
@@ -124,6 +129,7 @@ COPY users FROM stdin;
 Can't split in middle of COPY data!
 
 **Solution:** Parse COPY as atomic unit
+
 ```rust
 fn chunk_statements_safe(input: &Path) -> Vec<Vec<Statement>> {
     let mut chunks = Vec::new();
@@ -156,6 +162,7 @@ fn chunk_statements_safe(input: &Path) -> Vec<Vec<Statement>> {
 **Problem:** Chunking loads file into memory
 
 **Workaround:** Streaming with bounded queue
+
 ```rust
 use crossbeam::channel::bounded;
 
@@ -189,11 +196,11 @@ write_ordered(rx_output);
 ### Expected Performance
 
 | File Size | Threads | Current | Parallel | Speedup |
-|-----------|---------|---------|----------|---------|
-| 1 GB | 1 | 15s | 15s | 1.0x |
-| 1 GB | 4 | 15s | 4s | 3.8x |
-| 1 GB | 8 | 15s | 2.5s | 6.0x |
-| 10 GB | 8 | 150s | 25s | 6.0x |
+| --------- | ------- | ------- | -------- | ------- |
+| 1 GB      | 1       | 15s     | 15s      | 1.0x    |
+| 1 GB      | 4       | 15s     | 4s       | 3.8x    |
+| 1 GB      | 8       | 15s     | 2.5s     | 6.0x    |
+| 10 GB     | 8       | 150s    | 25s      | 6.0x    |
 
 **Complexity: Low** — Stateless conversion, easy to parallelize
 
@@ -204,6 +211,7 @@ write_ordered(rx_output);
 ### Why It's CPU-Bound
 
 **Fake data generation is expensive:**
+
 ```rust
 // Each fake generation involves RNG + string building
 fake::Name().fake()              // ~5 μs
@@ -216,6 +224,7 @@ fake::PhoneNumber().fake()       // ~4 μs
 ```
 
 **Benchmark:**
+
 - I/O: 600 MB/s
 - Parsing: 700 MB/s
 - **Fake generation: 200 MB/s ← Bottleneck!**
@@ -265,6 +274,7 @@ pub fn redact_parallel(
 **Problem:** `--seed 42` must produce identical output every time
 
 **Solution:** Sequence-aware seeding
+
 ```rust
 // Bad: Same seed for all workers → different order = different output
 let rng = StdRng::seed_from_u64(config.seed);
@@ -282,6 +292,7 @@ let mut rng = StdRng::seed_from_u64(chunk_seed);
 **Problem:** Same email must hash to same value across workers
 
 **Solution:** Hash function is deterministic (no RNG needed)
+
 ```rust
 // This is fine - pure function
 fn hash_value(value: &str, salt: &[u8]) -> String {
@@ -314,6 +325,7 @@ INSERT INTO users (email) VALUES
 **Challenge:** Need all values before shuffling!
 
 **Solution:** Two-pass or defer shuffle to single-threaded phase
+
 ```rust
 // Pass 1: Parallel redaction (skip shuffle columns)
 let partially_redacted = parallel_redact_non_shuffle(chunks);
@@ -325,11 +337,11 @@ apply_shuffle_strategy(partially_redacted, shuffle_columns);
 ### Expected Performance
 
 | File Size | PII Columns | Threads | Current | Parallel | Speedup |
-|-----------|-------------|---------|---------|----------|---------|
-| 1 GB | 5 | 1 | 20s | 20s | 1.0x |
-| 1 GB | 5 | 4 | 20s | 6s | 3.3x |
-| 1 GB | 5 | 8 | 20s | 4s | 5.0x |
-| 10 GB | 10 | 8 | 300s | 60s | 5.0x |
+| --------- | ----------- | ------- | ------- | -------- | ------- |
+| 1 GB      | 5           | 1       | 20s     | 20s      | 1.0x    |
+| 1 GB      | 5           | 4       | 20s     | 6s       | 3.3x    |
+| 1 GB      | 5           | 8       | 20s     | 4s       | 5.0x    |
+| 10 GB     | 10          | 8       | 300s    | 60s      | 5.0x    |
 
 **Complexity: Low-Medium** — Need deterministic RNG seeding, shuffle is special case
 
@@ -340,6 +352,7 @@ apply_shuffle_strategy(partially_redacted, shuffle_columns);
 ### Why It's CPU-Bound
 
 **Primary key duplicate detection:**
+
 ```rust
 // For each table, check for duplicate PKs
 let mut pk_set = HashSet::new();
@@ -357,6 +370,7 @@ for row in table_rows {
 ```
 
 **Foreign key validation:**
+
 ```rust
 // Check if all FKs reference existing PKs
 for (fk_table, fk_col) in foreign_keys {
@@ -414,10 +428,12 @@ pub fn validate_parallel(input: &Path, threads: usize) -> Result<ValidationRepor
 **Problem:** FK validation needs PK sets from other tables
 
 **Solution 1:** Two-phase approach (shown above)
+
 - Phase 1: Build all PK sets in parallel
 - Phase 2: Validate FKs in parallel using shared PK sets
 
 **Solution 2:** Arc-wrapped shared state
+
 ```rust
 let pk_sets = Arc::new(
     tables.par_iter()
@@ -439,6 +455,7 @@ tables.par_iter().for_each(|table| {
 Current strategy already does this, so no change.
 
 **Optimization:** Stream-validate for PK checking only
+
 ```rust
 // PK validation can be streaming
 let pk_violations = validate_pks_streaming(input)?;
@@ -453,6 +470,7 @@ let fk_violations = validate_fks_parallel(tables)?;
 **Problem:** Users want to see progress during long validations
 
 **Solution:** Shared progress counter
+
 ```rust
 let progress = Arc::new(AtomicUsize::new(0));
 let total = tables.len();
@@ -468,11 +486,11 @@ tables.par_iter().for_each(|table| {
 ### Expected Performance
 
 | File Size | Tables | Threads | Current | Parallel | Speedup |
-|-----------|--------|---------|---------|----------|---------|
-| 1 GB | 50 | 1 | 30s | 30s | 1.0x |
-| 1 GB | 50 | 4 | 30s | 10s | 3.0x |
-| 1 GB | 50 | 8 | 30s | 5s | 6.0x |
-| 10 GB | 200 | 8 | 400s | 60s | 6.7x |
+| --------- | ------ | ------- | ------- | -------- | ------- |
+| 1 GB      | 50     | 1       | 30s     | 30s      | 1.0x    |
+| 1 GB      | 50     | 4       | 30s     | 10s      | 3.0x    |
+| 1 GB      | 50     | 8       | 30s     | 5s       | 6.0x    |
+| 10 GB     | 200    | 8       | 400s    | 60s      | 6.7x    |
 
 **Complexity: Medium** — Cross-table dependencies, shared state for PK sets
 
@@ -483,6 +501,7 @@ tables.par_iter().for_each(|table| {
 ### Current Bottleneck
 
 **Mixed I/O and CPU:**
+
 - Parse statements: CPU-bound
 - Route to table: CPU (hash map lookup)
 - Write to files: **I/O-bound** (multiple file handles)
@@ -547,6 +566,7 @@ pub fn split_parallel(input: &Path, output_dir: &Path, threads: usize)
 **OS limit:** Typically 1024 (macOS) or 4096 (Linux)
 
 **Solution:** Partition tables among workers
+
 ```rust
 // Each worker gets exclusive set of tables
 fn assign_tables_to_workers(tables: Vec<String>, num_workers: usize)
@@ -567,6 +587,7 @@ fn assign_tables_to_workers(tables: Vec<String>, num_workers: usize)
 **Not actually a problem!** SQL doesn't require ordering (except DDL before DML)
 
 **Optional fix:** Include sequence number
+
 ```rust
 tx.send((sequence, table, stmt)).unwrap();
 
@@ -578,6 +599,7 @@ tx.send((sequence, table, stmt)).unwrap();
 **Problem:** Multiple workers writing to same disk → thrashing
 
 **Mitigation:**
+
 - Limit parallelism for HDDs (`--parallel 2`)
 - Optimal for SSDs/NVMe (`--parallel 8`)
 - Auto-detect disk type and suggest
@@ -585,11 +607,11 @@ tx.send((sequence, table, stmt)).unwrap();
 ### Expected Performance
 
 | File Size | Tables | Storage | Threads | Current | Parallel | Speedup |
-|-----------|--------|---------|---------|---------|----------|---------|
-| 1 GB | 50 | HDD | 1 | 10s | 10s | 1.0x |
-| 1 GB | 50 | HDD | 4 | 10s | 8s | 1.3x |
-| 1 GB | 50 | SSD | 8 | 8s | 2.5s | 3.2x |
-| 10 GB | 200 | NVMe | 8 | 80s | 20s | 4.0x |
+| --------- | ------ | ------- | ------- | ------- | -------- | ------- |
+| 1 GB      | 50     | HDD     | 1       | 10s     | 10s      | 1.0x    |
+| 1 GB      | 50     | HDD     | 4       | 10s     | 8s       | 1.3x    |
+| 1 GB      | 50     | SSD     | 8       | 8s      | 2.5s     | 3.2x    |
+| 10 GB     | 200    | NVMe    | 8       | 80s     | 20s      | 4.0x    |
 
 **Complexity: Medium** — File handle management, disk I/O coordination
 
@@ -600,6 +622,7 @@ tx.send((sequence, table, stmt)).unwrap();
 ### Why It's CPU-Bound
 
 **PK hashing for data comparison:**
+
 ```rust
 // Build PK hash set for 10M row table
 let pk_hashes: HashSet<u64> = rows.iter()
@@ -700,12 +723,12 @@ No shared state needed → perfect parallelism
 
 ### Expected Performance
 
-| Dump Size | Tables | Threads | Current | Parallel | Speedup |
-|-----------|--------|---------|---------|----------|---------|
-| 1 GB each | 50 | 1 | 20s | 20s | 1.0x |
-| 1 GB each | 50 | 4 | 20s | 7s | 2.9x |
-| 1 GB each | 50 | 8 | 20s | 4s | 5.0x |
-| 10 GB each | 200 | 8 | 250s | 45s | 5.6x |
+| Dump Size  | Tables | Threads | Current | Parallel | Speedup |
+| ---------- | ------ | ------- | ------- | -------- | ------- |
+| 1 GB each  | 50     | 1       | 20s     | 20s      | 1.0x    |
+| 1 GB each  | 50     | 4       | 20s     | 7s       | 2.9x    |
+| 1 GB each  | 50     | 8       | 20s     | 4s       | 5.0x    |
+| 10 GB each | 200    | 8       | 250s    | 45s      | 5.6x    |
 
 **Complexity: Medium** — Need to parse both files first (memory), then parallel comparison
 
@@ -734,6 +757,7 @@ for table in ordered_tables {
 ```
 
 **Dependency chain:**
+
 ```
 users (sample 10%)
   ↓ (selected user_ids: [1, 5, 7])
@@ -782,6 +806,7 @@ fn sample_table_rows(table: &Table, percent: f64) -> Vec<Row> {
 ### Why Not Full Parallelism?
 
 **Sequential dependencies:**
+
 ```
 Time
  ↓
@@ -793,6 +818,7 @@ Sample order_items    ← Depends on order IDs
 ```
 
 **Best case:** Pipeline parallelism (complex)
+
 ```rust
 // While sampling orders, start pre-filtering order_items
 // But gains are minimal for added complexity
@@ -801,10 +827,10 @@ Sample order_items    ← Depends on order IDs
 ### Expected Performance
 
 | File Size | FK Depth | Threads | Current | Parallel | Speedup |
-|-----------|----------|---------|---------|----------|---------|
-| 1 GB | 3 levels | 1 | 8s | 8s | 1.0x |
-| 1 GB | 3 levels | 4 | 8s | 6s | 1.3x |
-| 10 GB | 5 levels | 8 | 80s | 50s | 1.6x |
+| --------- | -------- | ------- | ------- | -------- | ------- |
+| 1 GB      | 3 levels | 1       | 8s      | 8s       | 1.0x    |
+| 1 GB      | 3 levels | 4       | 8s      | 6s       | 1.3x    |
+| 10 GB     | 5 levels | 8       | 80s     | 50s      | 1.6x    |
 
 **Complexity: High** — Sequential FK chain, limited parallelism opportunity
 
@@ -836,6 +862,7 @@ Sample order_items    ← Depends on order IDs
 ### Why It's Embarrassingly Parallel
 
 **Independent file reads:**
+
 ```bash
 # Merge 100 table files
 merge tables/*.sql -o merged.sql
@@ -876,11 +903,11 @@ Only challenge: **Topological ordering** (but that's single-threaded and fast)
 ### Expected Performance
 
 | Files | Threads | Current | Parallel | Speedup |
-|-------|---------|---------|----------|---------|
-| 50 | 1 | 5s | 5s | 1.0x |
-| 50 | 4 | 5s | 1.5s | 3.3x |
-| 200 | 8 | 20s | 3s | 6.7x |
-| 500 | 8 | 50s | 7s | 7.1x |
+| ----- | ------- | ------- | -------- | ------- |
+| 50    | 1       | 5s      | 5s       | 1.0x    |
+| 50    | 4       | 5s      | 1.5s     | 3.3x    |
+| 200   | 8       | 20s     | 3s       | 6.7x    |
+| 500   | 8       | 50s     | 7s       | 7.1x    |
 
 **Complexity: Low** — Trivial to implement
 
@@ -893,6 +920,7 @@ Only challenge: **Topological ordering** (but that's single-threaded and fast)
 ### Why It's CPU-Bound
 
 **WHERE clause evaluation:**
+
 ```rust
 for row in table_rows {
     if evaluate_where_clause(row, &where_expr) {  // CPU: expression eval
@@ -902,6 +930,7 @@ for row in table_rows {
 ```
 
 Complex expressions expensive:
+
 ```sql
 WHERE (age > 18 AND status = 'active')
    OR (premium = true AND created_at > '2024-01-01')
@@ -1017,11 +1046,13 @@ impl ParallelProgress {
 4. **Merge** — 7x speedup, trivial
 
 **Skip for v2.0.0:**
+
 - Sample (sequential FK dependencies)
 - Shard (sequential FK dependencies)
 - Analyze (I/O bound)
 
 **Total v2.0.0 effort:** ~60h remains accurate
+
 - 15h Convert
 - 15h Redact
 - 20h Validate

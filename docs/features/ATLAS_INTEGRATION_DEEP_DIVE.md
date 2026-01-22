@@ -1078,6 +1078,7 @@ atlas migrate apply --url postgresql://prod-db/mydb
 **Problem**: 10-year-old project with SQL dumps, no schema versioning.
 
 **Solution**:
+
 ```bash
 # Convert dumps to Atlas HCL
 sql-splitter atlas-export legacy_dump.sql -o schemas/v1.hcl
@@ -1094,6 +1095,7 @@ git commit -m "feat: import legacy schema to Atlas"
 **Problem**: Dropping column that might have data.
 
 **Solution**:
+
 ```bash
 # Atlas generates migration
 atlas migrate diff old.hcl new.hcl > drop_column.sql
@@ -1113,6 +1115,7 @@ sql-splitter atlas-test prod_dump.sql drop_column.sql
 **Problem**: Dev, staging, prod have schema drift.
 
 **Solution**:
+
 ```bash
 # Export all environments
 sql-splitter atlas-export dev_dump.sql -o schemas/dev.hcl
@@ -1132,6 +1135,7 @@ diff schemas/dev.hcl schemas/prod.hcl
 **Problem**: Need test data matching exact production schema constraints.
 
 **Solution**:
+
 ```bash
 # Export prod schema to HCL
 sql-splitter atlas-export prod_dump.sql -o prod_schema.hcl
@@ -1150,6 +1154,7 @@ sql-splitter atlas-generate prod_schema.hcl \
 **Problem**: New developers don't understand database schema.
 
 **Solution**:
+
 ```bash
 # HCL is more readable than SQL
 sql-splitter atlas-export dump.sql -o docs/schema.hcl
@@ -1203,11 +1208,13 @@ fn convert_auto_increment(&self, column: &ColumnDef) -> AtlasColumn {
 **Problem**: MySQL has native ENUM, PostgreSQL uses custom types, Atlas uses CHECK constraints.
 
 **MySQL**:
+
 ```sql
 status ENUM('active', 'inactive')
 ```
 
 **Atlas HCL**:
+
 ```hcl
 column "status" {
   type = varchar(255)
@@ -1247,6 +1254,7 @@ fn convert_enum(&self, column: &ColumnDef, values: &[String]) -> Result<(AtlasCo
 **Problem**: Atlas distinguishes literal defaults from SQL expression defaults.
 
 **MySQL**:
+
 ```sql
 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 price DECIMAL DEFAULT 9.99
@@ -1254,6 +1262,7 @@ status VARCHAR DEFAULT 'active'
 ```
 
 **Atlas HCL**:
+
 ```hcl
 column "created_at" {
   default = sql("CURRENT_TIMESTAMP")  # SQL expression

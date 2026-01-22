@@ -9,7 +9,7 @@ Future feature ideas beyond the v2.x roadmap (Query, Redact, Diff, Validate, MSS
 
 ## 1. Validate/Lint (`validate`)
 
-Check dump files for structural integrity and common issues. *Planned for v2.2.0.*
+Check dump files for structural integrity and common issues. _Planned for v2.2.0._
 
 ```bash
 sql-splitter validate dump.sql
@@ -25,7 +25,7 @@ sql-splitter validate dump.sql --format json
 
 ## 2. Auto-Detect PII (`detect-pii`)
 
-Scan schema and sample rows to suggest a redaction configuration. *Planned for v2.2.0.*
+Scan schema and sample rows to suggest a redaction configuration. _Planned for v2.2.0._
 
 ```bash
 sql-splitter detect-pii dump.sql -o redact-config.yaml
@@ -86,20 +86,20 @@ sql-splitter sample dump.sql -o sample.sql.zst --compress zstd
 
 ## Priority Matrix
 
-| Feature | Value | Complexity | Target |
-|---------|-------|------------|--------|
-| Validate | High | Medium | v2.2.0 |
-| Detect-PII | High | Low-Medium | v2.2.0 |
-| Canonicalize | Medium | Medium | Future |
-| Key Range Partitioning | Medium | Low | Future |
-| Streaming Compression | Medium | Low | Future |
+| Feature                | Value  | Complexity | Target |
+| ---------------------- | ------ | ---------- | ------ |
+| Validate               | High   | Medium     | v2.2.0 |
+| Detect-PII             | High   | Low-Medium | v2.2.0 |
+| Canonicalize           | Medium | Medium     | Future |
+| Key Range Partitioning | Medium | Low        | Future |
+| Streaming Compression  | Medium | Low        | Future |
 
 ---
 
 ## Shared Infrastructure (Available)
 
-| Module | Built In | Used By |
-|--------|----------|---------|
+| Module                       | Built In | Used By                                           |
+| ---------------------------- | -------- | ------------------------------------------------- |
 | Schema Graph (`src/schema/`) | v1.5-1.6 | sample, shard, validate (planned), diff (planned) |
-| Row Parsing (`src/parser/`) | v1.5-1.7 | sample, shard, convert, redact (planned) |
-| PK Tracking | v1.5-1.6 | sample, shard, validate (planned) |
+| Row Parsing (`src/parser/`)  | v1.5-1.7 | sample, shard, convert, redact (planned)          |
+| PK Tracking                  | v1.5-1.6 | sample, shard, validate (planned)                 |

@@ -301,13 +301,13 @@ Table::new("countries")  // Lookup
 
 ### Total Table Count: 18
 
-| Category | Tables | Has tenant_id |
-|----------|--------|---------------|
-| Tenant-owned | 10 | Yes |
-| Child (FK only) | 1 | No (order_items) |
-| Junction | 2 | No |
-| Global/Lookup | 5 | No |
-| **Total** | **18** | 10 (56%) |
+| Category        | Tables | Has tenant_id    |
+| --------------- | ------ | ---------------- |
+| Tenant-owned    | 10     | Yes              |
+| Child (FK only) | 1      | No (order_items) |
+| Junction        | 2      | No               |
+| Global/Lookup   | 5      | No               |
+| **Total**       | **18** | 10 (56%)         |
 
 ---
 
@@ -396,22 +396,22 @@ impl Generator {
             config: scale.config(),
         }
     }
-    
+
     pub fn generate(&mut self, dialect: Dialect) -> String {
         let mut output = String::new();
-        
+
         // Header
         output.push_str(&self.render_header(dialect));
-        
+
         // Schema (CREATE TABLEs)
         output.push_str(&self.render_schema(dialect));
-        
+
         // Data (INSERTs or COPY)
         output.push_str(&self.render_data(dialect));
-        
+
         // Footer
         output.push_str(&self.render_footer(dialect));
-        
+
         output
     }
 }
@@ -451,30 +451,30 @@ impl Generator {
         let last = self.choose(LAST_NAMES);
         format!("{} {}", first, last)
     }
-    
+
     fn fake_email(&mut self, name: &str) -> String {
         let normalized = name.to_lowercase().replace(' ', ".");
         let domain = self.choose(&["example.com", "test.org", "demo.net"]);
         format!("{}@{}", normalized, domain)
     }
-    
+
     fn fake_company(&mut self) -> String {
         let word1 = self.choose(COMPANY_WORDS);
         let word2 = self.choose(COMPANY_WORDS);
         format!("{}{} Inc", word1, word2)
     }
-    
+
     fn fake_product(&mut self) -> String {
         let adj = self.choose(PRODUCT_ADJECTIVES);
         let noun = self.choose(PRODUCT_NOUNS);
         format!("{} {}", adj, noun)
     }
-    
+
     fn fake_timestamp(&mut self, base: DateTime) -> DateTime {
         let days_offset = self.rng.gen_range(-365..0);
         base + Duration::days(days_offset)
     }
-    
+
     fn choose<T: Copy>(&mut self, items: &[T]) -> T {
         items[self.rng.gen_range(0..items.len())]
     }
@@ -507,30 +507,30 @@ impl SqlType {
             (SqlType::Serial, Dialect::MySql) => "INT AUTO_INCREMENT",
             (SqlType::Serial, Dialect::Postgres) => "SERIAL",
             (SqlType::Serial, Dialect::Sqlite) => "INTEGER",
-            
+
             // Integer
             (SqlType::Integer, _) => "INTEGER",
             (SqlType::BigInt, _) => "BIGINT",
-            
+
             // Strings
             (SqlType::VarChar(n), Dialect::Sqlite) => "TEXT",
             (SqlType::VarChar(n), _) => return format!("VARCHAR({})", n).leak(),
             (SqlType::Text, _) => "TEXT",
-            
+
             // Boolean
             (SqlType::Boolean, Dialect::MySql) => "TINYINT(1)",
             (SqlType::Boolean, Dialect::Postgres) => "BOOLEAN",
             (SqlType::Boolean, Dialect::Sqlite) => "INTEGER",
-            
+
             // Decimal
             (SqlType::Decimal(p, s), Dialect::Sqlite) => "REAL",
             (SqlType::Decimal(p, s), _) => return format!("DECIMAL({},{})", p, s).leak(),
-            
+
             // Timestamp
             (SqlType::Timestamp, Dialect::MySql) => "DATETIME",
             (SqlType::Timestamp, Dialect::Postgres) => "TIMESTAMP",
             (SqlType::Timestamp, Dialect::Sqlite) => "TEXT",
-            
+
             (SqlType::Date, Dialect::Sqlite) => "TEXT",
             (SqlType::Date, _) => "DATE",
         }
@@ -588,7 +588,7 @@ impl Value {
 impl Generator {
     fn render_table_data(&mut self, table: &Table, dialect: Dialect) -> String {
         let rows = self.generate_rows(table);
-        
+
         match dialect {
             Dialect::Postgres if rows.len() > 100 => {
                 // Use COPY for large datasets
@@ -600,14 +600,14 @@ impl Generator {
             }
         }
     }
-    
+
     fn render_copy(&self, table: &Table, rows: &[Row]) -> String {
         let mut out = format!(
             "COPY {} ({}) FROM stdin;\n",
             table.name,
             table.columns.iter().map(|c| c.name).collect::<Vec<_>>().join(", ")
         );
-        
+
         for row in rows {
             let values: Vec<String> = row.values.iter()
                 .map(|v| match v {
@@ -622,11 +622,11 @@ impl Generator {
         out.push_str("\\.\n\n");
         out
     }
-    
+
     fn render_inserts(&self, table: &Table, rows: &[Row], dialect: Dialect) -> String {
         let mut out = String::new();
         let q = |s| dialect.quote_identifier(s);
-        
+
         // Batch into groups of 100 rows
         for chunk in rows.chunks(100) {
             out.push_str(&format!(
@@ -634,7 +634,7 @@ impl Generator {
                 q(table.name),
                 table.columns.iter().map(|c| q(c.name)).collect::<Vec<_>>().join(", ")
             ));
-            
+
             for (i, row) in chunk.iter().enumerate() {
                 let values: Vec<String> = row.values.iter()
                     .map(|v| v.render(dialect))
@@ -675,16 +675,16 @@ cargo run -p test_data_gen -- --dialect mysql --tenants 100 --multiplier 2.0 --s
 
 ### CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--dialect` | Output dialect: mysql, postgres, sqlite, mssql | mysql |
-| `--scale` | Size preset: small, medium, large | medium |
-| `--tenants` | Custom tenant count (overrides scale) | — |
-| `--multiplier` | Scale multiplier for rows | 1.0 |
-| `--seed` | Random seed for reproducibility | 12345 |
-| `--schema-only` | Only output CREATE TABLE statements | false |
-| `--data-only` | Only output INSERT/COPY statements | false |
-| `--pretty` | Add extra whitespace and comments | true |
+| Flag            | Description                                    | Default |
+| --------------- | ---------------------------------------------- | ------- |
+| `--dialect`     | Output dialect: mysql, postgres, sqlite, mssql | mysql   |
+| `--scale`       | Size preset: small, medium, large              | medium  |
+| `--tenants`     | Custom tenant count (overrides scale)          | —       |
+| `--multiplier`  | Scale multiplier for rows                      | 1.0     |
+| `--seed`        | Random seed for reproducibility                | 12345   |
+| `--schema-only` | Only output CREATE TABLE statements            | false   |
+| `--data-only`   | Only output INSERT/COPY statements             | false   |
+| `--pretty`      | Add extra whitespace and comments              | true    |
 
 ---
 
@@ -763,7 +763,7 @@ use test_data_gen::{Generator, Dialect, Scale};
 pub fn fixture_path(dialect: &str, scale: &str) -> PathBuf {
     let generated = format!("tests/fixtures/generated/{}/{}.sql", dialect, scale);
     let path = PathBuf::from(&generated);
-    
+
     if !path.exists() {
         // Generate on-demand if not cached
         let dialect = match dialect {
@@ -778,13 +778,13 @@ pub fn fixture_path(dialect: &str, scale: &str) -> PathBuf {
             "large" => Scale::Large,
             _ => panic!("Unknown scale"),
         };
-        
+
         let mut gen = Generator::new(12345, scale);
         let sql = gen.generate(dialect);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, sql).unwrap();
     }
-    
+
     path
 }
 
@@ -805,19 +805,19 @@ use tempfile::TempDir;
 fn test_shard_extracts_single_tenant() {
     let input = fixture_path("mysql", "medium");
     let output_dir = TempDir::new().unwrap();
-    
+
     let config = ShardConfig {
         tenant_column: "tenant_id".to_string(),
         tenant_value: "1".to_string(),
         include_global: IncludeGlobal::Lookups,
         ..Default::default()
     };
-    
+
     let stats = Shard::new(input, output_dir.path().join("tenant_1.sql"))
         .with_config(config)
         .run()
         .unwrap();
-    
+
     // Tenant 1 should have:
     // - 1 tenant
     // - 50 users (medium scale)
@@ -825,7 +825,7 @@ fn test_shard_extracts_single_tenant() {
     assert_eq!(stats.tenants_extracted, 1);
     assert!(stats.total_rows > 500);  // Substantial data
     assert!(stats.total_rows < 2000); // But not all tenants
-    
+
     // Verify FK integrity
     assert_eq!(stats.orphan_warnings, 0);
 }
@@ -834,12 +834,12 @@ fn test_shard_extracts_single_tenant() {
 fn test_shard_handles_deep_fk_chain() {
     let input = fixture_path("mysql", "small");
     let output_dir = TempDir::new().unwrap();
-    
+
     let stats = Shard::new(input, output_dir.path().join("tenant.sql"))
         .with_tenant_value("1")
         .run()
         .unwrap();
-    
+
     // order_items has no tenant_id, should be included via:
     // order_items → orders → tenant_id = 1
     assert!(stats.tables_with_data.contains("order_items"));
@@ -913,19 +913,19 @@ INSERT INTO "users" ("id", "tenant_id", "email") VALUES
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| Schema model (tables, columns, FKs) | 4h |
-| Generator core (RNG, scale configs) | 3h |
-| Fake data helpers | 2h |
-| MySQL renderer | 3h |
-| PostgreSQL renderer (+ COPY) | 4h |
-| SQLite renderer | 2h |
-| CLI binary | 2h |
-| Static fixtures (edge cases) | 3h |
-| Test harness integration | 3h |
-| Documentation | 2h |
-| **Total** | **~28h** |
+| Component                           | Effort   |
+| ----------------------------------- | -------- |
+| Schema model (tables, columns, FKs) | 4h       |
+| Generator core (RNG, scale configs) | 3h       |
+| Fake data helpers                   | 2h       |
+| MySQL renderer                      | 3h       |
+| PostgreSQL renderer (+ COPY)        | 4h       |
+| SQLite renderer                     | 2h       |
+| CLI binary                          | 2h       |
+| Static fixtures (edge cases)        | 3h       |
+| Test harness integration            | 3h       |
+| Documentation                       | 2h       |
+| **Total**                           | **~28h** |
 
 ---
 

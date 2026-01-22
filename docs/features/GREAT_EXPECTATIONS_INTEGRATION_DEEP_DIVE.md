@@ -201,12 +201,14 @@ impl GreatExpectationsWrapper {
 ```
 
 **Pros**:
+
 - ✅ No Python bindings needed
 - ✅ Uses standard GX CLI (familiar to users)
 - ✅ Easy to debug (can run GX commands manually)
 - ✅ Leverages full GX ecosystem
 
 **Cons**:
+
 - ❌ Requires GX installed (`pip install great-expectations`)
 - ❌ Slower (process spawning overhead)
 - ⚠️ Version compatibility concerns
@@ -247,11 +249,13 @@ impl NativeValidator {
 ```
 
 **Pros**:
+
 - ✅ No external dependencies
 - ✅ Fast (native Rust)
 - ✅ Works offline, in containers
 
 **Cons**:
+
 - ❌ Need to reimplement GX expectations
 - ❌ Subset only (can't support all 300+ expectations)
 - ❌ No ecosystem integration
@@ -260,11 +264,13 @@ impl NativeValidator {
 ### Decision: Hybrid Approach
 
 **Phase 1 (v1.17.0)**: Python wrapper for suite generation
+
 - Generate expectation JSON files (no GX required)
 - Users run validation with native GX
 - Simple integration, leverages GX ecosystem
 
 **Phase 2 (v1.18.0)**: Add native validator for common expectations
+
 - Validate dumps without Python
 - Useful for CI/CD, quick checks
 - Supports ~20 most common expectations
@@ -672,6 +678,7 @@ sql-splitter gx-generate dump.sql -o gx/
 ```
 
 **Output structure**:
+
 ```
 gx/
 ├── great_expectations.yml
@@ -698,6 +705,7 @@ sql-splitter gx-validate dump.sql --suite gx/expectations/
 ```
 
 **Output**:
+
 ```
 Validating dump.sql against 3 expectation suites...
 
@@ -743,11 +751,13 @@ sql-splitter validate dump.sql --gx-suite gx/expectations/
 Generate expectations from CREATE TABLE statements only.
 
 **Pros**:
+
 - ✅ Instant (no data parsing)
 - ✅ Works with schema-only dumps
 - ✅ Covers structural constraints
 
 **Cons**:
+
 - ❌ Misses data quality issues
 - ❌ Can't infer ranges, patterns, cardinality
 
@@ -758,11 +768,13 @@ Generate expectations from CREATE TABLE statements only.
 Sample INSERT data to infer statistical expectations.
 
 **Pros**:
+
 - ✅ Discovers real data patterns
 - ✅ Detects quality issues (nulls, outliers)
 - ✅ Generates realistic ranges
 
 **Cons**:
+
 - ❌ Slower (must parse data)
 - ❌ Sample might not represent full dataset
 - ⚠️ Risk of overfitting to sample
@@ -782,6 +794,7 @@ sql-splitter gx-generate dump.sql \
 ```
 
 **Pros**:
+
 - ✅ Balances speed and quality
 - ✅ Focus profiling where it matters
 - ✅ Scalable to large dumps
@@ -792,24 +805,24 @@ sql-splitter gx-generate dump.sql \
 
 ### SQL to GX Expectation Mappings
 
-| SQL Type | GX Expectation | Notes |
-|----------|----------------|-------|
-| `INT` | `expect_column_values_to_be_of_type("int")` | Also check range |
-| `VARCHAR(N)` | `expect_column_value_lengths_to_be_between(0, N)` | |
-| `ENUM(...)` | `expect_column_values_to_be_in_set(values)` | |
-| `DATE` | `expect_column_values_to_be_dateutil_parseable` | Also check range 1900-2100 |
-| `BOOLEAN` | `expect_column_values_to_be_in_set([0, 1])` | |
-| `DECIMAL(P,S)` | `expect_column_values_to_be_of_type("float")` | Check precision |
+| SQL Type       | GX Expectation                                    | Notes                      |
+| -------------- | ------------------------------------------------- | -------------------------- |
+| `INT`          | `expect_column_values_to_be_of_type("int")`       | Also check range           |
+| `VARCHAR(N)`   | `expect_column_value_lengths_to_be_between(0, N)` |                            |
+| `ENUM(...)`    | `expect_column_values_to_be_in_set(values)`       |                            |
+| `DATE`         | `expect_column_values_to_be_dateutil_parseable`   | Also check range 1900-2100 |
+| `BOOLEAN`      | `expect_column_values_to_be_in_set([0, 1])`       |                            |
+| `DECIMAL(P,S)` | `expect_column_values_to_be_of_type("float")`     | Check precision            |
 
 ### Constraint to GX Expectation Mappings
 
-| SQL Constraint | GX Expectation |
-|----------------|----------------|
-| `PRIMARY KEY` | `expect_column_values_to_be_unique` |
-| `NOT NULL` | `expect_column_values_to_not_be_null` |
-| `UNIQUE` | `expect_column_values_to_be_unique` |
+| SQL Constraint     | GX Expectation                                    |
+| ------------------ | ------------------------------------------------- |
+| `PRIMARY KEY`      | `expect_column_values_to_be_unique`               |
+| `NOT NULL`         | `expect_column_values_to_not_be_null`             |
+| `UNIQUE`           | `expect_column_values_to_be_unique`               |
 | `CHECK (age >= 0)` | `expect_column_values_to_be_between("age", 0, ∞)` |
-| `FOREIGN KEY` | Custom expectation (GX doesn't have built-in) |
+| `FOREIGN KEY`      | Custom expectation (GX doesn't have built-in)     |
 
 ---
 
@@ -820,6 +833,7 @@ sql-splitter gx-generate dump.sql \
 **Problem**: New data team inherits legacy database with no quality checks.
 
 **Solution**:
+
 ```bash
 # Generate GX suite from production dump
 pg_dump mydb > dump.sql
@@ -840,6 +854,7 @@ great_expectations suite edit users
 **Problem**: Migrating from MySQL to Postgres, want to ensure data quality before cutover.
 
 **Solution**:
+
 ```bash
 # Generate expectations from MySQL dump
 sql-splitter gx-generate mysql_dump.sql -o gx/
@@ -855,6 +870,7 @@ sql-splitter gx-validate postgres_dump.sql --suite gx/expectations/
 **Problem**: Generated fake data with `sql-splitter redact`, want to ensure it's realistic.
 
 **Solution**:
+
 ```bash
 # Generate expectations from real production dump
 sql-splitter gx-generate prod_dump.sql --profile -o gx/
@@ -871,6 +887,7 @@ sql-splitter gx-validate synthetic.sql --suite gx/expectations/
 **Problem**: Daily dumps should maintain consistent quality over time.
 
 **Solution**:
+
 ```bash
 # Generate baseline from known-good dump
 sql-splitter gx-generate good_dump.sql -o gx/
@@ -888,6 +905,7 @@ sql-splitter gx-validate "dumps/$(date +%Y-%m-%d).sql" \
 **Problem**: Want same quality checks on live database as on dumps.
 
 **Solution**:
+
 ```bash
 # Generate expectations from dump
 sql-splitter gx-generate dump.sql -o gx/
@@ -906,15 +924,16 @@ great_expectations checkpoint run users_checkpoint \
 ### Generation Performance
 
 | Dump Size | Schema-Only | With Profiling (10k sample) |
-|-----------|-------------|----------------------------|
-| 100 MB | 2 seconds | 15 seconds |
-| 1 GB | 5 seconds | 45 seconds |
-| 10 GB | 15 seconds | 2 minutes |
-| 100 GB | 1 minute | 8 minutes |
+| --------- | ----------- | --------------------------- |
+| 100 MB    | 2 seconds   | 15 seconds                  |
+| 1 GB      | 5 seconds   | 45 seconds                  |
+| 10 GB     | 15 seconds  | 2 minutes                   |
+| 100 GB    | 1 minute    | 8 minutes                   |
 
 **Profiling overhead**: ~5-10x slower than schema-only.
 
 **Optimization**:
+
 ```bash
 # Profile only key columns
 sql-splitter gx-generate dump.sql \
@@ -927,14 +946,17 @@ sql-splitter gx-generate dump.sql --sample-size 5000
 ### Validation Performance
 
 **Native validation** (Rust):
+
 - Faster than GX for simple expectations (uniqueness, nulls)
 - 2-5x speedup vs Python
 
 **GX validation** (Python):
+
 - Slower but supports all 300+ expectations
 - Better reporting and documentation
 
 **Hybrid approach**:
+
 ```bash
 # Quick check with native validator
 sql-splitter gx-validate dump.sql --suite gx/ --native --fail-fast
@@ -965,6 +987,7 @@ great_expectations checkpoint run my_checkpoint
 ```
 
 Validate in Rust:
+
 ```rust
 fn validate_foreign_key(
     &self,

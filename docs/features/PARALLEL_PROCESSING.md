@@ -13,6 +13,7 @@ Enable multi-threaded parallel processing across all sql-splitter commands to ma
 Current implementation is **single-threaded**, leaving 87.5% of CPU cores idle on an 8-core system.
 
 **Performance impact:**
+
 - **Split:** 10GB dump takes 30s → could be 7.5s
 - **Convert:** Type conversion is CPU-bound → 4x faster
 - **Validate:** FK checking is embarrassingly parallel → 8x faster
@@ -60,6 +61,7 @@ SQL_SPLITTER_THREADS=4 sql-splitter convert dump.sql --dialect postgres
 ```
 
 **Algorithm:**
+
 1. Main thread parses statements sequentially
 2. Route CREATE TABLE to dedicated worker
 3. Route INSERT to table's worker
@@ -92,6 +94,7 @@ SQL_SPLITTER_THREADS=4 sql-splitter convert dump.sql --dialect postgres
 ```
 
 **Algorithm:**
+
 1. Chunk input into statement blocks (1000 statements each)
 2. Distribute chunks to worker pool
 3. Workers convert independently
@@ -122,6 +125,7 @@ SQL_SPLITTER_THREADS=4 sql-splitter convert dump.sql --dialect postgres
 ```
 
 **Algorithm:**
+
 1. Parse all INSERTs into per-table row buffers
 2. Distribute tables to workers for PK duplicate detection
 3. FK validation (requires cross-table coordination)
@@ -152,6 +156,7 @@ SQL_SPLITTER_THREADS=4 sql-splitter convert dump.sql --dialect postgres
 ```
 
 **Algorithm:**
+
 1. Parse schema, build redaction rules per table
 2. Chunk INSERT statements
 3. Workers apply redaction strategies (fake data generation)
@@ -356,12 +361,14 @@ impl OrderedMerger {
 **Challenge:** Parallel processing can spike memory usage.
 
 **Mitigations:**
+
 1. **Bounded work queues** — Limit queue depth to `2 * thread_count`
 2. **Streaming chunks** — Process and discard, don't accumulate
 3. **Memory monitoring** — Back off if RSS exceeds threshold
 4. **Chunk size tuning** — Smaller chunks for large files
 
 **Example:**
+
 ```rust
 pub struct MemoryBoundedPool {
     pool: ThreadPool,
@@ -385,13 +392,13 @@ impl MemoryBoundedPool {
 
 ### Target Metrics
 
-| Command | File Size | Threads=1 | Threads=8 | Speedup |
-|---------|-----------|-----------|-----------|---------|
-| split | 1 GB | 10s | 2.5s | 4.0x |
-| split | 10 GB | 100s | 25s | 4.0x |
-| convert | 1 GB | 15s | 3s | 5.0x |
-| validate | 1 GB | 30s | 5s | 6.0x |
-| redact | 1 GB | 20s | 5s | 4.0x |
+| Command  | File Size | Threads=1 | Threads=8 | Speedup |
+| -------- | --------- | --------- | --------- | ------- |
+| split    | 1 GB      | 10s       | 2.5s      | 4.0x    |
+| split    | 10 GB     | 100s      | 25s       | 4.0x    |
+| convert  | 1 GB      | 15s       | 3s        | 5.0x    |
+| validate | 1 GB      | 30s       | 5s        | 6.0x    |
+| redact   | 1 GB      | 20s       | 5s        | 4.0x    |
 
 ### Amdahl's Law Considerations
 
@@ -405,6 +412,7 @@ N = Number of cores
 ```
 
 **Estimate for split:**
+
 - 90% parallelizable (table writing)
 - 10% sequential (parsing)
 - Max speedup at 8 cores: 1 / (0.1 + 0.9/8) = 4.7x
@@ -438,22 +446,26 @@ Hint: For I/O-bound workloads, try --parallel 16
 ## Testing Strategy
 
 ### Unit Tests
+
 - Thread pool creation and shutdown
 - Work queue distribution
 - Ordered output merging
 - Memory bounds enforcement
 
 ### Integration Tests
+
 - Each command with --parallel flag
 - Correctness (parallel output == sequential output)
 - Speedup measurements (4+ cores required)
 
 ### Stress Tests
+
 - 100 GB dump with 16 threads
 - Memory usage monitoring
 - No deadlocks or race conditions
 
 ### Property Tests
+
 - Parallel output determinism (same input → same output)
 - No data loss (row count preserved)
 
@@ -470,12 +482,14 @@ sql-splitter split small.sql -o tables/ --parallel 16
 ### 2. Memory Exhaustion
 
 If parallel processing exceeds available RAM:
+
 - Reduce chunk size dynamically
 - Fall back to sequential processing with warning
 
 ### 3. I/O Bottlenecks
 
 Parallel writing to same disk may not improve performance:
+
 - Detect sequential I/O bottleneck
 - Suggest `--parallel 2` for spinning disks
 - Optimal for SSDs and NVMe
@@ -483,14 +497,17 @@ Parallel writing to same disk may not improve performance:
 ## Platform Considerations
 
 ### Linux
+
 - `num_cpus` uses `/proc/cpuinfo`
 - Thread affinity with `libc::sched_setaffinity`
 
 ### macOS
+
 - `num_cpus` uses `sysctl`
 - No thread affinity control
 
 ### Windows
+
 - `num_cpus` uses `GetSystemInfo`
 - Thread affinity with `SetThreadAffinityMask`
 
@@ -505,31 +522,31 @@ rayon = "1.8"  # Alternative: work-stealing scheduler
 
 **Choice: crossbeam vs rayon**
 
-| Feature | crossbeam | rayon |
-|---------|-----------|-------|
-| Work-stealing | ❌ | ✅ |
-| Fine-grained control | ✅ | ❌ |
-| Ordered output | Manual | Harder |
+| Feature              | crossbeam | rayon  |
+| -------------------- | --------- | ------ |
+| Work-stealing        | ❌        | ✅     |
+| Fine-grained control | ✅        | ❌     |
+| Ordered output       | Manual    | Harder |
 
 **Recommendation:** Start with **crossbeam** for explicit control, consider **rayon** for CPU-bound tasks like convert.
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| Thread pool implementation | 6 hours |
-| Ordered merger | 3 hours |
-| Memory-bounded queue | 3 hours |
-| Parallel split | 6 hours |
-| Parallel convert | 8 hours |
-| Parallel validate | 6 hours |
-| Parallel redact | 6 hours |
-| Parallel diff | 4 hours |
-| CLI integration (--parallel flag) | 3 hours |
-| Progress reporting | 4 hours |
-| Testing and benchmarking | 10 hours |
-| Documentation | 3 hours |
-| **Total** | **~60 hours** |
+| Component                         | Effort        |
+| --------------------------------- | ------------- |
+| Thread pool implementation        | 6 hours       |
+| Ordered merger                    | 3 hours       |
+| Memory-bounded queue              | 3 hours       |
+| Parallel split                    | 6 hours       |
+| Parallel convert                  | 8 hours       |
+| Parallel validate                 | 6 hours       |
+| Parallel redact                   | 6 hours       |
+| Parallel diff                     | 4 hours       |
+| CLI integration (--parallel flag) | 3 hours       |
+| Progress reporting                | 4 hours       |
+| Testing and benchmarking          | 10 hours      |
+| Documentation                     | 3 hours       |
+| **Total**                         | **~60 hours** |
 
 ## Future Enhancements
 

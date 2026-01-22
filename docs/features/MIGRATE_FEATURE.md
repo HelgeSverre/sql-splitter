@@ -13,6 +13,7 @@ The `migrate` command analyzes schema differences between two SQL dumps and gene
 Current `diff` command shows **what changed** but doesn't generate **how to apply changes**.
 
 Users need to:
+
 - **Generate migrations automatically** — Convert schema diffs into ALTER statements
 - **Plan production deployments** — Review migration steps before applying
 - **Generate rollback scripts** — Create reverse migrations for safety
@@ -51,24 +52,25 @@ sql-splitter migrate old.sql new.sql --tables "users,orders"
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Migration file path | stdout |
-| `--rollback` | Generate rollback script | none |
-| `-d, --dialect` | Target SQL dialect | auto-detect |
-| `--breaking-changes` | Show only breaking changes | false |
-| `--dry-run` | Preview without writing files | false |
-| `--with-data` | Include data migration helpers | false |
-| `--split` | Split into separate migration files | false |
-| `--tables` | Only migrate specific tables | all |
-| `--safe` | Skip breaking changes, warn instead | false |
-| `--format` | Output format: `sql`, `json` | sql |
+| Flag                 | Description                         | Default     |
+| -------------------- | ----------------------------------- | ----------- |
+| `-o, --output`       | Migration file path                 | stdout      |
+| `--rollback`         | Generate rollback script            | none        |
+| `-d, --dialect`      | Target SQL dialect                  | auto-detect |
+| `--breaking-changes` | Show only breaking changes          | false       |
+| `--dry-run`          | Preview without writing files       | false       |
+| `--with-data`        | Include data migration helpers      | false       |
+| `--split`            | Split into separate migration files | false       |
+| `--tables`           | Only migrate specific tables        | all         |
+| `--safe`             | Skip breaking changes, warn instead | false       |
+| `--format`           | Output format: `sql`, `json`        | sql         |
 
 ## Migration Types
 
 ### 1. Table Operations
 
 #### Add Table
+
 ```sql
 -- Migration
 CREATE TABLE new_table (
@@ -81,6 +83,7 @@ DROP TABLE new_table;
 ```
 
 #### Drop Table (Breaking)
+
 ```sql
 -- Migration
 DROP TABLE old_table;
@@ -92,6 +95,7 @@ CREATE TABLE old_table (
 ```
 
 #### Rename Table
+
 ```sql
 -- Migration
 ALTER TABLE old_name RENAME TO new_name;
@@ -103,6 +107,7 @@ ALTER TABLE new_name RENAME TO old_name;
 ### 2. Column Operations
 
 #### Add Column
+
 ```sql
 -- Migration
 ALTER TABLE users ADD COLUMN phone VARCHAR(20);
@@ -112,6 +117,7 @@ ALTER TABLE users DROP COLUMN phone;
 ```
 
 #### Drop Column (Breaking)
+
 ```sql
 -- Migration
 ALTER TABLE users DROP COLUMN deprecated_field;
@@ -121,6 +127,7 @@ ALTER TABLE users ADD COLUMN deprecated_field TEXT;
 ```
 
 #### Rename Column
+
 ```sql
 -- Migration (PostgreSQL)
 ALTER TABLE users RENAME COLUMN old_name TO new_name;
@@ -133,6 +140,7 @@ ALTER TABLE users RENAME COLUMN new_name TO old_name;
 ```
 
 #### Modify Column Type (Potentially Breaking)
+
 ```sql
 -- Migration
 ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
@@ -142,6 +150,7 @@ ALTER TABLE users ALTER COLUMN age TYPE INT;
 ```
 
 #### Add NOT NULL Constraint (Breaking)
+
 ```sql
 -- Migration (safe with default)
 ALTER TABLE users ADD COLUMN email VARCHAR(255) NOT NULL DEFAULT '';
@@ -156,6 +165,7 @@ ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
 ### 3. Constraint Operations
 
 #### Add Primary Key
+
 ```sql
 -- Migration
 ALTER TABLE users ADD PRIMARY KEY (id);
@@ -165,6 +175,7 @@ ALTER TABLE users DROP PRIMARY KEY;
 ```
 
 #### Add Foreign Key
+
 ```sql
 -- Migration
 ALTER TABLE orders
@@ -177,6 +188,7 @@ ALTER TABLE orders DROP CONSTRAINT fk_user;
 ```
 
 #### Add Unique Constraint (Potentially Breaking)
+
 ```sql
 -- Migration
 ALTER TABLE users ADD UNIQUE (email);
@@ -190,6 +202,7 @@ DROP INDEX users_email_key; -- PostgreSQL
 ### 4. Index Operations
 
 #### Add Index
+
 ```sql
 -- Migration
 CREATE INDEX idx_users_email ON users(email);
@@ -199,6 +212,7 @@ DROP INDEX idx_users_email;
 ```
 
 #### Drop Index
+
 ```sql
 -- Migration
 DROP INDEX idx_old_field;
@@ -211,23 +225,23 @@ CREATE INDEX idx_old_field ON users(old_field);
 
 ### Definite Breaking Changes
 
-| Change | Impact | Mitigation |
-|--------|--------|------------|
-| Drop table | Data loss | Backup required |
-| Drop column | Data loss | Backup required |
-| Add NOT NULL without DEFAULT | Insert failures | Add DEFAULT or backfill |
-| Reduce column size | Data truncation | Validate data first |
-| Add UNIQUE on non-unique data | Constraint violations | Deduplicate first |
-| Change column type (incompatible) | Type errors | Cast or backfill |
+| Change                            | Impact                | Mitigation              |
+| --------------------------------- | --------------------- | ----------------------- |
+| Drop table                        | Data loss             | Backup required         |
+| Drop column                       | Data loss             | Backup required         |
+| Add NOT NULL without DEFAULT      | Insert failures       | Add DEFAULT or backfill |
+| Reduce column size                | Data truncation       | Validate data first     |
+| Add UNIQUE on non-unique data     | Constraint violations | Deduplicate first       |
+| Change column type (incompatible) | Type errors           | Cast or backfill        |
 
 ### Potentially Breaking Changes
 
-| Change | Impact | Safe Condition |
-|--------|--------|----------------|
-| Add NOT NULL with DEFAULT | None | If DEFAULT is acceptable |
-| Increase column size | None | Always safe |
-| Add index | Performance during creation | Use CONCURRENTLY (PostgreSQL) |
-| Add foreign key | Validation failures | If data already valid |
+| Change                    | Impact                      | Safe Condition                |
+| ------------------------- | --------------------------- | ----------------------------- |
+| Add NOT NULL with DEFAULT | None                        | If DEFAULT is acceptable      |
+| Increase column size      | None                        | Always safe                   |
+| Add index                 | Performance during creation | Use CONCURRENTLY (PostgreSQL) |
+| Add foreign key           | Validation failures         | If data already valid         |
 
 ### Detection Output
 
@@ -365,6 +379,7 @@ ALTER TABLE users VALIDATE CONSTRAINT fk_user;
 ### SQLite
 
 **Limitations:**
+
 - Cannot drop columns (requires table recreation)
 - Cannot modify column types (requires table recreation)
 - Limited ALTER TABLE support
@@ -443,10 +458,12 @@ DROP TABLE new_table;
 ### 1. Column Rename vs Drop+Add
 
 **Problem:** Can't distinguish between:
+
 - Rename: `old_name` → `new_name`
 - Drop + Add: Remove `old_name`, add `new_name`
 
 **Solution:** Heuristic detection
+
 - Same type, position, constraints → likely rename
 - Otherwise → drop + add
 - Future: Config file to specify renames
@@ -454,6 +471,7 @@ DROP TABLE new_table;
 ### 2. Table Rename vs Drop+Create
 
 **Same heuristic challenge:**
+
 - Similar schema → likely rename
 - Otherwise → drop + create
 
@@ -483,13 +501,14 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL;
 
 ## Performance Considerations
 
-| Schema Size | Tables | Time |
-|-------------|--------|------|
-| Small | 50 | < 1s |
-| Medium | 200 | < 3s |
-| Large | 500 | < 10s |
+| Schema Size | Tables | Time  |
+| ----------- | ------ | ----- |
+| Small       | 50     | < 1s  |
+| Medium      | 200    | < 3s  |
+| Large       | 500    | < 10s |
 
 **Optimizations:**
+
 - Reuse existing diff infrastructure
 - Generate migrations during diff traversal
 - Template-based SQL generation
@@ -497,17 +516,20 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) NOT NULL;
 ## Testing Strategy
 
 ### Unit Tests
+
 - Each migration operation type
 - Breaking change detection
 - Rollback generation
 - Dialect-specific syntax
 
 ### Integration Tests
+
 - Real schema evolution (WordPress 5.0 → 6.0)
 - All four dialects
 - Complex changes (renames, type changes)
 
 ### Property Tests
+
 - Forward + rollback = identity
 - All breaking changes detected
 
@@ -548,19 +570,19 @@ sql-splitter migrate old.sql new.sql -o mysql_migration.sql --dialect mysql
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| Schema diff reuse (from diff command) | 1 hour |
-| Migration operation types | 4 hours |
-| SQL generation per dialect | 8 hours |
-| Breaking change detection | 4 hours |
-| Rollback generation | 3 hours |
-| Operation ordering | 2 hours |
-| Data migration helpers | 3 hours |
-| CLI integration | 2 hours |
-| Testing | 8 hours |
-| Documentation | 3 hours |
-| **Total** | **~40 hours** |
+| Component                             | Effort        |
+| ------------------------------------- | ------------- |
+| Schema diff reuse (from diff command) | 1 hour        |
+| Migration operation types             | 4 hours       |
+| SQL generation per dialect            | 8 hours       |
+| Breaking change detection             | 4 hours       |
+| Rollback generation                   | 3 hours       |
+| Operation ordering                    | 2 hours       |
+| Data migration helpers                | 3 hours       |
+| CLI integration                       | 2 hours       |
+| Testing                               | 8 hours       |
+| Documentation                         | 3 hours       |
+| **Total**                             | **~40 hours** |
 
 ## Future Enhancements
 

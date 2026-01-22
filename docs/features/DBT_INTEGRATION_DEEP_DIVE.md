@@ -736,6 +736,7 @@ CREATE TABLE orders (
 ### Output: dbt Project
 
 **dbt_project.yml**:
+
 ```yaml
 name: my_analytics
 version: 1.0.0
@@ -756,6 +757,7 @@ models:
 ```
 
 **models/sources.yml**:
+
 ```yaml
 version: 2
 
@@ -774,8 +776,8 @@ sources:
           - name: created_at
 
         freshness:
-          warn_after: {count: 24, period: hour}
-          error_after: {count: 48, period: hour}
+          warn_after: { count: 24, period: hour }
+          error_after: { count: 48, period: hour }
 
       - name: orders
         columns:
@@ -786,11 +788,12 @@ sources:
           - name: created_at
 
         freshness:
-          warn_after: {count: 24, period: hour}
-          error_after: {count: 48, period: hour}
+          warn_after: { count: 24, period: hour }
+          error_after: { count: 48, period: hour }
 ```
 
 **models/staging/stg_users.sql**:
+
 ```sql
 {{ config(materialized='view') }}
 
@@ -803,6 +806,7 @@ FROM {{ source('raw', 'users') }}
 ```
 
 **models/staging/stg_orders.sql**:
+
 ```sql
 {{ config(materialized='view') }}
 
@@ -815,7 +819,8 @@ SELECT
 FROM {{ source('raw', 'orders') }}
 ```
 
-**models/staging/_staging__models.yml**:
+**models/staging/\_staging\_\_models.yml**:
+
 ```yaml
 version: 2
 
@@ -837,7 +842,7 @@ models:
       - name: status
         tests:
           - accepted_values:
-              values: ['active', 'inactive']
+              values: ["active", "inactive"]
 
   - name: stg_orders
     description: Staging model for orders
@@ -861,10 +866,11 @@ models:
       - name: status
         tests:
           - accepted_values:
-              values: ['pending', 'completed', 'cancelled']
+              values: ["pending", "completed", "cancelled"]
 ```
 
 **tests/assert_positive_total.sql**:
+
 ```sql
 -- Test: total must be positive
 SELECT *
@@ -878,15 +884,15 @@ WHERE NOT (total > 0)
 
 ### Constraint → Test Mapping
 
-| SQL Constraint | dbt Test | Example |
-|----------------|----------|---------|
-| `PRIMARY KEY` | `unique`, `not_null` | `tests: [unique, not_null]` |
-| `NOT NULL` | `not_null` | `tests: [not_null]` |
-| `UNIQUE` | `unique` | `tests: [unique]` |
-| `FOREIGN KEY` | `relationships` | `relationships: {to: ref('parent'), field: id}` |
-| `ENUM('a','b')` | `accepted_values` | `accepted_values: {values: ['a', 'b']}` |
-| `CHECK (col IN (...))` | `accepted_values` | `accepted_values: {values: [...]}` |
-| `CHECK (col > 0)` | Custom test | SQL file in `tests/` |
+| SQL Constraint         | dbt Test             | Example                                         |
+| ---------------------- | -------------------- | ----------------------------------------------- |
+| `PRIMARY KEY`          | `unique`, `not_null` | `tests: [unique, not_null]`                     |
+| `NOT NULL`             | `not_null`           | `tests: [not_null]`                             |
+| `UNIQUE`               | `unique`             | `tests: [unique]`                               |
+| `FOREIGN KEY`          | `relationships`      | `relationships: {to: ref('parent'), field: id}` |
+| `ENUM('a','b')`        | `accepted_values`    | `accepted_values: {values: ['a', 'b']}`         |
+| `CHECK (col IN (...))` | `accepted_values`    | `accepted_values: {values: [...]}`              |
+| `CHECK (col > 0)`      | Custom test          | SQL file in `tests/`                            |
 
 ### Advanced Test Generation
 
@@ -1017,6 +1023,7 @@ sources:
 **Problem**: Starting dbt project from scratch is tedious.
 
 **Solution**:
+
 ```bash
 # Existing production database
 pg_dump production > prod_dump.sql
@@ -1038,6 +1045,7 @@ dbt docs generate  # Full documentation
 **Problem**: 10-year-old database with stored procedures, no tests, no docs.
 
 **Solution**:
+
 ```bash
 # Export schema
 mysqldump --no-data legacy_db > schema.sql
@@ -1057,6 +1065,7 @@ sql-splitter dbt-init schema.sql -o modern_analytics/
 **Problem**: Need to establish data quality metrics for existing system.
 
 **Solution**:
+
 ```bash
 # Generate dbt project with tests
 sql-splitter dbt-init dump.sql -o dbt/
@@ -1075,6 +1084,7 @@ dbt test --store-failures
 **Problem**: Dev, staging, prod have different schemas.
 
 **Solution**:
+
 ```bash
 # Generate dbt project from each environment
 sql-splitter dbt-init dev_dump.sql -o dbt_dev/
@@ -1092,6 +1102,7 @@ diff -r dbt_dev/models/sources.yml dbt_prod/models/sources.yml
 **Problem**: Want to drop a column, unsure what downstream models use it.
 
 **Solution**:
+
 ```bash
 # Generate dbt project
 sql-splitter dbt-init current_dump.sql -o dbt/
@@ -1133,6 +1144,7 @@ impl DbtProjectGenerator {
 ```
 
 **Example**:
+
 ```sql
 -- Source table
 CREATE TABLE UserAccounts (UserId INT, EmailAddress VARCHAR);
@@ -1208,9 +1220,9 @@ impl DbtProjectGenerator {
 models:
   my_project:
     staging:
-      materialized: view  # Fast, no storage
+      materialized: view # Fast, no storage
     marts:
-      materialized: table  # Slow queries, need persistence
+      materialized: table # Slow queries, need persistence
 ```
 
 ```bash
@@ -1357,10 +1369,12 @@ sql-splitter dbt-init dump.sql \
 ## Strategic Impact
 
 **Market positioning**:
+
 - **Before**: sql-splitter is a niche dump utility
 - **After**: sql-splitter is essential for dbt bootstrapping
 
 **User testimonial** (projected):
+
 > "We had 200+ tables and dreaded the YAML grind. sql-splitter dbt-init saved us 2 weeks of work. We went from dump to production dbt project in under an hour." — Data Engineer at Fortune 500
 
 **Viral potential**: dbt community (50k+ Slack members) loves automation. A well-executed dbt integration could drive significant adoption.

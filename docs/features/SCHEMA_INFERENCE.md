@@ -19,6 +19,7 @@ Common scenarios where schema is missing:
 5. **Database recovery** — Schema lost but data intact
 
 **Current workarounds:**
+
 - Manually write CREATE TABLE (error-prone, tedious)
 - Import to database and use `DESCRIBE` (requires DB setup)
 - Guess column types (often wrong)
@@ -53,19 +54,19 @@ sql-splitter infer data.sql --format json
 
 ## CLI Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output` | Output file path | stdout |
-| `-d, --dialect` | Target SQL dialect | mysql |
-| `--table` | Table name (required for CSV) | auto-detect |
-| `--with-data` | Include INSERT statements | false |
-| `--dry-run` | Preview without writing | false |
-| `--primary-key` | Hint: PK column(s) | auto-detect |
-| `--index` | Hint: columns to index | none |
-| `--sample` | Analyze first N rows only | all |
-| `--format` | Output format: `sql`, `json` | sql |
-| `--strict` | Fail on ambiguous types | false |
-| `--not-null` | Columns assumed NOT NULL (comma-separated) | auto-detect |
+| Flag            | Description                                | Default     |
+| --------------- | ------------------------------------------ | ----------- |
+| `-o, --output`  | Output file path                           | stdout      |
+| `-d, --dialect` | Target SQL dialect                         | mysql       |
+| `--table`       | Table name (required for CSV)              | auto-detect |
+| `--with-data`   | Include INSERT statements                  | false       |
+| `--dry-run`     | Preview without writing                    | false       |
+| `--primary-key` | Hint: PK column(s)                         | auto-detect |
+| `--index`       | Hint: columns to index                     | none        |
+| `--sample`      | Analyze first N rows only                  | all         |
+| `--format`      | Output format: `sql`, `json`               | sql         |
+| `--strict`      | Fail on ambiguous types                    | false       |
+| `--not-null`    | Columns assumed NOT NULL (comma-separated) | auto-detect |
 
 ## Inference Strategies
 
@@ -249,6 +250,7 @@ Column: product_id, Type: BIGINT
 ```
 
 **Validation:**
+
 - Check if referenced table exists in dump
 - Check if all values in `user_id` exist in `users.id`
 
@@ -299,11 +301,13 @@ id,email,age,created_at
 ```
 
 **Command:**
+
 ```bash
 sql-splitter infer users.csv --table users --dialect mysql
 ```
 
 **Output:**
+
 ```sql
 CREATE TABLE users (
   id INT PRIMARY KEY,
@@ -415,6 +419,7 @@ INSERT INTO users (id, email) VALUES (1, '');
 **Question:** Is empty string `''` equivalent to NULL?
 
 **Solution:**
+
 - Treat `''` as valid string value (NOT NULL)
 - Only explicit NULL → nullable
 
@@ -442,6 +447,7 @@ Values: 3.14159265358979323846
 ```
 
 **Solution:**
+
 - Count decimal places
 - If > 6 digits after decimal → DECIMAL
 - Otherwise → DOUBLE
@@ -455,6 +461,7 @@ Values: 3.14159265358979323846
 ```
 
 **Solution:**
+
 - Regex patterns for each format
 - Prefer most specific type (DATETIME > DATE)
 
@@ -465,17 +472,18 @@ Values: 0, 1, 0, 1 → BOOLEAN or TINYINT?
 ```
 
 **Solution:**
+
 - If all values are 0 or 1 → BOOLEAN
 - If hint provided (`--boolean status`) → BOOLEAN
 - Otherwise → TINYINT (safer)
 
 ## Performance Considerations
 
-| Rows | Columns | Time |
-|------|---------|------|
-| 1,000 | 10 | < 1s |
-| 100,000 | 50 | < 5s |
-| 1,000,000 | 100 | < 30s |
+| Rows      | Columns | Time  |
+| --------- | ------- | ----- |
+| 1,000     | 10      | < 1s  |
+| 100,000   | 50      | < 5s  |
+| 1,000,000 | 100     | < 30s |
 
 **Optimizations:**
 
@@ -487,17 +495,20 @@ Values: 0, 1, 0, 1 → BOOLEAN or TINYINT?
 ## Testing Strategy
 
 ### Unit Tests
+
 - Type inference for each data type
 - PK detection heuristics
 - NOT NULL detection
 - Index suggestions
 
 ### Integration Tests
+
 - Real-world data (WordPress export, Shopify data)
 - CSV files
 - All dialects
 
 ### Golden File Tests
+
 - Known inputs → expected CREATE TABLE output
 
 ## Example Workflows
@@ -536,20 +547,20 @@ sql-splitter infer mysql_data.sql -o schema.sql --dialect postgres
 
 ## Estimated Effort
 
-| Component | Effort |
-|-----------|--------|
-| INSERT/CSV parser | 4 hours |
-| Type inference engine | 8 hours |
-| PK detection | 4 hours |
-| NOT NULL detection | 2 hours |
-| Index suggestion | 4 hours |
-| FK inference | 6 hours |
-| CREATE TABLE generator | 4 hours |
-| Dialect-specific output | 6 hours |
-| CLI integration | 3 hours |
-| Testing | 8 hours |
-| Documentation | 3 hours |
-| **Total** | **~50 hours** |
+| Component               | Effort        |
+| ----------------------- | ------------- |
+| INSERT/CSV parser       | 4 hours       |
+| Type inference engine   | 8 hours       |
+| PK detection            | 4 hours       |
+| NOT NULL detection      | 2 hours       |
+| Index suggestion        | 4 hours       |
+| FK inference            | 6 hours       |
+| CREATE TABLE generator  | 4 hours       |
+| Dialect-specific output | 6 hours       |
+| CLI integration         | 3 hours       |
+| Testing                 | 8 hours       |
+| Documentation           | 3 hours       |
+| **Total**               | **~50 hours** |
 
 ## Future Enhancements
 
@@ -564,6 +575,7 @@ sql-splitter infer mysql_data.sql -o schema.sql --dialect postgres
 ## Limitations
 
 **Will NOT detect:**
+
 - Complex CHECK constraints
 - Triggers
 - Stored procedures
@@ -572,6 +584,7 @@ sql-splitter infer mysql_data.sql -o schema.sql --dialect postgres
 - Collation settings
 
 **Best-effort only:**
+
 - Foreign keys (requires cross-table validation)
 - Composite primary keys (requires correlation analysis)
 - Optimal index selection (requires query patterns)

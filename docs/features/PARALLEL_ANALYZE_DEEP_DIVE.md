@@ -6,6 +6,7 @@
 ## Current Analyze Implementation
 
 The `analyze` command currently:
+
 1. Reads SQL dump sequentially
 2. Parses each statement
 3. Collects statistics per table:
@@ -83,6 +84,7 @@ fn find_statement_boundaries(file: &Path, chunk_size: u64)
 ```
 
 **Challenges:**
+
 - ❌ Must find safe statement boundaries (can't split mid-statement)
 - ❌ Statement terminators (`;`) can appear in strings: `INSERT INTO logs (message) VALUES ('Error: failed;')`
 - ❌ Multi-line statements complicate boundary detection
@@ -131,6 +133,7 @@ fn chunk_file_by_statements(file: &Path, chunk_size: usize)
 ```
 
 **Trade-off:**
+
 - ✅ Safe: No mid-statement splitting
 - ✅ Simple: Reuse existing parser
 - ❌ Phase 1 is still single-threaded (reads entire file first)
@@ -154,6 +157,7 @@ time sql-splitter analyze dump.sql
 ```
 
 **Analysis:**
+
 - File reading: 600 MB/s (limited by disk)
 - Parsing: 1200 MB/s (CPU could go faster)
 - Statistics aggregation: ~3000 MB/s (negligible)
@@ -163,6 +167,7 @@ time sql-splitter analyze dump.sql
 ### When Parallel Would Help
 
 Only beneficial if:
+
 1. **NVMe SSDs:** 3+ GB/s sequential read → CPU becomes bottleneck
 2. **Compressed input:** Decompression is CPU-intensive
 3. **Network sources:** Multiple concurrent downloads
@@ -192,6 +197,7 @@ pub fn analyze_parallel_broken(file: &Path) -> Stats {
 ```
 
 **Problems:**
+
 - ❌ Lock contention: Workers fight over the mutex
 - ❌ Serialization: Only one worker can update stats at a time
 - ❌ Performance: Slower than single-threaded due to lock overhead!
@@ -220,6 +226,7 @@ pub fn analyze_parallel_correct(file: &Path, threads: usize) -> Stats {
 ```
 
 **Benefits:**
+
 - ✅ No lock contention
 - ✅ Cache-friendly (each worker has its own data)
 - ✅ Final merge is O(n) where n = number of workers
@@ -289,11 +296,13 @@ pub fn analyze_parallel_streaming(file: &Path, threads: usize) -> Stats {
 ```
 
 **Benefits:**
+
 - ✅ Constant memory: Only `threads * 2` chunks in memory
 - ✅ Streaming: Producer feeds workers continuously
 - ✅ Backpressure: Bounded channel blocks producer if workers are slow
 
 **Still has issues:**
+
 - ❌ Producer is still single-threaded (I/O bottleneck)
 - ⚠️ Complex: Multiple threads, channels, coordination
 
@@ -322,6 +331,7 @@ let decoder = Decoder::new(file)?; // Single-threaded!
 **Challenge:** Most compression formats are inherently sequential.
 
 **Solution:** Use formats with parallel decompression:
+
 - **zstd** with seekable frames (requires special encoding)
 - **pigz** (parallel gzip)
 - **Split archives** (dump split into multiple .gz files)
@@ -375,6 +385,7 @@ impl AnalyzeCommand {
 ```
 
 **Expected speedup:**
+
 - Uncompressed: 1.2-1.5x (limited by I/O)
 - Compressed: 2-4x (decompression CPU-bound)
 
@@ -383,6 +394,7 @@ impl AnalyzeCommand {
 Add streaming version with bounded queue (code above).
 
 **Expected benefits:**
+
 - Same performance as Phase 1
 - Constant memory usage
 - Works with 100 GB+ files
@@ -399,25 +411,27 @@ sql-splitter analyze dumps/*.sql --parallel 8
 
 ## Benchmark Results (Projected)
 
-| Scenario | 1 GB File | 10 GB File | Notes |
-|----------|-----------|------------|-------|
-| **Sequential (HDD)** | 10s | 100s | 100 MB/s disk |
-| **Parallel 8x (HDD)** | 10s | 100s | No improvement (I/O bound) |
-| **Sequential (NVMe)** | 1.5s | 15s | 700 MB/s |
-| **Parallel 8x (NVMe)** | 0.8s | 8s | 2x speedup |
-| **Sequential .gz (HDD)** | 30s | 300s | Decompression CPU-bound |
-| **Parallel 8x .gz (HDD)** | 8s | 80s | 4x speedup! |
+| Scenario                  | 1 GB File | 10 GB File | Notes                      |
+| ------------------------- | --------- | ---------- | -------------------------- |
+| **Sequential (HDD)**      | 10s       | 100s       | 100 MB/s disk              |
+| **Parallel 8x (HDD)**     | 10s       | 100s       | No improvement (I/O bound) |
+| **Sequential (NVMe)**     | 1.5s      | 15s        | 700 MB/s                   |
+| **Parallel 8x (NVMe)**    | 0.8s      | 8s         | 2x speedup                 |
+| **Sequential .gz (HDD)**  | 30s       | 300s       | Decompression CPU-bound    |
+| **Parallel 8x .gz (HDD)** | 8s        | 80s        | 4x speedup!                |
 
 ## Recommendation
 
 ### For Analyze Command
 
 **Don't implement parallel for v1.11.0.** Reasons:
+
 1. I/O bound on most systems (limited benefit)
 2. Implementation complexity high
 3. Better to focus on commands where parallelism helps more
 
 **Instead, prioritize parallel for:**
+
 1. **Convert** (CPU-bound type conversions)
 2. **Redact** (CPU-bound fake data generation)
 3. **Validate** (CPU-bound PK checking)
@@ -425,6 +439,7 @@ sql-splitter analyze dumps/*.sql --parallel 8
 ### When to Add Parallel Analyze
 
 **v2.0.0+** when implementing parallel infrastructure:
+
 - Reuse shared streaming worker pool
 - Add compressed file optimization
 - Provide modest speedup for compressed inputs
@@ -452,6 +467,7 @@ sql-splitter analyze "backups/2024-*.sql" --parallel 8
 ```
 
 **Benefits:**
+
 - ✅ Trivial implementation
 - ✅ Perfect parallelism (no coordination needed)
 - ✅ Works with glob patterns already supported
