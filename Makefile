@@ -12,7 +12,7 @@ help:
 	@echo "  make profile-large         - Memory profile with large dataset (~125MB)"
 	@echo "  make profile-mega          - Stress test profile (~1GB: 100 tables × 100k rows)"
 	@echo "  make profile-giga          - Extreme stress test (~10GB MySQL only)"
-	@echo "  make fmt                   - Format code"
+	@echo "  make fmt                   - Format code (Rust + Markdown)"
 	@echo "  make check                 - Check code without building"
 	@echo "  make clippy                - Run clippy lints"
 	@echo "  make clean                 - Clean build artifacts"
@@ -62,9 +62,10 @@ profile-mega: release
 profile-giga: release
 	./scripts/profile-memory.sh --size giga --output benchmark-results/profile-giga.txt
 
-# Format code
+# Format code (Rust + Markdown)
 fmt:
 	cargo fmt
+	npx prettier --write "**/*.md" --log-level warn
 
 # Check code without building
 check:

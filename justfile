@@ -78,9 +78,10 @@ bench-baseline name="main":
 bench-compare baseline="main":
     cargo bench -- --baseline {{ baseline }}
 
-# Format code
+# Format code (Rust + Markdown)
 fmt:
     cargo fmt
+    npx prettier --write "**/*.md" --log-level warn
 
 # Check code without building
 check:
