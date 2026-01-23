@@ -4,15 +4,18 @@ Competitor benchmarking for sql-splitter using Docker for reproducible results.
 
 ## Tools Tested
 
-| Tool               | Language    | GitHub Stars | URL                                                                         | Notes                                  |
-| ------------------ | ----------- | ------------ | --------------------------------------------------------------------------- | -------------------------------------- |
-| **sql-splitter**   | Rust        | -            | [HelgeSverre/sql-splitter](https://github.com/HelgeSverre/sql-splitter)     | Multi-dialect, streaming I/O           |
-| mysqldumpsplit     | Go          | ~40          | [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit)           | Buffers in memory, has deadlock bug\*  |
-| mysqldumpsplitter  | Bash/awk    | 540+         | [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter)   | Most popular shell-based tool          |
-| mysql_splitdump    | Bash/csplit | 93           | [jasny/mysql_splitdump.sh](https://gist.github.com/jasny/1608062)           | Uses GNU coreutils csplit              |
-| mysqldumpsplit     | Node.js     | 55           | [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit)     | Requires Node 10 (gulp 3.x)            |
-| mysql-dump-split   | Ruby        | 77           | [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split) | Archived project                       |
-| extract-mysql-dump | Python      | ~5           | [agroff/extract-mysql-dump](https://github.com/agroff/extract-mysql-dump)   | Multi-database extraction, Python 3.3+ |
+| Tool                      | Language    | GitHub Stars | URL                                                                                       | Notes                                   |
+| ------------------------- | ----------- | ------------ | ----------------------------------------------------------------------------------------- | --------------------------------------- |
+| **sql-splitter**          | Rust        | -            | [HelgeSverre/sql-splitter](https://github.com/HelgeSverre/sql-splitter)                   | Multi-dialect, streaming I/O            |
+| mysqldbsplit              | PHP         | 101          | [sadreck/mysqldbsplit](https://github.com/sadreck/mysqldbsplit)                           | **Fastest tool!** Selective extraction  |
+| mysqldump-splitter        | Rust        | 1            | [Scoopit/mysqldump-splitter](https://github.com/Scoopit/mysqldump-splitter)               | Hierarchical output, gzip support       |
+| mysql-dump-splitter       | Go          | 0            | [rafael-luigi-bekkema/mysql-dump-splitter](https://github.com/rafael-luigi-bekkema/mysql-dump-splitter) | Include/exclude tables        |
+| mysqldumpsplit            | Go          | ~40          | [afrase/mysqldumpsplit](https://github.com/afrase/mysqldumpsplit)                         | Buffers in memory, has deadlock bug\*   |
+| mysqldumpsplitter         | Bash/awk    | 540+         | [kedarvj/mysqldumpsplitter](https://github.com/kedarvj/mysqldumpsplitter)                 | Most popular shell-based tool           |
+| mysql_splitdump           | Bash/csplit | 93           | [jasny/mysql_splitdump.sh](https://gist.github.com/jasny/1608062)                         | Uses GNU coreutils csplit               |
+| mysqldumpsplit            | Node.js     | 55           | [vekexasia/mysqldumpsplit](https://github.com/vekexasia/mysqldumpsplit)                   | Requires Node 10 (gulp 3.x)             |
+| mysql-dump-split          | Ruby        | 77           | [ripienaar/mysql-dump-split](https://github.com/ripienaar/mysql-dump-split)               | Archived project                        |
+| extract-mysql-dump        | Python      | ~5           | [agroff/extract-mysql-dump](https://github.com/agroff/extract-mysql-dump)                 | Multi-database extraction, Python 3.3+  |
 
 _\*Original Go tool has a deadlock bug with non-interleaved dumps; benchmarks use a [patched fork](https://github.com/HelgeSverre/mysqldumpsplit/tree/fix/handle-non-interleaved-dumps)._
 
@@ -46,23 +49,26 @@ make docker-bench
 
 ---
 
-## Results - 2025-01-22
+## Results - 2025-01-23
 
 > **Hardware:** Apple M2 Max, 32GB RAM, Docker Desktop (linux/arm64)
 
 ### 100MB Generated Test File
 
-| Tool                        |    Mean |   σ | Throughput | Relative         |
-| :-------------------------- | ------: | --: | ---------: | :--------------- |
-| mysqldumpsplit (Go)\*       |  150 ms |  ±5 |   689 MB/s | 1.00 (fastest)   |
-| **sql-splitter (Rust)**     |  219 ms | ±13 |   471 MB/s | 1.46x slower     |
-| mysql_splitdump (csplit)    |  260 ms | ±35 |   398 MB/s | 1.73x slower     |
-| mysqldumpsplit (Node.js)    |  414 ms |  ±6 |   249 MB/s | 2.76x slower     |
-| mysql-dump-split (Ruby)     | 1031 ms | ±67 |   100 MB/s | **6.88x slower** |
-| mysqldumpsplitter (Bash)    | 1035 ms | ±55 |   100 MB/s | **6.91x slower** |
-| extract-mysql-dump (Python) | 1462 ms | ±63 |    71 MB/s | **9.76x slower** |
+| Tool                             |    Mean |    σ | Throughput | Relative          |
+| :------------------------------- | ------: | ---: | ---------: | :---------------- |
+| mysqldbsplit (PHP)               |   83 ms |  ±4  |  1238 MB/s | **1.00 (fastest)**|
+| mysql-dump-splitter (Go/Bekkema) |  102 ms |  ±2  |  1010 MB/s | 1.23x slower      |
+| mysqldump-splitter (Rust/Scoopit)|  124 ms | ±16  |   835 MB/s | 1.48x slower      |
+| mysqldumpsplit (Go)\*            |  155 ms | ±16  |   666 MB/s | 1.86x slower      |
+| **sql-splitter (Rust)**          |  226 ms |  ±9  |   457 MB/s | 2.71x slower      |
+| mysql_splitdump (csplit)         |  231 ms | ±28  |   447 MB/s | 2.77x slower      |
+| mysqldumpsplit (Node.js)         |  450 ms | ±29  |   230 MB/s | 5.39x slower      |
+| mysql-dump-split (Ruby)          |  970 ms | ±14  |   106 MB/s | **11.6x slower**  |
+| mysqldumpsplitter (Bash)         | 1049 ms |±142  |    98 MB/s | **12.6x slower**  |
+| extract-mysql-dump (Python)      | 1395 ms | ±15  |    74 MB/s | **16.7x slower**  |
 
-_\*Go tool uses patched fork; original has deadlock bug._
+_\*Go tool (afrase) uses patched fork; original has deadlock bug._
 
 ### 1GB Generated Test File
 
@@ -94,12 +100,13 @@ _\*Go tool uses patched fork; original has deadlock bug._
 
 ### Speed vs Memory Tradeoffs
 
-- **Go tool is fastest on small files** but buffers the entire file in memory. At 5GB+, it becomes slower than sql-splitter due to memory pressure.
-- **sql-splitter (Rust)** uses streaming I/O with fixed ~10-15MB memory regardless of file size. ~46% slower than Go at 100MB, but **47% faster at 5GB**.
+- **mysqldbsplit (PHP) is the fastest** at 1.2+ GB/s throughput—surprisingly beating all compiled tools on mysqldump format.
+- **New Go/Rust competitors** (Bekkema, Scoopit) are also faster than our sql-splitter on standard mysqldump format.
+- **sql-splitter (Rust)** uses streaming I/O with fixed ~10-15MB memory regardless of file size. Slower on small files, but consistent on large files.
 - **csplit** is surprisingly fast for a shell tool, but relies on GNU coreutils (not available on stock macOS).
-- **Node.js** is ~2.8x slower than Go but still reasonable for JS-based workflows.
-- **Ruby/Bash/awk** are ~7x slower—fine for one-off use but not for automation.
-- **Python (extract-mysql-dump)** is the slowest at ~10x slower, designed specifically for multi-database extraction scenarios.
+- **Node.js** is ~5x slower than PHP but still reasonable for JS-based workflows.
+- **Ruby/Bash/awk** are 11-13x slower—fine for one-off use but not for automation.
+- **Python (extract-mysql-dump)** is the slowest at ~17x slower, designed specifically for multi-database extraction scenarios.
 
 ### Format Compatibility (the real differentiator)
 
@@ -121,15 +128,18 @@ Competitors produce **0 tables** on non-mysqldump files.
 
 ### Known Limitations
 
-| Tool                | Issue                                                                         |
-| ------------------- | ----------------------------------------------------------------------------- |
-| Go (afrase)         | Deadlocks on files where all INSERTs for one table come before the next table |
-| Node.js (vekexasia) | Requires Node 10 (gulp 3.x incompatible with Node 12+)                        |
-| Ruby                | Project archived, unmaintained                                                |
-| Bash/awk            | Slow, Unix-only                                                               |
-| csplit              | Requires GNU coreutils                                                        |
-| extract-mysql-dump  | Designed for multi-database dumps; no absolute paths; slowest of all tools    |
-| sql-splitter        | ~46% slower than memory-buffered Go on small files                            |
+| Tool                       | Issue                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| mysqldbsplit (PHP)         | Requires PHP CLI; mysqldump format only                                       |
+| mysqldump-splitter (Scoopit)| Rust; mysqldump format only; hierarchical output structure                   |
+| mysql-dump-splitter (Bekkema)| Go; mysqldump format only                                                   |
+| Go (afrase)                | Deadlocks on files where all INSERTs for one table come before the next table |
+| Node.js (vekexasia)        | Requires Node 10 (gulp 3.x incompatible with Node 12+)                        |
+| Ruby                       | Project archived, unmaintained                                                |
+| Bash/awk                   | Slow, Unix-only                                                               |
+| csplit                     | Requires GNU coreutils                                                        |
+| extract-mysql-dump         | Designed for multi-database dumps; no absolute paths; slowest of all tools    |
+| sql-splitter               | Slower than specialized tools on mysqldump format; faster on non-standard SQL |
 
 ### When to use sql-splitter
 

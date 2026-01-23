@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Expanded benchmark suite with 4 new competitor tools**:
+  - `mysqldbsplit` (PHP) - Now the **fastest tool** at 1238 MB/s throughput
+  - `mysqldump-splitter` (Rust/Scoopit) - Hierarchical output with gzip support
+  - `mysql-dump-splitter` (Go/Bekkema) - Include/exclude table filtering
+  - `extract-mysql-dump` (Python/agroff) - Multi-database extraction
+  - Total of 10 tools now benchmarked in Docker suite
+
+- **JSON schema generation**: Auto-generate JSON schemas from Rust types using `schemars`
+  - New `schema` subcommand to export schemas for all JSON output formats
+  - Schemas available for: analyze, convert, graph, merge, redact, sample, shard, split, validate
+
+- **Website OG image generation**: Dynamic Open Graph images using Satori
+  - Automatic OG image generation for documentation pages
+  - IndexNow integration for faster search engine indexing
+
+- **Profiling and benchmark recipes**: New justfile recipes for performance analysis
+  - `just profile-medium` / `just profile-large` for CPU profiling
+  - `just bench-baseline` for criterion benchmarks
+
+### Changed
+
+- **Performance**: Use stack-allocated buffers in parser to reduce heap allocations
+- **Error handling**: Improved error handling in validation, sample, and compression modules
+- **Dependencies**: Updated multiple dependencies (clap, serde_json, flate2, indicatif, dirs, rustyline, rand, fake)
+
+### Fixed
+
+- **CI disk space**: Resolved disk space exhaustion in GitHub Actions builds
+- **Compression**: Return `Result` from `wrap_reader` for better error handling
+
 ## [1.12.6] - 2025-12-27
 
 ### Added

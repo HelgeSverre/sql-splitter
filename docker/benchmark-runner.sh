@@ -54,12 +54,16 @@ list_tools() {
     echo -e "${BOLD}Rust:${NC}"
     echo -n "  sql-splitter: "
     command -v sql-splitter &>/dev/null && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
-    
+    echo -n "  mysqldump-splitter-scoopit: "
+    [ -x /usr/local/bin/mysqldump-splitter-scoopit ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+
     echo -e "${BOLD}Go:${NC}"
     echo -n "  mysqldumpsplit-helgesverre: "
     [ -x /usr/local/bin/mysqldumpsplit-helgesverre ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
     echo -n "  mysqldumpsplit-afrase: "
     [ -x /usr/local/bin/mysqldumpsplit-afrase ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    echo -n "  mysqldumpsplit-bekkema: "
+    [ -x /usr/local/bin/mysqldumpsplit-bekkema ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 
     echo -e "${BOLD}Bash/Shell:${NC}"
     echo -n "  mysqldumpsplitter-bash: "
@@ -84,6 +88,10 @@ list_tools() {
     echo -e "${BOLD}Ruby:${NC}"
     echo -n "  mysql-dump-split: "
     [ -x /usr/local/bin/mysql-dump-split ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+
+    echo -e "${BOLD}PHP:${NC}"
+    echo -n "  mysqldbsplit: "
+    [ -x /usr/local/bin/mysqldbsplit ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 }
 
 generate_test_data() {
@@ -288,6 +296,30 @@ run_benchmark() {
         fi
     fi
 
+    # Scoopit/mysqldump-splitter (Rust) - hierarchical output
+    if [ -x /usr/local/bin/mysqldump-splitter-scoopit ]; then
+        mkdir -p /tmp/test-scoopit
+        if test_tool "mysqldump-splitter (Rust/Scoopit)" "timeout 60 /usr/local/bin/mysqldump-splitter-scoopit -i '$sql_file' -o /tmp/test-scoopit" "/tmp/test-scoopit"; then
+            working_tools+=("mysqldump-splitter (Rust/Scoopit)|/usr/local/bin/mysqldump-splitter-scoopit -i '$sql_file' -o /tmp/bench-scoopit")
+        fi
+    fi
+
+    # rafael-luigi-bekkema/mysql-dump-splitter (Go)
+    if [ -x /usr/local/bin/mysqldumpsplit-bekkema ]; then
+        mkdir -p /tmp/test-bekkema
+        if test_tool "mysql-dump-splitter (Go/Bekkema)" "timeout 60 /usr/local/bin/mysqldumpsplit-bekkema '$sql_file' -d /tmp/test-bekkema" "/tmp/test-bekkema"; then
+            working_tools+=("mysql-dump-splitter (Go/Bekkema)|/usr/local/bin/mysqldumpsplit-bekkema '$sql_file' -d /tmp/bench-bekkema")
+        fi
+    fi
+
+    # sadreck/mysqldbsplit (PHP)
+    if [ -x /usr/local/bin/mysqldbsplit ]; then
+        mkdir -p /tmp/test-php
+        if test_tool "mysqldbsplit (PHP)" "timeout 60 php /usr/local/bin/mysqldbsplit --in '$sql_file' --out /tmp/test-php --force" "/tmp/test-php"; then
+            working_tools+=("mysqldbsplit (PHP)|php /usr/local/bin/mysqldbsplit --in '$sql_file' --out /tmp/bench-php --force")
+        fi
+    fi
+
     echo ""
     echo -e "${CYAN}Running benchmark with ${#working_tools[@]} working tools...${NC}"
     echo ""
@@ -317,7 +349,7 @@ run_benchmark() {
         --warmup "$warmup" \
         --runs "$runs" \
         --ignore-failure \
-        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit /tmp/bench-ruby /tmp/bench-node /tmp/bench-extract' \
+        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit /tmp/bench-ruby /tmp/bench-node /tmp/bench-extract /tmp/bench-scoopit /tmp/bench-bekkema /tmp/bench-php' \
         $export_args \
         "${cmds[@]}"
 

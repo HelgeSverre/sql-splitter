@@ -4,7 +4,7 @@ FROM rust:1.85-slim-bookworm AS rust-builder
 
 # Install build dependencies for DuckDB
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config cmake \
+    build-essential pkg-config cmake git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -14,6 +14,10 @@ COPY benches ./benches
 COPY crates ./crates
 # Pin home crate to version compatible with Rust 1.85
 RUN cargo update home@0.5.12 --precise 0.5.9 && cargo build --release
+
+# Build Scoopit/mysqldump-splitter (Rust competitor)
+RUN git clone --depth 1 https://github.com/Scoopit/mysqldump-splitter.git /build-scoopit && \
+    cd /build-scoopit && cargo build --release || true
 
 # Stage 2: Build multiple Go tools
 FROM golang:1.23-bookworm AS go-builder
@@ -27,6 +31,10 @@ RUN git clone --branch fix/handle-non-interleaved-dumps --depth 1 \
 # Build afrase/mysqldumpsplit (Go alternative)
 RUN git clone --depth 1 https://github.com/afrase/mysqldumpsplit.git /build-afrase && \
     cd /build-afrase && CGO_ENABLED=0 go build -ldflags="-s -w" -o /mysqldumpsplit-afrase .
+
+# Build rafael-luigi-bekkema/mysql-dump-splitter (Go with include/exclude)
+RUN git clone --depth 1 https://github.com/rafael-luigi-bekkema/mysql-dump-splitter.git /build-bekkema && \
+    cd /build-bekkema && CGO_ENABLED=0 go build -ldflags="-s -w" -o /mysqldumpsplit-bekkema . || true
 
 # Stage 3: Build Node.js tools (requires Node 10 for gulp 3.x compatibility)
 FROM node:10-buster AS node-builder
@@ -74,6 +82,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
     golang-go \
+    php-cli \
     coreutils \
     ca-certificates \
     curl \
@@ -84,8 +93,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy built binaries from builder stages
 COPY --from=rust-builder /build/target/release/sql-splitter /usr/local/bin/sql-splitter
+COPY --from=rust-builder /build-scoopit/target/release/mysqldump-splitter /usr/local/bin/mysqldump-splitter-scoopit
 COPY --from=go-builder /mysqldumpsplit-go /usr/local/bin/mysqldumpsplit-helgesverre
 COPY --from=go-builder /mysqldumpsplit-afrase /usr/local/bin/mysqldumpsplit-afrase
+COPY --from=go-builder /mysqldumpsplit-bekkema /usr/local/bin/mysqldumpsplit-bekkema
 COPY --from=node-builder /build-node /opt/mysqldumpsplit-node
 COPY --from=python-builder /build-python-* /opt/python-tools/
 
@@ -124,7 +135,9 @@ RUN curl -sL "https://raw.githubusercontent.com/kedarvj/mysqldumpsplitter/master
     curl -sL "https://raw.githubusercontent.com/ripienaar/mysql-dump-split/master/split-mysql-dump.rb" \
     -o /usr/local/bin/mysql-dump-split && chmod +x /usr/local/bin/mysql-dump-split && \
     curl -sL "https://raw.githubusercontent.com/wdelfuego/mysqldumpsplitter/main/mysqldump-split.cpp" \
-    -o /usr/local/bin/mysqldump-split.cpp
+    -o /usr/local/bin/mysqldump-split.cpp && \
+    curl -sL "https://raw.githubusercontent.com/sadreck/mysqldbsplit/master/dbsplit.php" \
+    -o /usr/local/bin/mysqldbsplit && chmod +x /usr/local/bin/mysqldbsplit
 
 WORKDIR /workspace
 
