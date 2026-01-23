@@ -13,8 +13,7 @@ use super::glob_util::{expand_file_pattern, MultiFileResult};
 
 /// JSON output for single file analyze
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct AnalyzeJsonOutputs
-{
+pub(crate) struct AnalyzeJsonOutput {
     input_file: String,
     dialect: String,
     size_mb: f64,

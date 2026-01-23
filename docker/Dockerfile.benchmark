@@ -54,6 +54,10 @@ RUN git clone --depth 1 https://github.com/inspaacademy/sql-dump-splitter.git /b
     (cd /build-python-inspa && pip install -q --no-cache-dir -r requirements.txt 2>/dev/null || true) || \
     mkdir -p /build-python-inspa
 
+# Install agroff/extract-mysql-dump (multi-database extraction)
+RUN git clone --depth 1 https://github.com/agroff/extract-mysql-dump.git /build-python-agroff 2>/dev/null || \
+    mkdir -p /build-python-agroff
+
 # Stage 5: Final minimal runtime
 FROM debian:bookworm-slim
 
@@ -105,6 +109,12 @@ RUN for tool in sql-table-splitter.py splitter.py; do \
             cp /opt/python-tools/build-python-inspa/$tool /usr/local/bin/sql-dump-splitter && chmod +x /usr/local/bin/sql-dump-splitter; \
         fi; \
     done || true
+
+# Copy agroff/extract-mysql-dump (file ends up flattened due to wildcard COPY)
+RUN if [ -f /opt/python-tools/extractBackup.py ]; then \
+        cp /opt/python-tools/extractBackup.py /usr/local/bin/extract-mysql-dump && \
+        chmod +x /usr/local/bin/extract-mysql-dump; \
+    fi || true
 
 # Download shell-based competitor scripts (tiny, no build needed)
 RUN curl -sL "https://raw.githubusercontent.com/kedarvj/mysqldumpsplitter/master/mysqldumpsplitter.sh" \

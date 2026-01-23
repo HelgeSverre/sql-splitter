@@ -78,6 +78,8 @@ list_tools() {
     [ -x /usr/local/bin/sql-splitter-tkaratug ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
     echo -n "  sql-dump-splitter: "
     [ -x /usr/local/bin/sql-dump-splitter ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    echo -n "  extract-mysql-dump: "
+    [ -x /usr/local/bin/extract-mysql-dump ] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
 
     echo -e "${BOLD}Ruby:${NC}"
     echo -n "  mysql-dump-split: "
@@ -278,6 +280,14 @@ run_benchmark() {
         fi
     fi
 
+    if [ -x /usr/local/bin/extract-mysql-dump ]; then
+        # extract-mysql-dump requires relative paths (no absolute paths with /)
+        # Output goes to <basename>-extract directory automatically
+        if test_tool "extract-mysql-dump (Python)" "cd /tmp && cp '$sql_file' bench.sql && timeout 60 python3 /usr/local/bin/extract-mysql-dump bench.sql -x" "/tmp/bench-extract"; then
+            working_tools+=("extract-mysql-dump (Python)|cd /tmp && rm -rf bench-extract && cp '$sql_file' bench.sql && python3 /usr/local/bin/extract-mysql-dump bench.sql -x")
+        fi
+    fi
+
     echo ""
     echo -e "${CYAN}Running benchmark with ${#working_tools[@]} working tools...${NC}"
     echo ""
@@ -307,7 +317,7 @@ run_benchmark() {
         --warmup "$warmup" \
         --runs "$runs" \
         --ignore-failure \
-        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit /tmp/bench-ruby /tmp/bench-node' \
+        --prepare 'rm -rf /tmp/bench-*; mkdir -p /tmp/bench-csplit /tmp/bench-ruby /tmp/bench-node /tmp/bench-extract' \
         $export_args \
         "${cmds[@]}"
 
