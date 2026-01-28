@@ -20,11 +20,7 @@
       }
     }
   },
-  "required": [
-    "tables",
-    "relationships",
-    "stats"
-  ],
+  "required": ["tables", "relationships", "stats"],
   "$defs": {
     "ColumnJson": {
       "description": "JSON representation of a column",
@@ -43,16 +39,10 @@
           "type": "string"
         },
         "references_column": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "references_table": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "type": {
           "type": "string"
@@ -83,11 +73,7 @@
           "minimum": 0
         }
       },
-      "required": [
-        "table_count",
-        "column_count",
-        "relationship_count"
-      ]
+      "required": ["table_count", "column_count", "relationship_count"]
     },
     "RelationshipJson": {
       "description": "JSON representation of a relationship",
@@ -131,10 +117,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "name",
-        "columns"
-      ]
+      "required": ["name", "columns"]
     }
   }
 }

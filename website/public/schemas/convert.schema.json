@@ -14,10 +14,7 @@
       "type": "string"
     },
     "output_file": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "statistics": {
       "$ref": "#/$defs/ConvertStatistics"
@@ -29,13 +26,7 @@
       }
     }
   },
-  "required": [
-    "input_file",
-    "conversion",
-    "dry_run",
-    "statistics",
-    "warnings"
-  ],
+  "required": ["input_file", "conversion", "dry_run", "statistics", "warnings"],
   "$defs": {
     "ConversionInfo": {
       "type": "object",
@@ -47,10 +38,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "from",
-        "to"
-      ]
+      "required": ["from", "to"]
     },
     "ConvertStatistics": {
       "type": "object",
@@ -90,39 +78,27 @@
               "type": "string"
             },
             "suggestion": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             },
             "type": {
               "type": "string",
               "const": "unsupported_feature"
             }
           },
-          "required": [
-            "type",
-            "feature"
-          ]
+          "required": ["type", "feature"]
         },
         {
           "description": "Data type conversion may lose precision",
           "type": "object",
           "properties": {
             "column": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             },
             "from_type": {
               "type": "string"
             },
             "table": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             },
             "to_type": {
               "type": "string"
@@ -132,11 +108,7 @@
               "const": "lossy_conversion"
             }
           },
-          "required": [
-            "type",
-            "from_type",
-            "to_type"
-          ]
+          "required": ["type", "from_type", "to_type"]
         },
         {
           "description": "Statement was skipped",
@@ -153,11 +125,7 @@
               "const": "skipped_statement"
             }
           },
-          "required": [
-            "type",
-            "reason",
-            "statement_preview"
-          ]
+          "required": ["type", "reason", "statement_preview"]
         },
         {
           "description": "COPY statement needs conversion (PostgreSQL)",
@@ -171,10 +139,7 @@
               "const": "copy_not_converted"
             }
           },
-          "required": [
-            "type",
-            "table"
-          ]
+          "required": ["type", "table"]
         }
       ]
     }

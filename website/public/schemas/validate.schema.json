@@ -20,12 +20,7 @@
       "$ref": "#/$defs/SummaryStats"
     }
   },
-  "required": [
-    "dialect",
-    "issues",
-    "summary",
-    "checks"
-  ],
+  "required": ["dialect", "issues", "summary", "checks"],
   "$defs": {
     "CheckResults": {
       "type": "object",
@@ -58,9 +53,7 @@
       "oneOf": [
         {
           "type": "string",
-          "enum": [
-            "ok"
-          ]
+          "enum": ["ok"]
         },
         {
           "type": "object",
@@ -71,9 +64,7 @@
             }
           },
           "additionalProperties": false,
-          "required": [
-            "failed"
-          ]
+          "required": ["failed"]
         },
         {
           "type": "object",
@@ -83,9 +74,7 @@
             }
           },
           "additionalProperties": false,
-          "required": [
-            "skipped"
-          ]
+          "required": ["skipped"]
         }
       ]
     },
@@ -94,35 +83,22 @@
       "type": "object",
       "properties": {
         "approx_line": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "statement_index": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "table": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       }
     },
     "Severity": {
       "description": "Issue severity level",
       "type": "string",
-      "enum": [
-        "error",
-        "warning",
-        "info"
-      ]
+      "enum": ["error", "warning", "info"]
     },
     "SummaryStats": {
       "type": "object",
@@ -180,11 +156,7 @@
           "$ref": "#/$defs/Severity"
         }
       },
-      "required": [
-        "code",
-        "severity",
-        "message"
-      ]
+      "required": ["code", "severity", "message"]
     }
   }
 }

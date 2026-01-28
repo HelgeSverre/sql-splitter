@@ -17,10 +17,7 @@
       "$ref": "#/$defs/MergeOptions"
     },
     "output_file": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "statistics": {
       "$ref": "#/$defs/MergeStatistics"
@@ -51,10 +48,7 @@
           "type": "boolean"
         }
       },
-      "required": [
-        "transaction",
-        "header"
-      ]
+      "required": ["transaction", "header"]
     },
     "MergeStatistics": {
       "type": "object",
@@ -71,17 +65,10 @@
           "minimum": 0
         },
         "throughput_kb_per_sec": {
-          "type": [
-            "number",
-            "null"
-          ]
+          "type": ["number", "null"]
         }
       },
-      "required": [
-        "tables_merged",
-        "bytes_written",
-        "elapsed_secs"
-      ]
+      "required": ["tables_merged", "bytes_written", "elapsed_secs"]
     }
   }
 }

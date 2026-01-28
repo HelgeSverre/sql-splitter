@@ -5,19 +5,13 @@
   "type": "object",
   "properties": {
     "compression": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "dialect": {
       "type": "string"
     },
     "dialect_confidence": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "dry_run": {
       "type": "boolean"
@@ -66,10 +60,7 @@
           "minimum": 0
         },
         "throughput_mb_per_sec": {
-          "type": [
-            "number",
-            "null"
-          ]
+          "type": ["number", "null"]
         }
       },
       "required": [

@@ -14,10 +14,7 @@
       "type": "string"
     },
     "output_file": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "statistics": {
       "$ref": "#/$defs/ShardStatistics"
@@ -106,12 +103,7 @@
           "minimum": 0
         }
       },
-      "required": [
-        "name",
-        "classification",
-        "rows_selected",
-        "rows_total"
-      ]
+      "required": ["name", "classification", "rows_selected", "rows_total"]
     },
     "TenantInfo": {
       "type": "object",
@@ -126,11 +118,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "column",
-        "value",
-        "auto_detected"
-      ]
+      "required": ["column", "value", "auto_detected"]
     }
   }
 }

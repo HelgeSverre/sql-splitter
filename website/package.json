@@ -37,6 +37,7 @@
     "@tailwindcss/vite": "^4.1.18",
     "ajv-cli": "^5.0.0",
     "ajv-formats": "^3.0.1",
-    "tailwindcss": "^4.1.18"
+    "tailwindcss": "^4.1.18",
+    "tsx": "^4.21.0"
   }
 }

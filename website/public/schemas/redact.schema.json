@@ -58,11 +58,7 @@
           "minimum": 0
         }
       },
-      "required": [
-        "name",
-        "rows_processed",
-        "columns_redacted"
-      ]
+      "required": ["name", "rows_processed", "columns_redacted"]
     }
   }
 }
