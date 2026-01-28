@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
+    "prebuild": "npx tsx scripts/update-version.ts",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
