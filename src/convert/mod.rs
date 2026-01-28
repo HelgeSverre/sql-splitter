@@ -876,27 +876,35 @@ impl Converter {
 
     /// Strip ENGINE clause
     fn strip_engine_clause(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
         if self.to == SqlDialect::MySql {
             return stmt.to_string();
         }
 
         // Remove ENGINE=InnoDB, ENGINE=MyISAM, etc.
-        let re = regex::Regex::new(r"(?i)\s*ENGINE\s*=\s*\w+").unwrap();
-        re.replace_all(stmt, "").to_string()
+        static RE_ENGINE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*ENGINE\s*=\s*\w+").unwrap());
+        RE_ENGINE.replace_all(stmt, "").to_string()
     }
 
     /// Strip CHARSET/COLLATE clauses
     fn strip_charset_clauses(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
         if self.to == SqlDialect::MySql {
             return stmt.to_string();
         }
 
-        let result = stmt.to_string();
-        let re1 = regex::Regex::new(r"(?i)\s*(DEFAULT\s+)?CHARSET\s*=\s*\w+").unwrap();
-        let result = re1.replace_all(&result, "").to_string();
+        static RE_CHARSET: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*(DEFAULT\s+)?CHARSET\s*=\s*\w+").unwrap());
+        static RE_COLLATE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\s*COLLATE\s*=?\s*\w+").unwrap());
 
-        let re2 = regex::Regex::new(r"(?i)\s*COLLATE\s*=?\s*\w+").unwrap();
-        re2.replace_all(&result, "").to_string()
+        let result = RE_CHARSET.replace_all(stmt, "").to_string();
+        RE_COLLATE.replace_all(&result, "").to_string()
     }
 
     /// Strip PostgreSQL type casts (::type and ::regclass)
