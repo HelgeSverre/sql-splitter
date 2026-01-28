@@ -1,16 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SampleJsonOutput",
   "description": "JSON output for sample command",
   "type": "object",
-  "required": [
-    "dialect",
-    "dry_run",
-    "input_file",
-    "mode",
-    "statistics",
-    "tables"
-  ],
   "properties": {
     "dialect": {
       "type": "string"
@@ -22,18 +14,18 @@
       "type": "string"
     },
     "mode": {
-      "$ref": "#/definitions/SampleModeJson"
+      "$ref": "#/$defs/SampleModeJson"
     },
     "output_file": {
       "type": ["string", "null"]
     },
     "statistics": {
-      "$ref": "#/definitions/SampleStatistics"
+      "$ref": "#/$defs/SampleStatistics"
     },
     "tables": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/TableSampleJson"
+        "$ref": "#/$defs/TableSampleJson"
       }
     },
     "warnings": {
@@ -43,65 +35,66 @@
       }
     }
   },
-  "definitions": {
+  "required": [
+    "input_file",
+    "dialect",
+    "dry_run",
+    "mode",
+    "statistics",
+    "tables"
+  ],
+  "$defs": {
     "SampleModeJson": {
       "type": "object",
-      "required": ["type", "value"],
       "properties": {
         "type": {
           "type": "string"
         },
         "value": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": ["type", "value"]
     },
     "SampleStatistics": {
       "type": "object",
-      "required": [
-        "fk_orphans_rejected",
-        "rows_selected",
-        "rows_total",
-        "sample_rate_percent",
-        "tables_sampled",
-        "tables_skipped"
-      ],
       "properties": {
         "fk_orphans_rejected": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows_selected": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows_total": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "sample_rate_percent": {
           "type": "number"
         },
         "tables_sampled": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "tables_skipped": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "tables_sampled",
+        "tables_skipped",
+        "rows_selected",
+        "rows_total",
+        "sample_rate_percent",
+        "fk_orphans_rejected"
+      ]
     },
     "TableSampleJson": {
       "type": "object",
-      "required": [
-        "classification",
-        "name",
-        "rows_selected",
-        "rows_total",
-        "sample_rate_percent"
-      ],
       "properties": {
         "classification": {
           "type": "string"
@@ -111,16 +104,23 @@
         },
         "rows_selected": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows_total": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "sample_rate_percent": {
           "type": "number"
         }
-      }
+      },
+      "required": [
+        "name",
+        "classification",
+        "rows_selected",
+        "rows_total",
+        "sample_rate_percent"
+      ]
     }
   }
 }

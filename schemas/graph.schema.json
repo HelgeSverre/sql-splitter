@@ -1,37 +1,30 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ErdJson",
   "description": "JSON representation of the ERD",
   "type": "object",
-  "required": ["relationships", "stats", "tables"],
   "properties": {
     "relationships": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/RelationshipJson"
+        "$ref": "#/$defs/RelationshipJson"
       }
     },
     "stats": {
-      "$ref": "#/definitions/ErdStats"
+      "$ref": "#/$defs/ErdStats"
     },
     "tables": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/TableJson"
+        "$ref": "#/$defs/TableJson"
       }
     }
   },
-  "definitions": {
+  "required": ["tables", "relationships", "stats"],
+  "$defs": {
     "ColumnJson": {
       "description": "JSON representation of a column",
       "type": "object",
-      "required": [
-        "is_foreign_key",
-        "is_nullable",
-        "is_primary_key",
-        "name",
-        "type"
-      ],
       "properties": {
         "is_foreign_key": {
           "type": "boolean"
@@ -54,37 +47,37 @@
         "type": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "name",
+        "type",
+        "is_primary_key",
+        "is_foreign_key",
+        "is_nullable"
+      ]
     },
     "ErdStats": {
       "description": "ERD statistics",
       "type": "object",
-      "required": ["column_count", "relationship_count", "table_count"],
       "properties": {
         "column_count": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "relationship_count": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "table_count": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": ["table_count", "column_count", "relationship_count"]
     },
     "RelationshipJson": {
       "description": "JSON representation of a relationship",
       "type": "object",
-      "required": [
-        "cardinality",
-        "from_column",
-        "from_table",
-        "to_column",
-        "to_table"
-      ],
       "properties": {
         "cardinality": {
           "type": "string"
@@ -101,23 +94,30 @@
         "to_table": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "from_table",
+        "from_column",
+        "to_table",
+        "to_column",
+        "cardinality"
+      ]
     },
     "TableJson": {
       "description": "JSON representation of a table with full column details",
       "type": "object",
-      "required": ["columns", "name"],
       "properties": {
         "columns": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/ColumnJson"
+            "$ref": "#/$defs/ColumnJson"
           }
         },
         "name": {
           "type": "string"
         }
-      }
+      },
+      "required": ["name", "columns"]
     }
   }
 }

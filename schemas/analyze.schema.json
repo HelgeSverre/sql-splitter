@@ -1,16 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AnalyzeJsonOutput",
   "description": "JSON output for single file analyze",
   "type": "object",
-  "required": [
-    "dialect",
-    "elapsed_secs",
-    "input_file",
-    "size_mb",
-    "summary",
-    "tables"
-  ],
   "properties": {
     "dialect": {
       "type": "string"
@@ -25,56 +17,56 @@
       "type": "number"
     },
     "summary": {
-      "$ref": "#/definitions/AnalyzeSummary"
+      "$ref": "#/$defs/AnalyzeSummary"
     },
     "tables": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/TableAnalysis"
+        "$ref": "#/$defs/TableAnalysis"
       }
     }
   },
-  "definitions": {
+  "required": [
+    "input_file",
+    "dialect",
+    "size_mb",
+    "elapsed_secs",
+    "summary",
+    "tables"
+  ],
+  "$defs": {
     "AnalyzeSummary": {
       "type": "object",
-      "required": ["total_bytes", "total_inserts", "total_tables"],
       "properties": {
         "total_bytes": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "total_inserts": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "total_tables": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": ["total_tables", "total_inserts", "total_bytes"]
     },
     "TableAnalysis": {
       "type": "object",
-      "required": [
-        "bytes",
-        "creates",
-        "inserts",
-        "name",
-        "size_mb",
-        "statements"
-      ],
       "properties": {
         "bytes": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "creates": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "inserts": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         },
         "name": {
           "type": "string"
@@ -84,9 +76,17 @@
         },
         "statements": {
           "type": "integer",
-          "minimum": 0.0
+          "minimum": 0
         }
-      }
+      },
+      "required": [
+        "name",
+        "inserts",
+        "creates",
+        "statements",
+        "bytes",
+        "size_mb"
+      ]
     }
   }
 }

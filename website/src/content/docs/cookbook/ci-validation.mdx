@@ -63,7 +63,7 @@ jobs:
 # .gitlab-ci.yml
 validate-dumps:
   stage: test
-  image: rust:latest
+  image: rust:slim
   before_script:
     - cargo install sql-splitter
   script:
@@ -123,7 +123,7 @@ fi
 ## Validation in Docker
 
 ```dockerfile
-FROM rust:latest as builder
+FROM rust:slim AS builder
 RUN cargo install sql-splitter
 
 FROM debian:bookworm-slim
