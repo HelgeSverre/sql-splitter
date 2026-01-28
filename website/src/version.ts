@@ -28,8 +28,17 @@ export function getVersion(): string {
     }
   }
 
-  // Fallback: return a placeholder that the prebuild script will have updated
-  console.warn("Could not find Cargo.toml, using fallback version detection");
+  // Fallback: extract version from llms.txt which is updated by prebuild script
+  const llmsPath = resolve(dirname(fileURLToPath(import.meta.url)), "../llms.txt");
+  if (existsSync(llmsPath)) {
+    const llmsContent = readFileSync(llmsPath, "utf-8");
+    const llmsMatch = llmsContent.match(/# sql-splitter (\d+\.\d+\.\d+)/);
+    if (llmsMatch) {
+      return llmsMatch[1];
+    }
+  }
+
+  console.warn("Could not determine version from Cargo.toml or llms.txt");
   return "0.0.0";
 }
 
