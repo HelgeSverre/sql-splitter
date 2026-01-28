@@ -1,4 +1,4 @@
-.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all install-man docker-build docker-bench verify-realworld website-deploy man schemas
+.PHONY: help build release native test bench profile profile-large profile-mega profile-giga fmt check clippy clean install install-completions install-completions-all install-man docker-build docker-bench verify-realworld website-deploy man schemas version website-update-version release-prepare
 
 # Show available commands (default target)
 help:
@@ -25,6 +25,9 @@ help:
 	@echo "  make website-deploy        - Deploy website to Vercel"
 	@echo "  make man                   - Generate man pages"
 	@echo "  make schemas               - Generate JSON schemas from Rust types"
+	@echo "  make version               - Show current version from Cargo.toml"
+	@echo "  make website-update-version - Update version in website files"
+	@echo "  make release-prepare       - Prepare release (build, test, update website)"
 
 # Debug build
 build:
@@ -136,4 +139,26 @@ schemas: release
 	cp schemas/*.schema.json website/public/schemas/
 	@echo ""
 	@echo "✓ Schemas generated, formatted, validated, and copied to website/public/schemas/"
+
+# Show current version from Cargo.toml
+version:
+	@grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
+
+# Update version in website files from Cargo.toml
+website-update-version:
+	cd website && npx tsx scripts/update-version.ts
+
+# Prepare release (builds, tests, updates website version)
+release-prepare: release test schemas website-update-version
+	@echo ""
+	@echo "✓ Release preparation complete"
+	@echo ""
+	@echo "Version: $$(make version)"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. Update CHANGELOG.md"
+	@echo "  2. Review and commit changes"
+	@echo "  3. Create tag: git tag -a v$$(make version) -m 'Release v$$(make version)'"
+	@echo "  4. Push: git push origin main --tags"
+	@echo "  5. Create GitHub release: gh release create v$$(make version) --latest"
 

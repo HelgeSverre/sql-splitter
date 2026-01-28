@@ -124,6 +124,22 @@ man:
     @echo ""
     @echo "Man pages generated in man/ directory"
 
+# Generate JSON schemas from Rust types, validate, and copy to website
+schemas: release
+    @echo "Generating JSON schemas from Rust types..."
+    ./target/release/sql-splitter schema -o schemas/
+    @echo ""
+    @echo "Formatting schemas with prettier..."
+    npx prettier --write "schemas/*.schema.json" --log-level warn
+    @echo ""
+    @echo "Validating schemas against actual CLI output..."
+    cargo test --test json_schema_tests -- --quiet
+    @echo ""
+    @echo "Copying schemas to website..."
+    cp schemas/*.schema.json website/public/schemas/
+    @echo ""
+    @echo "✓ Schemas generated, formatted, validated, and copied to website/public/schemas/"
+
 # [website] Build website for production
 website-build:
     cd website && npm run build
@@ -200,3 +216,48 @@ website-maintain: website-audit website-clean website-install website-build webs
 # [website] Quick CI checks (build + validation)
 website-ci: website-build
     @echo "✓ Website CI checks passed"
+
+# [website] Update version in website files from Cargo.toml
+website-update-version:
+    cd website && npx tsx scripts/update-version.ts
+
+# Show current version from Cargo.toml
+version:
+    @grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
+
+# Bump version (usage: just bump 1.14.0)
+bump new_version:
+    @echo "Bumping version to {{ new_version }}..."
+    sed -i '' 's/^version = ".*"/version = "{{ new_version }}"/' Cargo.toml
+    cargo check
+    @echo "✓ Version bumped to {{ new_version }}"
+    @echo ""
+    @echo "Next steps:"
+    @echo "  1. Update CHANGELOG.md"
+    @echo "  2. Run: just release-prepare"
+
+# Prepare release (builds, tests, updates website version)
+release-prepare: release test schemas website-update-version
+    @echo ""
+    @echo "✓ Release preparation complete"
+    @echo ""
+    @echo "Version: $(just version)"
+    @echo ""
+    @echo "Next steps:"
+    @echo "  1. Review and commit changes"
+    @echo "  2. Create tag: git tag -a v$(just version) -m 'Release v$(just version)'"
+    @echo "  3. Push: git push origin main --tags"
+    @echo "  4. Create GitHub release: gh release create v$(just version)"
+
+# Full release workflow (interactive)
+release-tag version:
+    @echo "Creating release v{{ version }}..."
+    git add Cargo.toml Cargo.lock CHANGELOG.md
+    git commit -m "chore: release v{{ version }}"
+    git tag -a v{{ version }} -m "Release v{{ version }}"
+    @echo ""
+    @echo "✓ Tag v{{ version }} created"
+    @echo ""
+    @echo "To publish:"
+    @echo "  git push origin main --tags"
+    @echo "  gh release create v{{ version }} --latest"

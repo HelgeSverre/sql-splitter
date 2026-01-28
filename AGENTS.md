@@ -292,31 +292,29 @@ When optimizing for memory:
 
 Follow these steps to create a new release. **Both a git tag AND a GitHub release are required.**
 
-### 1. Pre-release Checks
+### 1. Pre-release Checks (Automated)
+
+Use the automated release preparation command:
 
 ```bash
-# Ensure all tests pass
-cargo test
+# Using justfile (recommended)
+just release-prepare
 
-# Ensure it builds in release mode
-cargo build --release
-
-# Run lints
-cargo clippy
-
-# Verify formatting
-cargo fmt --check
-
-# Optional: Run Docker benchmarks to verify performance
-./docker/run-benchmark.sh --generate 50
+# Or using Makefile
+make release-prepare
 ```
 
-### 2. Update Version
+This runs: release build, tests, schema generation, and website version update.
 
-1. Update version in `Cargo.toml`:
+### 2. Update Version and Changelog
 
-   ```toml
-   version = "X.Y.Z"
+1. Bump version in `Cargo.toml`:
+
+   ```bash
+   # Using justfile
+   just bump X.Y.Z
+
+   # Or manually edit Cargo.toml
    ```
 
 2. Update `CHANGELOG.md`:
@@ -324,11 +322,15 @@ cargo fmt --check
    - Move items from `[Unreleased]` to the new version section
    - Document all notable changes under Added/Changed/Fixed/Removed
 
+3. Website version is updated automatically:
+   - `website/llms.txt` - Updated by `prebuild` script
+   - `website/src/content/docs/roadmap.mdx` - Uses dynamic import from `Cargo.toml`
+
 ### 3. Commit, Tag, and Push
 
 ```bash
 # Stage all release files
-git add Cargo.toml Cargo.lock CHANGELOG.md src/ docs/
+git add Cargo.toml Cargo.lock CHANGELOG.md website/
 
 # Commit with descriptive message
 git commit -m "feat: <brief description> (vX.Y.Z)"
