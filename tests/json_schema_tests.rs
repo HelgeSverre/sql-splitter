@@ -50,7 +50,7 @@ fn validate_json_output(output: &std::process::Output, schema_name: &str) {
         panic!(
             "JSON output doesn't match {} schema:\n  - {}: {}\n\nOutput was:\n{}",
             schema_name,
-            error.instance_path,
+            error.instance_path(),
             error,
             serde_json::to_string_pretty(&json).unwrap()
         );
@@ -150,7 +150,7 @@ INSERT INTO orphans VALUES (1, 'test');
     if let Err(error) = schema.validate(&json) {
         panic!(
             "JSON output doesn't match validate schema:\n  - {}: {}\n\nOutput was:\n{}",
-            error.instance_path,
+            error.instance_path(),
             error,
             serde_json::to_string_pretty(&json).unwrap()
         );
