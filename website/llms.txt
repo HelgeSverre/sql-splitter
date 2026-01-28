@@ -40,7 +40,7 @@ make install  # Installs binary + shell completions + man pages
 
 ```bash
 sql-splitter --version
-# sql-splitter 1.12.6
+# sql-splitter 1.13.0
 ```
 
 ## Commands Overview
@@ -59,6 +59,7 @@ sql-splitter --version
 | `graph`    | Generate ERD diagrams (HTML, DOT, Mermaid)| Schema visualization, documentation, onboarding   |
 | `order`    | Reorder dump in topological FK order      | Safe imports, cycle detection, DROP order         |
 | `query`    | Run SQL analytics on dumps with DuckDB    | Ad-hoc queries, data exploration, export results  |
+| `schema`   | Generate JSON schemas for --json outputs  | API integration, tooling, validation              |
 
 ## Universal Capabilities
 
@@ -663,6 +664,30 @@ sql-splitter query --clear-cache
 
 ---
 
+## JSON Schema Generation
+
+**Goal:** Generate JSON schemas for `--json` output formats (useful for API integration, validation, tooling).
+
+```bash
+# Generate all schemas to ./schemas directory
+sql-splitter schema
+
+# Generate schema for specific command
+sql-splitter schema --command analyze
+
+# List available schema names
+sql-splitter schema --list
+
+# Output to stdout (for piping)
+sql-splitter schema --stdout --command validate
+```
+
+**Available schemas:** analyze, convert, diff, graph, merge, order, redact, sample, shard, split, validate
+
+Schemas follow JSON Schema draft-07 and are generated from Rust types using `schemars`.
+
+---
+
 ## Error Handling for AI Agents
 
 ### Dialect Issues
@@ -716,6 +741,7 @@ If commands fail with syntax errors or unknown keywords:
 - [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
 - [src/graph/](https://github.com/helgesverre/sql-splitter/tree/main/src/graph): ERD generation and graph analysis
 - [src/duckdb/](https://github.com/helgesverre/sql-splitter/tree/main/src/duckdb): DuckDB query engine integration
+- [schemas/](https://github.com/helgesverre/sql-splitter/tree/main/schemas): Generated JSON schemas for --json outputs
 
 ## Agent Skill Installation
 
