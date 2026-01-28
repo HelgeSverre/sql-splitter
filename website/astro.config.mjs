@@ -6,6 +6,29 @@ import indexnow from "astro-indexnow";
 import tailwindcss from "@tailwindcss/vite";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightGitHubAlerts from "starlight-github-alerts";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+
+// Read version from Cargo.toml or llms.txt at config time
+function getVersion() {
+  const cargoPath = resolve(import.meta.dirname, "../Cargo.toml");
+  if (existsSync(cargoPath)) {
+    const content = readFileSync(cargoPath, "utf-8");
+    const match = content.match(/^version\s*=\s*"([^"]+)"/m);
+    if (match) return match[1];
+  }
+
+  const llmsPath = resolve(import.meta.dirname, "llms.txt");
+  if (existsSync(llmsPath)) {
+    const content = readFileSync(llmsPath, "utf-8");
+    const match = content.match(/# sql-splitter (\d+\.\d+\.\d+)/);
+    if (match) return match[1];
+  }
+
+  return "0.0.0";
+}
+
+const SQL_SPLITTER_VERSION = getVersion();
 
 export default defineConfig({
   site: "https://sql-splitter.dev",
@@ -112,5 +135,8 @@ export default defineConfig({
   ],
   vite: {
     plugins: [tailwindcss()],
+    define: {
+      __SQL_SPLITTER_VERSION__: JSON.stringify(SQL_SPLITTER_VERSION),
+    },
   },
 });
