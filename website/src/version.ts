@@ -29,12 +29,19 @@ export function getVersion(): string {
   }
 
   // Fallback: extract version from llms.txt which is updated by prebuild script
-  const llmsPath = resolve(dirname(fileURLToPath(import.meta.url)), "../llms.txt");
-  if (existsSync(llmsPath)) {
-    const llmsContent = readFileSync(llmsPath, "utf-8");
-    const llmsMatch = llmsContent.match(/# sql-splitter (\d+\.\d+\.\d+)/);
-    if (llmsMatch) {
-      return llmsMatch[1];
+  const llmsPaths = [
+    resolve(dirname(fileURLToPath(import.meta.url)), "../llms.txt"),
+    resolve(process.cwd(), "llms.txt"),
+    resolve(process.cwd(), "../llms.txt"),
+  ];
+
+  for (const llmsPath of llmsPaths) {
+    if (existsSync(llmsPath)) {
+      const llmsContent = readFileSync(llmsPath, "utf-8");
+      const llmsMatch = llmsContent.match(/# sql-splitter (\d+\.\d+\.\d+)/);
+      if (llmsMatch) {
+        return llmsMatch[1];
+      }
     }
   }
 
