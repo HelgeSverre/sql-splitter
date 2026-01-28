@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] - 2025-01-28
+
 ### Added
 
 - **Expanded benchmark suite with 4 new competitor tools**:
@@ -32,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Performance**: Use stack-allocated buffers in parser to reduce heap allocations
 - **Error handling**: Improved error handling in validation, sample, and compression modules
-- **Dependencies**: Updated multiple dependencies (clap, serde_json, flate2, indicatif, dirs, rustyline, rand, fake)
+- **Dependencies**: Updated multiple dependencies (chrono 0.4.43, jsonschema 0.40, schemars 1.2, clap, serde_json, flate2, indicatif, dirs, rustyline, rand, fake)
 
 ### Fixed
 
