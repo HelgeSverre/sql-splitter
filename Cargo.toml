@@ -61,7 +61,7 @@ schemars = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 test_data_gen = { path = "crates/test_data_gen" }
-jsonschema = "0.29"
+jsonschema = "0.40"
 
 [dev-dependencies.clap_mangen]
 version = "0.2"
