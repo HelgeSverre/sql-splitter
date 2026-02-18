@@ -149,7 +149,7 @@ tables:
 include_global: lookups
 "#;
 
-        let config: ShardYamlConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ShardYamlConfig = serde_yaml_ng::from_str(yaml).unwrap();
 
         assert_eq!(config.tenant.column, Some("company_id".to_string()));
         assert!(config.tenant.root_tables.contains(&"companies".to_string()));

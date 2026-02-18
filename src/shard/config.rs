@@ -121,7 +121,7 @@ impl ShardYamlConfig {
     /// Load configuration from a YAML file
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
-        let config: ShardYamlConfig = serde_yml::from_str(&content)?;
+        let config: ShardYamlConfig = serde_yaml_ng::from_str(&content)?;
         Ok(config)
     }
 
