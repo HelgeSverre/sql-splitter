@@ -100,6 +100,10 @@ debug = false
 incremental = false
 strip = true
 
+# Profile for cargo-dist builds
+[profile.dist]
+inherits = "release"
+
 # Profile for flamegraph/samply profiling (release + debug symbols)
 [profile.profiling]
 inherits = "release"
