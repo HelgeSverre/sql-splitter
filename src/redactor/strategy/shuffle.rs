@@ -48,11 +48,6 @@ impl ShuffleStrategy {
         }
     }
 
-    /// Check if values have been collected
-    pub fn has_values(&self) -> bool {
-        !self.values.is_empty()
-    }
-
     /// Get the number of collected values
     pub fn len(&self) -> usize {
         self.values.len()

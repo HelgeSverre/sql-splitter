@@ -1,3 +1,5 @@
+//! SQL dump analyzer for gathering per-table statistics.
+
 use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
 use crate::splitter::Compression;
@@ -7,12 +9,18 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
+/// Per-table statistics gathered during analysis.
 #[derive(Debug, Clone, Serialize)]
 pub struct TableStats {
+    /// Name of the table.
     pub table_name: String,
+    /// Number of INSERT (or COPY) statements for this table.
     pub insert_count: u64,
+    /// Number of CREATE TABLE statements for this table.
     pub create_count: u64,
+    /// Total bytes of all statements for this table.
     pub total_bytes: u64,
+    /// Total number of statements for this table.
     pub statement_count: u64,
 }
 
@@ -28,6 +36,7 @@ impl TableStats {
     }
 }
 
+/// Streaming SQL dump analyzer that gathers per-table statistics.
 pub struct Analyzer {
     input_file: PathBuf,
     dialect: SqlDialect,
@@ -35,6 +44,7 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
+    /// Create a new analyzer for the given input file.
     pub fn new(input_file: PathBuf) -> Self {
         Self {
             input_file,
@@ -43,11 +53,13 @@ impl Analyzer {
         }
     }
 
+    /// Set the SQL dialect for parsing.
     pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
         self.dialect = dialect;
         self
     }
 
+    /// Run the analysis, returning sorted table statistics.
     pub fn analyze(mut self) -> anyhow::Result<Vec<TableStats>> {
         let file = File::open(&self.input_file)?;
         let file_size = file.metadata()?.len();
@@ -74,6 +86,7 @@ impl Analyzer {
         Ok(self.get_sorted_stats())
     }
 
+    /// Run the analysis with a progress callback, returning sorted table statistics.
     pub fn analyze_with_progress<F: Fn(u64) + 'static>(
         mut self,
         progress_fn: F,

@@ -14,8 +14,7 @@ mod rewriter;
 pub mod strategy;
 
 pub use config::RedactConfig;
-// These will be used when additional features are implemented
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Public API re-exports used by external consumers
 pub use config::{RedactConfigBuilder, RedactYamlConfig, Rule};
 pub use config_generator::generate_config;
 pub use matcher::ColumnMatcher;

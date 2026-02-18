@@ -156,13 +156,6 @@ enum RowFormat {
 }
 
 impl UnifiedRow {
-    fn pk(&self) -> Option<&smallvec::SmallVec<[crate::parser::mysql_insert::PkValue; 2]>> {
-        match self {
-            UnifiedRow::Insert(r) => r.pk.as_ref(),
-            UnifiedRow::Copy(r) => r.pk.as_ref(),
-        }
-    }
-
     fn fk_values(
         &self,
     ) -> &[(

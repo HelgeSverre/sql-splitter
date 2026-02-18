@@ -13,6 +13,5 @@ pub mod view;
 pub use analysis::{cyclic_tables, find_cycles, Cycle};
 pub use format::{to_dot, to_html, to_json, to_mermaid, Layout, OutputFormat};
 pub use view::GraphView;
-// Re-export for tests and external use
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Public API re-exports used by external consumers and tests
 pub use view::{ColumnInfo, EdgeInfo, TableInfo};

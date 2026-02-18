@@ -122,7 +122,7 @@ impl SampleYamlConfig {
     /// Load configuration from a YAML file
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
-        let config: SampleYamlConfig = serde_yaml::from_str(&content)?;
+        let config: SampleYamlConfig = serde_yml::from_str(&content)?;
         Ok(config)
     }
 

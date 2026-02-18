@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct ExpandedFiles {
     pub files: Vec<PathBuf>,
+    #[allow(dead_code)]
     pub pattern_was_glob: bool,
 }
 

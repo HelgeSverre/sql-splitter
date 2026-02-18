@@ -323,13 +323,6 @@ impl QueryEngine {
         &self.conn
     }
 
-    /// Save the current database to a file (for caching)
-    pub fn save_to_file(&self, path: &Path) -> Result<()> {
-        self.conn
-            .execute(&format!("EXPORT DATABASE '{}'", path.display()), [])
-            .context("Failed to export database")?;
-        Ok(())
-    }
 }
 
 impl Drop for QueryEngine {

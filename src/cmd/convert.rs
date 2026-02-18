@@ -410,11 +410,7 @@ fn print_stats(stats: &ConvertStats, dry_run: bool, progress: bool) {
     eprintln!("  Statements skipped: {}", stats.statements_skipped);
 
     if !stats.warnings.is_empty() {
-        eprintln!();
-        eprintln!("Warnings ({}):", stats.warnings.len());
-        for warning in &stats.warnings {
-            eprintln!("  ⚠ {}", warning);
-        }
+        crate::convert::print_warnings_summary(&stats.warnings, 100);
     }
 
     if dry_run {

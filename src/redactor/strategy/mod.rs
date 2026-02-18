@@ -17,20 +17,14 @@ mod null;
 mod shuffle;
 mod skip;
 
-// Strategy structs - will be used in Phase 3 when INSERT/COPY rewriting is implemented
-#[allow(unused_imports)]
 pub use constant::ConstantStrategy;
-#[allow(unused_imports)]
 pub use fake::FakeStrategy;
-#[allow(unused_imports)]
 pub use hash::HashStrategy;
-#[allow(unused_imports)]
 pub use mask::MaskStrategy;
-#[allow(unused_imports)]
 pub use null::NullStrategy;
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Public API re-export
 pub use shuffle::ShuffleStrategy;
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Public API re-export
 pub use skip::SkipStrategy;
 
 use serde::{Deserialize, Serialize};
@@ -110,18 +104,6 @@ impl StrategyKind {
         }
     }
 
-    /// Get the YAML string representation of this strategy
-    pub fn to_yaml_str(&self) -> &'static str {
-        match self {
-            StrategyKind::Null => "null",
-            StrategyKind::Constant { .. } => "constant",
-            StrategyKind::Hash { .. } => "hash",
-            StrategyKind::Mask { .. } => "mask",
-            StrategyKind::Shuffle => "shuffle",
-            StrategyKind::Fake { .. } => "fake",
-            StrategyKind::Skip => "skip",
-        }
-    }
 }
 
 /// Check if a fake generator name is valid
@@ -196,15 +178,6 @@ impl RedactValue {
         }
     }
 
-    /// Convert to string representation
-    pub fn to_string_value(&self) -> String {
-        match self {
-            RedactValue::Null => "NULL".to_string(),
-            RedactValue::String(s) => s.clone(),
-            RedactValue::Integer(i) => i.to_string(),
-            RedactValue::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
-        }
-    }
 }
 
 /// Trait for redaction strategies

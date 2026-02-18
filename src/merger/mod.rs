@@ -9,8 +9,11 @@ use std::path::PathBuf;
 /// Statistics from merge operation
 #[derive(Debug, Default)]
 pub struct MergeStats {
+    /// Number of tables merged.
     pub tables_merged: usize,
+    /// Total bytes written to output.
     pub bytes_written: u64,
+    /// Names of tables that were merged.
     pub table_names: Vec<String>,
 }
 

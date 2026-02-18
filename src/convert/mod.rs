@@ -26,7 +26,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 
 pub use types::TypeMapper;
-pub use warnings::{ConvertWarning, WarningCollector};
+pub use warnings::{print_warnings_summary, ConvertWarning, WarningCollector};
 
 /// Configuration for the convert command
 #[derive(Debug)]

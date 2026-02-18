@@ -291,6 +291,7 @@ fn resolve_dialect(
 }
 
 /// Display cycles in a user-friendly format
+#[allow(dead_code)]
 pub fn display_cycles(cycles: &[Cycle]) {
     if cycles.is_empty() {
         eprintln!("No cycles detected in the schema.");

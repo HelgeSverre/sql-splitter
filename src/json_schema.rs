@@ -83,7 +83,3 @@ pub fn get_schema(command: &str) -> Option<Schema> {
     all_schemas().remove(command)
 }
 
-/// List all available schema names.
-pub fn schema_names() -> Vec<&'static str> {
-    all_schemas().keys().copied().collect()
-}

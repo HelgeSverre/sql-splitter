@@ -40,11 +40,6 @@ impl InsertBatch {
         }
     }
 
-    /// Check if batch is ready to flush
-    pub fn should_flush(&self) -> bool {
-        self.rows.len() >= MAX_ROWS_PER_BATCH
-    }
-
     /// Total number of rows in batch
     pub fn row_count(&self) -> usize {
         self.rows.len()

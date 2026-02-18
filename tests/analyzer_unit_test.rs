@@ -49,3 +49,74 @@ fn test_analyzer_sorted_by_insert_count() {
     assert_eq!(stats[1].table_name, "a");
     assert_eq!(stats[1].insert_count, 1);
 }
+
+#[test]
+fn test_analyzer_empty_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("empty.sql");
+    std::fs::write(&input_file, b"").unwrap();
+    let analyzer = Analyzer::new(input_file);
+    let stats = analyzer.analyze().unwrap();
+    assert!(stats.is_empty());
+}
+
+#[test]
+fn test_analyzer_only_inserts() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    std::fs::write(
+        &input_file,
+        b"INSERT INTO users VALUES (1);\nINSERT INTO users VALUES (2);\nINSERT INTO users VALUES (3);",
+    )
+    .unwrap();
+    let analyzer = Analyzer::new(input_file);
+    let stats = analyzer.analyze().unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].insert_count, 3);
+    assert_eq!(stats[0].create_count, 0);
+}
+
+#[test]
+fn test_analyzer_tracks_total_bytes() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    std::fs::write(
+        &input_file,
+        b"CREATE TABLE t (id INT);\nINSERT INTO t VALUES (1);",
+    )
+    .unwrap();
+    let analyzer = Analyzer::new(input_file);
+    let stats = analyzer.analyze().unwrap();
+    assert_eq!(stats.len(), 1);
+    assert!(stats[0].total_bytes > 0);
+}
+
+#[test]
+fn test_analyzer_with_dialect() {
+    use sql_splitter::parser::SqlDialect;
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    std::fs::write(
+        &input_file,
+        b"CREATE TABLE users (id INT);\nINSERT INTO users VALUES (1);",
+    )
+    .unwrap();
+    let analyzer = Analyzer::new(input_file).with_dialect(SqlDialect::Postgres);
+    let stats = analyzer.analyze().unwrap();
+    assert_eq!(stats.len(), 1);
+}
+
+#[test]
+fn test_analyzer_unknown_statements_skipped() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    std::fs::write(
+        &input_file,
+        b"SET NAMES utf8;\nSET FOREIGN_KEY_CHECKS = 0;\nCREATE TABLE t (id INT);\nINSERT INTO t VALUES (1);",
+    )
+    .unwrap();
+    let analyzer = Analyzer::new(input_file);
+    let stats = analyzer.analyze().unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].statement_count, 2);
+}

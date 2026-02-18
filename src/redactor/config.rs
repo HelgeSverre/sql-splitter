@@ -346,13 +346,13 @@ impl RedactYamlConfig {
     /// Load configuration from a YAML file
     pub fn load(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Self = serde_yaml::from_str(&content)?;
+        let config: Self = serde_yml::from_str(&content)?;
         Ok(config)
     }
 
     /// Save configuration to a YAML file
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let content = serde_yaml::to_string(self)?;
+        let content = serde_yml::to_string(self)?;
         std::fs::write(path, content)?;
         Ok(())
     }

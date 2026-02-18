@@ -16,19 +16,6 @@ pub struct MergeStats {
     pub table_names: Vec<String>,
 }
 
-/// Merge configuration (reserved for future use)
-#[allow(dead_code)]
-pub struct MergeConfig {
-    pub input_dir: PathBuf,
-    pub output: Option<PathBuf>,
-    pub dialect: SqlDialect,
-    pub tables: Option<HashSet<String>>,
-    pub exclude: HashSet<String>,
-    pub add_transaction: bool,
-    pub add_header: bool,
-    pub progress: bool,
-}
-
 /// JSON output for merge command
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct MergeJsonOutput {

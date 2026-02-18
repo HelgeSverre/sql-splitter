@@ -11,16 +11,6 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 
-/// Order command options
-pub struct OrderOptions {
-    pub file: PathBuf,
-    pub output: Option<PathBuf>,
-    pub dialect: Option<String>,
-    pub check: bool,
-    pub dry_run: bool,
-    pub reverse: bool,
-}
-
 /// Run the order command
 #[allow(clippy::too_many_arguments)]
 pub fn run(

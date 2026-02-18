@@ -8,20 +8,31 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// Statistics from a split operation.
 #[derive(Serialize)]
 pub struct Stats {
+    /// Total statements processed.
     pub statements_processed: u64,
+    /// Number of unique tables found.
     pub tables_found: usize,
+    /// Total bytes processed from input.
     pub bytes_processed: u64,
+    /// Names of all tables found.
     pub table_names: Vec<String>,
 }
 
+/// Configuration for the splitter.
 #[derive(Default)]
 pub struct SplitterConfig {
+    /// SQL dialect for parsing.
     pub dialect: SqlDialect,
+    /// If true, parse without writing output files.
     pub dry_run: bool,
+    /// If set, only process tables in this set.
     pub table_filter: Option<AHashSet<String>>,
+    /// Optional callback for progress reporting.
     pub progress_fn: Option<Box<dyn Fn(u64)>>,
+    /// Filter for which statement types to include.
     pub content_filter: ContentFilter,
 }
 

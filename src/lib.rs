@@ -1,6 +1,3 @@
-// Allow dead code for items that are part of the public API but only used in tests
-#![allow(dead_code)]
-
 pub mod analyzer;
 pub mod cmd;
 pub mod convert;

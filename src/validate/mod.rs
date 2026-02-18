@@ -677,6 +677,7 @@ impl Validator {
     }
 
     /// Check rows from a PostgreSQL COPY statement
+    #[allow(dead_code)]
     fn check_copy_statement(
         &mut self,
         stmt: &[u8],

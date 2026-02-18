@@ -8,7 +8,7 @@ mod mermaid;
 pub use dot::to_dot;
 pub use html::to_html;
 pub use json::to_json;
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Public API re-exports; ErdJson used by json_schema.rs
 pub use json::{ColumnJson, ErdJson, ErdStats, RelationshipJson, TableJson};
 pub use mermaid::to_mermaid;
 

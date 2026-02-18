@@ -172,7 +172,7 @@ tables:
     skip: true
 "#;
 
-        let config: SampleYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: SampleYamlConfig = serde_yml::from_str(yaml).unwrap();
 
         assert_eq!(config.default.percent, Some(10));
         assert!(config
@@ -204,7 +204,7 @@ classification:
     - currencies
 "#;
 
-        let config: SampleYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: SampleYamlConfig = serde_yml::from_str(yaml).unwrap();
 
         assert_eq!(
             config.get_classification("migrations"),

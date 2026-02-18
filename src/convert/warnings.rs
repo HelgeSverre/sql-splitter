@@ -148,17 +148,22 @@ impl WarningCollector {
 
     /// Print summary of warnings
     pub fn print_summary(&self) {
-        if self.warnings.is_empty() {
-            return;
-        }
+        print_warnings_summary(&self.warnings, self.max_warnings);
+    }
+}
 
-        eprintln!("\nConversion warnings ({}):", self.warnings.len());
-        for warning in &self.warnings {
-            eprintln!("  ⚠ {}", warning);
-        }
+/// Print a summary of conversion warnings to stderr.
+pub fn print_warnings_summary(warnings: &[ConvertWarning], max_warnings: usize) {
+    if warnings.is_empty() {
+        return;
+    }
 
-        if self.warnings.len() >= self.max_warnings {
-            eprintln!("  ... (additional warnings truncated)");
-        }
+    eprintln!("\nConversion warnings ({}):", warnings.len());
+    for warning in warnings {
+        eprintln!("  ⚠ {}", warning);
+    }
+
+    if warnings.len() >= max_warnings {
+        eprintln!("  ... (additional warnings truncated)");
     }
 }

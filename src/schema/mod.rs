@@ -203,13 +203,6 @@ impl TableSchema {
         self.primary_key.contains(&col_id)
     }
 
-    /// Get all FK column IDs (columns that reference other tables)
-    pub fn fk_column_ids(&self) -> Vec<ColumnId> {
-        self.foreign_keys
-            .iter()
-            .flat_map(|fk| fk.columns.iter().copied())
-            .collect()
-    }
 }
 
 /// Complete database schema

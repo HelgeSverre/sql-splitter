@@ -15,6 +15,7 @@ use std::io::Write;
 pub struct ColumnAnalysis {
     pub table: String,
     pub column: String,
+    #[allow(dead_code)]
     pub column_type: String,
     pub suggested_strategy: Option<StrategyKind>,
     pub confidence: Confidence,

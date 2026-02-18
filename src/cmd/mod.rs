@@ -1083,9 +1083,8 @@ fn run_schema(
     use crate::json_schema;
     use std::fs;
 
-    let schemas = json_schema::all_schemas();
-
     if list {
+        let schemas = json_schema::all_schemas();
         for name in schemas.keys() {
             println!("{}", name);
         }
@@ -1093,14 +1092,14 @@ fn run_schema(
     }
 
     if let Some(cmd) = command {
-        let schema = schemas.get(cmd.as_str()).ok_or_else(|| {
+        let schema = json_schema::get_schema(&cmd).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown command: {}. Use --list to see available schemas.",
                 cmd
             )
         })?;
 
-        let json = serde_json::to_string_pretty(schema)?;
+        let json = serde_json::to_string_pretty(&schema)?;
 
         if to_stdout {
             println!("{}", json);
@@ -1111,11 +1110,13 @@ fn run_schema(
             eprintln!("Wrote: {}", path.display());
         }
     } else if to_stdout {
+        let schemas = json_schema::all_schemas();
         for (name, schema) in &schemas {
             let json = serde_json::to_string_pretty(schema)?;
             println!("// {}.schema.json\n{}\n", name, json);
         }
     } else {
+        let schemas = json_schema::all_schemas();
         fs::create_dir_all(&output_dir)?;
         for (name, schema) in &schemas {
             let json = serde_json::to_string_pretty(schema)?;

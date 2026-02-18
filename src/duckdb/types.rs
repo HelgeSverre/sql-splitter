@@ -5,6 +5,7 @@ use regex::Regex;
 
 /// DuckDB native types
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum DuckDBType {
     Boolean,
     TinyInt,
@@ -276,57 +277,6 @@ impl TypeConverter {
 
         // Unknown type - pass through as-is
         type_str.to_string()
-    }
-
-    /// Convert an entire column definition
-    pub fn convert_column_def(column_def: &str) -> String {
-        // Handle AUTO_INCREMENT
-        let mut result = column_def.to_string();
-
-        // Replace type with converted type
-        static RE_TYPE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)^(\s*`?[^`\s]+`?\s+)([A-Z][A-Z0-9_\s(),']+?)(\s+|$)").unwrap()
-        });
-
-        if let Some(caps) = RE_TYPE.captures(&result) {
-            if let Some(type_match) = caps.get(2) {
-                let original_type = type_match.as_str().trim();
-                let converted_type = Self::convert(original_type);
-                result = result.replacen(original_type, &converted_type, 1);
-            }
-        }
-
-        // Remove AUTO_INCREMENT (DuckDB handles this differently)
-        result = result.replace("AUTO_INCREMENT", "");
-        result = result.replace("auto_increment", "");
-
-        // Remove UNSIGNED (already handled in type conversion)
-        result = result.replace(" UNSIGNED", "");
-        result = result.replace(" unsigned", "");
-
-        // Remove ZEROFILL
-        result = result.replace(" ZEROFILL", "");
-        result = result.replace(" zerofill", "");
-
-        // Remove ON UPDATE CURRENT_TIMESTAMP
-        static RE_ON_UPDATE: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\s*ON\s+UPDATE\s+CURRENT_TIMESTAMP").unwrap());
-        result = RE_ON_UPDATE.replace_all(&result, "").to_string();
-
-        // Remove CHARACTER SET
-        static RE_CHARSET: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\s*CHARACTER\s+SET\s+\w+").unwrap());
-        result = RE_CHARSET.replace_all(&result, "").to_string();
-
-        // Remove COLLATE
-        static RE_COLLATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*COLLATE\s+\w+").unwrap());
-        result = RE_COLLATE.replace_all(&result, "").to_string();
-
-        // Clean up multiple spaces
-        static RE_SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
-        result = RE_SPACES.replace_all(&result, " ").trim().to_string();
-
-        result
     }
 }
 

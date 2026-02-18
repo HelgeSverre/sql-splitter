@@ -13,6 +13,7 @@ use fake::Fake;
 #[derive(Debug, Clone)]
 pub struct FakeStrategy {
     generator: String,
+    #[allow(dead_code)]
     locale: String,
 }
 
