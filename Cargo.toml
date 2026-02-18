@@ -10,6 +10,7 @@ authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "High-performance CLI tool for splitting large SQL dump files into individual table files"
 license = "MIT"
 repository = "https://github.com/helgesverre/sql-splitter"
+homepage = "https://github.com/helgesverre/sql-splitter"
 keywords = ["sql", "mysql", "dump", "split", "cli"]
 categories = ["command-line-utilities", "database"]
 exclude = [

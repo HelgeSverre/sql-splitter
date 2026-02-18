@@ -1,0 +1,30 @@
+# Publish to crates.io when a version tag is pushed.
+#
+# Usage:
+#   1. Bump the version in Cargo.toml
+#   2. Commit and push
+#   3. Tag and push:  git tag v1.13.0 && git push origin v1.13.0
+#
+# Setup:
+#   Add your crates.io API token as a secret named CARGO_REGISTRY_TOKEN in
+#   github.com/helgesverre/sql-splitter → Settings → Secrets → Actions
+
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
