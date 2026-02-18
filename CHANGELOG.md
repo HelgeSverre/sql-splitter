@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-02-18
+
+### Fixed
+
+- **Fix extra closing parenthesis in diff text output** for foreign key lines (`FK (col) → table.((col)))` → `FK (col) → table.(col)`)
+- **Fix premature truncation in data diff** where duplicate PK inserts overcounted the global PK entry tracker, causing false "truncated due to memory limits" on dumps with repeated PKs
+
+### Changed
+
+- **Consolidate duplicate ignore-pattern helpers** — `parse_ignore_patterns()` and `should_ignore_column()` were duplicated in `data.rs` and `schema.rs`, now shared from `differ/mod.rs`
+- **Simplify schema extraction in Differ::diff()** — removed redundant identical `if/else` branches (schema is always needed, even in data-only mode)
+- **Use `&Path` instead of `&PathBuf`** in internal `extract_schema()` helper (idiomatic Rust)
+- **Add differ module unit tests** — 34 new tests covering format parsing, table filtering, schema comparison, and all output formatters
+
 ## [1.13.0] - 2025-01-28
 
 ### Added

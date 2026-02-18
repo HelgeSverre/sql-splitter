@@ -88,7 +88,7 @@ pub fn format_text(result: &DiffResult) -> String {
 
                 for fk in &modification.fks_added {
                     output.push_str(&format!(
-                        "      + FK ({}) → {}.({}))\n",
+                        "      + FK ({}) → {}.({})\n",
                         fk.columns.join(", "),
                         fk.referenced_table,
                         fk.referenced_columns.join(", ")
@@ -97,7 +97,7 @@ pub fn format_text(result: &DiffResult) -> String {
 
                 for fk in &modification.fks_removed {
                     output.push_str(&format!(
-                        "      - FK ({}) → {}.({}))\n",
+                        "      - FK ({}) → {}.({})\n",
                         fk.columns.join(", "),
                         fk.referenced_table,
                         fk.referenced_columns.join(", ")

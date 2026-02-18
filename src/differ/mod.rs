@@ -18,10 +18,11 @@ use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
 use crate::schema::{Schema, SchemaBuilder};
 use crate::splitter::Compression;
+use glob::Pattern;
 use serde::Serialize;
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Configuration for the diff operation
@@ -183,37 +184,20 @@ impl Differ {
             (old_size + new_size) * 2 // Schema pass + data pass for each file
         };
 
-        // Pass 0: Extract schemas from both files
-        let (old_schema, new_schema) = if !self.config.data_only {
-            let old = self.extract_schema(&self.config.old_path.clone(), 0, total_bytes)?;
-            let new = self.extract_schema(&self.config.new_path.clone(), old_size, total_bytes)?;
-            (Some(old), Some(new))
-        } else {
-            // Even for data-only, we need schema for PK info
-            let old = self.extract_schema(&self.config.old_path.clone(), 0, total_bytes)?;
-            let new = self.extract_schema(&self.config.new_path.clone(), old_size, total_bytes)?;
-            (Some(old), Some(new))
-        };
+        // Pass 0: Extract schemas from both files (always needed, even data-only needs PK info)
+        let old_schema = self.extract_schema(&self.config.old_path.clone(), 0, total_bytes)?;
+        let new_schema =
+            self.extract_schema(&self.config.new_path.clone(), old_size, total_bytes)?;
 
         // Schema comparison
         let schema_diff = if !self.config.data_only {
-            old_schema
-                .as_ref()
-                .zip(new_schema.as_ref())
-                .map(|(old, new)| compare_schemas(old, new, &self.config))
+            Some(compare_schemas(&old_schema, &new_schema, &self.config))
         } else {
             None
         };
 
         // Data comparison
         let (data_diff, warnings) = if !self.config.schema_only {
-            let old_schema = old_schema
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Schema required for data comparison"))?;
-            let new_schema = new_schema
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Schema required for data comparison"))?;
-
             let base_offset = if self.config.data_only {
                 0
             } else {
@@ -221,7 +205,7 @@ impl Differ {
             };
 
             let (data, warns) =
-                self.compare_data(old_schema, new_schema, base_offset, total_bytes)?;
+                self.compare_data(&old_schema, &new_schema, base_offset, total_bytes)?;
             (Some(data), warns)
         } else {
             (None, Vec::new())
@@ -241,7 +225,7 @@ impl Differ {
     /// Extract schema from a SQL file
     fn extract_schema(
         &self,
-        path: &PathBuf,
+        path: &Path,
         byte_offset: u64,
         total_bytes: u64,
     ) -> anyhow::Result<Schema> {
@@ -391,6 +375,20 @@ impl Differ {
             truncated,
         }
     }
+}
+
+/// Parse ignore column patterns into compiled Pattern objects
+pub fn parse_ignore_patterns(patterns: &[String]) -> Vec<Pattern> {
+    patterns
+        .iter()
+        .filter_map(|p| Pattern::new(&p.to_lowercase()).ok())
+        .collect()
+}
+
+/// Check if a column should be ignored based on patterns
+pub fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool {
+    let full_name = format!("{}.{}", table.to_lowercase(), column.to_lowercase());
+    patterns.iter().any(|p| p.matches(&full_name))
 }
 
 /// Check if a table should be included based on filter config

@@ -3,7 +3,7 @@
 //! Uses streaming with memory-bounded PK tracking to compare row-level
 //! differences between two SQL dumps.
 
-use super::{should_include_table, DiffWarning};
+use super::{parse_ignore_patterns, should_ignore_column, should_include_table, DiffWarning};
 use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
@@ -166,20 +166,6 @@ fn format_pk_value(pk: &[mysql_insert::PkValue]) -> String {
         let parts: Vec<String> = pk.iter().map(format_single_pk).collect();
         format!("({})", parts.join(", "))
     }
-}
-
-/// Parse ignore column patterns into compiled Pattern objects
-fn parse_ignore_patterns(patterns: &[String]) -> Vec<Pattern> {
-    patterns
-        .iter()
-        .filter_map(|p| Pattern::new(&p.to_lowercase()).ok())
-        .collect()
-}
-
-/// Check if a column should be ignored based on patterns
-fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool {
-    let full_name = format!("{}.{}", table.to_lowercase(), column.to_lowercase());
-    patterns.iter().any(|p| p.matches(&full_name))
 }
 
 /// Hash non-PK column values to detect row modifications, excluding ignored column indices
@@ -676,8 +662,10 @@ impl DataDiffer {
                 } else {
                     hash_row_digest_with_ignore(all_values, ignore_indices)
                 };
-                map.insert(pk_hash, row_digest);
-                self.total_pk_entries += 1;
+                let was_new = map.insert(pk_hash, row_digest).is_none();
+                if was_new {
+                    self.total_pk_entries += 1;
+                }
 
                 // Also store PK string for sampling if enabled
                 if let Some(ref mut pk_str_map) = state.pk_strings {

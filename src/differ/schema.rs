@@ -1,6 +1,6 @@
 //! Schema comparison for diff command.
 
-use super::{should_include_table, DiffConfig};
+use super::{parse_ignore_patterns, should_ignore_column, should_include_table, DiffConfig};
 use crate::schema::{Column, ColumnType, ForeignKey, IndexDef, Schema, TableSchema};
 use glob::Pattern;
 use serde::Serialize;
@@ -180,20 +180,6 @@ impl From<&IndexDef> for IndexInfo {
             index_type: idx.index_type.clone(),
         }
     }
-}
-
-/// Parse ignore column patterns into compiled Pattern objects
-fn parse_ignore_patterns(patterns: &[String]) -> Vec<Pattern> {
-    patterns
-        .iter()
-        .filter_map(|p| Pattern::new(&p.to_lowercase()).ok())
-        .collect()
-}
-
-/// Check if a column should be ignored based on patterns
-fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool {
-    let full_name = format!("{}.{}", table.to_lowercase(), column.to_lowercase());
-    patterns.iter().any(|p| p.matches(&full_name))
 }
 
 /// Compare two schemas and return the differences
