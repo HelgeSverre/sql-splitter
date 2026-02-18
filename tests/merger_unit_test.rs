@@ -170,11 +170,7 @@ fn test_merge_bytes_written_tracking() {
     let input_dir = temp_dir.path().join("tables");
     let output_file = temp_dir.path().join("merged.sql");
     fs::create_dir_all(&input_dir).unwrap();
-    fs::write(
-        input_dir.join("t.sql"),
-        "INSERT INTO t VALUES (1);\n",
-    )
-    .unwrap();
+    fs::write(input_dir.join("t.sql"), "INSERT INTO t VALUES (1);\n").unwrap();
 
     let merger = Merger::new(input_dir, Some(output_file)).with_header(false);
     let stats = merger.merge().unwrap();

@@ -91,8 +91,11 @@ fn test_writer_pool_multiple_tables() {
     pool.ensure_output_dir().unwrap();
 
     for table in &["users", "posts", "comments", "tags", "categories"] {
-        pool.write_statement(table, format!("CREATE TABLE {} (id INT);", table).as_bytes())
-            .unwrap();
+        pool.write_statement(
+            table,
+            format!("CREATE TABLE {} (id INT);", table).as_bytes(),
+        )
+        .unwrap();
     }
     pool.close_all().unwrap();
 

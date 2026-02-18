@@ -103,7 +103,6 @@ impl StrategyKind {
             StrategyKind::Skip => Ok(()),
         }
     }
-
 }
 
 /// Check if a fake generator name is valid
@@ -177,7 +176,6 @@ impl RedactValue {
             _ => None,
         }
     }
-
 }
 
 /// Trait for redaction strategies

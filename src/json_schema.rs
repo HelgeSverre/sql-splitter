@@ -82,4 +82,3 @@ pub fn all_schemas() -> BTreeMap<&'static str, Schema> {
 pub fn get_schema(command: &str) -> Option<Schema> {
     all_schemas().remove(command)
 }
-

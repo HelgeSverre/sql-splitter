@@ -322,7 +322,6 @@ impl QueryEngine {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
-
 }
 
 impl Drop for QueryEngine {

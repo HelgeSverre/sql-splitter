@@ -202,7 +202,6 @@ impl TableSchema {
     pub fn is_pk_column(&self, col_id: ColumnId) -> bool {
         self.primary_key.contains(&col_id)
     }
-
 }
 
 /// Complete database schema
