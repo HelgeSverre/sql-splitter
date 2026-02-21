@@ -43,7 +43,7 @@ bzip2 = "0.6"
 xz2 = "0.1"
 zstd = "0.13"
 indicatif = "0.18"
-rand = "0.9"
+rand = "0.10"
 smallvec = { version = "1.13", features = ["union"] }
 chrono = "0.4"
 tempfile = "3"
