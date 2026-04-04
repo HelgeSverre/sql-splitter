@@ -880,6 +880,21 @@ tests/
 
 ---
 
+## Ecosystem Integrations (v1.16+)
+
+Strategic integrations beyond core CLI features. See [Integration Roadmap Master](INTEGRATION_ROADMAP_MASTER.md) for full analysis.
+
+| Version | Integration            | Theme                              | Effort |
+| ------- | ---------------------- | ---------------------------------- | ------ |
+| v1.16.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge  | 12h    |
+| v1.17.0 | **Great Expectations** | Auto-generate data quality suites  | 16h    |
+| v1.18.0 | **Atlas**              | SQL dump → HCL schema-as-code      | 20h    |
+| v1.19.0 | **dbt**                | Bootstrap dbt projects from dumps  | 28h    |
+
+These follow the core roadmap (v1.13–v2.1) and require user demand validation before committing.
+
+---
+
 ## Related Documents
 
 ### Active
@@ -887,12 +902,21 @@ tests/
 - [Test Data Generator Design](TEST_DATA_GENERATOR.md)
 - [Additional Ideas](features/ADDITIONAL_IDEAS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
+- [Integration Opportunities](INTEGRATION_OPPORTUNITIES.md)
+- [Integration Roadmap Master](INTEGRATION_ROADMAP_MASTER.md)
 
 ### Upcoming Feature Designs
 
 - [Enum Conversion](features/ENUM_CONVERSION.md) — v1.13.0
 - [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.14.0
 - [DBML Support](features/DBML_SUPPORT.md) — v1.15.0
+
+### Ecosystem Integration Designs (v1.16+)
+
+- [DuckDB Deep Dive](features/DUCKDB_INTEGRATION_DEEP_DIVE.md) — Parquet export (v1.16.0)
+- [Great Expectations Deep Dive](features/GREAT_EXPECTATIONS_INTEGRATION_DEEP_DIVE.md) — v1.17.0
+- [Atlas Deep Dive](features/ATLAS_INTEGRATION_DEEP_DIVE.md) — v1.18.0
+- [dbt Deep Dive](features/DBT_INTEGRATION_DEEP_DIVE.md) — v1.19.0
 
 ### Completed Feature Designs (moved to archived after implementation)
 

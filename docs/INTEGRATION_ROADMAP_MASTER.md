@@ -1,8 +1,8 @@
 # Integration Roadmap: Master Plan
 
-**Date**: 2025-12-24
-**Status**: Strategic Vision
-**Total Effort**: 80 hours (Phase 1)
+**Date**: 2025-12-24 (Updated: 2026-04-04)
+**Status**: Strategic Vision — DuckDB core SHIPPED (v1.12.0), Parquet + GX/Atlas/dbt are future
+**Total Effort**: 64 hours remaining (Parquet 12h + GX 16h + Atlas 20h + dbt 28h minus DuckDB query 16h already done)
 
 ---
 
@@ -36,14 +36,18 @@ This document consolidates the strategic plan for integrating sql-splitter with 
 
 ### Tier 1 Integrations (Completed Design)
 
-| Integration            | Effort | Value           | Status   | Version |
-| ---------------------- | ------ | --------------- | -------- | ------- |
-| **DuckDB**             | 16h    | 🔥 Game-changer | Designed | v1.16.0 |
-| **Great Expectations** | 16h    | ⭐ High impact  | Designed | v1.17.0 |
-| **Atlas**              | 20h    | ⭐ High impact  | Designed | v1.18.0 |
-| **dbt**                | 28h    | 🔥 Game-changer | Designed | v1.19.0 |
+| Integration            | Effort  | Value           | Status              | Version  |
+| ---------------------- | ------- | --------------- | ------------------- | -------- |
+| **DuckDB (query)**     | ~~16h~~ | 🔥 Game-changer | ✅ **Shipped**       | v1.12.0  |
+| **DuckDB (Parquet)**   | 12h     | ⭐ High impact  | 🟡 Designed         | v1.16.0  |
+| **Great Expectations** | 16h     | ⭐ High impact  | 🟡 Designed         | v1.17.0  |
+| **Atlas**              | 20h     | ⭐ High impact  | 🟡 Designed         | v1.18.0  |
+| **dbt**                | 28h     | 🔥 Game-changer | 🟡 Designed         | v1.19.0  |
 
-**Total Phase 1 Effort**: 80 hours (~2 sprints)
+**Total Remaining Effort**: 76 hours (~2 sprints)
+
+> **Note**: DuckDB `query` command shipped in v1.12.0. Remaining work is Parquet export only.
+> The core query engine (in-memory, REPL, caching, 5 output formats) is fully implemented.
 
 ### Integration Synergies
 
@@ -65,7 +69,7 @@ These integrations aren't isolated features—they form a **unified workflow**:
 
 ---
 
-## Integration #1: DuckDB Query Engine
+## Integration #1: DuckDB Query Engine ✅ SHIPPED (v1.12.0)
 
 ### What It Enables
 
@@ -74,13 +78,13 @@ Turn any SQL dump into a **queryable analytical database** without import, setup
 ### Key Features
 
 ```bash
-# Query dump directly
+# Query dump directly (✅ implemented)
 sql-splitter query dump.sql "SELECT * FROM users WHERE age > 25"
 
-# Interactive REPL
+# Interactive REPL (✅ implemented)
 sql-splitter query dump.sql --interactive
 
-# Export to Parquet (data lake integration)
+# Export to Parquet (❌ not yet — v1.16.0 target)
 sql-splitter export dump.sql --format parquet -o data/
 ```
 
@@ -451,20 +455,29 @@ psql staging < synthetic.sql
 
 ## Implementation Roadmap
 
+### Phase 0: Already Done ✅
+
+| Version | Feature              | Effort | Status          |
+| ------- | -------------------- | ------ | --------------- |
+| v1.12.0 | DuckDB query engine  | 16h    | ✅ **Shipped**  |
+
 ### Phase 1: Foundation (v1.16.0 - v1.19.0)
 
-**Timeline**: 2 months (80 hours)
+> Note: v1.13.0 (Enum Conversion), v1.14.0 (Migrate), v1.15.0 (DBML) are already on the core
+> roadmap. These integrations follow after. Exact versions TBD based on core roadmap progress.
+
+**Timeline**: 2 months (76 hours remaining)
 
 | Version | Feature                        | Effort | Priority |
 | ------- | ------------------------------ | ------ | -------- |
-| v1.16.0 | DuckDB Integration             | 16h    | Critical |
+| v1.16.0 | DuckDB Parquet export          | 12h    | High     |
 | v1.17.0 | Great Expectations Integration | 16h    | High     |
 | v1.18.0 | Atlas Integration              | 20h    | High     |
 | v1.19.0 | dbt Integration                | 28h    | Critical |
 
 **Success Criteria**:
 
-- All 4 integrations shipped and documented
+- All integrations shipped and documented
 - Example workflows published
 - Community feedback gathered
 
@@ -476,7 +489,7 @@ psql staging < synthetic.sql
 
 **Mitigation**:
 
-- Start with DuckDB (highest impact, lowest risk)
+- Start with Parquet export (extends existing DuckDB work, low risk)
 - Build buffer time into sprint planning
 - Early beta testing with friendly users
 
@@ -758,11 +771,12 @@ The four-integration strategy (**DuckDB, Great Expectations, Atlas, dbt**) trans
 
 ### Recommended Next Steps
 
-1. ✅ **Approve roadmap** (v1.16-v1.19)
-2. 🚀 **Start with DuckDB** (v1.16.0, highest impact/lowest risk)
-3. 📢 **Early announcement** (build anticipation in dbt/data communities)
-4. 🧪 **Beta testing program** (get feedback before GA)
-5. 📊 **Track metrics** (measure adoption, iterate)
+1. ✅ **DuckDB query engine shipped** (v1.12.0)
+2. 🚀 **Ship v1.13.0 Enum Conversion first** (on core roadmap, see ROADMAP.md)
+3. 🚀 **Add Parquet export** (v1.16.0, extends existing DuckDB work)
+4. 📢 **Early announcement** (build anticipation in dbt/data communities)
+5. 🧪 **Beta testing program** (get feedback before GA)
+6. 📊 **Track metrics** (measure adoption, iterate)
 
 ---
 
