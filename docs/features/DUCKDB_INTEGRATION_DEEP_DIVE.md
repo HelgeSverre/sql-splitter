@@ -1,8 +1,13 @@
 # DuckDB Integration Deep Dive
 
 **Date**: 2025-12-24
-**Priority**: Very High (v1.16)
-**Effort**: 16h (query engine) + 12h (Parquet export) = 28h total
+**Status**: ✅ Core query engine IMPLEMENTED (v1.12.0) — Parquet export remaining (~12h)
+**Effort**: ~~16h (query engine)~~ DONE + 12h (Parquet export) = 12h remaining
+
+> **Note**: The `query` command (DuckDB-powered) shipped in v1.12.0 with full support for
+> in-memory/disk modes, interactive REPL, 5 output formats (table, json, jsonl, csv, tsv),
+> persistent caching with 400x speedup, and multi-dialect import. This doc covers the
+> original design rationale and the **remaining Parquet export feature**.
 
 ## What is DuckDB?
 
@@ -43,6 +48,24 @@ grep "INSERT INTO users" dump.sql | wc -l
 # One command, instant results
 sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 ```
+
+---
+
+## Implementation Status (v1.12.0)
+
+**Shipped features** (see `src/duckdb/` and `src/cmd/query.rs`):
+
+| Feature | Status |
+|---------|--------|
+| In-memory DuckDB import | ✅ Done |
+| Disk-based mode (>2GB dumps) | ✅ Done |
+| MySQL/PostgreSQL/SQLite/MSSQL import | ✅ Done |
+| Output formats: table, json, jsonl, csv, tsv | ✅ Done |
+| Interactive REPL with meta-commands | ✅ Done |
+| Persistent cache (SHA256-keyed, 400x speedup) | ✅ Done |
+| `--tables` filter (import specific tables only) | ✅ Done |
+| `--memory-limit` configuration | ✅ Done |
+| **Parquet export** | ❌ Not yet — see §Parquet Export Integration |
 
 ---
 
