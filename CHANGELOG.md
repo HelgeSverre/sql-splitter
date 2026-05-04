@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.5] - 2026-05-04
+
+### Changed
+
+- **`duckdb` 1.4 → 1.10502** (DuckDB switched to CalVer; same internal duckdb engine, new versioning scheme)
+- **`sha2` 0.10 → 0.11**
+- **`clap_mangen` 0.2 → 0.3** (dev-dep, used to generate the man page)
+- **`flate2` 1.1.8 → 1.1.9**, **`indicatif` 0.18.3 → 0.18.4**
+
 ## [1.13.4] - 2026-05-04
 
 ### Changed
