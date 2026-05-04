@@ -22,16 +22,34 @@ use sql_splitter::schema::SchemaBuilder;
 
 #[test]
 fn test_diff_output_format_from_str() {
-    assert_eq!("text".parse::<DiffOutputFormat>().unwrap(), DiffOutputFormat::Text);
-    assert_eq!("json".parse::<DiffOutputFormat>().unwrap(), DiffOutputFormat::Json);
-    assert_eq!("sql".parse::<DiffOutputFormat>().unwrap(), DiffOutputFormat::Sql);
+    assert_eq!(
+        "text".parse::<DiffOutputFormat>().unwrap(),
+        DiffOutputFormat::Text
+    );
+    assert_eq!(
+        "json".parse::<DiffOutputFormat>().unwrap(),
+        DiffOutputFormat::Json
+    );
+    assert_eq!(
+        "sql".parse::<DiffOutputFormat>().unwrap(),
+        DiffOutputFormat::Sql
+    );
 }
 
 #[test]
 fn test_diff_output_format_case_insensitive() {
-    assert_eq!("TEXT".parse::<DiffOutputFormat>().unwrap(), DiffOutputFormat::Text);
-    assert_eq!("Json".parse::<DiffOutputFormat>().unwrap(), DiffOutputFormat::Json);
-    assert_eq!("SQL".parse::<DiffOutputFormat>().unwrap(), DiffOutputFormat::Sql);
+    assert_eq!(
+        "TEXT".parse::<DiffOutputFormat>().unwrap(),
+        DiffOutputFormat::Text
+    );
+    assert_eq!(
+        "Json".parse::<DiffOutputFormat>().unwrap(),
+        DiffOutputFormat::Json
+    );
+    assert_eq!(
+        "SQL".parse::<DiffOutputFormat>().unwrap(),
+        DiffOutputFormat::Sql
+    );
 }
 
 #[test]
@@ -232,7 +250,8 @@ fn test_compare_schemas_identical() {
 #[test]
 fn test_compare_schemas_table_added() {
     let old_sql = "CREATE TABLE users (id INT PRIMARY KEY)";
-    let new_sql = "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE orders (id INT PRIMARY KEY)";
+    let new_sql =
+        "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE orders (id INT PRIMARY KEY)";
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
     let config = DiffConfig::default();
@@ -246,7 +265,8 @@ fn test_compare_schemas_table_added() {
 
 #[test]
 fn test_compare_schemas_table_removed() {
-    let old_sql = "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE legacy (id INT PRIMARY KEY)";
+    let old_sql =
+        "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE legacy (id INT PRIMARY KEY)";
     let new_sql = "CREATE TABLE users (id INT PRIMARY KEY)";
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
@@ -291,7 +311,8 @@ fn test_compare_schemas_column_removed() {
 
 #[test]
 fn test_compare_schemas_with_table_filter() {
-    let old_sql = "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE orders (id INT PRIMARY KEY)";
+    let old_sql =
+        "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE orders (id INT PRIMARY KEY)";
     let new_sql = "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(255));\nCREATE TABLE orders (id INT PRIMARY KEY, total DECIMAL)";
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
@@ -307,7 +328,8 @@ fn test_compare_schemas_with_table_filter() {
 
 #[test]
 fn test_compare_schemas_with_exclude_filter() {
-    let old_sql = "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE logs (id INT PRIMARY KEY)";
+    let old_sql =
+        "CREATE TABLE users (id INT PRIMARY KEY);\nCREATE TABLE logs (id INT PRIMARY KEY)";
     let new_sql = "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(255));\nCREATE TABLE logs (id INT PRIMARY KEY, level TEXT)";
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
