@@ -40,7 +40,7 @@ impl HashStrategy {
 }
 
 impl Strategy for HashStrategy {
-    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::Rng) -> RedactValue {
         match value {
             RedactValue::Null => RedactValue::Null,
             RedactValue::String(s) => RedactValue::String(self.hash_value(s)),

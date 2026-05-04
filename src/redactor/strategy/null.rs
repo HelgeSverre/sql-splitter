@@ -13,7 +13,7 @@ impl NullStrategy {
 }
 
 impl Strategy for NullStrategy {
-    fn apply(&self, _value: &RedactValue, _rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, _value: &RedactValue, _rng: &mut dyn rand::Rng) -> RedactValue {
         // Always return NULL regardless of input
         RedactValue::Null
     }

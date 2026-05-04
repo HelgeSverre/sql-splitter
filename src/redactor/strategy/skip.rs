@@ -13,7 +13,7 @@ impl SkipStrategy {
 }
 
 impl Strategy for SkipStrategy {
-    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::Rng) -> RedactValue {
         // Return value unchanged
         value.clone()
     }

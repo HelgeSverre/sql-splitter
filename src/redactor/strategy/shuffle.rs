@@ -60,7 +60,7 @@ impl ShuffleStrategy {
 }
 
 impl Strategy for ShuffleStrategy {
-    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::Rng) -> RedactValue {
         // Note: For shuffle strategy, we need a two-pass approach:
         // 1. First pass: collect all values
         // 2. Shuffle

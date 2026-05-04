@@ -23,7 +23,7 @@ impl FakeStrategy {
     }
 
     /// Generate a fake value based on the generator type
-    fn generate(&self, rng: &mut dyn rand::RngCore) -> String {
+    fn generate(&self, rng: &mut dyn rand::Rng) -> String {
         // Convert rng to StdRng for fake crate compatibility
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
@@ -185,7 +185,7 @@ impl FakeStrategy {
 }
 
 impl Strategy for FakeStrategy {
-    fn apply(&self, value: &RedactValue, rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, value: &RedactValue, rng: &mut dyn rand::Rng) -> RedactValue {
         match value {
             RedactValue::Null => RedactValue::Null,
             _ => RedactValue::String(self.generate(rng)),
@@ -199,7 +199,7 @@ impl Strategy for FakeStrategy {
     }
 }
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 #[cfg(test)]
 mod tests {

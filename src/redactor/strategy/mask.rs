@@ -1,7 +1,7 @@
 //! Mask strategy - partial masking with pattern.
 
 use super::{RedactValue, Strategy, StrategyKind};
-use rand::Rng;
+use rand::RngExt;
 
 /// Strategy that partially masks values using a pattern.
 ///
@@ -21,7 +21,7 @@ impl MaskStrategy {
     }
 
     /// Apply the mask pattern to a value
-    fn mask_value(&self, value: &str, rng: &mut dyn rand::RngCore) -> String {
+    fn mask_value(&self, value: &str, rng: &mut dyn rand::Rng) -> String {
         let chars: Vec<char> = value.chars().collect();
         let mut result = String::with_capacity(self.pattern.len());
 
@@ -59,7 +59,7 @@ impl MaskStrategy {
 }
 
 impl Strategy for MaskStrategy {
-    fn apply(&self, value: &RedactValue, rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, value: &RedactValue, rng: &mut dyn rand::Rng) -> RedactValue {
         match value {
             RedactValue::Null => RedactValue::Null,
             RedactValue::String(s) => RedactValue::String(self.mask_value(s, rng)),

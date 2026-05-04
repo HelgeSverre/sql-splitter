@@ -2,7 +2,7 @@
 //!
 //! Provides deterministic fake data for names, emails, dates, etc.
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// First names for fake data
 const FIRST_NAMES: &[&str] = &[

@@ -181,7 +181,7 @@ impl RedactValue {
 /// Trait for redaction strategies
 pub trait Strategy: Send + Sync {
     /// Apply the strategy to redact a value
-    fn apply(&self, value: &RedactValue, rng: &mut dyn rand::RngCore) -> RedactValue;
+    fn apply(&self, value: &RedactValue, rng: &mut dyn rand::Rng) -> RedactValue;
 
     /// Get the strategy kind
     fn kind(&self) -> StrategyKind;

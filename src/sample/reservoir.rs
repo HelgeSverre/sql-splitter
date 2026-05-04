@@ -4,7 +4,7 @@
 //! with a fixed-size reservoir.
 
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::RngExt;
 
 /// Reservoir sampler using Algorithm R.
 ///

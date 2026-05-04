@@ -19,7 +19,7 @@ use crate::splitter::Splitter;
 use ahash::AHashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

@@ -5,7 +5,7 @@
 //! - Simple: uniform tables with configurable row/table counts
 //! - MultiTenant: realistic multi-tenant schema with FK relationships
 
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;

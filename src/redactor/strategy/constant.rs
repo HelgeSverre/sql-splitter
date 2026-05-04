@@ -15,7 +15,7 @@ impl ConstantStrategy {
 }
 
 impl Strategy for ConstantStrategy {
-    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::RngCore) -> RedactValue {
+    fn apply(&self, value: &RedactValue, _rng: &mut dyn rand::Rng) -> RedactValue {
         // Preserve NULL values, replace everything else with constant
         if value.is_null() {
             RedactValue::Null
