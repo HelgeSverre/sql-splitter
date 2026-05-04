@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.3] - 2026-05-04
+
+### Fixed
+
+- **Release workflow**: Revert `actions/upload-artifact` v7 → v6 and `actions/download-artifact` v8 → v7 in `release.yml` to match what cargo-dist 0.30.4 generates. The v1.13.2 release blocked cargo-dist's `plan` step (workflow drift check); v1.13.2 still published to crates.io but binary artifacts and Homebrew formula were skipped. v1.13.3 ships those.
+
 ## [1.13.2] - 2026-05-04
 
 ### Changed
 
 - **Dependency bumps** (patch-level): `regex` 1.12.2 → 1.12.3, `memchr` 2.7.6 → 2.8.0, `tempfile` 3.24.0 → 3.25.0, `clap` 4.5.57 → 4.5.60
-- **CI: GitHub Actions** bumped: `actions/upload-artifact` v6 → v7, `actions/download-artifact` v7 → v8
 
 ### Fixed
 
