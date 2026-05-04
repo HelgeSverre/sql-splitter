@@ -358,6 +358,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_json_value_conversion() {
         assert_eq!(
             QueryResultFormatter::json_value("NULL"),

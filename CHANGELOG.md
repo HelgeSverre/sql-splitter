@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-05-04
+
+### Changed
+
+- **Dependency bumps** (patch-level): `regex` 1.12.2 → 1.12.3, `memchr` 2.7.6 → 2.8.0, `tempfile` 3.24.0 → 3.25.0, `clap` 4.5.57 → 4.5.60
+- **CI: GitHub Actions** bumped: `actions/upload-artifact` v6 → v7, `actions/download-artifact` v7 → v8
+
+### Fixed
+
+- **rustfmt formatting** on `tests/differ_unit_test.rs` (Lint job had been failing on dependabot PRs)
+- **Clippy nits**: replaced `len() >= 1` with `!is_empty()` in `tests/duckdb_test.rs` (6 occurrences); silenced `clippy::approx_constant` in a JSON-conversion test that uses `3.14` as test data
+
 ## [1.13.1] - 2026-02-18
 
 ### Fixed

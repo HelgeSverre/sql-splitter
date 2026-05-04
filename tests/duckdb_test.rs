@@ -161,7 +161,7 @@ fn test_query_with_join() {
         )
         .unwrap();
 
-    assert!(result.rows.len() >= 1);
+    assert!(!result.rows.is_empty());
     // Alice has 2 orders: 99.99 + 149.50 = 249.49
 }
 
@@ -2803,7 +2803,7 @@ fn test_exists_subquery() {
         )
         .unwrap();
     // Users with at least one order
-    assert!(result.rows.len() >= 1);
+    assert!(!result.rows.is_empty());
 }
 
 #[test]
@@ -2817,7 +2817,7 @@ fn test_in_subquery() {
     let result = engine
         .query("SELECT name FROM users WHERE id IN (SELECT DISTINCT user_id FROM orders)")
         .unwrap();
-    assert!(result.rows.len() >= 1);
+    assert!(!result.rows.is_empty());
 }
 
 #[test]
@@ -3284,7 +3284,7 @@ INSERT INTO order_items VALUES (3, 2, 2, 1, 49.99);
          ORDER BY units_sold DESC",
         )
         .unwrap();
-    assert!(result.rows.len() >= 1);
+    assert!(!result.rows.is_empty());
 }
 
 #[test]
@@ -3365,7 +3365,7 @@ INSERT INTO comments VALUES (2, 2, 2, 'Very helpful', '2024-01-16 09:00:00');
          GROUP BY a.id, a.username",
         )
         .unwrap();
-    assert!(result.rows.len() >= 1);
+    assert!(!result.rows.is_empty());
 }
 
 // =============================================================================
@@ -3516,7 +3516,7 @@ fn test_mssql_join_query() {
     let result = engine
         .query("SELECT u.name, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.id, u.name")
         .unwrap();
-    assert!(result.rows.len() >= 1);
+    assert!(!result.rows.is_empty());
 }
 
 #[test]
