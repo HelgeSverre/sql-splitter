@@ -1,7 +1,7 @@
 # dbt (data build tool) Integration: Deep Dive
 
 **Date**: 2025-12-24
-**Feature**: dbt Integration (v1.19.0)
+**Feature**: dbt Integration (v1.20.0)
 **Effort**: 28 hours
 **Priority**: Tier 1 (High Impact, High Effort)
 
@@ -1344,13 +1344,13 @@ sql-splitter dbt-init dump.sql \
 
 ## Next Steps
 
-1. **v1.19.0 Implementation**:
+1. **v1.20.0 Implementation**:
    - Implement dbt project generator
    - Support MySQL, PostgreSQL sources
    - Auto-generate tests from constraints
    - Documentation generation
 
-2. **v1.20.0 Enhancements**:
+2. **v1.21.0+ Enhancements**:
    - Incremental model generation (detect append-only tables)
    - Snapshot generation (detect SCD tables)
    - Macro generation (common transformations)
@@ -1364,7 +1364,7 @@ sql-splitter dbt-init dump.sql \
 
 ---
 
-**Recommendation**: Implement dbt integration for v1.19.0. This is a **game-changer** feature that positions sql-splitter as essential for dbt adoption. The 28h effort is justified by massive value: teams can go from "dump file" to "production dbt project" in minutes instead of days. This bridges the gap between legacy databases and modern analytics engineering.
+**Recommendation**: Implement dbt integration for v1.20.0. This is a **game-changer** feature that positions sql-splitter as essential for dbt adoption. The 28h effort is justified by massive value: teams can go from "dump file" to "production dbt project" in minutes instead of days. This bridges the gap between legacy databases and modern analytics engineering.
 
 ## Strategic Impact
 

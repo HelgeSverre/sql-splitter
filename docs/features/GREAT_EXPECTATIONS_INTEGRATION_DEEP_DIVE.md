@@ -1,7 +1,7 @@
 # Great Expectations Integration: Deep Dive
 
 **Date**: 2025-12-24
-**Feature**: Great Expectations Integration (v1.17.0)
+**Feature**: Great Expectations Integration (v1.18.0)
 **Effort**: 16 hours
 **Priority**: Tier 1 (High Impact, Medium Effort)
 
@@ -263,13 +263,13 @@ impl NativeValidator {
 
 ### Decision: Hybrid Approach
 
-**Phase 1 (v1.17.0)**: Python wrapper for suite generation
+**Phase 1 (v1.18.0)**: Python wrapper for suite generation
 
 - Generate expectation JSON files (no GX required)
 - Users run validation with native GX
 - Simple integration, leverages GX ecosystem
 
-**Phase 2 (v1.18.0)**: Add native validator for common expectations
+**Phase 2 (v1.19.0+)**: Add native validator for common expectations
 
 - Validate dumps without Python
 - Useful for CI/CD, quick checks
@@ -1156,12 +1156,12 @@ sql-splitter gx-diff gx/v1/ gx/v2/
 
 ## Next Steps
 
-1. **v1.17.0 Implementation**:
+1. **v1.18.0 Implementation**:
    - Implement core GX integration
    - Release `gx-generate` and `gx-validate` commands
    - Documentation and examples
 
-2. **v1.18.0 Enhancements**:
+2. **v1.19.0+ Enhancements**:
    - Add native validator for offline validation
    - Expectation suite diffing
    - Advanced profiling (distribution analysis)
@@ -1173,4 +1173,4 @@ sql-splitter gx-diff gx/v1/ gx/v2/
 
 ---
 
-**Recommendation**: Implement GX integration for v1.17.0. It's a high-impact feature with manageable scope (16h) that addresses a critical gap (comprehensive data quality testing) and positions sql-splitter as a complete data quality toolkit.
+**Recommendation**: Implement GX integration for v1.18.0. It's a high-impact feature with manageable scope (16h) that addresses a critical gap (comprehensive data quality testing) and positions sql-splitter as a complete data quality toolkit.

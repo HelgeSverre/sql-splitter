@@ -1,7 +1,7 @@
 # Enum Type Conversion Feature Design
 
-**Status**: Planning (v1.13.0)  
-**Date**: 2025-01-22  
+**Status**: Planning (v1.14.0)  
+**Date**: 2025-01-22 (renumbered 2026-05-07: v1.13.0 → v1.14.0 after v1.13.x shipped as maintenance releases)  
 **Priority**: Medium  
 **Effort**: ~30 hours
 

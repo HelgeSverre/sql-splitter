@@ -1,6 +1,6 @@
 # Integration Opportunities & Tool Synergies
 
-**Date**: 2025-12-24
+**Date**: 2025-12-24 (Updated 2026-05-07: DuckDB query engine shipped in v1.12.0)
 **Purpose**: Identify strategic integrations to extend sql-splitter capabilities
 
 ## Philosophy: Build vs Integrate vs Wrap
@@ -13,7 +13,7 @@
 
 ## 🔥 Tier 1: High-Impact Integrations
 
-### 1. DuckDB Integration ⭐⭐⭐⭐⭐
+### 1. DuckDB Integration ⭐⭐⭐⭐⭐ — ✅ Query Engine SHIPPED (v1.12.0)
 
 **What is DuckDB?**
 
@@ -24,47 +24,30 @@
 
 **Synergy:** sql-splitter prepares data → DuckDB queries it
 
-#### Integration Strategy A: Query Engine
+#### Integration Strategy A: Query Engine — ✅ SHIPPED v1.12.0
+
+The query engine shipped in v1.12.0. Actual usage:
 
 ```bash
-# Load dump into DuckDB, run analytics
-sql-splitter query dump.sql --engine duckdb \
-  --sql "SELECT user_id, COUNT(*) FROM orders GROUP BY user_id LIMIT 10"
+# Single query
+sql-splitter query dump.sql "SELECT user_id, COUNT(*) FROM orders GROUP BY user_id LIMIT 10"
 
-# Behind the scenes:
-# 1. sql-splitter imports dump.sql into temp DuckDB file
-# 2. DuckDB executes query
-# 3. Output results
+# Interactive REPL
+sql-splitter query dump.sql --interactive
+
+# Export results
+sql-splitter query dump.sql "SELECT * FROM orders" -f json -o results.json
 ```
 
-**Implementation:**
+Implementation lives in `src/cmd/query.rs` and `src/duckdb/`. Features delivered:
 
-```rust
-pub fn query_with_duckdb(dump: &Path, sql: &str) -> Result<Vec<Row>> {
-    // Create temp DuckDB database
-    let temp_db = tempfile::NamedTempFile::new()?;
-    let conn = Connection::open(temp_db.path())?;
+- In-memory and disk-backed modes (>2GB dumps)
+- Multi-dialect import (MySQL, PostgreSQL, SQLite, MSSQL)
+- 5 output formats (table, json, jsonl, csv, tsv)
+- Persistent SHA256-keyed cache (400× speedup on repeat queries)
+- `--tables` filter, `--memory-limit` config
 
-    // Import dump (convert INSERT → CREATE + INSERT for DuckDB)
-    import_dump_to_duckdb(&conn, dump)?;
-
-    // Execute query
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map([], |row| {
-        // Map row to our Row type
-    })?;
-
-    Ok(rows)
-}
-```
-
-**Benefits:**
-
-- ✅ Full SQL analytics without database setup
-- ✅ Aggregations, JOINs, window functions
-- ✅ 100x faster than naive row filtering
-
-**Effort:** ~16h (wrap DuckDB, import conversion)
+For the full design rationale and remaining Parquet export work, see [DUCKDB_INTEGRATION_DEEP_DIVE.md](features/DUCKDB_INTEGRATION_DEEP_DIVE.md).
 
 ---
 
@@ -321,7 +304,7 @@ sql-splitter docs dump.sql -o docs/
 
 ### 6. Graphviz/Mermaid (Already Planned) ✅
 
-**Status:** Already in roadmap for graph command
+**Status:** ✅ Implemented in v1.11.0 (graph command — HTML, DOT, Mermaid, JSON output)
 
 **Additional integration:** Live preview
 
@@ -679,71 +662,9 @@ terraform apply  # Applies changes
 
 ## Integration Architecture
 
-### Wrapper Pattern (Low Effort, High Value)
-
-```rust
-// Simple wrapper around DuckDB CLI
-pub fn query_with_duckdb(dump: &Path, sql: &str) -> Result<String> {
-    // Convert dump to DuckDB-compatible format
-    let temp_dir = tempdir()?;
-    convert_for_duckdb(dump, &temp_dir)?;
-
-    // Shell out to DuckDB
-    let output = Command::new("duckdb")
-        .arg(temp_dir.path().join("db.duckdb"))
-        .arg("-c")
-        .arg(sql)
-        .output()?;
-
-    Ok(String::from_utf8(output.stdout)?)
-}
-```
-
-**Pros:**
-
-- ✅ Quick to implement
-- ✅ Leverage existing tools
-- ✅ No reimplementation
-
-**Cons:**
-
-- ❌ External dependency required
-- ❌ Less control over behavior
-
----
-
-### Library Integration (Medium Effort, More Control)
-
-```rust
-// Use DuckDB as library (via FFI or Rust bindings)
-use duckdb::{Connection, params};
-
-pub fn query_with_duckdb_lib(dump: &Path, sql: &str) -> Result<Vec<Row>> {
-    let conn = Connection::open_in_memory()?;
-
-    // Import dump directly into DuckDB
-    import_dump(&conn, dump)?;
-
-    // Query
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![], |row| {
-        // ...
-    })?;
-
-    Ok(rows.collect()?)
-}
-```
-
-**Pros:**
-
-- ✅ No external binary required
-- ✅ Better error handling
-- ✅ Embedded in sql-splitter binary
-
-**Cons:**
-
-- ❌ More implementation work
-- ❌ Need to keep bindings updated
+> **Historical context:** Two patterns were considered for the DuckDB integration —
+> a CLI wrapper (shell out to `duckdb` binary) and a library integration (Rust FFI bindings).
+> The library path was chosen and shipped in v1.12.0 (`src/duckdb/`).
 
 ---
 
@@ -777,33 +698,38 @@ pub async fn deploy_to_supabase(
 
 ## Recommended Integration Roadmap
 
-### v1.16 — Query & Analytics
+> Note: this section was renumbered on 2026-05-07 to match the updated master roadmap.
+> The DuckDB query engine shipped in v1.12.0; v1.13.x was used for maintenance releases;
+> core features Enum/Migrate/DBML occupy v1.14–v1.16. Integrations follow at v1.17+.
 
-- **DuckDB integration** (16h) — Query engine for dumps
-- **Parquet export** (12h) — Bridge to modern data stack
+### ✅ v1.12.0 — DuckDB Query Engine (SHIPPED)
 
-### v1.17 — Schema Management
+- DuckDB integration as embedded library (16h, completed)
+- See [DUCKDB_INTEGRATION_DEEP_DIVE.md](features/DUCKDB_INTEGRATION_DEEP_DIVE.md)
 
-- **Atlas HCL export** (20h) — Schema-as-code
-- **Liquibase changelog generation** (24h) — Migration tool integration
+### v1.17 — Parquet Export
+
+- **Parquet export** (12h) — Bridge to modern data stack, extends DuckDB query engine
 
 ### v1.18 — Data Quality
 
 - **Great Expectations integration** (16h) — Bootstrap testing
 
-### v1.19 — Documentation
+### v1.19 — Schema Management
+
+- **Atlas HCL export** (20h) — Schema-as-code
+- **Liquibase changelog generation** (24h) — Migration tool integration
+
+### v1.20 — dbt Integration
+
+- **dbt project generation** (28h) — Data transformation
+
+### Future (v2.x) — Documentation & Cloud
 
 - **Self-contained schema browser** (32h) — Interactive docs
 - **tbls format export** (20h) — Compatibility
-
-### v2.2 — Platform Integrations
-
-- **dbt project generation** (28h) — Data transformation
 - **GitHub Action** (12h) — CI/CD
 - **Airbyte connector** (24h) — ELT pipelines
-
-### v2.3 — Cloud Deployment
-
 - **Supabase deployment** (20h) — Instant database provisioning
 - **Terraform provider** (32h) — IaC integration
 
@@ -813,12 +739,9 @@ pub async fn deploy_to_supabase(
 
 **Under 20h effort, huge value:**
 
-1. **DuckDB query engine** (16h)
-   - Instant SQL analytics on dumps
-   - No database setup required
-
-2. **Parquet export** (12h)
+1. **Parquet export** (12h, planned v1.17.0)
    - Bridge SQL → data lakes
+   - Extends already-shipped DuckDB query engine
    - Pandas/Spark/DuckDB compatible
 
 3. **GitHub Action** (12h)
@@ -877,10 +800,10 @@ sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 
 **Top 5 integrations for maximum impact:**
 
-1. **DuckDB** — Query analytics on dumps (game changer)
-2. **Atlas/Liquibase** — Schema management workflows
-3. **dbt** — Bootstrap data transformation projects
-4. **Great Expectations** — Data quality testing
-5. **GitHub Actions** — CI/CD automation
+1. ✅ **DuckDB** — Query analytics on dumps (shipped v1.12.0; Parquet export remaining at v1.17.0)
+2. **Atlas/Liquibase** — Schema management workflows (planned v1.19.0)
+3. **dbt** — Bootstrap data transformation projects (planned v1.20.0)
+4. **Great Expectations** — Data quality testing (planned v1.18.0)
+5. **GitHub Actions** — CI/CD automation (future)
 
 These integrations position sql-splitter as the **Swiss Army knife that plays well with others** rather than trying to replace every tool in the ecosystem.

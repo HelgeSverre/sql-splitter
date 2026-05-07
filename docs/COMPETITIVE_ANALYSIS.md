@@ -1,11 +1,11 @@
 # Competitive Analysis
 
-**Last Updated**: 2025-12-26
+**Last Updated**: 2026-05-07
 **Purpose**: Comprehensive competitive landscape and feature opportunity analysis
 
 ## Executive Summary
 
-sql-splitter occupies a **unique position** in the SQL dump processing ecosystem by combining multiple capabilities that currently require separate tools. As of v1.9.0, we offer: **split + merge + analyze + validate + sample (FK-preserving) + shard + convert + diff + redact**.
+sql-splitter occupies a **unique position** in the SQL dump processing ecosystem by combining multiple capabilities that currently require separate tools. As of v1.13.5, we offer: **split + merge + analyze + validate + sample (FK-preserving) + shard + convert + diff + redact + graph + order + query (DuckDB)**.
 
 No existing tool offers this combination in a single, streaming, CLI-first, multi-dialect binary.
 
@@ -13,8 +13,9 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 - Works on dump files directly (no database connection required)
 - Streaming architecture handles 10GB+ dumps
-- Multi-dialect support (MySQL, PostgreSQL, SQLite)
+- Multi-dialect support (MySQL, PostgreSQL, SQLite, MSSQL)
 - 600+ MB/s throughput
+- Embedded DuckDB for SQL analytics on dumps without import
 
 ---
 
@@ -35,9 +36,14 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | Dialect conversion                        | ✅ Implemented | v1.7.0  |
 | Validate (integrity checks)               | ✅ Implemented | v1.8.0  |
 | Diff dumps                                | ✅ Implemented | v1.9.0  |
-| Redaction/anonymization                   | ✅ Implemented | v1.9.0  |
-| Query/Filter (WHERE-style)                | 🟡 Planned     | —       |
-| MSSQL support                             | 🟡 Planned     | —       |
+| Redaction/anonymization                   | ✅ Implemented | v1.10.0 |
+| Graph (ERD generation)                    | ✅ Implemented | v1.11.0 |
+| Order (topological FK ordering)           | ✅ Implemented | v1.11.0 |
+| Query (DuckDB SQL analytics)              | ✅ Implemented | v1.12.0 |
+| MSSQL support                             | ✅ Implemented | v1.12.x |
+| Enum type conversion (PG↔MySQL)           | 🟡 Planned     | v1.14.0 |
+| Migrate (schema migration generation)     | 🟡 Planned     | v1.15.0 |
+| DBML import/export                        | 🟡 Planned     | v1.16.0 |
 
 ---
 
@@ -110,7 +116,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool                    | Language | Stars | MySQL | PostgreSQL | SQLite | Streaming | Notes                         |
 | ----------------------- | -------- | ----- | ----- | ---------- | ------ | --------- | ----------------------------- |
-| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.9.0                        |
+| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.10.0, ~230 MB/s            |
 | **nxs-data-anonymizer** | Go       | 271   | ✅    | ✅         | ❌     | ✅        | Go templates + Sprig          |
 | **pynonymizer**         | Python   | 109   | ✅    | ✅         | ❌     | ❌        | Faker integration, GDPR focus |
 | **myanon**              | C        | ~30   | ✅    | ❌         | ❌     | ✅        | stdin/stdout streaming        |
@@ -130,7 +136,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool               | Language    | Stars | Dialects  | COPY↔INSERT | Streaming |
 | ------------------ | ----------- | ----- | --------- | ----------- | --------- |
-| **sql-splitter**   | Rust        | —     | 3 (✅)    | ✅          | ✅        |
+| **sql-splitter**   | Rust        | —     | 4 (✅)    | ✅          | ✅        |
 | **sqlglot**        | Python      | 7k+   | 31        | ❌          | ❌        |
 | **pgloader**       | Common Lisp | 5k+   | → PG only | ✅          | ✅        |
 | **mysql2postgres** | Ruby        | 300   | MySQL→PG  | Partial     | ❌        |
@@ -155,13 +161,13 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 ### Query/Filter Dumps
 
-| Tool             | Language | Stars | Notes                               |
-| ---------------- | -------- | ----- | ----------------------------------- |
-| **sql-splitter** | Rust     | —     | 🟡 Planned: WHERE-style filtering   |
-| **DuckDB**       | C++      | 34.8k | Query SQL/CSV/JSON/Parquet directly |
-| **sqlglot**      | Python   | 7k+   | Parse/transpile, not filter         |
+| Tool             | Language | Stars | Notes                                        |
+| ---------------- | -------- | ----- | -------------------------------------------- |
+| **sql-splitter** | Rust     | —     | ✅ Embedded DuckDB (v1.12.0), full SQL       |
+| **DuckDB**       | C++      | 34.8k | Query SQL/CSV/JSON/Parquet directly          |
+| **sqlglot**      | Python   | 7k+   | Parse/transpile, not filter                  |
 
-**[DuckDB](https://github.com/duckdb/duckdb)** could solve querying but is overkill for simple dump filtering.
+sql-splitter embeds DuckDB to give full SQL analytics on dumps without an import step (in-memory or disk-backed for >2GB dumps), with persistent caching that delivers a 400× speedup on repeat queries.
 
 ---
 
@@ -169,13 +175,13 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool             | MSSQL             |
 | ---------------- | ----------------- |
-| **sql-splitter** | 🟡 Planned        |
+| **sql-splitter** | ✅ (v1.12.x)      |
 | Jailer           | ✅ (via JDBC)     |
 | pynonymizer      | ✅                |
 | sqlglot          | ✅ (parsing only) |
 | pgloader         | ❌                |
 
-**Gap**: Major gap in ecosystem for MSSQL dump processing CLI tools.
+sql-splitter is now the only **streaming, file-based, multi-dialect** CLI with SQL Server support — Jailer/pynonymizer require live DB connections.
 
 ---
 
@@ -247,13 +253,13 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | Sample + FK      | ✅           | ❌       | ❌       | ✅      | ✅        | ❌       | ❌      | ❌      |
 | Tenant sharding  | ✅           | ❌       | ❌       | Limited | Limited   | ❌       | ❌      | Via SQL |
 | Redaction        | ✅           | Basic    | ❌       | ❌      | ❌        | ✅       | ❌      | ❌      |
-| Query/Filter     | 🟡           | ❌       | ❌       | Limited | ❌        | ❌       | ✅      | ✅      |
+| Query/Filter     | ✅           | ❌       | ❌       | Limited | ❌        | ❌       | ✅      | ✅      |
 | Diff             | ✅           | ❌       | ❌       | Limited | ❌        | ❌       | ❌      | Via SQL |
 | Convert dialects | ✅           | ❌       | → PG     | Limited | ❌        | ❌       | ✅      | ✅      |
 | MySQL            | ✅           | ✅       | ✅       | ✅      | ✅        | ✅       | ✅      | ✅      |
 | PostgreSQL       | ✅           | ❌       | ✅       | ✅      | ✅        | ✅       | ✅      | ✅      |
 | SQLite           | ✅           | ❌       | ✅       | ✅      | ❌        | ❌       | ✅      | ✅      |
-| MSSQL            | 🟡           | ❌       | ❌       | ✅      | ❌        | ❌       | ✅      | ❌      |
+| MSSQL            | ✅           | ❌       | ❌       | ✅      | ❌        | ❌       | ✅      | ❌      |
 | Streaming        | ✅           | ✅       | ✅       | ❌      | ❌        | ✅       | ❌      | ✅      |
 | CLI-first        | ✅           | ✅       | ✅       | ❌      | ✅        | ✅       | ✅      | ✅      |
 | Works on dumps   | ✅           | ❌       | ❌       | ❌      | ❌        | ✅       | ✅      | ❌      |
@@ -263,15 +269,16 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 ## Unique Value Proposition
 
-1. **Unified tool** — Split + merge + sample + shard + convert + diff + redact in one binary
+1. **Unified tool** — Split + merge + sample + shard + convert + diff + redact + graph + order + query in one binary
 2. **Works on dump files** — No database connection required (unlike Jailer, Condenser, mydumper)
 3. **Streaming architecture** — Handle 10GB+ dumps without memory issues
 4. **CLI-first** — DevOps/automation friendly, pipe-compatible
-5. **Multi-dialect** — MySQL, PostgreSQL, SQLite in one tool
+5. **Multi-dialect** — MySQL, PostgreSQL, SQLite, MSSQL in one tool
 6. **FK-aware operations** — Sample and shard preserve referential integrity
 7. **Rust performance** — 600+ MB/s, faster than Python/Java alternatives
 8. **Compression support** — gzip, bz2, xz, zstd auto-detected
 9. **Composable** — Split → Sample → Redact → Convert → Merge pipeline
+10. **Embedded analytics** — DuckDB-powered SQL queries on dumps without import (v1.12.0)
 
 ---
 
@@ -424,7 +431,7 @@ sql-splitter test dump.sql --config schema-tests.yaml
 
 ### Priorities
 
-1. **Complete v2.0** — Current roadmap features
+1. **Complete v1.14–v1.16** — Enum, Migrate, DBML (planned core features)
 2. **Quick wins** — Schema drift (16h), size optimization (12h), cost estimation (8h)
 3. **Differentiation** — Data quality profiling, compliance checks
 4. **Future** — AI integration for schema suggestions, natural language queries

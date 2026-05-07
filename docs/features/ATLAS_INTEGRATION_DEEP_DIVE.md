@@ -1,7 +1,7 @@
 # Atlas Schema-as-Code Integration: Deep Dive
 
 **Date**: 2025-12-24
-**Feature**: Atlas Integration (v1.18.0)
+**Feature**: Atlas Integration (v1.19.0)
 **Effort**: 20 hours
 **Priority**: Tier 1 (High Impact, Medium Effort)
 
@@ -1409,12 +1409,12 @@ table "addresses" {
 
 ## Next Steps
 
-1. **v1.18.0 Implementation**:
+1. **v1.19.0 Implementation**:
    - Implement SQL → HCL export
    - Add migration testing capability
    - Documentation and examples
 
-2. **v1.19.0 Enhancements**:
+2. **v1.20.0+ Enhancements**:
    - Test data generation from HCL
    - Schema diff visualization
    - Atlas Cloud integration (schema registry)
@@ -1426,4 +1426,4 @@ table "addresses" {
 
 ---
 
-**Recommendation**: Implement Atlas integration for v1.18.0. It complements the migrate feature (v1.15.0), provides infrastructure-as-code workflows, and positions sql-splitter as essential for modern schema management. The 20h effort is manageable and delivers high value for teams adopting IaC practices.
+**Recommendation**: Implement Atlas integration for v1.19.0. It complements the migrate feature (v1.15.0), provides infrastructure-as-code workflows, and positions sql-splitter as essential for modern schema management. The 20h effort is manageable and delivers high value for teams adopting IaC practices.

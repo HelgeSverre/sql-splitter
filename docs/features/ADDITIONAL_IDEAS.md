@@ -1,31 +1,15 @@
 # Additional Feature Ideas
 
 **Date**: 2025-12-20  
-**Updated**: 2025-12-21
+**Updated**: 2026-05-07 (post-v1.13.5 audit: marked shipped features, kept genuinely-future ideas)
 
-Future feature ideas beyond the v2.x roadmap (Query, Redact, Diff, Validate, MSSQL).
-
----
-
-## 1. Validate/Lint (`validate`)
-
-Check dump files for structural integrity and common issues. _Planned for v2.2.0._
-
-```bash
-sql-splitter validate dump.sql
-sql-splitter validate dump.sql --check-fk
-sql-splitter validate dump.sql --format json
-```
-
-**Checks:** Syntax errors, DDL/DML consistency, duplicate PKs, FK integrity, encoding issues.
-
-**Effort:** M-L (2-4 days)
+Future feature ideas beyond the current roadmap. Validate, Redact, Diff, Query, MSSQL all shipped (v1.8–v1.12).
 
 ---
 
-## 2. Auto-Detect PII (`detect-pii`)
+## 1. Auto-Detect PII (`detect-pii`)
 
-Scan schema and sample rows to suggest a redaction configuration. _Planned for v2.2.0._
+Scan schema and sample rows to suggest a redaction configuration. The `redact --generate-config` command (v1.10.0) covers the basic case; this would be a richer standalone command with statistical detection.
 
 ```bash
 sql-splitter detect-pii dump.sql -o redact-config.yaml
@@ -34,11 +18,13 @@ sql-splitter detect-pii dump.sql --preview
 
 **Detection:** Column names (email, phone, ssn), data patterns (regex), statistical uniqueness.
 
+**Status:** Partially covered by `redact --generate-config` (v1.10.0). Standalone command not yet planned.
+
 **Effort:** S-M (1-2 days)
 
 ---
 
-## 3. Canonicalize + Checksum
+## 2. Canonicalize + Checksum
 
 Normalize SQL formatting and compute checksums for CI verification.
 
@@ -53,7 +39,7 @@ sql-splitter verify dump.sql --checksums checksums.json
 
 ---
 
-## 4. Key Range Partitioning
+## 3. Key Range Partitioning
 
 Extend shard with date/time range partitioning.
 
@@ -69,7 +55,7 @@ sql-splitter shard dump.sql -o ranges/ \
 
 ---
 
-## 5. Streaming Output Compression
+## 4. Streaming Output Compression
 
 Output directly to compressed formats.
 
@@ -88,8 +74,7 @@ sql-splitter sample dump.sql -o sample.sql.zst --compress zstd
 
 | Feature                | Value  | Complexity | Target |
 | ---------------------- | ------ | ---------- | ------ |
-| Validate               | High   | Medium     | v2.2.0 |
-| Detect-PII             | High   | Low-Medium | v2.2.0 |
+| Detect-PII (standalone) | High   | Low-Medium | Future |
 | Canonicalize           | Medium | Medium     | Future |
 | Key Range Partitioning | Medium | Low        | Future |
 | Streaming Compression  | Medium | Low        | Future |
@@ -98,8 +83,8 @@ sql-splitter sample dump.sql -o sample.sql.zst --compress zstd
 
 ## Shared Infrastructure (Available)
 
-| Module                       | Built In | Used By                                           |
-| ---------------------------- | -------- | ------------------------------------------------- |
-| Schema Graph (`src/schema/`) | v1.5-1.6 | sample, shard, validate (planned), diff (planned) |
-| Row Parsing (`src/parser/`)  | v1.5-1.7 | sample, shard, convert, redact (planned)          |
-| PK Tracking                  | v1.5-1.6 | sample, shard, validate (planned)                 |
+| Module                       | Built In | Used By                                       |
+| ---------------------------- | -------- | --------------------------------------------- |
+| Schema Graph (`src/schema/`) | v1.5–v1.11 | sample, shard, validate, diff, graph, order |
+| Row Parsing (`src/parser/`)  | v1.5–v1.10 | sample, shard, convert, redact, query       |
+| PK Tracking                  | v1.5–v1.9  | sample, shard, validate, diff                |
