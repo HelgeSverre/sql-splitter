@@ -79,7 +79,7 @@ impl Compression {
             #[cfg(feature = "compression")]
             Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
             #[cfg(not(feature = "compression"))]
-            Compression::Gzip | Compression::Bzip2 | Compression::Xz | Compression::Zstd => {
+            _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     "compressed input requires the `compression` feature",

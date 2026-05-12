@@ -143,17 +143,20 @@ fn test_splitter_compressed_input_requires_feature() {
     let input_file = temp_dir.path().join("input.sql.gz");
     let output_dir = temp_dir.path().join("output");
 
-    std::fs::write(&input_file, b"CREATE TABLE users (id INT);").unwrap();
+    std::fs::write(
+        &input_file,
+        b"\x1f\x8b\x08\x00\\\x06\x03j\x02\xffs\x0eru\x0cqU\x08qt\xf2qU(-N-*V\xd0\xc8LQ\xf0\xf4\x0b\xd1\xb4\xe6\x02\x00^\xb7Dc\x1d\x00\x00\x00",
+    )
+    .unwrap();
 
     let splitter = Splitter::new(input_file, output_dir);
     let err = match splitter.split() {
         Ok(_) => panic!("expected compressed input to fail without `compression` feature"),
         Err(err) => err,
     };
-    assert!(
-        err.to_string()
-            .contains("Failed to initialize gzip decompression")
-    );
+    assert!(err
+        .chain()
+        .any(|cause| cause.to_string() == "compressed input requires the `compression` feature"));
 }
 
 #[test]
