@@ -58,6 +58,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Overlay Dockerfile from main (backfill runs)
+        # Tags published before Docker support was added don't have a Dockerfile.
+        # On workflow_dispatch backfills, copy the current Dockerfile + .dockerignore
+        # from main on top of the tag's source tree so old releases can still be built.
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch origin main --depth=1
+          git checkout origin/main -- Dockerfile .dockerignore
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
