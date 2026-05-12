@@ -1,0 +1,109 @@
+name: Docker
+
+# Builds and publishes the sql-splitter image to Docker Hub and GHCR.
+#
+# Triggers:
+#   - push to a version tag (v*): builds that tag
+#   - workflow_dispatch with `tag` input: builds the given ref (used to backfill old releases)
+#
+# Required secrets:
+#   - DOCKERHUB_USERNAME: Docker Hub account (e.g. helgesverre)
+#   - DOCKERHUB_TOKEN:    Docker Hub access token with read/write/delete on the repo
+#
+# GHCR uses the workflow's GITHUB_TOKEN -- no extra secret needed.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to build (e.g. v1.13.5). Required for backfill runs.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve ref to build
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR validation: build the PR head, don't push
+            echo "ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.ref.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        if: steps.ref.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        if: steps.ref.outputs.push == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sql-splitter
+            ghcr.io/${{ github.repository_owner }}/sql-splitter
+          # Strip any leading "v" so we get both `v1.13.5` and `1.13.5`, plus partial semver tags.
+          # `latest` is applied automatically when the ref is the highest semver tag.
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.ref.outputs.ref }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.ref.outputs.ref }}
+            type=semver,pattern={{major}},value=${{ steps.ref.outputs.ref }}
+            type=raw,value=${{ steps.ref.outputs.ref }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # PR validation builds amd64 only to keep CI quick; tag/dispatch publishes multi-arch.
+          platforms: ${{ steps.ref.outputs.push == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ steps.ref.outputs.push == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
