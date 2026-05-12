@@ -5,6 +5,7 @@ mod analyzer;
 mod cmd;
 mod convert;
 mod differ;
+#[cfg(feature = "duckdb-query")]
 mod duckdb;
 mod graph;
 mod json_schema;

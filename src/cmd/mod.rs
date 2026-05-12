@@ -5,6 +5,7 @@ mod glob_util;
 pub(crate) mod graph;
 pub(crate) mod merge;
 mod order;
+#[cfg(feature = "duckdb-query")]
 mod query;
 pub(crate) mod redact;
 pub(crate) mod sample;
@@ -700,6 +701,7 @@ pub enum Commands {
     },
 
     /// Query SQL dumps using DuckDB's analytical engine
+    #[cfg(feature = "duckdb-query")]
     #[command(visible_alias = "qy")]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   sql-splitter query dump.sql \"SELECT COUNT(*) FROM users\"
@@ -1055,6 +1057,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             reverse,
         } => order::run(file, output, dialect, check, dry_run, reverse),
+        #[cfg(feature = "duckdb-query")]
         Commands::Query(args) => query::run(args),
         Commands::Schema {
             output,

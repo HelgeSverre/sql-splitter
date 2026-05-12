@@ -110,6 +110,7 @@ fn test_splitter_data_only() {
 }
 
 #[test]
+#[cfg(feature = "compression")]
 fn test_splitter_gzip_compressed() {
     use flate2::write::GzEncoder;
     use flate2::Compression as GzCompression;
@@ -133,6 +134,26 @@ fn test_splitter_gzip_compressed() {
     assert_eq!(stats.tables_found, 1);
     assert_eq!(stats.statements_processed, 2);
     assert!(output_dir.join("users.sql").exists());
+}
+
+#[test]
+#[cfg(not(feature = "compression"))]
+fn test_splitter_compressed_input_requires_feature() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql.gz");
+    let output_dir = temp_dir.path().join("output");
+
+    std::fs::write(&input_file, b"CREATE TABLE users (id INT);").unwrap();
+
+    let splitter = Splitter::new(input_file, output_dir);
+    let err = match splitter.split() {
+        Ok(_) => panic!("expected compressed input to fail without `compression` feature"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("Failed to initialize gzip decompression")
+    );
 }
 
 #[test]

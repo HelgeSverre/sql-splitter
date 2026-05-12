@@ -5,7 +5,7 @@
 //!
 //! # Features
 //!
-//! - **Zero dependencies**: DuckDB is bundled and compiled into sql-splitter
+//! - **Bundled engine**: DuckDB is embedded via the optional `duckdb-query` feature
 //! - **Multi-dialect support**: MySQL, PostgreSQL, and SQLite dumps
 //! - **Memory management**: Auto-switches to disk mode for large dumps
 //! - **Caching**: Optional persistent cache for repeated queries
