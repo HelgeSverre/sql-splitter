@@ -1,0 +1,13 @@
+.git
+.github
+target
+website
+docs
+docker
+tests/fixtures/generated
+tests/data/generated
+tests/realworld
+benches/data
+*.log
+*.tmp
+.DS_Store
