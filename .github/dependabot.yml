@@ -6,6 +6,14 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "deps"
+    # rustyline 18 drops a transitive Windows dep that libduckdb-sys was
+    # relying on to link rstrtmgr.lib (Restart Manager), producing
+    # unresolved-symbol link errors on Windows. Stay on rustyline 17 until
+    # duckdb-rs declares the link itself or we add an explicit
+    # windows-sys/Win32_System_RestartManager dep.
+    ignore:
+      - dependency-name: "rustyline"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
