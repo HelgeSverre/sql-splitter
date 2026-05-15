@@ -70,10 +70,21 @@ impl Compression {
     ) -> std::io::Result<Box<dyn Read + 'a>> {
         Ok(match self {
             Compression::None => reader,
+            #[cfg(feature = "compression")]
             Compression::Gzip => Box::new(flate2::read::GzDecoder::new(reader)),
+            #[cfg(feature = "compression")]
             Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(reader)),
+            #[cfg(feature = "compression")]
             Compression::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
+            #[cfg(feature = "compression")]
             Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
+            #[cfg(not(feature = "compression"))]
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "compressed input requires the `compression` feature",
+                ))
+            }
         })
     }
 }

@@ -110,6 +110,7 @@ fn test_splitter_data_only() {
 }
 
 #[test]
+#[cfg(feature = "compression")]
 fn test_splitter_gzip_compressed() {
     use flate2::write::GzEncoder;
     use flate2::Compression as GzCompression;
@@ -133,6 +134,29 @@ fn test_splitter_gzip_compressed() {
     assert_eq!(stats.tables_found, 1);
     assert_eq!(stats.statements_processed, 2);
     assert!(output_dir.join("users.sql").exists());
+}
+
+#[test]
+#[cfg(not(feature = "compression"))]
+fn test_splitter_compressed_input_requires_feature() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql.gz");
+    let output_dir = temp_dir.path().join("output");
+
+    std::fs::write(
+        &input_file,
+        b"\x1f\x8b\x08\x00\\\x06\x03j\x02\xffs\x0eru\x0cqU\x08qt\xf2qU(-N-*V\xd0\xc8LQ\xf0\xf4\x0b\xd1\xb4\xe6\x02\x00^\xb7Dc\x1d\x00\x00\x00",
+    )
+    .unwrap();
+
+    let splitter = Splitter::new(input_file, output_dir);
+    let err = match splitter.split() {
+        Ok(_) => panic!("expected compressed input to fail without `compression` feature"),
+        Err(err) => err,
+    };
+    assert!(err
+        .chain()
+        .any(|cause| cause.to_string() == "compressed input requires the `compression` feature"));
 }
 
 #[test]

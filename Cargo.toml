@@ -29,6 +29,11 @@ exclude = [
 name = "sql-splitter"
 path = "src/main.rs"
 
+[features]
+default = ["duckdb-query", "compression"]
+duckdb-query = ["dep:duckdb", "compression"]
+compression = ["dep:flate2", "dep:bzip2", "dep:xz2", "dep:zstd"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
@@ -38,10 +43,10 @@ memchr = "2"
 once_cell = "1"
 ahash = "0.8"
 anyhow = "1"
-flate2 = "1"
-bzip2 = "0.6"
-xz2 = "0.1"
-zstd = "0.13"
+flate2 = { version = "1", optional = true }
+bzip2 = { version = "0.6", optional = true }
+xz2 = { version = "0.1", optional = true }
+zstd = { version = "0.13", optional = true }
 indicatif = "0.18"
 rand = "0.10"
 smallvec = { version = "1.13", features = ["union"] }
@@ -53,7 +58,7 @@ serde_yaml_ng = "0.10"
 fake = { version = "5", features = ["derive"] }
 sha2 = "0.11"
 hex = "0.4"
-duckdb = { version = "1.10502", features = ["bundled"] }
+duckdb = { version = "1.10502", features = ["bundled"], optional = true }
 dirs = "6"
 rustyline = "17"
 schemars = "1"

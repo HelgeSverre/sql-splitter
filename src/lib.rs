@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod cmd;
 pub mod convert;
 pub mod differ;
+#[cfg(feature = "duckdb-query")]
 pub mod duckdb;
 pub mod graph;
 pub mod json_schema;

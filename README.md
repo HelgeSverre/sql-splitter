@@ -22,6 +22,19 @@ Split large SQL dump files into individual table files. Fast, memory-efficient, 
 cargo install sql-splitter
 ```
 
+### Cargo features (library consumers)
+
+`sql-splitter` enables all features by default. To reduce dependency footprint:
+
+```toml
+sql-splitter = { version = "1", default-features = false }
+```
+
+Optional features:
+
+- `compression` (gzip/bzip2/xz/zstd support)
+- `duckdb-query` (enables the `query` command and DuckDB integration)
+
 ### From source
 
 ```bash
