@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.6] - 2026-05-15
+
+### Added
+
+- **Cargo feature flags for library consumers** ([#40](https://github.com/HelgeSverre/sql-splitter/issues/40), [#52](https://github.com/HelgeSverre/sql-splitter/pull/52)) — library users can now opt out of heavy dependencies. New features:
+  - `duckdb-query` — DuckDB engine + `query` subcommand
+  - `compression` — gzip/bzip2/xz/zstd readers
+  - `default = ["duckdb-query", "compression"]`, so existing consumers see no change. Add `default-features = false` to your `Cargo.toml` to drop the DuckDB + Arrow + compression toolchain (~500 transitive deps). Compressed inputs return a clear error when `compression` is off.
+- **Docker images on Docker Hub and GHCR** ([#51](https://github.com/HelgeSverre/sql-splitter/pull/51), [#53](https://github.com/HelgeSverre/sql-splitter/pull/53)) — multi-arch images published on tag.
+
+### Changed
+
+- **`once_cell` 1.21.3 → 1.21.4** ([#46](https://github.com/HelgeSverre/sql-splitter/pull/46))
+- **`anyhow` 1.0.100 → 1.0.102** ([#47](https://github.com/HelgeSverre/sql-splitter/pull/47))
+- **`chrono` 0.4.43 → 0.4.44** ([#49](https://github.com/HelgeSverre/sql-splitter/pull/49))
+- **`jsonschema` 0.41 → 0.46.4** ([#50](https://github.com/HelgeSverre/sql-splitter/pull/50)) — dev-dep only, used in schema validation tests.
+
 ## [1.13.5] - 2026-05-04
 
 ### Changed
