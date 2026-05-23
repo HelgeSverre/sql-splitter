@@ -58,7 +58,7 @@ serde_yaml_ng = "0.10"
 fake = { version = "5", features = ["derive"] }
 sha2 = "0.11"
 hex = "0.4"
-duckdb = { version = "1.10502", features = ["bundled"], optional = true }
+duckdb = { version = "1.10503", features = ["bundled"], optional = true }
 dirs = "6"
 rustyline = "17"
 schemars = "1"
