@@ -9,6 +9,20 @@ sql-splitter works seamlessly in Docker containers for CI/CD pipelines and repro
 
 ## Quick Start
 
+### Pre-built Images
+
+Multi-arch images (amd64, arm64) are published to Docker Hub and GHCR on every release:
+
+```bash
+# Docker Hub
+docker run --rm -v $(pwd):/data helgesverre/sql-splitter analyze /data/dump.sql
+
+# GitHub Container Registry
+docker run --rm -v $(pwd):/data ghcr.io/helgesverre/sql-splitter analyze /data/dump.sql
+```
+
+Tags: `latest`, exact versions (`1.13.8`), and partial semver (`1.13`, `1`).
+
 ### Building the Image
 
 ```bash
