@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.13.5 (current)
-**Last Updated**: 2026-05-04
-**Revision**: 3.6 — Renumbered planned features after v1.13.x shipped as maintenance releases
+**Version**: 1.14.0 (current)
+**Last Updated**: 2026-07-10
+**Revision**: 3.7 — Renumbered planned features after v1.14.0 shipped CLI/library fixes instead of enum conversion
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -26,13 +26,17 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Maintenance (v1.13.x):**
 
-- v1.13.0–v1.13.5: Benchmark expansion, JSON schema generation, OG images, dependency bumps, CI fixes (no new features)
+- v1.13.0–v1.13.7: Benchmark expansion, JSON schema generation, OG images, dependency bumps, CI fixes, library feature flags, convert bug fixes (no new commands)
 
-**Next (v1.14+):**
+**Shipped (v1.14.0):**
 
-- v1.14.0: Enum Conversion — Proper PG↔MySQL enum type conversion
-- v1.15.0: Migrate — Schema migration generation
-- v1.16.0: DBML — Import/export DBML schema definitions
+- ✅ `-o -` stdout support across streaming commands, redact compressed-input fix, MySQL→SQLite sized auto-increment fix, docs accuracy overhaul
+
+**Next (v1.15+):**
+
+- v1.15.0: Enum Conversion — Proper PG↔MySQL enum type conversion
+- v1.16.0: Migrate — Schema migration generation
+- v1.17.0: DBML — Import/export DBML schema definitions
 
 **Future (v2.x):**
 
@@ -520,11 +524,11 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-## Upcoming Features (v1.14+)
+## Upcoming Features (v1.15+)
 
 ---
 
-### v1.15.0 — Migration Generation
+### v1.16.0 — Migration Generation
 
 **Theme**: Schema evolution tracking
 
@@ -548,7 +552,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.16.0 — DBML Import/Export
+### v1.17.0 — DBML Import/Export
 
 **Theme**: Schema documentation and interoperability
 
@@ -585,7 +589,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.14.0 — Enum Type Conversion
+### v1.15.0 — Enum Type Conversion
 
 **Target**: 2-3 weeks  
 **Theme**: Proper bidirectional enum conversion between PostgreSQL and MySQL
@@ -747,14 +751,17 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | v1.13.3 | Release workflow fix (cargo-dist artifact versions)         | ✅ Released |
 | v1.13.4 | `rand` 0.10, `fake` 5, dependabot guard for cargo-dist deps | ✅ Released |
 | v1.13.5 | `duckdb` 1.10502 (CalVer), `sha2` 0.11, dep bumps           | ✅ Released |
+| v1.13.6 | Cargo feature flags for library consumers, Docker images     | ✅ Released |
+| v1.13.7 | MySQL→PG convert fixes (COMMENT/AUTO_INCREMENT/UNIQUE KEY)   | ✅ Released |
+| v1.14.0 | `-o -` stdout, redact compression fix, docs overhaul         | ✅ Released |
 
-### Upcoming Features (v1.14+)
+### Upcoming Features (v1.15+)
 
 | Version | Features        | Status      |
 | ------- | --------------- | ----------- |
-| v1.14.0 | Enum Conversion | Planned     |
-| v1.15.0 | Migrate         | Planned     |
-| v1.16.0 | DBML            | Planned     |
+| v1.15.0 | Enum Conversion | Planned     |
+| v1.16.0 | Migrate         | Planned     |
+| v1.17.0 | DBML            | Planned     |
 | v2.0.0  | Parallel        | Planned     |
 | v2.1.0  | Infer           | Planned     |
 
@@ -830,26 +837,36 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
     - Unicode strings (N'...'), CLUSTERED indexes
     - 29 MSSQL integration tests
 
-15. ✅ **v1.13.x — Maintenance Releases** — Released (Jan–May 2026)
+15. ✅ **v1.13.x — Maintenance Releases** — Released (Jan–Jul 2026)
     - v1.13.0: Benchmark suite expansion (10 tools), JSON schema generation, OG image gen
     - v1.13.1: Diff bug fixes
     - v1.13.2–v1.13.5: Dependency bumps (rand 0.10, fake 5, duckdb CalVer, sha2 0.11), CI fixes
+    - v1.13.6: Cargo feature flags (`compression`, `duckdb-query`) for library consumers, Docker Hub/GHCR images
+    - v1.13.7: MySQL→PostgreSQL convert fixes (COMMENT/AUTO_INCREMENT/UNIQUE KEY, #64)
     - No new commands or features; planned roadmap features bumped +1 minor version
 
-16. 🟡 **v1.14.0 — Enum Conversion** — Planned
+16. ✅ **v1.14.0 — CLI & Library Polish** — Released (Jul 2026)
+    - `-o -` accepted as stdout for merge/sample/shard/convert/redact/order
+    - merge status lines moved to stderr when SQL streams to stdout
+    - redact now decompresses .gz/.bz2/.xz/.zst input (was a silent no-op)
+    - MySQL→SQLite sized AUTO_INCREMENT fix (BIGINTEGER), MergeStats Serialize
+    - Docs: Library Usage + Known Limitations pages, full accuracy sweep, Astro 7
+    - Planned roadmap features bumped +1 minor version
+
+17. 🟡 **v1.15.0 — Enum Conversion** — Planned
     - Proper PG↔MySQL enum type conversion
     - PostgreSQL CREATE TYPE ... AS ENUM → MySQL inline ENUM()
     - MySQL inline ENUM() → PostgreSQL CREATE TYPE
     - Registry-based state tracking for streaming
     - Strip ::type casts in DML statements
 
-17. 🟡 **v1.15.0 — Migrate** — Planned
+18. 🟡 **v1.16.0 — Migrate** — Planned
     - Schema migration generation from diff
     - ALTER TABLE, CREATE INDEX statements
     - Rollback script generation
     - Breaking change detection
 
-18. 🟡 **v1.16.0 — DBML Import/Export** — Planned
+19. 🟡 **v1.17.0 — DBML Import/Export** — Planned
     - Export SQL schemas to DBML format
     - Import DBML to SQL DDL (all 4 dialects)
     - Extends `graph` command (export) and `convert` command (import)
@@ -901,18 +918,18 @@ tests/
 
 ---
 
-## Ecosystem Integrations (v1.17+)
+## Ecosystem Integrations (v1.18+)
 
 Strategic integrations beyond core CLI features. See [Integration Roadmap Master](INTEGRATION_ROADMAP_MASTER.md) for full analysis.
 
 | Version | Integration            | Theme                              | Effort |
 | ------- | ---------------------- | ---------------------------------- | ------ |
-| v1.17.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge  | 12h    |
+| v1.18.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge  | 12h    |
 | v1.18.0 | **Great Expectations** | Auto-generate data quality suites  | 16h    |
 | v1.19.0 | **Atlas**              | SQL dump → HCL schema-as-code      | 20h    |
 | v1.20.0 | **dbt**                | Bootstrap dbt projects from dumps  | 28h    |
 
-These follow the core roadmap (v1.14–v2.1) and require user demand validation before committing.
+These follow the core roadmap (v1.15–v2.1) and require user demand validation before committing.
 
 ---
 
@@ -928,13 +945,13 @@ These follow the core roadmap (v1.14–v2.1) and require user demand validation 
 
 ### Upcoming Feature Designs
 
-- [Enum Conversion](features/ENUM_CONVERSION.md) — v1.14.0
-- [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.15.0
-- [DBML Support](features/DBML_SUPPORT.md) — v1.16.0
+- [Enum Conversion](features/ENUM_CONVERSION.md) — v1.15.0
+- [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.16.0
+- [DBML Support](features/DBML_SUPPORT.md) — v1.17.0
 
-### Ecosystem Integration Designs (v1.17+)
+### Ecosystem Integration Designs (v1.18+)
 
-- [DuckDB Deep Dive](features/DUCKDB_INTEGRATION_DEEP_DIVE.md) — Parquet export (v1.17.0)
+- [DuckDB Deep Dive](features/DUCKDB_INTEGRATION_DEEP_DIVE.md) — Parquet export (v1.18.0)
 - [Great Expectations Deep Dive](features/GREAT_EXPECTATIONS_INTEGRATION_DEEP_DIVE.md) — v1.18.0
 - [Atlas Deep Dive](features/ATLAS_INTEGRATION_DEEP_DIVE.md) — v1.19.0
 - [dbt Deep Dive](features/DBT_INTEGRATION_DEEP_DIVE.md) — v1.20.0

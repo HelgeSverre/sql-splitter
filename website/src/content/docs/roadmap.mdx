@@ -24,10 +24,12 @@ All core features have been released:
 | v1.12.0 | Query (DuckDB analytics)          | Released |
 | v1.12.x | MSSQL Support (fourth dialect)    | Released |
 | v1.13.0 | JSON Schema Generation            | Released |
+| v1.13.x | Library feature flags, Docker images, convert fixes | Released |
+| v1.14.0 | `-o -` stdout support, redact compression fix | Released |
 
 ## Upcoming Features
 
-### v1.14.0 — Enum Type Conversion
+### v1.15.0 — Enum Type Conversion
 
 Proper bidirectional enum conversion between PostgreSQL and MySQL. Today, `ENUM('a','b')` converts lossily to `VARCHAR(255)` — this replaces that with real type conversion:
 
@@ -39,7 +41,7 @@ Proper bidirectional enum conversion between PostgreSQL and MySQL. Today, `ENUM(
 - Strip `::type` casts in DML statements
 - `VARCHAR` fallback with a warning for unknown types
 
-### v1.15.0 — Migration Generation
+### v1.16.0 — Migration Generation
 
 Generate ALTER statements from schema differences:
 
@@ -56,7 +58,7 @@ sql-splitter migrate old.sql new.sql --breaking-changes
 - Rollback script generation
 - Breaking change detection
 
-### v1.16.0 — DBML Import/Export
+### v1.17.0 — DBML Import/Export
 
 Schema documentation and interoperability with [DBML](https://dbml.dbdiagram.io/):
 
