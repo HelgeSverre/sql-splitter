@@ -919,7 +919,12 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             file,
             dash_is_stdout(output),
             from,
-            to, strict, progress, dry_run, fail_fast, json,
+            to,
+            strict,
+            progress,
+            dry_run,
+            fail_fast,
+            json,
         ),
         Commands::Validate {
             file,
@@ -1064,7 +1069,14 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             check,
             dry_run,
             reverse,
-        } => order::run(file, dash_is_stdout(output), dialect, check, dry_run, reverse),
+        } => order::run(
+            file,
+            dash_is_stdout(output),
+            dialect,
+            check,
+            dry_run,
+            reverse,
+        ),
         #[cfg(feature = "duckdb-query")]
         Commands::Query(args) => query::run(args),
         Commands::Schema {

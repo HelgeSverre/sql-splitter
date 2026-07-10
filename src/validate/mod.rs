@@ -71,7 +71,6 @@ impl Location {
         self.statement_index = Some(index);
         self
     }
-
 }
 
 impl Default for Location {

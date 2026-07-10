@@ -574,7 +574,10 @@ fn test_redact_gzip_input_is_decompressed() {
 
     let dir = TempDir::new().unwrap();
     let input_path = dir.path().join("dump.sql.gz");
-    let mut encoder = GzEncoder::new(fs::File::create(&input_path).unwrap(), GzCompression::default());
+    let mut encoder = GzEncoder::new(
+        fs::File::create(&input_path).unwrap(),
+        GzCompression::default(),
+    );
     encoder.write_all(sql.as_bytes()).unwrap();
     encoder.finish().unwrap();
 
@@ -593,6 +596,12 @@ fn test_redact_gzip_input_is_decompressed() {
     assert_eq!(stats.rows_redacted, 1);
 
     let output = fs::read_to_string(&output_path).unwrap();
-    assert!(output.to_lowercase().contains("insert into"), "got: {output}");
-    assert!(!output.contains("alice@example.com"), "email must be redacted");
+    assert!(
+        output.to_lowercase().contains("insert into"),
+        "got: {output}"
+    );
+    assert!(
+        !output.contains("alice@example.com"),
+        "email must be redacted"
+    );
 }
