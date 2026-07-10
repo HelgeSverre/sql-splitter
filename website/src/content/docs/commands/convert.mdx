@@ -68,11 +68,11 @@ sql-splitter convert dump.sql --to postgres --strict
 Pipe the converted output directly into your database client:
 
 ```bash
-# Convert and restore in one step
-sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+# Convert and restore in one step (omit -o to write to stdout)
+sql-splitter convert mysql.sql.gz --to postgres | psql "$PG_CONN"
 
 # Convert and load into SQLite
-sql-splitter convert pg_dump.sql --to sqlite -o - | sqlite3 dev.db
+sql-splitter convert pg_dump.sql --to sqlite | sqlite3 dev.db
 ```
 
 ## Options

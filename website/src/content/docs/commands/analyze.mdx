@@ -19,7 +19,7 @@ Read-only analysis of SQL dump files to show table statistics.
 
 The `analyze` command performs a **single [streaming](/reference/glossary#streaming) pass** through the dump file, counting statements and rows without loading the entire file into memory.
 
-**What counts as a row:** Each value tuple in an `INSERT` statement. A multi-row insert like `INSERT INTO users VALUES (1, 'alice'), (2, 'bob')` counts as 2 rows.
+**What counts as an INSERT:** Each `INSERT` statement counts once. A multi-row insert like `INSERT INTO users VALUES (1, 'alice'), (2, 'bob')` counts as 1 INSERT, not 2—the report shows statement counts, not row counts.
 
 **What counts as a statement:** Any complete SQL statement associated with a table—`CREATE TABLE`, `INSERT`, `ALTER TABLE`, `CREATE INDEX`, `DROP TABLE`, and PostgreSQL `COPY` blocks.
 
@@ -79,38 +79,39 @@ sql-splitter analyze dump.sql --json
 ## Output
 
 ```
-┌─────────────┬──────┬───────────┬─────────────┐
-│ Table       │ Rows │ Size (KB) │ Statements  │
-├─────────────┼──────┼───────────┼─────────────┤
-│ users       │ 150  │ 12.3      │ 2           │
-│ orders      │ 500  │ 45.2      │ 2           │
-│ products    │ 100  │ 8.1       │ 2           │
-│ order_items │ 1200 │ 89.4      │ 2           │
-└─────────────┴──────┴───────────┴─────────────┘
+Analyzing SQL file: dump.sql (0.15 MB) [dialect: mysql]
 
-Summary:
-  Tables: 4
-  Total rows: 1950
-  Total size: 155.0 KB
-  Dialect: mysql
+✓ Analysis completed in 25.4ms
+
+Found 4 tables:
+
+Table Name                                    INSERTs  Total Stmts    Size (MB)
+────────────────────────────────────────────────────────────────────────────────
+order_items                                        12            13         0.09
+orders                                              5             6         0.04
+products                                            1             2         0.01
+users                                               2             3         0.01
+────────────────────────────────────────────────────────────────────────────────
+TOTAL                                              20             -         0.15
 ```
 
 ## JSON Output
 
 ```json
 {
-  "input": "dump.sql",
+  "input_file": "dump.sql",
   "dialect": "mysql",
-  "tables": [
-    { "name": "users", "rows": 150, "bytes": 12595, "statements": 2 },
-    { "name": "orders", "rows": 500, "bytes": 46284, "statements": 2 }
-  ],
+  "size_mb": 0.15,
+  "elapsed_secs": 0.025,
   "summary": {
     "total_tables": 4,
-    "total_rows": 1950,
-    "total_bytes": 158720,
-    "elapsed_ms": 25
-  }
+    "total_inserts": 20,
+    "total_bytes": 158720
+  },
+  "tables": [
+    { "name": "users", "inserts": 2, "creates": 1, "statements": 3, "bytes": 12595, "size_mb": 0.01 },
+    { "name": "orders", "inserts": 5, "creates": 1, "statements": 6, "bytes": 46284, "size_mb": 0.04 }
+  ]
 }
 ```
 
@@ -149,9 +150,9 @@ diff <(sql-splitter analyze old.sql --json | jq '.tables | sort_by(.name)') \
 
 ## Troubleshooting
 
-### Row count seems wrong
+### INSERT count seems wrong
 
-Multi-row `INSERT` statements count each value tuple separately. An insert like `INSERT INTO t VALUES (1), (2), (3)` counts as 3 rows, not 1. This matches the actual number of records being inserted.
+The INSERTs column counts `INSERT` statements, not rows. A multi-row insert like `INSERT INTO t VALUES (1), (2), (3)` counts as 1 INSERT even though it inserts 3 rows. Use [`query`](/commands/query) with `SELECT COUNT(*)` if you need exact row counts.
 
 ### Size doesn't match the file size
 

@@ -32,9 +32,9 @@ sql-splitter validate dump.sql.xz
 sql-splitter convert mysql.sql.zst --to postgres -o pg.sql
 ```
 
-## All Commands Support Compression
+## Commands Supporting Compression
 
-Every command that accepts an input file supports compressed input:
+Nearly every command that accepts an input file supports compressed input:
 
 ```bash
 sql-splitter split backup.sql.gz -o tables/
@@ -45,10 +45,16 @@ sql-splitter shard backup.sql.gz --tenant-value 123 -o tenant.sql
 sql-splitter convert backup.sql.gz --to postgres -o pg.sql
 sql-splitter validate backup.sql.gz --strict
 sql-splitter diff old.sql.gz new.sql.gz
-sql-splitter redact backup.sql.gz --hash "*.email" -o safe.sql
 sql-splitter graph backup.sql.gz -o schema.html
 sql-splitter order backup.sql.gz -o ordered.sql
 sql-splitter query backup.sql.gz "SELECT COUNT(*) FROM users"
+```
+
+**Exception:** `redact` does not decompress input. Decompress first, then redact:
+
+```bash
+zcat backup.sql.gz > backup.sql
+sql-splitter redact backup.sql --hash "*.email" -o safe.sql
 ```
 
 ## Compression on Output
@@ -56,15 +62,17 @@ sql-splitter query backup.sql.gz "SELECT COUNT(*) FROM users"
 sql-splitter does not compress output directly. Use pipes for compressed output:
 
 ```bash
-# Gzip output
-sql-splitter merge tables/ | gzip > merged.sql.gz
-
 # Zstandard output (faster, better compression)
 sql-splitter sample dump.sql --percent 10 | zstd > sample.sql.zst
 
 # Bzip2 output
 sql-splitter convert mysql.sql --to postgres | bzip2 > pg.sql.bz2
+
+# Merge and compress
+sql-splitter merge tables/ | gzip > merged.sql.gz
 ```
+
+When output goes to stdout, status lines are written to stderr, so piped SQL stays clean.
 
 ## Performance Notes
 
@@ -83,19 +91,9 @@ zstd -T0 huge-dump.sql -o huge-dump.sql.zst
 sql-splitter analyze huge-dump.sql.zst --progress
 ```
 
-## Stdin with Compression
+## No Stdin Input
 
-When reading from stdin with `-`, you can decompress externally:
-
-```bash
-# Decompress with zcat and pipe
-zcat backup.sql.gz | sql-splitter analyze -
-
-# Or use process substitution
-sql-splitter analyze <(zcat backup.sql.gz)
-```
-
-However, passing the compressed file directly is simpler and handles buffering better:
+sql-splitter reads from file paths only—`-` for stdin is not supported, and process substitution (`<(zcat ...)`) fails because the input is read more than once (dialect detection, then parsing). Pass the compressed file directly instead:
 
 ```bash
 sql-splitter analyze backup.sql.gz

@@ -108,14 +108,15 @@ sql-splitter shard dump.sql --tenant-value 123 --dry-run
 
 sql-splitter auto-detects common tenant columns:
 
-- `tenant_id`
 - `company_id`
-- `account_id`
-- `org_id`
+- `tenant_id`
 - `organization_id`
+- `org_id`
+- `account_id`
+- `team_id`
 - `workspace_id`
 
-Override with `--tenant-column`:
+A candidate column must appear in at least two tables to be auto-detected. Override with `--tenant-column`:
 
 ```bash
 sql-splitter shard dump.sql --tenant-column customer_id --tenant-value 42

@@ -82,12 +82,12 @@ sql-splitter analyze "dumps/*.sql" --json
 
 ```json
 {
-  "files_processed": 5,
-  "total_tables": 42,
-  "total_rows": 150000,
+  "total_files": 5,
+  "succeeded": 5,
+  "failed": 0,
   "results": [
-    { "file": "dumps/users.sql", "tables": 1, "rows": 1000 },
-    { "file": "dumps/orders.sql", "tables": 1, "rows": 50000 }
+    { "file": "dumps/users.sql", "tables_count": 1, "total_inserts": 1000, "status": "success" },
+    { "file": "dumps/orders.sql", "tables_count": 1, "total_inserts": 50000, "status": "success" }
   ]
 }
 ```
@@ -102,13 +102,12 @@ sql-splitter validate "*.sql" --json
 
 ```json
 {
-  "total_files": 3,
   "passed": 2,
   "failed": 1,
   "results": [
-    { "file": "a.sql", "summary": { "errors": 0, "warnings": 0 } },
-    { "file": "b.sql", "summary": { "errors": 0, "warnings": 1 } },
-    { "file": "c.sql", "summary": { "errors": 2, "warnings": 0 } }
+    { "file": "a.sql", "passed": true, "summary": { "summary": { "errors": 0, "warnings": 0 } } },
+    { "file": "b.sql", "passed": true, "summary": { "summary": { "errors": 0, "warnings": 1 } } },
+    { "file": "c.sql", "passed": false, "summary": { "summary": { "errors": 2, "warnings": 0 } } }
   ]
 }
 ```

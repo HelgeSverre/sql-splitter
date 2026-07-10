@@ -22,26 +22,26 @@ sql-splitter query dump.sql --interactive
 REPL commands:
 
 ```
-sql-splitter> .tables
+sql> .tables
 users
 orders
 products
 
-sql-splitter> .schema users
+sql> .schema users
 CREATE TABLE users (
   id INT PRIMARY KEY,
   name VARCHAR(100),
   email VARCHAR(255)
 );
 
-sql-splitter> SELECT COUNT(*) FROM users;
-┌──────────┐
-│ count(*) │
-├──────────┤
-│ 1500     │
-└──────────┘
+sql> SELECT COUNT(*) FROM users;
+┌──────────────┐
+│ count_star() │
+├──────────────┤
+│ 1500         │
+└──────────────┘
 
-sql-splitter> .sample orders 5
+sql> .sample orders 5
 ┌────┬─────────┬────────┐
 │ id │ user_id │ total  │
 ├────┼─────────┼────────┤
@@ -49,7 +49,7 @@ sql-splitter> .sample orders 5
 │ 2  │ 17      │ 149.50 │
 ...
 
-sql-splitter> .exit
+sql> .exit
 ```
 
 ## Output Formats

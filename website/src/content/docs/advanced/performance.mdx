@@ -57,8 +57,8 @@ sql-splitter split backup.sql.gz -o tables/
 Avoid intermediate files when possible:
 
 ```bash
-# Direct stream (no intermediate file)
-sql-splitter convert mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+# Direct stream (omit -o to write to stdout)
+sql-splitter convert mysql.sql.gz --to postgres | psql "$PG_CONN"
 
 # vs. intermediate file (slower)
 sql-splitter convert mysql.sql.gz --to postgres -o temp.sql

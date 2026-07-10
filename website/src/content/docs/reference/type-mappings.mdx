@@ -14,7 +14,7 @@ sql-splitter handles 50+ data type mappings during conversion.
 | `MEDIUMINT`    | `INTEGER`          | `INTEGER` | `INT`          |
 | `INT`          | `INTEGER`          | `INTEGER` | `INT`          |
 | `BIGINT`       | `BIGINT`           | `INTEGER` | `BIGINT`       |
-| `FLOAT`        | `REAL`             | `REAL`    | `FLOAT`        |
+| `FLOAT`        | `REAL`             | `REAL`    | `REAL`         |
 | `DOUBLE`       | `DOUBLE PRECISION` | `REAL`    | `FLOAT`        |
 | `DECIMAL(p,s)` | `DECIMAL(p,s)`     | `REAL`    | `DECIMAL(p,s)` |
 
@@ -22,11 +22,13 @@ sql-splitter handles 50+ data type mappings during conversion.
 
 | MySQL        | PostgreSQL   | SQLite | MSSQL           |
 | ------------ | ------------ | ------ | --------------- |
-| `CHAR(n)`    | `CHAR(n)`    | `TEXT` | `NCHAR(n)`      |
-| `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `NVARCHAR(n)`   |
-| `TEXT`       | `TEXT`       | `TEXT` | `NVARCHAR(MAX)` |
+| `CHAR(n)`    | `CHAR(n)`    | `TEXT` | `CHAR(n)`       |
+| `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `VARCHAR(n)`    |
+| `TEXT`       | `TEXT`       | `TEXT` | `TEXT`          |
 | `MEDIUMTEXT` | `TEXT`       | `TEXT` | `NVARCHAR(MAX)` |
 | `LONGTEXT`   | `TEXT`       | `TEXT` | `NVARCHAR(MAX)` |
+
+`CHAR`, `VARCHAR`, and `TEXT` are valid MSSQL types and pass through unchanged.
 
 ## Binary Types
 
@@ -45,15 +47,17 @@ sql-splitter handles 50+ data type mappings during conversion.
 | `DATE`      | `DATE`      | `TEXT`    | `DATE`      |
 | `TIME`      | `TIME`      | `TEXT`    | `TIME`      |
 | `DATETIME`  | `TIMESTAMP` | `TEXT`    | `DATETIME2` |
-| `TIMESTAMP` | `TIMESTAMP` | `TEXT`    | `DATETIME2` |
-| `YEAR`      | `SMALLINT`  | `INTEGER` | `SMALLINT`  |
+| `TIMESTAMP` | `TIMESTAMP` | `TEXT`    | `TIMESTAMP` |
+
+MySQL `YEAR` and `TIMESTAMP` (for MSSQL targets) are not rewritten and pass through unchanged.
 
 ## Boolean Types
 
 | MySQL        | PostgreSQL | SQLite    | MSSQL |
 | ------------ | ---------- | --------- | ----- |
 | `TINYINT(1)` | `BOOLEAN`  | `INTEGER` | `BIT` |
-| `BOOL`       | `BOOLEAN`  | `INTEGER` | `BIT` |
+
+The `BOOL`/`BOOLEAN` aliases are not rewritten—only the literal `TINYINT(1)` form is detected.
 
 ## Auto-Increment
 
@@ -74,7 +78,7 @@ sql-splitter handles 50+ data type mappings during conversion.
 
 MySQL ENUMs are converted to:
 
-- **PostgreSQL**: `VARCHAR(255)` with CHECK constraint
+- **PostgreSQL**: `VARCHAR(255)` (a warning suggests adding a CHECK constraint manually)
 - **SQLite**: `TEXT`
 - **MSSQL**: `NVARCHAR(255)`
 
@@ -82,24 +86,23 @@ MySQL ENUMs are converted to:
 
 PostgreSQL `UUID` is converted to:
 
-- **MySQL**: `CHAR(36)`
+- **MySQL**: `VARCHAR(36)`
 - **SQLite**: `TEXT`
 - **MSSQL**: `UNIQUEIDENTIFIER`
 
 ### Arrays (PostgreSQL)
 
-PostgreSQL arrays generate a warning and are converted to:
-
-- **MySQL**: `JSON`
-- **SQLite**: `TEXT`
-- **MSSQL**: `NVARCHAR(MAX)`
+PostgreSQL array types (e.g. `integer[]`) generate a warning but are **not converted**—they pass through unchanged. The warning suggests using JSON in the target dialect.
 
 ## Unsupported Features
 
 These features generate warnings during conversion:
 
-- Custom types (`CREATE TYPE`)
-- Triggers (`CREATE TRIGGER`)
-- Stored procedures
-- Views with dialect-specific syntax
-- Partitioning
+- Custom types (`CREATE TYPE`) - skipped when converting from PostgreSQL
+- Triggers (`CREATE TRIGGER`) - skipped when converting from PostgreSQL
+- Stored procedures and functions (`CREATE PROCEDURE`/`CREATE FUNCTION`) - skipped when converting from PostgreSQL
+- Table inheritance (`INHERITS`)
+- Partitioning (`PARTITION BY`, when converting PostgreSQL to SQLite)
+- MySQL `UNSIGNED`/`ZEROFILL` modifiers (removed)
+
+See [Known Limitations](/reference/limitations/) for the full list of skipped and lossily rewritten constructs.

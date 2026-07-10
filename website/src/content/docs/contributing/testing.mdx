@@ -10,7 +10,7 @@ description: Running and writing tests
 cargo test
 
 # Specific test
-cargo test test_split_mysql
+cargo test test_splitter_basic
 
 # With output
 cargo test -- --nocapture
@@ -39,11 +39,11 @@ mod tests {
 End-to-end tests in `tests/`:
 
 ```rust
-// tests/split_tests.rs
+// tests/splitter_integration_test.rs
 #[test]
 fn test_split_mysql_dump() {
     let output = Command::new("./target/release/sql-splitter")
-        .args(["split", "tests/fixtures/mysql.sql", "-o", "output/"])
+        .args(["split", "tests/fixtures/static/mssql/simple.sql", "-o", "output/"])
         .output()
         .expect("failed to execute");
 
@@ -65,24 +65,28 @@ Located in `tests/fixtures/`:
 
 ```
 tests/fixtures/
-├── mysql/
-│   ├── simple.sql
-│   ├── multi_table.sql
-│   └── compressed.sql.gz
-├── postgres/
-│   ├── simple.sql
-│   └── with_copy.sql
-├── sqlite/
-│   └── simple.sql
-└── mssql/
-    └── simple.sql
+├── generated/          # Test data generated at test time (gitignored)
+└── static/
+    ├── mysql/
+    │   ├── duplicate_pk.sql
+    │   ├── escaped_strings.sql
+    │   ├── fk_missing_parent.sql
+    │   └── missing_table.sql
+    ├── postgres/
+    │   └── copy_with_nulls.sql
+    ├── sqlite/
+    │   └── minimal_tenant.sql
+    └── mssql/
+        ├── edge_cases.sql
+        ├── multi_tenant.sql
+        └── simple.sql
 ```
 
 ## Writing Tests
 
 ### Test a New Feature
 
-1. Create fixture files in `tests/fixtures/`
+1. Create fixture files in `tests/fixtures/static/`
 2. Write unit tests in the module
 3. Write integration test in `tests/`
 4. Run `cargo test`
@@ -90,7 +94,7 @@ tests/fixtures/
 ### Test Fixture Example
 
 ```sql
--- tests/fixtures/mysql/my_feature.sql
+-- tests/fixtures/static/mysql/my_feature.sql
 CREATE TABLE test (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100)
@@ -105,7 +109,7 @@ INSERT INTO test VALUES (2, 'Bob');
 ```rust
 #[test]
 fn test_my_feature() {
-    let result = my_function("tests/fixtures/mysql/my_feature.sql");
+    let result = my_function("tests/fixtures/static/mysql/my_feature.sql");
     assert!(result.is_ok());
     assert_eq!(result.unwrap().table_count, 1);
 }

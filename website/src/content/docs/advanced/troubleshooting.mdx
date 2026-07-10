@@ -53,9 +53,9 @@ xcode-select --install
 
 ## Dialect Detection Issues
 
-### "Could not detect SQL dialect"
+### Dialect detection fails on generic SQL
 
-sql-splitter analyzes the first ~1000 lines to detect the dialect. If your dump starts with generic SQL, detection may fail.
+sql-splitter analyzes the first 8 KB of the file to detect the dialect. If your dump starts with generic SQL, detection falls back to MySQL with low confidence.
 
 **Solution:** Explicitly specify the dialect:
 
@@ -259,7 +259,7 @@ sql-splitter query --list-cache
 
 Some SQL features don't have direct equivalents across dialects:
 
-- **ENUM types** → Converted to VARCHAR with CHECK constraint
+- **ENUM types** → Converted to VARCHAR (with a warning)
 - **AUTO_INCREMENT** → Converted to SERIAL (PostgreSQL) or IDENTITY (MSSQL)
 - **Stored procedures** → Skipped (out of scope)
 

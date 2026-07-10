@@ -22,7 +22,7 @@ For a 10 GB file, this uses 10+ GB of RAM.
 
 sql-splitter processes files incrementally:
 
-1. Read a chunk (64 KB default)
+1. Read a chunk (64 KB buffer; 256 KB for files over 1 GB)
 2. Parse statements in the chunk
 3. Write output immediately
 4. Release memory

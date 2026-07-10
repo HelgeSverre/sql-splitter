@@ -47,10 +47,10 @@ sql-splitter validate prod_postgres.sql \
 psql "$PG_CONN" < prod_postgres.sql
 ```
 
-Or stream directly:
+Or stream directly (output goes to stdout when `-o` is omitted):
 
 ```bash
-sql-splitter convert prod_mysql.sql.gz --to postgres -o - | psql "$PG_CONN"
+sql-splitter convert prod_mysql.sql.gz --to postgres | psql "$PG_CONN"
 ```
 
 ## Handling Conversion Warnings
@@ -61,7 +61,7 @@ Not all features convert perfectly. Common warnings:
 
 MySQL ENUMs don't exist in PostgreSQL. Options:
 
-1. Convert to VARCHAR with CHECK constraint (automatic)
+1. Convert to `VARCHAR(255)` (automatic)
 2. Create custom TYPE (manual)
 
 ### Auto-Increment
@@ -92,9 +92,9 @@ sql-splitter validate mysql_dump.sql --dialect=mysql --strict
 ### MSSQL-Specific Handling
 
 - `GO` batch separators are removed
-- `IDENTITY` → `AUTO_INCREMENT`
-- `NVARCHAR` → `VARCHAR` (with CHARACTER SET utf8mb4)
-- `DATETIME2` → `DATETIME`
+- `IDENTITY(1,1)` → `AUTO_INCREMENT`
+- `NVARCHAR` → `VARCHAR` (the output header sets `SET NAMES utf8mb4`)
+- `DATETIME2` → `DATETIME(6)`
 
 ## Best Practices
 
@@ -107,11 +107,13 @@ sql-splitter validate mysql_dump.sql --dialect=mysql --strict
 
 ### "Unsupported feature" warnings
 
-Use `--strict` to see all warnings, then address manually:
+Warnings are printed to stderr by default; use `--json` to inspect them, then address manually:
 
 ```bash
-sql-splitter convert dump.sql --to postgres --strict 2>&1 | grep WARNING
+sql-splitter convert dump.sql --to postgres -o pg.sql --json | jq '.warnings'
 ```
+
+Add `--strict` to fail the conversion when any warnings are generated.
 
 ### Encoding issues
 
@@ -127,7 +129,7 @@ file dump.sql
 For multi-GB dumps:
 
 ```bash
-sql-splitter convert big.sql.gz --to postgres -o - | psql "$PG_CONN"
+sql-splitter convert big.sql.gz --to postgres | psql "$PG_CONN"
 ```
 
 This streams without writing an intermediate file.

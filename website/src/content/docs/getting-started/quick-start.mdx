@@ -27,8 +27,7 @@ This guide walks you through the most common sql-splitter workflow: splitting a 
    ├── users.sql
    ├── orders.sql
    ├── products.sql
-   ├── order_items.sql
-   └── _global.sql  # Header statements, settings
+   └── order_items.sql
    ```
 
    **Dialect Auto-Detection**
@@ -117,14 +116,16 @@ This guide walks you through the most common sql-splitter workflow: splitting a 
    Output:
 
    ```
-   ┌─────────────┬──────┬───────────┬─────────────┐
-   │ Table       │ Rows │ Size (KB) │ Statements  │
-   ├─────────────┼──────┼───────────┼─────────────┤
-   │ users       │ 150  │ 12.3      │ 2           │
-   │ orders      │ 500  │ 45.2      │ 2           │
-   │ products    │ 100  │ 8.1       │ 2           │
-   │ order_items │ 1200 │ 89.4      │ 2           │
-   └─────────────┴──────┴───────────┴─────────────┘
+   Found 4 tables:
+
+   Table Name                                    INSERTs  Total Stmts    Size (MB)
+   ────────────────────────────────────────────────────────────────────────────────
+   users                                             150          152         0.01
+   orders                                            500          502         0.04
+   products                                          100          102         0.01
+   order_items                                      1200         1202         0.09
+   ────────────────────────────────────────────────────────────────────────────────
+   TOTAL                                            1950            -         0.15
    ```
 
 </Steps>

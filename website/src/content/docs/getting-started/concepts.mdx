@@ -18,11 +18,11 @@ sql-splitter supports four SQL dialects:
 
 ### Auto-Detection
 
-sql-splitter automatically detects the dialect by analyzing:
+sql-splitter automatically detects the dialect by analyzing the start of the file:
 
-- Keywords: `AUTO_INCREMENT` (MySQL), `SERIAL` (PostgreSQL), `GO` (MSSQL)
-- Quoting: Backticks (MySQL), double quotes (PostgreSQL/SQLite), brackets (MSSQL)
-- Session commands: `SET @` (MySQL), `SET client_encoding` (PostgreSQL)
+- Tool banners: `MySQL dump`, `PostgreSQL database dump` / `pg_dump`, `SQLite`
+- Dialect markers: `LOCK TABLES` and `/*!40...*/` comments (MySQL), `COPY ... FROM stdin` and `search_path` (PostgreSQL), `PRAGMA` (SQLite), `SET ANSI_NULLS` and `GO` batches (MSSQL)
+- Quoting: Backticks (MySQL), `[brackets]` (MSSQL)
 
 Override with `--dialect`:
 
@@ -86,11 +86,11 @@ sql-splitter validate "*.sql" --fail-fast
 
 ## JSON Output
 
-All commands support `--json` for machine-readable output:
+Most commands support `--json` for machine-readable output (`diff` uses `--format json`, and `order` has no JSON mode):
 
 ```bash
 sql-splitter analyze dump.sql --json | jq '.tables[].name'
-sql-splitter validate dump.sql --json | jq '.errors'
+sql-splitter validate dump.sql --json | jq '.issues'
 ```
 
 JSON output includes:

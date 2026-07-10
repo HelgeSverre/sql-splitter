@@ -34,8 +34,8 @@ Redaction runs as a [streaming](/reference/glossary#streaming) single-pass opera
 
 **Exit codes:**
 - `0` - Success
-- `1` - Validation errors or `--strict` mode warnings
-- `2` - Runtime error (file not found, parse failure)
+- `1` - Error (validation errors, `--strict` mode warnings, file not found, parse failure)
+- `2` - Invalid CLI arguments
 
 ## Usage
 
@@ -205,12 +205,9 @@ Review and adjust the generated config before use—automated detection may miss
 seed: 12345
 locale: en
 
-defaults:
-  strategy: skip
-
 rules:
   - column: "*.ssn"
-    strategy: null
+    strategy: "null"   # quote it—unquoted null is a YAML null value
   - column: "*.email"
     strategy: hash
   - column: "*.name"

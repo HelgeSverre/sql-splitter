@@ -22,9 +22,11 @@ Use [`validate`](/commands/validate) if you only need to check a single dump's i
 The diff command loads both dumps, extracts schema metadata (tables, columns, indexes, foreign keys), and compares them structurally. For data comparison, it uses primary keys to match rows efficiently - this means tables without primary keys require special handling (`--allow-no-pk`).
 
 **Exit codes:**
-- `0` - No differences found
-- `1` - Differences detected (useful for CI gates)
-- `2` - Error during comparison
+- `0` - Comparison completed (whether or not differences were found)
+- `1` - Error during comparison (missing file, parse error)
+- `2` - Invalid CLI arguments
+
+To gate CI on differences, use `--format json` and inspect the summary (see below)—the exit code alone does not signal differences.
 
 ## Usage
 
@@ -60,8 +62,10 @@ This creates ALTER TABLE, CREATE TABLE, and DROP TABLE statements. Review before
 ### CI/CD Integration
 
 ```bash
-# Fail CI if any differences exist
-sql-splitter diff production.sql staging.sql --schema-only || exit 1
+# Fail CI if any schema differences exist (exit code is 0 either way,
+# so check the JSON summary instead)
+sql-splitter diff production.sql staging.sql --schema-only --format json \
+  | jq -e '.summary.tables_added + .summary.tables_removed + .summary.tables_modified == 0'
 
 # Export diff as JSON for further processing
 sql-splitter diff old.sql new.sql --format json -o diff.json
@@ -132,15 +136,19 @@ sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message
 
 ```
 Schema Changes:
-  + Table 'audit_logs' added
-  - Table 'temp_data' removed
-  ~ Table 'users' modified:
-    + Column 'phone' added (VARCHAR(20))
-    ~ Column 'email' changed: VARCHAR(100) → VARCHAR(255)
+  + Table 'audit_logs' (new)
+      + id INT NULL [PK]
+  - Table 'temp_data' (removed)
+  ~ Table 'users':
+      + Column 'phone' TEXT NULL
 
 Data Changes:
-  users: +5 added, -2 removed, ~10 modified
-  orders: +100 added
+  Table 'users': +5 rows, -2 rows, ~10 modified
+  Table 'orders': +100 rows
+
+Summary:
+  1 tables added, 1 removed, 1 modified
+  105 rows added, 2 removed, 10 modified
 ```
 
 ### JSON
@@ -150,18 +158,42 @@ Data Changes:
   "schema": {
     "tables_added": ["audit_logs"],
     "tables_removed": ["temp_data"],
-    "tables_modified": {
+    "tables_modified": [
+      {
+        "table_name": "users",
+        "columns_added": [
+          { "name": "phone", "col_type": "TEXT", "is_nullable": true, "is_primary_key": false }
+        ],
+        "columns_removed": [],
+        "columns_modified": [],
+        "pk_changed": false,
+        "fks_added": [],
+        "fks_removed": [],
+        "indexes_added": [],
+        "indexes_removed": []
+      }
+    ]
+  },
+  "data": {
+    "tables": {
       "users": {
-        "columns_added": [{ "name": "phone", "type": "VARCHAR(20)" }],
-        "columns_modified": [
-          { "name": "email", "old": "VARCHAR(100)", "new": "VARCHAR(255)" }
-        ]
+        "old_row_count": 12,
+        "new_row_count": 15,
+        "added_count": 5,
+        "removed_count": 2,
+        "modified_count": 10,
+        "truncated": false
       }
     }
   },
-  "data": {
-    "users": { "added": 5, "removed": 2, "modified": 10 },
-    "orders": { "added": 100, "removed": 0, "modified": 0 }
+  "summary": {
+    "tables_added": 1,
+    "tables_removed": 1,
+    "tables_modified": 1,
+    "rows_added": 5,
+    "rows_removed": 2,
+    "rows_modified": 10,
+    "truncated": false
   }
 }
 ```
@@ -210,9 +242,9 @@ Tables without primary keys can't be efficiently compared. Options:
 2. **Use `--allow-no-pk`**: Compare using all columns (slower, may have false positives)
 3. **Specify custom keys**: `--primary-key logs:timestamp+source_id`
 
-### Exit code is 1 but no output
+### Summary shows changes but no detail
 
-The exit code indicates differences were found. Use `--verbose` to see details:
+The default output summarizes row changes per table. Use `--verbose` to see sample PK values for the affected rows:
 
 ```bash
 sql-splitter diff old.sql new.sql --verbose

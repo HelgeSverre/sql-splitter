@@ -29,8 +29,8 @@ Validation runs in two passes:
 
 **Exit codes:**
 - `0` - Valid (no errors; warnings may exist)
-- `1` - Invalid (errors found, or warnings with `--strict`)
-- `2` - Runtime error (file not found, parse failure)
+- `1` - Invalid (errors found, or warnings with `--strict`), or runtime error (file not found, parse failure)
+- `2` - Invalid CLI arguments
 
 ## Usage
 
@@ -158,7 +158,8 @@ sql-splitter validate dump.sql --strict || exit 1
 sql-splitter validate dump.sql --json | jq 'select(.summary.errors > 0)'
 
 # Multi-file validation returns aggregate with results array
-sql-splitter validate "*.sql" --json | jq '.results[] | select(.summary.errors > 0)'
+# (each result nests the per-file report under .summary)
+sql-splitter validate "*.sql" --json | jq '.results[] | select(.passed | not)'
 ```
 
 ## Composing with Other Tools

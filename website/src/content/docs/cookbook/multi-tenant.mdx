@@ -32,11 +32,12 @@ sql-splitter shard multi_tenant.sql \
 
 sql-splitter auto-detects common column names:
 
-- `tenant_id`
 - `company_id`
-- `account_id`
-- `org_id`
+- `tenant_id`
 - `organization_id`
+- `org_id`
+- `account_id`
+- `team_id`
 - `workspace_id`
 
 Override if needed:
@@ -130,8 +131,8 @@ sql-splitter sample tenant_123.sql \
 Anonymize after sharding:
 
 ```bash
-sql-splitter shard dump.sql --tenant-value 123 -o - | \
-  sql-splitter redact - \
+sql-splitter shard dump.sql --tenant-value 123 -o tenant_123.sql && \
+  sql-splitter redact tenant_123.sql \
     --hash "*.email" \
     --fake "*.name" \
     -o tenant_123_safe.sql

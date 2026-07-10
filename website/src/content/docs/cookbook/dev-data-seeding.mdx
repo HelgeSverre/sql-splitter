@@ -65,7 +65,7 @@ Production data is realistic but contains sensitive PII. Random test data lacks 
        strategy: fake
        generator: name
      - column: "*.ssn"
-       strategy: null
+       strategy: "null"
      - column: "*.phone"
        strategy: fake
        generator: phone
@@ -100,8 +100,8 @@ Production data is realistic but contains sensitive PII. Random test data lacks 
 For quick anonymization without a config file:
 
 ```bash
-sql-splitter sample prod.sql.gz --percent 10 --preserve-relations -o - | \
-  sql-splitter redact - \
+sql-splitter sample prod.sql.gz --percent 10 --preserve-relations -o sampled.sql && \
+  sql-splitter redact sampled.sql \
     --hash "*.email" \
     --fake "*.name,*.phone" \
     --null "*.ssn,*.password" \
@@ -124,8 +124,8 @@ Use `--seed` for deterministic results:
 
 ```bash
 # Same seed = same fake data every time
-sql-splitter sample prod.sql --percent 10 --seed 42 -o - | \
-  sql-splitter redact - --config redact.yaml --seed 42 -o dev.sql
+sql-splitter sample prod.sql --percent 10 --seed 42 -o sampled.sql && \
+  sql-splitter redact sampled.sql --config redact.yaml --seed 42 -o dev.sql
 ```
 
 ## CI/CD Integration
@@ -145,8 +145,8 @@ jobs:
             --percent 10 \
             --preserve-relations \
             --seed ${{ github.run_id }} \
-            -o - | \
-          sql-splitter redact - \
+            -o sampled.sql
+          sql-splitter redact sampled.sql \
             --config redact.yaml \
             -o dev.sql
 

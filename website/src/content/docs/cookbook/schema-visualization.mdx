@@ -123,20 +123,14 @@ sql-splitter graph dump.sql --table orders --transitive --max-depth 2
 Find circular foreign key dependencies:
 
 ```bash
-sql-splitter graph dump.sql --cycles-only
-```
-
-Output:
-
-```
-Circular dependencies found:
-  orders → payments → invoices → orders
-```
-
-Visualize cycles:
-
-```bash
 sql-splitter graph dump.sql --cycles-only -o cycles.html
+```
+
+The cycle list is printed to stderr, and the diagram itself is filtered to only the tables involved:
+
+```
+Cycles detected (1):
+  1. orders -> payments -> invoices -> orders
 ```
 
 ## Layout Options

@@ -13,8 +13,10 @@ seed: 12345
 locale: en
 
 # Default strategy for unmatched columns
+# (note the nested `strategy` key)
 defaults:
-  strategy: skip
+  strategy:
+    strategy: skip
 
 # Column-specific rules
 rules:
@@ -70,9 +72,18 @@ rules:
 
   # Wildcard in column name
   - column: "*.ssn*"
+```
 
-  # Multiple patterns (comma-separated)
-  - column: "*.phone,*.mobile,*.fax"
+Each rule takes a single glob pattern. To match multiple patterns, use one rule per pattern:
+
+```yaml
+rules:
+  - column: "*.phone"
+    strategy: fake
+    generator: phone
+  - column: "*.mobile"
+    strategy: fake
+    generator: phone
 ```
 
 ### Strategies
@@ -83,8 +94,10 @@ Replace with NULL:
 
 ```yaml
 - column: "*.ssn"
-  strategy: null
+  strategy: "null"
 ```
+
+The quotes are required—unquoted `null` is a YAML null value and fails to parse.
 
 #### constant
 
@@ -106,6 +119,14 @@ SHA256 hash (deterministic):
 ```
 
 Same input always produces same hash, preserving FK relationships.
+
+Optionally keep the email domain (`user@domain.com` → `hash@domain.com`):
+
+```yaml
+- column: "*.email"
+  strategy: hash
+  preserve_domain: true
+```
 
 #### fake
 
@@ -207,20 +228,30 @@ seed: 42
 locale: en
 
 defaults:
-  strategy: skip
+  strategy:
+    strategy: skip
 
 rules:
   # PII
   - column: "*.email"
     strategy: hash
-  - column: "*.name,*.first_name,*.last_name"
+  - column: "*.name"
     strategy: fake
     generator: name
-  - column: "*.phone,*.mobile"
+  - column: "*.first_name"
+    strategy: fake
+    generator: first_name
+  - column: "*.last_name"
+    strategy: fake
+    generator: last_name
+  - column: "*.phone"
+    strategy: fake
+    generator: phone
+  - column: "*.mobile"
     strategy: fake
     generator: phone
   - column: "*.ssn"
-    strategy: null
+    strategy: "null"
   - column: "*.password"
     strategy: constant
     value: "$2a$10$REDACTED"
@@ -233,13 +264,16 @@ rules:
     strategy: shuffle
 
   # Addresses
-  - column: "*.address,*.street"
+  - column: "*.address"
     strategy: fake
     generator: address
   - column: "*.city"
     strategy: fake
     generator: city
-  - column: "*.zip,*.postal_code"
+  - column: "*.zip"
+    strategy: fake
+    generator: zip
+  - column: "*.postal_code"
     strategy: fake
     generator: zip
 

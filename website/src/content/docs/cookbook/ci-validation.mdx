@@ -85,14 +85,20 @@ Example output:
 {
   "file": "dumps/broken.sql",
   "passed": false,
-  "errors": [
-    {
-      "type": "syntax_error",
-      "line": 42,
-      "message": "Unexpected token near 'CREAT'"
-    }
-  ],
-  "warnings": []
+  "size_mb": 12.4,
+  "summary": {
+    "dialect": "mysql",
+    "issues": [
+      {
+        "code": "DDL_MISSING_TABLE",
+        "severity": "error",
+        "message": "INSERT/COPY references table 'users' with no CREATE TABLE",
+        "location": { "table": "users", "statement_index": 1 }
+      }
+    ],
+    "summary": { "errors": 1, "warnings": 0, "info": 0 },
+    "checks": { "syntax": "ok", "ddl_dml_consistency": { "failed": 1 } }
+  }
 }
 ```
 
@@ -116,7 +122,7 @@ staged_sql=$(git diff --cached --name-only --diff-filter=ACM | grep '\.sql$' || 
 
 if [ -n "$staged_sql" ]; then
   echo "Validating SQL files..."
-  echo "$staged_sql" | xargs sql-splitter validate --strict
+  echo "$staged_sql" | xargs -n1 sql-splitter validate --strict
 fi
 ```
 

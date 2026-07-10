@@ -81,15 +81,21 @@ esac
 
 ## JSON Output with Exit Codes
 
-JSON output includes a `passed` field:
+Single-file JSON output includes an error count in `summary`:
 
 ```bash
 result=$(sql-splitter validate dump.sql --json)
-passed=$(echo "$result" | jq -r '.passed')
+errors=$(echo "$result" | jq -r '.summary.errors')
 
-if [ "$passed" = "true" ]; then
+if [ "$errors" = "0" ]; then
   echo "Valid"
 else
   echo "Invalid"
 fi
+```
+
+In multi-file mode (glob input), each entry in `results` has a boolean `passed` field:
+
+```bash
+sql-splitter validate "backups/*.sql" --json | jq '.results[] | select(.passed | not) | .file'
 ```

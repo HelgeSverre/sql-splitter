@@ -86,7 +86,7 @@ sql-splitter graph dump.sql --json | jq '.relationships | length'
 | Flag            | Short | Description                                          | Default     |
 | --------------- | ----- | ---------------------------------------------------- | ----------- |
 | `--output`      | `-o`  | Output file (html, dot, mmd, json, png, svg, pdf)    | stdout      |
-| `--format`      |       | Output format: `html`, `dot`, `mermaid`, `json`      | auto        |
+| `--format`      | `-f`  | Output format: `html`, `dot`, `mermaid`, `json`      | auto        |
 | `--dialect`     | `-d`  | SQL dialect                                          | auto-detect |
 | `--layout`      |       | Layout direction: `lr` (horizontal), `tb` (vertical) | `lr`        |
 | `--tables`      | `-t`  | Include tables matching glob patterns                | all         |

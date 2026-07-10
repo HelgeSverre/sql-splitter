@@ -245,7 +245,7 @@ sql-splitter query sample.sql "SELECT COUNT(*) FROM users"
 
 ```bash
 # Preview what would be sampled
-sql-splitter sample dump.sql --percent 10 --preserve-relations --dry-run --json | jq '.table_stats'
+sql-splitter sample dump.sql --percent 10 --preserve-relations --dry-run --json | jq '.tables'
 ```
 
 ### Missing related rows (broken FKs)

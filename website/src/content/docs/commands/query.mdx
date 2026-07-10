@@ -210,8 +210,8 @@ sql-splitter query dump.sql "SELECT email FROM users" -f json | jq -r '.[].email
 # Find tables with orphaned foreign keys
 sql-splitter query dump.sql "SELECT * FROM orders WHERE user_id NOT IN (SELECT id FROM users)" -f csv
 
-# Quick row counts for all tables (combine with analyze for speed)
-sql-splitter analyze dump.sql --json | jq '.tables | to_entries[] | "\(.key): \(.value.rows)"'
+# Quick per-table stats without a full import (analyze is faster)
+sql-splitter analyze dump.sql --json | jq -r '.tables[] | "\(.name): \(.inserts) inserts"'
 
 # Export and compress in one step
 sql-splitter query dump.sql "SELECT * FROM large_table" -f csv | gzip > export.csv.gz
@@ -235,7 +235,7 @@ sql-splitter query dump.sql "SELECT * FROM large_table" -f csv | gzip > export.c
 
 The dump may use schema-qualified names. Try:
 ```bash
-sql-splitter query dump.sql ".tables"  # List all tables
+sql-splitter query dump.sql --interactive  # then run .tables to list all tables
 sql-splitter query dump.sql "SELECT * FROM public.users"  # Use schema prefix
 ```
 

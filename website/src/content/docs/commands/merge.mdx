@@ -209,8 +209,8 @@ sql-splitter merge tables/ -o sanitized.sql
 # Create subset dump
 sql-splitter merge tables/ -o subset.sql --tables users,orders,products
 
-# Validate FK integrity of the subset
-sql-splitter validate subset.sql --check-fk
+# Validate FK integrity of the subset (PK/FK checks run by default)
+sql-splitter validate subset.sql
 ```
 
 ### CI/CD Pipeline Integration

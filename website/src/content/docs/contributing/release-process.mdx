@@ -67,13 +67,9 @@ make verify-realworld
 # Build and test binary
 cargo build --release
 ./target/release/sql-splitter --version
-./target/release/sql-splitter validate tests/fixtures/mysql/simple.sql
+./target/release/sql-splitter validate tests/fixtures/static/mssql/simple.sql
 ```
 
 ## Crates.io Publishing
 
-After tagging, maintainers publish to crates.io:
-
-```bash
-cargo publish
-```
+Publishing to crates.io is automated: pushing a version tag triggers the publish workflow, which runs `cargo publish` using the `CARGO_REGISTRY_TOKEN` repository secret.

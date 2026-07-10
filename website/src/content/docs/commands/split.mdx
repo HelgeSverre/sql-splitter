@@ -137,29 +137,18 @@ sql-splitter split dump.sql -o tables/ --json
 
 ```json
 {
-  "input": "dump.sql",
+  "input_file": "dump.sql",
   "output_dir": "tables/",
-  "tables": [
-    {
-      "name": "users",
-      "file": "tables/users.sql",
-      "rows": 150,
-      "bytes": 12345
-    },
-    {
-      "name": "orders",
-      "file": "tables/orders.sql",
-      "rows": 500,
-      "bytes": 45678
-    }
-  ],
+  "dialect": "mysql",
+  "dry_run": false,
   "statistics": {
-    "total_tables": 2,
-    "total_rows": 650,
-    "total_bytes": 58023,
-    "elapsed_ms": 42,
+    "tables_found": 2,
+    "statements_processed": 654,
+    "bytes_processed": 58023,
+    "elapsed_secs": 0.042,
     "throughput_mb_per_sec": 612.5
-  }
+  },
+  "tables": ["orders", "users"]
 }
 ```
 
@@ -212,9 +201,9 @@ sql-splitter split dump.sql --tables orders,logs,events -o large_tables/
 ### Split → Merge Subset
 
 ```bash
-# Extract all tables, merge back a subset in dependency order
+# Extract all tables, merge back a subset
 sql-splitter split dump.sql -o all/
-sql-splitter merge all/users.sql all/orders.sql all/order_items.sql -o subset.sql
+sql-splitter merge all/ --tables users,orders,order_items -o subset.sql
 ```
 
 ## Troubleshooting
@@ -261,11 +250,11 @@ sql-splitter split dump.sql -o tables/
 gzip tables/*.sql
 ```
 
-Or for a single compressed output, use [`merge`](/commands/merge) with compression:
+Or for a single compressed output, pipe [`merge`](/commands/merge) through gzip:
 
 ```bash
 sql-splitter split dump.sql -o tables/
-sql-splitter merge "tables/*.sql" -o combined.sql.gz
+sql-splitter merge tables/ | gzip > combined.sql.gz
 ```
 
 ### Permission denied writing output

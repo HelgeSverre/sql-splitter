@@ -13,13 +13,13 @@ Omit `-o` to write to stdout, enabling pipes:
 sql-splitter convert mysql.sql --to postgres | psql "$PG_CONN"
 ```
 
-Read from stdin with `-`:
+Input must be a file path — sql-splitter does not read from stdin. Compressed files (`.gz`, `.bz2`, `.xz`, `.zst`) are decompressed natively, so there's no need to `zcat` into a pipe:
 
 ```bash
-cat dump.sql | sql-splitter analyze -
+sql-splitter analyze dump.sql.gz
 ```
 
-**Note:** Most commands default to stdout when `-o` is not specified.
+**Note:** Most commands default to stdout when `-o` is not specified. `-o -` is also accepted as an explicit alias for stdout (`merge`, `sample`, `shard`, `convert`, `redact`, `order`).
 
 ## Pipeline Examples
 
@@ -46,9 +46,10 @@ sql-splitter merge tables/ | zstd > merged.sql.zst
 ### Filter and Process
 
 ```bash
-# Sample, redact, and save
-sql-splitter sample prod.sql --percent 10 | \
-  sql-splitter redact - --hash "*.email" -o dev.sql
+# Sample, then redact (chained via intermediate file)
+sql-splitter sample prod.sql --percent 10 -o sampled.sql
+sql-splitter redact sampled.sql --hash "*.email" -o dev.sql
+rm sampled.sql
 ```
 
 ### Parallel Validation
@@ -62,9 +63,8 @@ find dumps -name '*.sql.gz' -print0 | \
 ### Decompress on the Fly
 
 ```bash
-# Decompress, process, recompress
-zcat backup.sql.gz | \
-  sql-splitter convert - --to postgres | \
+# Compressed input is decompressed natively; recompress the output
+sql-splitter convert backup.sql.gz --to postgres | \
   gzip > backup_pg.sql.gz
 ```
 
@@ -73,9 +73,9 @@ zcat backup.sql.gz | \
 ### Full Dev Dataset Pipeline
 
 ```bash
-sql-splitter sample prod.sql.gz --percent 10 --preserve-relations | \
-  sql-splitter redact - --hash "*.email" --fake "*.name" | \
-  sql-splitter validate - --strict && \
+sql-splitter sample prod.sql.gz --percent 10 --preserve-relations -o sampled.sql && \
+  sql-splitter redact sampled.sql --hash "*.email" --fake "*.name" -o dev.sql && \
+  sql-splitter validate dev.sql --strict && \
   echo "Valid dev dataset created"
 ```
 
@@ -84,10 +84,9 @@ sql-splitter sample prod.sql.gz --percent 10 --preserve-relations | \
 ```bash
 # Validate, convert, validate, import
 sql-splitter validate source.sql --strict && \
-  sql-splitter convert source.sql --to postgres | \
-  sql-splitter validate - --dialect postgres --strict && \
-  sql-splitter convert source.sql --to postgres | \
-  psql "$PG_CONN"
+  sql-splitter convert source.sql --to postgres -o converted.sql && \
+  sql-splitter validate converted.sql --dialect postgres --strict && \
+  psql "$PG_CONN" < converted.sql
 ```
 
 ## Exit Code Handling
