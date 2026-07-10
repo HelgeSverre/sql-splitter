@@ -6,6 +6,7 @@
 mod cases;
 mod convert_test;
 mod graph_test;
+#[cfg(feature = "duckdb-query")]
 mod query_test;
 mod redact_test;
 mod split_test;

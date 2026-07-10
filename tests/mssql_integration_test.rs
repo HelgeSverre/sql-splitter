@@ -644,6 +644,7 @@ fn test_mssql_shard_tenant_column_detection() {
 
 // Phase 6: Query Command Tests
 
+#[cfg(feature = "duckdb-query")]
 #[test]
 fn test_mssql_query_command() {
     use sql_splitter::duckdb::{QueryConfig, QueryEngine};
@@ -669,6 +670,7 @@ fn test_mssql_query_command() {
     assert!(!result.rows.is_empty(), "Query should return result");
 }
 
+#[cfg(feature = "duckdb-query")]
 #[test]
 fn test_mssql_query_with_nvarchar() {
     use sql_splitter::duckdb::{QueryConfig, QueryEngine};

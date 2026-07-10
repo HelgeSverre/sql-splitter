@@ -1,4 +1,5 @@
 //! Unit and integration tests for the DuckDB query module.
+#![cfg(feature = "duckdb-query")]
 
 use sql_splitter::duckdb::{
     CacheManager, OutputFormat, QueryConfig, QueryEngine, QueryResultFormatter,
