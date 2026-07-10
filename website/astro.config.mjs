@@ -60,31 +60,31 @@ export default defineConfig({
       sidebar: [
         {
           label: "Getting Started",
-          autogenerate: { directory: "getting-started" },
+          items: [{ autogenerate: { directory: "getting-started" } }],
         },
         {
           label: "Commands",
-          autogenerate: { directory: "commands" },
+          items: [{ autogenerate: { directory: "commands" } }],
         },
         {
           label: "Cookbook",
           collapsed: true,
-          autogenerate: { directory: "cookbook" },
+          items: [{ autogenerate: { directory: "cookbook" } }],
         },
         {
           label: "Reference",
           collapsed: true,
-          autogenerate: { directory: "reference" },
+          items: [{ autogenerate: { directory: "reference" } }],
         },
         {
           label: "Advanced",
           collapsed: true,
-          autogenerate: { directory: "advanced" },
+          items: [{ autogenerate: { directory: "advanced" } }],
         },
         {
           label: "Contributing",
           collapsed: true,
-          autogenerate: { directory: "contributing" },
+          items: [{ autogenerate: { directory: "contributing" } }],
         },
         { label: "Roadmap", link: "/roadmap/" },
       ],
