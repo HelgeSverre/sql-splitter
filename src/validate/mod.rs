@@ -52,8 +52,6 @@ pub struct Location {
     pub table: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub statement_index: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub approx_line: Option<u64>,
 }
 
 impl Location {
@@ -61,7 +59,6 @@ impl Location {
         Self {
             table: None,
             statement_index: None,
-            approx_line: None,
         }
     }
 
@@ -75,11 +72,6 @@ impl Location {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn with_line(mut self, line: u64) -> Self {
-        self.approx_line = Some(line);
-        self
-    }
 }
 
 impl Default for Location {
@@ -141,9 +133,6 @@ impl fmt::Display for ValidationIssue {
             }
             if let Some(stmt) = loc.statement_index {
                 write!(f, " stmt={}", stmt)?;
-            }
-            if let Some(line) = loc.approx_line {
-                write!(f, " line~{}", line)?;
             }
         }
         write!(f, ": {}", self.message)

@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Documentation accuracy sweep**: every docs page was audited against the real CLI (examples executed, JSON shapes verified). Fixed wrong exit-code docs, fabricated JSON examples, non-parsing redact YAML examples, stale dialect-detection descriptions, wrong release asset names, and a stale roadmap. Removed stdin-`-` examples (input must be a file path).
 - **Website upgraded to Astro 7 / Starlight 0.41.**
+- Removed the never-populated `approx_line` field from `validate`'s issue `location` (it was declared in the JSON schema but never emitted; `validate.schema.json` regenerated).
 
 ## [1.13.7] - 2026-07-10
 

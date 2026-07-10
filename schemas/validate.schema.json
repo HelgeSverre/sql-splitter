@@ -82,10 +82,6 @@
       "description": "Location in the SQL dump where an issue was found",
       "type": "object",
       "properties": {
-        "approx_line": {
-          "type": ["integer", "null"],
-          "minimum": 0
-        },
         "statement_index": {
           "type": ["integer", "null"],
           "minimum": 0
