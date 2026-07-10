@@ -1,0 +1,273 @@
+---
+title: Library Usage
+description: Use sql-splitter as a Rust crate — split, parse, convert, redact, sample, and analyze SQL dumps programmatically
+---
+
+sql-splitter is published on [crates.io](https://crates.io/crates/sql-splitter) as both a CLI and a library. Every subcommand is backed by a public module you can call from Rust.
+
+```toml
+[dependencies]
+sql-splitter = { version = "1", default-features = false, features = ["compression"] }
+```
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `compression` | on | Read `.gz`, `.bz2`, `.xz`, `.zst` input. Without it, compressed files fail with an `Unsupported` I/O error; plain `.sql` still works. |
+| `duckdb-query` | on | The `duckdb` module (backing the `query` command). Pulls in bundled DuckDB — a large build dependency. Implies `compression`. |
+
+For library use, `default-features = false` with `compression` is the practical baseline; add `duckdb-query` only if you need it.
+
+## Conventions
+
+All high-level APIs follow the same shape: build a config (struct literal or builder), call a runner, get back a `Serialize`-able stats struct. Errors are `anyhow::Result` throughout; the low-level parser returns `std::io::Result`.
+
+Two things to know before starting:
+
+- **High-level runners work on file paths**, not readers. `Splitter`, `Analyzer`, `Redactor`, and `Validator` open files themselves. For in-memory or streaming input, drop down to [`Parser`](#stream-statements-with-parser) and [`Converter`](#convert-between-dialects), which work over any `Read` / byte slice.
+- **`output: None` means process stdout** for `convert::run`, `sample::run`, `Redactor::run`, and `Merger::merge` — same behavior as the CLI's `-o -`.
+
+## Detect the dialect
+
+`SqlDialect` is the enum passed to every API. Detect it from a file header, or parse it from a string (`"mysql"`, `"postgres"`, `"sqlite"`, `"mssql"` and common aliases):
+
+```rust
+use sql_splitter::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
+
+fn main() -> anyhow::Result<()> {
+    let detection = detect_dialect_from_file("dump.sql".as_ref())?;
+    if detection.confidence == DialectConfidence::Low {
+        eprintln!("warning: low-confidence dialect guess: {}", detection.dialect);
+    }
+    let dialect: SqlDialect = "postgres".parse().unwrap();
+    println!("detected={} explicit={}", detection.dialect, dialect);
+    Ok(())
+}
+```
+
+Detection reads the first 8 KB and can guess wrong — see [Known Limitations](/reference/limitations/#dialect-auto-detection). Pass an explicit dialect when you know the source.
+
+## Split a dump
+
+`Splitter` writes one `.sql` file per table into an output directory and returns `Stats`:
+
+```rust
+use sql_splitter::parser::SqlDialect;
+use sql_splitter::splitter::Splitter;
+
+fn main() -> anyhow::Result<()> {
+    let stats = Splitter::new("dump.sql".into(), "tables/".into())
+        .with_dialect(SqlDialect::MySql)
+        .with_table_filter(vec!["users".into(), "orders".into()]) // optional
+        .with_progress(|bytes| eprintln!("{bytes} bytes read"))   // optional
+        .split()?;
+
+    println!(
+        "{} tables, {} statements, {} bytes",
+        stats.tables_found, stats.statements_processed, stats.bytes_processed
+    );
+    Ok(())
+}
+```
+
+Compressed input is detected from the file extension. Use `.with_dry_run(true)` to collect stats without writing files, and `.with_content_filter(ContentFilter::SchemaOnly)` (or `DataOnly`) to mirror the CLI's `--schema-only`/`--data-only`.
+
+## Stream statements with Parser
+
+`Parser` is the streaming engine everything else builds on. It works over any `Read`, yields one statement at a time as raw bytes, and never loads the whole dump into memory:
+
+```rust
+use std::fs::File;
+use sql_splitter::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
+
+fn main() -> anyhow::Result<()> {
+    let dialect = SqlDialect::Postgres;
+    let file = File::open("dump.sql")?;
+    let buffer_size = determine_buffer_size(file.metadata()?.len());
+    let mut parser = Parser::with_dialect(file, buffer_size, dialect);
+
+    let mut inserts = 0u64;
+    while let Some(stmt) = parser.read_statement()? {
+        let (stmt_type, table) =
+            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+        if stmt_type == StatementType::Insert {
+            inserts += 1;
+            let _ = table; // table name the statement was attributed to
+        }
+    }
+    println!("{inserts} INSERT statements");
+    Ok(())
+}
+```
+
+`read_statement` handles quoting, escapes, PostgreSQL dollar-quoted bodies and `COPY` data blocks, and MSSQL `GO` batches. Statement types are `CreateTable`, `Insert`, `CreateIndex`, `AlterTable`, `DropTable`, `Copy`, or `Unknown` — see [Known Limitations](/reference/limitations/) for what falls into `Unknown`.
+
+## Convert between dialects
+
+Whole-file conversion mirrors the `convert` command:
+
+```rust
+use sql_splitter::convert::{self, ConvertConfig};
+use sql_splitter::parser::SqlDialect;
+
+fn main() -> anyhow::Result<()> {
+    let stats = convert::run(ConvertConfig {
+        input: "mysql.sql".into(),
+        output: Some("postgres.sql".into()), // None writes to stdout
+        from_dialect: None,                  // None auto-detects
+        to_dialect: SqlDialect::Postgres,
+        ..Default::default()
+    })?;
+
+    println!("{} converted, {} skipped", stats.statements_converted, stats.statements_skipped);
+    for warning in &stats.warnings {
+        eprintln!("warning: {warning:?}");
+    }
+    Ok(())
+}
+```
+
+For statement-level control (custom pipelines, non-file sources), use `Converter` directly. An `Ok` with an empty `Vec` means the statement was skipped for the target dialect:
+
+```rust
+use sql_splitter::convert::Converter;
+use sql_splitter::parser::SqlDialect;
+
+fn main() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    match converter.convert_statement(
+        b"CREATE TABLE `users` (`id` INT AUTO_INCREMENT PRIMARY KEY);",
+    ) {
+        Ok(converted) => println!("{}", String::from_utf8_lossy(&converted)),
+        Err(warning) => eprintln!("unsupported: {warning:?}"),
+    }
+}
+```
+
+Conversion is lossy for some constructs (`ENUM`, `UNSIGNED`, PostgreSQL-only DDL) — the details are in [Known Limitations](/reference/limitations/#conversion-convert) and [Type Mappings](/reference/type-mappings/).
+
+## Redact sensitive data
+
+`RedactConfig` uses a builder; patterns are `table.column` globs, identical to the CLI flags:
+
+```rust
+use sql_splitter::redactor::{RedactConfig, Redactor};
+
+fn main() -> anyhow::Result<()> {
+    let config = RedactConfig::builder()
+        .input("dump.sql".into())
+        .output(Some("safe.sql".into()))
+        .hash_patterns(vec!["*.email".into()])
+        .fake_patterns(vec!["users.name".into()])
+        .null_patterns(vec!["*.ssn".into()])
+        .seed(Some(42)) // deterministic output
+        .build()?;
+
+    let stats = Redactor::new(config)?.run()?;
+    println!("{} rows redacted across {} tables", stats.rows_redacted, stats.tables_processed);
+    Ok(())
+}
+```
+
+`Redactor::new` makes a first pass over the input to build the schema (so patterns can be validated against real columns); `run` makes the second pass and writes the output. See the [redact command](/commands/redact/) for the available strategies and [redact config](/reference/redact-config/) for the YAML format (`RedactYamlConfig::load` reads the same files).
+
+## Sample a subset
+
+```rust
+use sql_splitter::parser::SqlDialect;
+use sql_splitter::sample::{self, SampleConfig, SampleMode};
+
+fn main() -> anyhow::Result<()> {
+    let stats = sample::run(SampleConfig {
+        input: "prod.sql".into(),
+        output: Some("dev.sql".into()),
+        dialect: SqlDialect::MySql,
+        mode: SampleMode::Percent(10),
+        preserve_relations: true, // keep FK integrity
+        seed: 42,
+        ..Default::default()
+    })?;
+
+    println!(
+        "{} of {} rows kept, {} orphans rejected",
+        stats.total_rows_selected, stats.total_rows_seen, stats.fk_orphans_rejected
+    );
+    Ok(())
+}
+```
+
+`SampleConfig::default()` uses a random seed — set `seed` explicitly for reproducible samples.
+
+## Analyze, validate, merge
+
+`Analyzer` is the cleanest read-only entry point — it returns data and writes nothing:
+
+```rust
+use sql_splitter::analyzer::Analyzer;
+use sql_splitter::parser::SqlDialect;
+
+fn main() -> anyhow::Result<()> {
+    let tables = Analyzer::new("dump.sql".into())
+        .with_dialect(SqlDialect::MySql)
+        .analyze()?; // sorted by insert count, descending
+
+    for t in &tables {
+        println!("{}: {} inserts, {} bytes", t.table_name, t.insert_count, t.total_bytes);
+    }
+    Ok(())
+}
+```
+
+`Validator` runs the same checks as the `validate` command and returns a `ValidationSummary`. `ValidateOptions` has no `Default` — construct it fully (the CLI's default row limit is 1,000,000):
+
+```rust
+use sql_splitter::validate::{ValidateOptions, Validator};
+
+fn main() -> anyhow::Result<()> {
+    let summary = Validator::new(ValidateOptions {
+        path: "dump.sql".into(),
+        dialect: None, // auto-detect
+        progress: false,
+        strict: true,
+        json: false,
+        max_rows_per_table: 1_000_000,
+        fk_checks_enabled: true,
+        max_pk_fk_keys: None,
+    })
+    .validate()?;
+
+    if summary.has_errors() {
+        for issue in &summary.issues {
+            eprintln!("{}: {}", issue.code, issue.message);
+        }
+        anyhow::bail!("validation failed");
+    }
+    Ok(())
+}
+```
+
+`Merger` recombines a directory of per-table files (the inverse of `Splitter`):
+
+```rust
+use sql_splitter::merger::Merger;
+
+fn main() -> anyhow::Result<()> {
+    let stats = Merger::new("tables/".into(), Some("restored.sql".into()))
+        .with_transaction(true) // wrap in BEGIN/COMMIT
+        .merge()?;
+    println!("{} tables merged, {} bytes", stats.tables_merged, stats.bytes_written);
+    Ok(())
+}
+```
+
+## Caveats
+
+- The `cmd` module contains the CLI layer — it takes parsed clap arguments and prints to the terminal. Don't call it from library code; use the module APIs above.
+- All stats structs implement `serde::Serialize` (handy for JSON pipelines).
+- Progress callbacks take cumulative bytes read: `Fn(u64) + 'static` — except `Validator`, which requires `Fn(u64) + Send + Sync + 'static`.
+- `sample` and `redact` read uncompressed input only; `split`, `analyze`, and `convert` auto-detect compression by extension (with the `compression` feature).
+
+## See also
+
+- [Known Limitations](/reference/limitations/) — what the parser does not handle
+- [Type Mappings](/reference/type-mappings/) — conversion matrix between dialects
+- [JSON Output](/reference/json-output/) — the same stats structures, as emitted by the CLI

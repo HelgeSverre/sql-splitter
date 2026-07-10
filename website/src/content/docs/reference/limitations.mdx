@@ -1,0 +1,71 @@
+---
+title: Known Limitations
+description: What sql-splitter does not parse, per dialect — stored procedures, binary formats, detection edge cases, and lossy conversions
+---
+
+sql-splitter is a streaming statement splitter, not a full SQL parser. It recognizes six statement types — `CREATE TABLE`, `INSERT`, `CREATE INDEX`, `ALTER TABLE`, `DROP TABLE`, and PostgreSQL `COPY` — and attributes each to a table. Everything else (views, triggers, procedures, grants, session commands) passes through as *unknown* and is **skipped by `split`**, since it cannot be attributed to a table.
+
+This page lists what does not work, so you can check your dump against it before relying on the output.
+
+## All dialects
+
+- **Statements without a table are dropped by `split`.** `CREATE VIEW`, `CREATE TRIGGER`, `CREATE PROCEDURE`/`FUNCTION`, `GRANT`/`REVOKE`, `TRUNCATE`, `SET`, and `USE` are not written to any output file. Run `validate` or compare statement counts if your dump relies on them.
+- **Schema qualifiers are discarded.** Table attribution keys on the bare table name: `sales.orders` and `hr.orders` both land in `orders.sql`. Multi-schema dumps merge colliding names into one file.
+- **A `;` inside a backtick-quoted identifier or inside a `/* */` block comment splits the statement early.** Quoted *strings* are handled correctly; backtick identifiers and mid-statement block comments are not.
+- **A leading UTF-8 BOM** can make the first statement unrecognized. Strip it first (`sed -i '1s/^\xEF\xBB\xBF//' dump.sql`).
+- **No character-set transcoding.** Input bytes pass through verbatim; latin1 dumps are not converted to UTF-8. `validate` emits an `ENCODING` warning for statements containing invalid UTF-8.
+- **Compressed input** (`.gz`, `.bz2`, `.xz`, `.zst`) requires the `compression` Cargo feature (on by default in released binaries).
+
+## MySQL / MariaDB
+
+- **`DELIMITER` is not supported.** Dumps containing stored procedures, functions, or triggers wrapped in `DELIMITER $$ ... $$` are split at every internal `;`, producing broken fragments that `split` then drops. Dump with `--skip-triggers` and without `--routines`, or handle routine definitions separately.
+- Conditional comments (`/*!40101 SET ... */;`) are tolerated as leading comments; the wrapped statement is still detected.
+- Multi-database dumps using `USE db;` are not namespaced — same-named tables from different databases collide into one file.
+
+## PostgreSQL
+
+- **Plain-text format only.** `pg_dump -Fc` (custom), `-Fd` (directory), and `-Ft` (tar) are binary formats and will not parse. Use `pg_dump -Fp`, or convert an existing archive with `pg_restore -f dump.sql archive.dump`.
+- **`COPY` data must be text format**: tab-separated with `\N` for NULL (pg_dump's default). `COPY ... WITH (FORMAT csv)` and `WITH BINARY` are not supported.
+- Dollar-quoted bodies (`$$ ... $$`, `$tag$ ... $tag$`) are handled — function bodies with internal `;` split correctly.
+- `CREATE FUNCTION`/`TYPE`/`DOMAIN`/`SEQUENCE`/`EXTENSION`, `COMMENT ON`, `GRANT`, and `ALTER ... OWNER TO` carry no table and are dropped by `split` (and skipped with a warning by `convert`).
+
+## SQLite
+
+- `PRAGMA`, `BEGIN TRANSACTION`, and `COMMIT` are dropped by `split` — re-add them when re-importing (`sql-splitter merge --transaction` restores a transaction wrapper).
+- `CREATE VIEW` and `CREATE TRIGGER` are dropped by `split`.
+
+## MSSQL
+
+- **`GO` must be alone on its own line** (optionally `GO <count>`). An inline `GO` or one followed by a comment does not separate batches.
+- Both `GO` *and* `;` terminate statements, so multi-statement batches (procedure bodies, `BEGIN ... END` blocks with internal semicolons) are split apart.
+- `CREATE PROCEDURE`/`FUNCTION`/`TRIGGER`/`VIEW`, `MERGE`, and `EXEC` are dropped by `split`.
+
+## Dialect auto-detection
+
+Detection reads the **first 8 KB** of the file and scores dialect markers (`pg_dump` headers, backticks, `GO` lines, `IDENTITY(`, square brackets, ...). The highest score wins; ties default to MySQL.
+
+It can guess wrong when:
+
+- Marker text appears inside **data or comments** in the first 8 KB — matching is substring-based, so a literal `pg_dump` or `SQLite` in a value counts.
+- A MySQL or PostgreSQL dump contains `[...]` or `N'...'` early in the file — MSSQL markers are weighted heavily.
+- A long license or comment banner pushes real markers past the first 8 KB.
+
+Detection confidence is advisory: commands proceed even on a low-confidence guess. **Pass `--dialect` explicitly whenever you know the source** — a wrong guess silently produces wrong splits (for example, unrecognized `COPY` blocks).
+
+## Conversion (`convert`)
+
+Conversion is string-based rewriting, not AST transformation. It is deliberately lossy for constructs the target dialect lacks; every drop or rewrite is reported as a warning (deduplicated per feature, capped at 100).
+
+- **Skipped**: session commands (`SET NAMES`, `SET ANSI_NULLS`, `LOCK TABLES`, `PRAGMA`, ...), and PostgreSQL-only DDL (`CREATE FUNCTION`/`TYPE`/`DOMAIN`/`SEQUENCE`/`EXTENSION`/`TRIGGER`, `COMMENT ON`, `GRANT`) — each with a warning.
+- **Rewritten lossily**: MySQL `ENUM(...)` and `SET(...)` become `VARCHAR(255)`/`TEXT` (constraint semantics lost); `UNSIGNED` and `ZEROFILL` are removed; inline `COMMENT` clauses are stripped for PostgreSQL targets.
+- **Warned but left as-is**: PostgreSQL array types (`integer[]`) and `INHERITS` — no equivalent is generated.
+- **Not detectable**: SQLite auto-increment (`INTEGER PRIMARY KEY`) passes through unchanged when converting *from* SQLite; MSSQL `TIMESTAMP` (rowversion) is only converted when written as `[TIMESTAMP]`.
+- `COPY` blocks are converted to multi-row `INSERT`s (1000 rows per statement) for non-PostgreSQL targets.
+
+Use `--strict` to fail on the first unsupported construct instead of collecting warnings. See [Type Mappings](/reference/type-mappings/) for the full type conversion matrix.
+
+## Practical guidance
+
+- Dumps that are **schema + data only** (the common `mysqldump`/`pg_dump -Fp` case, no routines) split and convert reliably — this is the designed-for path.
+- Always spot-check with `sql-splitter validate "output/*.sql" --strict` after splitting or converting a dump that contains anything beyond tables, indexes, and rows.
+- If in doubt, run with `--dry-run` first and compare the reported table list against your expectations.
