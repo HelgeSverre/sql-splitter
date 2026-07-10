@@ -40,7 +40,7 @@ make install  # Installs binary + shell completions + man pages
 
 ```bash
 sql-splitter --version
-# sql-splitter 1.13.7
+# sql-splitter 1.13.8
 ```
 
 ## Commands Overview
