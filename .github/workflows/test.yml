@@ -49,8 +49,12 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: 0
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            # Skip integration tests on Windows due to stack size issues with convert command
-            cargo test --verbose --lib --bins
+            # Skip integration tests on Windows due to stack size issues with convert command.
+            # Also skip the duckdb-query feature: the current windows-latest MSVC toolset has
+            # dropped stdext::checked_array_iterator, which the C++ fmt library vendored inside
+            # duckdb's bundled build still depends on, breaking compilation. Not fixable from
+            # this repo; tracked upstream at https://github.com/duckdb/duckdb-rs/issues/413.
+            cargo test --verbose --lib --bins --no-default-features --features compression
           else
             cargo test --verbose
           fi
