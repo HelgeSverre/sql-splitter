@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.7] - 2026-07-10
+
+### Fixed
+
+- **MySQL → PostgreSQL conversion emitted invalid SQL for `COMMENT`/`AUTO_INCREMENT`/`UNIQUE KEY`** ([#64](https://github.com/HelgeSverre/sql-splitter/issues/64)) — converting a MySQL `CREATE TABLE` with inline column `COMMENT 'text'`, a trailing table-level `COMMENT='text'`/`ENGINE=`/`AUTO_INCREMENT=N` option, or a `UNIQUE KEY \`name\` (\`col\`) USING BTREE` constraint produced non-executable PostgreSQL (e.g. the table-option tail degraded into a bare `) =2 COMMENT='...';`). All three are now stripped/converted correctly, including MySQL prefix-length index columns like `` `email`(191) ``.
+  - The stripping is string-literal-aware (character-scanning instead of blind regex), fixing a related bug caught during review where a `DEFAULT` value or `CHECK` expression containing the literal text "comment" or "AUTO_INCREMENT=N" would be silently corrupted or drop a subsequent column.
+  - Also fixed a pre-existing case-sensitivity gap where lowercase `auto_increment` (vs. `AUTO_INCREMENT`) was never converted to `SERIAL`.
+
 ## [1.13.6] - 2026-05-15
 
 ### Added
