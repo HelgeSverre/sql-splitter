@@ -1,7 +1,9 @@
 pub mod mysql_insert;
 pub mod postgres_copy;
 
-// Re-export types for bulk loading
+// Re-export types for bulk loading (consumed by the duckdb loader and by
+// library users; the bin target without duckdb-query doesn't use them)
+#[cfg_attr(not(feature = "duckdb-query"), allow(unused_imports))]
 pub use mysql_insert::{parse_insert_for_bulk, ParsedValue};
 
 use once_cell::sync::Lazy;
