@@ -24,6 +24,7 @@ pub use strategy::StrategyKind;
 use crate::parser::postgres_copy::parse_copy_columns;
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::schema::{Schema, SchemaBuilder};
+use crate::splitter::Compression;
 use ahash::AHashMap;
 use schemars::JsonSchema;
 use std::fs::File;
@@ -93,10 +94,17 @@ impl Redactor {
         })
     }
 
+    /// Open the input file, transparently decompressing .gz/.bz2/.xz/.zst
+    fn open_input(input: &Path) -> anyhow::Result<Box<dyn std::io::Read>> {
+        let file = File::open(input)?;
+        let reader = Compression::from_path(input).wrap_reader(Box::new(file))?;
+        Ok(reader)
+    }
+
     /// Build schema from input file
     fn build_schema(input: &Path, dialect: SqlDialect) -> anyhow::Result<Schema> {
-        let file = File::open(input)?;
-        let mut parser = Parser::with_dialect(file, 64 * 1024, dialect);
+        let reader = Self::open_input(input)?;
+        let mut parser = Parser::with_dialect(reader, 64 * 1024, dialect);
         let mut builder = SchemaBuilder::new();
 
         while let Some(stmt) = parser.read_statement()? {
@@ -132,8 +140,8 @@ impl Redactor {
 
     /// Dry run - analyze without writing
     fn dry_run(&mut self) -> anyhow::Result<RedactStats> {
-        let file = File::open(&self.config.input)?;
-        let mut parser = Parser::with_dialect(file, 64 * 1024, self.config.dialect);
+        let reader = Self::open_input(&self.config.input)?;
+        let mut parser = Parser::with_dialect(reader, 64 * 1024, self.config.dialect);
 
         let mut tables_seen: AHashMap<String, u64> = AHashMap::new();
 
@@ -170,8 +178,8 @@ impl Redactor {
 
     /// Process the file and write redacted output
     fn process_file(&mut self, mut output: Box<dyn Write>) -> anyhow::Result<()> {
-        let file = File::open(&self.config.input)?;
-        let mut parser = Parser::with_dialect(file, 64 * 1024, self.config.dialect);
+        let reader = Self::open_input(&self.config.input)?;
+        let mut parser = Parser::with_dialect(reader, 64 * 1024, self.config.dialect);
 
         while let Some(stmt) = parser.read_statement()? {
             let (stmt_type, table_name) =

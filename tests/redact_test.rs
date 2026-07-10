@@ -560,3 +560,39 @@ INSERT INTO `users` VALUES (2, 'bob@test.org');
         "Same seed should produce identical output"
     );
 }
+
+#[cfg(feature = "compression")]
+#[test]
+fn test_redact_gzip_input_is_decompressed() {
+    // Regression: compressed input used to be read as raw bytes, silently
+    // producing an empty result ("Tables processed: 0") with exit code 0.
+    use flate2::write::GzEncoder;
+    use flate2::Compression as GzCompression;
+
+    let sql = "CREATE TABLE users (id INT, email VARCHAR(255));\n\
+               INSERT INTO users VALUES (1, 'alice@example.com');\n";
+
+    let dir = TempDir::new().unwrap();
+    let input_path = dir.path().join("dump.sql.gz");
+    let mut encoder = GzEncoder::new(fs::File::create(&input_path).unwrap(), GzCompression::default());
+    encoder.write_all(sql.as_bytes()).unwrap();
+    encoder.finish().unwrap();
+
+    let output_path = dir.path().join("redacted.sql");
+    let config = RedactConfig::builder()
+        .input(input_path)
+        .output(Some(output_path.clone()))
+        .dialect(SqlDialect::MySql)
+        .hash_patterns(vec!["*.email".to_string()])
+        .seed(Some(42))
+        .build()
+        .unwrap();
+
+    let stats = Redactor::new(config).unwrap().run().unwrap();
+    assert_eq!(stats.tables_processed, 1, "gzip input must be decompressed");
+    assert_eq!(stats.rows_redacted, 1);
+
+    let output = fs::read_to_string(&output_path).unwrap();
+    assert!(output.to_lowercase().contains("insert into"), "got: {output}");
+    assert!(!output.contains("alice@example.com"), "email must be redacted");
+}
