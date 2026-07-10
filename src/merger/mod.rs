@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 /// Statistics from merge operation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct MergeStats {
     /// Number of tables merged.
     pub tables_merged: usize,
