@@ -1,11 +1,29 @@
 ---
 title: Installation
-description: Install sql-splitter via Cargo, pre-built binaries, or from source
+description: Install sql-splitter with the shell installer, Homebrew, Cargo, or pre-built binaries
 ---
 
 import { TabItem, Tabs } from "@astrojs/starlight/components";
 
 <Tabs>
+    <TabItem label="Shell" icon="linux">
+        macOS and Linux:
+
+        ```bash
+        curl -fsSL https://sql-splitter.dev/install.sh | sh
+        ```
+
+        Downloads the pre-built binary for your platform from the latest
+        [GitHub Release](https://github.com/helgesverre/sql-splitter/releases)
+        and installs it to `$CARGO_HOME/bin` (or `$HOME/.cargo/bin`).
+        Override the location with `SQL_SPLITTER_INSTALL_DIR`.
+
+    </TabItem>
+    <TabItem label="Homebrew" icon="apple">
+        ```bash
+        brew install helgesverre/tap/sql-splitter
+        ```
+    </TabItem>
     <TabItem label="Cargo" icon="seti:rust">
         If you have Rust installed:
 
@@ -16,32 +34,43 @@ import { TabItem, Tabs } from "@astrojs/starlight/components";
         Don't have Rust? Install it from [rustup.rs](https://rustup.rs/).
 
     </TabItem>
-    <TabItem label="Pre-built Binaries" icon="rocket">
+    <TabItem label="Windows" icon="seti:windows">
+        PowerShell:
+
+        ```powershell
+        powershell -ExecutionPolicy Bypass -c "irm https://sql-splitter.dev/install.ps1 | iex"
+        ```
+    </TabItem>
+    <TabItem label="Binaries" icon="rocket">
         Download from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases):
 
         | Platform | Download |
         |----------|----------|
-        | Linux x86_64 | [sql-splitter-linux-amd64.tar.gz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-linux-amd64.tar.gz) |
-        | Linux ARM64 | [sql-splitter-linux-arm64.tar.gz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-linux-arm64.tar.gz) |
-        | macOS Intel | [sql-splitter-darwin-amd64.tar.gz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-darwin-amd64.tar.gz) |
-        | macOS Apple Silicon | [sql-splitter-darwin-arm64.tar.gz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-darwin-arm64.tar.gz) |
-        | Windows x86_64 | [sql-splitter-windows-amd64.zip](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-windows-amd64.zip) |
+        | Linux x86_64 | [sql-splitter-x86_64-unknown-linux-gnu.tar.xz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-x86_64-unknown-linux-gnu.tar.xz) |
+        | Linux ARM64 | [sql-splitter-aarch64-unknown-linux-gnu.tar.xz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-aarch64-unknown-linux-gnu.tar.xz) |
+        | macOS Intel | [sql-splitter-x86_64-apple-darwin.tar.xz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-x86_64-apple-darwin.tar.xz) |
+        | macOS Apple Silicon | [sql-splitter-aarch64-apple-darwin.tar.xz](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-aarch64-apple-darwin.tar.xz) |
+        | Windows x86_64 | [sql-splitter-x86_64-pc-windows-msvc.zip](https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-x86_64-pc-windows-msvc.zip) |
 
-    </TabItem>
-    <TabItem label="From Source" icon="github">
-        ```bash
-        git clone https://github.com/helgesverre/sql-splitter
-        cd sql-splitter
-        make install # Installs binary + shell completions + man pages
-        ```
-    </TabItem>
-    <TabItem label="From GitHub">
-        ```bash
-        cargo install --git https://github.com/helgesverre/sql-splitter
-        ```
+        Each archive ships with a matching `.sha256` checksum file.
+
     </TabItem>
 
 </Tabs>
+
+## Build from Source
+
+```bash
+git clone https://github.com/helgesverre/sql-splitter
+cd sql-splitter
+make install # Installs binary + shell completions + man pages
+```
+
+Or straight from the repository without cloning:
+
+```bash
+cargo install --git https://github.com/helgesverre/sql-splitter
+```
 
 ## Optimized Build
 
@@ -87,3 +116,7 @@ git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
 make install-man
 ```
+
+## Use as a Rust Library
+
+sql-splitter is also published as a crate. See [Library Usage](/reference/library-usage/) for the API.

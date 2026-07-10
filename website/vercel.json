@@ -1,5 +1,27 @@
 {
   "installCommand": "bun install",
   "buildCommand": "bun run build",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "redirects": [
+    {
+      "source": "/docs",
+      "destination": "/getting-started/",
+      "permanent": false
+    },
+    {
+      "source": "/docs/:path*",
+      "destination": "/getting-started/",
+      "permanent": false
+    },
+    {
+      "source": "/install.sh",
+      "destination": "https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-installer.sh",
+      "permanent": false
+    },
+    {
+      "source": "/install.ps1",
+      "destination": "https://github.com/helgesverre/sql-splitter/releases/latest/download/sql-splitter-installer.ps1",
+      "permanent": false
+    }
+  ]
 }

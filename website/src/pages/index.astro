@@ -112,10 +112,26 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         <div class="step-number">1</div>
         <div class="step-content">
           <h3>Install</h3>
-          <div class="code-block">
-            <pre><code>cargo install sql-splitter</code></pre>
-            <button class="copy-btn" data-copy="cargo install sql-splitter">Copy</button>
+          <div class="install-methods">
+            <div class="install-method">
+              <span class="install-label">curl</span>
+              <pre><code>curl -fsSL https://sql-splitter.dev/install.sh | sh</code></pre>
+              <button class="copy-btn copy-btn-inline" data-copy="curl -fsSL https://sql-splitter.dev/install.sh | sh">Copy</button>
+            </div>
+            <div class="install-method">
+              <span class="install-label">brew</span>
+              <pre><code>brew install helgesverre/tap/sql-splitter</code></pre>
+              <button class="copy-btn copy-btn-inline" data-copy="brew install helgesverre/tap/sql-splitter">Copy</button>
+            </div>
+            <div class="install-method">
+              <span class="install-label">cargo</span>
+              <pre><code>cargo install sql-splitter</code></pre>
+              <button class="copy-btn copy-btn-inline" data-copy="cargo install sql-splitter">Copy</button>
+            </div>
           </div>
+          <p class="install-more">
+            Windows, pre-built binaries, and more in the <a href="/getting-started/installation/">install guide</a>.
+          </p>
         </div>
       </div>
 
@@ -459,6 +475,67 @@ ls tables/
   .step-content h3 {
     font-size: 1rem;
     margin-bottom: var(--space-xs);
+  }
+
+  /* Install methods */
+  .install-methods {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    margin: var(--space-xs) 0 var(--space-xs);
+  }
+
+  .install-method {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0.5rem var(--space-sm);
+  }
+
+  .install-label {
+    flex-shrink: 0;
+    width: 3.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }
+
+  .install-method pre {
+    margin: 0;
+    padding: 0;
+    padding-right: 3.5rem;
+    background: none;
+    border: none;
+    overflow-x: auto;
+  }
+
+  .install-method code {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    color: var(--color-text);
+    background: none;
+    padding: 0;
+  }
+
+  .install-method .copy-btn-inline {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .install-more {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-sm);
+  }
+
+  .install-more a {
+    color: var(--cmd-split);
   }
 
   /* Code Blocks */
