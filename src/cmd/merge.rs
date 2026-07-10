@@ -111,17 +111,24 @@ pub fn run(
     sorted_files.sort_by(|a, b| a.0.cmp(&b.0));
 
     if !json {
-        println!(
-            "Merging {} tables from: {}",
-            sorted_files.len(),
-            input_dir.display()
-        );
         if let Some(ref out) = output {
+            println!(
+                "Merging {} tables from: {}",
+                sorted_files.len(),
+                input_dir.display()
+            );
             println!("Output: {}", out.display());
+            println!();
         } else {
-            println!("Output: stdout");
+            // SQL goes to stdout — keep status lines out of the piped output
+            eprintln!(
+                "Merging {} tables from: {}",
+                sorted_files.len(),
+                input_dir.display()
+            );
+            eprintln!("Output: stdout");
+            eprintln!();
         }
-        println!();
     }
 
     if dry_run {

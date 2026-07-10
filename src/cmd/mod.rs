@@ -348,7 +348,7 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Convert a SQL dump between MySQL, PostgreSQL, and SQLite
+    /// Convert a SQL dump between MySQL, PostgreSQL, SQLite, and MSSQL
     #[command(visible_alias = "cv")]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   sql-splitter convert mysql.sql --to postgres -o pg.sql
@@ -755,6 +755,11 @@ pub enum Commands {
     },
 }
 
+/// Treat an output path of `-` as "write to stdout" (Unix convention).
+fn dash_is_stdout(output: Option<PathBuf>) -> Option<PathBuf> {
+    output.filter(|p| p.as_os_str() != "-")
+}
+
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Split {
@@ -802,7 +807,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             json,
         } => merge::run(
             input_dir,
-            output,
+            dash_is_stdout(output),
             dialect,
             tables,
             exclude,
@@ -840,7 +845,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             };
             sample::run(
                 file,
-                output,
+                dash_is_stdout(output),
                 dialect,
                 percent,
                 rows,
@@ -884,7 +889,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             };
             shard::run(
                 file,
-                output,
+                dash_is_stdout(output),
                 dialect,
                 tenant_column,
                 tenant_value,
@@ -911,7 +916,10 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             fail_fast,
             json,
         } => convert::run(
-            file, output, from, to, strict, progress, dry_run, fail_fast, json,
+            file,
+            dash_is_stdout(output),
+            from,
+            to, strict, progress, dry_run, fail_fast, json,
         ),
         Commands::Validate {
             file,
@@ -997,7 +1005,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             validate,
         } => redact::run(
             file,
-            output,
+            dash_is_stdout(output),
             dialect,
             config,
             generate_config,
@@ -1056,7 +1064,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             check,
             dry_run,
             reverse,
-        } => order::run(file, output, dialect, check, dry_run, reverse),
+        } => order::run(file, dash_is_stdout(output), dialect, check, dry_run, reverse),
         #[cfg(feature = "duckdb-query")]
         Commands::Query(args) => query::run(args),
         Commands::Schema {
