@@ -107,7 +107,7 @@ jobs:
             type=raw,value=${{ steps.ref.outputs.ref }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           # PR validation builds amd64 only to keep CI quick; tag/dispatch publishes multi-arch.
