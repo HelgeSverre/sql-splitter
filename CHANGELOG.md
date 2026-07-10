@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.13.8] - 2026-07-10
+## [1.14.0] - 2026-07-10
 
 ### Added
 
@@ -27,7 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Documentation accuracy sweep**: every docs page was audited against the real CLI (examples executed, JSON shapes verified). Fixed wrong exit-code docs, fabricated JSON examples, non-parsing redact YAML examples, stale dialect-detection descriptions, wrong release asset names, and a stale roadmap. Removed stdin-`-` examples (input must be a file path).
 - **Website upgraded to Astro 7 / Starlight 0.41.**
-- Removed the never-populated `approx_line` field from `validate`'s issue `location` (it was declared in the JSON schema but never emitted; `validate.schema.json` regenerated).
+- Planned roadmap features shifted +1 minor version (enum conversion is now v1.15.0, migrate v1.16.0, DBML v1.17.0).
+
+### Removed
+
+- **Library API**: the never-populated `approx_line` field on `validate::Location` and its `with_line()` builder. The field was declared in `validate.schema.json` but never emitted in actual JSON output (schema regenerated). If you referenced it from library code, drop the field — it always held `None`.
 
 ## [1.13.7] - 2026-07-10
 
