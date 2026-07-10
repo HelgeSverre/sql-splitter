@@ -228,7 +228,7 @@ version:
 # Bump version (usage: just bump 1.14.0)
 bump new_version:
     @echo "Bumping version to {{ new_version }}..."
-    sed -i '' 's/^version = ".*"/version = "{{ new_version }}"/' Cargo.toml
+    awk -v new="{{ new_version }}" '!done && /^version = "/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 } { print }' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
     cargo check
     @echo "✓ Version bumped to {{ new_version }}"
     @echo ""
