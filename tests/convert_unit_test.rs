@@ -943,3 +943,19 @@ mod copy_to_insert_tests {
         assert!(sql.contains("it''s a test"));
     }
 }
+
+#[test]
+fn test_mysql_sized_int_auto_increment_to_sqlite() {
+    // Regression: "BIGINT AUTO_INCREMENT" used to hit the "INT AUTO_INCREMENT"
+    // substring replacement and produce invalid "BIGINTEGER".
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Sqlite);
+
+    let input = b"CREATE TABLE t (id BIGINT AUTO_INCREMENT PRIMARY KEY, n SMALLINT AUTO_INCREMENT);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("BIGINTEGER"), "got: {output_str}");
+    assert!(!output_str.contains("SMALLINTEGER"), "got: {output_str}");
+    assert!(output_str.contains("INTEGER PRIMARY KEY"), "got: {output_str}");
+    assert!(!output_str.contains("AUTO_INCREMENT"), "got: {output_str}");
+}

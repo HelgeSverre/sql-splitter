@@ -683,8 +683,24 @@ impl Converter {
             }
             (SqlDialect::MySql, SqlDialect::Sqlite) => {
                 // INT AUTO_INCREMENT PRIMARY KEY → INTEGER PRIMARY KEY
-                // The AUTOINCREMENT keyword is optional in SQLite
-                let result = stmt.replace("INT AUTO_INCREMENT", "INTEGER");
+                // The AUTOINCREMENT keyword is optional in SQLite.
+                // Sized variants (BIGINT/MEDIUMINT/SMALLINT/TINYINT) must be
+                // handled before the bare INT replacement — otherwise the
+                // substring match inside e.g. "BIGINT" produces "BIGINTEGER".
+                let mut result = stmt.to_string();
+                for sized in [
+                    "BIGINT AUTO_INCREMENT",
+                    "bigint AUTO_INCREMENT",
+                    "MEDIUMINT AUTO_INCREMENT",
+                    "mediumint AUTO_INCREMENT",
+                    "SMALLINT AUTO_INCREMENT",
+                    "smallint AUTO_INCREMENT",
+                    "TINYINT AUTO_INCREMENT",
+                    "tinyint AUTO_INCREMENT",
+                ] {
+                    result = result.replace(sized, "INTEGER");
+                }
+                let result = result.replace("INT AUTO_INCREMENT", "INTEGER");
                 let result = result.replace("int AUTO_INCREMENT", "INTEGER");
                 result.replace("AUTO_INCREMENT", "")
             }
