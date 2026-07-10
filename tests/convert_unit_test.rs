@@ -68,6 +68,446 @@ fn test_strip_engine_clause() {
 }
 
 #[test]
+fn test_strip_mysql_table_auto_increment_option() {
+    // Table-level AUTO_INCREMENT=N option (distinct from column-level AUTO_INCREMENT
+    // keyword) must be fully removed, not just have "AUTO_INCREMENT" stripped and
+    // "=2" left dangling. See https://github.com/HelgeSverre/sql-splitter/issues/64
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("AUTO_INCREMENT"));
+    assert!(!output_str.contains("=2"));
+    assert!(output_str.trim_end().ends_with(");"));
+}
+
+#[test]
+fn test_strip_mysql_table_comment_option() {
+    // Trailing table-level COMMENT='...' option is not valid PostgreSQL syntax
+    // and must be stripped entirely.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT) COMMENT='some comment';";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"));
+    assert!(!output_str.contains("some comment"));
+    assert!(output_str.trim_end().ends_with(");"));
+}
+
+#[test]
+fn test_strip_mysql_inline_column_comment() {
+    // Inline column COMMENT 'text' is MySQL-only syntax; PostgreSQL rejects it
+    // inside a column definition.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT COMMENT 'the id', name VARCHAR(20) COMMENT 'name field');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"));
+    assert!(!output_str.contains("the id"));
+    assert!(!output_str.contains("name field"));
+}
+
+#[test]
+fn test_convert_unique_key_using_btree() {
+    // MySQL's `UNIQUE KEY name (col) USING BTREE` table constraint has no direct
+    // PostgreSQL equivalent inline; it must become a plain `UNIQUE (col)`.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT, username VARCHAR(20), UNIQUE KEY `username` (`username`) USING BTREE);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("UNIQUE (\"username\")"));
+    assert!(!output_str.contains("USING BTREE"));
+    assert!(!output_str.contains("UNIQUE KEY"));
+}
+
+#[test]
+fn test_convert_issue_64_full_reproduction() {
+    // Full reproduction of https://github.com/HelgeSverre/sql-splitter/issues/64:
+    // converting a realistic MySQL CREATE TABLE (inline column comments, a unique
+    // key with USING BTREE, and ENGINE/AUTO_INCREMENT/CHARSET/COMMENT table
+    // options) must produce syntactically clean PostgreSQL output.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE `fa_admin` (\n  `id` int(10) unsigned NOT NULL AUTO_INCREMENT COMMENT 'ID',\n  `username` varchar(20) DEFAULT '' COMMENT 'username',\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `username` (`username`) USING BTREE\n) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='admin table';";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"), "{output_str}");
+    assert!(!output_str.contains("ENGINE"), "{output_str}");
+    assert!(!output_str.contains("USING BTREE"), "{output_str}");
+    assert!(!output_str.contains("UNIQUE KEY"), "{output_str}");
+    assert!(output_str.contains("UNIQUE (\"username\")"), "{output_str}");
+    assert!(output_str.trim_end().ends_with(");"), "{output_str}");
+}
+
+// --- Permutations of the AUTO_INCREMENT=N table option ---
+
+#[test]
+fn test_auto_increment_table_option_alone() {
+    // No ENGINE/CHARSET around it at all.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY) AUTO_INCREMENT=5;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("AUTO_INCREMENT"), "{output_str}");
+    assert!(!output_str.contains("=5"), "{output_str}");
+    assert!(output_str.trim_end().ends_with(");"), "{output_str}");
+}
+
+#[test]
+fn test_auto_increment_table_option_before_engine() {
+    // Unusual but valid MySQL ordering: AUTO_INCREMENT=N before ENGINE=.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY) AUTO_INCREMENT=100 ENGINE=InnoDB;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("AUTO_INCREMENT"), "{output_str}");
+    assert!(!output_str.contains("=100"), "{output_str}");
+    assert!(!output_str.contains("ENGINE"), "{output_str}");
+}
+
+#[test]
+fn test_auto_increment_table_option_lowercase() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT auto_increment PRIMARY KEY) engine=InnoDB auto_increment=2;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(
+        !output_str.to_uppercase().contains("AUTO_INCREMENT"),
+        "{output_str}"
+    );
+    assert!(!output_str.contains("=2"), "{output_str}");
+}
+
+#[test]
+fn test_auto_increment_table_option_multi_digit() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB AUTO_INCREMENT=1234567;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("1234567"), "{output_str}");
+    assert!(!output_str.contains("AUTO_INCREMENT"), "{output_str}");
+}
+
+#[test]
+fn test_no_table_auto_increment_option_still_converts_column_keyword() {
+    // Regression: tables with only the column-level keyword (no table option)
+    // must still get SERIAL treatment.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("SERIAL"), "{output_str}");
+    assert!(!output_str.contains("AUTO_INCREMENT"), "{output_str}");
+}
+
+// --- Permutations of COMMENT clauses ---
+
+#[test]
+fn test_column_comment_with_escaped_quote() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT COMMENT 'it\\'s the id');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"), "{output_str}");
+    assert!(!output_str.contains("it's the id"), "{output_str}");
+}
+
+#[test]
+fn test_last_column_comment_before_closing_paren() {
+    // No trailing comma after the COMMENT — closing paren follows directly.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT, name VARCHAR(20) COMMENT 'the name');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"), "{output_str}");
+    assert!(output_str.trim_end().ends_with(");"), "{output_str}");
+}
+
+#[test]
+fn test_table_comment_without_equals_sign() {
+    // MySQL allows the table-level COMMENT option without `=`.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT) COMMENT 'my table';";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"), "{output_str}");
+    assert!(!output_str.contains("my table"), "{output_str}");
+    assert!(output_str.trim_end().ends_with(");"), "{output_str}");
+}
+
+#[test]
+fn test_table_comment_between_engine_and_charset() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT) ENGINE=InnoDB COMMENT='mid table' DEFAULT CHARSET=utf8mb4;";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"), "{output_str}");
+    assert!(!output_str.contains("ENGINE"), "{output_str}");
+    assert!(!output_str.contains("CHARSET"), "{output_str}");
+}
+
+#[test]
+fn test_comment_containing_parentheses() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT COMMENT 'contains (parens) here');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(!output_str.contains("COMMENT"), "{output_str}");
+    assert!(!output_str.contains("contains"), "{output_str}");
+    assert!(output_str.trim_end().ends_with(");"), "{output_str}");
+}
+
+#[test]
+fn test_mixed_columns_with_and_without_comments() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT COMMENT 'the id', name VARCHAR(20), age INT COMMENT 'the age');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert_eq!(
+        output_str.trim(),
+        "CREATE TABLE t (id INT, name VARCHAR(20), age INT);"
+    );
+}
+
+#[test]
+fn test_standalone_comment_on_table_statement_untouched() {
+    // Regression: a standalone `COMMENT ON TABLE ... IS '...'` statement is a
+    // different statement type entirely and must not be touched by the
+    // CREATE TABLE inline-comment stripping.
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::Postgres);
+
+    let input = b"COMMENT ON TABLE foo IS 'bar';";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("COMMENT ON TABLE"), "{output_str}");
+    assert!(output_str.contains("'bar'"), "{output_str}");
+}
+
+// --- Permutations of UNIQUE KEY / USING BTREE constraints ---
+
+#[test]
+fn test_unique_key_without_name() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT, email VARCHAR(50), UNIQUE KEY (`email`));";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("UNIQUE (\"email\")"), "{output_str}");
+    assert!(!output_str.contains("UNIQUE KEY"), "{output_str}");
+}
+
+#[test]
+fn test_unique_key_without_using_clause() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (id INT, email VARCHAR(50), UNIQUE KEY `email` (`email`));";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("UNIQUE (\"email\")"), "{output_str}");
+    assert!(!output_str.contains("UNIQUE KEY"), "{output_str}");
+}
+
+#[test]
+fn test_unique_key_using_hash() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT, email VARCHAR(50), UNIQUE KEY `email` (`email`) USING HASH);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("UNIQUE (\"email\")"), "{output_str}");
+    assert!(!output_str.contains("USING HASH"), "{output_str}");
+}
+
+#[test]
+fn test_unique_key_using_btree_lowercase() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT, email VARCHAR(50), unique key `email` (`email`) using btree);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(
+        output_str.to_uppercase().contains("UNIQUE (\"EMAIL\")"),
+        "{output_str}"
+    );
+    assert!(
+        !output_str.to_uppercase().contains("USING BTREE"),
+        "{output_str}"
+    );
+}
+
+#[test]
+fn test_unique_key_multi_column() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT, a INT, b INT, UNIQUE KEY `idx_ab` (`a`,`b`) USING BTREE);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("UNIQUE (\"a\",\"b\")"), "{output_str}");
+    assert!(!output_str.contains("UNIQUE KEY"), "{output_str}");
+    assert!(!output_str.contains("USING BTREE"), "{output_str}");
+}
+
+#[test]
+fn test_primary_key_untouched_by_unique_key_conversion() {
+    // Regression: PRIMARY KEY must not be affected by the UNIQUE KEY regex.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT, email VARCHAR(50), PRIMARY KEY (`id`), UNIQUE KEY `email` (`email`) USING BTREE);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("PRIMARY KEY (\"id\")"), "{output_str}");
+    assert!(output_str.contains("UNIQUE (\"email\")"), "{output_str}");
+}
+
+#[test]
+fn test_named_unique_constraint_untouched() {
+    // Regression: a standard `CONSTRAINT name UNIQUE (...)` (not MySQL's
+    // `UNIQUE KEY` form) must pass through unchanged.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input =
+        b"CREATE TABLE t (id INT, email VARCHAR(50), CONSTRAINT uq_email UNIQUE (`email`));";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(
+        output_str.contains("CONSTRAINT uq_email UNIQUE (\"email\")"),
+        "{output_str}"
+    );
+}
+
+// --- Adversarial findings: string-literal-aware stripping ---
+
+#[test]
+fn test_default_value_literally_comment_does_not_eat_next_column() {
+    // The word "comment" appearing as a DEFAULT string value must not be
+    // mistaken for a MySQL COMMENT clause and must not consume subsequent
+    // column definitions.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (a VARCHAR(20) DEFAULT 'comment', b VARCHAR(20) DEFAULT 'x');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert_eq!(
+        output_str.trim(),
+        "CREATE TABLE t (a VARCHAR(20) DEFAULT 'comment', b VARCHAR(20) DEFAULT 'x');"
+    );
+}
+
+#[test]
+fn test_check_constraint_literal_comment_not_corrupted() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (col VARCHAR(10) CHECK (col <> 'COMMENT'), name VARCHAR(20) DEFAULT 'bob');";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(
+        output_str.contains("CHECK (col <> 'COMMENT')"),
+        "{output_str}"
+    );
+    assert!(
+        output_str.contains("name VARCHAR(20) DEFAULT 'bob'"),
+        "{output_str}"
+    );
+}
+
+#[test]
+fn test_escaped_quote_pair_in_default_value_not_corrupted() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (note VARCHAR(255) DEFAULT 'See comment ''123'' here', x INT);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(
+        output_str.contains("DEFAULT 'See comment ''123'' here'"),
+        "{output_str}"
+    );
+    assert!(output_str.contains(", x INT"), "{output_str}");
+}
+
+#[test]
+fn test_default_value_literally_auto_increment_not_corrupted() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (label VARCHAR(20) DEFAULT 'AUTO_INCREMENT=5', id INT);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(
+        output_str.contains("DEFAULT 'AUTO_INCREMENT=5'"),
+        "{output_str}"
+    );
+}
+
+// --- Adversarial findings: UNIQUE KEY with prefix-length index ---
+
+#[test]
+fn test_unique_key_with_prefix_length() {
+    // MySQL utf8mb4 prefix-length indexes, e.g. `(email(191))`, are extremely
+    // common in real dumps and must not be left as invalid Postgres syntax.
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let input = b"CREATE TABLE t (email VARCHAR(255), UNIQUE KEY `email` (`email`(191)));";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+
+    assert!(output_str.contains("UNIQUE (\"email\")"), "{output_str}");
+    assert!(!output_str.contains("UNIQUE KEY"), "{output_str}");
+    assert!(!output_str.contains("(191)"), "{output_str}");
+}
+
+#[test]
 fn test_strip_conditional_comments() {
     // Test through convert_statement
     let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);

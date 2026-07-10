@@ -193,6 +193,12 @@ impl Converter {
         // Convert CHARSET/COLLATE
         result = self.strip_charset_clauses(&result);
 
+        // Strip MySQL inline column/table COMMENT annotations
+        result = self.strip_mysql_comment_clauses(&result);
+
+        // Convert UNIQUE KEY ... USING BTREE table constraints
+        result = self.convert_unique_key_constraint(&result);
+
         Ok(result.into_bytes())
     }
 
@@ -654,15 +660,26 @@ impl Converter {
 
     /// Convert AUTO_INCREMENT/SERIAL syntax
     fn convert_auto_increment(&self, stmt: &str, _table_name: Option<&str>) -> String {
+        // Strip the MySQL table-level `AUTO_INCREMENT=N` option first (distinct from
+        // the column-level `AUTO_INCREMENT` keyword handled below). Otherwise the
+        // column-level replacements below strip the word "AUTO_INCREMENT" and leave
+        // a dangling "=N" behind, e.g. `) ENGINE=InnoDB AUTO_INCREMENT=2 ...` becomes
+        // `) =2 ...`. See https://github.com/HelgeSverre/sql-splitter/issues/64
+        let stmt = if self.from == SqlDialect::MySql && self.to != SqlDialect::MySql {
+            self.strip_mysql_auto_increment_table_option(stmt)
+        } else {
+            stmt.to_string()
+        };
+        let stmt = stmt.as_str();
+
         match (self.from, self.to) {
             (SqlDialect::MySql, SqlDialect::Postgres) => {
-                // INT AUTO_INCREMENT → SERIAL
-                // BIGINT AUTO_INCREMENT → BIGSERIAL
-                let result = stmt.replace("BIGINT AUTO_INCREMENT", "BIGSERIAL");
-                let result = result.replace("bigint AUTO_INCREMENT", "BIGSERIAL");
-                let result = result.replace("INT AUTO_INCREMENT", "SERIAL");
-                let result = result.replace("int AUTO_INCREMENT", "SERIAL");
-                result.replace("AUTO_INCREMENT", "") // Clean up any remaining
+                // INT AUTO_INCREMENT → SERIAL, BIGINT AUTO_INCREMENT → BIGSERIAL,
+                // case-insensitive (MySQL dumps commonly use lowercase
+                // `auto_increment`) and string-literal-aware (a DEFAULT value or
+                // CHECK expression containing the literal text "AUTO_INCREMENT"
+                // must not be touched).
+                self.convert_mysql_auto_increment_keyword(stmt)
             }
             (SqlDialect::MySql, SqlDialect::Sqlite) => {
                 // INT AUTO_INCREMENT PRIMARY KEY → INTEGER PRIMARY KEY
@@ -905,6 +922,239 @@ impl Converter {
 
         let result = RE_CHARSET.replace_all(stmt, "").to_string();
         RE_COLLATE.replace_all(&result, "").to_string()
+    }
+
+    /// Case-insensitively checks whether `keyword` starts at `chars[pos]`, with
+    /// word boundaries on both sides (so e.g. "COMMENT" doesn't match inside
+    /// "COMMENTARY" or a preceding identifier char like "XCOMMENT"). Returns the
+    /// index just past the keyword on success.
+    fn match_keyword_ci(chars: &[char], pos: usize, keyword: &str) -> Option<usize> {
+        let kw_len = keyword.len();
+        if pos > 0 && (chars[pos - 1].is_alphanumeric() || chars[pos - 1] == '_') {
+            return None;
+        }
+        let end = pos + kw_len;
+        if end > chars.len() {
+            return None;
+        }
+        let candidate: String = chars[pos..end].iter().collect();
+        if !candidate.eq_ignore_ascii_case(keyword) {
+            return None;
+        }
+        if end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            return None;
+        }
+        Some(end)
+    }
+
+    /// Removes trailing whitespace already pushed into `result`, so that stripping
+    /// a clause also absorbs the whitespace that preceded it (matching the old
+    /// `\s*<keyword>...` regex behavior).
+    fn trim_trailing_whitespace(result: &mut String) {
+        while result.ends_with(|c: char| c.is_whitespace()) {
+            result.pop();
+        }
+    }
+
+    /// Strip MySQL table-level `AUTO_INCREMENT=N` option. String-literal-aware so
+    /// that a DEFAULT value or other string content containing the literal text
+    /// "AUTO_INCREMENT=N" is left untouched.
+    /// See https://github.com/HelgeSverre/sql-splitter/issues/64
+    fn strip_mysql_auto_increment_table_option(&self, stmt: &str) -> String {
+        let chars: Vec<char> = stmt.chars().collect();
+        let n = chars.len();
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+        let mut i = 0;
+
+        while i < n {
+            let c = chars[i];
+            if c == '\'' {
+                in_string = !in_string;
+                result.push(c);
+                i += 1;
+                continue;
+            }
+            if !in_string {
+                if let Some(after_kw) = Self::match_keyword_ci(&chars, i, "AUTO_INCREMENT") {
+                    let mut j = after_kw;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '=' {
+                        j += 1;
+                        while j < n && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        let digits_start = j;
+                        while j < n && chars[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                        if j > digits_start {
+                            Self::trim_trailing_whitespace(&mut result);
+                            i = j;
+                            continue;
+                        }
+                    }
+                }
+            }
+            result.push(c);
+            i += 1;
+        }
+        result
+    }
+
+    /// Strip MySQL column/table `COMMENT 'text'` (or `COMMENT='text'`) annotations.
+    /// Neither is valid inside a PostgreSQL column definition or as a CREATE TABLE
+    /// table option, so they are removed entirely rather than translated.
+    /// String-literal-aware: only matches a real `COMMENT` clause, never the word
+    /// "comment" sitting inside an unrelated DEFAULT value or CHECK expression.
+    fn strip_mysql_comment_clauses(&self, stmt: &str) -> String {
+        if self.to == SqlDialect::MySql {
+            return stmt.to_string();
+        }
+
+        let chars: Vec<char> = stmt.chars().collect();
+        let n = chars.len();
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+        let mut i = 0;
+
+        while i < n {
+            let c = chars[i];
+            if c == '\'' {
+                in_string = !in_string;
+                result.push(c);
+                i += 1;
+                continue;
+            }
+            if !in_string {
+                if let Some(after_kw) = Self::match_keyword_ci(&chars, i, "COMMENT") {
+                    let mut j = after_kw;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '=' {
+                        j += 1;
+                        while j < n && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                    }
+                    if j < n && chars[j] == '\'' {
+                        // Consume the quoted comment text itself, honoring ''
+                        // as an escaped quote, then drop the whole clause.
+                        j += 1;
+                        loop {
+                            if j >= n {
+                                break;
+                            }
+                            if chars[j] == '\'' {
+                                if j + 1 < n && chars[j + 1] == '\'' {
+                                    j += 2;
+                                    continue;
+                                }
+                                j += 1;
+                                break;
+                            }
+                            j += 1;
+                        }
+                        Self::trim_trailing_whitespace(&mut result);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+            result.push(c);
+            i += 1;
+        }
+        result
+    }
+
+    /// Convert MySQL's column-level `AUTO_INCREMENT` keyword to PostgreSQL's
+    /// `SERIAL`/`BIGSERIAL`, case-insensitively and string-literal-aware (a
+    /// DEFAULT value or CHECK expression containing the literal text
+    /// "AUTO_INCREMENT" must not be touched — see finding in issue #64 follow-up
+    /// review).
+    fn convert_mysql_auto_increment_keyword(&self, stmt: &str) -> String {
+        let chars: Vec<char> = stmt.chars().collect();
+        let n = chars.len();
+        let mut result = String::with_capacity(stmt.len());
+        let mut in_string = false;
+        let mut i = 0;
+
+        while i < n {
+            let c = chars[i];
+            if c == '\'' {
+                in_string = !in_string;
+                result.push(c);
+                i += 1;
+                continue;
+            }
+            if !in_string {
+                if let Some(after_type) = Self::match_keyword_ci(&chars, i, "BIGINT") {
+                    let mut j = after_type;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if let Some(end) = Self::match_keyword_ci(&chars, j, "AUTO_INCREMENT") {
+                        result.push_str("BIGSERIAL");
+                        i = end;
+                        continue;
+                    }
+                }
+                if let Some(after_type) = Self::match_keyword_ci(&chars, i, "INT") {
+                    let mut j = after_type;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if let Some(end) = Self::match_keyword_ci(&chars, j, "AUTO_INCREMENT") {
+                        result.push_str("SERIAL");
+                        i = end;
+                        continue;
+                    }
+                }
+                if let Some(end) = Self::match_keyword_ci(&chars, i, "AUTO_INCREMENT") {
+                    // Clean up any remaining standalone occurrence (e.g. when
+                    // other modifiers like NOT NULL sit between the type and
+                    // the keyword).
+                    i = end;
+                    continue;
+                }
+            }
+            result.push(c);
+            i += 1;
+        }
+        result
+    }
+
+    /// Convert MySQL `UNIQUE KEY [name] (cols) [USING BTREE|HASH]` table constraint
+    /// to standard `UNIQUE (cols)`, which is the closest PostgreSQL equivalent.
+    /// Also strips MySQL prefix-length index annotations (e.g. `email(191)`),
+    /// which have no PostgreSQL equivalent and aren't valid there.
+    fn convert_unique_key_constraint(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::{Captures, Regex};
+
+        if self.to == SqlDialect::MySql {
+            return stmt.to_string();
+        }
+
+        // The column-list group allows one level of nested `(digits)` prefix-length
+        // annotations (e.g. `("email"(191),"other")`), which are common in
+        // real-world MySQL dumps using utf8mb4 prefix indexes.
+        static RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r#"(?i)UNIQUE\s+KEY\s+(?:"[^"]*"\s+)?(\([^()]*(?:\(\d+\)[^()]*)*\))(?:\s*USING\s+(?:BTREE|HASH))?"#,
+            )
+            .unwrap()
+        });
+        static RE_PREFIX_LEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(\d+\)").unwrap());
+
+        RE.replace_all(stmt, |caps: &Captures| {
+            let cols = RE_PREFIX_LEN.replace_all(&caps[1], "");
+            format!("UNIQUE {}", cols)
+        })
+        .to_string()
     }
 
     /// Strip PostgreSQL type casts (::type and ::regclass)
