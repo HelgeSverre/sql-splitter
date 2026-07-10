@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.8] - 2026-07-10
+
+### Added
+
+- **`-o -` now writes to stdout** for `merge`, `sample`, `shard`, `convert`, `redact`, and `order` (the Unix convention). Previously it created a literal file named `-`. `merge` also routes its status lines to stderr when SQL goes to stdout, so `sql-splitter merge tables/ | gzip` produces clean piped output.
+- **New documentation pages**: [Library Usage](https://sql-splitter.dev/reference/library-usage/) (using the crate from Rust, with compile-tested examples) and [Known Limitations](https://sql-splitter.dev/reference/limitations/) (per-dialect parser gaps, detection failure modes, lossy conversions).
+- **Website**: `curl -fsSL https://sql-splitter.dev/install.sh | sh` and `brew install helgesverre/tap/sql-splitter` are now surfaced on the homepage; `/docs`, `/install.sh`, and `/install.ps1` redirect to the right places.
+
+### Fixed
+
+- **`redact` silently ignored compressed input** — a `.gz`/`.bz2`/`.xz`/`.zst` dump was read as raw bytes, reporting "Tables processed: 0" and exiting 0 while writing output with nothing redacted. Compressed input is now decompressed like the other commands.
+- **MySQL → SQLite conversion produced invalid types for sized auto-increment columns** — `BIGINT AUTO_INCREMENT` became `BIGINTEGER` (same for `SMALLINT`/`MEDIUMINT`/`TINYINT`); all now convert to `INTEGER`.
+- **`merger::MergeStats` now derives `Serialize`**, matching every other stats struct in the library API.
+- **`cargo test --no-default-features` failed to compile** — DuckDB-dependent tests are now gated behind the `duckdb-query` feature.
+- `convert --help` now mentions MSSQL among the supported dialects.
+
+### Changed
+
+- **Documentation accuracy sweep**: every docs page was audited against the real CLI (examples executed, JSON shapes verified). Fixed wrong exit-code docs, fabricated JSON examples, non-parsing redact YAML examples, stale dialect-detection descriptions, wrong release asset names, and a stale roadmap. Removed stdin-`-` examples (input must be a file path).
+- **Website upgraded to Astro 7 / Starlight 0.41.**
+
 ## [1.13.7] - 2026-07-10
 
 ### Fixed
