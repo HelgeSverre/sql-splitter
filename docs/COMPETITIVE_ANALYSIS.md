@@ -14,7 +14,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 - Works on dump files directly (no database connection required)
 - Streaming architecture handles 10GB+ dumps
 - Multi-dialect support (MySQL, PostgreSQL, SQLite, MSSQL)
-- 600+ MB/s throughput
+- ~300 MB/s end-to-end throughput (parser ~470 MB/s)
 - Embedded DuckDB for SQL analytics on dumps without import
 
 ---
@@ -116,7 +116,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool                    | Language | Stars | MySQL | PostgreSQL | SQLite | Streaming | Notes                         |
 | ----------------------- | -------- | ----- | ----- | ---------- | ------ | --------- | ----------------------------- |
-| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.10.0, ~230 MB/s            |
+| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.14.0, ~300 MB/s            |
 | **nxs-data-anonymizer** | Go       | 271   | ✅    | ✅         | ❌     | ✅        | Go templates + Sprig          |
 | **pynonymizer**         | Python   | 109   | ✅    | ✅         | ❌     | ❌        | Faker integration, GDPR focus |
 | **myanon**              | C        | ~30   | ✅    | ❌         | ❌     | ✅        | stdin/stdout streaming        |
@@ -275,7 +275,7 @@ sql-splitter is now the only **streaming, file-based, multi-dialect** CLI with S
 4. **CLI-first** — DevOps/automation friendly, pipe-compatible
 5. **Multi-dialect** — MySQL, PostgreSQL, SQLite, MSSQL in one tool
 6. **FK-aware operations** — Sample and shard preserve referential integrity
-7. **Rust performance** — 600+ MB/s, faster than Python/Java alternatives
+7. **Rust performance** — ~300 MB/s end-to-end (parser ~470 MB/s), faster than Python/Java alternatives
 8. **Compression support** — gzip, bz2, xz, zstd auto-detected
 9. **Composable** — Split → Sample → Redact → Convert → Merge pipeline
 10. **Embedded analytics** — DuckDB-powered SQL queries on dumps without import (v1.12.0)

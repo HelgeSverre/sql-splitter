@@ -2,7 +2,7 @@
 
 > High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
 > MySQL/PostgreSQL/SQLite/MSSQL, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
-> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 600+ MB/s throughput
+> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 300+ MB/s throughput
 > and constant ~50MB memory usage.
 
 sql-splitter is a **dump-first** tool: it operates on SQL dump files on disk (optionally compressed) rather than live
