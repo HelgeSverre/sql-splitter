@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-07-14
+
+### Changed
+
+- **Corrected throughput claims to measured numbers.** The headline "600+ MB/s" dated from an early, leaner parser; multi-dialect and edge-case handling added parsing work since then. Measured on Apple M2 Max (`target-cpu=native` and PGO gave no meaningful gain): ~300 MB/s end-to-end split, ~470 MB/s raw parser. Updated the README, competitive analysis, and website hero/description/OG/`llms.txt` accordingly, and replaced a fabricated flat "625 MB/s at 100 MB / 1 GB / 10 GB" table with real ~300 MB/s scaling.
+
+### Dependencies
+
+- Bump `regex` 1.12.3 → 1.13.0, `anyhow` 1.0.102 → 1.0.103, `rand` 0.10.1 → 0.10.2, `indicatif` 0.18.4 → 0.18.6, `smallvec` 1.15.1 → 1.15.2.
+
 ## [1.14.0] - 2026-07-10
 
 ### Added
