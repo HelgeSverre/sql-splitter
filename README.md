@@ -32,7 +32,8 @@ sql-splitter = { version = "1", default-features = false }
 
 Optional features:
 
-- `compression` (gzip/bzip2/xz/zstd support)
+- `compression` (gzip/bzip2/xz/zstd support, for compressed input and per-file output)
+- `archive` (single-file `tar.*`/`zip` output; implies `compression`)
 - `duckdb-query` (enables the `query` command and DuckDB integration)
 
 ### From source
@@ -72,9 +73,16 @@ sql-splitter split sqlite.sql -o tables/ --dialect=sqlite
 # MSSQL/T-SQL dump (SSMS "Generate Scripts", sqlcmd)
 sql-splitter split mssql_dump.sql -o tables/ --dialect=mssql
 
-# Compressed files (auto-detected)
+# Compressed input (auto-detected)
 sql-splitter split backup.sql.gz -o tables/
 sql-splitter split backup.sql.zst -o tables/
+
+# Compressed output — one compressed file per table (users.sql.zst, ...)
+sql-splitter split dump.sql -o tables/ --compress zstd   # or gzip, bzip2, xz
+
+# Single-archive output — all tables in one file (format from the extension)
+sql-splitter split dump.sql -o dump.tar.gz               # .tgz/.tar.zst/.tar.bz2/.tar.xz/.tar
+sql-splitter split dump.sql -o dump.zip
 
 # Split specific tables only
 sql-splitter split dump.sql --tables users,posts,orders
@@ -230,9 +238,10 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 
 | Flag             | Description                                         | Default     |
 | ---------------- | --------------------------------------------------- | ----------- |
-| `-o, --output`   | Output directory                                    | `output`    |
+| `-o, --output`   | Output directory, or an archive path (`.tar.gz`, `.zip`, …) | `output`    |
 | `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `-t, --tables`   | Only split these tables (comma-separated)           | —           |
+| `--compress`     | Compress each output file: `gzip`, `zstd`, `bzip2`, `xz` | `none`  |
 | `-p, --progress` | Show progress bar                                   | —           |
 | `--dry-run`      | Preview without writing files                       | —           |
 | `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)           | —           |
@@ -241,6 +250,15 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | `--json`         | Output results as JSON                              | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
+
+**Output formats.** By default `split` writes one plain `<table>.sql` per table.
+`--compress <fmt>` instead writes one *compressed* file per table
+(`<table>.sql.gz`/`.zst`/`.bz2`/`.xz`) — useful for archival or transfer; each
+file compresses independently and in parallel. Alternatively, give `-o` an
+archive path (`dump.tar.gz`, `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`,
+or `.zip`) to pack **all** tables into a single archive of `<table>.sql`
+entries. Archive output requires a single input file, and `--compress` applies
+only to directory output (for an archive the codec comes from the extension).
 
 ### Merge Options
 

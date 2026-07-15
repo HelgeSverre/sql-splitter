@@ -285,6 +285,13 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
 <span class="sh-comment"># Data only (INSERT/COPY statements)</span>
 <span class="sh-tool">sql-splitter</span> split database.sql --data-only -o data/
 
+<span class="sh-comment"># Compressed output — one compressed file per table</span>
+<span class="sh-tool">sql-splitter</span> split database.sql -o tables/ --compress zstd
+
+<span class="sh-comment"># Single archive — all tables in one file (format from the extension)</span>
+<span class="sh-tool">sql-splitter</span> split database.sql -o dump.tar.gz
+<span class="sh-tool">sql-splitter</span> split database.sql -o dump.zip
+
 <span class="sh-comment"># Batch with glob patterns</span>
 <span class="sh-tool">sql-splitter</span> split "*.sql" -o output/ --fail-fast</code></pre>
             <button
@@ -1649,7 +1656,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
               </tr>
               <tr>
                 <td>Compressed Files</td>
-                <td>gzip, bz2, xz, zstd</td>
+                <td>in &amp; out: gzip, bz2, xz, zstd · archives: tar.*, zip</td>
               </tr>
             </tbody>
           </table>
@@ -1787,6 +1794,16 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
                 bzip2 (<code>.bz2</code>), xz (<code>.xz</code>), and zstd
                 (<code>.zst</code>). Pass compressed files directly to any
                 command.
+              </p>
+              <p>
+                For output, <code>split</code> can compress too. Use
+                <code>--compress gzip|zstd|bzip2|xz</code> to write one
+                compressed file per table (<code>users.sql.zst</code>, …), or
+                point <code>-o</code> at an archive path
+                (<code>dump.tar.gz</code>, <code>.tgz</code>,
+                <code>.tar.zst</code>, <code>.tar.bz2</code>,
+                <code>.tar.xz</code>, <code>.tar</code>, or <code>.zip</code>)
+                to pack every table into a single file.
               </p>
             </div>
           </details>
