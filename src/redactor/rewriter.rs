@@ -3,7 +3,7 @@
 //! Handles parsing values, applying redaction strategies, and formatting
 //! the redacted values back to SQL with proper dialect-aware escaping.
 
-use crate::parser::mysql_insert::{InsertParser, ParsedValue};
+use crate::parser::mysql_insert::{InsertParser, ParsedValue, RowExtraction};
 use crate::parser::postgres_copy::{parse_copy_columns, CopyParser};
 use crate::parser::SqlDialect;
 use crate::redactor::strategy::{
@@ -50,7 +50,8 @@ impl ValueRewriter {
         // non-MySQL strings aren't corrupted on re-serialization, bug #3)
         let mut parser = InsertParser::new(stmt)
             .with_schema(table)
-            .with_dialect(self.dialect);
+            .with_dialect(self.dialect)
+            .with_extraction(RowExtraction::ValuesOnly);
         let rows = parser.parse_rows()?;
 
         if rows.is_empty() {
@@ -133,7 +134,8 @@ impl ValueRewriter {
         // Parse data rows
         let mut parser = CopyParser::new(data_block)
             .with_schema(table)
-            .with_column_order(columns.clone());
+            .with_column_order(columns.clone())
+            .with_extraction(RowExtraction::ValuesOnly);
         let rows = parser.parse_rows()?;
 
         if rows.is_empty() {
@@ -194,7 +196,8 @@ impl ValueRewriter {
         // Parse data rows
         let mut parser = CopyParser::new(data_block)
             .with_schema(table)
-            .with_column_order(columns.to_vec());
+            .with_column_order(columns.to_vec())
+            .with_extraction(RowExtraction::ValuesOnly);
         let rows = parser.parse_rows()?;
 
         if rows.is_empty() {

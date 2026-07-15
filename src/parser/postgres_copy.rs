@@ -5,9 +5,11 @@
 
 use crate::schema::{ColumnId, ColumnType, TableSchema};
 use smallvec::SmallVec;
+use std::borrow::Cow;
+use std::sync::Arc;
 
 // Re-use types from mysql_insert for consistency
-use super::mysql_insert::{FkRef, PkValue};
+use super::mysql_insert::{FkRef, PkValue, RowExtraction};
 
 /// Tuple of PK values for composite primary keys
 pub type PkTuple = SmallVec<[PkValue; 2]>;
@@ -21,10 +23,12 @@ pub struct ParsedCopyRow {
     pub pk: Option<PkTuple>,
     /// Extracted foreign key values with their references
     pub fk_values: Vec<(FkRef, PkTuple)>,
-    /// All column values (for data diff comparison)
+    /// All column values (for data diff comparison).
+    /// Empty unless parsed with [`RowExtraction::Full`].
     pub all_values: Vec<PkValue>,
-    /// Mapping from schema column index to value index (for finding specific columns)
-    pub column_map: Vec<Option<usize>>,
+    /// Mapping from schema column index to value index (for finding specific
+    /// columns). Shared across all rows of a block (computed once).
+    pub column_map: Arc<[Option<usize>]>,
 }
 
 impl ParsedCopyRow {
@@ -47,8 +51,10 @@ pub struct CopyParser<'a> {
     /// Resolved column order (value index -> column ID)
     column_order: Vec<Option<ColumnId>>,
     /// Reverse of `column_order` (schema column ordinal -> value index),
-    /// computed once per block so per-row FK/column lookups are O(1).
-    col_to_value: Vec<Option<usize>>,
+    /// computed once per block and shared with every row via `Arc`.
+    col_to_value: Arc<[Option<usize>]>,
+    /// How much derived data to compute per row.
+    extraction: RowExtraction,
 }
 
 impl<'a> CopyParser<'a> {
@@ -59,13 +65,20 @@ impl<'a> CopyParser<'a> {
             table_schema: None,
             column_names: Vec::new(),
             column_order: Vec::new(),
-            col_to_value: Vec::new(),
+            col_to_value: Arc::from(Vec::new()),
+            extraction: RowExtraction::Full,
         }
     }
 
     /// Set the table schema for PK/FK extraction
     pub fn with_schema(mut self, schema: &'a TableSchema) -> Self {
         self.table_schema = Some(schema);
+        self
+    }
+
+    /// Choose how much per-row derived data to compute (default: [`RowExtraction::Full`]).
+    pub fn with_extraction(mut self, extraction: RowExtraction) -> Self {
+        self.extraction = extraction;
         self
     }
 
@@ -89,7 +102,8 @@ impl<'a> CopyParser<'a> {
                     .collect()
             };
 
-            // Precompute the reverse column map once for the whole block.
+            // Precompute the reverse column map once for the whole block;
+            // rows share it via Arc instead of cloning it per row.
             let mut map = vec![None; schema.columns.len()];
             for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
                 if let Some(col_id) = col_id_opt {
@@ -99,7 +113,7 @@ impl<'a> CopyParser<'a> {
                     }
                 }
             }
-            self.col_to_value = map;
+            self.col_to_value = map.into();
         }
 
         // An empty line is a legitimate single empty-string value only for a
@@ -146,16 +160,14 @@ impl<'a> CopyParser<'a> {
     fn parse_row(&self, line: &[u8]) -> anyhow::Result<Option<ParsedCopyRow>> {
         let raw = line.to_vec();
 
-        // Split by tabs
-        let values: Vec<CopyValue> = self.split_and_parse_values(line);
-
-        // Extract PK, FK, all values, and column map if we have schema
-        let (pk, fk_values, all_values, column_map) = if let Some(schema) = self.table_schema {
-            let (pk, fk_values, all_values) = self.extract_pk_fk(&values, schema);
-            let column_map = self.build_column_map(schema);
-            (pk, fk_values, all_values, column_map)
-        } else {
-            (None, Vec::new(), Vec::new(), Vec::new())
+        // Split, parse and extract PK/FK only when the caller wants them;
+        // ValuesOnly consumers (e.g. redact) just need `raw`.
+        let (pk, fk_values, all_values) = match (self.table_schema, self.extraction) {
+            (Some(schema), RowExtraction::PkFk | RowExtraction::Full) => {
+                let values: Vec<CopyValue> = self.split_and_parse_values(line);
+                self.extract_pk_fk(&values, schema)
+            }
+            _ => (None, Vec::new(), Vec::new()),
         };
 
         Ok(Some(ParsedCopyRow {
@@ -163,18 +175,12 @@ impl<'a> CopyParser<'a> {
             pk,
             fk_values,
             all_values,
-            column_map,
+            column_map: Arc::clone(&self.col_to_value),
         }))
     }
 
-    /// The schema-column-ordinal -> value-index map, precomputed once per block
-    /// in [`parse_rows`].
-    fn build_column_map(&self, _schema: &TableSchema) -> Vec<Option<usize>> {
-        self.col_to_value.clone()
-    }
-
     /// Split line by tabs and parse each value
-    fn split_and_parse_values(&self, line: &[u8]) -> Vec<CopyValue> {
+    fn split_and_parse_values<'b>(&self, line: &'b [u8]) -> Vec<CopyValue<'b>> {
         let mut values = Vec::new();
         let mut start = 0;
 
@@ -193,26 +199,30 @@ impl<'a> CopyParser<'a> {
     }
 
     /// Parse a single COPY value
-    fn parse_copy_value(&self, value: &[u8]) -> CopyValue {
+    fn parse_copy_value<'b>(&self, value: &'b [u8]) -> CopyValue<'b> {
         // Check for NULL marker
         if value == b"\\N" {
             return CopyValue::Null;
         }
 
-        // Decode escape sequences
-        let decoded = self.decode_copy_escapes(value);
+        // Decode escape sequences; values without a backslash (the common
+        // case) are borrowed as-is instead of copied.
+        let decoded: Cow<'b, [u8]> = if memchr::memchr(b'\\', value).is_none() {
+            Cow::Borrowed(value)
+        } else {
+            Cow::Owned(self.decode_copy_escapes(value))
+        };
 
         // Try to parse as integer, but only when the text is the *canonical*
         // representation of that integer. Otherwise "0123" or "+5" would be
         // treated as numbers and compare equal to their numeric forms in diff,
         // silently conflating distinct text primary keys (bug #12).
         if let Ok(s) = std::str::from_utf8(&decoded) {
-            if let Ok(n) = s.parse::<i64>() {
-                if n.to_string() == s {
+            if is_canonical_int(s) {
+                if let Ok(n) = s.parse::<i64>() {
                     return CopyValue::Integer(n);
                 }
-            } else if let Ok(n) = s.parse::<i128>() {
-                if n.to_string() == s {
+                if let Ok(n) = s.parse::<i128>() {
                     return CopyValue::BigInteger(n);
                 }
             }
@@ -263,7 +273,7 @@ impl<'a> CopyParser<'a> {
     /// Extract PK, FK, and all values from parsed values
     fn extract_pk_fk(
         &self,
-        values: &[CopyValue],
+        values: &[CopyValue<'_>],
         schema: &TableSchema,
     ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
         super::mysql_insert::extract_pk_fk_generic(
@@ -271,12 +281,13 @@ impl<'a> CopyParser<'a> {
             schema,
             &self.column_order,
             &self.col_to_value,
+            self.extraction == RowExtraction::Full,
             |v, col| self.value_to_pk(v, col),
         )
     }
 
     /// Convert a parsed value to a PkValue
-    fn value_to_pk(&self, value: &CopyValue, col: Option<&crate::schema::Column>) -> PkValue {
+    fn value_to_pk(&self, value: &CopyValue<'_>, col: Option<&crate::schema::Column>) -> PkValue {
         match value {
             CopyValue::Null => PkValue::Null,
             CopyValue::Integer(n) => PkValue::Int(*n),
@@ -307,13 +318,32 @@ impl<'a> CopyParser<'a> {
     }
 }
 
-/// Internal representation of a parsed COPY value
+/// Internal representation of a parsed COPY value. Text borrows from the line
+/// unless escape decoding forced a copy.
 #[derive(Debug, Clone)]
-enum CopyValue {
+enum CopyValue<'a> {
     Null,
     Integer(i64),
     BigInteger(i128),
-    Text(Vec<u8>),
+    Text(Cow<'a, [u8]>),
+}
+
+/// True when `s` is the canonical decimal rendering of an integer — digits
+/// only, no `+`, no leading zeros, no `-0`. Combined with a successful parse
+/// this is equivalent to `n.to_string() == s` without the allocation (bug #12).
+fn is_canonical_int(s: &str) -> bool {
+    let b = s.as_bytes();
+    let (neg, digits) = match b.split_first() {
+        Some((b'+', _)) => return false,
+        Some((b'-', rest)) => (true, rest),
+        _ => (false, b),
+    };
+    match digits {
+        [] => false,
+        [b'0'] => !neg,
+        [b'0', ..] => false,
+        _ => digits.iter().all(u8::is_ascii_digit),
+    }
 }
 
 /// Parse column list from COPY header
@@ -337,8 +367,20 @@ pub fn parse_postgres_copy_rows(
     schema: &TableSchema,
     column_order: Vec<String>,
 ) -> anyhow::Result<Vec<ParsedCopyRow>> {
+    parse_postgres_copy_rows_with(data, schema, column_order, RowExtraction::Full)
+}
+
+/// Like [`parse_postgres_copy_rows`], but with an explicit [`RowExtraction`]
+/// level so consumers that don't need `all_values` skip that work.
+pub fn parse_postgres_copy_rows_with(
+    data: &[u8],
+    schema: &TableSchema,
+    column_order: Vec<String>,
+    extraction: RowExtraction,
+) -> anyhow::Result<Vec<ParsedCopyRow>> {
     let mut parser = CopyParser::new(data)
         .with_schema(schema)
-        .with_column_order(column_order);
+        .with_column_order(column_order)
+        .with_extraction(extraction);
     parser.parse_rows()
 }

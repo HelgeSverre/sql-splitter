@@ -126,6 +126,12 @@ impl WriterPool {
 /// Threshold at which a table's staging buffer is shipped to its writer thread.
 const STAGE_FLUSH: usize = 256 * 1024;
 
+/// Cap on the *total* bytes staged across all tables. Individual buffers ship
+/// at [`STAGE_FLUSH`], but a dump with thousands of tables could otherwise
+/// stage up to `tables × STAGE_FLUSH`; crossing this cap flushes every staged
+/// buffer so producer-side memory stays bounded regardless of table count.
+const STAGE_TOTAL_CAP: usize = 32 * 1024 * 1024;
+
 /// A batched write job: pre-assembled bytes for one table.
 struct Chunk {
     table: Arc<str>,
@@ -149,6 +155,8 @@ pub struct ParallelWriters {
     error_flag: Arc<AtomicBool>,
     intern: AHashMap<String, Arc<str>>,
     stage: AHashMap<Arc<str>, Vec<u8>>,
+    /// Total bytes currently staged across all tables (see [`STAGE_TOTAL_CAP`]).
+    staged_bytes: usize,
 }
 
 impl ParallelWriters {
@@ -173,6 +181,7 @@ impl ParallelWriters {
             error_flag,
             intern: AHashMap::new(),
             stage: AHashMap::new(),
+            staged_bytes: 0,
         })
     }
 
@@ -198,9 +207,21 @@ impl ParallelWriters {
         buf.extend_from_slice(stmt);
         buf.extend_from_slice(suffix);
         buf.push(b'\n');
+        self.staged_bytes += stmt.len() + suffix.len() + 1;
         if buf.len() >= STAGE_FLUSH {
             let data = std::mem::take(buf);
+            self.staged_bytes -= data.len();
             self.ship(&arc, data);
+        } else if self.staged_bytes >= STAGE_TOTAL_CAP {
+            // Many tables, each under the per-table threshold: flush everything
+            // so total staging memory stays bounded by the cap.
+            let stage = std::mem::take(&mut self.stage);
+            for (table, data) in stage {
+                if !data.is_empty() {
+                    self.ship(&table, data);
+                }
+            }
+            self.staged_bytes = 0;
         }
     }
 

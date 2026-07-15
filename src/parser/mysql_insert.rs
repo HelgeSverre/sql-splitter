@@ -7,6 +7,24 @@ use crate::parser::SqlDialect;
 use crate::schema::{ColumnId, ColumnType, TableSchema};
 use ahash::AHashSet;
 use smallvec::SmallVec;
+use std::sync::Arc;
+
+/// How much derived data to compute per parsed row.
+///
+/// PK/FK extraction and especially `all_values` (one `PkValue` — often a
+/// `String` allocation — per column per row) dominate row-parsing cost, so
+/// consumers that don't need them should opt out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowExtraction {
+    /// Only `raw` and `values` — no PK/FK/all_values work (e.g. redact).
+    ValuesOnly,
+    /// `pk` and `fk_values`, skipping `all_values` (e.g. sample, validate).
+    PkFk,
+    /// Everything, including `all_values` for full-row comparison
+    /// (e.g. diff, shard).
+    #[default]
+    Full,
+}
 
 /// Primary key value representation supporting common types
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -92,11 +110,13 @@ pub struct ParsedRow {
     /// Extracted foreign key values with their references
     /// Only includes FKs where all columns are non-NULL
     pub fk_values: Vec<(FkRef, PkTuple)>,
-    /// All column values (for data diff comparison)
+    /// All column values (for data diff comparison).
+    /// Empty unless parsed with [`RowExtraction::Full`].
     pub all_values: Vec<PkValue>,
-    /// Mapping from schema column index to value index (for finding specific columns)
-    /// If column_map[schema_col_idx] == Some(val_idx), then all_values[val_idx] is the value
-    pub column_map: Vec<Option<usize>>,
+    /// Mapping from schema column index to value index (for finding specific columns).
+    /// If column_map[schema_col_idx] == Some(val_idx), then all_values[val_idx] is the value.
+    /// Shared across all rows of a statement (computed once).
+    pub column_map: Arc<[Option<usize>]>,
 }
 
 impl ParsedRow {
@@ -112,6 +132,17 @@ impl ParsedRow {
 #[inline]
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Copy bytes into a `String`, validating UTF-8 once and falling back to a
+/// lossy re-encode only for invalid input. Unlike `from_utf8_lossy(..).into_owned()`,
+/// the valid path is a straight validate + copy with no chunk iteration.
+#[inline]
+pub(crate) fn bytes_to_string(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+    }
 }
 
 /// Find the byte offset just past the `VALUES` keyword, matching it as a
@@ -245,26 +276,33 @@ pub(crate) fn extract_column_list_before(stmt: &[u8], values_pos: usize) -> Opti
 /// shared by the INSERT and COPY parsers. `to_pk` converts a dialect-specific
 /// value into a [`PkValue`]; `column_order` maps value index -> column, and
 /// `col_to_value` is its precomputed inverse (schema ordinal -> value index).
+/// `all_values` (a `PkValue` per column, often a `String` allocation) is only
+/// built when `include_all_values` is set — see [`RowExtraction`].
 #[allow(clippy::type_complexity)]
 pub(crate) fn extract_pk_fk_generic<V>(
     values: &[V],
     schema: &TableSchema,
     column_order: &[Option<ColumnId>],
     col_to_value: &[Option<usize>],
+    include_all_values: bool,
     to_pk: impl Fn(&V, Option<&crate::schema::Column>) -> PkValue,
 ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
     // All column values, in value order.
-    let all_values: Vec<PkValue> = values
-        .iter()
-        .enumerate()
-        .map(|(idx, v)| {
-            let col = column_order
-                .get(idx)
-                .and_then(|c| *c)
-                .and_then(|id| schema.column(id));
-            to_pk(v, col)
-        })
-        .collect();
+    let all_values: Vec<PkValue> = if include_all_values {
+        values
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| {
+                let col = column_order
+                    .get(idx)
+                    .and_then(|c| *c)
+                    .and_then(|id| schema.column(id));
+                to_pk(v, col)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // PK from columns marked primary key.
     let mut pk_values = PkTuple::new();
@@ -326,11 +364,13 @@ pub struct InsertParser<'a> {
     /// Column order in the INSERT (maps value index -> column ID)
     column_order: Vec<Option<ColumnId>>,
     /// Reverse of `column_order` (schema column ordinal -> value index),
-    /// computed once per statement so per-row FK/column lookups are O(1).
-    col_to_value: Vec<Option<usize>>,
+    /// computed once per statement and shared with every row via `Arc`.
+    col_to_value: Arc<[Option<usize>]>,
     /// Dialect governs string escaping. Only MySQL treats `\` as an escape
     /// character; Postgres/SQLite/MSSQL treat it as a literal byte.
     dialect: SqlDialect,
+    /// How much derived data to compute per row.
+    extraction: RowExtraction,
 }
 
 impl<'a> InsertParser<'a> {
@@ -341,8 +381,9 @@ impl<'a> InsertParser<'a> {
             pos: 0,
             table_schema: None,
             column_order: Vec::new(),
-            col_to_value: Vec::new(),
+            col_to_value: Arc::from(Vec::new()),
             dialect: SqlDialect::MySql,
+            extraction: RowExtraction::Full,
         }
     }
 
@@ -358,6 +399,12 @@ impl<'a> InsertParser<'a> {
         self
     }
 
+    /// Choose how much per-row derived data to compute (default: [`RowExtraction::Full`]).
+    pub fn with_extraction(mut self, extraction: RowExtraction) -> Self {
+        self.extraction = extraction;
+        self
+    }
+
     /// Parse all rows from the INSERT statement
     pub fn parse_rows(&mut self) -> anyhow::Result<Vec<ParsedRow>> {
         // Find the VALUES keyword
@@ -367,7 +414,8 @@ impl<'a> InsertParser<'a> {
         // Parse column list if present
         self.parse_column_list();
 
-        // Precompute the reverse column map once for the whole statement.
+        // Precompute the reverse column map once for the whole statement;
+        // rows share it via Arc instead of cloning it per row.
         if let Some(schema) = self.table_schema {
             let mut map = vec![None; schema.columns.len()];
             for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
@@ -378,7 +426,7 @@ impl<'a> InsertParser<'a> {
                     }
                 }
             }
-            self.col_to_value = map;
+            self.col_to_value = map.into();
         }
 
         // Parse each row
@@ -476,13 +524,12 @@ impl<'a> InsertParser<'a> {
         let end = self.pos;
         let raw = self.stmt[start..end].to_vec();
 
-        // Extract PK, FK, all values, and column map if we have a schema
-        let (pk, fk_values, all_values, column_map) = if let Some(schema) = self.table_schema {
-            let (pk, fk_values, all_values) = self.extract_pk_fk(&values, schema);
-            let column_map = self.build_column_map(schema);
-            (pk, fk_values, all_values, column_map)
-        } else {
-            (None, Vec::new(), Vec::new(), Vec::new())
+        // Extract PK, FK, and (for Full extraction) all values if we have a schema
+        let (pk, fk_values, all_values) = match (self.table_schema, self.extraction) {
+            (Some(schema), RowExtraction::PkFk | RowExtraction::Full) => {
+                self.extract_pk_fk(&values, schema)
+            }
+            _ => (None, Vec::new(), Vec::new()),
         };
 
         Ok(Some(ParsedRow {
@@ -491,7 +538,7 @@ impl<'a> InsertParser<'a> {
             pk,
             fk_values,
             all_values,
-            column_map,
+            column_map: Arc::clone(&self.col_to_value),
         }))
     }
 
@@ -549,45 +596,71 @@ impl<'a> InsertParser<'a> {
         // MySQL unescaping there corrupts Windows paths, regexes, JSON, etc.
         let honor_backslash = self.dialect == SqlDialect::MySql;
 
-        let mut value = Vec::new();
-        let mut escape_next = false;
+        // memchr from one significant byte (quote/backslash) to the next and
+        // bulk-copy the plain bytes in between. `owned` stays empty on the
+        // fast path (no escapes at all), where the literal is a single slice.
+        let mut owned: Vec<u8> = Vec::new();
+        let mut chunk_start = self.pos;
 
-        while self.pos < self.stmt.len() {
-            let b = self.stmt[self.pos];
-
-            if escape_next {
-                // Handle MySQL escape sequences
-                let escaped = match b {
-                    b'n' => b'\n',
-                    b'r' => b'\r',
-                    b't' => b'\t',
-                    b'0' => 0,
-                    _ => b, // \', \\, etc.
-                };
-                value.push(escaped);
-                escape_next = false;
-                self.pos += 1;
-            } else if b == b'\\' && honor_backslash {
-                escape_next = true;
-                self.pos += 1;
-            } else if b == b'\'' {
-                // Check for escaped quote ''
-                if self.pos + 1 < self.stmt.len() && self.stmt[self.pos + 1] == b'\'' {
-                    value.push(b'\'');
-                    self.pos += 2;
-                } else {
-                    self.pos += 1; // End of string
-                    break;
-                }
+        let content_end = loop {
+            let rest = &self.stmt[self.pos..];
+            let hit = if honor_backslash {
+                memchr::memchr2(b'\'', b'\\', rest)
             } else {
-                value.push(b);
-                self.pos += 1;
+                memchr::memchr(b'\'', rest)
+            };
+            let Some(off) = hit else {
+                // Unterminated literal: take everything to the end.
+                self.pos = self.stmt.len();
+                break self.pos;
+            };
+            self.pos += off;
+
+            if self.stmt[self.pos] == b'\\' {
+                owned.extend_from_slice(&self.stmt[chunk_start..self.pos]);
+                match self.stmt.get(self.pos + 1) {
+                    Some(&c) => {
+                        // MySQL escape sequences
+                        let escaped = match c {
+                            b'n' => b'\n',
+                            b'r' => b'\r',
+                            b't' => b'\t',
+                            b'0' => 0,
+                            _ => c, // \', \\, etc.
+                        };
+                        owned.push(escaped);
+                        self.pos += 2;
+                    }
+                    // Trailing backslash at end of statement: drop it.
+                    None => self.pos += 1,
+                }
+                chunk_start = self.pos;
+            } else if self.stmt.get(self.pos + 1) == Some(&b'\'') {
+                // Doubled quote '' is an escaped quote: keep one.
+                owned.extend_from_slice(&self.stmt[chunk_start..=self.pos]);
+                self.pos += 2;
+                chunk_start = self.pos;
+            } else {
+                let end = self.pos;
+                self.pos += 1; // Consume the closing quote
+                break end;
             }
-        }
+        };
 
-        let text = String::from_utf8_lossy(&value).into_owned();
+        let tail = &self.stmt[chunk_start..content_end];
+        let value = if owned.is_empty() {
+            bytes_to_string(tail)
+        } else {
+            owned.extend_from_slice(tail);
+            // Consume the already-owned bytes without a second copy; only
+            // invalid UTF-8 falls back to the lossy re-encode.
+            match String::from_utf8(owned) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            }
+        };
 
-        Ok(ParsedValue::String { value: text })
+        Ok(ParsedValue::String { value })
     }
 
     /// Parse a hex literal 0xABCD...
@@ -677,21 +750,23 @@ impl<'a> InsertParser<'a> {
             }
         }
 
-        let raw = self.stmt[start..self.pos].to_vec();
-        let value_str = String::from_utf8_lossy(&raw);
+        let raw = &self.stmt[start..self.pos];
 
-        // Try to parse as integer
+        // Try to parse as integer before copying: plain integers (the common
+        // case for IDs) then need no allocation at all.
         if !has_dot {
-            if let Ok(n) = value_str.parse::<i64>() {
-                return Ok(ParsedValue::Integer(n));
-            }
-            if let Ok(n) = value_str.parse::<i128>() {
-                return Ok(ParsedValue::BigInteger(n));
+            if let Ok(value_str) = std::str::from_utf8(raw) {
+                if let Ok(n) = value_str.parse::<i64>() {
+                    return Ok(ParsedValue::Integer(n));
+                }
+                if let Ok(n) = value_str.parse::<i128>() {
+                    return Ok(ParsedValue::BigInteger(n));
+                }
             }
         }
 
         // Fall back to raw value
-        Ok(ParsedValue::Other(raw))
+        Ok(ParsedValue::Other(raw.to_vec()))
     }
 
     /// Skip whitespace and newlines
@@ -717,14 +792,9 @@ impl<'a> InsertParser<'a> {
             schema,
             &self.column_order,
             &self.col_to_value,
+            self.extraction == RowExtraction::Full,
             |v, col| self.value_to_pk(v, col),
         )
-    }
-
-    /// The schema-column-ordinal -> value-index map, precomputed once per
-    /// statement in [`parse_rows`].
-    fn build_column_map(&self, _schema: &TableSchema) -> Vec<Option<usize>> {
-        self.col_to_value.clone()
     }
 
     /// Convert a parsed value to a PkValue
@@ -787,9 +857,21 @@ pub fn parse_insert_rows(
     schema: &TableSchema,
     dialect: SqlDialect,
 ) -> anyhow::Result<Vec<ParsedRow>> {
+    parse_insert_rows_with(stmt, schema, dialect, RowExtraction::Full)
+}
+
+/// Like [`parse_insert_rows`], but with an explicit [`RowExtraction`] level so
+/// consumers that don't need `all_values` (or PK/FK at all) skip that work.
+pub fn parse_insert_rows_with(
+    stmt: &[u8],
+    schema: &TableSchema,
+    dialect: SqlDialect,
+    extraction: RowExtraction,
+) -> anyhow::Result<Vec<ParsedRow>> {
     let mut parser = InsertParser::new(stmt)
         .with_schema(schema)
-        .with_dialect(dialect);
+        .with_dialect(dialect)
+        .with_extraction(extraction);
     parser.parse_rows()
 }
 

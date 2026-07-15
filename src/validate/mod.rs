@@ -654,7 +654,12 @@ impl Validator {
         };
 
         // Parse rows from INSERT using the schema (works for MySQL and SQLite)
-        let rows = match mysql_insert::parse_insert_rows(stmt, table_schema, self.dialect) {
+        let rows = match mysql_insert::parse_insert_rows_with(
+            stmt,
+            table_schema,
+            self.dialect,
+            mysql_insert::RowExtraction::PkFk,
+        ) {
             Ok(r) => r,
             Err(_) => return,
         };
@@ -708,10 +713,11 @@ impl Validator {
         };
 
         // Parse the COPY data rows
-        let rows = match postgres_copy::parse_postgres_copy_rows(
+        let rows = match postgres_copy::parse_postgres_copy_rows_with(
             data_section.as_bytes(),
             table_schema,
             column_order,
+            mysql_insert::RowExtraction::PkFk,
         ) {
             Ok(r) => r,
             Err(_) => return,
@@ -753,8 +759,12 @@ impl Validator {
         };
 
         // Parse the COPY data rows
-        let rows = match postgres_copy::parse_postgres_copy_rows(&data, table_schema, column_order)
-        {
+        let rows = match postgres_copy::parse_postgres_copy_rows_with(
+            &data,
+            table_schema,
+            column_order,
+            mysql_insert::RowExtraction::PkFk,
+        ) {
             Ok(r) => r,
             Err(_) => return,
         };
