@@ -285,6 +285,13 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
 <span class="sh-comment"># Data only (INSERT/COPY statements)</span>
 <span class="sh-tool">sql-splitter</span> split database.sql --data-only -o data/
 
+<span class="sh-comment"># Compressed output — one compressed file per table</span>
+<span class="sh-tool">sql-splitter</span> split database.sql -o tables/ --compress zstd
+
+<span class="sh-comment"># Single archive — all tables in one file (format from the extension)</span>
+<span class="sh-tool">sql-splitter</span> split database.sql -o dump.tar.gz
+<span class="sh-tool">sql-splitter</span> split database.sql -o dump.zip
+
 <span class="sh-comment"># Batch with glob patterns</span>
 <span class="sh-tool">sql-splitter</span> split "*.sql" -o output/ --fail-fast</code></pre>
             <button
@@ -581,7 +588,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
               <tr>
                 <td><code>--output</code></td>
                 <td><code>-o</code></td>
-                <td>Output directory</td>
+                <td>Output directory, or an archive path (<code>.tar.gz</code>, <code>.zip</code>, …)</td>
                 <td>output</td>
               </tr>
               <tr>
@@ -595,6 +602,12 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
                 <td><code>-t</code></td>
                 <td>Only split specific tables (comma-separated)</td>
                 <td>—</td>
+              </tr>
+              <tr>
+                <td><code>--compress</code></td>
+                <td>—</td>
+                <td>Compress each output file: gzip, zstd, bzip2, xz</td>
+                <td>none</td>
               </tr>
               <tr>
                 <td><code>--schema-only</code></td>
@@ -631,6 +644,18 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
           <p class="note">
             Input accepts glob patterns: <code>*.sql</code>,
             <code>dumps/**/*.sql</code>
+          </p>
+          <p class="note">
+            <strong>Output formats.</strong> Default is one plain
+            <code>&lt;table&gt;.sql</code> per table. <code>--compress</code>
+            writes one compressed file per table
+            (<code>&lt;table&gt;.sql.zst</code>, …), each compressed
+            independently and in parallel. Or point <code>-o</code> at an
+            archive (<code>.tar.gz</code>, <code>.tgz</code>,
+            <code>.tar.zst</code>, <code>.tar.bz2</code>, <code>.tar.xz</code>,
+            <code>.tar</code>, <code>.zip</code>) to pack every table into a
+            single file. Archive output takes a single input file, and
+            <code>--compress</code> applies only to directory output.
           </p>
         </article>
 
@@ -1465,7 +1490,10 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
             </div>
           </div>
           <p class="note">
-            Compressed files supported: .gz, .bz2, .xz, .zst (auto-detected)
+            Compressed input auto-detected: .gz, .bz2, .xz, .zst. Compressed
+            output for <code>split</code> too — per-file
+            (<code>--compress</code>) or a single <code>.tar.*</code>/<code>.zip</code>
+            archive.
           </p>
         </article>
 
@@ -1485,6 +1513,25 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
             <button
               class="copy-btn"
               data-copy="sql-splitter split dump.sql -o tables/ -p"
+            >
+              Copy
+            </button>
+          </div>
+
+          <h4>Compress / Archive Per-Table Output</h4>
+          <div class="code-block">
+            <pre><code><span class="sh-comment"># One compressed file per table (users.sql.zst, ...)</span>
+<span class="sh-tool">sql-splitter</span> split dump.sql -o tables/ --compress zstd
+
+<span class="sh-comment"># All tables in a single archive (format from the extension)</span>
+<span class="sh-tool">sql-splitter</span> split dump.sql -o dump.tar.gz
+<span class="sh-tool">sql-splitter</span> split dump.sql -o dump.zip
+
+<span class="sh-comment"># Inspect without extracting</span>
+<span class="sh-tool">tar</span> tzf dump.tar.gz</code></pre>
+            <button
+              class="copy-btn"
+              data-copy="sql-splitter split dump.sql -o dump.tar.gz"
             >
               Copy
             </button>
@@ -1649,7 +1696,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
               </tr>
               <tr>
                 <td>Compressed Files</td>
-                <td>gzip, bz2, xz, zstd</td>
+                <td>in &amp; out: gzip, bz2, xz, zstd · archives: tar.*, zip</td>
               </tr>
             </tbody>
           </table>
@@ -1673,7 +1720,8 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
               <tr>
                 <td><code>split</code></td>
                 <td>
-                  Split a large SQL dump into separate files, one per table
+                  Split a large SQL dump into separate files, one per table —
+                  optionally compressed, or packed into a single archive
                 </td>
               </tr>
               <tr>
@@ -1787,6 +1835,16 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
                 bzip2 (<code>.bz2</code>), xz (<code>.xz</code>), and zstd
                 (<code>.zst</code>). Pass compressed files directly to any
                 command.
+              </p>
+              <p>
+                For output, <code>split</code> can compress too. Use
+                <code>--compress gzip|zstd|bzip2|xz</code> to write one
+                compressed file per table (<code>users.sql.zst</code>, …), or
+                point <code>-o</code> at an archive path
+                (<code>dump.tar.gz</code>, <code>.tgz</code>,
+                <code>.tar.zst</code>, <code>.tar.bz2</code>,
+                <code>.tar.xz</code>, <code>.tar</code>, or <code>.zip</code>)
+                to pack every table into a single file.
               </p>
             </div>
           </details>

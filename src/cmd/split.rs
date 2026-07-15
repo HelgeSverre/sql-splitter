@@ -1,5 +1,7 @@
 use crate::parser::{detect_dialect_from_file, ContentFilter, DialectConfidence, SqlDialect};
 use crate::splitter::{Compression, Splitter};
+#[allow(unused_imports)]
+use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -78,8 +80,20 @@ pub fn run(
     data_only: bool,
     fail_fast: bool,
     json: bool,
+    compress: String,
 ) -> anyhow::Result<()> {
+    let out_compression = Compression::parse_output(&compress).map_err(|e| anyhow::anyhow!(e))?;
     let expanded = expand_file_pattern(&file)?;
+
+    #[cfg(feature = "archive")]
+    if expanded.files.len() > 1
+        && crate::archive::ArchiveFormat::from_output_path(&output).is_some()
+    {
+        anyhow::bail!(
+            "archive output (e.g. -o out.tar.gz) requires a single input file; the pattern matched {} files",
+            expanded.files.len()
+        );
+    }
 
     if expanded.files.len() == 1 {
         run_single(
@@ -93,6 +107,7 @@ pub fn run(
             schema_only,
             data_only,
             json,
+            out_compression,
         )
     } else {
         run_multi(
@@ -107,6 +122,7 @@ pub fn run(
             data_only,
             fail_fast,
             json,
+            out_compression,
         )
     }
 }
@@ -123,6 +139,7 @@ fn run_single(
     schema_only: bool,
     data_only: bool,
     json: bool,
+    out_compression: Compression,
 ) -> anyhow::Result<()> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
@@ -164,6 +181,48 @@ fn run_single(
         ContentFilter::All
     };
 
+    // Archive output? Inferred from the -o extension (e.g. `-o dump.tar.gz`).
+    #[cfg(feature = "archive")]
+    let archive_format = crate::archive::ArchiveFormat::from_output_path(&output);
+    let archive_label: Option<&'static str> = {
+        #[cfg(feature = "archive")]
+        {
+            archive_format.map(|f| f.label())
+        }
+        #[cfg(not(feature = "archive"))]
+        {
+            None
+        }
+    };
+    if archive_label.is_some() && out_compression != Compression::None {
+        anyhow::bail!(
+            "`--compress` applies to directory output; for an archive the format comes from the -o extension (e.g. -o out.tar.gz)"
+        );
+    }
+
+    // Archive mode spools the per-table files into a temp dir on the same
+    // filesystem as the target, then packs them; directory mode writes directly.
+    let spool = if archive_label.is_some() && !dry_run {
+        let parent = output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::fs::create_dir_all(&parent).ok();
+        Some(
+            tempfile::Builder::new()
+                .prefix(".sqlsplit-spool-")
+                .tempdir_in(&parent)
+                .context("creating spool directory for archive output")?,
+        )
+    } else {
+        None
+    };
+    let split_out_dir = spool
+        .as_ref()
+        .map(|d| d.path().to_path_buf())
+        .unwrap_or_else(|| output.clone());
+
     if !json {
         if dry_run {
             println!(
@@ -177,7 +236,18 @@ fn run_single(
                 file.display(),
                 file_size_mb
             );
-            println!("Output directory: {}", output.display());
+            if let Some(fmt) = archive_label {
+                println!("Output archive: {} ({})", output.display(), fmt);
+            } else {
+                println!("Output directory: {}", output.display());
+                if out_compression != Compression::None {
+                    println!(
+                        "Compressing output: {} (*.sql{})",
+                        out_compression,
+                        out_compression.output_extension()
+                    );
+                }
+            }
         }
 
         match content_filter {
@@ -196,10 +266,11 @@ fn run_single(
         println!("Filtering to tables: {}\n", table_filter.join(", "));
     }
 
-    let mut splitter = Splitter::new(file.clone(), output.clone())
+    let mut splitter = Splitter::new(file.clone(), split_out_dir.clone())
         .with_dialect(dialect_resolved)
         .with_dry_run(dry_run)
-        .with_content_filter(content_filter);
+        .with_content_filter(content_filter)
+        .with_output_compression(out_compression);
 
     if !table_filter.is_empty() {
         splitter = splitter.with_table_filter(table_filter);
@@ -234,6 +305,16 @@ fn run_single(
     } else {
         splitter.split()?
     };
+
+    // Archive mode: pack the spooled per-table files into the single archive,
+    // then the spool tempdir is removed when `spool` drops.
+    #[cfg(feature = "archive")]
+    if !dry_run {
+        if let (Some(fmt), Some(dir)) = (archive_format, spool.as_ref()) {
+            crate::archive::pack_directory(dir.path(), &output, fmt)
+                .with_context(|| format!("packing archive {}", output.display()))?;
+        }
+    }
 
     let elapsed = start_time.elapsed();
 
@@ -312,6 +393,7 @@ fn run_multi(
     data_only: bool,
     fail_fast: bool,
     json: bool,
+    out_compression: Compression,
 ) -> anyhow::Result<()> {
     let total = files.len();
     let mut result = MultiFileResult::new();
@@ -418,7 +500,8 @@ fn run_multi(
         let mut splitter = Splitter::new(file.clone(), output_dir.clone())
             .with_dialect(resolved_dialect)
             .with_dry_run(dry_run)
-            .with_content_filter(content_filter);
+            .with_content_filter(content_filter)
+            .with_output_compression(out_compression);
 
         if !table_filter.is_empty() {
             splitter = splitter.with_table_filter(table_filter);

@@ -123,6 +123,8 @@ impl WriterPool {
     }
 }
 
+use crate::splitter::Compression;
+
 /// Threshold at which a table's staging buffer is shipped to its writer thread.
 const STAGE_FLUSH: usize = 256 * 1024;
 
@@ -136,6 +138,83 @@ const STAGE_TOTAL_CAP: usize = 32 * 1024 * 1024;
 struct Chunk {
     table: Arc<str>,
     data: Vec<u8>,
+}
+
+/// A per-table output stream: a plain file, or a streaming compressor over one.
+/// Compressing per file keeps every output independent, so the writer pool
+/// still runs fully in parallel — and the compression work parallelizes with it.
+enum TableSink {
+    Raw(File),
+    #[cfg(feature = "compression")]
+    Gzip(flate2::write::GzEncoder<File>),
+    #[cfg(feature = "compression")]
+    Bzip2(bzip2::write::BzEncoder<File>),
+    #[cfg(feature = "compression")]
+    Xz(xz2::write::XzEncoder<File>),
+    #[cfg(feature = "compression")]
+    Zstd(zstd::stream::write::Encoder<'static, File>),
+}
+
+impl TableSink {
+    /// Create the `<table>.sql[.ext]` file and wrap it in the chosen encoder.
+    fn create(dir: &Path, table: &str, format: Compression) -> std::io::Result<Self> {
+        let path = dir.join(format!("{}.sql{}", table, format.output_extension()));
+        let file = File::create(&path)?;
+        Ok(match format {
+            Compression::None => TableSink::Raw(file),
+            #[cfg(feature = "compression")]
+            Compression::Gzip => TableSink::Gzip(flate2::write::GzEncoder::new(
+                file,
+                flate2::Compression::default(),
+            )),
+            #[cfg(feature = "compression")]
+            Compression::Bzip2 => TableSink::Bzip2(bzip2::write::BzEncoder::new(
+                file,
+                bzip2::Compression::default(),
+            )),
+            #[cfg(feature = "compression")]
+            Compression::Xz => TableSink::Xz(xz2::write::XzEncoder::new(file, 6)),
+            #[cfg(feature = "compression")]
+            Compression::Zstd => TableSink::Zstd(zstd::stream::write::Encoder::new(file, 3)?),
+            #[cfg(not(feature = "compression"))]
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "compressed output requires the `compression` feature",
+                ))
+            }
+        })
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            TableSink::Raw(f) => f.write_all(data),
+            #[cfg(feature = "compression")]
+            TableSink::Gzip(e) => e.write_all(data),
+            #[cfg(feature = "compression")]
+            TableSink::Bzip2(e) => e.write_all(data),
+            #[cfg(feature = "compression")]
+            TableSink::Xz(e) => e.write_all(data),
+            #[cfg(feature = "compression")]
+            TableSink::Zstd(e) => e.write_all(data),
+        }
+    }
+
+    /// Finalize the stream, flushing the compressor's epilogue (required for a
+    /// valid archive — especially zstd, which writes a frame footer).
+    fn finish(self) -> std::io::Result<()> {
+        match self {
+            TableSink::Raw(mut f) => f.flush(),
+            #[cfg(feature = "compression")]
+            TableSink::Gzip(e) => e.finish().map(|_| ()),
+            #[cfg(feature = "compression")]
+            TableSink::Bzip2(e) => e.finish().map(|_| ()),
+            #[cfg(feature = "compression")]
+            TableSink::Xz(e) => e.finish().map(|_| ()),
+            #[cfg(feature = "compression")]
+            TableSink::Zstd(e) => e.finish().map(|_| ()),
+        }
+    }
 }
 
 /// Parallel, pipelined writer pool.
@@ -160,9 +239,15 @@ pub struct ParallelWriters {
 }
 
 impl ParallelWriters {
-    /// Spawn `num_writers` writer threads targeting `output_dir`. `capacity` is
-    /// the per-shard channel depth (chunks in flight).
-    pub fn new(output_dir: PathBuf, num_writers: usize, capacity: usize) -> std::io::Result<Self> {
+    /// Spawn `num_writers` writer threads targeting `output_dir`, compressing
+    /// each per-table file with `format`. `capacity` is the per-shard channel
+    /// depth (chunks in flight).
+    pub fn new(
+        output_dir: PathBuf,
+        num_writers: usize,
+        capacity: usize,
+        format: Compression,
+    ) -> std::io::Result<Self> {
         fs::create_dir_all(&output_dir)?;
         let n = num_writers.max(1);
         let error_flag = Arc::new(AtomicBool::new(false));
@@ -173,7 +258,7 @@ impl ParallelWriters {
             senders.push(tx);
             let dir = output_dir.clone();
             let ef = Arc::clone(&error_flag);
-            handles.push(std::thread::spawn(move || writer_loop(rx, dir, ef)));
+            handles.push(std::thread::spawn(move || writer_loop(rx, dir, ef, format)));
         }
         Ok(Self {
             senders,
@@ -282,33 +367,42 @@ fn writer_loop(
     rx: Receiver<Chunk>,
     output_dir: PathBuf,
     error_flag: Arc<AtomicBool>,
+    format: Compression,
 ) -> std::io::Result<()> {
-    // Chunks are already ~256KB, so write straight to the file (each write is a
-    // large syscall) with no extra buffering layer.
-    let mut files: AHashMap<Arc<str>, File> = AHashMap::new();
+    // Chunks are already ~256KB, so write straight to the sink (each write is a
+    // large syscall / compressor input) with no extra buffering layer.
+    let mut sinks: AHashMap<Arc<str>, TableSink> = AHashMap::new();
     let mut first_err: Option<std::io::Error> = None;
 
     for chunk in rx {
         if first_err.is_some() {
             continue; // keep draining so the producer never blocks
         }
-        let file = match files.entry(Arc::clone(&chunk.table)) {
+        let sink = match sinks.entry(Arc::clone(&chunk.table)) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                let path = output_dir.join(format!("{}.sql", chunk.table));
-                match File::create(&path) {
-                    Ok(f) => e.insert(f),
-                    Err(err) => {
-                        error_flag.store(true, Ordering::Relaxed);
-                        first_err = Some(err);
-                        continue;
-                    }
+            Entry::Vacant(e) => match TableSink::create(&output_dir, &chunk.table, format) {
+                Ok(s) => e.insert(s),
+                Err(err) => {
+                    error_flag.store(true, Ordering::Relaxed);
+                    first_err = Some(err);
+                    continue;
                 }
-            }
+            },
         };
-        if let Err(err) = file.write_all(&chunk.data) {
+        if let Err(err) = sink.write_all(&chunk.data) {
             error_flag.store(true, Ordering::Relaxed);
             first_err = Some(err);
+        }
+    }
+
+    // Finalize every sink so compressor epilogues are flushed (best effort even
+    // after an error, so files close cleanly).
+    for (_, sink) in sinks.drain() {
+        if let Err(err) = sink.finish() {
+            error_flag.store(true, Ordering::Relaxed);
+            if first_err.is_none() {
+                first_err = Some(err);
+            }
         }
     }
 

@@ -1,4 +1,6 @@
 pub mod analyzer;
+#[cfg(feature = "archive")]
+pub mod archive;
 pub mod cmd;
 pub mod convert;
 pub mod differ;
