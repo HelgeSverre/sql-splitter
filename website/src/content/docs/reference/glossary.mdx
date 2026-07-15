@@ -159,7 +159,7 @@ The referencing table in a foreign key relationship—it contains the foreign ke
 
 Processing a dump file incrementally as it's read, rather than loading the entire file into memory.
 
-**Commands that stream (constant ~50MB memory):**
+**Commands that stream (bounded memory, independent of file size):**
 - `split`, `merge`, `convert`, `analyze`, `redact`
 
 **Commands that require more memory:**

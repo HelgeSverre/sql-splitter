@@ -252,7 +252,7 @@ RUN cargo build --release
 
 ### Memory Limits
 
-sql-splitter uses ~50MB constant memory regardless of file size, so you can set conservative limits:
+sql-splitter uses ~20–150 MB memory regardless of file size, so you can set conservative limits:
 
 ```bash
 docker run --rm \

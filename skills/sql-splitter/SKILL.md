@@ -48,6 +48,8 @@ sql-splitter split dump.sql --output tables/ --progress
 sql-splitter split dump.sql --tables users,orders --output tables/
 sql-splitter split dump.sql --schema-only --output schema/
 sql-splitter split dump.sql --data-only --output data/
+sql-splitter split dump.sql --compress zstd --output tables/   # <table>.sql.zst per table
+sql-splitter split dump.sql --output dump.tar.gz               # single archive (.tgz/.tar.zst/.tar.bz2/.tar.xz/.tar/.zip)
 ```
 
 ### merge
@@ -550,7 +552,7 @@ For running SQL queries on dump files without loading into a database:
 | Safe exploration       | `--dry-run --progress`           |
 | Reproducible sampling  | `--seed 42 --preserve-relations` |
 | Fast progress feedback | `--progress`                     |
-| Compressed output      | Pipe to `gzip -c` or `zstd -c`   |
+| Compressed output      | `split --compress gzip\|zstd\|bzip2\|xz`, or archive via `-o dump.tar.gz`/`.zip` |
 
 ---
 
@@ -575,7 +577,7 @@ sql-splitter convert dump.sql --from mssql --to mysql --output out.sql
 
 ### Large Files
 
-- sql-splitter uses constant ~50MB memory
+- sql-splitter uses ~20–150 MB memory, independent of file size
 - Downstream tools may be bottlenecks
 - Test with `sample` before full operations
 

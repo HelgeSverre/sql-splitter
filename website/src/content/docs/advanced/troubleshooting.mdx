@@ -80,7 +80,7 @@ sql-splitter analyze dump.sql --json | jq '.dialect'
 
 ### "memory allocation failed" or OOM killed
 
-This shouldn't happen with normal sql-splitter commands (they use ~50MB constant memory). If it does:
+This shouldn't happen with normal sql-splitter commands (they use ~20–150 MB, independent of file size). If it does:
 
 1. **Check for memory-intensive commands:** `validate` and `diff` with FK checks can use more memory on very large files.
 

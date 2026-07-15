@@ -28,7 +28,7 @@ sql-splitter processes files incrementally:
 4. Release memory
 5. Repeat
 
-Memory stays constant at ~50 MB regardless of file size.
+Memory stays bounded (~20–150 MB) regardless of file size.
 
 ## How It Works
 
@@ -64,13 +64,17 @@ Only the decompression buffer exists in memory, not the full file.
 
 ## Memory Profile
 
-| File Size | Memory Usage |
-| --------- | ------------ |
-| 10 MB     | ~50 MB       |
-| 100 MB    | ~50 MB       |
-| 1 GB      | ~50 MB       |
-| 10 GB     | ~50 MB       |
-| 100 GB    | ~50 MB       |
+Measured peak RSS for `split` (MySQL dumps, Apple M2 Max):
+
+| File Size          | Peak Memory |
+| ------------------ | ----------- |
+| 25 MB (10 tables)  | ~35 MB      |
+| 124 MB (10 tables) | ~19 MB      |
+| 260 MB (10 tables) | ~33 MB      |
+| 1 GB (100 tables)  | ~148 MB     |
+
+Peak memory tracks the table count and the largest single statement (a huge
+PostgreSQL `COPY` block must fit in memory), not the file size.
 
 ## Commands That Stream
 

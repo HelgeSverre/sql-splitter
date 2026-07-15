@@ -2,8 +2,8 @@
 
 > High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
 > MySQL/PostgreSQL/SQLite/MSSQL, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
-> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 600+ MB/s throughput
-> and constant ~50MB memory usage.
+> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with ~1 GB/s split throughput
+> and bounded memory usage independent of file size.
 
 sql-splitter is a **dump-first** tool: it operates on SQL dump files on disk (optionally compressed) rather than live
 database connections. It is designed to be **safe to automate** in scripts, CI pipelines, and AI-driven workflows.
@@ -302,6 +302,8 @@ sql-splitter split big_dump.sql \
 - `--tables`: Only split specific tables (comma-separated)
 - `--schema-only`: Only DDL (CREATE TABLE, indexes)
 - `--data-only`: Only DML (INSERT, COPY statements)
+- `--compress`: Compress each output file (gzip, zstd, bzip2, xz) — writes `<table>.sql.gz` etc.
+- Archive output: `-o dump.tar.gz` (also `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`, `.zip`) writes a single archive instead of a directory
 
 **Merge options:**
 
@@ -707,7 +709,7 @@ If commands fail with syntax errors or unknown keywords:
 
 ### Large File Handling
 
-- sql-splitter uses constant ~50MB memory regardless of file size
+- sql-splitter uses ~20–150 MB memory, independent of file size
 - Downstream tools (psql, mysql) may be bottlenecks
 - Consider `sample` for testing before full operations
 

@@ -8,7 +8,7 @@ import { Steps } from "@astrojs/starlight/components";
 This guide walks you through the most common sql-splitter workflow: splitting a dump into individual table files, editing them, and merging back.
 
 > [!TIP]
-> sql-splitter uses streaming I/O, handling files of any size with constant ~50MB memory.
+> sql-splitter uses streaming I/O, handling files of any size with bounded (~20–150 MB) memory.
 
 <Steps>
 

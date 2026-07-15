@@ -39,10 +39,10 @@ This document consolidates the strategic plan for integrating sql-splitter with 
 | Integration            | Effort  | Value           | Status              | Version  |
 | ---------------------- | ------- | --------------- | ------------------- | -------- |
 | **DuckDB (query)**     | ~~16h~~ | 🔥 Game-changer | ✅ **Shipped**       | v1.12.0  |
-| **DuckDB (Parquet)**   | 12h     | ⭐ High impact  | 🟡 Designed         | v1.17.0  |
-| **Great Expectations** | 16h     | ⭐ High impact  | 🟡 Designed         | v1.18.0  |
-| **Atlas**              | 20h     | ⭐ High impact  | 🟡 Designed         | v1.19.0  |
-| **dbt**                | 28h     | 🔥 Game-changer | 🟡 Designed         | v1.20.0  |
+| **DuckDB (Parquet)**   | 12h     | ⭐ High impact  | 🟡 Designed         | v1.20.0  |
+| **Great Expectations** | 16h     | ⭐ High impact  | 🟡 Designed         | v1.21.0  |
+| **Atlas**              | 20h     | ⭐ High impact  | 🟡 Designed         | v1.22.0  |
+| **dbt**                | 28h     | 🔥 Game-changer | 🟡 Designed         | v1.23.0  |
 
 **Total Remaining Effort**: 76 hours (~2 sprints)
 
@@ -84,7 +84,7 @@ sql-splitter query dump.sql "SELECT * FROM users WHERE age > 25"
 # Interactive REPL (✅ implemented)
 sql-splitter query dump.sql --interactive
 
-# Export to Parquet (❌ not yet — v1.17.0 target)
+# Export to Parquet (❌ not yet — v1.20.0 target)
 sql-splitter export dump.sql --format parquet -o data/
 ```
 
@@ -223,7 +223,7 @@ table "users" {
 ### Strategic Value
 
 - **Terraform for databases**: Rides IaC trend
-- **Complements migrate feature**: Extends v1.15.0 with formal schema versioning
+- **Complements migrate feature**: Extends the migrate feature (v1.18.0) with formal schema versioning
 - **GitOps enabler**: Schema in git, migrations automated
 
 ### Technical Deep Dive
@@ -461,20 +461,20 @@ psql staging < synthetic.sql
 | ------- | -------------------- | ------ | --------------- |
 | v1.12.0 | DuckDB query engine  | 16h    | ✅ **Shipped**  |
 
-### Phase 1: Foundation (v1.17.0 - v1.20.0)
+### Phase 1: Foundation (v1.20.0 - v1.23.0)
 
-> Note: v1.13.x shipped as maintenance/dep-bump releases (no new features). Core roadmap
-> features have been bumped +1 minor: v1.14.0 (Enum Conversion), v1.15.0 (Migrate),
-> v1.16.0 (DBML). These integrations follow after.
+> Note: v1.13.x/v1.14.x shipped as maintenance and polish releases. Core roadmap
+> features now sit at: v1.16.0 (Zip Input), v1.17.0 (Enum Conversion), v1.18.0 (Migrate),
+> v1.19.0 (DBML). These integrations follow after.
 
 **Timeline**: 2 months (76 hours remaining)
 
 | Version | Feature                        | Effort | Priority |
 | ------- | ------------------------------ | ------ | -------- |
-| v1.17.0 | DuckDB Parquet export          | 12h    | High     |
-| v1.18.0 | Great Expectations Integration | 16h    | High     |
-| v1.19.0 | Atlas Integration              | 20h    | High     |
-| v1.20.0 | dbt Integration                | 28h    | Critical |
+| v1.20.0 | DuckDB Parquet export          | 12h    | High     |
+| v1.21.0 | Great Expectations Integration | 16h    | High     |
+| v1.22.0 | Atlas Integration              | 20h    | High     |
+| v1.23.0 | dbt Integration                | 28h    | Critical |
 
 **Success Criteria**:
 
@@ -496,16 +496,16 @@ psql staging < synthetic.sql
 
 ---
 
-### Phase 2: Enhancements (v1.21.0 - v1.22.0)
+### Phase 2: Enhancements (v1.24.0 - v1.25.0)
 
 **Timeline**: 2 months (48 hours)
 
 | Version | Enhancement                                       | Effort |
 | ------- | ------------------------------------------------- | ------ |
-| v1.21.0 | GX native validator + suite diffing               | 16h    |
-| v1.22.0 | Atlas bidirectional sync + dbt incremental models | 32h    |
+| v1.24.0 | GX native validator + suite diffing               | 16h    |
+| v1.25.0 | Atlas bidirectional sync + dbt incremental models | 32h    |
 
-> Parquet export was moved to Phase 1 (v1.17.0) since it extends the already-shipped
+> Parquet export was moved to Phase 1 (v1.20.0) since it extends the already-shipped
 > DuckDB query engine and is the smallest remaining piece.
 
 **Goals**:
@@ -776,14 +776,14 @@ The four-integration strategy (**DuckDB, Great Expectations, Atlas, dbt**) trans
 
 1. ✅ **DuckDB query engine shipped** (v1.12.0)
 2. 🚀 **Ship v1.13.0 Enum Conversion first** (on core roadmap, see ROADMAP.md)
-3. 🚀 **Add Parquet export** (v1.17.0, extends existing DuckDB work)
+3. 🚀 **Add Parquet export** (v1.20.0, extends existing DuckDB work)
 4. 📢 **Early announcement** (build anticipation in dbt/data communities)
 5. 🧪 **Beta testing program** (get feedback before GA)
 6. 📊 **Track metrics** (measure adoption, iterate)
 
 ---
 
-**Strategic Vision**: By v1.20.0, sql-splitter becomes the **universal bridge** between legacy dumps and modern data infrastructure—essential for any team managing databases at scale.
+**Strategic Vision**: By v1.23.0, sql-splitter becomes the **universal bridge** between legacy dumps and modern data infrastructure—essential for any team managing databases at scale.
 
 ---
 

@@ -8,11 +8,11 @@
 
 Split large SQL dump files into individual table files. Fast, memory-efficient, multi-dialect.
 
-- **300+ MB/s** end-to-end throughput on large dumps (parser peaks ~470 MB/s; hardware-dependent)
+- **~1 GB/s** end-to-end split throughput on large dumps (0.8–1.4 GB/s across dialects on Apple M2 Max; hardware-dependent)
 - **MySQL, PostgreSQL, SQLite, MSSQL** support (including `COPY FROM stdin`, `GO` batches)
 - **Compressed files** — gzip, bzip2, xz, zstd auto-detected
 - **Streaming architecture** — handles files larger than RAM
-- **5x faster** than shell-based alternatives
+- **10x faster** than shell-based alternatives
 
 ## Installation
 
@@ -219,7 +219,7 @@ sql-splitter is a **dump-first, CLI-first** tool designed for automation and CI/
 | ------------------------------ | ---------------------------------------------------------------------------------- |
 | **One tool for the workflow**  | Split → sample → shard → convert → merge in a single binary                        |
 | **Works on dump files**        | No running database or JDBC connection needed (unlike mydumper, Jailer, Condenser) |
-| **Streaming architecture**     | 10GB+ dumps with constant memory, 300+ MB/s throughput (parser ~470 MB/s)          |
+| **Streaming architecture**     | 10GB+ dumps with bounded memory, ~1 GB/s split throughput                          |
 | **Multi-dialect + conversion** | MySQL, PostgreSQL, SQLite including `COPY FROM stdin` → INSERT                     |
 | **FK-aware operations**        | Sampling and tenant sharding preserve referential integrity                        |
 

@@ -4,6 +4,8 @@ target
 website
 docs
 docker
+# Dockerfile.benchmark needs this one script from docker/
+!docker/benchmark-runner.sh
 tests/fixtures/generated
 tests/data/generated
 tests/realworld

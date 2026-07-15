@@ -1,6 +1,6 @@
 # Migration Generation Feature Design
 
-**Status**: Planning (v1.15.0)
+**Status**: Planning (v1.18.0)
 **Date**: 2025-12-24
 **Priority**: High
 

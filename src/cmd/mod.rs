@@ -67,13 +67,15 @@ pub enum Commands {
   sql-splitter split dump.sql -o tables/
   sql-splitter split dump.sql.gz -o tables/ --tables users,orders
   sql-splitter split dump.sql -o schema/ --schema-only
+  sql-splitter split dump.sql -o tables/ --compress zstd
+  sql-splitter split dump.sql -o dump.tar.gz
   sql-splitter split \"backups/*.sql\" -o out/ --fail-fast")]
     Split {
         /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
         #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
         file: PathBuf,
 
-        /// Output directory for split files
+        /// Output directory, or archive path (.tar.gz/.tgz/.tar.zst/.tar.bz2/.tar.xz/.tar/.zip)
         #[arg(short, long, default_value = "output", value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
         output: PathBuf,
 

@@ -14,7 +14,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 - Works on dump files directly (no database connection required)
 - Streaming architecture handles 10GB+ dumps
 - Multi-dialect support (MySQL, PostgreSQL, SQLite, MSSQL)
-- ~300 MB/s end-to-end throughput (parser ~470 MB/s)
+- ~1 GB/s end-to-end split throughput
 - Embedded DuckDB for SQL analytics on dumps without import
 
 ---
@@ -42,8 +42,8 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 | Query (DuckDB SQL analytics)              | ✅ Implemented | v1.12.0 |
 | MSSQL support                             | ✅ Implemented | v1.12.x |
 | Enum type conversion (PG↔MySQL)           | 🟡 Planned     | v1.14.0 |
-| Migrate (schema migration generation)     | 🟡 Planned     | v1.15.0 |
-| DBML import/export                        | 🟡 Planned     | v1.16.0 |
+| Migrate (schema migration generation)     | 🟡 Planned     | v1.18.0 |
+| DBML import/export                        | 🟡 Planned     | v1.19.0 |
 
 ---
 
@@ -116,7 +116,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool                    | Language | Stars | MySQL | PostgreSQL | SQLite | Streaming | Notes                         |
 | ----------------------- | -------- | ----- | ----- | ---------- | ------ | --------- | ----------------------------- |
-| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.14.0, ~300 MB/s            |
+| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.15.0, ~1 GB/s            |
 | **nxs-data-anonymizer** | Go       | 271   | ✅    | ✅         | ❌     | ✅        | Go templates + Sprig          |
 | **pynonymizer**         | Python   | 109   | ✅    | ✅         | ❌     | ❌        | Faker integration, GDPR focus |
 | **myanon**              | C        | ~30   | ✅    | ❌         | ❌     | ✅        | stdin/stdout streaming        |
@@ -275,7 +275,7 @@ sql-splitter is now the only **streaming, file-based, multi-dialect** CLI with S
 4. **CLI-first** — DevOps/automation friendly, pipe-compatible
 5. **Multi-dialect** — MySQL, PostgreSQL, SQLite, MSSQL in one tool
 6. **FK-aware operations** — Sample and shard preserve referential integrity
-7. **Rust performance** — ~300 MB/s end-to-end (parser ~470 MB/s), faster than Python/Java alternatives
+7. **Rust performance** — ~1 GB/s end-to-end split, faster than Python/Java alternatives
 8. **Compression support** — gzip, bz2, xz, zstd auto-detected
 9. **Composable** — Split → Sample → Redact → Convert → Merge pipeline
 10. **Embedded analytics** — DuckDB-powered SQL queries on dumps without import (v1.12.0)
@@ -431,7 +431,7 @@ sql-splitter test dump.sql --config schema-tests.yaml
 
 ### Priorities
 
-1. **Complete v1.14–v1.16** — Enum, Migrate, DBML (planned core features)
+1. **Complete v1.17–v1.19** — Enum, Migrate, DBML (planned core features)
 2. **Quick wins** — Schema drift (16h), size optimization (12h), cost estimation (8h)
 3. **Differentiation** — Data quality profiling, compliance checks
 4. **Future** — AI integration for schema suggestions, natural language queries

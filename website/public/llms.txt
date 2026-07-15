@@ -2,8 +2,8 @@
 
 > High-performance CLI for working with SQL dump files: split/merge by table, analyze, convert between
 > MySQL/PostgreSQL/SQLite/MSSQL, validate integrity, create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
-> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with 300+ MB/s throughput
-> and constant ~50MB memory usage.
+> and reorder for safe imports. Optimized for automation, CI/CD, and large compressed dumps with ~1 GB/s split throughput
+> and bounded memory usage independent of file size.
 
 sql-splitter is a **dump-first** tool: it operates on SQL dump files on disk (optionally compressed) rather than live
 database connections. It is designed to be **safe to automate** in scripts, CI pipelines, and AI-driven workflows.
@@ -40,7 +40,7 @@ make install  # Installs binary + shell completions + man pages
 
 ```bash
 sql-splitter --version
-# sql-splitter 1.12.6
+# sql-splitter 1.14.1
 ```
 
 ## Commands Overview
@@ -59,6 +59,7 @@ sql-splitter --version
 | `graph`    | Generate ERD diagrams (HTML, DOT, Mermaid)| Schema visualization, documentation, onboarding   |
 | `order`    | Reorder dump in topological FK order      | Safe imports, cycle detection, DROP order         |
 | `query`    | Run SQL analytics on dumps with DuckDB    | Ad-hoc queries, data exploration, export results  |
+| `schema`   | Generate JSON schemas for --json outputs  | API integration, tooling, validation              |
 
 ## Universal Capabilities
 
@@ -274,7 +275,7 @@ sql-splitter sample tenant_12345.sql \
 
 ---
 
-## Workflow 6: Per-Table Editing
+## Workflow 5: Per-Table Editing
 
 **Goal:** Edit specific tables within a large dump.
 
@@ -301,6 +302,8 @@ sql-splitter split big_dump.sql \
 - `--tables`: Only split specific tables (comma-separated)
 - `--schema-only`: Only DDL (CREATE TABLE, indexes)
 - `--data-only`: Only DML (INSERT, COPY statements)
+- `--compress`: Compress each output file (gzip, zstd, bzip2, xz) — writes `<table>.sql.gz` etc.
+- Archive output: `-o dump.tar.gz` (also `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`, `.zip`) writes a single archive instead of a directory
 
 **Merge options:**
 
@@ -310,7 +313,7 @@ sql-splitter split big_dump.sql \
 
 ---
 
-## Workflow 7: Comparing SQL Dumps
+## Workflow 6: Comparing SQL Dumps
 
 **Goal:** Detect schema and data changes between two SQL dump files.
 
@@ -384,7 +387,7 @@ sql-splitter diff old.sql new.sql --allow-no-pk
 
 ---
 
-## Workflow 8: Data Anonymization for Dev/Testing
+## Workflow 7: Data Anonymization for Dev/Testing
 
 **Goal:** Anonymize sensitive PII data for safe sharing, development, or demo environments.
 
@@ -499,7 +502,7 @@ skip_tables:
 
 ---
 
-## Workflow 9: Schema Visualization and Import Order
+## Workflow 8: Schema Visualization and Import Order
 
 **Goal:** Generate ERD diagrams and ensure safe import order for dumps with FK dependencies.
 
@@ -663,6 +666,30 @@ sql-splitter query --clear-cache
 
 ---
 
+## JSON Schema Generation
+
+**Goal:** Generate JSON schemas for `--json` output formats (useful for API integration, validation, tooling).
+
+```bash
+# Generate all schemas to ./schemas directory
+sql-splitter schema
+
+# Generate schema for specific command
+sql-splitter schema --command analyze
+
+# List available schema names
+sql-splitter schema --list
+
+# Output to stdout (for piping)
+sql-splitter schema --stdout --command validate
+```
+
+**Available schemas:** analyze, convert, diff, graph, merge, order, redact, sample, shard, split, validate
+
+Schemas follow JSON Schema draft-07 and are generated from Rust types using `schemars`.
+
+---
+
 ## Error Handling for AI Agents
 
 ### Dialect Issues
@@ -682,7 +709,7 @@ If commands fail with syntax errors or unknown keywords:
 
 ### Large File Handling
 
-- sql-splitter uses constant ~50MB memory regardless of file size
+- sql-splitter uses ~20–150 MB memory, independent of file size
 - Downstream tools (psql, mysql) may be bottlenecks
 - Consider `sample` for testing before full operations
 
@@ -716,6 +743,7 @@ If commands fail with syntax errors or unknown keywords:
 - [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
 - [src/graph/](https://github.com/helgesverre/sql-splitter/tree/main/src/graph): ERD generation and graph analysis
 - [src/duckdb/](https://github.com/helgesverre/sql-splitter/tree/main/src/duckdb): DuckDB query engine integration
+- [schemas/](https://github.com/helgesverre/sql-splitter/tree/main/schemas): Generated JSON schemas for --json outputs
 
 ## Agent Skill Installation
 

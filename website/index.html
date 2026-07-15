@@ -6,7 +6,7 @@
     <title>sql-splitter - High-Performance SQL Dump Toolkit in Rust</title>
     <meta
       name="description"
-      content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files. MySQL, PostgreSQL, SQLite. Written in Rust."
+      content="Split, merge, convert, validate, sample, and shard SQL dump files at 1 GB/s. Memory-efficient streaming for gigabyte-scale files. MySQL, PostgreSQL, SQLite. Written in Rust."
     />
 
     <!-- OpenGraph -->
@@ -17,7 +17,7 @@
     />
     <meta
       property="og:description"
-      content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s. Memory-efficient streaming for gigabyte-scale files."
+      content="Split, merge, convert, validate, sample, and shard SQL dump files at 1 GB/s. Memory-efficient streaming for gigabyte-scale files."
     />
     <meta property="og:url" content="https://sql-splitter.dev" />
     <meta property="og:image" content="https://sql-splitter.dev/og-image.png" />
@@ -33,7 +33,7 @@
     />
     <meta
       name="twitter:description"
-      content="Split, merge, convert, validate, sample, and shard SQL dump files at 600+ MB/s."
+      content="Split, merge, convert, validate, sample, and shard SQL dump files at 1 GB/s."
     />
     <meta
       name="twitter:image"
@@ -102,7 +102,7 @@
           <span class="logo-icon">;</span>
           sql-splitter
         </h1>
-        <p class="subtitle">SQL dump toolkit at 600+ MB/s</p>
+        <p class="subtitle">SQL dump toolkit at 1 GB/s</p>
         <p class="description">
           Split, merge, convert, validate, sample, shard, diff, redact, and
           query SQL dump files. MySQL, PostgreSQL, and SQLite. Written in Rust.
@@ -131,12 +131,12 @@
           <div class="benefit">
             <div class="benefit-icon">~</div>
             <h3>Blazing Fast</h3>
-            <p>600+ MB/s throughput</p>
+            <p>~1 GB/s throughput</p>
           </div>
           <div class="benefit">
             <div class="benefit-icon">&lt;</div>
             <h3>Memory Efficient</h3>
-            <p>~50MB constant usage</p>
+            <p>~20–150 MB, size-independent</p>
           </div>
           <div class="benefit">
             <div class="benefit-icon">*</div>
@@ -1683,12 +1683,12 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
             </thead>
             <tbody>
               <tr>
-                <td>Parser Throughput</td>
-                <td>600+ MB/s</td>
+                <td>Split Throughput</td>
+                <td>~1 GB/s (0.8–1.4 GB/s across dialects)</td>
               </tr>
               <tr>
                 <td>Memory Usage</td>
-                <td>~50 MB constant</td>
+                <td>~20–150 MB, independent of file size</td>
               </tr>
               <tr>
                 <td>Cold Start</td>
@@ -1927,7 +1927,7 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
             <div class="details-content">
               <p>
                 Zero-cost abstractions, no garbage collection, and memory safety
-                enable 600+ MB/s throughput with constant memory usage
+                enable ~1 GB/s throughput with constant memory usage
                 regardless of file size.
               </p>
             </div>

@@ -107,7 +107,7 @@ test_tool() {
     local name="$1"
     local cmd="$2"
     local out_dir="$3"
-    local timeout_sec="${4:-60}"
+    local timeout_sec="${4:-600}"
 
     rm -rf "$out_dir" 2>/dev/null
     mkdir -p "$out_dir"
@@ -116,6 +116,9 @@ test_tool() {
 
     if timeout "$timeout_sec" bash -c "$cmd" > /dev/null 2>&1; then
         local count=$(ls -1 "$out_dir" 2>/dev/null | wc -l | tr -d ' ')
+        # Free the split output immediately — with multi-GB inputs, keeping
+        # every tool's output alive overflows the tmpfs workspace.
+        rm -rf "$out_dir" 2>/dev/null
         if [ "$count" -gt 0 ]; then
             echo -e "${GREEN}OK${NC} ($count files)"
             return 0
@@ -124,6 +127,7 @@ test_tool() {
             return 1
         fi
     else
+        rm -rf "$out_dir" 2>/dev/null
         echo -e "${RED}failed${NC}"
         return 1
     fi
@@ -152,19 +156,19 @@ test_tools() {
 
     if command -v mysqldumpsplit-go &>/dev/null; then
         test_tool "mysqldumpsplit-go (Go)" \
-            "timeout 30 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" \
+            "timeout 600 mysqldumpsplit-go -i '$sql_file' -o /tmp/test-go" \
             "/tmp/test-go" 30 || true
     fi
 
     if [ -x /usr/bin/mysqldumpsplit ]; then
         test_tool "mysqldumpsplit (Node.js)" \
-            "timeout 60 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" \
+            "timeout 600 /usr/bin/mysqldumpsplit -o /tmp/test-node '$sql_file'" \
             "/tmp/test-node" 60 || true
     fi
 
     if [ -x /usr/local/bin/mysql-dump-split.rb ]; then
         test_tool "mysql-dump-split.rb (Ruby)" \
-            "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" \
+            "cd /tmp/test-ruby && timeout 600 ruby /usr/local/bin/mysql-dump-split.rb '$sql_file'" \
             "/tmp/test-ruby/tables" 60 || true
     fi
 }
@@ -269,21 +273,21 @@ run_benchmark() {
 
     if [ -x /usr/local/bin/mysqldumpsplit-helgesverre ]; then
         mkdir -p /tmp/test-go
-        if test_tool "mysqldumpsplit (Go)" "timeout 30 /usr/local/bin/mysqldumpsplit-helgesverre -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
+        if test_tool "mysqldumpsplit (Go)" "timeout 600 /usr/local/bin/mysqldumpsplit-helgesverre -i '$sql_file' -o /tmp/test-go" "/tmp/test-go"; then
             working_tools+=("mysqldumpsplit (Go)|/usr/local/bin/mysqldumpsplit-helgesverre -i '$sql_file' -o /tmp/bench-go")
         fi
     fi
 
     if [ -x /usr/local/bin/mysqldumpsplit-node ]; then
         mkdir -p /tmp/test-node
-        if test_tool "mysqldumpsplit (Node.js)" "timeout 60 /usr/local/bin/mysqldumpsplit-node -o /tmp/test-node '$sql_file'" "/tmp/test-node"; then
+        if test_tool "mysqldumpsplit (Node.js)" "timeout 600 /usr/local/bin/mysqldumpsplit-node -o /tmp/test-node '$sql_file'" "/tmp/test-node"; then
             working_tools+=("mysqldumpsplit (Node.js)|/usr/local/bin/mysqldumpsplit-node -o /tmp/bench-node '$sql_file'")
         fi
     fi
 
     if [ -x /usr/local/bin/mysql-dump-split ]; then
         mkdir -p /tmp/test-ruby
-        if test_tool "mysql-dump-split (Ruby)" "cd /tmp/test-ruby && timeout 60 ruby /usr/local/bin/mysql-dump-split '$sql_file'" "/tmp/test-ruby/tables"; then
+        if test_tool "mysql-dump-split (Ruby)" "cd /tmp/test-ruby && timeout 600 ruby /usr/local/bin/mysql-dump-split '$sql_file'" "/tmp/test-ruby/tables"; then
             working_tools+=("mysql-dump-split (Ruby)|cd /tmp/bench-ruby && ruby /usr/local/bin/mysql-dump-split '$sql_file'")
         fi
     fi
@@ -291,7 +295,7 @@ run_benchmark() {
     if [ -x /usr/local/bin/extract-mysql-dump ]; then
         # extract-mysql-dump requires relative paths (no absolute paths with /)
         # Output goes to <basename>-extract directory automatically
-        if test_tool "extract-mysql-dump (Python)" "cd /tmp && cp '$sql_file' bench.sql && timeout 60 python3 /usr/local/bin/extract-mysql-dump bench.sql -x" "/tmp/bench-extract"; then
+        if test_tool "extract-mysql-dump (Python)" "cd /tmp && cp '$sql_file' bench.sql && timeout 600 python3 /usr/local/bin/extract-mysql-dump bench.sql -x" "/tmp/bench-extract"; then
             working_tools+=("extract-mysql-dump (Python)|cd /tmp && rm -rf bench-extract && cp '$sql_file' bench.sql && python3 /usr/local/bin/extract-mysql-dump bench.sql -x")
         fi
     fi
@@ -299,7 +303,7 @@ run_benchmark() {
     # Scoopit/mysqldump-splitter (Rust) - hierarchical output
     if [ -x /usr/local/bin/mysqldump-splitter-scoopit ]; then
         mkdir -p /tmp/test-scoopit
-        if test_tool "mysqldump-splitter (Rust/Scoopit)" "timeout 60 /usr/local/bin/mysqldump-splitter-scoopit -i '$sql_file' -o /tmp/test-scoopit" "/tmp/test-scoopit"; then
+        if test_tool "mysqldump-splitter (Rust/Scoopit)" "timeout 600 /usr/local/bin/mysqldump-splitter-scoopit -i '$sql_file' -o /tmp/test-scoopit" "/tmp/test-scoopit"; then
             working_tools+=("mysqldump-splitter (Rust/Scoopit)|/usr/local/bin/mysqldump-splitter-scoopit -i '$sql_file' -o /tmp/bench-scoopit")
         fi
     fi
@@ -307,7 +311,7 @@ run_benchmark() {
     # rafael-luigi-bekkema/mysql-dump-splitter (Go)
     if [ -x /usr/local/bin/mysqldumpsplit-bekkema ]; then
         mkdir -p /tmp/test-bekkema
-        if test_tool "mysql-dump-splitter (Go/Bekkema)" "timeout 60 /usr/local/bin/mysqldumpsplit-bekkema '$sql_file' -d /tmp/test-bekkema" "/tmp/test-bekkema"; then
+        if test_tool "mysql-dump-splitter (Go/Bekkema)" "timeout 600 /usr/local/bin/mysqldumpsplit-bekkema '$sql_file' -d /tmp/test-bekkema" "/tmp/test-bekkema"; then
             working_tools+=("mysql-dump-splitter (Go/Bekkema)|/usr/local/bin/mysqldumpsplit-bekkema '$sql_file' -d /tmp/bench-bekkema")
         fi
     fi
@@ -315,7 +319,7 @@ run_benchmark() {
     # sadreck/mysqldbsplit (PHP)
     if [ -x /usr/local/bin/mysqldbsplit ]; then
         mkdir -p /tmp/test-php
-        if test_tool "mysqldbsplit (PHP)" "timeout 60 php /usr/local/bin/mysqldbsplit --in '$sql_file' --out /tmp/test-php --force" "/tmp/test-php"; then
+        if test_tool "mysqldbsplit (PHP)" "timeout 600 php /usr/local/bin/mysqldbsplit --in '$sql_file' --out /tmp/test-php --force" "/tmp/test-php"; then
             working_tools+=("mysqldbsplit (PHP)|php /usr/local/bin/mysqldbsplit --in '$sql_file' --out /tmp/bench-php --force")
         fi
     fi
