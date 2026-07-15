@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-07-15
+
+### Added
+
+- **`split --compress gzip|zstd|bzip2|xz`** — per-table output files are streamed through independent compressors (`<table>.sql.gz` etc.), keeping the writer pool fully parallel. When compressing, the writer count defaults to all cores since the work is CPU-bound.
+- **Single-file archive output for `split`** — `-o dump.tar.gz` (also `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`, `.zip`) writes one archive of `<table>.sql` entries via a spool-then-pack model. New default-on `archive` Cargo feature (deps: `tar`, `zip`). `--compress` and archive output are mutually exclusive.
+
+### Fixed
+
+- **12 parser bugs from the dialect-parser review**, including an O(n²) rescan in the statement readers that made large single-statement dumps quadratic, MySQL `--` now only starting a comment when followed by whitespace/EOL (`a--b` is arithmetic), and a Postgres COPY empty line counting as a legitimate empty-string row for one-column tables.
+- **Dialect auto-detection is markedly more accurate** — generated MySQL dumps that previously misdetected as `mssql` (silently skipping FK validation in `validate`) now detect correctly.
+
+### Performance
+
+- **`split` is 2.4–4.4x faster** (parallel pipelined writers, no forced per-100-statement flush, memchr-based statement scanning): a 124 MB MySQL dump splits in ~120 ms (~1 GB/s) vs ~515 ms on v1.14.1; 0.8–1.4 GB/s across MySQL/PostgreSQL/SQLite on Apple M2 Max.
+- **`validate` ~2.3x faster, `analyze` ~2.9x faster, `sample` 1.4–1.6x, `redact`/`diff` ~2x** — allocation-lean row parsing (opt-in row extraction, shared column maps, borrow-not-copy COPY values). Postgres `sample` peak memory dropped 223 MB → 14 MB.
+- **Writer staging is bounded at 32 MB total** across all tables, so many-table dumps no longer stage `tables x 256 KB` (1000-table dump: 187 MB → 86 MB peak). Split output remains byte-identical; writer count/buffer overridable via `SQL_SPLITTER_WRITERS` / `SQL_SPLITTER_WRITE_BUF`.
+- Updated stated throughput in README, website, and competitive analysis from ~300 MB/s to ~1 GB/s to match the new measurements, and re-ran the full Docker competitor suite (sql-splitter is now the fastest tool at 100MB, 1GB, and 5GB).
+
+### Infrastructure
+
+- Fixed `.dockerignore` excluding `docker/`, which had broken the benchmark container build since May 2026; the benchmark runner now also cleans tool outputs between compatibility tests and uses 600s timeouts so multi-GB runs don't overflow the workspace or silently drop slow tools.
+- Roadmap: zip input support parked as v1.16.0 (investigated design in `docs/ROADMAP.md`); enum conversion, migrate, and DBML shifted +1 minor accordingly.
+
 ## [1.14.1] - 2026-07-14
 
 ### Changed
