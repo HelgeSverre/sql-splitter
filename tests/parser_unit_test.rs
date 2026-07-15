@@ -566,6 +566,46 @@ mod postgres_copy_tests {
         assert_eq!(rows[2].pk.as_ref().unwrap()[0], PkValue::Int(3));
     }
 
+    // #12: an empty line is a valid single empty-string row for a one-column
+    // text table, but is skipped for multi-column tables.
+    #[test]
+    fn test_empty_line_one_column_is_a_row() {
+        let mut schema = TableSchema::new("tags".to_string(), TableId(0));
+        schema.columns = vec![Column {
+            name: "label".to_string(),
+            col_type: ColumnType::Text,
+            ordinal: ColumnId(0),
+            is_primary_key: false,
+            is_nullable: true,
+        }];
+
+        let data = b"a\n\nb\n\\.\n";
+        let rows = parse_postgres_copy_rows(data, &schema, vec!["label".to_string()]).unwrap();
+        assert_eq!(
+            rows.len(),
+            3,
+            "empty line should be a row for a 1-col table"
+        );
+        assert_eq!(rows[1].all_values[0], PkValue::Text("".into()));
+    }
+
+    #[test]
+    fn test_empty_line_multi_column_skipped() {
+        let schema = create_simple_schema();
+        let data = b"1\tAlice\t5\n\n2\tBob\t5\n\\.\n";
+        let rows = parse_postgres_copy_rows(
+            data,
+            &schema,
+            vec![
+                "id".to_string(),
+                "name".to_string(),
+                "company_id".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2, "empty line should be skipped for multi-col");
+    }
+
     #[test]
     fn test_parse_null_values() {
         let data = b"1\t\\N\t\\N\n";

@@ -492,7 +492,7 @@ impl<R: Read> Parser<R> {
         // Lookup table of bytes that are significant outside strings/comments;
         // everything else can be skipped in a tight loop.
         let mut sig = [false; 256];
-        for &c in &[b';', b'\'', b'"', b'-', b'/'] {
+        for &c in b";'\"-/" {
             sig[c as usize] = true;
         }
         if is_mysql {
@@ -612,6 +612,34 @@ impl<R: Read> Parser<R> {
                     if b == b'-' {
                         match self.buf.get(i + 1) {
                             Some(b'-') => {
+                                // MySQL requires whitespace/EOL after `--` for it
+                                // to be a comment; `a--b` is arithmetic. Other
+                                // dialects always treat `--` as a comment.
+                                if is_mysql {
+                                    match self.buf.get(i + 2) {
+                                        Some(&c)
+                                            if c == b' '
+                                                || c == b'\t'
+                                                || c == b'\n'
+                                                || c == b'\r' =>
+                                        {
+                                            in_line_comment = true;
+                                            i += 2;
+                                            continue;
+                                        }
+                                        None if at_eof => {
+                                            in_line_comment = true;
+                                            i += 2;
+                                            continue;
+                                        }
+                                        None => break 'scan,
+                                        // `--x`: not a comment, just consume one `-`.
+                                        Some(_) => {
+                                            i += 1;
+                                            continue;
+                                        }
+                                    }
+                                }
                                 in_line_comment = true;
                                 i += 2;
                                 continue;

@@ -241,6 +241,83 @@ pub(crate) fn extract_column_list_before(stmt: &[u8], values_pos: usize) -> Opti
     }
 }
 
+/// Extract PK tuple, FK tuples and all column values from one parsed row,
+/// shared by the INSERT and COPY parsers. `to_pk` converts a dialect-specific
+/// value into a [`PkValue`]; `column_order` maps value index -> column, and
+/// `col_to_value` is its precomputed inverse (schema ordinal -> value index).
+#[allow(clippy::type_complexity)]
+pub(crate) fn extract_pk_fk_generic<V>(
+    values: &[V],
+    schema: &TableSchema,
+    column_order: &[Option<ColumnId>],
+    col_to_value: &[Option<usize>],
+    to_pk: impl Fn(&V, Option<&crate::schema::Column>) -> PkValue,
+) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
+    // All column values, in value order.
+    let all_values: Vec<PkValue> = values
+        .iter()
+        .enumerate()
+        .map(|(idx, v)| {
+            let col = column_order
+                .get(idx)
+                .and_then(|c| *c)
+                .and_then(|id| schema.column(id));
+            to_pk(v, col)
+        })
+        .collect();
+
+    // PK from columns marked primary key.
+    let mut pk_values = PkTuple::new();
+    for (idx, col_id_opt) in column_order.iter().enumerate() {
+        if let Some(col_id) = col_id_opt {
+            if schema.is_pk_column(*col_id) {
+                if let Some(value) = values.get(idx) {
+                    pk_values.push(to_pk(value, schema.column(*col_id)));
+                }
+            }
+        }
+    }
+
+    // FK tuples (only when every FK column is non-NULL).
+    let mut fk_values = Vec::new();
+    for (fk_idx, fk) in schema.foreign_keys.iter().enumerate() {
+        if fk.referenced_table_id.is_none() {
+            continue;
+        }
+        let mut fk_tuple = PkTuple::new();
+        let mut all_non_null = true;
+        for &col_id in &fk.columns {
+            if let Some(idx) = col_to_value.get(col_id.0 as usize).copied().flatten() {
+                if let Some(value) = values.get(idx) {
+                    let pk_val = to_pk(value, schema.column(col_id));
+                    if pk_val.is_null() {
+                        all_non_null = false;
+                        break;
+                    }
+                    fk_tuple.push(pk_val);
+                }
+            }
+        }
+        if all_non_null && !fk_tuple.is_empty() {
+            fk_values.push((
+                FkRef {
+                    table_id: schema.id.0,
+                    fk_index: fk_idx as u16,
+                },
+                fk_tuple,
+            ));
+        }
+    }
+
+    let pk = if pk_values.is_empty() || pk_values.iter().any(|v| v.is_null()) {
+        None
+    } else {
+        Some(pk_values)
+    };
+
+    (pk, fk_values, all_values)
+}
+
 /// Parser for MySQL INSERT statements
 pub struct InsertParser<'a> {
     stmt: &'a [u8],
@@ -635,76 +712,13 @@ impl<'a> InsertParser<'a> {
         values: &[ParsedValue],
         schema: &TableSchema,
     ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
-        let mut pk_values = PkTuple::new();
-        let mut fk_values = Vec::new();
-
-        // Build all_values: convert each value to PkValue
-        let all_values: Vec<PkValue> = values
-            .iter()
-            .enumerate()
-            .map(|(idx, v)| {
-                let col = self
-                    .column_order
-                    .get(idx)
-                    .and_then(|c| *c)
-                    .and_then(|id| schema.column(id));
-                self.value_to_pk(v, col)
-            })
-            .collect();
-
-        // Build PK from columns marked as primary key
-        for (idx, col_id_opt) in self.column_order.iter().enumerate() {
-            if let Some(col_id) = col_id_opt {
-                if schema.is_pk_column(*col_id) {
-                    if let Some(value) = values.get(idx) {
-                        let pk_val = self.value_to_pk(value, schema.column(*col_id));
-                        pk_values.push(pk_val);
-                    }
-                }
-            }
-        }
-
-        // Build FK tuples
-        for (fk_idx, fk) in schema.foreign_keys.iter().enumerate() {
-            if fk.referenced_table_id.is_none() {
-                continue;
-            }
-
-            let mut fk_tuple = PkTuple::new();
-            let mut all_non_null = true;
-
-            for &col_id in &fk.columns {
-                // Find the value index for this column via the precomputed map.
-                if let Some(idx) = self.col_to_value.get(col_id.0 as usize).copied().flatten() {
-                    if let Some(value) = values.get(idx) {
-                        let pk_val = self.value_to_pk(value, schema.column(col_id));
-                        if pk_val.is_null() {
-                            all_non_null = false;
-                            break;
-                        }
-                        fk_tuple.push(pk_val);
-                    }
-                }
-            }
-
-            if all_non_null && !fk_tuple.is_empty() {
-                fk_values.push((
-                    FkRef {
-                        table_id: schema.id.0,
-                        fk_index: fk_idx as u16,
-                    },
-                    fk_tuple,
-                ));
-            }
-        }
-
-        let pk = if pk_values.is_empty() || pk_values.iter().any(|v| v.is_null()) {
-            None
-        } else {
-            Some(pk_values)
-        };
-
-        (pk, fk_values, all_values)
+        extract_pk_fk_generic(
+            values,
+            schema,
+            &self.column_order,
+            &self.col_to_value,
+            |v, col| self.value_to_pk(v, col),
+        )
     }
 
     /// The schema-column-ordinal -> value-index map, precomputed once per

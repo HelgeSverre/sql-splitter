@@ -102,14 +102,19 @@ impl<'a> CopyParser<'a> {
             self.col_to_value = map;
         }
 
+        // An empty line is a legitimate single empty-string value only for a
+        // one-column table; for anything else it's padding and is skipped.
+        let empty_line_is_row = self
+            .table_schema
+            .map(|s| s.columns.len() == 1)
+            .unwrap_or(false);
+
         let mut rows = Vec::new();
         let mut pos = 0;
 
         while pos < self.data.len() {
             // Find end of line
-            let line_end = self.data[pos..]
-                .iter()
-                .position(|&b| b == b'\n')
+            let line_end = memchr::memchr(b'\n', &self.data[pos..])
                 .map(|p| pos + p)
                 .unwrap_or(self.data.len());
 
@@ -120,8 +125,8 @@ impl<'a> CopyParser<'a> {
                 line = &line[..line.len() - 1];
             }
 
-            // Check for terminator
-            if line == b"\\." || line.is_empty() {
+            // Check for terminator / skippable blank line
+            if line == b"\\." || (line.is_empty() && !empty_line_is_row) {
                 pos = line_end + 1;
                 continue;
             }
@@ -261,75 +266,13 @@ impl<'a> CopyParser<'a> {
         values: &[CopyValue],
         schema: &TableSchema,
     ) -> (Option<PkTuple>, Vec<(FkRef, PkTuple)>, Vec<PkValue>) {
-        let mut pk_values = PkTuple::new();
-        let mut fk_values = Vec::new();
-
-        // Build all_values: convert each value to PkValue
-        let all_values: Vec<PkValue> = values
-            .iter()
-            .enumerate()
-            .map(|(idx, v)| {
-                let col = self
-                    .column_order
-                    .get(idx)
-                    .and_then(|c| *c)
-                    .and_then(|id| schema.column(id));
-                self.value_to_pk(v, col)
-            })
-            .collect();
-
-        // Build PK from columns marked as primary key
-        for (idx, col_id_opt) in self.column_order.iter().enumerate() {
-            if let Some(col_id) = col_id_opt {
-                if schema.is_pk_column(*col_id) {
-                    if let Some(value) = values.get(idx) {
-                        let pk_val = self.value_to_pk(value, schema.column(*col_id));
-                        pk_values.push(pk_val);
-                    }
-                }
-            }
-        }
-
-        // Build FK tuples
-        for (fk_idx, fk) in schema.foreign_keys.iter().enumerate() {
-            if fk.referenced_table_id.is_none() {
-                continue;
-            }
-
-            let mut fk_tuple = PkTuple::new();
-            let mut all_non_null = true;
-
-            for &col_id in &fk.columns {
-                if let Some(idx) = self.col_to_value.get(col_id.0 as usize).copied().flatten() {
-                    if let Some(value) = values.get(idx) {
-                        let pk_val = self.value_to_pk(value, schema.column(col_id));
-                        if pk_val.is_null() {
-                            all_non_null = false;
-                            break;
-                        }
-                        fk_tuple.push(pk_val);
-                    }
-                }
-            }
-
-            if all_non_null && !fk_tuple.is_empty() {
-                fk_values.push((
-                    FkRef {
-                        table_id: schema.id.0,
-                        fk_index: fk_idx as u16,
-                    },
-                    fk_tuple,
-                ));
-            }
-        }
-
-        let pk = if pk_values.is_empty() || pk_values.iter().any(|v| v.is_null()) {
-            None
-        } else {
-            Some(pk_values)
-        };
-
-        (pk, fk_values, all_values)
+        super::mysql_insert::extract_pk_fk_generic(
+            values,
+            schema,
+            &self.column_order,
+            &self.col_to_value,
+            |v, col| self.value_to_pk(v, col),
+        )
     }
 
     /// Convert a parsed value to a PkValue

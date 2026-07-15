@@ -177,6 +177,31 @@ fn regr_double_quote_in_expression_value() {
     }
 }
 
+// #12: MySQL treats `a--b` as arithmetic, not a comment (needs whitespace
+// after `--`), so an interior ';' still terminates.
+#[test]
+fn bug12_mysql_double_dash_arithmetic() {
+    let sql = b"SELECT 1--2;\nSELECT 3;";
+    let stmts = read_all(sql, SqlDialect::MySql, 1024);
+    assert_eq!(stmts.len(), 2, "`--2;` wrongly treated as a comment");
+    assert_eq!(stmts[0], b"SELECT 1--2;");
+}
+
+#[test]
+fn bug12_mysql_double_dash_comment_with_space_still_works() {
+    let sql = b"SELECT 1 -- c ; still comment\n, 2;";
+    let stmts = read_all(sql, SqlDialect::MySql, 1024);
+    assert_eq!(stmts.len(), 1, "`-- ` comment not honored");
+}
+
+#[test]
+fn bug12_postgres_double_dash_always_comment() {
+    // In Postgres `--` is always a comment regardless of the next char.
+    let sql = b"SELECT 1--2 ; still comment\n;";
+    let stmts = read_all(sql, SqlDialect::Postgres, 1024);
+    assert_eq!(stmts.len(), 1);
+}
+
 // Bug #6 worst-case: dollar-quote close tag straddling boundary is recognized.
 #[test]
 fn bug6_dollar_close_straddling_boundary() {
