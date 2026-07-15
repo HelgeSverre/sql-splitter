@@ -86,66 +86,53 @@ struct DialectScore {
 pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
     let mut score = DialectScore::default();
 
-    // High confidence markers (+10)
-    if contains_bytes(header, b"pg_dump") {
-        score.postgres += 10;
-    }
-    if contains_bytes(header, b"PostgreSQL database dump") {
-        score.postgres += 10;
-    }
-    if contains_bytes(header, b"MySQL dump") {
-        score.mysql += 10;
-    }
-    if contains_bytes(header, b"MariaDB dump") {
-        score.mysql += 10;
-    }
-    if contains_bytes(header, b"SQLite") {
-        score.sqlite += 10;
+    // Simple "substring present => add weight to a dialect" markers. Confidence
+    // is encoded by the weight: 20/10 = high, 5 = medium, 2 = low.
+    const MARKERS: &[(&[u8], SqlDialect, u32)] = &[
+        (b"pg_dump", SqlDialect::Postgres, 10),
+        (b"PostgreSQL database dump", SqlDialect::Postgres, 10),
+        (b"MySQL dump", SqlDialect::MySql, 10),
+        (b"MariaDB dump", SqlDialect::MySql, 10),
+        (b"SQLite", SqlDialect::Sqlite, 10),
+        (b"search_path", SqlDialect::Postgres, 5),
+        (b"LOCK TABLES", SqlDialect::MySql, 5),
+        (b"PRAGMA", SqlDialect::Sqlite, 5),
+        (b"CREATE EXTENSION", SqlDialect::Postgres, 2),
+        // BEGIN TRANSACTION is generic ANSI SQL, only slightly suggests SQLite
+        (b"BEGIN TRANSACTION", SqlDialect::Sqlite, 2),
+        (b"SET ANSI_NULLS", SqlDialect::Mssql, 20),
+        (b"SET QUOTED_IDENTIFIER", SqlDialect::Mssql, 20),
+        (b"IDENTITY(", SqlDialect::Mssql, 10),
+        (b"ON [PRIMARY]", SqlDialect::Mssql, 10),
+        (b"NVARCHAR", SqlDialect::Mssql, 5),
+        (b"CLUSTERED", SqlDialect::Mssql, 5),
+        (b"SET NOCOUNT", SqlDialect::Mssql, 5),
+    ];
+    for &(needle, dialect, weight) in MARKERS {
+        if contains_bytes(header, needle) {
+            match dialect {
+                SqlDialect::MySql => score.mysql += weight,
+                SqlDialect::Postgres => score.postgres += weight,
+                SqlDialect::Sqlite => score.sqlite += weight,
+                SqlDialect::Mssql => score.mssql += weight,
+            }
+        }
     }
 
-    // Medium confidence markers (+5)
+    // Compound / structural markers that don't fit the simple table.
     if contains_bytes(header, b"COPY ") && contains_bytes(header, b"FROM stdin") {
-        score.postgres += 5;
-    }
-    if contains_bytes(header, b"search_path") {
         score.postgres += 5;
     }
     if contains_bytes(header, b"/*!40") || contains_bytes(header, b"/*!50") {
         score.mysql += 5;
     }
-    if contains_bytes(header, b"LOCK TABLES") {
-        score.mysql += 5;
-    }
-    if contains_bytes(header, b"PRAGMA") {
-        score.sqlite += 5;
-    }
-
-    // Low confidence markers (+2)
     if contains_bytes(header, b"$$") {
         score.postgres += 2;
-    }
-    if contains_bytes(header, b"CREATE EXTENSION") {
-        score.postgres += 2;
-    }
-    // BEGIN TRANSACTION is generic ANSI SQL, only slightly suggests SQLite
-    if contains_bytes(header, b"BEGIN TRANSACTION") {
-        score.sqlite += 2;
     }
     // Backticks suggest MySQL (could also appear in data/comments)
     if header.contains(&b'`') {
         score.mysql += 2;
     }
-
-    // MSSQL/T-SQL markers
-    // High confidence markers (+20)
-    if contains_bytes(header, b"SET ANSI_NULLS") {
-        score.mssql += 20;
-    }
-    if contains_bytes(header, b"SET QUOTED_IDENTIFIER") {
-        score.mssql += 20;
-    }
-
-    // Medium confidence markers (+10-15)
     // GO as batch separator on its own line (check for common patterns)
     if contains_bytes(header, b"\nGO\n") || contains_bytes(header, b"\nGO\r\n") {
         score.mssql += 15;
@@ -185,14 +172,7 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
             score.postgres += 2;
         }
     }
-    if contains_bytes(header, b"IDENTITY(") {
-        score.mssql += 10;
-    }
-    if contains_bytes(header, b"ON [PRIMARY]") {
-        score.mssql += 10;
-    }
 
-    // Low confidence markers (+5)
     // N'unicode' literal — require a non-word char before N so ordinary data
     // ending in N before a quote (e.g. ...JOHN') doesn't score MSSQL (bug #9).
     {
@@ -208,15 +188,6 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
             }
             k += 1;
         }
-    }
-    if contains_bytes(header, b"NVARCHAR") {
-        score.mssql += 5;
-    }
-    if contains_bytes(header, b"CLUSTERED") {
-        score.mssql += 5;
-    }
-    if contains_bytes(header, b"SET NOCOUNT") {
-        score.mssql += 5;
     }
 
     // Determine winner and confidence
