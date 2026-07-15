@@ -413,12 +413,14 @@ pub struct Parser<R: Read> {
     dialect: SqlDialect,
     /// For PostgreSQL: true when reading COPY data block
     in_copy_data: bool,
-    /// Bytes read ahead from the reader that belong to the next statement
-    /// (everything after a `;`/GO terminator on the last processed chunk).
-    /// The scanners always consume whole `fill_buf` chunks so multi-byte
-    /// tokens can never straddle an internal buffer boundary; the unused tail
-    /// is carried here instead of relying on `BufReader`'s consume cursor.
-    pending: Vec<u8>,
+    /// Accumulated, not-yet-returned input. The scanners read whole `fill_buf`
+    /// chunks into `buf` and scan it with an index cursor, so a multi-byte
+    /// token (`--`, `/* */`, `$tag$`, `]]`) can never straddle an internal
+    /// buffer boundary. `buf_pos` is the start of the next statement to return;
+    /// bytes before it are already-returned and are dropped on the next refill
+    /// (never per-statement) so scanning stays O(n) rather than O(n²).
+    buf: Vec<u8>,
+    buf_pos: usize,
 }
 
 impl<R: Read> Parser<R> {
@@ -432,8 +434,27 @@ impl<R: Read> Parser<R> {
             reader: BufReader::with_capacity(buffer_size, reader),
             dialect,
             in_copy_data: false,
-            pending: Vec::new(),
+            buf: Vec::new(),
+            buf_pos: 0,
         }
+    }
+
+    /// Drop the already-returned prefix `buf[..keep_from]` and append the next
+    /// `fill_buf` chunk. Returns `(bytes_removed_from_front, got_more_data)`.
+    /// Callers subtract `bytes_removed_from_front` from their scan indices.
+    #[inline]
+    fn grow_buffer(&mut self, keep_from: usize) -> std::io::Result<(usize, bool)> {
+        if keep_from > 0 {
+            self.buf.drain(..keep_from);
+        }
+        let chunk = self.reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok((keep_from, false));
+        }
+        self.buf.extend_from_slice(chunk);
+        let n = chunk.len();
+        self.reader.consume(n);
+        Ok((keep_from, true))
     }
 
     pub fn read_statement(&mut self) -> std::io::Result<Option<Vec<u8>>> {
@@ -450,13 +471,13 @@ impl<R: Read> Parser<R> {
         let is_mysql = self.dialect == SqlDialect::MySql;
         let is_postgres = self.dialect == SqlDialect::Postgres;
 
-        // Accumulate the whole statement (including any read-ahead tail left over
-        // from the previous statement) in `work`. Whole `fill_buf` chunks are
-        // consumed eagerly and appended to `work`, so a multi-byte token (`--`,
-        // `/* */`, `$tag$`) can never straddle a chunk boundary: the scan simply
-        // waits for more bytes with the state (`i`, quote/comment flags) intact.
-        let mut work = std::mem::take(&mut self.pending);
-        let mut i = 0;
+        // Scan `self.buf` from the current statement start with an index cursor.
+        // More data is appended by `grow_buffer` (which also drops already-
+        // returned statements), so a multi-byte token (`--`, `/* */`, `$tag$`)
+        // never straddles a chunk boundary: the scan waits for more bytes with
+        // its state (`i`, quote/comment flags) intact.
+        let mut start = self.buf_pos;
+        let mut i = self.buf_pos;
 
         let mut inside_single_quote = false;
         let mut inside_double_quote = false;
@@ -469,13 +490,13 @@ impl<R: Read> Parser<R> {
         let mut at_eof = false;
 
         loop {
-            'scan: while i < work.len() {
-                let b = work[i];
+            'scan: while i < self.buf.len() {
+                let b = self.buf[i];
 
                 // Inside a /* */ block comment: only the closing */ ends it.
                 if in_block_comment {
                     if b == b'*' {
-                        match work.get(i + 1) {
+                        match self.buf.get(i + 1) {
                             Some(b'/') => {
                                 in_block_comment = false;
                                 i += 2;
@@ -527,7 +548,7 @@ impl<R: Read> Parser<R> {
                 if !inside_string {
                     // -- line comment
                     if b == b'-' {
-                        match work.get(i + 1) {
+                        match self.buf.get(i + 1) {
                             Some(b'-') => {
                                 in_line_comment = true;
                                 i += 2;
@@ -552,7 +573,7 @@ impl<R: Read> Parser<R> {
                     }
                     // /* block comment
                     if b == b'/' {
-                        match work.get(i + 1) {
+                        match self.buf.get(i + 1) {
                             Some(b'*') => {
                                 in_block_comment = true;
                                 i += 2;
@@ -574,9 +595,9 @@ impl<R: Read> Parser<R> {
                 // PostgreSQL dollar-quoting (outside other quotes).
                 if is_postgres && !inside_single_quote && !inside_double_quote && !inside_backtick {
                     if b == b'$' && !in_dollar_quote {
-                        match work[i + 1..].iter().position(|&c| c == b'$') {
+                        match self.buf[i + 1..].iter().position(|&c| c == b'$') {
                             Some(end) => {
-                                let tag_bytes = &work[i + 1..i + 1 + end];
+                                let tag_bytes = &self.buf[i + 1..i + 1 + end];
                                 if is_valid_dollar_tag(tag_bytes) {
                                     dollar_tag = tag_bytes.to_vec();
                                     in_dollar_quote = true;
@@ -598,9 +619,9 @@ impl<R: Read> Parser<R> {
                         }
                     } else if b == b'$' && in_dollar_quote {
                         let tag_len = dollar_tag.len();
-                        if i + 1 + tag_len < work.len() {
-                            if work[i + 1..i + 1 + tag_len] == dollar_tag[..]
-                                && work[i + 1 + tag_len] == b'$'
+                        if i + 1 + tag_len < self.buf.len() {
+                            if self.buf[i + 1..i + 1 + tag_len] == dollar_tag[..]
+                                && self.buf[i + 1 + tag_len] == b'$'
                             {
                                 in_dollar_quote = false;
                                 dollar_tag.clear();
@@ -631,10 +652,10 @@ impl<R: Read> Parser<R> {
                 {
                     inside_backtick = !inside_backtick;
                 } else if b == b';' && !inside_string {
-                    // Statement terminator. Everything after it is read-ahead
-                    // belonging to the next statement.
-                    let result: Vec<u8> = work.drain(..=i).collect();
-                    self.pending = work;
+                    // Statement terminator. The bytes after it stay in `buf` and
+                    // become the next statement (buf_pos advances, no shifting).
+                    let result = self.buf[start..=i].to_vec();
+                    self.buf_pos = i + 1;
 
                     if is_postgres && self.is_copy_from_stdin(&result) {
                         self.in_copy_data = true;
@@ -646,22 +667,23 @@ impl<R: Read> Parser<R> {
             }
 
             if at_eof {
-                if work.is_empty() {
+                if start >= self.buf.len() {
                     return Ok(None);
                 }
-                return Ok(Some(work));
+                let result = self.buf[start..].to_vec();
+                self.buf_pos = self.buf.len();
+                return Ok(Some(result));
             }
 
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
-                // Re-scan the remaining bytes one last time with at_eof set so
-                // any incomplete token at the tail is treated literally.
+            // Need more bytes. Drop already-returned statements before `start`.
+            let (removed, got_more) = self.grow_buffer(start)?;
+            start -= removed;
+            i -= removed;
+            if !got_more {
+                // Re-scan the remaining bytes once more with at_eof set so any
+                // incomplete token at the tail is treated literally.
                 at_eof = true;
-                continue;
             }
-            work.extend_from_slice(buf);
-            let len = buf.len();
-            self.reader.consume(len);
         }
     }
 
@@ -711,44 +733,46 @@ impl<R: Read> Parser<R> {
     /// very large table. This is intentional: downstream consumers (redact,
     /// diff, sample) operate on a full block at a time.
     fn read_copy_data(&mut self) -> std::io::Result<Option<Vec<u8>>> {
-        let mut data = std::mem::take(&mut self.pending);
-        let mut scan_from = 0;
+        let mut start = self.buf_pos;
+        let mut scan = self.buf_pos;
 
         loop {
             // Scan completed lines for the terminator.
-            while let Some(rel) = data[scan_from..].iter().position(|&b| b == b'\n') {
-                let nl = scan_from + rel;
-                let line = &data[scan_from..=nl];
+            while let Some(rel) = memchr::memchr(b'\n', &self.buf[scan..]) {
+                let nl = scan + rel;
+                let line = &self.buf[scan..=nl];
                 if line == b"\\.\n" || line == b"\\.\r\n" {
                     self.in_copy_data = false;
-                    self.pending = data.split_off(nl + 1);
-                    return Ok(Some(data));
+                    let result = self.buf[start..=nl].to_vec();
+                    self.buf_pos = nl + 1;
+                    return Ok(Some(result));
                 }
-                scan_from = nl + 1;
+                scan = nl + 1;
             }
 
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
+            let (removed, got_more) = self.grow_buffer(start)?;
+            start -= removed;
+            scan -= removed;
+            if !got_more {
                 self.in_copy_data = false;
-                if data.is_empty() {
+                if start >= self.buf.len() {
                     return Ok(None);
                 }
-                return Ok(Some(data));
+                let result = self.buf[start..].to_vec();
+                self.buf_pos = self.buf.len();
+                return Ok(Some(result));
             }
-            data.extend_from_slice(buf);
-            let len = buf.len();
-            self.reader.consume(len);
         }
     }
 
     /// Read MSSQL statement with GO batch separator support.
     /// GO is a batch separator that appears on its own line; `;` also
-    /// terminates. Uses the same eager-consume + `pending` carry as
-    /// [`read_statement`] so tokens can't straddle a chunk boundary.
+    /// terminates. Uses the same `buf` + cursor model as [`read_statement`] so
+    /// tokens can't straddle a chunk boundary and scanning stays O(n).
     fn read_statement_mssql(&mut self) -> std::io::Result<Option<Vec<u8>>> {
-        let mut work = std::mem::take(&mut self.pending);
-        let mut i = 0;
-        let mut line_start = 0usize;
+        let mut start = self.buf_pos;
+        let mut i = self.buf_pos;
+        let mut line_start = self.buf_pos;
 
         let mut inside_single_quote = false;
         let mut inside_bracket_quote = false;
@@ -757,12 +781,12 @@ impl<R: Read> Parser<R> {
         let mut at_eof = false;
 
         loop {
-            'scan: while i < work.len() {
-                let b = work[i];
+            'scan: while i < self.buf.len() {
+                let b = self.buf[i];
 
                 if in_block_comment {
                     if b == b'*' {
-                        match work.get(i + 1) {
+                        match self.buf.get(i + 1) {
                             Some(b'/') => {
                                 in_block_comment = false;
                                 i += 2;
@@ -794,7 +818,7 @@ impl<R: Read> Parser<R> {
 
                 if inside_bracket_quote {
                     if b == b']' {
-                        match work.get(i + 1) {
+                        match self.buf.get(i + 1) {
                             // Escaped ]] stays inside the identifier (bug #8)
                             Some(b']') => {
                                 i += 2;
@@ -827,7 +851,7 @@ impl<R: Read> Parser<R> {
 
                 // Outside strings/comments.
                 if b == b'-' {
-                    match work.get(i + 1) {
+                    match self.buf.get(i + 1) {
                         Some(b'-') => {
                             in_line_comment = true;
                             i += 2;
@@ -845,7 +869,7 @@ impl<R: Read> Parser<R> {
                     }
                 }
                 if b == b'/' {
-                    match work.get(i + 1) {
+                    match self.buf.get(i + 1) {
                         Some(b'*') => {
                             in_block_comment = true;
                             i += 2;
@@ -873,30 +897,27 @@ impl<R: Read> Parser<R> {
                     continue;
                 }
                 if b == b';' {
-                    let result: Vec<u8> = work.drain(..=i).collect();
-                    self.pending = work;
+                    let result = self.buf[start..=i].to_vec();
+                    self.buf_pos = i + 1;
                     return Ok(Some(result));
                 }
                 if b == b'\n' {
-                    let line = &work[line_start..=i];
-                    if is_go_line(line) {
+                    if is_go_line(&self.buf[line_start..=i]) {
                         // Trim trailing whitespace before the GO line.
                         let mut stmt_end = line_start;
-                        while stmt_end > 0
-                            && matches!(work[stmt_end - 1], b'\n' | b'\r' | b' ' | b'\t')
+                        while stmt_end > start
+                            && matches!(self.buf[stmt_end - 1], b'\n' | b'\r' | b' ' | b'\t')
                         {
                             stmt_end -= 1;
                         }
-                        if stmt_end > 0 {
-                            let pending = work.split_off(i + 1);
-                            work.truncate(stmt_end);
-                            self.pending = pending;
-                            return Ok(Some(work));
+                        self.buf_pos = i + 1;
+                        if stmt_end > start {
+                            return Ok(Some(self.buf[start..stmt_end].to_vec()));
                         }
-                        // Empty batch: drop up to and including the GO line.
-                        work.drain(..=i);
-                        i = 0;
-                        line_start = 0;
+                        // Empty batch: start a new statement after the GO line.
+                        start = i + 1;
+                        line_start = i + 1;
+                        i += 1;
                         continue;
                     }
                     line_start = i + 1;
@@ -908,32 +929,35 @@ impl<R: Read> Parser<R> {
             }
 
             if at_eof {
-                if work.is_empty() {
+                if start >= self.buf.len() {
                     return Ok(None);
                 }
                 // Handle a trailing GO with no final newline (bug #12).
-                if is_go_line(&work[line_start..]) {
+                if is_go_line(&self.buf[line_start..]) {
                     let mut stmt_end = line_start;
-                    while stmt_end > 0 && matches!(work[stmt_end - 1], b'\n' | b'\r' | b' ' | b'\t')
+                    while stmt_end > start
+                        && matches!(self.buf[stmt_end - 1], b'\n' | b'\r' | b' ' | b'\t')
                     {
                         stmt_end -= 1;
                     }
-                    work.truncate(stmt_end);
-                }
-                if work.is_empty() {
+                    self.buf_pos = self.buf.len();
+                    if stmt_end > start {
+                        return Ok(Some(self.buf[start..stmt_end].to_vec()));
+                    }
                     return Ok(None);
                 }
-                return Ok(Some(work));
+                let result = self.buf[start..].to_vec();
+                self.buf_pos = self.buf.len();
+                return Ok(Some(result));
             }
 
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
+            let (removed, got_more) = self.grow_buffer(start)?;
+            start -= removed;
+            i -= removed;
+            line_start -= removed;
+            if !got_more {
                 at_eof = true;
-                continue;
             }
-            work.extend_from_slice(buf);
-            let len = buf.len();
-            self.reader.consume(len);
         }
     }
 
