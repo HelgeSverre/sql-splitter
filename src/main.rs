@@ -2,6 +2,8 @@
 #![allow(dead_code)]
 
 mod analyzer;
+#[cfg(feature = "archive")]
+mod archive;
 mod cmd;
 mod convert;
 mod differ;
