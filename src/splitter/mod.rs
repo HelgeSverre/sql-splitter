@@ -34,11 +34,14 @@ pub struct SplitterConfig {
     pub progress_fn: Option<Box<dyn Fn(u64)>>,
     /// Filter for which statement types to include.
     pub content_filter: ContentFilter,
+    /// Per-table output compression (default `None` → plain `.sql`).
+    pub output_compression: Compression,
 }
 
 /// Compression format detected from file extension
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compression {
+    #[default]
     None,
     Gzip,
     Bzip2,
@@ -60,6 +63,31 @@ impl Compression {
             Some("xz" | "lzma") => Compression::Xz,
             Some("zst" | "zstd") => Compression::Zstd,
             _ => Compression::None,
+        }
+    }
+
+    /// Parse an output-compression format name (for the `--compress` flag).
+    pub fn parse_output(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "none" | "" => Ok(Compression::None),
+            "gzip" | "gz" => Ok(Compression::Gzip),
+            "bzip2" | "bz2" => Ok(Compression::Bzip2),
+            "xz" | "lzma" => Ok(Compression::Xz),
+            "zstd" | "zst" => Ok(Compression::Zstd),
+            other => Err(format!(
+                "Unknown compression '{other}'. Valid: none, gzip, bzip2, xz, zstd"
+            )),
+        }
+    }
+
+    /// File-name extension for compressed output (empty for `None`).
+    pub fn output_extension(&self) -> &'static str {
+        match self {
+            Compression::None => "",
+            Compression::Gzip => ".gz",
+            Compression::Bzip2 => ".bz2",
+            Compression::Xz => ".xz",
+            Compression::Zstd => ".zst",
         }
     }
 
@@ -143,6 +171,11 @@ impl Splitter {
         self
     }
 
+    pub fn with_output_compression(mut self, format: Compression) -> Self {
+        self.config.output_compression = format;
+        self
+    }
+
     pub fn split(mut self) -> anyhow::Result<Stats> {
         let file = File::open(&self.input_file)
             .with_context(|| format!("Failed to open input file: {:?}", self.input_file))?;
@@ -176,23 +209,31 @@ impl Splitter {
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         // Parallel, pipelined writers (skipped for dry runs). Writer count is
-        // min(4, cores) by default; override with SQL_SPLITTER_WRITERS.
+        // overridable with SQL_SPLITTER_WRITERS; otherwise use all cores when
+        // compressing (CPU-bound) and min(4, cores) for raw writes (I/O-bound).
+        let out_compression = self.config.output_compression;
         let mut writers = if self.config.dry_run {
             None
         } else {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
             let num_writers = std::env::var("SQL_SPLITTER_WRITERS")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&n| n >= 1)
                 .unwrap_or_else(|| {
-                    std::thread::available_parallelism()
-                        .map(|n| n.get().min(4))
-                        .unwrap_or(4)
+                    if out_compression == Compression::None {
+                        cores.min(4)
+                    } else {
+                        cores
+                    }
                 });
             Some(
-                ParallelWriters::new(self.output_dir.clone(), num_writers, 64).with_context(
-                    || format!("Failed to create output directory: {:?}", self.output_dir),
-                )?,
+                ParallelWriters::new(self.output_dir.clone(), num_writers, 64, out_compression)
+                    .with_context(|| {
+                        format!("Failed to create output directory: {:?}", self.output_dir)
+                    })?,
             )
         };
 

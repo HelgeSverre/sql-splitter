@@ -78,7 +78,9 @@ pub fn run(
     data_only: bool,
     fail_fast: bool,
     json: bool,
+    compress: String,
 ) -> anyhow::Result<()> {
+    let out_compression = Compression::parse_output(&compress).map_err(|e| anyhow::anyhow!(e))?;
     let expanded = expand_file_pattern(&file)?;
 
     if expanded.files.len() == 1 {
@@ -93,6 +95,7 @@ pub fn run(
             schema_only,
             data_only,
             json,
+            out_compression,
         )
     } else {
         run_multi(
@@ -107,6 +110,7 @@ pub fn run(
             data_only,
             fail_fast,
             json,
+            out_compression,
         )
     }
 }
@@ -123,6 +127,7 @@ fn run_single(
     schema_only: bool,
     data_only: bool,
     json: bool,
+    out_compression: Compression,
 ) -> anyhow::Result<()> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
@@ -178,6 +183,13 @@ fn run_single(
                 file_size_mb
             );
             println!("Output directory: {}", output.display());
+            if out_compression != Compression::None {
+                println!(
+                    "Compressing output: {} (*.sql{})",
+                    out_compression,
+                    out_compression.output_extension()
+                );
+            }
         }
 
         match content_filter {
@@ -199,7 +211,8 @@ fn run_single(
     let mut splitter = Splitter::new(file.clone(), output.clone())
         .with_dialect(dialect_resolved)
         .with_dry_run(dry_run)
-        .with_content_filter(content_filter);
+        .with_content_filter(content_filter)
+        .with_output_compression(out_compression);
 
     if !table_filter.is_empty() {
         splitter = splitter.with_table_filter(table_filter);
@@ -312,6 +325,7 @@ fn run_multi(
     data_only: bool,
     fail_fast: bool,
     json: bool,
+    out_compression: Compression,
 ) -> anyhow::Result<()> {
     let total = files.len();
     let mut result = MultiFileResult::new();
@@ -418,7 +432,8 @@ fn run_multi(
         let mut splitter = Splitter::new(file.clone(), output_dir.clone())
             .with_dialect(resolved_dialect)
             .with_dry_run(dry_run)
-            .with_content_filter(content_filter);
+            .with_content_filter(content_filter)
+            .with_output_compression(out_compression);
 
         if !table_filter.is_empty() {
             splitter = splitter.with_table_filter(table_filter);

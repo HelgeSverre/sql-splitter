@@ -105,6 +105,10 @@ pub enum Commands {
         #[arg(long, help_heading = OUTPUT_FORMAT)]
         json: bool,
 
+        /// Compress each output file: none, gzip, zstd, bzip2, xz
+        #[arg(long, default_value = "none", value_name = "FORMAT", help_heading = INPUT_OUTPUT)]
+        compress: String,
+
         /// Preview without writing files
         #[arg(long, help_heading = BEHAVIOR)]
         dry_run: bool,
@@ -774,6 +778,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             data_only,
             fail_fast,
             json,
+            compress,
         } => split::run(
             file,
             output,
@@ -786,6 +791,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             data_only,
             fail_fast,
             json,
+            compress,
         ),
         Commands::Analyze {
             file,

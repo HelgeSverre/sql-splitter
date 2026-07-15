@@ -1,6 +1,53 @@
 use sql_splitter::parser::ContentFilter;
 use sql_splitter::splitter::{Compression, Splitter};
+use std::io::Read;
 use tempfile::TempDir;
+
+/// Split with each compression format and verify every output file decompresses
+/// byte-identically to the plain `.sql` split (using the crate's own decoders).
+#[test]
+fn test_splitter_output_compression_roundtrip() {
+    let dump = b"CREATE TABLE `users` (id INT);\nINSERT INTO `users` VALUES (1),(2);\nCREATE TABLE `orders` (id INT);\nINSERT INTO `orders` VALUES (10);\n";
+
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("in.sql");
+    std::fs::write(&input, dump).unwrap();
+
+    // Reference: plain split.
+    let plain_dir = temp.path().join("plain");
+    Splitter::new(input.clone(), plain_dir.clone())
+        .split()
+        .unwrap();
+
+    for (fmt, ext) in [
+        (Compression::Gzip, "gz"),
+        (Compression::Bzip2, "bz2"),
+        (Compression::Xz, "xz"),
+        (Compression::Zstd, "zst"),
+    ] {
+        let out_dir = temp.path().join(format!("out_{ext}"));
+        Splitter::new(input.clone(), out_dir.clone())
+            .with_output_compression(fmt)
+            .split()
+            .unwrap();
+
+        for table in ["users", "orders"] {
+            let plain = std::fs::read(plain_dir.join(format!("{table}.sql"))).unwrap();
+            let comp_path = out_dir.join(format!("{table}.sql.{ext}"));
+            assert!(comp_path.exists(), "missing {comp_path:?}");
+
+            let comp = std::fs::File::open(&comp_path).unwrap();
+            let mut reader = fmt.wrap_reader(Box::new(comp)).unwrap();
+            let mut decoded = Vec::new();
+            reader.read_to_end(&mut decoded).unwrap();
+
+            assert_eq!(
+                decoded, plain,
+                "{fmt} output for {table} did not round-trip to the plain .sql"
+            );
+        }
+    }
+}
 
 #[test]
 fn test_splitter_basic() {
