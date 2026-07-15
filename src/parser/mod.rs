@@ -489,6 +489,20 @@ impl<R: Read> Parser<R> {
         let mut dollar_tag: Vec<u8> = Vec::new();
         let mut at_eof = false;
 
+        // Lookup table of bytes that are significant outside strings/comments;
+        // everything else can be skipped in a tight loop.
+        let mut sig = [false; 256];
+        for &c in &[b';', b'\'', b'"', b'-', b'/'] {
+            sig[c as usize] = true;
+        }
+        if is_mysql {
+            sig[b'`' as usize] = true;
+            sig[b'#' as usize] = true;
+        }
+        if is_postgres {
+            sig[b'$' as usize] = true;
+        }
+
         loop {
             'scan: while i < self.buf.len() {
                 let b = self.buf[i];
@@ -537,6 +551,44 @@ impl<R: Read> Parser<R> {
                     || inside_backtick
                     || in_dollar_quote;
 
+                // Fast path: inside a string/quoted region only the closing
+                // delimiter (and, for MySQL, a `\` escape) is significant, so
+                // memchr past the ordinary bytes. This is the hot loop for
+                // INSERT string data.
+                if inside_string {
+                    let rest = &self.buf[i..];
+                    let hit = if inside_single_quote {
+                        if is_mysql {
+                            memchr::memchr2(b'\'', b'\\', rest)
+                        } else {
+                            memchr::memchr(b'\'', rest)
+                        }
+                    } else if inside_double_quote {
+                        if is_mysql {
+                            memchr::memchr2(b'"', b'\\', rest)
+                        } else {
+                            memchr::memchr(b'"', rest)
+                        }
+                    } else if inside_backtick {
+                        memchr::memchr(b'`', rest)
+                    } else {
+                        // in_dollar_quote: only `$` can start the closing tag
+                        memchr::memchr(b'$', rest)
+                    };
+                    match hit {
+                        Some(0) => {} // significant byte at i
+                        Some(off) => {
+                            i += off;
+                            continue;
+                        }
+                        None if at_eof => {
+                            i = self.buf.len();
+                            continue;
+                        }
+                        None => break 'scan,
+                    }
+                }
+
                 // MySQL backslash escapes apply inside both '…' and "…" string
                 // literals (but not backtick identifiers or dollar quotes).
                 if b == b'\\' && (inside_single_quote || inside_double_quote) && is_mysql {
@@ -546,6 +598,16 @@ impl<R: Read> Parser<R> {
                 }
 
                 if !inside_string {
+                    // Fast path: skip runs of insignificant bytes outside any
+                    // string/comment with a tight table lookup.
+                    if !sig[b as usize] {
+                        let mut j = i + 1;
+                        while j < self.buf.len() && !sig[self.buf[j] as usize] {
+                            j += 1;
+                        }
+                        i = j;
+                        continue;
+                    }
                     // -- line comment
                     if b == b'-' {
                         match self.buf.get(i + 1) {
@@ -842,8 +904,18 @@ impl<R: Read> Parser<R> {
                 }
 
                 if inside_single_quote {
-                    if b == b'\'' {
-                        inside_single_quote = false;
+                    // Fast-skip to the closing quote (MSSQL has no `\` escapes).
+                    match memchr::memchr(b'\'', &self.buf[i..]) {
+                        Some(0) => inside_single_quote = false,
+                        Some(off) => {
+                            i += off;
+                            continue;
+                        }
+                        None if at_eof => {
+                            i = self.buf.len();
+                            continue;
+                        }
+                        None => break 'scan,
                     }
                     i += 1;
                     continue;
