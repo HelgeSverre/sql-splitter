@@ -86,93 +86,108 @@ struct DialectScore {
 pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
     let mut score = DialectScore::default();
 
-    // High confidence markers (+10)
-    if contains_bytes(header, b"pg_dump") {
-        score.postgres += 10;
-    }
-    if contains_bytes(header, b"PostgreSQL database dump") {
-        score.postgres += 10;
-    }
-    if contains_bytes(header, b"MySQL dump") {
-        score.mysql += 10;
-    }
-    if contains_bytes(header, b"MariaDB dump") {
-        score.mysql += 10;
-    }
-    if contains_bytes(header, b"SQLite") {
-        score.sqlite += 10;
+    // Simple "substring present => add weight to a dialect" markers. Confidence
+    // is encoded by the weight: 20/10 = high, 5 = medium, 2 = low.
+    const MARKERS: &[(&[u8], SqlDialect, u32)] = &[
+        (b"pg_dump", SqlDialect::Postgres, 10),
+        (b"PostgreSQL database dump", SqlDialect::Postgres, 10),
+        (b"MySQL dump", SqlDialect::MySql, 10),
+        (b"MariaDB dump", SqlDialect::MySql, 10),
+        (b"SQLite", SqlDialect::Sqlite, 10),
+        (b"search_path", SqlDialect::Postgres, 5),
+        (b"LOCK TABLES", SqlDialect::MySql, 5),
+        (b"PRAGMA", SqlDialect::Sqlite, 5),
+        (b"CREATE EXTENSION", SqlDialect::Postgres, 2),
+        // BEGIN TRANSACTION is generic ANSI SQL, only slightly suggests SQLite
+        (b"BEGIN TRANSACTION", SqlDialect::Sqlite, 2),
+        (b"SET ANSI_NULLS", SqlDialect::Mssql, 20),
+        (b"SET QUOTED_IDENTIFIER", SqlDialect::Mssql, 20),
+        (b"IDENTITY(", SqlDialect::Mssql, 10),
+        (b"ON [PRIMARY]", SqlDialect::Mssql, 10),
+        (b"NVARCHAR", SqlDialect::Mssql, 5),
+        (b"CLUSTERED", SqlDialect::Mssql, 5),
+        (b"SET NOCOUNT", SqlDialect::Mssql, 5),
+    ];
+    for &(needle, dialect, weight) in MARKERS {
+        if contains_bytes(header, needle) {
+            match dialect {
+                SqlDialect::MySql => score.mysql += weight,
+                SqlDialect::Postgres => score.postgres += weight,
+                SqlDialect::Sqlite => score.sqlite += weight,
+                SqlDialect::Mssql => score.mssql += weight,
+            }
+        }
     }
 
-    // Medium confidence markers (+5)
+    // Compound / structural markers that don't fit the simple table.
     if contains_bytes(header, b"COPY ") && contains_bytes(header, b"FROM stdin") {
-        score.postgres += 5;
-    }
-    if contains_bytes(header, b"search_path") {
         score.postgres += 5;
     }
     if contains_bytes(header, b"/*!40") || contains_bytes(header, b"/*!50") {
         score.mysql += 5;
     }
-    if contains_bytes(header, b"LOCK TABLES") {
-        score.mysql += 5;
-    }
-    if contains_bytes(header, b"PRAGMA") {
-        score.sqlite += 5;
-    }
-
-    // Low confidence markers (+2)
     if contains_bytes(header, b"$$") {
         score.postgres += 2;
-    }
-    if contains_bytes(header, b"CREATE EXTENSION") {
-        score.postgres += 2;
-    }
-    // BEGIN TRANSACTION is generic ANSI SQL, only slightly suggests SQLite
-    if contains_bytes(header, b"BEGIN TRANSACTION") {
-        score.sqlite += 2;
     }
     // Backticks suggest MySQL (could also appear in data/comments)
     if header.contains(&b'`') {
         score.mysql += 2;
     }
-
-    // MSSQL/T-SQL markers
-    // High confidence markers (+20)
-    if contains_bytes(header, b"SET ANSI_NULLS") {
-        score.mssql += 20;
-    }
-    if contains_bytes(header, b"SET QUOTED_IDENTIFIER") {
-        score.mssql += 20;
-    }
-
-    // Medium confidence markers (+10-15)
     // GO as batch separator on its own line (check for common patterns)
     if contains_bytes(header, b"\nGO\n") || contains_bytes(header, b"\nGO\r\n") {
         score.mssql += 15;
     }
-    // Square bracket identifiers
-    if header.contains(&b'[') && header.contains(&b']') {
-        score.mssql += 10;
-    }
-    if contains_bytes(header, b"IDENTITY(") {
-        score.mssql += 10;
-    }
-    if contains_bytes(header, b"ON [PRIMARY]") {
-        score.mssql += 10;
+    // Square-bracket identifiers, but distinguish them from PostgreSQL array
+    // types: `[id]`/`[dbo]` (identifier-shaped) => MSSQL; `integer[]` (empty)
+    // or `[5]` (non-identifier) => not MSSQL (bug #9).
+    {
+        let mut mssql_bracket_ident = false;
+        let mut pg_array_brackets = false;
+        let mut k = 0;
+        while k < header.len() {
+            if header[k] == b'[' {
+                if let Some(rel) = header[k + 1..].iter().position(|&c| c == b']') {
+                    let inner = &header[k + 1..k + 1 + rel];
+                    let ident_shaped = inner
+                        .first()
+                        .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_')
+                        && inner
+                            .iter()
+                            .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b' ');
+                    if inner.is_empty() {
+                        pg_array_brackets = true;
+                    } else if ident_shaped {
+                        mssql_bracket_ident = true;
+                    }
+                    k += rel + 2;
+                    continue;
+                }
+            }
+            k += 1;
+        }
+        if mssql_bracket_ident {
+            score.mssql += 10;
+        }
+        if pg_array_brackets {
+            score.postgres += 2;
+        }
     }
 
-    // Low confidence markers (+5)
-    if contains_bytes(header, b"N'") {
-        score.mssql += 5;
-    }
-    if contains_bytes(header, b"NVARCHAR") {
-        score.mssql += 5;
-    }
-    if contains_bytes(header, b"CLUSTERED") {
-        score.mssql += 5;
-    }
-    if contains_bytes(header, b"SET NOCOUNT") {
-        score.mssql += 5;
+    // N'unicode' literal — require a non-word char before N so ordinary data
+    // ending in N before a quote (e.g. ...JOHN') doesn't score MSSQL (bug #9).
+    {
+        let mut k = 0;
+        while k + 1 < header.len() {
+            if header[k] == b'N' && header[k + 1] == b'\'' {
+                let before_ok =
+                    k == 0 || !(header[k - 1].is_ascii_alphanumeric() || header[k - 1] == b'_');
+                if before_ok {
+                    score.mssql += 5;
+                    break;
+                }
+            }
+            k += 1;
+        }
     }
 
     // Determine winner and confidence
@@ -231,9 +246,7 @@ pub fn detect_dialect_from_file(path: &std::path::Path) -> std::io::Result<Diale
 
 #[inline]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// Check if a line is a MSSQL GO batch separator
@@ -276,14 +289,11 @@ fn is_go_line(line: &[u8]) -> bool {
         && (trimmed[1] == b'O' || trimmed[1] == b'o')
         && (trimmed[2] == b' ' || trimmed[2] == b'\t')
     {
-        // Rest should be whitespace and digits
-        let rest = &trimmed[3..];
-        let rest_trimmed = rest
+        // Rest should be whitespace and digits (allocation-free scan)
+        return trimmed[3..]
             .iter()
             .skip_while(|&&b| b == b' ' || b == b'\t')
-            .copied()
-            .collect::<Vec<_>>();
-        return rest_trimmed.is_empty() || rest_trimmed.iter().all(|&b| b.is_ascii_digit());
+            .all(|&b| b.is_ascii_digit());
     }
 
     false
@@ -331,14 +341,10 @@ pub enum ContentFilter {
     DataOnly,
 }
 
-static CREATE_TABLE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*CREATE\s+TABLE\s+`?([^\s`(]+)`?").unwrap());
-
-static INSERT_INTO_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*INSERT\s+INTO\s+`?([^\s`(]+)`?").unwrap());
-
+// Word boundary before ON so index names ending in "on" (idx_position,
+// idx_created_on, ...) don't match the "on" inside the identifier.
 static CREATE_INDEX_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)ON\s+`?([^\s`(;]+)`?").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)\bON\s+`?([^\s`(;]+)`?").unwrap());
 
 // MSSQL CREATE INDEX: extracts table from ON [schema].[table] or ON [table]
 // Matches: ON [table], ON [dbo].[table], ON [db].[dbo].[table]
@@ -375,10 +381,17 @@ static INSERT_FLEXIBLE_RE: Lazy<Regex> = Lazy::new(|| {
 
 pub struct Parser<R: Read> {
     reader: BufReader<R>,
-    stmt_buffer: Vec<u8>,
     dialect: SqlDialect,
     /// For PostgreSQL: true when reading COPY data block
     in_copy_data: bool,
+    /// Accumulated, not-yet-returned input. The scanners read whole `fill_buf`
+    /// chunks into `buf` and scan it with an index cursor, so a multi-byte
+    /// token (`--`, `/* */`, `$tag$`, `]]`) can never straddle an internal
+    /// buffer boundary. `buf_pos` is the start of the next statement to return;
+    /// bytes before it are already-returned and are dropped on the next refill
+    /// (never per-statement) so scanning stays O(n) rather than O(n²).
+    buf: Vec<u8>,
+    buf_pos: usize,
 }
 
 impl<R: Read> Parser<R> {
@@ -390,10 +403,29 @@ impl<R: Read> Parser<R> {
     pub fn with_dialect(reader: R, buffer_size: usize, dialect: SqlDialect) -> Self {
         Self {
             reader: BufReader::with_capacity(buffer_size, reader),
-            stmt_buffer: Vec::with_capacity(32 * 1024),
             dialect,
             in_copy_data: false,
+            buf: Vec::new(),
+            buf_pos: 0,
         }
+    }
+
+    /// Drop the already-returned prefix `buf[..keep_from]` and append the next
+    /// `fill_buf` chunk. Returns `(bytes_removed_from_front, got_more_data)`.
+    /// Callers subtract `bytes_removed_from_front` from their scan indices.
+    #[inline]
+    fn grow_buffer(&mut self, keep_from: usize) -> std::io::Result<(usize, bool)> {
+        if keep_from > 0 {
+            self.buf.drain(..keep_from);
+        }
+        let chunk = self.reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok((keep_from, false));
+        }
+        self.buf.extend_from_slice(chunk);
+        let n = chunk.len();
+        self.reader.consume(n);
+        Ok((keep_from, true))
     }
 
     pub fn read_statement(&mut self) -> std::io::Result<Option<Vec<u8>>> {
@@ -407,130 +439,312 @@ impl<R: Read> Parser<R> {
             return self.read_statement_mssql();
         }
 
-        self.stmt_buffer.clear();
+        let is_mysql = self.dialect == SqlDialect::MySql;
+        let is_postgres = self.dialect == SqlDialect::Postgres;
+
+        // Scan `self.buf` from the current statement start with an index cursor.
+        // More data is appended by `grow_buffer` (which also drops already-
+        // returned statements), so a multi-byte token (`--`, `/* */`, `$tag$`)
+        // never straddles a chunk boundary: the scan waits for more bytes with
+        // its state (`i`, quote/comment flags) intact.
+        let mut start = self.buf_pos;
+        let mut i = self.buf_pos;
 
         let mut inside_single_quote = false;
         let mut inside_double_quote = false;
+        let mut inside_backtick = false; // MySQL `identifier` quoting (bug #10)
         let mut escaped = false;
         let mut in_line_comment = false;
-        // For PostgreSQL dollar-quoting: track the tag
+        let mut in_block_comment = false; // /* ... */ (bug #5)
         let mut in_dollar_quote = false;
         let mut dollar_tag: Vec<u8> = Vec::new();
+        let mut at_eof = false;
+
+        // Lookup table of bytes that are significant outside strings/comments;
+        // everything else can be skipped in a tight loop.
+        let mut sig = [false; 256];
+        for &c in b";'\"-/" {
+            sig[c as usize] = true;
+        }
+        if is_mysql {
+            sig[b'`' as usize] = true;
+            sig[b'#' as usize] = true;
+        }
+        if is_postgres {
+            sig[b'$' as usize] = true;
+        }
 
         loop {
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
-                if self.stmt_buffer.is_empty() {
-                    return Ok(None);
+            'scan: while i < self.buf.len() {
+                let b = self.buf[i];
+
+                // Inside a /* */ block comment: only the closing */ ends it.
+                if in_block_comment {
+                    if b == b'*' {
+                        match self.buf.get(i + 1) {
+                            Some(b'/') => {
+                                in_block_comment = false;
+                                i += 2;
+                                continue;
+                            }
+                            Some(_) => {
+                                i += 1;
+                                continue;
+                            }
+                            None if at_eof => {
+                                i += 1;
+                                continue;
+                            }
+                            None => break 'scan,
+                        }
+                    }
+                    i += 1;
+                    continue;
                 }
-                let result = std::mem::take(&mut self.stmt_buffer);
-                return Ok(Some(result));
-            }
 
-            let mut consumed = 0;
-            let mut found_terminator = false;
-
-            for (i, &b) in buf.iter().enumerate() {
-                let inside_string = inside_single_quote || inside_double_quote || in_dollar_quote;
-
-                // End of line comment on newline
+                // Inside a -- or # line comment: consume until newline.
                 if in_line_comment {
                     if b == b'\n' {
                         in_line_comment = false;
                     }
+                    i += 1;
                     continue;
                 }
 
                 if escaped {
                     escaped = false;
+                    i += 1;
                     continue;
                 }
 
-                // Handle backslash escapes (MySQL style)
-                if b == b'\\' && inside_string && self.dialect == SqlDialect::MySql {
+                let inside_string = inside_single_quote
+                    || inside_double_quote
+                    || inside_backtick
+                    || in_dollar_quote;
+
+                // Fast path: inside a string/quoted region only the closing
+                // delimiter (and, for MySQL, a `\` escape) is significant, so
+                // memchr past the ordinary bytes. This is the hot loop for
+                // INSERT string data.
+                if inside_string {
+                    let rest = &self.buf[i..];
+                    let hit = if inside_single_quote {
+                        if is_mysql {
+                            memchr::memchr2(b'\'', b'\\', rest)
+                        } else {
+                            memchr::memchr(b'\'', rest)
+                        }
+                    } else if inside_double_quote {
+                        if is_mysql {
+                            memchr::memchr2(b'"', b'\\', rest)
+                        } else {
+                            memchr::memchr(b'"', rest)
+                        }
+                    } else if inside_backtick {
+                        memchr::memchr(b'`', rest)
+                    } else {
+                        // in_dollar_quote: only `$` can start the closing tag
+                        memchr::memchr(b'$', rest)
+                    };
+                    match hit {
+                        Some(0) => {} // significant byte at i
+                        Some(off) => {
+                            i += off;
+                            continue;
+                        }
+                        None if at_eof => {
+                            i = self.buf.len();
+                            continue;
+                        }
+                        None => break 'scan,
+                    }
+                }
+
+                // MySQL backslash escapes apply inside both '…' and "…" string
+                // literals (but not backtick identifiers or dollar quotes).
+                if b == b'\\' && (inside_single_quote || inside_double_quote) && is_mysql {
                     escaped = true;
+                    i += 1;
                     continue;
                 }
 
-                // Handle line comments (-- to end of line)
-                if b == b'-' && !inside_string && i + 1 < buf.len() && buf[i + 1] == b'-' {
-                    in_line_comment = true;
-                    continue;
-                }
-
-                // Handle dollar-quoting for PostgreSQL
-                if self.dialect == SqlDialect::Postgres
-                    && !inside_single_quote
-                    && !inside_double_quote
-                {
-                    if b == b'$' && !in_dollar_quote {
-                        // Start of dollar-quote: scan for the closing $
-                        if let Some(end) = buf[i + 1..].iter().position(|&c| c == b'$') {
-                            let tag_bytes = &buf[i + 1..i + 1 + end];
-
-                            // Validate tag: must be empty OR identifier-like [A-Za-z_][A-Za-z0-9_]*
-                            let is_valid_tag = if tag_bytes.is_empty() {
-                                true
-                            } else {
-                                let mut iter = tag_bytes.iter();
-                                match iter.next() {
-                                    Some(&first)
-                                        if first.is_ascii_alphabetic() || first == b'_' =>
-                                    {
-                                        iter.all(|&c| c.is_ascii_alphanumeric() || c == b'_')
+                if !inside_string {
+                    // Fast path: skip runs of insignificant bytes outside any
+                    // string/comment with a tight table lookup.
+                    if !sig[b as usize] {
+                        let mut j = i + 1;
+                        while j < self.buf.len() && !sig[self.buf[j] as usize] {
+                            j += 1;
+                        }
+                        i = j;
+                        continue;
+                    }
+                    // -- line comment
+                    if b == b'-' {
+                        match self.buf.get(i + 1) {
+                            Some(b'-') => {
+                                // MySQL requires whitespace/EOL after `--` for it
+                                // to be a comment; `a--b` is arithmetic. Other
+                                // dialects always treat `--` as a comment.
+                                if is_mysql {
+                                    match self.buf.get(i + 2) {
+                                        Some(&c)
+                                            if c == b' '
+                                                || c == b'\t'
+                                                || c == b'\n'
+                                                || c == b'\r' =>
+                                        {
+                                            in_line_comment = true;
+                                            i += 2;
+                                            continue;
+                                        }
+                                        None if at_eof => {
+                                            in_line_comment = true;
+                                            i += 2;
+                                            continue;
+                                        }
+                                        None => break 'scan,
+                                        // `--x`: not a comment, just consume one `-`.
+                                        Some(_) => {
+                                            i += 1;
+                                            continue;
+                                        }
                                     }
-                                    _ => false,
                                 }
-                            };
-
-                            if is_valid_tag {
-                                dollar_tag = tag_bytes.to_vec();
-                                in_dollar_quote = true;
+                                in_line_comment = true;
+                                i += 2;
                                 continue;
                             }
-                            // Invalid tag - treat $ as normal character
+                            Some(_) => {
+                                i += 1;
+                                continue;
+                            }
+                            None if at_eof => {
+                                i += 1;
+                                continue;
+                            }
+                            None => break 'scan,
                         }
-                    } else if b == b'$' && in_dollar_quote {
-                        // Potential end of dollar-quote
-                        let tag_len = dollar_tag.len();
-                        if i + 1 + tag_len < buf.len()
-                            && buf[i + 1..i + 1 + tag_len] == dollar_tag[..]
-                            && buf.get(i + 1 + tag_len) == Some(&b'$')
-                        {
-                            in_dollar_quote = false;
-                            dollar_tag.clear();
-                            continue;
+                    }
+                    // MySQL # line comment
+                    if b == b'#' && is_mysql {
+                        in_line_comment = true;
+                        i += 1;
+                        continue;
+                    }
+                    // /* block comment
+                    if b == b'/' {
+                        match self.buf.get(i + 1) {
+                            Some(b'*') => {
+                                in_block_comment = true;
+                                i += 2;
+                                continue;
+                            }
+                            Some(_) => {
+                                i += 1;
+                                continue;
+                            }
+                            None if at_eof => {
+                                i += 1;
+                                continue;
+                            }
+                            None => break 'scan,
                         }
                     }
                 }
 
-                if b == b'\'' && !inside_double_quote && !in_dollar_quote {
-                    inside_single_quote = !inside_single_quote;
-                } else if b == b'"' && !inside_single_quote && !in_dollar_quote {
-                    inside_double_quote = !inside_double_quote;
-                } else if b == b';' && !inside_string {
-                    self.stmt_buffer.extend_from_slice(&buf[..=i]);
-                    consumed = i + 1;
-                    found_terminator = true;
-                    break;
+                // PostgreSQL dollar-quoting (outside other quotes).
+                if is_postgres && !inside_single_quote && !inside_double_quote && !inside_backtick {
+                    if b == b'$' && !in_dollar_quote {
+                        match self.buf[i + 1..].iter().position(|&c| c == b'$') {
+                            Some(end) => {
+                                let tag_bytes = &self.buf[i + 1..i + 1 + end];
+                                if is_valid_dollar_tag(tag_bytes) {
+                                    dollar_tag = tag_bytes.to_vec();
+                                    in_dollar_quote = true;
+                                    // Skip the whole opening $tag$ so its trailing
+                                    // $ is not re-read as a closer (bug #7).
+                                    i += end + 2;
+                                    continue;
+                                }
+                                // Not a valid tag: treat $ as an ordinary byte.
+                                i += 1;
+                                continue;
+                            }
+                            None if at_eof => {
+                                i += 1;
+                                continue;
+                            }
+                            // No closing $ yet — it may arrive in the next chunk.
+                            None => break 'scan,
+                        }
+                    } else if b == b'$' && in_dollar_quote {
+                        let tag_len = dollar_tag.len();
+                        if i + 1 + tag_len < self.buf.len() {
+                            if self.buf[i + 1..i + 1 + tag_len] == dollar_tag[..]
+                                && self.buf[i + 1 + tag_len] == b'$'
+                            {
+                                in_dollar_quote = false;
+                                dollar_tag.clear();
+                                i += tag_len + 2;
+                                continue;
+                            }
+                            i += 1;
+                            continue;
+                        } else if at_eof {
+                            i += 1;
+                            continue;
+                        } else {
+                            break 'scan;
+                        }
+                    }
                 }
+
+                if b == b'\'' && !inside_double_quote && !inside_backtick && !in_dollar_quote {
+                    inside_single_quote = !inside_single_quote;
+                } else if b == b'"' && !inside_single_quote && !inside_backtick && !in_dollar_quote
+                {
+                    inside_double_quote = !inside_double_quote;
+                } else if b == b'`'
+                    && is_mysql
+                    && !inside_single_quote
+                    && !inside_double_quote
+                    && !in_dollar_quote
+                {
+                    inside_backtick = !inside_backtick;
+                } else if b == b';' && !inside_string {
+                    // Statement terminator. The bytes after it stay in `buf` and
+                    // become the next statement (buf_pos advances, no shifting).
+                    let result = self.buf[start..=i].to_vec();
+                    self.buf_pos = i + 1;
+
+                    if is_postgres && self.is_copy_from_stdin(&result) {
+                        self.in_copy_data = true;
+                    }
+                    return Ok(Some(result));
+                }
+
+                i += 1;
             }
 
-            if found_terminator {
-                self.reader.consume(consumed);
-                let result = std::mem::take(&mut self.stmt_buffer);
-
-                // Check if this is a PostgreSQL COPY FROM stdin statement
-                if self.dialect == SqlDialect::Postgres && self.is_copy_from_stdin(&result) {
-                    self.in_copy_data = true;
+            if at_eof {
+                if start >= self.buf.len() {
+                    return Ok(None);
                 }
-
+                let result = self.buf[start..].to_vec();
+                self.buf_pos = self.buf.len();
                 return Ok(Some(result));
             }
 
-            self.stmt_buffer.extend_from_slice(buf);
-            let len = buf.len();
-            self.reader.consume(len);
+            // Need more bytes. Drop already-returned statements before `start`.
+            let (removed, got_more) = self.grow_buffer(start)?;
+            start -= removed;
+            i -= removed;
+            if !got_more {
+                // Re-scan the remaining bytes once more with at_eof set so any
+                // incomplete token at the tail is treated literally.
+                at_eof = true;
+            }
         }
     }
 
@@ -538,7 +752,7 @@ impl<R: Read> Parser<R> {
     fn is_copy_from_stdin(&self, stmt: &[u8]) -> bool {
         // Strip leading comments (pg_dump adds -- comments before COPY statements)
         let stmt = strip_leading_comments_and_whitespace(stmt);
-        if stmt.len() < 15 {
+        if stmt.len() < 17 {
             // Minimum: "COPY x FROM STDIN" = 17 chars
             return false;
         }
@@ -555,190 +769,266 @@ impl<R: Read> Parser<R> {
         // Search for "FROM STDIN" case-insensitively without allocating
         // Look within first 500 bytes (typical COPY statements are shorter)
         let search_len = stmt.len().min(500);
-        for i in 0..search_len.saturating_sub(10) {
-            if stmt[i..i + 10]
-                .iter()
-                .zip(b"FROM STDIN".iter())
-                .all(|(&a, &b)| a.to_ascii_uppercase() == b)
-            {
-                return true;
+        if search_len >= 10 {
+            // Inclusive upper bound so a "FROM STDIN" ending exactly at the
+            // window edge isn't missed.
+            for i in 0..=(search_len - 10) {
+                if stmt[i..i + 10]
+                    .iter()
+                    .zip(b"FROM STDIN".iter())
+                    .all(|(&a, &b)| a.to_ascii_uppercase() == b)
+                {
+                    return true;
+                }
             }
         }
         false
     }
 
-    /// Read PostgreSQL COPY data block until we see the terminator line (\.)
+    /// Read PostgreSQL COPY data block until we see the terminator line (\.).
+    /// The returned block includes everything up to and including the
+    /// terminator line; anything after it is carried in `pending`.
+    ///
+    /// Note: a COPY block is buffered whole in memory (like every other
+    /// statement here) — its size sets the memory floor for a pg_dump with one
+    /// very large table. This is intentional: downstream consumers (redact,
+    /// diff, sample) operate on a full block at a time.
     fn read_copy_data(&mut self) -> std::io::Result<Option<Vec<u8>>> {
-        self.stmt_buffer.clear();
+        let mut start = self.buf_pos;
+        let mut scan = self.buf_pos;
 
         loop {
-            // First, fill the buffer and check if empty
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
+            // Scan completed lines for the terminator.
+            while let Some(rel) = memchr::memchr(b'\n', &self.buf[scan..]) {
+                let nl = scan + rel;
+                let line = &self.buf[scan..=nl];
+                if line == b"\\.\n" || line == b"\\.\r\n" {
+                    self.in_copy_data = false;
+                    let result = self.buf[start..=nl].to_vec();
+                    self.buf_pos = nl + 1;
+                    return Ok(Some(result));
+                }
+                scan = nl + 1;
+            }
+
+            let (removed, got_more) = self.grow_buffer(start)?;
+            start -= removed;
+            scan -= removed;
+            if !got_more {
                 self.in_copy_data = false;
-                if self.stmt_buffer.is_empty() {
+                if start >= self.buf.len() {
                     return Ok(None);
                 }
-                return Ok(Some(std::mem::take(&mut self.stmt_buffer)));
-            }
-
-            // Look for a newline in the buffer
-            let newline_pos = buf.iter().position(|&b| b == b'\n');
-
-            if let Some(i) = newline_pos {
-                // Include this newline
-                self.stmt_buffer.extend_from_slice(&buf[..=i]);
-                self.reader.consume(i + 1);
-
-                // Check if the line we just added ends the COPY block
-                // Looking for a line that is just "\.\n" or "\.\r\n"
-                if self.ends_with_copy_terminator() {
-                    self.in_copy_data = false;
-                    return Ok(Some(std::mem::take(&mut self.stmt_buffer)));
-                }
-                // Continue reading - we need to process more lines
-            } else {
-                // No newline found, consume the whole buffer and continue
-                let len = buf.len();
-                self.stmt_buffer.extend_from_slice(buf);
-                self.reader.consume(len);
+                let result = self.buf[start..].to_vec();
+                self.buf_pos = self.buf.len();
+                return Ok(Some(result));
             }
         }
     }
 
-    /// Check if buffer ends with the COPY terminator line (\.)
-    fn ends_with_copy_terminator(&self) -> bool {
-        let data = &self.stmt_buffer;
-        if data.len() < 2 {
-            return false;
-        }
-
-        // Look for a line that is just "\.\n" or "\.\r\n"
-        // We need to find the start of the last line
-        let last_newline = data[..data.len() - 1]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-
-        let last_line = &data[last_newline..];
-
-        // Check if it's "\.\n" or "\.\r\n"
-        last_line == b"\\.\n" || last_line == b"\\.\r\n"
-    }
-
-    /// Read MSSQL statement with GO batch separator support
-    /// GO is a batch separator that appears on its own line
+    /// Read MSSQL statement with GO batch separator support.
+    /// GO is a batch separator that appears on its own line; `;` also
+    /// terminates. Uses the same `buf` + cursor model as [`read_statement`] so
+    /// tokens can't straddle a chunk boundary and scanning stays O(n).
     fn read_statement_mssql(&mut self) -> std::io::Result<Option<Vec<u8>>> {
-        self.stmt_buffer.clear();
+        let mut start = self.buf_pos;
+        let mut i = self.buf_pos;
+        let mut line_start = self.buf_pos;
 
         let mut inside_single_quote = false;
         let mut inside_bracket_quote = false;
         let mut in_line_comment = false;
-        let mut line_start = 0usize; // Track where current line started in stmt_buffer
+        let mut in_block_comment = false;
+        let mut at_eof = false;
 
         loop {
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
-                if self.stmt_buffer.is_empty() {
-                    return Ok(None);
+            'scan: while i < self.buf.len() {
+                let b = self.buf[i];
+
+                if in_block_comment {
+                    if b == b'*' {
+                        match self.buf.get(i + 1) {
+                            Some(b'/') => {
+                                in_block_comment = false;
+                                i += 2;
+                                continue;
+                            }
+                            Some(_) => {
+                                i += 1;
+                                continue;
+                            }
+                            None if at_eof => {
+                                i += 1;
+                                continue;
+                            }
+                            None => break 'scan,
+                        }
+                    }
+                    i += 1;
+                    continue;
                 }
-                let result = std::mem::take(&mut self.stmt_buffer);
-                return Ok(Some(result));
-            }
 
-            let mut consumed = 0;
-            let mut found_terminator = false;
-
-            for (i, &b) in buf.iter().enumerate() {
-                let inside_string = inside_single_quote || inside_bracket_quote;
-
-                // End of line comment on newline
                 if in_line_comment {
                     if b == b'\n' {
                         in_line_comment = false;
-                        // Add to buffer and update line_start
-                        self.stmt_buffer.extend_from_slice(&buf[consumed..=i]);
-                        consumed = i + 1;
-                        line_start = self.stmt_buffer.len();
+                        line_start = i + 1;
                     }
+                    i += 1;
                     continue;
                 }
 
-                // Handle line comments (-- to end of line)
-                if b == b'-' && !inside_string && i + 1 < buf.len() && buf[i + 1] == b'-' {
-                    in_line_comment = true;
+                if inside_bracket_quote {
+                    if b == b']' {
+                        match self.buf.get(i + 1) {
+                            // Escaped ]] stays inside the identifier (bug #8)
+                            Some(b']') => {
+                                i += 2;
+                                continue;
+                            }
+                            Some(_) => {
+                                inside_bracket_quote = false;
+                                i += 1;
+                                continue;
+                            }
+                            None if at_eof => {
+                                inside_bracket_quote = false;
+                                i += 1;
+                                continue;
+                            }
+                            None => break 'scan,
+                        }
+                    }
+                    i += 1;
                     continue;
                 }
 
-                // Handle N'...' unicode strings - treat N as prefix, ' as quote start
-                // (The N is just a prefix, single quote handling is the same)
+                if inside_single_quote {
+                    // Fast-skip to the closing quote (MSSQL has no `\` escapes).
+                    match memchr::memchr(b'\'', &self.buf[i..]) {
+                        Some(0) => inside_single_quote = false,
+                        Some(off) => {
+                            i += off;
+                            continue;
+                        }
+                        None if at_eof => {
+                            i = self.buf.len();
+                            continue;
+                        }
+                        None => break 'scan,
+                    }
+                    i += 1;
+                    continue;
+                }
 
-                // Handle string quotes
-                if b == b'\'' && !inside_bracket_quote {
-                    inside_single_quote = !inside_single_quote;
-                } else if b == b'[' && !inside_single_quote {
+                // Outside strings/comments.
+                if b == b'-' {
+                    match self.buf.get(i + 1) {
+                        Some(b'-') => {
+                            in_line_comment = true;
+                            i += 2;
+                            continue;
+                        }
+                        Some(_) => {
+                            i += 1;
+                            continue;
+                        }
+                        None if at_eof => {
+                            i += 1;
+                            continue;
+                        }
+                        None => break 'scan,
+                    }
+                }
+                if b == b'/' {
+                    match self.buf.get(i + 1) {
+                        Some(b'*') => {
+                            in_block_comment = true;
+                            i += 2;
+                            continue;
+                        }
+                        Some(_) => {
+                            i += 1;
+                            continue;
+                        }
+                        None if at_eof => {
+                            i += 1;
+                            continue;
+                        }
+                        None => break 'scan,
+                    }
+                }
+                if b == b'\'' {
+                    inside_single_quote = true;
+                    i += 1;
+                    continue;
+                }
+                if b == b'[' {
                     inside_bracket_quote = true;
-                } else if b == b']' && inside_bracket_quote {
-                    // Check for escaped ]]
-                    if i + 1 < buf.len() && buf[i + 1] == b']' {
-                        // Skip the escape sequence - consume one extra ]
+                    i += 1;
+                    continue;
+                }
+                if b == b';' {
+                    let result = self.buf[start..=i].to_vec();
+                    self.buf_pos = i + 1;
+                    return Ok(Some(result));
+                }
+                if b == b'\n' {
+                    if is_go_line(&self.buf[line_start..=i]) {
+                        // Trim trailing whitespace before the GO line.
+                        let mut stmt_end = line_start;
+                        while stmt_end > start
+                            && matches!(self.buf[stmt_end - 1], b'\n' | b'\r' | b' ' | b'\t')
+                        {
+                            stmt_end -= 1;
+                        }
+                        self.buf_pos = i + 1;
+                        if stmt_end > start {
+                            return Ok(Some(self.buf[start..stmt_end].to_vec()));
+                        }
+                        // Empty batch: start a new statement after the GO line.
+                        start = i + 1;
+                        line_start = i + 1;
+                        i += 1;
                         continue;
                     }
-                    inside_bracket_quote = false;
-                } else if b == b';' && !inside_string {
-                    // Semicolon is a statement terminator in MSSQL too
-                    self.stmt_buffer.extend_from_slice(&buf[consumed..=i]);
-                    consumed = i + 1;
-                    found_terminator = true;
-                    break;
-                } else if b == b'\n' && !inside_string {
-                    // Check if the current line (from line_start to here) is just "GO"
-                    // First, add bytes up to and including the newline
-                    self.stmt_buffer.extend_from_slice(&buf[consumed..=i]);
-                    consumed = i + 1;
-
-                    // Get the line we just completed
-                    let line = &self.stmt_buffer[line_start..];
-                    if is_go_line(line) {
-                        // Remove the GO line from the buffer
-                        self.stmt_buffer.truncate(line_start);
-                        // Trim trailing whitespace from the statement
-                        while self
-                            .stmt_buffer
-                            .last()
-                            .is_some_and(|&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
-                        {
-                            self.stmt_buffer.pop();
-                        }
-                        // If we have content, return it
-                        if !self.stmt_buffer.is_empty() {
-                            self.reader.consume(consumed);
-                            let result = std::mem::take(&mut self.stmt_buffer);
-                            return Ok(Some(result));
-                        }
-                        // Otherwise, reset and continue (empty batch)
-                        line_start = 0;
-                    } else {
-                        // Update line_start to after the newline
-                        line_start = self.stmt_buffer.len();
-                    }
+                    line_start = i + 1;
+                    i += 1;
                     continue;
                 }
+
+                i += 1;
             }
 
-            if found_terminator {
-                self.reader.consume(consumed);
-                let result = std::mem::take(&mut self.stmt_buffer);
+            if at_eof {
+                if start >= self.buf.len() {
+                    return Ok(None);
+                }
+                // Handle a trailing GO with no final newline (bug #12).
+                if is_go_line(&self.buf[line_start..]) {
+                    let mut stmt_end = line_start;
+                    while stmt_end > start
+                        && matches!(self.buf[stmt_end - 1], b'\n' | b'\r' | b' ' | b'\t')
+                    {
+                        stmt_end -= 1;
+                    }
+                    self.buf_pos = self.buf.len();
+                    if stmt_end > start {
+                        return Ok(Some(self.buf[start..stmt_end].to_vec()));
+                    }
+                    return Ok(None);
+                }
+                let result = self.buf[start..].to_vec();
+                self.buf_pos = self.buf.len();
                 return Ok(Some(result));
             }
 
-            // Add remaining bytes to buffer
-            if consumed < buf.len() {
-                self.stmt_buffer.extend_from_slice(&buf[consumed..]);
+            let (removed, got_more) = self.grow_buffer(start)?;
+            start -= removed;
+            i -= removed;
+            line_start -= removed;
+            if !got_more {
+                at_eof = true;
             }
-            let len = buf.len();
-            self.reader.consume(len);
         }
     }
 
@@ -793,15 +1083,6 @@ impl<R: Read> Parser<R> {
                     );
                 }
             }
-            // Original regex as last resort
-            if let Some(caps) = CREATE_TABLE_RE.captures(stmt) {
-                if let Some(m) = caps.get(1) {
-                    return (
-                        StatementType::CreateTable,
-                        String::from_utf8_lossy(m.as_bytes()).into_owned(),
-                    );
-                }
-            }
         }
 
         if upper_prefix.starts_with(b"INSERT INTO") || upper_prefix.starts_with(b"INSERT ONLY") {
@@ -809,14 +1090,6 @@ impl<R: Read> Parser<R> {
                 return (StatementType::Insert, name);
             }
             if let Some(caps) = INSERT_FLEXIBLE_RE.captures(stmt) {
-                if let Some(m) = caps.get(1) {
-                    return (
-                        StatementType::Insert,
-                        String::from_utf8_lossy(m.as_bytes()).into_owned(),
-                    );
-                }
-            }
-            if let Some(caps) = INSERT_INTO_RE.captures(stmt) {
                 if let Some(m) = caps.get(1) {
                     return (
                         StatementType::Insert,
@@ -845,10 +1118,12 @@ impl<R: Read> Parser<R> {
             // Fall back to generic regex for MySQL/PostgreSQL/SQLite
             if let Some(caps) = CREATE_INDEX_RE.captures(stmt) {
                 if let Some(m) = caps.get(1) {
-                    return (
-                        StatementType::CreateIndex,
-                        String::from_utf8_lossy(m.as_bytes()).into_owned(),
-                    );
+                    let name = String::from_utf8_lossy(m.as_bytes());
+                    // Strip schema qualifier (public.users -> users) so indexes
+                    // group under the same key as their CREATE TABLE, which also
+                    // strips the schema.
+                    let table_name = name.split('.').next_back().unwrap_or(&name).to_string();
+                    return (StatementType::CreateIndex, table_name);
                 }
             }
         }
@@ -1031,12 +1306,9 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
                 i += 1;
                 (Some(b'`'), b'`')
             }
-            Some(b'"') if dialect != SqlDialect::MySql => {
-                i += 1;
-                (Some(b'"'), b'"')
-            }
+            // Double quotes are the standard identifier quote for
+            // Postgres/SQLite/MSSQL, and accepted for MySQL too (less common).
             Some(b'"') => {
-                // Allow double quotes for MySQL too (though less common)
                 i += 1;
                 (Some(b'"'), b'"')
             }
@@ -1113,6 +1385,19 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
 #[inline]
 fn is_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// A dollar-quote tag is either empty (`$$`) or an identifier
+/// (`[A-Za-z_][A-Za-z0-9_]*`), matching PostgreSQL's rules.
+#[inline]
+fn is_valid_dollar_tag(tag: &[u8]) -> bool {
+    match tag.first() {
+        None => true,
+        Some(&first) if first.is_ascii_alphabetic() || first == b'_' => tag[1..]
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'_'),
+        _ => false,
+    }
 }
 
 pub fn determine_buffer_size(file_size: u64) -> usize {

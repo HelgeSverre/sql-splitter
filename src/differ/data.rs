@@ -454,7 +454,13 @@ impl DataDiffer {
 
             match stmt_type {
                 StatementType::Insert => {
-                    self.process_insert_statement(&stmt, &table_name, table_schema, is_old)?;
+                    self.process_insert_statement(
+                        &stmt,
+                        &table_name,
+                        table_schema,
+                        is_old,
+                        dialect,
+                    )?;
                 }
                 StatementType::Copy => {
                     // For PostgreSQL COPY, the data comes in the next statement
@@ -477,8 +483,9 @@ impl DataDiffer {
         table_name: &str,
         table_schema: &crate::schema::TableSchema,
         is_old: bool,
+        dialect: SqlDialect,
     ) -> anyhow::Result<()> {
-        let rows = mysql_insert::parse_mysql_insert_rows(stmt, table_schema)?;
+        let rows = mysql_insert::parse_insert_rows(stmt, table_schema, dialect)?;
 
         let (pk_indices, has_override, invalid_cols) =
             self.get_effective_pk_indices(table_name, table_schema);

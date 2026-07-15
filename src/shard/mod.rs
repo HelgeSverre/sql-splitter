@@ -14,7 +14,7 @@ pub use config::{
     DefaultShardClassifier, GlobalTableMode, ShardTableClassification, ShardYamlConfig,
 };
 
-use crate::parser::mysql_insert::{parse_mysql_insert_rows, ParsedRow, PkSet, PkTuple, PkValue};
+use crate::parser::mysql_insert::{parse_insert_rows, ParsedRow, PkSet, PkTuple, PkValue};
 use crate::parser::postgres_copy::{parse_copy_columns, parse_postgres_copy_rows, ParsedCopyRow};
 use crate::parser::{ContentFilter, Parser, SqlDialect, StatementType};
 use crate::schema::{SchemaBuilder, SchemaGraph, TableId, TableSchema};
@@ -390,7 +390,7 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
 
             match stmt_type {
                 StatementType::Insert => {
-                    let rows = parse_mysql_insert_rows(&stmt, table_schema)?;
+                    let rows = parse_insert_rows(&stmt, table_schema, config.dialect)?;
 
                     for row in rows {
                         rows_seen += 1;
