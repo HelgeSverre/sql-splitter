@@ -119,7 +119,7 @@ fn is_ident_byte(b: u8) -> bool {
 /// appear inside a quoted identifier (backtick / double-quote / bracket) or a
 /// string literal. This prevents tables like `product_values` or
 /// `` `order values` `` from being mistaken for the VALUES clause (bug #2).
-fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
+pub(crate) fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
     let mut in_single = false;
     let mut in_double = false;
     let mut in_backtick = false;
@@ -209,7 +209,7 @@ fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
 /// Extract a column list `(a, b, c)` appearing immediately before the VALUES
 /// keyword, given the byte offset just past VALUES. Shared by
 /// [`InsertParser::parse_column_list`] and [`parse_insert_for_bulk`] (bug #2).
-fn extract_column_list_before(stmt: &[u8], values_pos: usize) -> Option<Vec<String>> {
+pub(crate) fn extract_column_list_before(stmt: &[u8], values_pos: usize) -> Option<Vec<String>> {
     let before = &stmt[..values_pos.saturating_sub(6)];
     let s = String::from_utf8_lossy(before);
 
@@ -248,6 +248,9 @@ pub struct InsertParser<'a> {
     table_schema: Option<&'a TableSchema>,
     /// Column order in the INSERT (maps value index -> column ID)
     column_order: Vec<Option<ColumnId>>,
+    /// Reverse of `column_order` (schema column ordinal -> value index),
+    /// computed once per statement so per-row FK/column lookups are O(1).
+    col_to_value: Vec<Option<usize>>,
     /// Dialect governs string escaping. Only MySQL treats `\` as an escape
     /// character; Postgres/SQLite/MSSQL treat it as a literal byte.
     dialect: SqlDialect,
@@ -261,6 +264,7 @@ impl<'a> InsertParser<'a> {
             pos: 0,
             table_schema: None,
             column_order: Vec::new(),
+            col_to_value: Vec::new(),
             dialect: SqlDialect::MySql,
         }
     }
@@ -285,6 +289,20 @@ impl<'a> InsertParser<'a> {
 
         // Parse column list if present
         self.parse_column_list();
+
+        // Precompute the reverse column map once for the whole statement.
+        if let Some(schema) = self.table_schema {
+            let mut map = vec![None; schema.columns.len()];
+            for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
+                if let Some(col_id) = col_id_opt {
+                    let ord = col_id.0 as usize;
+                    if ord < map.len() {
+                        map[ord] = Some(val_idx);
+                    }
+                }
+            }
+            self.col_to_value = map;
+        }
 
         // Parse each row
         let mut rows = Vec::new();
@@ -656,8 +674,8 @@ impl<'a> InsertParser<'a> {
             let mut all_non_null = true;
 
             for &col_id in &fk.columns {
-                // Find the value index for this column
-                if let Some(idx) = self.column_order.iter().position(|&c| c == Some(col_id)) {
+                // Find the value index for this column via the precomputed map.
+                if let Some(idx) = self.col_to_value.get(col_id.0 as usize).copied().flatten() {
                     if let Some(value) = values.get(idx) {
                         let pk_val = self.value_to_pk(value, schema.column(col_id));
                         if pk_val.is_null() {
@@ -689,22 +707,10 @@ impl<'a> InsertParser<'a> {
         (pk, fk_values, all_values)
     }
 
-    /// Build a mapping from schema column index to value index
-    /// This allows finding a specific column's value by its schema position
-    fn build_column_map(&self, schema: &TableSchema) -> Vec<Option<usize>> {
-        // Create a map where map[schema_col_ordinal] = Some(value_index)
-        let mut map = vec![None; schema.columns.len()];
-
-        for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
-            if let Some(col_id) = col_id_opt {
-                let ordinal = col_id.0 as usize;
-                if ordinal < map.len() {
-                    map[ordinal] = Some(val_idx);
-                }
-            }
-        }
-
-        map
+    /// The schema-column-ordinal -> value-index map, precomputed once per
+    /// statement in [`parse_rows`].
+    fn build_column_map(&self, _schema: &TableSchema) -> Vec<Option<usize>> {
+        self.col_to_value.clone()
     }
 
     /// Convert a parsed value to a PkValue

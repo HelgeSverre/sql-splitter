@@ -275,9 +275,7 @@ pub fn detect_dialect_from_file(path: &std::path::Path) -> std::io::Result<Diale
 
 #[inline]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// Check if a line is a MSSQL GO batch separator
@@ -320,14 +318,11 @@ fn is_go_line(line: &[u8]) -> bool {
         && (trimmed[1] == b'O' || trimmed[1] == b'o')
         && (trimmed[2] == b' ' || trimmed[2] == b'\t')
     {
-        // Rest should be whitespace and digits
-        let rest = &trimmed[3..];
-        let rest_trimmed = rest
+        // Rest should be whitespace and digits (allocation-free scan)
+        return trimmed[3..]
             .iter()
             .skip_while(|&&b| b == b' ' || b == b'\t')
-            .copied()
-            .collect::<Vec<_>>();
-        return rest_trimmed.is_empty() || rest_trimmed.iter().all(|&b| b.is_ascii_digit());
+            .all(|&b| b.is_ascii_digit());
     }
 
     false
@@ -374,12 +369,6 @@ pub enum ContentFilter {
     /// Only data statements (INSERT, COPY)
     DataOnly,
 }
-
-static CREATE_TABLE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*CREATE\s+TABLE\s+`?([^\s`(]+)`?").unwrap());
-
-static INSERT_INTO_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*INSERT\s+INTO\s+`?([^\s`(]+)`?").unwrap());
 
 // Word boundary before ON so index names ending in "on" (idx_position,
 // idx_created_on, ...) don't match the "on" inside the identifier.
@@ -716,6 +705,11 @@ impl<R: Read> Parser<R> {
     /// Read PostgreSQL COPY data block until we see the terminator line (\.).
     /// The returned block includes everything up to and including the
     /// terminator line; anything after it is carried in `pending`.
+    ///
+    /// Note: a COPY block is buffered whole in memory (like every other
+    /// statement here) — its size sets the memory floor for a pg_dump with one
+    /// very large table. This is intentional: downstream consumers (redact,
+    /// diff, sample) operate on a full block at a time.
     fn read_copy_data(&mut self) -> std::io::Result<Option<Vec<u8>>> {
         let mut data = std::mem::take(&mut self.pending);
         let mut scan_from = 0;
@@ -994,15 +988,6 @@ impl<R: Read> Parser<R> {
                     );
                 }
             }
-            // Original regex as last resort
-            if let Some(caps) = CREATE_TABLE_RE.captures(stmt) {
-                if let Some(m) = caps.get(1) {
-                    return (
-                        StatementType::CreateTable,
-                        String::from_utf8_lossy(m.as_bytes()).into_owned(),
-                    );
-                }
-            }
         }
 
         if upper_prefix.starts_with(b"INSERT INTO") || upper_prefix.starts_with(b"INSERT ONLY") {
@@ -1010,14 +995,6 @@ impl<R: Read> Parser<R> {
                 return (StatementType::Insert, name);
             }
             if let Some(caps) = INSERT_FLEXIBLE_RE.captures(stmt) {
-                if let Some(m) = caps.get(1) {
-                    return (
-                        StatementType::Insert,
-                        String::from_utf8_lossy(m.as_bytes()).into_owned(),
-                    );
-                }
-            }
-            if let Some(caps) = INSERT_INTO_RE.captures(stmt) {
                 if let Some(m) = caps.get(1) {
                     return (
                         StatementType::Insert,
@@ -1234,12 +1211,9 @@ fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) 
                 i += 1;
                 (Some(b'`'), b'`')
             }
-            Some(b'"') if dialect != SqlDialect::MySql => {
-                i += 1;
-                (Some(b'"'), b'"')
-            }
+            // Double quotes are the standard identifier quote for
+            // Postgres/SQLite/MSSQL, and accepted for MySQL too (less common).
             Some(b'"') => {
-                // Allow double quotes for MySQL too (though less common)
                 i += 1;
                 (Some(b'"'), b'"')
             }

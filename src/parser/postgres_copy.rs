@@ -41,8 +41,14 @@ impl ParsedCopyRow {
 pub struct CopyParser<'a> {
     data: &'a [u8],
     table_schema: Option<&'a TableSchema>,
-    /// Column order from COPY header
+    /// Column names from the COPY header, resolved against the schema lazily
+    /// in `parse_rows` (so builder order doesn't matter).
+    column_names: Vec<String>,
+    /// Resolved column order (value index -> column ID)
     column_order: Vec<Option<ColumnId>>,
+    /// Reverse of `column_order` (schema column ordinal -> value index),
+    /// computed once per block so per-row FK/column lookups are O(1).
+    col_to_value: Vec<Option<usize>>,
 }
 
 impl<'a> CopyParser<'a> {
@@ -51,7 +57,9 @@ impl<'a> CopyParser<'a> {
         Self {
             data,
             table_schema: None,
+            column_names: Vec::new(),
             column_order: Vec::new(),
+            col_to_value: Vec::new(),
         }
     }
 
@@ -61,24 +69,37 @@ impl<'a> CopyParser<'a> {
         self
     }
 
-    /// Set column order from COPY header
+    /// Set column order from the COPY header. Resolution against the schema is
+    /// deferred to `parse_rows`, so this may be called before `with_schema`.
     pub fn with_column_order(mut self, columns: Vec<String>) -> Self {
-        if let Some(schema) = self.table_schema {
-            self.column_order = columns
-                .iter()
-                .map(|name| schema.get_column_id(name))
-                .collect();
-        }
+        self.column_names = columns;
         self
     }
 
     /// Parse all rows from the COPY data block
     pub fn parse_rows(&mut self) -> anyhow::Result<Vec<ParsedCopyRow>> {
-        // If no explicit column order, use natural schema order
-        if self.column_order.is_empty() {
-            if let Some(schema) = self.table_schema {
-                self.column_order = schema.columns.iter().map(|c| Some(c.ordinal)).collect();
+        if let Some(schema) = self.table_schema {
+            self.column_order = if self.column_names.is_empty() {
+                // No explicit column list - use natural schema order
+                schema.columns.iter().map(|c| Some(c.ordinal)).collect()
+            } else {
+                self.column_names
+                    .iter()
+                    .map(|name| schema.get_column_id(name))
+                    .collect()
+            };
+
+            // Precompute the reverse column map once for the whole block.
+            let mut map = vec![None; schema.columns.len()];
+            for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
+                if let Some(col_id) = col_id_opt {
+                    let ord = col_id.0 as usize;
+                    if ord < map.len() {
+                        map[ord] = Some(val_idx);
+                    }
+                }
             }
+            self.col_to_value = map;
         }
 
         let mut rows = Vec::new();
@@ -141,20 +162,10 @@ impl<'a> CopyParser<'a> {
         }))
     }
 
-    /// Build a mapping from schema column index to value index
-    fn build_column_map(&self, schema: &TableSchema) -> Vec<Option<usize>> {
-        let mut map = vec![None; schema.columns.len()];
-
-        for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
-            if let Some(col_id) = col_id_opt {
-                let ordinal = col_id.0 as usize;
-                if ordinal < map.len() {
-                    map[ordinal] = Some(val_idx);
-                }
-            }
-        }
-
-        map
+    /// The schema-column-ordinal -> value-index map, precomputed once per block
+    /// in [`parse_rows`].
+    fn build_column_map(&self, _schema: &TableSchema) -> Vec<Option<usize>> {
+        self.col_to_value.clone()
     }
 
     /// Split line by tabs and parse each value
@@ -289,7 +300,7 @@ impl<'a> CopyParser<'a> {
             let mut all_non_null = true;
 
             for &col_id in &fk.columns {
-                if let Some(idx) = self.column_order.iter().position(|&c| c == Some(col_id)) {
+                if let Some(idx) = self.col_to_value.get(col_id.0 as usize).copied().flatten() {
                     if let Some(value) = values.get(idx) {
                         let pk_val = self.value_to_pk(value, schema.column(col_id));
                         if pk_val.is_null() {

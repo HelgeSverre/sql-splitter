@@ -57,9 +57,10 @@ impl ValueRewriter {
             return Ok((stmt.to_vec(), 0, 0));
         }
 
-        // Get the column list (if any) from the statement
-        let stmt_str = String::from_utf8_lossy(stmt);
-        let column_list = self.extract_column_list(&stmt_str);
+        // Get the column list (if any) from the statement, locating VALUES as a
+        // keyword so a table named like `*values*` doesn't misplace it (bug #2).
+        let column_list = crate::parser::mysql_insert::find_values_keyword_pos(stmt)
+            .and_then(|pos| crate::parser::mysql_insert::extract_column_list_before(stmt, pos));
 
         // Build the header: INSERT INTO table_name (columns) VALUES
         let mut result = self.build_insert_header(table_name, &column_list);
@@ -355,46 +356,6 @@ impl ValueRewriter {
         result
     }
 
-    /// Extract column list from INSERT statement
-    fn extract_column_list(&self, stmt: &str) -> Option<Vec<String>> {
-        let upper = stmt.to_uppercase();
-        let values_pos = upper.find("VALUES")?;
-        let before_values = &stmt[..values_pos];
-
-        // Find the last (...) before VALUES
-        let close_paren = before_values.rfind(')')?;
-        let open_paren = before_values[..close_paren].rfind('(')?;
-
-        let col_list = &before_values[open_paren + 1..close_paren];
-
-        // Check if this looks like a column list
-        let upper_cols = col_list.to_uppercase();
-        if col_list.trim().is_empty()
-            || upper_cols.contains("SELECT")
-            || upper_cols.contains("VALUES")
-        {
-            return None;
-        }
-
-        let columns: Vec<String> = col_list
-            .split(',')
-            .map(|c| {
-                c.trim()
-                    .trim_matches('`')
-                    .trim_matches('"')
-                    .trim_matches('[')
-                    .trim_matches(']')
-                    .to_string()
-            })
-            .collect();
-
-        if columns.is_empty() {
-            None
-        } else {
-            Some(columns)
-        }
-    }
-
     /// Build INSERT statement header
     fn build_insert_header(&self, table_name: &str, columns: &Option<Vec<String>>) -> Vec<u8> {
         let mut result = Vec::new();
@@ -591,6 +552,30 @@ mod tests {
             indexes: vec![],
             create_statement: None,
         }
+    }
+
+    #[test]
+    fn test_rewrite_insert_table_name_with_values() {
+        // A table named `product_values` must not have its column list dropped
+        // by matching the "values" substring inside the name (bug #2).
+        let mut schema = create_test_schema();
+        schema.name = "product_values".to_string();
+
+        let mut rewriter = ValueRewriter::new(Some(1), SqlDialect::MySql, "en".to_string());
+        let stmt = b"INSERT INTO `product_values` (`id`, `email`, `name`) VALUES (1, 'a@b.com', 'Al'), (2, 'c@d.com', 'Bo');";
+        let strategies = vec![StrategyKind::Skip, StrategyKind::Skip, StrategyKind::Skip];
+
+        let (result, _rows, _cols) = rewriter
+            .rewrite_insert(stmt, "product_values", &schema, &strategies)
+            .unwrap();
+        let s = String::from_utf8_lossy(&result);
+
+        assert!(
+            s.contains("(`id`, `email`, `name`)"),
+            "column list dropped: {s}"
+        );
+        // Two data rows, no phantom third row.
+        assert_eq!(s.matches("@").count(), 2, "wrong row count: {s}");
     }
 
     #[test]
