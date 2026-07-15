@@ -1,6 +1,6 @@
 use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
-use crate::writer::WriterPool;
+use crate::writer::ParallelWriters;
 use ahash::AHashSet;
 use anyhow::Context;
 use serde::Serialize;
@@ -175,12 +175,26 @@ impl Splitter {
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
-        let mut writer_pool = WriterPool::new(self.output_dir.clone());
-        if !self.config.dry_run {
-            writer_pool.ensure_output_dir().with_context(|| {
-                format!("Failed to create output directory: {:?}", self.output_dir)
-            })?;
-        }
+        // Parallel, pipelined writers (skipped for dry runs). Writer count is
+        // min(4, cores) by default; override with SQL_SPLITTER_WRITERS.
+        let mut writers = if self.config.dry_run {
+            None
+        } else {
+            let num_writers = std::env::var("SQL_SPLITTER_WRITERS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n >= 1)
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get().min(4))
+                        .unwrap_or(4)
+                });
+            Some(
+                ParallelWriters::new(self.output_dir.clone(), num_writers, 64).with_context(
+                    || format!("Failed to create output directory: {:?}", self.output_dir),
+                )?,
+            )
+        };
 
         let mut tables_seen: AHashSet<String> = AHashSet::new();
         let mut stats = Stats {
@@ -252,34 +266,38 @@ impl Splitter {
                 stats.table_names.push(table_name.clone());
             }
 
-            if !self.config.dry_run {
-                // For MSSQL, add semicolon if statement doesn't end with one
-                // (MSSQL uses GO as batch separator, but we need semicolons for re-parsing)
-                let write_result = if self.config.dialect == SqlDialect::Mssql {
-                    let trimmed = stmt
+            if let Some(w) = writers.as_mut() {
+                // For MSSQL, add a semicolon when the statement doesn't already
+                // end with one (GO is the batch separator, but we need `;` for
+                // re-parsing). Other dialects add no suffix.
+                let suffix: &[u8] = if self.config.dialect == SqlDialect::Mssql {
+                    let last = stmt
                         .iter()
                         .rev()
                         .find(|&&b| b != b'\n' && b != b'\r' && b != b' ' && b != b'\t');
-                    if trimmed != Some(&b';') {
-                        // Write statement + semicolon without cloning
-                        writer_pool.write_statement_with_suffix(&table_name, &stmt, b";")
+                    if last != Some(&b';') {
+                        b";"
                     } else {
-                        writer_pool.write_statement(&table_name, &stmt)
+                        b""
                     }
                 } else {
-                    writer_pool.write_statement(&table_name, &stmt)
+                    b""
                 };
-                write_result.with_context(|| {
-                    format!("Failed to write statement to table file: {}", table_name)
-                })?;
+                w.write(&table_name, &stmt, suffix);
+
+                // A writer thread hit an I/O error; stop parsing and surface it.
+                if w.errored() {
+                    break;
+                }
             }
 
             stats.statements_processed += 1;
             stats.bytes_processed += stmt.len() as u64;
         }
 
-        if !self.config.dry_run {
-            writer_pool.close_all()?;
+        if let Some(w) = writers {
+            w.finish()
+                .with_context(|| format!("Failed writing output to {:?}", self.output_dir))?;
         }
 
         Ok(stats)
