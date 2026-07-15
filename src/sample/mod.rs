@@ -11,7 +11,7 @@ mod reservoir;
 pub use config::{DefaultClassifier, GlobalTableMode, SampleYamlConfig, TableClassification};
 pub use reservoir::Reservoir;
 
-use crate::parser::mysql_insert::{hash_pk_tuple, parse_mysql_insert_rows, ParsedRow, PkHashSet};
+use crate::parser::mysql_insert::{hash_pk_tuple, parse_insert_rows, ParsedRow, PkHashSet};
 use crate::parser::postgres_copy::{parse_copy_columns, parse_postgres_copy_rows, ParsedCopyRow};
 use crate::parser::{ContentFilter, Parser, SqlDialect, StatementType};
 use crate::schema::{SchemaBuilder, SchemaGraph, TableId};
@@ -614,7 +614,7 @@ fn sample_table_streaming(
 
                 match stmt_type {
                     StatementType::Insert => {
-                        let rows = parse_mysql_insert_rows(&stmt, table_schema)?;
+                        let rows = parse_insert_rows(&stmt, table_schema, config.dialect)?;
                         for row in rows {
                             rows_seen += 1;
 
@@ -733,7 +733,7 @@ fn sample_table_streaming(
 
                 match stmt_type {
                     StatementType::Insert => {
-                        let rows = parse_mysql_insert_rows(&stmt, table_schema)?;
+                        let rows = parse_insert_rows(&stmt, table_schema, config.dialect)?;
                         for row in rows {
                             let current_idx = rows_seen;
                             rows_seen += 1;
@@ -849,7 +849,7 @@ fn sample_table_streaming(
 
                 match stmt_type {
                     StatementType::Insert => {
-                        let rows = parse_mysql_insert_rows(&stmt, table_schema)?;
+                        let rows = parse_insert_rows(&stmt, table_schema, config.dialect)?;
                         for row in rows {
                             if let Some((next_idx, _)) = select_iter.peek() {
                                 if current_row_idx == *next_idx {

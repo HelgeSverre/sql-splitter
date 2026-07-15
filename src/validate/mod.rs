@@ -654,7 +654,7 @@ impl Validator {
         };
 
         // Parse rows from INSERT using the schema (works for MySQL and SQLite)
-        let rows = match mysql_insert::parse_mysql_insert_rows(stmt, table_schema) {
+        let rows = match mysql_insert::parse_insert_rows(stmt, table_schema, self.dialect) {
             Ok(r) => r,
             Err(_) => return,
         };

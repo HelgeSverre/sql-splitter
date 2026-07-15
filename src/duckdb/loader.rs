@@ -391,7 +391,7 @@ impl<'a> DumpLoader<'a> {
         }
 
         // Try to parse the INSERT statement
-        let parsed = match parse_insert_for_bulk(stmt.as_bytes()) {
+        let parsed = match parse_insert_for_bulk(stmt.as_bytes(), dialect) {
             Ok(p) => p,
             Err(_) => return false, // Parse failed, use fallback
         };

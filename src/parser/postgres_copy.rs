@@ -92,7 +92,12 @@ impl<'a> CopyParser<'a> {
                 .map(|p| pos + p)
                 .unwrap_or(self.data.len());
 
-            let line = &self.data[pos..line_end];
+            let mut line = &self.data[pos..line_end];
+            // Strip a trailing CR so CRLF-terminated dumps don't leave \r in the
+            // last value of every row (and so the \. terminator still matches).
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
 
             // Check for terminator
             if line == b"\\." || line.is_empty() {
@@ -181,13 +186,19 @@ impl<'a> CopyParser<'a> {
         // Decode escape sequences
         let decoded = self.decode_copy_escapes(value);
 
-        // Try to parse as integer
+        // Try to parse as integer, but only when the text is the *canonical*
+        // representation of that integer. Otherwise "0123" or "+5" would be
+        // treated as numbers and compare equal to their numeric forms in diff,
+        // silently conflating distinct text primary keys (bug #12).
         if let Ok(s) = std::str::from_utf8(&decoded) {
             if let Ok(n) = s.parse::<i64>() {
-                return CopyValue::Integer(n);
-            }
-            if let Ok(n) = s.parse::<i128>() {
-                return CopyValue::BigInteger(n);
+                if n.to_string() == s {
+                    return CopyValue::Integer(n);
+                }
+            } else if let Ok(n) = s.parse::<i128>() {
+                if n.to_string() == s {
+                    return CopyValue::BigInteger(n);
+                }
             }
         }
 

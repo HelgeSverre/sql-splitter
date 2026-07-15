@@ -46,8 +46,11 @@ impl ValueRewriter {
         table: &TableSchema,
         strategies: &[StrategyKind],
     ) -> anyhow::Result<(Vec<u8>, u64, u64)> {
-        // Parse the INSERT statement
-        let mut parser = InsertParser::new(stmt).with_schema(table);
+        // Parse the INSERT statement (dialect governs backslash unescaping so
+        // non-MySQL strings aren't corrupted on re-serialization, bug #3)
+        let mut parser = InsertParser::new(stmt)
+            .with_schema(table)
+            .with_dialect(self.dialect);
         let rows = parser.parse_rows()?;
 
         if rows.is_empty() {

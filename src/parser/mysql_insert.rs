@@ -3,6 +3,7 @@
 //! Parses INSERT INTO ... VALUES statements to extract individual rows
 //! and optionally extract PK/FK column values for dependency tracking.
 
+use crate::parser::SqlDialect;
 use crate::schema::{ColumnId, ColumnType, TableSchema};
 use ahash::AHashSet;
 use smallvec::SmallVec;
@@ -108,6 +109,138 @@ impl ParsedRow {
     }
 }
 
+#[inline]
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Find the byte offset just past the `VALUES` keyword, matching it as a
+/// keyword rather than a substring: it must be word-boundaried and must not
+/// appear inside a quoted identifier (backtick / double-quote / bracket) or a
+/// string literal. This prevents tables like `product_values` or
+/// `` `order values` `` from being mistaken for the VALUES clause (bug #2).
+fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut in_bracket = false;
+    let mut i = 0;
+
+    while i < stmt.len() {
+        let b = stmt[i];
+
+        if in_single {
+            // Only need to find the end of the string; treat '' as an escaped
+            // quote so we don't exit early. Backslash handling is irrelevant
+            // here because string literals only ever follow VALUES.
+            if b == b'\'' {
+                if stmt.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if b == b'"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_backtick {
+            if b == b'`' {
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_bracket {
+            if b == b']' {
+                in_bracket = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => {
+                in_single = true;
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                in_double = true;
+                i += 1;
+                continue;
+            }
+            b'`' => {
+                in_backtick = true;
+                i += 1;
+                continue;
+            }
+            b'[' => {
+                in_bracket = true;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if (b == b'V' || b == b'v')
+            && i + 6 <= stmt.len()
+            && stmt[i..i + 6].eq_ignore_ascii_case(b"VALUES")
+        {
+            let before_ok = i == 0 || !is_ident_byte(stmt[i - 1]);
+            let after_ok = stmt.get(i + 6).is_none_or(|&c| !is_ident_byte(c));
+            if before_ok && after_ok {
+                return Some(i + 6);
+            }
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+/// Extract a column list `(a, b, c)` appearing immediately before the VALUES
+/// keyword, given the byte offset just past VALUES. Shared by
+/// [`InsertParser::parse_column_list`] and [`parse_insert_for_bulk`] (bug #2).
+fn extract_column_list_before(stmt: &[u8], values_pos: usize) -> Option<Vec<String>> {
+    let before = &stmt[..values_pos.saturating_sub(6)];
+    let s = String::from_utf8_lossy(before);
+
+    let close = s.rfind(')')?;
+    let open = s[..close].rfind('(')?;
+    let col_list = &s[open + 1..close];
+
+    let upper = col_list.to_uppercase();
+    if col_list.trim().is_empty() || upper.contains("SELECT") {
+        return None;
+    }
+
+    let columns: Vec<String> = col_list
+        .split(',')
+        .map(|c| {
+            c.trim()
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches('[')
+                .trim_matches(']')
+                .to_string()
+        })
+        .collect();
+
+    if columns.is_empty() {
+        None
+    } else {
+        Some(columns)
+    }
+}
+
 /// Parser for MySQL INSERT statements
 pub struct InsertParser<'a> {
     stmt: &'a [u8],
@@ -115,22 +248,32 @@ pub struct InsertParser<'a> {
     table_schema: Option<&'a TableSchema>,
     /// Column order in the INSERT (maps value index -> column ID)
     column_order: Vec<Option<ColumnId>>,
+    /// Dialect governs string escaping. Only MySQL treats `\` as an escape
+    /// character; Postgres/SQLite/MSSQL treat it as a literal byte.
+    dialect: SqlDialect,
 }
 
 impl<'a> InsertParser<'a> {
-    /// Create a new parser for an INSERT statement
+    /// Create a new parser for an INSERT statement (defaults to MySQL escaping)
     pub fn new(stmt: &'a [u8]) -> Self {
         Self {
             stmt,
             pos: 0,
             table_schema: None,
             column_order: Vec::new(),
+            dialect: SqlDialect::MySql,
         }
     }
 
     /// Set the table schema for PK/FK extraction
     pub fn with_schema(mut self, schema: &'a TableSchema) -> Self {
         self.table_schema = Some(schema);
+        self
+    }
+
+    /// Set the dialect so string values are unescaped correctly (bug #3).
+    pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
+        self.dialect = dialect;
         self
     }
 
@@ -170,14 +313,8 @@ impl<'a> InsertParser<'a> {
 
     /// Find the VALUES keyword and return position after it
     fn find_values_keyword(&self) -> anyhow::Result<usize> {
-        let stmt_str = String::from_utf8_lossy(self.stmt);
-        let upper = stmt_str.to_uppercase();
-
-        if let Some(pos) = upper.find("VALUES") {
-            Ok(pos + 6) // Length of "VALUES"
-        } else {
-            anyhow::bail!("INSERT statement missing VALUES keyword")
-        }
+        find_values_keyword_pos(self.stmt)
+            .ok_or_else(|| anyhow::anyhow!("INSERT statement missing VALUES keyword"))
     }
 
     /// Parse optional column list after INSERT INTO table_name
@@ -188,34 +325,11 @@ impl<'a> InsertParser<'a> {
 
         let schema = self.table_schema.unwrap();
 
-        // Look for column list between table name and VALUES
-        // We need to look backwards from current position (after VALUES)
-        let before_values = &self.stmt[..self.pos.saturating_sub(6)];
-        let stmt_str = String::from_utf8_lossy(before_values);
-
-        // Find the last (...) before VALUES
-        if let Some(close_paren) = stmt_str.rfind(')') {
-            if let Some(open_paren) = stmt_str[..close_paren].rfind('(') {
-                let col_list = &stmt_str[open_paren + 1..close_paren];
-                // Check if this looks like a column list (no VALUES, etc.)
-                if !col_list.to_uppercase().contains("SELECT") {
-                    let cols: Vec<&str> = col_list.split(',').collect();
-                    self.column_order = cols
-                        .iter()
-                        .map(|c| {
-                            // Strip quotes: backticks (MySQL), double quotes (PG/SQLite), brackets (MSSQL)
-                            let name = c
-                                .trim()
-                                .trim_matches('`')
-                                .trim_matches('"')
-                                .trim_matches('[')
-                                .trim_matches(']');
-                            schema.get_column_id(name)
-                        })
-                        .collect();
-                    return;
-                }
-            }
+        // self.pos is just past VALUES; look for a column list immediately
+        // before it (shared with the bulk-loader path).
+        if let Some(cols) = extract_column_list_before(self.stmt, self.pos) {
+            self.column_order = cols.iter().map(|name| schema.get_column_id(name)).collect();
+            return;
         }
 
         // No explicit column list - use natural order
@@ -335,6 +449,11 @@ impl<'a> InsertParser<'a> {
     fn parse_string_value(&mut self) -> anyhow::Result<ParsedValue> {
         self.pos += 1; // Skip opening quote
 
+        // Backslash is only an escape character in MySQL. Postgres (standard
+        // strings), SQLite and MSSQL treat it as a literal byte, so applying
+        // MySQL unescaping there corrupts Windows paths, regexes, JSON, etc.
+        let honor_backslash = self.dialect == SqlDialect::MySql;
+
         let mut value = Vec::new();
         let mut escape_next = false;
 
@@ -353,7 +472,7 @@ impl<'a> InsertParser<'a> {
                 value.push(escaped);
                 escape_next = false;
                 self.pos += 1;
-            } else if b == b'\\' {
+            } else if b == b'\\' && honor_backslash {
                 escape_next = true;
                 self.pos += 1;
             } else if b == b'\'' {
@@ -422,11 +541,40 @@ impl<'a> InsertParser<'a> {
             } else if b == b',' || b == b')' || b.is_ascii_whitespace() {
                 break;
             } else {
-                // Unknown character in number, skip to next delimiter
+                // Unknown character: this is an expression/function call rather
+                // than a plain number. Skip to the delimiter that ends this
+                // value, respecting string/identifier quotes (' and ") and
+                // nested parentheses so a value like
+                // ST_GeomFromText('POLYGON((0 0,1 1))') or CONCAT("x)y", "z")
+                // isn't split inside its own string/parens (bug #11).
+                let mut depth = 0i32;
+                let mut quote: Option<u8> = None;
+                let honor_backslash = self.dialect == SqlDialect::MySql;
                 while self.pos < self.stmt.len() {
                     let c = self.stmt[self.pos];
-                    if c == b',' || c == b')' {
-                        break;
+                    if let Some(q) = quote {
+                        if c == b'\\' && honor_backslash {
+                            self.pos += 2;
+                            continue;
+                        }
+                        if c == q {
+                            // A doubled quote ('' or "") stays inside.
+                            if self.stmt.get(self.pos + 1) == Some(&q) {
+                                self.pos += 2;
+                                continue;
+                            }
+                            quote = None;
+                        }
+                        self.pos += 1;
+                        continue;
+                    }
+                    match c {
+                        b'\'' | b'"' => quote = Some(c),
+                        b'(' => depth += 1,
+                        b')' if depth > 0 => depth -= 1,
+                        b')' => break,
+                        b',' if depth == 0 => break,
+                        _ => {}
                     }
                     self.pos += 1;
                 }
@@ -613,16 +761,28 @@ pub enum ParsedValue {
     Other(Vec<u8>),
 }
 
+/// Parse all rows from an INSERT statement using the given dialect's escaping.
+pub fn parse_insert_rows(
+    stmt: &[u8],
+    schema: &TableSchema,
+    dialect: SqlDialect,
+) -> anyhow::Result<Vec<ParsedRow>> {
+    let mut parser = InsertParser::new(stmt)
+        .with_schema(schema)
+        .with_dialect(dialect);
+    parser.parse_rows()
+}
+
 /// Parse all rows from a MySQL INSERT statement
 pub fn parse_mysql_insert_rows(
     stmt: &[u8],
     schema: &TableSchema,
 ) -> anyhow::Result<Vec<ParsedRow>> {
-    let mut parser = InsertParser::new(stmt).with_schema(schema);
-    parser.parse_rows()
+    parse_insert_rows(stmt, schema, SqlDialect::MySql)
 }
 
 /// Parse rows without schema (just raw row extraction)
+#[allow(dead_code)]
 pub fn parse_mysql_insert_rows_raw(stmt: &[u8]) -> anyhow::Result<Vec<ParsedRow>> {
     let mut parser = InsertParser::new(stmt);
     parser.parse_rows()
@@ -635,7 +795,7 @@ mod tests {
     #[test]
     fn test_parse_insert_for_bulk_simple() {
         let sql = b"INSERT INTO users VALUES (1, 'Alice')";
-        let result = parse_insert_for_bulk(sql).unwrap();
+        let result = parse_insert_for_bulk(sql, SqlDialect::MySql).unwrap();
         assert_eq!(result.table, "users");
         assert!(result.columns.is_none());
         assert_eq!(result.rows.len(), 1);
@@ -644,7 +804,7 @@ mod tests {
     #[test]
     fn test_parse_insert_for_bulk_with_columns() {
         let sql = b"INSERT INTO users (name, id) VALUES ('Alice', 1)";
-        let result = parse_insert_for_bulk(sql).unwrap();
+        let result = parse_insert_for_bulk(sql, SqlDialect::MySql).unwrap();
         assert_eq!(result.table, "users");
         assert_eq!(
             result.columns,
@@ -657,7 +817,7 @@ mod tests {
     fn test_parse_insert_for_bulk_mssql() {
         let sql =
             b"INSERT INTO [dbo].[users] ([email], [name]) VALUES (N'alice@example.com', N'Alice')";
-        let result = parse_insert_for_bulk(sql).unwrap();
+        let result = parse_insert_for_bulk(sql, SqlDialect::Mssql).unwrap();
         assert_eq!(result.table, "users");
         assert_eq!(
             result.columns,
@@ -669,7 +829,7 @@ mod tests {
     #[test]
     fn test_parse_insert_for_bulk_mysql() {
         let sql = b"INSERT INTO `users` (`id`, `name`) VALUES (1, 'Bob')";
-        let result = parse_insert_for_bulk(sql).unwrap();
+        let result = parse_insert_for_bulk(sql, SqlDialect::MySql).unwrap();
         assert_eq!(result.table, "users");
         assert_eq!(
             result.columns,
@@ -695,18 +855,20 @@ pub struct InsertValues {
 /// This function extracts table name, optional column list, and all VALUES
 /// from an INSERT statement without requiring a schema. It's optimized for
 /// bulk loading into DuckDB via the Appender API.
-pub fn parse_insert_for_bulk(stmt: &[u8]) -> anyhow::Result<InsertValues> {
+pub fn parse_insert_for_bulk(stmt: &[u8], dialect: SqlDialect) -> anyhow::Result<InsertValues> {
     let stmt_str = String::from_utf8_lossy(stmt);
     let upper = stmt_str.to_uppercase();
 
     // Extract table name: INSERT INTO [schema.]table_name [(columns)] VALUES
     let table = extract_insert_table_name(&stmt_str, &upper)?;
 
-    // Extract column list if present
-    let columns = extract_column_list(&stmt_str, &upper);
+    // Locate VALUES as a keyword (not a substring) so tables/columns containing
+    // "values" don't shift parsing (bug #2), then extract the column list.
+    let columns =
+        find_values_keyword_pos(stmt).and_then(|pos| extract_column_list_before(stmt, pos));
 
     // Parse rows using the existing parser
-    let mut parser = InsertParser::new(stmt);
+    let mut parser = InsertParser::new(stmt).with_dialect(dialect);
     let parsed_rows = parser.parse_rows()?;
 
     let rows = parsed_rows.into_iter().map(|r| r.values).collect();
@@ -824,42 +986,4 @@ fn strip_identifier_quotes(s: &str) -> String {
         .trim_matches('[')
         .trim_matches(']')
         .to_string()
-}
-
-/// Extract column list from INSERT statement if present
-fn extract_column_list(stmt: &str, upper: &str) -> Option<Vec<String>> {
-    // Find position of VALUES
-    let values_pos = upper.find("VALUES")?;
-    let before_values = &stmt[..values_pos];
-
-    // Find the last (...) before VALUES
-    let close_paren = before_values.rfind(')')?;
-    let open_paren = before_values[..close_paren].rfind('(')?;
-
-    let col_list = &before_values[open_paren + 1..close_paren];
-
-    // Check if this looks like a column list (not empty, no SQL keywords)
-    let upper_cols = col_list.to_uppercase();
-    if col_list.trim().is_empty() || upper_cols.contains("SELECT") || upper_cols.contains("VALUES")
-    {
-        return None;
-    }
-
-    let columns: Vec<String> = col_list
-        .split(',')
-        .map(|c| {
-            c.trim()
-                .trim_matches('`')
-                .trim_matches('"')
-                .trim_matches('[')
-                .trim_matches(']')
-                .to_string()
-        })
-        .collect();
-
-    if columns.is_empty() {
-        None
-    } else {
-        Some(columns)
-    }
 }
