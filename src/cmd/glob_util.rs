@@ -157,34 +157,6 @@ pub fn drive_multi_file<P>(
     run
 }
 
-/// Result type for multi-file command execution.
-#[derive(Debug, Default)]
-pub struct MultiFileResult {
-    pub total_files: usize,
-    pub succeeded: usize,
-    pub failed: usize,
-    pub errors: Vec<(PathBuf, String)>,
-}
-
-impl MultiFileResult {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn record_success(&mut self) {
-        self.succeeded += 1;
-    }
-
-    pub fn record_failure(&mut self, path: PathBuf, error: String) {
-        self.failed += 1;
-        self.errors.push((path, error));
-    }
-
-    pub fn has_failures(&self) -> bool {
-        self.failed > 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,16 +236,57 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_file_result() {
-        let mut result = MultiFileResult::new();
-        result.total_files = 3;
-        result.record_success();
-        result.record_success();
-        result.record_failure(PathBuf::from("bad.sql"), "parse error".to_string());
+    fn test_drive_multi_file_counts_and_fail_fast() {
+        let files = vec![
+            PathBuf::from("a.sql"),
+            PathBuf::from("b.sql"),
+            PathBuf::from("c.sql"),
+        ];
 
-        assert_eq!(result.succeeded, 2);
-        assert_eq!(result.failed, 1);
-        assert!(result.has_failures());
-        assert_eq!(result.errors.len(), 1);
+        // No fail_fast: every file attempted.
+        let run = drive_multi_file(
+            &files,
+            false,
+            |idx, _file| {
+                if idx == 1 {
+                    FileOutcome::Failure {
+                        payload: Some("failed"),
+                        error: "boom".to_string(),
+                    }
+                } else {
+                    FileOutcome::Success("ok")
+                }
+            },
+            |_| Some("skipped"),
+        );
+        assert_eq!(run.total, 3);
+        assert_eq!(run.succeeded, 2);
+        assert_eq!(run.failed, 1);
+        assert_eq!(run.skipped, 0);
+        assert!(run.has_failures());
+        assert_eq!(run.payloads, vec!["ok", "failed", "ok"]);
+        assert_eq!(run.errors.len(), 1);
+        assert_eq!(run.errors[0].0, PathBuf::from("b.sql"));
+
+        // fail_fast: stops after the first failure, tail marked skipped.
+        let run = drive_multi_file(
+            &files,
+            true,
+            |idx, _file| {
+                if idx == 0 {
+                    FileOutcome::Failure {
+                        payload: None,
+                        error: "boom".to_string(),
+                    }
+                } else {
+                    FileOutcome::Success("ok")
+                }
+            },
+            |_| Some("skipped"),
+        );
+        assert_eq!(run.succeeded, 0);
+        assert_eq!(run.failed, 1);
+        assert_eq!(run.skipped, 2);
+        assert_eq!(run.payloads, vec!["skipped", "skipped"]);
     }
 }
