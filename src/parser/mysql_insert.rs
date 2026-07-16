@@ -272,6 +272,37 @@ pub(crate) fn extract_column_list_before(stmt: &[u8], values_pos: usize) -> Opti
     }
 }
 
+/// Build the reverse column map (schema column ordinal -> value index) for a
+/// statement/block, shared with every row via `Arc` instead of cloned per row.
+/// Used by both the INSERT and COPY parsers.
+pub(crate) fn build_col_to_value(
+    column_order: &[Option<ColumnId>],
+    n_columns: usize,
+) -> Arc<[Option<usize>]> {
+    let mut map = vec![None; n_columns];
+    for (val_idx, col_id_opt) in column_order.iter().enumerate() {
+        if let Some(col_id) = col_id_opt {
+            let ord = col_id.0 as usize;
+            if ord < map.len() {
+                map[ord] = Some(val_idx);
+            }
+        }
+    }
+    map.into()
+}
+
+/// Coerce a textual value to an integer [`PkValue`] when the schema column is
+/// `Int`/`BigInt` (integer PKs are often dumped as quoted strings). Shared by
+/// the INSERT and COPY `value_to_pk` paths so the coercion rules can't drift
+/// between MySQL and Postgres dumps.
+pub(crate) fn coerce_text_pk(s: &str, col: Option<&crate::schema::Column>) -> Option<PkValue> {
+    match col?.col_type {
+        ColumnType::Int => s.parse::<i64>().ok().map(PkValue::Int),
+        ColumnType::BigInt => s.parse::<i128>().ok().map(PkValue::BigInt),
+        _ => None,
+    }
+}
+
 /// Extract PK tuple, FK tuples and all column values from one parsed row,
 /// shared by the INSERT and COPY parsers. `to_pk` converts a dialect-specific
 /// value into a [`PkValue`]; `column_order` maps value index -> column, and
@@ -414,19 +445,9 @@ impl<'a> InsertParser<'a> {
         // Parse column list if present
         self.parse_column_list();
 
-        // Precompute the reverse column map once for the whole statement;
-        // rows share it via Arc instead of cloning it per row.
+        // Precompute the reverse column map once for the whole statement.
         if let Some(schema) = self.table_schema {
-            let mut map = vec![None; schema.columns.len()];
-            for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
-                if let Some(col_id) = col_id_opt {
-                    let ord = col_id.0 as usize;
-                    if ord < map.len() {
-                        map[ord] = Some(val_idx);
-                    }
-                }
-            }
-            self.col_to_value = map.into();
+            self.col_to_value = build_col_to_value(&self.column_order, schema.columns.len());
         }
 
         // Parse each row
@@ -439,7 +460,7 @@ impl<'a> InsertParser<'a> {
             }
 
             if self.stmt[self.pos] == b'(' {
-                if let Some(row) = self.parse_row()? {
+                if let Some(row) = self.parse_row() {
                     rows.push(row);
                 }
             } else if self.stmt[self.pos] == b',' {
@@ -479,12 +500,13 @@ impl<'a> InsertParser<'a> {
         self.column_order = schema.columns.iter().map(|c| Some(c.ordinal)).collect();
     }
 
-    /// Parse a single row "(val1, val2, ...)"
-    fn parse_row(&mut self) -> anyhow::Result<Option<ParsedRow>> {
+    /// Parse a single row "(val1, val2, ...)". Infallible: malformed input
+    /// degrades to best-effort values rather than an error (see `parse_value`).
+    fn parse_row(&mut self) -> Option<ParsedRow> {
         self.skip_whitespace();
 
         if self.pos >= self.stmt.len() || self.stmt[self.pos] != b'(' {
-            return Ok(None);
+            return None;
         }
 
         let start = self.pos;
@@ -513,7 +535,7 @@ impl<'a> InsertParser<'a> {
                     self.pos += 1;
                 }
                 _ if depth == 1 => {
-                    values.push(self.parse_value()?);
+                    values.push(self.parse_value());
                 }
                 _ => {
                     self.pos += 1;
@@ -532,22 +554,22 @@ impl<'a> InsertParser<'a> {
             _ => (None, Vec::new(), Vec::new()),
         };
 
-        Ok(Some(ParsedRow {
+        Some(ParsedRow {
             raw,
             values,
             pk,
             fk_values,
             all_values,
             column_map: Arc::clone(&self.col_to_value),
-        }))
+        })
     }
 
     /// Parse a single value (string, number, NULL, etc.)
-    fn parse_value(&mut self) -> anyhow::Result<ParsedValue> {
+    fn parse_value(&mut self) -> ParsedValue {
         self.skip_whitespace();
 
         if self.pos >= self.stmt.len() {
-            return Ok(ParsedValue::Null);
+            return ParsedValue::Null;
         }
 
         let b = self.stmt[self.pos];
@@ -557,7 +579,7 @@ impl<'a> InsertParser<'a> {
             let word = &self.stmt[self.pos..self.pos + 4];
             if word.eq_ignore_ascii_case(b"NULL") {
                 self.pos += 4;
-                return Ok(ParsedValue::Null);
+                return ParsedValue::Null;
             }
         }
 
@@ -588,7 +610,7 @@ impl<'a> InsertParser<'a> {
     }
 
     /// Parse a string literal 'value'
-    fn parse_string_value(&mut self) -> anyhow::Result<ParsedValue> {
+    fn parse_string_value(&mut self) -> ParsedValue {
         self.pos += 1; // Skip opening quote
 
         // Backslash is only an escape character in MySQL. Postgres (standard
@@ -660,11 +682,11 @@ impl<'a> InsertParser<'a> {
             }
         };
 
-        Ok(ParsedValue::String { value })
+        ParsedValue::String { value }
     }
 
     /// Parse a hex literal 0xABCD...
-    fn parse_hex_value(&mut self) -> anyhow::Result<ParsedValue> {
+    fn parse_hex_value(&mut self) -> ParsedValue {
         let start = self.pos;
         self.pos += 2; // Skip 0x
 
@@ -678,11 +700,11 @@ impl<'a> InsertParser<'a> {
         }
 
         let raw = self.stmt[start..self.pos].to_vec();
-        Ok(ParsedValue::Hex(raw))
+        ParsedValue::Hex(raw)
     }
 
     /// Parse a number or other non-string value
-    fn parse_number_value(&mut self) -> anyhow::Result<ParsedValue> {
+    fn parse_number_value(&mut self) -> ParsedValue {
         let start = self.pos;
         let mut has_dot = false;
 
@@ -757,16 +779,16 @@ impl<'a> InsertParser<'a> {
         if !has_dot {
             if let Ok(value_str) = std::str::from_utf8(raw) {
                 if let Ok(n) = value_str.parse::<i64>() {
-                    return Ok(ParsedValue::Integer(n));
+                    return ParsedValue::Integer(n);
                 }
                 if let Ok(n) = value_str.parse::<i128>() {
-                    return Ok(ParsedValue::BigInteger(n));
+                    return ParsedValue::BigInteger(n);
                 }
             }
         }
 
         // Fall back to raw value
-        Ok(ParsedValue::Other(raw.to_vec()))
+        ParsedValue::Other(raw.to_vec())
     }
 
     /// Skip whitespace and newlines
@@ -805,22 +827,8 @@ impl<'a> InsertParser<'a> {
             ParsedValue::BigInteger(n) => PkValue::BigInt(*n),
             ParsedValue::String { value } => {
                 // Check if this might be an integer stored as string
-                if let Some(col) = col {
-                    match col.col_type {
-                        ColumnType::Int => {
-                            if let Ok(n) = value.parse::<i64>() {
-                                return PkValue::Int(n);
-                            }
-                        }
-                        ColumnType::BigInt => {
-                            if let Ok(n) = value.parse::<i128>() {
-                                return PkValue::BigInt(n);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                PkValue::Text(value.clone().into_boxed_str())
+                coerce_text_pk(value, col)
+                    .unwrap_or_else(|| PkValue::Text(value.clone().into_boxed_str()))
             }
             ParsedValue::Hex(raw) => {
                 PkValue::Text(String::from_utf8_lossy(raw).into_owned().into_boxed_str())
@@ -884,7 +892,6 @@ pub fn parse_mysql_insert_rows(
 }
 
 /// Parse rows without schema (just raw row extraction)
-#[allow(dead_code)]
 pub fn parse_mysql_insert_rows_raw(stmt: &[u8]) -> anyhow::Result<Vec<ParsedRow>> {
     let mut parser = InsertParser::new(stmt);
     parser.parse_rows()
@@ -958,11 +965,8 @@ pub struct InsertValues {
 /// from an INSERT statement without requiring a schema. It's optimized for
 /// bulk loading into DuckDB via the Appender API.
 pub fn parse_insert_for_bulk(stmt: &[u8], dialect: SqlDialect) -> anyhow::Result<InsertValues> {
-    let stmt_str = String::from_utf8_lossy(stmt);
-    let upper = stmt_str.to_uppercase();
-
     // Extract table name: INSERT INTO [schema.]table_name [(columns)] VALUES
-    let table = extract_insert_table_name(&stmt_str, &upper)?;
+    let table = extract_insert_table_name(stmt, dialect)?;
 
     // Locate VALUES as a keyword (not a substring) so tables/columns containing
     // "values" don't shift parsing (bug #2), then extract the column list.
@@ -982,110 +986,26 @@ pub fn parse_insert_for_bulk(stmt: &[u8], dialect: SqlDialect) -> anyhow::Result
     })
 }
 
-/// Extract table name from INSERT statement
-fn extract_insert_table_name(stmt: &str, upper: &str) -> anyhow::Result<String> {
-    // Find "INSERT INTO" or "INSERT"
-    let start_pos = if let Some(pos) = upper.find("INSERT INTO") {
-        pos + 11 // Length of "INSERT INTO"
-    } else if let Some(pos) = upper.find("INSERT") {
-        pos + 6 // Length of "INSERT"
+/// Extract the table name from an INSERT statement without copying or
+/// uppercasing the whole statement — extended INSERTs can be many MB, and the
+/// table name lives in the first few bytes. Quote handling, schema stripping
+/// and `IF EXISTS`/`ONLY` skipping are shared with the split path via
+/// [`super::extract_table_name_flexible`].
+fn extract_insert_table_name(stmt: &[u8], dialect: SqlDialect) -> anyhow::Result<String> {
+    let stmt = super::strip_leading_comments_and_whitespace(stmt);
+
+    const INSERT_INTO: &[u8] = b"INSERT INTO";
+    const INSERT: &[u8] = b"INSERT";
+    let offset = if stmt.len() >= INSERT_INTO.len()
+        && stmt[..INSERT_INTO.len()].eq_ignore_ascii_case(INSERT_INTO)
+    {
+        INSERT_INTO.len()
+    } else if stmt.len() >= INSERT.len() && stmt[..INSERT.len()].eq_ignore_ascii_case(INSERT) {
+        INSERT.len()
     } else {
         anyhow::bail!("Not an INSERT statement");
     };
 
-    // Skip whitespace
-    let remaining = stmt[start_pos..].trim_start();
-
-    // Extract the full table reference (might be schema.table or just table)
-    let table_ref = extract_table_reference(remaining)?;
-
-    // Strip schema prefix if present
-    if let Some(dot_pos) = table_ref.rfind('.') {
-        let table_part = &table_ref[dot_pos + 1..];
-        Ok(strip_identifier_quotes(table_part))
-    } else {
-        Ok(strip_identifier_quotes(&table_ref))
-    }
-}
-
-/// Extract a full table reference (e.g., "[dbo].[users]" or "schema.table")
-fn extract_table_reference(s: &str) -> anyhow::Result<String> {
-    let s = s.trim();
-
-    if s.is_empty() {
-        anyhow::bail!("Empty table reference");
-    }
-
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(&c) = chars.peek() {
-        match c {
-            '[' => {
-                // MSSQL bracket quoting
-                chars.next();
-                result.push('[');
-                while let Some(&inner) = chars.peek() {
-                    chars.next();
-                    result.push(inner);
-                    if inner == ']' {
-                        break;
-                    }
-                }
-            }
-            '`' => {
-                // MySQL backtick quoting
-                chars.next();
-                result.push('`');
-                while let Some(&inner) = chars.peek() {
-                    chars.next();
-                    result.push(inner);
-                    if inner == '`' {
-                        break;
-                    }
-                }
-            }
-            '"' => {
-                // PostgreSQL/SQLite double-quote
-                chars.next();
-                result.push('"');
-                while let Some(&inner) = chars.peek() {
-                    chars.next();
-                    result.push(inner);
-                    if inner == '"' {
-                        break;
-                    }
-                }
-            }
-            '.' => {
-                // Schema separator
-                chars.next();
-                result.push('.');
-            }
-            c if c.is_whitespace() || c == '(' || c == ',' => {
-                // End of table reference
-                break;
-            }
-            _ => {
-                // Regular identifier character
-                chars.next();
-                result.push(c);
-            }
-        }
-    }
-
-    if result.is_empty() {
-        anyhow::bail!("Empty table reference");
-    }
-
-    Ok(result)
-}
-
-/// Strip quotes from an identifier
-fn strip_identifier_quotes(s: &str) -> String {
-    s.trim_matches('`')
-        .trim_matches('"')
-        .trim_matches('[')
-        .trim_matches(']')
-        .to_string()
+    super::extract_table_name_flexible(stmt, offset, dialect)
+        .ok_or_else(|| anyhow::anyhow!("Empty table reference"))
 }
