@@ -170,20 +170,13 @@ impl std::fmt::Display for Compression {
 /// different opening strategy than the stream decoders (see
 /// `crate::zip_input`). This is the entry point call sites should use
 /// instead of manually pairing `File::open` with [`Compression::wrap_reader`].
-pub fn open_input(path: &Path) -> anyhow::Result<Box<dyn Read>> {
-    open_input_impl(path, None)
-}
-
-/// Same as [`open_input`], but reports bytes read from disk (compressed
-/// bytes, for compressed/zip inputs) through `progress_fn` as they're read.
-pub fn open_input_with_progress(
-    path: &Path,
-    progress_fn: Box<dyn Fn(u64)>,
-) -> anyhow::Result<Box<dyn Read>> {
-    open_input_impl(path, Some(progress_fn))
-}
-
-fn open_input_impl(
+///
+/// When `progress_fn` is `Some`, it receives cumulative bytes read from disk
+/// (raw/compressed bytes, for compressed/zip inputs) as they're read; size a
+/// progress bar over this with [`input_progress_len`]. The zero- and
+/// always-progress conveniences [`open_input`] / [`open_input_with_progress`]
+/// are thin wrappers over this.
+pub fn open_input_opt_progress(
     path: &Path,
     progress_fn: Option<Box<dyn Fn(u64)>>,
 ) -> anyhow::Result<Box<dyn Read>> {
@@ -208,6 +201,19 @@ fn open_input_impl(
     compression
         .wrap_reader(reader)
         .with_context(|| format!("Failed to initialize {compression} decompression for {path:?}"))
+}
+
+/// Convenience wrapper: [`open_input_opt_progress`] without progress reporting.
+pub fn open_input(path: &Path) -> anyhow::Result<Box<dyn Read>> {
+    open_input_opt_progress(path, None)
+}
+
+/// Convenience wrapper: [`open_input_opt_progress`] with progress reporting.
+pub fn open_input_with_progress(
+    path: &Path,
+    progress_fn: Box<dyn Fn(u64)>,
+) -> anyhow::Result<Box<dyn Read>> {
+    open_input_opt_progress(path, Some(progress_fn))
 }
 
 /// Total number of bytes the progress callback installed by
@@ -332,10 +338,8 @@ impl Splitter {
 
         // Open the input, transparently handling any supported compression
         // format (including zip archives, which need a two-phase open).
-        let reader: Box<dyn Read> = match self.config.progress_fn.take() {
-            Some(cb) => open_input_with_progress(&self.input_file, cb)?,
-            None => open_input(&self.input_file)?,
-        };
+        let reader: Box<dyn Read> =
+            open_input_opt_progress(&self.input_file, self.config.progress_fn.take())?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
