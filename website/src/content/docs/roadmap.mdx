@@ -31,6 +31,25 @@ All core features have been released:
 
 ## Upcoming Features
 
+### vNext — Synthetic Data Generation
+
+Generate production-shaped synthetic SQL from a dump, schema, or reusable YAML model:
+
+```bash
+sql-splitter generate production.sql -o synthetic.sql
+sql-splitter generate production.sql --emit-config synthetic.yaml
+sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql
+```
+
+**Features:**
+
+- Bounded basic/full profiling and exact emitted row counts
+- Editable per-table and per-column YAML rules
+- Registered generators and planners for relational and multi-column invariants
+- Stable global, table, column, and operator seed streams
+- Public library API using the same compiler and engine as the CLI
+- Neutral profile evidence reusable by the future `infer` command
+
 ### v1.16.0 — Zip Input + Adaptive I/O Profiles (shipped)
 
 `.zip` dumps are now accepted as input across all commands — real-world exports often arrive as `dump.sql.zip`:
@@ -129,6 +148,7 @@ sql-splitter infer data.csv --table users --dialect mysql
 - Primary key detection
 - Index suggestion
 - FK inference (heuristic)
+- Reuses or extends `generate`'s bounded neutral profile evidence
 
 ## Non-Goals
 

@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
 **Version**: 1.15.0 (current)
-**Last Updated**: 2026-07-15
-**Revision**: 3.9 — v1.16.0 zip input implemented (all input commands, single `.sql` member policy)
+**Last Updated**: 2026-07-16
+**Revision**: 4.0 — synthetic data generation promoted from a fixture utility to a product feature
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -42,6 +42,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Next:**
 
+- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models
 - v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.18.0: Migrate — Schema migration generation
 - v1.19.0: DBML — Import/export DBML schema definitions
@@ -81,6 +82,10 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
                     │                                         │
                     └─────────────────────────────────────────┘
 ```
+
+`generate` adds a bounded `DumpProfiler` and neutral evidence model on top of
+Schema Graph and Row Parsing. The future `infer` command can reuse or extend that
+evidence without freezing profiler internals around an unbuilt consumer.
 
 ---
 
@@ -536,6 +541,27 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
+### vNext — Synthetic Data Generation
+
+**Theme**: Generate production-shaped synthetic SQL from files
+
+`generate` profiles a SQL dump or schema into a complete, editable YAML model,
+then streams relationally consistent synthetic data. The CLI and public library
+share the same model compiler and generation engine.
+
+**Deliverables:**
+
+- `sql-splitter generate production.sql -o synthetic.sql`
+- `sql-splitter generate production.sql --emit-config synthetic.yaml`
+- `sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql`
+- Bounded basic/full profiling and exact emitted row counts
+- Registered typed generators and planners without a YAML expression language
+- Stable top-level, table, column, and operator seed streams
+
+**Design:** [Synthetic data generation](superpowers/specs/2026-07-16-synthetic-data-generation-design.md)
+
+---
+
 ### v1.16.0 — Zip Input + Adaptive I/O Profiles
 
 **Theme**: Real-world inputs, real-world devices
@@ -749,6 +775,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 - Index suggestion based on data patterns
 - Foreign key inference (heuristic)
 - NOT NULL constraint detection
+- Reuse or extend `generate`'s bounded neutral profile evidence
 
 **Deliverables:**
 
@@ -759,9 +786,10 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ## Feature Dependency Matrix
 
-| Feature/Module        | Depends On                  | Unlocks                               |
-| --------------------- | --------------------------- | ------------------------------------- |
-| **Test Data Gen**     | (none)                      | All integration tests                 |
+| Feature/Module        | Depends On                        | Unlocks                               |
+| --------------------- | --------------------------------- | ------------------------------------- |
+| **Test Data Gen**     | (none)                            | All integration tests                 |
+| **Generate**          | Schema Graph, Row Parsing         | Synthetic fixtures, Infer evidence    |
 | **Merge**             | Split                       | —                                     |
 | **Schema Graph v1**   | (built in Sample)           | Sample, Shard, Validate, Diff         |
 | **Row Parsing v1**    | (built in Sample)           | Sample, Shard, Query, Redact, Convert |
@@ -781,7 +809,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 | **MSSQL**             | Convert                     | —                                     |
 | **Migrate**           | Diff, Schema Graph          | —                                     |
 | **Parallel**          | (all commands)              | —                                     |
-| **Infer**             | Row Parsing                 | —                                     |
+| **Infer**             | Row Parsing, Generate evidence   | —                                     |
 
 ---
 
@@ -822,14 +850,15 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ### Upcoming Features (v1.16+)
 
-| Version | Features        | Status      |
-| ------- | --------------- | ----------- |
-| v1.16.0 | Zip Input + Adaptive I/O | Released |
-| v1.17.0 | Enum Conversion | Planned     |
-| v1.18.0 | Migrate         | Planned     |
-| v1.19.0 | DBML            | Planned     |
-| v2.0.0  | Parallel        | Planned     |
-| v2.1.0  | Infer           | Planned     |
+| Version | Features                  | Status   |
+| ------- | ------------------------- | -------- |
+| v1.16.0 | Zip Input + Adaptive I/O  | Released |
+| vNext   | Synthetic Data Generation | Designed |
+| v1.17.0 | Enum Conversion           | Planned  |
+| v1.18.0 | Migrate                   | Planned  |
+| v1.19.0 | DBML                      | Planned  |
+| v2.0.0  | Parallel                  | Planned  |
+| v2.1.0  | Infer                     | Planned  |
 
 ---
 
@@ -1008,7 +1037,7 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ### Active
 
-- [Test Data Generator Design](TEST_DATA_GENERATOR.md)
+- [Synthetic Data Generation](superpowers/specs/2026-07-16-synthetic-data-generation-design.md)
 - [Additional Ideas](features/ADDITIONAL_IDEAS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
 - [Integration Opportunities](INTEGRATION_OPPORTUNITIES.md)
@@ -1029,7 +1058,7 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ### Completed Feature Designs (moved to archived after implementation)
 
-- [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md) — v1.12.x (released)
+- [MSSQL Feasibility](archived/MSSQL_FEASIBILITY.md) — v1.12.x (released)
 
 ### Archived (Implemented)
 
