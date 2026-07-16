@@ -1,6 +1,13 @@
-//! Tests for the synthetic-data-generation diagnostics module.
+//! Tests for the synthetic-data-generation diagnostics module and the typed
+//! extension registry.
 
 use sql_splitter::diagnostic::{Diagnostic, DiagnosticBag, Severity, SourceLocation};
+use sql_splitter::generate::{
+    Buffering, ColumnScope, CompileContext, CompiledGenerator, ConstantFactory, Determinism,
+    ExtensionRegistry, GeneratedValue, GeneratorDescriptor, GeneratorFactory, RowContext,
+    Verification,
+};
+use sql_splitter::synthetic::{GeneratorConfig, SqlTypeFamily};
 
 #[test]
 fn diagnostic_bag_keeps_independent_errors() {
@@ -131,4 +138,139 @@ fn diagnostic_json_roundtrips_through_serde() {
     let json = serde_json::to_string(&bag).unwrap();
     let restored: DiagnosticBag = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.diagnostics, bag.diagnostics);
+}
+
+// --- Extension registry -----------------------------------------------------
+
+/// A do-nothing compiled generator used by the collision test factories below.
+struct NoopGenerator;
+
+impl CompiledGenerator for NoopGenerator {
+    fn generate(
+        &mut self,
+        _context: &RowContext<'_>,
+        output: &mut GeneratedValue,
+    ) -> Result<(), sql_splitter::generate::GenerateError> {
+        *output = GeneratedValue::Null;
+        Ok(())
+    }
+}
+
+/// Builds a static generator descriptor for a test factory.
+macro_rules! test_descriptor {
+    ($kind:expr, $aliases:expr) => {
+        &GeneratorDescriptor {
+            kind: $kind,
+            aliases: $aliases,
+            summary: "test factory",
+            arguments: &[],
+            accepts: &[SqlTypeFamily::Text],
+            writes: ColumnScope::OwnColumn,
+            reads: ColumnScope::None,
+            determinism: Determinism::Deterministic,
+            buffering: Buffering::Streaming,
+            verification: Verification::Unsupported,
+        }
+    };
+}
+
+macro_rules! test_factory {
+    ($name:ident, $kind:expr, $aliases:expr) => {
+        struct $name;
+        impl GeneratorFactory for $name {
+            fn descriptor(&self) -> &'static GeneratorDescriptor {
+                test_descriptor!($kind, $aliases)
+            }
+            fn compile(
+                &self,
+                _config: &GeneratorConfig,
+                _context: &CompileContext<'_>,
+            ) -> Result<Box<dyn CompiledGenerator>, DiagnosticBag> {
+                Ok(Box::new(NoopGenerator))
+            }
+        }
+    };
+}
+
+test_factory!(AlphaGen, "alpha", &["a1", "shared"]);
+test_factory!(BetaGen, "beta", &["b1", "shared"]);
+test_factory!(ShadowGen, "shadow", &["alpha"]);
+test_factory!(ZuluGen, "zulu", &[]);
+
+#[test]
+fn registry_rejects_duplicate_kinds_and_resolves_aliases() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .register_generator(Box::new(ConstantFactory))
+        .unwrap();
+    assert_eq!(
+        registry.generator("const").unwrap().descriptor().kind,
+        "constant"
+    );
+    let err = registry
+        .register_generator(Box::new(ConstantFactory))
+        .unwrap_err();
+    assert!(err.to_string().contains("GEN-REGISTRY-DUPLICATE"));
+}
+
+#[test]
+fn registry_resolves_primary_and_alias_to_the_same_factory() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .register_generator(Box::new(ConstantFactory))
+        .unwrap();
+    assert_eq!(
+        registry.generator("constant").unwrap().descriptor().kind,
+        "constant"
+    );
+    assert_eq!(
+        registry.generator("const").unwrap().descriptor().kind,
+        "constant"
+    );
+    assert!(registry.generator("missing").is_none());
+}
+
+#[test]
+fn registry_rejects_duplicate_aliases_across_factories() {
+    let mut registry = ExtensionRegistry::new();
+    registry.register_generator(Box::new(AlphaGen)).unwrap();
+    let err = registry.register_generator(Box::new(BetaGen)).unwrap_err();
+    assert!(err.to_string().contains("GEN-REGISTRY-ALIAS-DUPLICATE"));
+    // The rejected factory must not have been partially installed.
+    assert!(registry.generator("beta").is_none());
+    assert!(registry.generator("b1").is_none());
+}
+
+#[test]
+fn registry_rejects_aliases_that_shadow_primary_kinds() {
+    let mut registry = ExtensionRegistry::new();
+    registry.register_generator(Box::new(AlphaGen)).unwrap();
+    let err = registry
+        .register_generator(Box::new(ShadowGen))
+        .unwrap_err();
+    assert!(err.to_string().contains("GEN-REGISTRY-ALIAS-SHADOWS-KIND"));
+}
+
+#[test]
+fn registry_lists_generators_in_deterministic_kind_order() {
+    let mut registry = ExtensionRegistry::new();
+    registry.register_generator(Box::new(ZuluGen)).unwrap();
+    registry.register_generator(Box::new(AlphaGen)).unwrap();
+    registry
+        .register_generator(Box::new(ConstantFactory))
+        .unwrap();
+    let kinds: Vec<&str> = registry
+        .generators()
+        .map(|factory| factory.descriptor().kind)
+        .collect();
+    assert_eq!(kinds, vec!["alpha", "constant", "zulu"]);
+}
+
+#[test]
+fn standard_registry_installs_the_constant_generator() {
+    let registry = ExtensionRegistry::standard();
+    assert_eq!(
+        registry.generator("constant").unwrap().descriptor().kind,
+        "constant"
+    );
 }
