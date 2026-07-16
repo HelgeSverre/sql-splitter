@@ -45,7 +45,9 @@ use super::plan::{
     ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
     PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
 };
-use super::registry::{ColumnScope, CompileContext, CompiledPlanner, ExtensionRegistry};
+use super::registry::{
+    ColumnScope, CompileContext, CompiledModifier, CompiledPlanner, ExtensionRegistry,
+};
 use super::seed::{SeedRoot, StreamId};
 
 /// A single per-table count override from the CLI (`--table-rows` or
@@ -482,7 +484,7 @@ impl ModelCompiler {
                 null_permille: 0,
             });
         }
-        fold_foreign_key_generators(table, &mut relationships);
+        fold_foreign_key_generators(name, table, &mut relationships, bag);
 
         let planners = self.compile_planners(name, table, compile_seed, bag);
         let claims = collect_claims(table, &planners);
@@ -502,10 +504,12 @@ impl ModelCompiler {
                     inference,
                     bag,
                 );
-                self.check_modifiers(name, table, column, bag);
+                let modifiers =
+                    self.compile_modifiers(name, table, column, &owner, compile_seed, bag);
                 PlannedColumn {
                     schema: column.clone(),
                     owner,
+                    modifiers,
                 }
             })
             .collect();
@@ -764,17 +768,30 @@ impl ModelCompiler {
         ColumnOwner::GeneratedByDatabase
     }
 
-    /// Type-check each modifier declared on `column` against the registry.
-    fn check_modifiers(
+    /// Type-check every modifier declared on `column`, and compile the pipeline
+    /// into runnable operators (in declared order) for a generator-owned column
+    /// so the engine can apply it after generation.
+    ///
+    /// Modifiers are compiled only for [`ColumnOwner::Generator`] columns: a
+    /// `DatabaseDefault`/`GeneratedByDatabase`/`Relationship`/`Planner` column
+    /// does not run a per-column generator pipeline (its value is a database
+    /// placeholder, a materialized key, or planner-coordinated). Type-checking
+    /// still runs for every column so a misapplied modifier is reported
+    /// regardless of owner.
+    fn compile_modifiers(
         &self,
         table_name: &str,
         table: &TableModel,
         column: &PortableColumn,
+        owner: &ColumnOwner,
+        seed: SeedRoot,
         bag: &mut DiagnosticBag,
-    ) {
+    ) -> Vec<Box<dyn CompiledModifier>> {
         let Some(rule) = table.columns.get(&column.name) else {
-            return;
+            return Vec::new();
         };
+        let is_generator = matches!(owner, ColumnOwner::Generator { .. });
+        let mut compiled: Vec<Box<dyn CompiledModifier>> = Vec::new();
         for (index, modifier) in rule.modifiers.iter().enumerate() {
             let path = format!(
                 "tables.{table_name}.columns.{}.modifiers[{index}]",
@@ -797,8 +814,18 @@ impl ModelCompiler {
                         modifier.kind, column.name, column.family
                     ),
                 );
+                continue;
+            }
+            if !is_generator {
+                continue;
+            }
+            let context = CompileContext::for_column(&table.schema, column, seed, &path);
+            match factory.compile(modifier, &context) {
+                Ok(operator) => compiled.push(operator),
+                Err(errors) => bag.diagnostics.extend(errors.diagnostics),
             }
         }
+        compiled
     }
 }
 
@@ -1362,7 +1389,15 @@ fn parse_distribution(name: Option<&str>) -> RelationshipDistribution {
 /// an inferred FK (owner `Relationship`) and an explicit FK generator (owner
 /// `Generator`) converge on the same compiled relationship the engine executes.
 /// Recognizes `distribution` (a name) and `null_rate` (a `0.0..=1.0` fraction).
-fn fold_foreign_key_generators(table: &TableModel, relationships: &mut [CompiledRelationship]) {
+/// An FK generator whose column no relationship covers is a
+/// `GEN-FOREIGN-KEY-UNRESOLVED` error: it would otherwise render `DEFAULT`
+/// silently at run time.
+fn fold_foreign_key_generators(
+    table_name: &str,
+    table: &TableModel,
+    relationships: &mut [CompiledRelationship],
+    bag: &mut DiagnosticBag,
+) {
     for (column, rule) in &table.columns {
         let Some(generator) = &rule.generator else {
             continue;
@@ -1374,6 +1409,14 @@ fn fold_foreign_key_generators(table: &TableModel, relationships: &mut [Compiled
             .iter_mut()
             .find(|relationship| relationship.columns.iter().any(|c| c == column))
         else {
+            bag.error(
+                "GEN-FOREIGN-KEY-UNRESOLVED",
+                format!("tables.{table_name}.columns.{column}.generator"),
+                format!(
+                    "column `{column}` on table `{table_name}` uses generator `{}` but no relationship declares it as a foreign key; declare a `relationships:` entry covering it",
+                    generator.kind
+                ),
+            );
             continue;
         };
         if let Some(name) = generator.args.get("distribution").and_then(|v| v.as_str()) {

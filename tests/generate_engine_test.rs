@@ -1341,3 +1341,234 @@ fn same_seed_reproduces_and_different_seed_diverges() {
         run_customer_ids(9, Some("uniform"))
     );
 }
+
+// --- Task 13 fix: column modifiers execute end-to-end ------------------------
+
+/// A single `metrics` table whose `score` column carries `generator` +
+/// `modifiers`, so the engine's owner→modifier→sink pipeline is observable.
+fn metrics_model(seed: u64, generator: &str, modifiers: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  metrics:
+    rows: {{ kind: fixed, count: 50 }}
+    schema:
+      name: metrics
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: score, type: {score_type}, nullable: true }}
+    columns:
+      score:
+        generator: {generator}
+        modifiers: {modifiers}
+"#,
+        score_type = if generator.contains("integer") {
+            "bigint"
+        } else {
+            "text"
+        }
+    )
+}
+
+fn run_metrics(seed: u64, generator: &str, modifiers: &str) -> Vec<GeneratedValue> {
+    let plan = compile(&metrics_model(seed, generator, modifiers));
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+    sink.values("metrics", "score").cloned().collect()
+}
+
+#[test]
+fn clamp_modifier_bounds_every_generated_value() {
+    // A wide random range clamped to [0, 100]: every emitted value stays in
+    // range, which only holds if the modifier actually runs.
+    let scores = run_metrics(
+        7,
+        "{ kind: integer, min: -100000, max: 100000 }",
+        "[{ kind: clamp, min: 0, max: 100 }]",
+    );
+    assert_eq!(scores.len(), 50);
+    for value in &scores {
+        let n = value.as_integer().unwrap();
+        assert!((0..=100).contains(&n), "value {n} escaped the clamp");
+    }
+}
+
+#[test]
+fn null_rate_modifier_introduces_reproducible_nulls() {
+    let modifiers = "[{ kind: null_rate, rate: 0.5 }]";
+    let a = run_metrics(7, "{ kind: integer, min: 1, max: 9 }", modifiers);
+    let b = run_metrics(7, "{ kind: integer, min: 1, max: 9 }", modifiers);
+    // Same seed reproduces the same null positions exactly.
+    assert_eq!(a, b);
+    let nulls = a.iter().filter(|v| v.is_null()).count();
+    assert!(
+        nulls > 0 && nulls < a.len(),
+        "expected a moderate mix of nulls, got {nulls} of {}",
+        a.len()
+    );
+}
+
+#[test]
+fn modifier_pipeline_applies_in_declared_order_through_the_engine() {
+    // suffix-then-truncate discards the suffix; truncate-then-suffix keeps it.
+    let suffix_then_truncate = run_metrics(
+        1,
+        "{ kind: constant, value: abcde }",
+        "[{ kind: suffix, value: XYZ }, { kind: truncate, max_length: 5 }]",
+    );
+    let truncate_then_suffix = run_metrics(
+        1,
+        "{ kind: constant, value: abcde }",
+        "[{ kind: truncate, max_length: 5 }, { kind: suffix, value: XYZ }]",
+    );
+    assert!(suffix_then_truncate
+        .iter()
+        .all(|v| v.as_text().unwrap() == "abcde"));
+    assert!(truncate_then_suffix
+        .iter()
+        .all(|v| v.as_text().unwrap() == "abcdeXYZ"));
+}
+
+// --- Task 13 fix: random-access (uuid) parent key domains --------------------
+
+#[test]
+fn uuid_parent_key_children_reference_real_generated_ids() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  customers:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: uuid, nullable: false, primary_key: true }
+    columns:
+      id:
+        generator: { kind: uuid }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 40
+      distribution: { kind: fixed, mean: 4.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: uuid, nullable: false }
+    relationships:
+      - { columns: [customer_id], references: { table: customers, columns: [id] } }
+"#;
+    let run = || {
+        let plan = compile(model);
+        let mut sink = CollectingSink::default();
+        GenerationEngine::new(plan).run(&mut sink).unwrap();
+        let ids: Vec<String> = sink
+            .values("customers", "id")
+            .map(|v| v.as_text().unwrap().to_string())
+            .collect();
+        let fks: Vec<String> = sink
+            .values("orders", "customer_id")
+            .map(|v| v.as_text().unwrap().to_string())
+            .collect();
+        (ids, fks)
+    };
+    let (ids, fks) = run();
+    // The parent renders exactly the keys children reference.
+    let id_set: HashSet<&String> = ids.iter().collect();
+    assert_eq!(id_set.len(), 10);
+    let uuid_shape = |s: &str| s.len() == 36 && s.matches('-').count() == 4;
+    for id in &ids {
+        assert!(uuid_shape(id), "customer id not a uuid: {id}");
+    }
+    assert_eq!(fks.len(), 40);
+    for fk in &fks {
+        assert!(uuid_shape(fk), "customer_id not a uuid: {fk}");
+        assert!(id_set.contains(fk), "fk {fk} not an existing customer id");
+    }
+    // Same-seed reproduces.
+    assert_eq!(run(), (ids, fks));
+}
+
+#[test]
+fn stateful_parent_key_is_unsupported() {
+    // A `sequence` primary key is stateful — its start/step can't be introspected
+    // for random access — so a child referencing it errors, not silently defaults.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  customers:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1, step: 1 }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 40
+      distribution: { kind: fixed, mean: 4.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+    relationships:
+      - { columns: [customer_id], references: { table: customers, columns: [id] } }
+"#;
+    let plan = compile(model);
+    let mut sink = CollectingSink::default();
+    let err = GenerationEngine::new(plan).run(&mut sink).unwrap_err();
+    assert!(
+        err.to_string().contains("GEN-KEY-DOMAIN-UNSUPPORTED"),
+        "unexpected error: {err}"
+    );
+}
+
+// --- Task 13 fix: unresolved FK generator is a compile error -----------------
+
+#[test]
+fn foreign_key_generator_without_a_relationship_is_a_compile_error() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  orders:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: true }
+    columns:
+      customer_id:
+        generator: { kind: relation.foreign_key }
+"#;
+    let model = SyntheticFile::parse_str(model)
+        .expect("valid model YAML")
+        .into_model()
+        .expect("document is a model");
+    let err = ModelCompiler::standard()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("GEN-FOREIGN-KEY-UNRESOLVED"),
+        "unexpected error: {err}"
+    );
+}

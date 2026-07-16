@@ -26,7 +26,7 @@ use crate::parser::SqlDialect;
 use crate::synthetic::model::{InsertMode, OutputMode};
 use crate::synthetic::schema::{PortableColumn, PortableTable};
 
-use super::registry::{CompiledGenerator, CompiledPlanner};
+use super::registry::{CompiledGenerator, CompiledModifier, CompiledPlanner};
 use super::seed::SeedRoot;
 
 /// A fully compiled generation plan: the immutable contract every downstream
@@ -125,16 +125,37 @@ impl fmt::Debug for PlannedTable {
     }
 }
 
-/// A schema column paired with the operator that owns its values.
+/// A schema column paired with the operator that owns its values and the
+/// compiled modifier pipeline applied after generation.
 ///
-/// Cannot derive `Clone`/`PartialEq`: a [`ColumnOwner::Generator`] holds a
-/// `Box<dyn CompiledGenerator>` trait object.
-#[derive(Debug)]
+/// Cannot derive `Debug`/`Clone`/`PartialEq`: a [`ColumnOwner::Generator`]
+/// holds a `Box<dyn CompiledGenerator>` and `modifiers` holds
+/// `Box<dyn CompiledModifier>` trait objects. The hand-written [`fmt::Debug`]
+/// describes the modifier pipeline by count.
 pub struct PlannedColumn {
     /// The column's portable schema.
     pub schema: PortableColumn,
     /// What produces this column's values.
     pub owner: ColumnOwner,
+    /// The compiled modifier pipeline, in declared order, applied to the value
+    /// after the owner produces it. Only populated for generator-owned columns;
+    /// empty otherwise (see `ModelCompiler::compile_modifiers`).
+    pub modifiers: Vec<Box<dyn CompiledModifier>>,
+}
+
+impl fmt::Debug for PlannedColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `CompiledModifier` is not `Debug`; describe the pipeline by count so
+        // the plan stays observable without pretending the operators print.
+        f.debug_struct("PlannedColumn")
+            .field("schema", &self.schema)
+            .field("owner", &self.owner)
+            .field(
+                "modifiers",
+                &format_args!("[{} compiled]", self.modifiers.len()),
+            )
+            .finish()
+    }
 }
 
 /// What produces a column's values.
