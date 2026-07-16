@@ -1,7 +1,7 @@
 //! SQL dump analyzer for gathering per-table statistics.
 
 use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
-use crate::splitter::{open_input, open_input_with_progress};
+use crate::splitter::open_input_opt_progress;
 use ahash::AHashMap;
 use serde::Serialize;
 use std::io::Read;
@@ -58,44 +58,27 @@ impl Analyzer {
     }
 
     /// Run the analysis, returning sorted table statistics.
-    pub fn analyze(mut self) -> anyhow::Result<Vec<TableStats>> {
-        let file_size = std::fs::metadata(&self.input_file)?.len();
-        let buffer_size = determine_buffer_size(file_size);
-        let dialect = self.dialect;
-
-        // Open the input, transparently handling any supported compression
-        // format (including zip archives).
-        let reader: Box<dyn Read> = open_input(&self.input_file)?;
-
-        let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
-
-        while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, table_name) =
-                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
-
-            if stmt_type == StatementType::Unknown || table_name.is_empty() {
-                continue;
-            }
-
-            self.update_stats(&table_name, stmt_type, stmt.len() as u64);
-        }
-
-        Ok(self.get_sorted_stats())
+    pub fn analyze(self) -> anyhow::Result<Vec<TableStats>> {
+        self.run(None)
     }
 
     /// Run the analysis with a progress callback, returning sorted table statistics.
     pub fn analyze_with_progress<F: Fn(u64) + 'static>(
-        mut self,
+        self,
         progress_fn: F,
     ) -> anyhow::Result<Vec<TableStats>> {
+        self.run(Some(Box::new(progress_fn)))
+    }
+
+    /// Shared scan loop behind [`Self::analyze`] / [`Self::analyze_with_progress`].
+    fn run(mut self, progress_fn: Option<Box<dyn Fn(u64)>>) -> anyhow::Result<Vec<TableStats>> {
         let file_size = std::fs::metadata(&self.input_file)?.len();
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.dialect;
 
         // Open the input, transparently handling any supported compression
         // format (including zip archives).
-        let reader: Box<dyn Read> =
-            open_input_with_progress(&self.input_file, Box::new(progress_fn))?;
+        let reader: Box<dyn Read> = open_input_opt_progress(&self.input_file, progress_fn)?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
@@ -131,7 +114,7 @@ impl Analyzer {
 
     fn get_sorted_stats(&self) -> Vec<TableStats> {
         let mut result: Vec<TableStats> = self.stats.values().cloned().collect();
-        result.sort_by(|a, b| b.insert_count.cmp(&a.insert_count));
+        result.sort_by_key(|s| std::cmp::Reverse(s.insert_count));
         result
     }
 }
