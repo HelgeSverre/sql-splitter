@@ -580,6 +580,89 @@ fn phases_and_columns_are_ordered_and_initially_unowned() {
     assert!(matches!(customers.columns[0].owner, ColumnOwner::Unowned));
 }
 
+#[test]
+fn mutual_relation_children_counts_are_a_cycle_error() {
+    // `a`'s count derives from `b` and `b`'s from `a`: an unresolvable count
+    // cycle that must be reported, not silently resolved to zero rows.
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+seed: 7
+tables:
+  a:
+    rows:
+      kind: relation.children
+      parent: b
+      count: 100
+      distribution: { kind: fixed, mean: 2.0, min: 1.0, max: 100.0 }
+    schema:
+      name: a
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: b_id, type: bigint, nullable: false }
+  b:
+    rows:
+      kind: relation.children
+      parent: a
+      count: 100
+      distribution: { kind: fixed, mean: 2.0, min: 1.0, max: 100.0 }
+    schema:
+      name: b
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: a_id, type: bigint, nullable: false }
+"#,
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("GEN-ROWS-CYCLE"));
+    assert!(text.contains('a') && text.contains('b'));
+}
+
+#[test]
+fn self_referential_relationship_is_not_a_cycle() {
+    // A self-referential FK (manager_id -> employees) is stripped from the
+    // dependency graph; the table's own `fixed` count resolves normally.
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+seed: 7
+tables:
+  employees:
+    rows: { kind: fixed, count: 50 }
+    schema:
+      name: employees
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: manager_id, type: bigint, nullable: true }
+    relationships:
+      - { columns: [manager_id], references: { table: employees, columns: [id] } }
+"#,
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    assert_eq!(plan.table("employees").unwrap().rows, 50);
+}
+
+#[test]
+fn root_table_scale_replaces_the_global_scale() {
+    // Global `--scale 0.5` AND `--table-scale users=0.1`: the per-table scale
+    // REPLACES the global one (10_000 * 0.1 = 1_000), it does not compound to
+    // 10_000 * 0.5 * 0.1 = 500.
+    let options = CompileOptions {
+        scale: Some(0.5),
+        table_rows: vec![TableCountOverride::scale("users", 0.1)],
+        ..Default::default()
+    };
+    let plan = compiler().compile(users_model(10_000), options).unwrap();
+    assert_eq!(plan.table("users").unwrap().rows, 1_000);
+}
+
 /// Type stubs forward-referenced by the plan (`GenerationPlan`) must exist and
 /// be constructible so downstream tasks (10, 13, 22) can extend them.
 #[allow(dead_code)]

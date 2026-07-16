@@ -143,7 +143,23 @@ impl ModelCompiler {
 
         let root_seed = options.seed.or(model.seed);
         let rounding_root = SeedRoot::new(root_seed.unwrap_or(0));
-        let order = topo_order(&selected, &parents);
+        let (order, cyclic) = topo_order(&selected, &parents);
+        if !cyclic.is_empty() {
+            // Tables left unordered by the Kahn drain form a mutual
+            // relation-children dependency cycle: each derives its count from a
+            // parent that in turn derives from it. Resolving them would silently
+            // yield zero rows, so this is a Task-9 count error. (Distinct from
+            // the column-generation cycle Task 10 owns and the FK deferral
+            // Task 22 owns.)
+            bag.error(
+                "GEN-ROWS-CYCLE",
+                "tables",
+                format!(
+                    "relation-children row counts form a dependency cycle among tables: {}; each table's count derives from a parent that ultimately derives from it",
+                    cyclic.join(", ")
+                ),
+            );
+        }
 
         let mut resolved: BTreeMap<String, u64> = BTreeMap::new();
         let mut tables: Vec<PlannedTable> = Vec::with_capacity(order.len());
@@ -522,12 +538,16 @@ fn required_parents(model: &SyntheticModel) -> BTreeMap<String, BTreeSet<String>
 }
 
 /// Topologically order the selected tables, parents before children, using
-/// only edges between selected tables. Deterministic via sorted `BTreeMap`s;
-/// any tables left over from a cycle are appended in name order.
+/// only edges between selected tables. Deterministic via sorted `BTreeMap`s.
+///
+/// Returns `(order, cyclic)`: `order` is the tables that could be sequenced
+/// parents-first, and `cyclic` is any tables trapped in a mutual dependency
+/// cycle (in name order). The caller turns a non-empty `cyclic` into a
+/// `GEN-ROWS-CYCLE` error rather than resolving those tables to zero rows.
 fn topo_order(
     selected: &BTreeSet<String>,
     parents: &BTreeMap<String, BTreeSet<String>>,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
     let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in selected {
@@ -572,13 +592,13 @@ fn topo_order(
         queue.reverse();
     }
 
-    // Append any table trapped in a cycle so the plan still lists it.
-    for name in selected {
-        if !order.contains(name) {
-            order.push(name.clone());
-        }
-    }
-    order
+    // Any selected table the Kahn drain never reached is trapped in a cycle.
+    let cyclic: Vec<String> = selected
+        .iter()
+        .filter(|name| !order.contains(name))
+        .cloned()
+        .collect();
+    (order, cyclic)
 }
 
 /// Build a [`PlannedTable`] with resolved count, seed, unowned columns, and
