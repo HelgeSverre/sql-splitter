@@ -1,9 +1,11 @@
 //! Tests for the synthetic-data-generation YAML document model
 //! (`SyntheticFile`, `SyntheticModel`, `SyntheticOverrides`, and the
-//! tri-state seed types).
+//! tri-state seed types) and its local-import loader (`ConfigLoader`).
+
+use std::fs;
 
 use sql_splitter::synthetic::{
-    RootSeedOverride, SyntheticFile, SyntheticOverrides, TableSeed, TableSeedOverride,
+    ConfigLoader, RootSeedOverride, SyntheticFile, SyntheticOverrides, TableSeed, TableSeedOverride,
 };
 
 #[test]
@@ -404,4 +406,135 @@ defaults:
         overrides.defaults.unwrap().inference,
         sql_splitter::synthetic::InferenceMode::Schema
     );
+}
+
+#[test]
+fn imports_reject_collisions_but_root_may_override() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    seed: 1\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    seed: 2\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("bad.yaml"),
+        "version: 1\nkind: overrides\nimports: [a.yaml, b.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+    let err = ConfigLoader::load(&dir.path().join("bad.yaml")).unwrap_err();
+    assert!(err.to_string().contains("GEN-IMPORT-COLLISION"));
+    assert!(err.to_string().contains("tables.users.seed"));
+    assert!(err.to_string().contains("a.yaml"));
+    assert!(err.to_string().contains("b.yaml"));
+
+    fs::write(
+        dir.path().join("good.yaml"),
+        "version: 1\nkind: overrides\nimports: [a.yaml]\ntables:\n  users:\n    seed: 9\n",
+    )
+    .unwrap();
+    let loaded = ConfigLoader::load(&dir.path().join("good.yaml")).unwrap();
+    assert_eq!(
+        loaded.into_overrides().unwrap().tables["users"].seed,
+        TableSeedOverride::Fixed(9)
+    );
+}
+
+#[test]
+fn import_paths_must_be_local_and_relative() {
+    let dir = tempfile::tempdir().unwrap();
+    let absolute = dir.path().join("shared.yaml");
+    fs::write(&absolute, "version: 1\nkind: overrides\ntables: {}\n").unwrap();
+    let root_yaml = format!(
+        "version: 1\nkind: overrides\nimports: [\"{}\"]\ntables: {{}}\n",
+        absolute.display()
+    );
+    fs::write(dir.path().join("root.yaml"), root_yaml).unwrap();
+
+    let err = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap_err();
+    assert!(err.to_string().contains("GEN-IMPORT-REMOTE"));
+}
+
+#[test]
+fn imports_cannot_themselves_import() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("leaf.yaml"),
+        "version: 1\nkind: overrides\ntables: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("nested.yaml"),
+        "version: 1\nkind: overrides\nimports: [leaf.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [nested.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let err = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap_err();
+    assert!(err.to_string().contains("GEN-IMPORT-NESTED"));
+}
+
+#[test]
+fn imported_model_kind_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("model.yaml"),
+        "version: 1\nkind: model\ntables: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [model.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let err = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap_err();
+    assert!(err.to_string().contains("GEN-IMPORT-KIND"));
+}
+
+#[test]
+fn duplicate_keys_in_an_imported_file_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("dupe.yaml"),
+        "version: 1\nkind: overrides\ntables: {}\ntables: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [dupe.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let err = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("duplicate"));
+}
+
+#[test]
+fn root_lists_replace_rather_than_concatenate_imported_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("base.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  orders:\n    relationships:\n      - { columns: [customer_id], references: { table: customers, columns: [id] } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [base.yaml]\ntables:\n  orders:\n    relationships:\n      - { columns: [warehouse_id], references: { table: warehouses, columns: [id] } }\n",
+    )
+    .unwrap();
+
+    let loaded = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap();
+    let overrides = loaded.into_overrides().unwrap();
+    let relationships = overrides.tables["orders"].relationships.as_ref().unwrap();
+    assert_eq!(relationships.len(), 1);
+    assert_eq!(relationships[0].columns, vec!["warehouse_id".to_string()]);
 }

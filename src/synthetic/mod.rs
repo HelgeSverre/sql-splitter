@@ -10,10 +10,12 @@
 //! [`schema::PortableSchema`] is that snapshot. Build one from a parsed
 //! [`crate::schema::Schema`] with [`schema::PortableSchema::from_runtime`].
 
+pub mod config;
 pub mod model;
 pub mod overrides;
 pub mod schema;
 
+pub use config::{merge_yaml, ConfigLoader};
 pub use model::{
     ChildDistribution, ColumnRule, FingerprintPolicy, GeneratorConfig, InferenceMode, InsertMode,
     ModelDefaults, ModelKind, ModifierConfig, OutputMode, OutputModel, PlannerConfig,

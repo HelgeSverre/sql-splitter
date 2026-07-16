@@ -48,6 +48,17 @@ impl SyntheticFile {
     /// [`serde_yaml_ng::Value`], so that check happens for free here.
     pub fn parse_str(input: &str) -> anyhow::Result<Self> {
         let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)?;
+        Self::parse_value(value)
+    }
+
+    /// Parse an already-constructed YAML [`serde_yaml_ng::Value`], such as
+    /// one produced by merging a root document with its resolved local
+    /// imports (see [`crate::synthetic::config::ConfigLoader`]).
+    ///
+    /// Validates the same `version`/`kind` envelope as [`Self::parse_str`];
+    /// the only difference is that parsing from text is skipped because
+    /// the caller already has a `Value`.
+    pub fn parse_value(value: serde_yaml_ng::Value) -> anyhow::Result<Self> {
         let envelope: DocumentEnvelope = serde_yaml_ng::from_value(value.clone())?;
 
         if envelope.version != SUPPORTED_VERSION {

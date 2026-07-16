@@ -154,6 +154,15 @@ impl DiagnosticBag {
     }
 }
 
+impl fmt::Display for DiagnosticBag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rendered: Vec<String> = self.diagnostics.iter().map(Diagnostic::to_string).collect();
+        write!(f, "{}", rendered.join("\n"))
+    }
+}
+
+impl std::error::Error for DiagnosticBag {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
