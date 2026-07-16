@@ -66,6 +66,7 @@ pub enum Commands {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   sql-splitter split dump.sql -o tables/
   sql-splitter split dump.sql.gz -o tables/ --tables users,orders
+  sql-splitter split dump.zip -o tables/
   sql-splitter split dump.sql -o schema/ --schema-only
   sql-splitter split dump.sql -o tables/ --compress zstd
   sql-splitter split dump.sql -o dump.tar.gz

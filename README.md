@@ -10,7 +10,7 @@ Split large SQL dump files into individual table files. Fast, memory-efficient, 
 
 - **~1 GB/s** end-to-end split throughput on large dumps (0.8–1.4 GB/s across dialects on Apple M2 Max; hardware-dependent)
 - **MySQL, PostgreSQL, SQLite, MSSQL** support (including `COPY FROM stdin`, `GO` batches)
-- **Compressed files** — gzip, bzip2, xz, zstd auto-detected
+- **Compressed files** — gzip, bzip2, xz, zstd, zip (single `.sql` member) auto-detected
 - **Streaming architecture** — handles files larger than RAM
 - **10x faster** than shell-based alternatives
 
@@ -33,7 +33,7 @@ sql-splitter = { version = "1", default-features = false }
 Optional features:
 
 - `compression` (gzip/bzip2/xz/zstd support, for compressed input and per-file output)
-- `archive` (single-file `tar.*`/`zip` output; implies `compression`)
+- `archive` (single-file `tar.*`/`zip` output, plus `.zip` archive input; implies `compression`)
 - `duckdb-query` (enables the `query` command and DuckDB integration)
 
 ### From source
@@ -76,6 +76,9 @@ sql-splitter split mssql_dump.sql -o tables/ --dialect=mssql
 # Compressed input (auto-detected)
 sql-splitter split backup.sql.gz -o tables/
 sql-splitter split backup.sql.zst -o tables/
+
+# Zipped input — a .zip with exactly one .sql member (deflated or stored)
+sql-splitter split backup.zip -o tables/
 
 # Compressed output — one compressed file per table (users.sql.zst, ...)
 sql-splitter split dump.sql -o tables/ --compress zstd   # or gzip, bzip2, xz
@@ -250,7 +253,11 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | `--fail-fast`    | Stop on first error (for glob patterns)             | —           |
 | `--json`         | Output results as JSON                              | —           |
 
-Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
+Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`),
+plain or compressed (`.gz`/`.bz2`/`.xz`/`.zst`), or a `.zip` archive
+containing exactly one `.sql` member (deflated or stored; junk entries like
+`__MACOSX/` and `.DS_Store` are ignored). This applies to every command that
+reads a dump, not just `split`.
 
 **Output formats.** By default `split` writes one plain `<table>.sql` per table.
 `--compress <fmt>` instead writes one *compressed* file per table

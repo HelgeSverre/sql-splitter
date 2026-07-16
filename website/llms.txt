@@ -65,7 +65,7 @@ sql-splitter --version
 
 All commands support:
 
-- **Compressed input**: `.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst` (auto-detected)
+- **Compressed input**: `.sql`, `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`, `.zip` (single `.sql` member; auto-detected)
 - **Glob patterns**: `*.sql`, `**/*.sql`, `backups/**/*.sql.gz`
 - **Common flags**:
     - `--progress` / `-p`: Show progress bar

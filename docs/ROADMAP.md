@@ -2,7 +2,7 @@
 
 **Version**: 1.15.0 (current)
 **Last Updated**: 2026-07-15
-**Revision**: 3.8 — v1.15.0 shipped output compression, archives & the perf rework; zip input parked as v1.16.0, later features bumped +1
+**Revision**: 3.9 — v1.16.0 zip input implemented (all input commands, single `.sql` member policy)
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -36,9 +36,12 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 - ✅ `split --compress gzip|zstd|bzip2|xz`, single-file archive output (tar.*/zip), 2.4–4.4× split speedup (parallel pipelined writers, allocation-lean parsing), 12 parser bug fixes
 
-**Next (v1.16+):**
+**Shipped (v1.16.0):**
 
-- v1.16.0: Zip Input + Adaptive I/O — `.zip` dump input; `--io-profile` auto-tuning for HDDs/slow media
+- ✅ `.zip` dump input (single `.sql` member, all input commands); `--io-profile` auto-tuning for HDDs/slow media
+
+**Next:**
+
 - v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.18.0: Migrate — Schema migration generation
 - v1.19.0: DBML — Import/export DBML schema definitions
@@ -537,10 +540,10 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 **Theme**: Real-world inputs, real-world devices
 
-| Feature            | Effort   | Notes                                       |
-| ------------------ | -------- | ------------------------------------------- |
-| Zip input          | ~6–8h    | No new deps; `zip` crate already present    |
-| Adaptive I/O       | ~2–3 days| `--io-profile auto\|fast\|hdd\|minimal-ops` |
+| Feature            | Effort   | Status  | Notes                                       |
+| ------------------ | -------- | ------- | -------------------------------------------- |
+| Zip input          | ~6–8h    | ✅ Done | No new deps; `zip` crate already present    |
+| Adaptive I/O       | ~2–3 days| ✅ Done | `--io-profile auto\|fast\|hdd\|minimal-ops` |
 
 **Adaptive I/O profiles** — measured 2026-07-15/16: same-spindle split on a
 USB HDD runs at 21–33 MB/s with defaults but 54.7 MB/s (2.52×) with
@@ -556,32 +559,37 @@ the deterministic test plan (mock-clock controller tests, throttled-sink
 integration tests, cross-profile sha256 golden invariant, real-hardware
 acceptance script): [ADAPTIVE_IO_PROFILES.md](features/ADAPTIVE_IO_PROFILES.md)
 
-Zip is an archive (multiple members) rather than a stream compression, and the
-`zip` crate's reader needs `Read + Seek`, so it can't just be another
-`Compression::wrap_reader` decoder. Design (investigated 2026-07-15):
+**Zip input** — shipped. Zip is an archive (multiple members) rather than a
+stream compression, and the `zip` crate's reader needs `Read + Seek`, so it
+can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 - Two-phase open: parse the central directory seekably (`zip::ZipArchive`,
   which handles zip64 and junk entries like `__MACOSX/` for free) to locate
   the member, then reopen/seek the `File` to `data_start()` and stream the
-  tail through `flate2::read::DeflateDecoder` (or `.take(size)` for stored
+  tail through `flate2::read::DeflateDecoder` (or a bounded read for stored
   members). Downstream stays an ordinary streaming `Box<dyn Read>` — no
-  parser changes.
+  parser changes. See `src/zip_input.rs`.
 - Member policy: exactly one `.sql` member → use it; several → error listing
-  them (a `--member` flag can come later); none → clear error. Encrypted →
-  error.
-- New `Compression::Zip` variant + an `open_input(path)` helper; switch the
-  ~10 `File::open` + `wrap_reader` call sites across the 6 input commands
-  (including the progress-reader variants).
+  them; none → clear error. Encrypted or unsupported-compression members →
+  clear error.
+- New `Compression::Zip` variant plus `crate::splitter::open_input`/
+  `open_input_with_progress` helpers; every `File::open` + `wrap_reader` call
+  site across the input commands (`split`, `analyze`, `validate`, `diff`,
+  `graph`, `order`, `convert`, `redact`, `query`, `sample`, `shard`) now goes
+  through these, including the progress-reader variants. Dialect
+  auto-detection (`detect_dialect_from_file`) goes through the same helper
+  so it works on zipped dumps too.
 - `--compress zip` for per-file *output* stays excluded — archive output
   (`-o dump.zip`) already covers that.
-- Feature-gate under the existing `archive` feature.
+- Feature-gated under the existing `archive` feature; without it, opening a
+  `.zip` produces a clear "requires the archive feature" error.
 
-**Deliverables:**
+**Deliverables (shipped):**
 
 - `sql-splitter split reflow_latest.sql.zip -o tables/` (and every other
   input command)
-- Fixture-zip tests: single member, junk entries, multi-member error,
-  stored + deflated methods
+- Fixture-zip tests: single member (deflated + stored), junk-entry
+  tolerance, multi-member error, no-`.sql`-member error (`tests/zip_input_test.rs`)
 
 ---
 
@@ -816,7 +824,7 @@ Zip is an archive (multiple members) rather than a stream compression, and the
 
 | Version | Features        | Status      |
 | ------- | --------------- | ----------- |
-| v1.16.0 | Zip Input + Adaptive I/O | Planned |
+| v1.16.0 | Zip Input + Adaptive I/O | Released |
 | v1.17.0 | Enum Conversion | Planned     |
 | v1.18.0 | Migrate         | Planned     |
 | v1.19.0 | DBML            | Planned     |
@@ -911,7 +919,7 @@ Zip is an archive (multiple members) rather than a stream compression, and the
     - Docs: Library Usage + Known Limitations pages, full accuracy sweep, Astro 7
     - Planned roadmap features bumped +1 minor version
 
-17. 🟡 **v1.16.0 — Zip Input + Adaptive I/O** — Planned
+17. ✅ **v1.16.0 — Zip Input + Adaptive I/O** — Released
     - `.zip` dumps accepted as input across all commands
     - Central-directory locate + streamed deflate (no new deps)
     - Single-`.sql`-member policy; clear errors for multi-member/encrypted
