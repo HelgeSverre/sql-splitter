@@ -329,6 +329,24 @@ pub trait GeneratorFactory: Send + Sync {
     ) -> Result<Box<dyn CompiledGenerator>, DiagnosticBag>;
 }
 
+/// How a generator materializes as a random-access key domain when its column
+/// is a primary key referenced by a child foreign key. Context-free: the engine
+/// supplies the parent table/column/seed. A generator that is not a
+/// reproducible random-access key returns `None` from
+/// [`CompiledGenerator::key_recipe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRecipe {
+    /// A dense integer sequence: parent row `n`'s key is `start + n * step`.
+    Dense {
+        /// The key of parent row 0.
+        start: i128,
+        /// The per-row increment.
+        step: i128,
+    },
+    /// A per-row-reseeded random UUID (RFC 4122 v4).
+    Uuid,
+}
+
 /// A compiled generator: produces one value per row into a caller-owned slot.
 pub trait CompiledGenerator: Send {
     /// Overwrite `output` with the value for the current row. Overwriting
@@ -339,6 +357,16 @@ pub trait CompiledGenerator: Send {
         context: &RowContext<'_>,
         output: &mut GeneratedValue,
     ) -> Result<(), GenerateError>;
+
+    /// How this generator materializes as a random-access key when its column
+    /// is a primary key referenced by a child foreign key. The default is
+    /// `None` (not a reproducible random-access key — the engine then reports
+    /// `GEN-KEY-DOMAIN-UNSUPPORTED`). A generator whose row `n` value is a
+    /// closed-form or per-row-reseeded function of `n` overrides this so the
+    /// engine can regenerate any parent row's key by index.
+    fn key_recipe(&self) -> Option<KeyRecipe> {
+        None
+    }
 }
 
 /// Compiles a [`ModifierConfig`] into a runnable modifier.

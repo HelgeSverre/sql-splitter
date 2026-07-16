@@ -1498,9 +1498,10 @@ tables:
 }
 
 #[test]
-fn stateful_parent_key_is_unsupported() {
-    // A `sequence` primary key is stateful — its start/step can't be introspected
-    // for random access — so a child referencing it errors, not silently defaults.
+fn explicit_sequence_primary_key_children_reference_real_generated_ids() {
+    // The mainline spec shape: an explicit `{ kind: sequence, start: 1 }` PK
+    // referenced by a child FK. It is random-access (row n renders start + n*step)
+    // so it must compile and generate valid FK chains, not error.
     let model = r#"
 version: 1
 kind: model
@@ -1530,6 +1531,58 @@ tables:
     relationships:
       - { columns: [customer_id], references: { table: customers, columns: [id] } }
 "#;
+    let run = || {
+        let plan = compile(model);
+        let mut sink = CollectingSink::default();
+        GenerationEngine::new(plan).run(&mut sink).unwrap();
+        (
+            sink.integers("customers", "id"),
+            sink.integers("orders", "customer_id"),
+        )
+    };
+    let (ids, fks) = run();
+    let id_set: HashSet<i128> = ids.iter().copied().collect();
+    // The parent renders exactly what children reference: sequence start 1 -> 1..=10.
+    assert_eq!(id_set, (1..=10).collect());
+    assert!(fks.iter().all(|fk| id_set.contains(fk)));
+    // Same seed reproduces.
+    assert_eq!(run(), (ids, fks));
+}
+
+#[test]
+fn stateful_parent_key_is_unsupported() {
+    // A `string` primary key advances a per-row stream and is not random-access
+    // (it describes no key recipe), so a child referencing it errors rather than
+    // silently rendering DEFAULT.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  customers:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: text, nullable: false, primary_key: true }
+    columns:
+      id:
+        generator: { kind: string, min_length: 8, max_length: 8 }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 40
+      distribution: { kind: fixed, mean: 4.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: text, nullable: false }
+    relationships:
+      - { columns: [customer_id], references: { table: customers, columns: [id] } }
+"#;
     let plan = compile(model);
     let mut sink = CollectingSink::default();
     let err = GenerationEngine::new(plan).run(&mut sink).unwrap_err();
@@ -1537,6 +1590,77 @@ tables:
         err.to_string().contains("GEN-KEY-DOMAIN-UNSUPPORTED"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn canonical_three_table_sequence_pk_fk_chain_generates_end_to_end() {
+    // The spec's canonical shape: customers (seq PK) <- orders (seq PK +
+    // customer_id FK) <- order_items (seq PK + order_id FK). Every FK link in the
+    // chain must resolve to a real generated parent id.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  customers:
+    rows: { kind: fixed, count: 8 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1, step: 1 }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 24
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1, step: 1 }
+    relationships:
+      - { columns: [customer_id], references: { table: customers, columns: [id] } }
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 60
+      distribution: { kind: fixed, mean: 2.5, min: 1.0, max: 1000000.0 }
+    schema:
+      name: order_items
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1, step: 1 }
+    relationships:
+      - { columns: [order_id], references: { table: orders, columns: [id] } }
+"#;
+    let plan = compile(model);
+    let mut sink = CollectingSink::default();
+    let report = GenerationEngine::new(plan).run(&mut sink).unwrap();
+    assert_eq!(report.rows_written, 8 + 24 + 60);
+    assert_eq!(sink.table_order(), ["customers", "orders", "order_items"]);
+
+    let customer_ids: HashSet<i128> = sink.integers("customers", "id").into_iter().collect();
+    let order_ids: HashSet<i128> = sink.integers("orders", "id").into_iter().collect();
+    assert!(sink
+        .integers("orders", "customer_id")
+        .iter()
+        .all(|id| customer_ids.contains(id)));
+    assert!(sink
+        .integers("order_items", "order_id")
+        .iter()
+        .all(|id| order_ids.contains(id)));
 }
 
 // --- Task 13 fix: unresolved FK generator is a compile error -----------------

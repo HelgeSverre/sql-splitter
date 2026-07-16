@@ -37,7 +37,7 @@ use super::plan::{
     ColumnOwner, CompiledRelationship, GenerationPlan, PlannedTable, RelationshipDistribution,
     ResolvedTableSeed,
 };
-use super::registry::{RowContext, RowView};
+use super::registry::{KeyRecipe, RowContext, RowView};
 use super::seed::{SeedRoot, StreamId};
 use super::value::{GenerateError, GeneratedValue};
 
@@ -142,60 +142,41 @@ fn seeded_uuid(seed: SeedRoot, table: &str, column: &str, row_index: u64) -> Gen
     ))
 }
 
-/// A cloneable recipe for a referenced parent key column: enough to both render
-/// the parent's own key and reconstruct a random-access generator for child
-/// selection, without cloning a trait object.
-#[derive(Clone)]
-enum KeyRecipe {
-    /// A dense integer sequence `start + step * n` (a bare integer PK sequence).
-    Dense { start: i128, step: i128 },
-    /// A per-row-reseeded random UUID (a `uuid`-generator PK).
-    Uuid {
-        seed: SeedRoot,
-        table: String,
-        column: String,
-    },
+/// A referenced parent key column: the generator's context-free [`KeyRecipe`]
+/// shape plus the parent table/column/seed context the engine supplies, and the
+/// row count. Renders the parent's own key and reconstructs a random-access
+/// generator for child selection — both from the one shared derivation, so a
+/// parent PK and the child's reference agree by construction.
+struct ParentKey {
+    shape: KeyRecipe,
+    seed: SeedRoot,
+    table: String,
+    column: String,
+    count: u64,
 }
 
-impl KeyRecipe {
-    /// A fresh random-access generator realizing this recipe.
-    fn generator(&self) -> Box<dyn RandomAccessKeyGenerator> {
-        match self {
-            KeyRecipe::Dense { start, step } => Box::new(DenseIntegerKey {
-                start: *start,
-                step: *step,
-            }),
-            KeyRecipe::Uuid {
-                seed,
-                table,
-                column,
-            } => Box::new(SeededUuidKey {
-                seed: *seed,
-                table: table.clone(),
-                column: column.clone(),
-            }),
-        }
-    }
-
+impl ParentKey {
     /// The key value at parent `row_index` (used to render the parent's own PK).
     fn key_at(&self, row_index: u64) -> GeneratedValue {
-        match self {
+        match self.shape {
             KeyRecipe::Dense { start, step } => {
                 GeneratedValue::Integer(start + step * row_index as i128)
             }
-            KeyRecipe::Uuid {
-                seed,
-                table,
-                column,
-            } => seeded_uuid(*seed, table, column, row_index),
+            KeyRecipe::Uuid => seeded_uuid(self.seed, &self.table, &self.column, row_index),
         }
     }
-}
 
-/// A referenced parent key column: how to reproduce its key, and its row count.
-struct ParentKey {
-    recipe: KeyRecipe,
-    count: u64,
+    /// A fresh random-access generator realizing this key (for child selection).
+    fn generator(&self) -> Box<dyn RandomAccessKeyGenerator> {
+        match self.shape {
+            KeyRecipe::Dense { start, step } => Box::new(DenseIntegerKey { start, step }),
+            KeyRecipe::Uuid => Box::new(SeededUuidKey {
+                seed: self.seed,
+                table: self.table.clone(),
+                column: self.column.clone(),
+            }),
+        }
+    }
 }
 
 /// A reproducible domain of parent keys a child references, addressable by
@@ -328,7 +309,7 @@ impl GenerationEngine {
                     buffer[i] = GeneratedValue::Default;
                 }
                 for (i, key) in &exec.dense {
-                    buffer[*i] = key_domains[key].recipe.key_at(row_index);
+                    buffer[*i] = key_domains[key].key_at(row_index);
                 }
                 for selector in selectors.iter_mut() {
                     selector.assign(row_index, &mut buffer);
@@ -427,7 +408,7 @@ fn build_key_domains(
                 else {
                     continue;
                 };
-                let recipe = match &column.owner {
+                let shape = match &column.owner {
                     // A bare integer primary key is a database sequence:
                     // children reference 1..=count and the parent renders it.
                     ColumnOwner::GeneratedByDatabase
@@ -435,24 +416,23 @@ fn build_key_domains(
                     {
                         KeyRecipe::Dense { start: 1, step: 1 }
                     }
-                    // A `uuid` primary key is random-access: each parent row's
-                    // key reseeds from `primary_key.row.<n>`.
-                    ColumnOwner::Generator { kind, .. } if kind == "uuid" => KeyRecipe::Uuid {
-                        seed: seed_root_of(&parent.seed),
-                        table: parent.name.clone(),
-                        column: parent_column.clone(),
+                    // Any generator that describes itself as a random-access key
+                    // (`sequence` -> Dense, `uuid` -> Uuid) is materializable.
+                    ColumnOwner::Generator { compiled, .. } => match compiled.key_recipe() {
+                        Some(shape) => shape,
+                        None => {
+                            return Err(unsupported_key(&relationship.parent_table, parent_column))
+                        }
                     },
-                    _ => {
-                        return Err(GenerateError::InvalidInput(format!(
-                            "GEN-KEY-DOMAIN-UNSUPPORTED: parent key `{}.{}` cannot be materialized for random access; supported: bare integer primary keys and `uuid` keys (stateful keys await protected key spooling)",
-                            relationship.parent_table, parent_column
-                        )));
-                    }
+                    _ => return Err(unsupported_key(&relationship.parent_table, parent_column)),
                 };
                 domains.insert(
                     key,
                     ParentKey {
-                        recipe,
+                        shape,
+                        seed: seed_root_of(&parent.seed),
+                        table: parent.name.clone(),
+                        column: parent_column.clone(),
                         count: parent.rows,
                     },
                 );
@@ -460,6 +440,14 @@ fn build_key_domains(
         }
     }
     Ok(domains)
+}
+
+/// The `GEN-KEY-DOMAIN-UNSUPPORTED` error for a parent key that cannot be
+/// reproduced by random access (a stateful or otherwise non-describable key).
+fn unsupported_key(parent_table: &str, parent_column: &str) -> GenerateError {
+    GenerateError::InvalidInput(format!(
+        "GEN-KEY-DOMAIN-UNSUPPORTED: parent key `{parent_table}.{parent_column}` cannot be materialized for random access; supported: bare integer primary keys, `sequence`, and `uuid` keys (stateful keys await protected key spooling)"
+    ))
 }
 
 /// The per-column execution plan for one table: which columns are constant
@@ -575,21 +563,21 @@ impl FkSelector {
         let parent_count = parents.first()?.count;
 
         let domain = if parents.len() == 1 {
-            match &parents[0].recipe {
+            match parents[0].shape {
                 KeyRecipe::Dense { start, step } => KeyDomain::DenseInteger {
-                    start: *start,
-                    step: *step,
+                    start,
+                    step,
                     count: parent_count,
                 },
-                recipe => KeyDomain::Deterministic {
+                KeyRecipe::Uuid => KeyDomain::Deterministic {
                     count: parent_count,
-                    generator: recipe.generator(),
+                    generator: parents[0].generator(),
                 },
             }
         } else {
             KeyDomain::Composite {
                 count: parent_count,
-                components: parents.iter().map(|p| p.recipe.generator()).collect(),
+                components: parents.iter().map(|p| p.generator()).collect(),
             }
         };
 

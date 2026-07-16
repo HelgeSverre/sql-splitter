@@ -27,7 +27,7 @@ pub use plan::{
 pub use registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,
     CompiledPlanner, Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory,
-    ModifierDescriptor, ModifierFactory, PlanContext, PlannerDescriptor, PlannerFactory,
+    KeyRecipe, ModifierDescriptor, ModifierFactory, PlanContext, PlannerDescriptor, PlannerFactory,
     RowContext, RowView, Verification,
 };
 pub use seed::{derive_seed, SeedRoot, StreamId};

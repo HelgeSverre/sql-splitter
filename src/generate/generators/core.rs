@@ -21,8 +21,8 @@ use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
 
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,
-    Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory, ModifierDescriptor,
-    ModifierFactory, RowContext, Verification,
+    Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory, KeyRecipe,
+    ModifierDescriptor, ModifierFactory, RowContext, Verification,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
@@ -245,6 +245,9 @@ enum CoreGenerator {
 }
 
 struct SequenceState {
+    /// The row-0 value, retained so the generator can describe itself as a
+    /// random-access `Dense` key domain (see `CompiledGenerator::key_recipe`).
+    start: i128,
     next: Option<i128>,
     step: i128,
 }
@@ -434,6 +437,20 @@ impl CompiledGenerator for CompiledCore {
         }
         Ok(())
     }
+
+    fn key_recipe(&self) -> Option<KeyRecipe> {
+        match &self.0 {
+            // A sequence is row-ordinal: row `n` renders `start + n * step`,
+            // exactly a dense integer key domain.
+            CoreGenerator::Sequence(state) => Some(KeyRecipe::Dense {
+                start: state.start,
+                step: state.step,
+            }),
+            // A UUID key is reproducible per parent row via a row-indexed seed.
+            CoreGenerator::Uuid(_) => Some(KeyRecipe::Uuid),
+            _ => None,
+        }
+    }
 }
 
 // --- Factories ----------------------------------------------------------------
@@ -531,6 +548,7 @@ impl GeneratorFactory for SequenceFactory {
         }
         bag.into_result(
             Box::new(CompiledCore(CoreGenerator::Sequence(SequenceState {
+                start,
                 next: Some(start),
                 step,
             }))) as Box<dyn CompiledGenerator>,
