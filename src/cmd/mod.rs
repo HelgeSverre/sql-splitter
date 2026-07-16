@@ -214,71 +214,7 @@ pub enum Commands {
   sql-splitter shard dump.sql -o tenant.sql --tenant-value 123
   sql-splitter shard dump.sql -o tenant.sql --tenant-column company_id --tenant-value 42
   sql-splitter shard dump.sql -o shards/ --tenant-values \"1,2,3\"")]
-    Shard {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output SQL file or directory (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// YAML config file for table classification
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        config: Option<PathBuf>,
-
-        /// Column containing tenant ID (auto-detected if omitted)
-        #[arg(long, help_heading = MODE)]
-        tenant_column: Option<String>,
-
-        /// Single tenant value to extract
-        #[arg(long, conflicts_with = "tenant_values", help_heading = MODE)]
-        tenant_value: Option<String>,
-
-        /// Multiple tenant values (comma-separated, outputs to directory)
-        #[arg(long, conflicts_with = "tenant_value", help_heading = MODE)]
-        tenant_values: Option<String>,
-
-        /// Tables containing tenant column (comma-separated)
-        #[arg(long, help_heading = FILTERING)]
-        root_tables: Option<String>,
-
-        /// Handle lookup tables: none, lookups, all
-        #[arg(long, default_value = "lookups", help_heading = FILTERING)]
-        include_global: Option<String>,
-
-        /// Fail on FK integrity violations
-        #[arg(long, help_heading = BEHAVIOR)]
-        strict_fk: bool,
-
-        /// Exclude CREATE TABLE statements from output
-        #[arg(long, help_heading = BEHAVIOR)]
-        no_schema: bool,
-
-        /// Max rows to select (0 = unlimited)
-        #[arg(long, help_heading = LIMITS)]
-        max_selected_rows: Option<usize>,
-
-        /// Disable row limit
-        #[arg(long, help_heading = LIMITS)]
-        no_limit: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Preview without writing files
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-    },
+    Shard(shard::ShardArgs),
 
     /// Convert a SQL dump between MySQL, PostgreSQL, SQLite, and MSSQL
     #[command(visible_alias = "cv")]
@@ -675,47 +611,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             json,
         ),
         Commands::Sample(args) => sample::run(args),
-        Commands::Shard {
-            file,
-            output,
-            dialect,
-            tenant_column,
-            tenant_value,
-            tenant_values,
-            root_tables,
-            include_global,
-            config,
-            max_selected_rows,
-            no_limit,
-            strict_fk,
-            no_schema,
-            progress,
-            dry_run,
-            json,
-        } => {
-            let effective_limit = if no_limit || max_selected_rows == Some(0) {
-                None
-            } else {
-                max_selected_rows
-            };
-            shard::run(
-                file,
-                dash_is_stdout(output),
-                dialect,
-                tenant_column,
-                tenant_value,
-                tenant_values,
-                root_tables,
-                include_global,
-                config,
-                effective_limit,
-                strict_fk,
-                no_schema,
-                progress,
-                dry_run,
-                json,
-            )
-        }
+        Commands::Shard(args) => shard::run(args),
         Commands::Convert {
             file,
             output,

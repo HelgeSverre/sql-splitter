@@ -1,10 +1,79 @@
 //! Shard command CLI handler.
 
+use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
 use crate::parser::SqlDialect;
 use crate::shard::{self, GlobalTableMode, ShardConfig, ShardStats, ShardTableClassification};
+use clap::{Args, ValueHint};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
+
+#[derive(Args)]
+pub struct ShardArgs {
+    /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    file: PathBuf,
+
+    /// Output SQL file or directory (default: stdout)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    output: Option<PathBuf>,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
+    dialect: Option<String>,
+
+    /// YAML config file for table classification
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    config: Option<PathBuf>,
+
+    /// Column containing tenant ID (auto-detected if omitted)
+    #[arg(long, help_heading = MODE)]
+    tenant_column: Option<String>,
+
+    /// Single tenant value to extract
+    #[arg(long, conflicts_with = "tenant_values", help_heading = MODE)]
+    tenant_value: Option<String>,
+
+    /// Multiple tenant values (comma-separated, outputs to directory)
+    #[arg(long, conflicts_with = "tenant_value", help_heading = MODE)]
+    tenant_values: Option<String>,
+
+    /// Tables containing tenant column (comma-separated)
+    #[arg(long, help_heading = FILTERING)]
+    root_tables: Option<String>,
+
+    /// Handle lookup tables: none, lookups, all
+    #[arg(long, default_value = "lookups", help_heading = FILTERING)]
+    include_global: Option<String>,
+
+    /// Fail on FK integrity violations
+    #[arg(long, help_heading = BEHAVIOR)]
+    strict_fk: bool,
+
+    /// Exclude CREATE TABLE statements from output
+    #[arg(long, help_heading = BEHAVIOR)]
+    no_schema: bool,
+
+    /// Max rows to select (0 = unlimited)
+    #[arg(long, help_heading = LIMITS)]
+    max_selected_rows: Option<usize>,
+
+    /// Disable row limit
+    #[arg(long, help_heading = LIMITS)]
+    no_limit: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
+    json: bool,
+
+    /// Preview without writing files
+    #[arg(long, help_heading = BEHAVIOR)]
+    dry_run: bool,
+}
 
 /// JSON output for single-tenant shard command
 #[derive(Serialize, JsonSchema)]
@@ -78,24 +147,32 @@ pub(crate) struct TableShardJson {
     rows_total: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    file: PathBuf,
-    output: Option<PathBuf>,
-    dialect: Option<String>,
-    tenant_column: Option<String>,
-    tenant_value: Option<String>,
-    tenant_values: Option<String>,
-    root_tables: Option<String>,
-    include_global: Option<String>,
-    config: Option<PathBuf>,
-    max_selected_rows: Option<usize>,
-    strict_fk: bool,
-    no_schema: bool,
-    progress: bool,
-    dry_run: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+pub fn run(args: ShardArgs) -> anyhow::Result<()> {
+    let ShardArgs {
+        file,
+        output,
+        dialect,
+        config,
+        tenant_column,
+        tenant_value,
+        tenant_values,
+        root_tables,
+        include_global,
+        strict_fk,
+        no_schema,
+        max_selected_rows,
+        no_limit,
+        progress,
+        json,
+        dry_run,
+    } = args;
+    let output = super::common::dash_is_stdout(output);
+    let max_selected_rows = if no_limit || max_selected_rows == Some(0) {
+        None
+    } else {
+        max_selected_rows
+    };
+
     // Validate that at least one tenant value is provided
     if tenant_value.is_none() && tenant_values.is_none() {
         anyhow::bail!("Must specify either --tenant-value or --tenant-values");
