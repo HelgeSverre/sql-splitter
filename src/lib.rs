@@ -8,6 +8,7 @@ pub mod diagnostic;
 pub mod differ;
 #[cfg(feature = "duckdb-query")]
 pub mod duckdb;
+pub mod generate;
 pub mod graph;
 pub mod json_schema;
 pub mod merger;

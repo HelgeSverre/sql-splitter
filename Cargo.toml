@@ -52,6 +52,7 @@ tar = { version = "0.4", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 indicatif = "0.18"
 rand = "0.10"
+rand_chacha = "0.10"
 smallvec = { version = "1.13", features = ["union"] }
 chrono = "0.4"
 tempfile = "3"
