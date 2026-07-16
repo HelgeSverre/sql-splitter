@@ -284,7 +284,7 @@ output. Pin one when you already know the target device:
 | ------------- | ------- | ----------- | ------- | ------------------------------------------------------------------------- |
 | `ssd`         | up to 4 | 256 KB      | 32 MB   | SSD/NVMe — high-IOPS devices that like many small parallel writes         |
 | `hdd`         | 1       | up to 64 MB | 256 MB  | Spinning disks — one writer avoids competing seeks; big sequential writes amortize head movement |
-| `cheap`       | 1       | up to 64 MB | 512 MB  | Cheap USB flash, network mounts — every write *operation* is expensive regardless of locality, so issue the fewest, largest ones. (Also answers to `shit` and `potato`.) |
+| `cheap`       | 1       | up to 64 MB | 512 MB  | Cheap USB flash, network mounts — every write *operation* is expensive regardless of locality, so issue the fewest, largest ones. (Also answers to `potato`.) |
 | `auto`        | adapts  | adapts      | adapts  | Unknown targets — probes the output dir at startup, then switches between the profiles above based on observed backpressure |
 
 ### Merge Options

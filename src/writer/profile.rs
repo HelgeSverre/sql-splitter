@@ -65,7 +65,7 @@ impl IoProfile {
             // The honest name. The aliases are for everyone who has ever fought
             // a no-name USB stick from a conference and knows exactly which
             // profile they need.
-            "cheap" | "shit" | "potato" => Ok(IoProfile::Cheap),
+            "cheap" | "potato" => Ok(IoProfile::Cheap),
             other => Err(format!(
                 "Unknown I/O profile '{other}'. Valid: auto, ssd, hdd, cheap"
             )),
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(IoProfile::parse("auto"), Ok(IoProfile::Auto));
         assert_eq!(IoProfile::parse("ssd"), Ok(IoProfile::Ssd));
         assert_eq!(IoProfile::parse("HDD"), Ok(IoProfile::Hdd));
-        assert_eq!(IoProfile::parse("shit"), Ok(IoProfile::Cheap));
+        assert_eq!(IoProfile::parse("potato"), Ok(IoProfile::Cheap));
         assert!(IoProfile::parse("turbo").is_err());
     }
 

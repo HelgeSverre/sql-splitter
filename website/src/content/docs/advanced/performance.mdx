@@ -61,7 +61,7 @@ only the scheduling of bytes onto the device changes.
 | ------------- | --------------------------- | --------------------- | -------------- | --------------------------- |
 | `ssd`         | up to 4 (all cores when compressing) | 256 KB       | 32 MB          | SSD/NVMe: high IOPS and internal parallelism — many small concurrent writes keep the device's queues full |
 | `hdd`         | 1                           | 8 MB chunks, coalesced up to 64 MB | 256 MB | Spinning disks: parallel writers make the head seek between files, so one writer issues long sequential writes that amortize head movement |
-| `cheap`       | 1                           | 32 MB chunks, coalesced up to 64 MB | 512 MB | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible (aliases: `shit`, `potato` — we know what it is like out there) |
+| `cheap`       | 1                           | 32 MB chunks, coalesced up to 64 MB | 512 MB | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible (alias: `potato` — we know what it is like out there) |
 | `auto` (default) | starts at 1, grows to `ssd`'s count if the device proves fast | adapts | adapts | Unknown targets: an 8 MB fsync probe picks the opening profile, then runtime backpressure monitoring switches between the rows above |
 
 Pin `hdd` for spinning disks or `cheap` for slow-per-operation devices
