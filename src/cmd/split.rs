@@ -635,27 +635,17 @@ fn resolve_dialect(
 fn resolve_dialect_with_confidence(
     file: &std::path::Path,
     dialect: Option<String>,
-    compression: Compression,
+    _compression: Compression,
 ) -> anyhow::Result<(SqlDialect, DialectConfidence)> {
-    use crate::parser::detect_dialect;
-    use std::io::Read;
-
     match dialect {
         Some(d) => {
             let parsed: SqlDialect = d.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             Ok((parsed, DialectConfidence::High))
         }
         None => {
-            let result = if compression != Compression::None {
-                let file_handle = std::fs::File::open(file)?;
-                let mut reader = compression.wrap_reader(Box::new(file_handle))?;
-                let mut header = vec![0u8; 8192];
-                let bytes_read = reader.read(&mut header)?;
-                header.truncate(bytes_read);
-                detect_dialect(&header)
-            } else {
-                detect_dialect_from_file(file)?
-            };
+            // `detect_dialect_from_file` opens through `open_input`, so it
+            // transparently handles compressed/zipped input on its own.
+            let result = detect_dialect_from_file(file)?;
 
             Ok((result.dialect, result.confidence))
         }

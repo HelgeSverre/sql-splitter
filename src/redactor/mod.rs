@@ -24,7 +24,6 @@ pub use strategy::StrategyKind;
 use crate::parser::postgres_copy::parse_copy_columns;
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::schema::{Schema, SchemaBuilder};
-use crate::splitter::Compression;
 use ahash::AHashMap;
 use schemars::JsonSchema;
 use std::fs::File;
@@ -94,11 +93,10 @@ impl Redactor {
         })
     }
 
-    /// Open the input file, transparently decompressing .gz/.bz2/.xz/.zst
+    /// Open the input file, transparently decompressing .gz/.bz2/.xz/.zst and
+    /// zip archives (see `crate::splitter::open_input`).
     fn open_input(input: &Path) -> anyhow::Result<Box<dyn std::io::Read>> {
-        let file = File::open(input)?;
-        let reader = Compression::from_path(input).wrap_reader(Box::new(file))?;
-        Ok(reader)
+        crate::splitter::open_input(input)
     }
 
     /// Build schema from input file

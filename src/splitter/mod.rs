@@ -64,6 +64,11 @@ pub enum Compression {
     Bzip2,
     Xz,
     Zstd,
+    /// A zip *archive* (not a stream compressor) containing exactly one
+    /// `.sql` member. Detected here so callers can branch on it, but it
+    /// never goes through [`Compression::wrap_reader`] — see [`open_input`]
+    /// and `crate::zip_input`.
+    Zip,
 }
 
 impl Compression {
@@ -79,6 +84,7 @@ impl Compression {
             Some("bz2" | "bzip2") => Compression::Bzip2,
             Some("xz" | "lzma") => Compression::Xz,
             Some("zst" | "zstd") => Compression::Zstd,
+            Some("zip") => Compression::Zip,
             _ => Compression::None,
         }
     }
@@ -105,6 +111,9 @@ impl Compression {
             Compression::Bzip2 => ".bz2",
             Compression::Xz => ".xz",
             Compression::Zstd => ".zst",
+            // Never selected as an output compression: `parse_output` has no
+            // "zip" case, so per-table output stays rejected as documented.
+            Compression::Zip => "",
         }
     }
 
@@ -123,6 +132,15 @@ impl Compression {
             Compression::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
             #[cfg(feature = "compression")]
             Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
+            // Zip is an archive, not a stream decoder: it needs a seekable
+            // `File` to parse the central directory, so it can never be
+            // wrapped here. Callers must go through `open_input` instead.
+            Compression::Zip => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "zip input must be opened via open_input(), not wrap_reader() (needs a seekable File)",
+                ))
+            }
             #[cfg(not(feature = "compression"))]
             _ => {
                 return Err(std::io::Error::new(
@@ -142,8 +160,54 @@ impl std::fmt::Display for Compression {
             Compression::Bzip2 => write!(f, "bzip2"),
             Compression::Xz => write!(f, "xz"),
             Compression::Zstd => write!(f, "zstd"),
+            Compression::Zip => write!(f, "zip"),
         }
     }
+}
+
+/// Open `path` as a streaming byte source, transparently handling any
+/// supported compression format — including zip archives, which need a
+/// different opening strategy than the stream decoders (see
+/// `crate::zip_input`). This is the entry point call sites should use
+/// instead of manually pairing `File::open` with [`Compression::wrap_reader`].
+pub fn open_input(path: &Path) -> anyhow::Result<Box<dyn Read>> {
+    open_input_impl(path, None)
+}
+
+/// Same as [`open_input`], but reports bytes read from disk (compressed
+/// bytes, for compressed/zip inputs) through `progress_fn` as they're read.
+pub fn open_input_with_progress(
+    path: &Path,
+    progress_fn: Box<dyn Fn(u64)>,
+) -> anyhow::Result<Box<dyn Read>> {
+    open_input_impl(path, Some(progress_fn))
+}
+
+fn open_input_impl(
+    path: &Path,
+    progress_fn: Option<Box<dyn Fn(u64)>>,
+) -> anyhow::Result<Box<dyn Read>> {
+    let compression = Compression::from_path(path);
+
+    if compression == Compression::Zip {
+        #[cfg(feature = "archive")]
+        {
+            return crate::zip_input::open_zip_member(path, progress_fn);
+        }
+        #[cfg(not(feature = "archive"))]
+        {
+            anyhow::bail!("zip input requires the `archive` feature");
+        }
+    }
+
+    let file = File::open(path).with_context(|| format!("Failed to open input file: {path:?}"))?;
+    let reader: Box<dyn Read> = match progress_fn {
+        Some(cb) => Box::new(ProgressReader::new(file, cb)),
+        None => Box::new(file),
+    };
+    compression
+        .wrap_reader(reader)
+        .with_context(|| format!("Failed to initialize {compression} decompression for {path:?}"))
 }
 
 pub struct Splitter {
@@ -211,33 +275,18 @@ impl Splitter {
     }
 
     pub fn split(mut self) -> anyhow::Result<Stats> {
-        let file = File::open(&self.input_file)
-            .with_context(|| format!("Failed to open input file: {:?}", self.input_file))?;
-        let file_size = file.metadata()?.len();
+        let file_size = std::fs::metadata(&self.input_file)
+            .with_context(|| format!("Failed to open input file: {:?}", self.input_file))?
+            .len();
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.config.dialect;
         let content_filter = self.config.content_filter;
 
-        // Detect and apply decompression
-        let compression = Compression::from_path(&self.input_file);
-
-        let reader: Box<dyn Read> = if let Some(cb) = self.config.progress_fn.take() {
-            let progress_reader = ProgressReader::new(file, cb);
-            compression
-                .wrap_reader(Box::new(progress_reader))
-                .with_context(|| {
-                    format!(
-                        "Failed to initialize {} decompression for {:?}",
-                        compression, self.input_file
-                    )
-                })?
-        } else {
-            compression.wrap_reader(Box::new(file)).with_context(|| {
-                format!(
-                    "Failed to initialize {} decompression for {:?}",
-                    compression, self.input_file
-                )
-            })?
+        // Open the input, transparently handling any supported compression
+        // format (including zip archives, which need a two-phase open).
+        let reader: Box<dyn Read> = match self.config.progress_fn.take() {
+            Some(cb) => open_input_with_progress(&self.input_file, cb)?,
+            None => open_input(&self.input_file)?,
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);

@@ -341,6 +341,16 @@ impl TableSink {
             Compression::Xz => TableSink::Xz(xz2::write::XzEncoder::new(file, 6)),
             #[cfg(feature = "compression")]
             Compression::Zstd => TableSink::Zstd(zstd::stream::write::Encoder::new(file, 3)?),
+            // Zip is never selected as per-table output compression:
+            // `Compression::parse_output` has no "zip" case, so `--compress
+            // zip` stays rejected at the CLI layer (archive output uses `-o
+            // dump.zip` instead, see `crate::archive`).
+            Compression::Zip => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "zip is not a valid per-file output compression",
+                ))
+            }
             #[cfg(not(feature = "compression"))]
             _ => {
                 return Err(std::io::Error::new(

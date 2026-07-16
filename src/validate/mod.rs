@@ -10,14 +10,12 @@
 use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
-use crate::progress::ProgressReader;
 use crate::schema::{Schema, SchemaBuilder, TableId};
-use crate::splitter::Compression;
+use crate::splitter::{open_input, open_input_with_progress};
 use ahash::{AHashMap, AHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::fmt;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::PathBuf;
@@ -415,21 +413,21 @@ impl Validator {
     }
 
     pub fn validate(mut self) -> anyhow::Result<ValidationSummary> {
-        let file = File::open(&self.options.path)?;
-        let file_size = file.metadata()?.len();
+        let file_size = std::fs::metadata(&self.options.path)?.len();
         let buffer_size = determine_buffer_size(file_size);
 
-        // Pass 1 reports bytes as 0 to file_size/2 (first half of progress bar)
-        let compression = Compression::from_path(&self.options.path);
+        // Pass 1 reports bytes as 0 to file_size/2 (first half of progress
+        // bar). Open transparently handles any supported compression format
+        // (including zip archives).
         let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
             let cb = Arc::clone(cb);
-            let progress_reader = ProgressReader::new(file, move |bytes| {
+            open_input_with_progress(
+                &self.options.path,
                 // Scale to first half: 0% to 50%
-                cb(bytes / 2)
-            });
-            compression.wrap_reader(Box::new(progress_reader))?
+                Box::new(move |bytes| cb(bytes / 2)),
+            )?
         } else {
-            compression.wrap_reader(Box::new(file))?
+            open_input(&self.options.path)?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
@@ -560,21 +558,21 @@ impl Validator {
     }
 
     fn run_data_checks(&mut self) -> anyhow::Result<()> {
-        let file = File::open(&self.options.path)?;
-        let file_size = file.metadata()?.len();
+        let file_size = std::fs::metadata(&self.options.path)?.len();
         let buffer_size = determine_buffer_size(file_size);
 
-        // Pass 2 reports bytes as file_size/2 to file_size (second half of progress bar)
-        let compression = Compression::from_path(&self.options.path);
+        // Pass 2 reports bytes as file_size/2 to file_size (second half of
+        // progress bar). Open transparently handles any supported
+        // compression format (including zip archives).
         let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
             let cb = Arc::clone(cb);
-            let progress_reader = ProgressReader::new(file, move |bytes| {
+            open_input_with_progress(
+                &self.options.path,
                 // Scale to second half: 50% to 100%
-                cb(file_size / 2 + bytes / 2)
-            });
-            compression.wrap_reader(Box::new(progress_reader))?
+                Box::new(move |bytes| cb(file_size / 2 + bytes / 2)),
+            )?
         } else {
-            compression.wrap_reader(Box::new(file))?
+            open_input(&self.options.path)?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);

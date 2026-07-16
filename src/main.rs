@@ -22,6 +22,8 @@ mod shard;
 mod splitter;
 mod validate;
 mod writer;
+#[cfg(feature = "archive")]
+mod zip_input;
 
 use clap::Parser;
 use cmd::Cli;

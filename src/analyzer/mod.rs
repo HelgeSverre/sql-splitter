@@ -1,11 +1,9 @@
 //! SQL dump analyzer for gathering per-table statistics.
 
 use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
-use crate::progress::ProgressReader;
-use crate::splitter::Compression;
+use crate::splitter::{open_input, open_input_with_progress};
 use ahash::AHashMap;
 use serde::Serialize;
-use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -61,14 +59,13 @@ impl Analyzer {
 
     /// Run the analysis, returning sorted table statistics.
     pub fn analyze(mut self) -> anyhow::Result<Vec<TableStats>> {
-        let file = File::open(&self.input_file)?;
-        let file_size = file.metadata()?.len();
+        let file_size = std::fs::metadata(&self.input_file)?.len();
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.dialect;
 
-        // Detect and apply decompression
-        let compression = Compression::from_path(&self.input_file);
-        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(file))?;
+        // Open the input, transparently handling any supported compression
+        // format (including zip archives).
+        let reader: Box<dyn Read> = open_input(&self.input_file)?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
@@ -91,15 +88,14 @@ impl Analyzer {
         mut self,
         progress_fn: F,
     ) -> anyhow::Result<Vec<TableStats>> {
-        let file = File::open(&self.input_file)?;
-        let file_size = file.metadata()?.len();
+        let file_size = std::fs::metadata(&self.input_file)?.len();
         let buffer_size = determine_buffer_size(file_size);
         let dialect = self.dialect;
 
-        // Detect and apply decompression
-        let compression = Compression::from_path(&self.input_file);
-        let progress_reader = ProgressReader::new(file, progress_fn);
-        let reader: Box<dyn Read> = compression.wrap_reader(Box::new(progress_reader))?;
+        // Open the input, transparently handling any supported compression
+        // format (including zip archives).
+        let reader: Box<dyn Read> =
+            open_input_with_progress(&self.input_file, Box::new(progress_fn))?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 

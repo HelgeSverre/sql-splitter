@@ -183,14 +183,9 @@ pub fn run(
 fn build_schema_graph_from_file(
     path: &Path,
     dialect: crate::parser::SqlDialect,
-    compression: Compression,
+    _compression: Compression,
 ) -> Result<SchemaGraph> {
-    let file = File::open(path)?;
-    let reader: Box<dyn Read> = if compression != Compression::None {
-        compression.wrap_reader(Box::new(file))?
-    } else {
-        Box::new(file)
-    };
+    let reader: Box<dyn Read> = crate::splitter::open_input(path)?;
 
     let mut parser = Parser::with_dialect(reader, 64 * 1024, dialect);
     let mut builder = SchemaBuilder::new();
@@ -258,23 +253,16 @@ fn render_with_graphviz(dot_source: &str, output_path: &Path) -> Result<()> {
 fn resolve_dialect(
     file: &Path,
     dialect: Option<String>,
-    compression: Compression,
+    _compression: Compression,
 ) -> Result<crate::parser::SqlDialect> {
-    use crate::parser::{detect_dialect, DialectConfidence};
+    use crate::parser::DialectConfidence;
 
     match dialect {
         Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
         None => {
-            let result = if compression != Compression::None {
-                let file_handle = File::open(file)?;
-                let mut reader = compression.wrap_reader(Box::new(file_handle))?;
-                let mut header = vec![0u8; 8192];
-                let bytes_read = reader.read(&mut header)?;
-                header.truncate(bytes_read);
-                detect_dialect(&header)
-            } else {
-                detect_dialect_from_file(file)?
-            };
+            // `detect_dialect_from_file` opens through `open_input`, so it
+            // transparently handles compressed/zipped input on its own.
+            let result = detect_dialect_from_file(file)?;
 
             let confidence_str = match result.confidence {
                 DialectConfidence::High => "high confidence",

@@ -233,14 +233,16 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
     }
 }
 
-/// Detect dialect from a file, reading first 8KB
-pub fn detect_dialect_from_file(path: &std::path::Path) -> std::io::Result<DialectDetectionResult> {
-    use std::fs::File;
+/// Detect dialect from a file, reading its first 8KB. Goes through
+/// [`crate::splitter::open_input`] so compressed and zipped inputs are
+/// transparently decoded before sniffing — without that, detection would
+/// see raw compressed bytes instead of SQL text.
+pub fn detect_dialect_from_file(path: &std::path::Path) -> anyhow::Result<DialectDetectionResult> {
     use std::io::Read;
 
-    let mut file = File::open(path)?;
+    let mut reader = crate::splitter::open_input(path)?;
     let mut buf = [0u8; 8192];
-    let n = file.read(&mut buf)?;
+    let n = reader.read(&mut buf)?;
     Ok(detect_dialect(&buf[..n]))
 }
 
