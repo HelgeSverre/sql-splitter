@@ -176,3 +176,50 @@ fn test_merge_bytes_written_tracking() {
     let stats = merger.merge().unwrap();
     assert!(stats.bytes_written > 0);
 }
+
+#[test]
+fn test_merge_non_utf8_content() {
+    // Split files can legitimately contain latin1/binary blob INSERT data;
+    // merge must pass those bytes through byte-exact instead of failing on
+    // UTF-8 validation (regression test for the BufRead::lines() copy loop).
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("tables");
+    let output_file = temp_dir.path().join("merged.sql");
+
+    fs::create_dir_all(&input_dir).unwrap();
+    let latin1_row: Vec<u8> = b"INSERT INTO blobs VALUES (1, '\xE9\xFF\x00abc');\n".to_vec();
+    fs::write(input_dir.join("blobs.sql"), &latin1_row).unwrap();
+
+    let merger = Merger::new(input_dir, Some(output_file.clone()));
+    let stats = merger.merge().unwrap();
+
+    assert_eq!(stats.tables_merged, 1);
+    let content = fs::read(&output_file).unwrap();
+    // The exact input bytes must appear unmodified in the output.
+    assert!(
+        content
+            .windows(latin1_row.len())
+            .any(|w| w == latin1_row.as_slice()),
+        "non-UTF-8 bytes were not copied byte-exact"
+    );
+}
+
+#[test]
+fn test_merge_adds_trailing_newline_when_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("tables");
+    let output_file = temp_dir.path().join("merged.sql");
+
+    fs::create_dir_all(&input_dir).unwrap();
+    // No trailing newline in the source file.
+    fs::write(input_dir.join("a.sql"), "INSERT INTO a VALUES (1);").unwrap();
+    fs::write(input_dir.join("b.sql"), "INSERT INTO b VALUES (2);\n").unwrap();
+
+    let merger = Merger::new(input_dir, Some(output_file.clone()));
+    merger.merge().unwrap();
+
+    let content = fs::read_to_string(&output_file).unwrap();
+    // The two statements must not run together on one line.
+    assert!(content.contains("INSERT INTO a VALUES (1);\n"));
+    assert!(content.contains("INSERT INTO b VALUES (2);\n"));
+}

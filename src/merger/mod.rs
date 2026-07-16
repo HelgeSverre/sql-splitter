@@ -3,7 +3,7 @@
 use crate::parser::SqlDialect;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::PathBuf;
 
 /// Statistics from merge operation
@@ -167,15 +167,26 @@ impl Merger {
             writer.write_all(separator.as_bytes())?;
             stats.bytes_written += separator.len() as u64;
 
-            // Stream file content
-            let file = File::open(path)?;
-            let reader = BufReader::with_capacity(64 * 1024, file);
+            // Stream file content as raw bytes (byte-exact, no per-line
+            // allocation, and non-UTF-8 data passes through untouched)
+            let mut file = File::open(path)?;
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut last_byte = b'\n';
 
-            for line in reader.lines() {
-                let line = line?;
-                writer.write_all(line.as_bytes())?;
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf[..n])?;
+                last_byte = buf[n - 1];
+                stats.bytes_written += n as u64;
+            }
+
+            // Ensure statements from consecutive files stay separated
+            if last_byte != b'\n' {
                 writer.write_all(b"\n")?;
-                stats.bytes_written += line.len() as u64 + 1;
+                stats.bytes_written += 1;
             }
 
             stats.table_names.push(table_name.clone());
