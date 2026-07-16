@@ -10,13 +10,13 @@
 use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
+use crate::pk::{format_single_pk, hash_pk_values, PkHash};
 use crate::schema::{Schema, SchemaBuilder, TableId};
-use crate::splitter::{open_input, open_input_with_progress};
+use crate::splitter::open_input_opt_progress;
 use ahash::{AHashMap, AHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -207,41 +207,6 @@ impl ValidationSummary {
     }
 }
 
-/// Compact primary/foreign key representation for duplicate and FK checks.
-/// We use a 64-bit hash; collision risk is negligible for realistic dumps.
-type PkHash = u64;
-
-/// Hash a list of PK/FK values into a compact 64-bit hash.
-/// Uses AHash for fast, high-quality hashing.
-fn hash_pk_values(values: &smallvec::SmallVec<[mysql_insert::PkValue; 2]>) -> PkHash {
-    let mut hasher = ahash::AHasher::default();
-
-    // Include arity (number of columns) in the hash to distinguish (1) from (1, NULL)
-    (values.len() as u8).hash(&mut hasher);
-
-    for v in values {
-        match v {
-            mysql_insert::PkValue::Int(i) => {
-                0u8.hash(&mut hasher);
-                i.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::BigInt(i) => {
-                1u8.hash(&mut hasher);
-                i.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::Text(s) => {
-                2u8.hash(&mut hasher);
-                s.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::Null => {
-                3u8.hash(&mut hasher);
-            }
-        }
-    }
-
-    hasher.finish()
-}
-
 /// Pending FK check to be validated after all PKs are loaded.
 /// Uses compact hash representation to minimize memory usage.
 struct PendingFkCheck {
@@ -419,16 +384,12 @@ impl Validator {
         // Pass 1 reports bytes as 0 to file_size/2 (first half of progress
         // bar). Open transparently handles any supported compression format
         // (including zip archives).
-        let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
+        let progress_fn: Option<Box<dyn Fn(u64)>> = self.progress_fn.as_ref().map(|cb| {
             let cb = Arc::clone(cb);
-            open_input_with_progress(
-                &self.options.path,
-                // Scale to first half: 0% to 50%
-                Box::new(move |bytes| cb(bytes / 2)),
-            )?
-        } else {
-            open_input(&self.options.path)?
-        };
+            // Scale to first half: 0% to 50%
+            Box::new(move |bytes: u64| cb(bytes / 2)) as Box<dyn Fn(u64)>
+        });
+        let reader: Box<dyn Read> = open_input_opt_progress(&self.options.path, progress_fn)?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
 
@@ -515,16 +476,14 @@ impl Validator {
                     self.tables_from_ddl.insert(table_name.clone());
 
                     // Parse CREATE TABLE for schema info (all dialects supported)
-                    if let Ok(stmt_str) = std::str::from_utf8(stmt) {
-                        self.schema_builder.parse_create_table(stmt_str);
-                    }
+                    self.schema_builder
+                        .ingest(stmt_type, &String::from_utf8_lossy(stmt));
                 }
             }
             StatementType::AlterTable => {
                 // Parse ALTER TABLE for FK constraints (all dialects supported)
-                if let Ok(stmt_str) = std::str::from_utf8(stmt) {
-                    self.schema_builder.parse_alter_table(stmt_str);
-                }
+                self.schema_builder
+                    .ingest(stmt_type, &String::from_utf8_lossy(stmt));
             }
             StatementType::Insert | StatementType::Copy => {
                 if !table_name.is_empty() {
@@ -564,16 +523,12 @@ impl Validator {
         // Pass 2 reports bytes as file_size/2 to file_size (second half of
         // progress bar). Open transparently handles any supported
         // compression format (including zip archives).
-        let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
+        let progress_fn: Option<Box<dyn Fn(u64)>> = self.progress_fn.as_ref().map(|cb| {
             let cb = Arc::clone(cb);
-            open_input_with_progress(
-                &self.options.path,
-                // Scale to second half: 50% to 100%
-                Box::new(move |bytes| cb(file_size / 2 + bytes / 2)),
-            )?
-        } else {
-            open_input(&self.options.path)?
-        };
+            // Scale to second half: 50% to 100%
+            Box::new(move |bytes: u64| cb(file_size / 2 + bytes / 2)) as Box<dyn Fn(u64)>
+        });
+        let reader: Box<dyn Read> = open_input_opt_progress(&self.options.path, progress_fn)?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
         let mut stmt_count: u64 = 0;
@@ -590,7 +545,7 @@ impl Validator {
             // Handle PostgreSQL COPY data (separate statement from header)
             if self.dialect == SqlDialect::Postgres && stmt_type == StatementType::Unknown {
                 // Check if this looks like COPY data (ends with \.)
-                if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
+                if crate::copy_data::is_copy_data_block(&stmt) {
                     if let Some((ref copy_table, ref column_order, copy_table_id)) =
                         self.current_copy_context.clone()
                     {
@@ -667,65 +622,6 @@ impl Validator {
         }
     }
 
-    /// Check rows from a PostgreSQL COPY statement
-    #[allow(dead_code)]
-    fn check_copy_statement(
-        &mut self,
-        stmt: &[u8],
-        table_id: TableId,
-        table_name: &str,
-        stmt_count: u64,
-    ) {
-        // Find the COPY header line and the data section
-        let stmt_str = match std::str::from_utf8(stmt) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        // Find the data section (after the header line ending with "FROM stdin;")
-        let data_start = if let Some(pos) = stmt_str.find("FROM stdin;") {
-            pos + "FROM stdin;".len()
-        } else if let Some(pos) = stmt_str.find("from stdin;") {
-            pos + "from stdin;".len()
-        } else {
-            return;
-        };
-
-        // Skip any whitespace/newlines after the header
-        let data_section = stmt_str[data_start..].trim_start();
-        if data_section.is_empty() {
-            return;
-        }
-
-        // Parse column list from the header
-        let header = &stmt_str[..data_start];
-        let column_order = postgres_copy::parse_copy_columns(header);
-
-        // Get table schema
-        let table_schema = match &self.schema {
-            Some(s) => match s.table(table_id) {
-                Some(ts) => ts,
-                None => return,
-            },
-            None => return,
-        };
-
-        // Parse the COPY data rows
-        let rows = match postgres_copy::parse_postgres_copy_rows_with(
-            data_section.as_bytes(),
-            table_schema,
-            column_order,
-            mysql_insert::RowExtraction::PkFk,
-        ) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-
-        for row in rows {
-            self.check_copy_row(table_id, table_name, &row, stmt_count);
-        }
-    }
-
     /// Check rows from PostgreSQL COPY data (separate statement from header)
     fn check_copy_data(
         &mut self,
@@ -735,13 +631,9 @@ impl Validator {
         column_order: Vec<String>,
         stmt_count: u64,
     ) {
-        // The data_stmt contains the raw COPY data lines (may have leading newline)
-        // Strip leading whitespace/newlines
-        let data: Vec<u8> = data_stmt
-            .iter()
-            .skip_while(|&&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
-            .cloned()
-            .collect();
+        // The data_stmt contains the raw COPY data lines (may have leading
+        // newline); trim in place as a slice — no copy needed.
+        let data = crate::copy_data::trim_copy_data(data_stmt);
 
         if data.is_empty() {
             return;
@@ -758,7 +650,7 @@ impl Validator {
 
         // Parse the COPY data rows
         let rows = match postgres_copy::parse_postgres_copy_rows_with(
-            &data,
+            data,
             table_schema,
             column_order,
             mysql_insert::RowExtraction::PkFk,
@@ -866,12 +758,7 @@ impl Validator {
                     // Build human-readable display on demand (duplicates are rare)
                     let pk_display: String = pk_values
                         .iter()
-                        .map(|v| match v {
-                            mysql_insert::PkValue::Int(i) => i.to_string(),
-                            mysql_insert::PkValue::BigInt(i) => i.to_string(),
-                            mysql_insert::PkValue::Text(s) => s.to_string(),
-                            mysql_insert::PkValue::Null => "NULL".to_string(),
-                        })
+                        .map(format_single_pk)
                         .collect::<Vec<_>>()
                         .join(", ");
 

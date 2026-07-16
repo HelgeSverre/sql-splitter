@@ -7,14 +7,14 @@ use super::{parse_ignore_patterns, should_ignore_column, should_include_table, D
 use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
-use crate::pk::{hash_pk_values, PkHash};
+use crate::pk::{format_pk_tuple, hash_pk_value_into, hash_pk_values, PkHash};
 use crate::schema::Schema;
-use crate::splitter::{open_input, open_input_with_progress};
+use crate::splitter::open_input_opt_progress;
 use ahash::AHashMap;
 use glob::Pattern;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,75 +121,15 @@ impl TableState {
     }
 }
 
-/// Hash non-PK column values to detect row modifications
-fn hash_row_digest(values: &[mysql_insert::PkValue]) -> u64 {
-    let mut hasher = ahash::AHasher::default();
-    for v in values {
-        match v {
-            mysql_insert::PkValue::Int(i) => {
-                0u8.hash(&mut hasher);
-                i.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::BigInt(i) => {
-                1u8.hash(&mut hasher);
-                i.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::Text(s) => {
-                2u8.hash(&mut hasher);
-                s.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::Null => {
-                3u8.hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
-/// Format a single PK value as a string
-fn format_single_pk(v: &mysql_insert::PkValue) -> String {
-    match v {
-        mysql_insert::PkValue::Int(i) => i.to_string(),
-        mysql_insert::PkValue::BigInt(i) => i.to_string(),
-        mysql_insert::PkValue::Text(s) => s.to_string(),
-        mysql_insert::PkValue::Null => "NULL".to_string(),
-    }
-}
-
-/// Format a PK tuple as a string (single value as-is, composite as "(val1, val2)")
-fn format_pk_value(pk: &[mysql_insert::PkValue]) -> String {
-    if pk.len() == 1 {
-        format_single_pk(&pk[0])
-    } else {
-        let parts: Vec<String> = pk.iter().map(format_single_pk).collect();
-        format!("({})", parts.join(", "))
-    }
-}
-
-/// Hash non-PK column values to detect row modifications, excluding ignored column indices
-fn hash_row_digest_with_ignore(values: &[mysql_insert::PkValue], ignore_indices: &[usize]) -> u64 {
+/// Hash row column values to detect row modifications, excluding ignored
+/// column indices (pass an empty slice to hash every column).
+fn hash_row_digest(values: &[mysql_insert::PkValue], ignore_indices: &[usize]) -> u64 {
     let mut hasher = ahash::AHasher::default();
     for (i, v) in values.iter().enumerate() {
         if ignore_indices.contains(&i) {
             continue;
         }
-        match v {
-            mysql_insert::PkValue::Int(val) => {
-                0u8.hash(&mut hasher);
-                val.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::BigInt(val) => {
-                1u8.hash(&mut hasher);
-                val.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::Text(s) => {
-                2u8.hash(&mut hasher);
-                s.hash(&mut hasher);
-            }
-            mysql_insert::PkValue::Null => {
-                3u8.hash(&mut hasher);
-            }
-        }
+        hash_pk_value_into(v, &mut hasher);
     }
     hasher.finish()
 }
@@ -321,14 +261,11 @@ impl DataDiffer {
         let mut pk_values: smallvec::SmallVec<[mysql_insert::PkValue; 2]> =
             smallvec::SmallVec::new();
         for &idx in pk_indices {
-            if let Some(val) = all_values.get(idx) {
-                if val.is_null() {
-                    return None;
-                }
-                pk_values.push(val.clone());
-            } else {
+            let val = all_values.get(idx)?;
+            if val.is_null() {
                 return None;
             }
+            pk_values.push(val.clone());
         }
         if pk_values.is_empty() {
             None
@@ -354,15 +291,11 @@ impl DataDiffer {
 
         // Open the input, transparently handling any supported compression
         // format (including zip archives).
-        let reader: Box<dyn Read> = if let Some(ref cb) = progress_fn {
+        let progress: Option<Box<dyn Fn(u64)>> = progress_fn.as_ref().map(|cb| {
             let cb = Arc::clone(cb);
-            open_input_with_progress(
-                path,
-                Box::new(move |bytes| cb(byte_offset + bytes, total_bytes)),
-            )?
-        } else {
-            open_input(path)?
-        };
+            Box::new(move |bytes| cb(byte_offset + bytes, total_bytes)) as Box<dyn Fn(u64)>
+        });
+        let reader: Box<dyn Read> = open_input_opt_progress(path, progress)?;
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
@@ -376,7 +309,7 @@ impl DataDiffer {
             // Handle PostgreSQL COPY data (separate statement from header)
             if dialect == SqlDialect::Postgres && stmt_type == StatementType::Unknown {
                 // Check if this looks like COPY data (ends with \.)
-                if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
+                if crate::copy_data::is_copy_data_block(&stmt) {
                     if let Some((ref copy_table, ref column_order)) =
                         self.current_copy_context.clone()
                     {
@@ -530,19 +463,15 @@ impl DataDiffer {
         column_order: Vec<String>,
         is_old: bool,
     ) -> anyhow::Result<()> {
-        // The data_stmt contains the raw COPY data lines (may have leading newline)
-        // Strip leading whitespace/newlines
-        let data = data_stmt
-            .iter()
-            .skip_while(|&&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
-            .cloned()
-            .collect::<Vec<u8>>();
+        // The data_stmt contains the raw COPY data lines (may have leading
+        // newline); trim in place as a slice — no copy needed.
+        let data = crate::copy_data::trim_copy_data(data_stmt);
 
         if data.is_empty() {
             return Ok(());
         }
 
-        let rows = postgres_copy::parse_postgres_copy_rows(&data, table_schema, column_order)?;
+        let rows = postgres_copy::parse_postgres_copy_rows(data, table_schema, column_order)?;
 
         let (pk_indices, has_override, invalid_cols) =
             self.get_effective_pk_indices(table_name, table_schema);
@@ -662,11 +591,7 @@ impl DataDiffer {
         if let Some(ref pk_values) = pk {
             if let Some(ref mut map) = state.pk_to_digest {
                 let pk_hash = hash_pk_values(pk_values);
-                let row_digest = if ignore_indices.is_empty() {
-                    hash_row_digest(all_values)
-                } else {
-                    hash_row_digest_with_ignore(all_values, ignore_indices)
-                };
+                let row_digest = hash_row_digest(all_values, ignore_indices);
                 let was_new = map.insert(pk_hash, row_digest).is_none();
                 if was_new {
                     self.total_pk_entries += 1;
@@ -674,7 +599,7 @@ impl DataDiffer {
 
                 // Also store PK string for sampling if enabled
                 if let Some(ref mut pk_str_map) = state.pk_strings {
-                    pk_str_map.insert(pk_hash, format_pk_value(pk_values));
+                    pk_str_map.insert(pk_hash, format_pk_tuple(pk_values));
                 }
             }
         }
