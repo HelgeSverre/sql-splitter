@@ -210,6 +210,27 @@ fn open_input_impl(
         .with_context(|| format!("Failed to initialize {compression} decompression for {path:?}"))
 }
 
+/// Total number of bytes the progress callback installed by
+/// [`open_input_with_progress`] can report for `path` — i.e. the correct
+/// length for a progress bar over this input.
+///
+/// For most inputs this is simply the on-disk file size (progress counts
+/// raw/compressed bytes read from disk). Zip archives are the exception:
+/// only the sole `.sql` member's compressed bytes are ever streamed, so the
+/// total is that member's compressed size — sizing a bar with the archive's
+/// file size would leave it stuck below 100% by the archive overhead and any
+/// sibling members. Falls back to the file size when the member can't be
+/// located (the subsequent open reports the real error).
+pub fn input_progress_len(path: &Path) -> u64 {
+    #[cfg(feature = "archive")]
+    if Compression::from_path(path) == Compression::Zip {
+        if let Ok(size) = crate::zip_input::sql_member_compressed_size(path) {
+            return size;
+        }
+    }
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 /// Estimated decompressed size of an input file, for adaptive-I/O gating and
 /// epoch sizing. Exact for uncompressed input; for compressed/zip input a
 /// deliberately conservative 4× multiplier is applied (SQL text typically

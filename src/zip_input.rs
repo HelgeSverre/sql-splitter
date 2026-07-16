@@ -132,6 +132,18 @@ fn locate_sql_member(path: &Path) -> anyhow::Result<(zip::ZipArchive<File>, ZipS
     }
 }
 
+/// Compressed size of the sole `.sql` member of the zip archive at `path`.
+///
+/// This is the total number of bytes the progress callback of
+/// [`open_zip_member`] can ever report: only the member's compressed bytes
+/// are streamed (archive overhead and sibling members are never read), so a
+/// progress bar sized from the whole archive's file size would finish short
+/// of 100%. Size the bar with this instead.
+pub(crate) fn sql_member_compressed_size(path: &Path) -> anyhow::Result<u64> {
+    let (_, member) = locate_sql_member(path)?;
+    Ok(member.compressed_size)
+}
+
 /// Open the sole `.sql` member of the zip archive at `path` as a streaming
 /// reader. If `progress_fn` is given, it is fed the count of raw
 /// (compressed) bytes read from disk, matching how progress is tracked for
