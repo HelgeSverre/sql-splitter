@@ -8,13 +8,11 @@ use crate::parser::{
     detect_dialect_from_file, parse_insert_for_bulk, Parser, SqlDialect, StatementType,
 };
 use crate::progress::ProgressReader;
-use crate::splitter::Compression;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
@@ -64,16 +62,10 @@ impl<'a> DumpLoader<'a> {
             None
         };
 
-        // Open file with compression detection
-        let file = File::open(dump_path).context("Failed to open dump file")?;
-        let compression = Compression::from_path(dump_path);
-        let reader: Box<dyn Read> = match compression {
-            Compression::Gzip => Box::new(flate2::read::GzDecoder::new(file)),
-            Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(file)),
-            Compression::Xz => Box::new(xz2::read::XzDecoder::new(file)),
-            Compression::Zstd => Box::new(zstd::stream::Decoder::new(file)?),
-            Compression::None => Box::new(file),
-        };
+        // Open file with compression detection (including zip archives,
+        // which need the two-phase open in `crate::splitter::open_input`).
+        let reader: Box<dyn Read> =
+            crate::splitter::open_input(dump_path).context("Failed to open dump file")?;
 
         let reader: Box<dyn Read> = if let Some(ref pb) = progress_bar {
             let pb_clone = pb.clone();

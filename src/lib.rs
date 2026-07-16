@@ -19,3 +19,5 @@ pub mod shard;
 pub mod splitter;
 pub mod validate;
 pub mod writer;
+#[cfg(feature = "archive")]
+mod zip_input;
