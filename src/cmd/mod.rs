@@ -69,6 +69,7 @@ pub enum Commands {
   sql-splitter split dump.sql -o schema/ --schema-only
   sql-splitter split dump.sql -o tables/ --compress zstd
   sql-splitter split dump.sql -o dump.tar.gz
+  sql-splitter split dump.sql -o /mnt/usb/tables/ --io-profile hdd
   sql-splitter split \"backups/*.sql\" -o out/ --fail-fast")]
     Split {
         /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
@@ -110,6 +111,10 @@ pub enum Commands {
         /// Compress each output file: none, gzip, zstd, bzip2, xz
         #[arg(long, default_value = "none", value_name = "FORMAT", help_heading = INPUT_OUTPUT)]
         compress: String,
+
+        /// Output device I/O profile: auto, fast, hdd, minimal-ops
+        #[arg(long, default_value = "auto", value_name = "PROFILE", help_heading = BEHAVIOR)]
+        io_profile: String,
 
         /// Preview without writing files
         #[arg(long, help_heading = BEHAVIOR)]
@@ -781,6 +786,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             fail_fast,
             json,
             compress,
+            io_profile,
         } => split::run(
             file,
             output,
@@ -794,6 +800,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             fail_fast,
             json,
             compress,
+            io_profile,
         ),
         Commands::Analyze {
             file,

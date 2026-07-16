@@ -1,6 +1,10 @@
 //! Unit tests for writer module, extracted from src/writer/mod.rs
 
-use sql_splitter::writer::{TableWriter, WriterPool};
+use sql_splitter::splitter::Compression;
+use sql_splitter::writer::{
+    ParallelWriters, ProfileValues, TableWriter, WriterPool, WriterProfile,
+};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
@@ -117,4 +121,61 @@ fn test_writer_pool_write_statement_with_suffix() {
     pool.close_all().unwrap();
     let content = std::fs::read_to_string(temp_dir.path().join("users.sql")).unwrap();
     assert!(content.contains("INSERT INTO users VALUES (1);"));
+}
+
+/// Regression for the 2026-07-16 field bug: `bytes_acked` counted bytes
+/// landing in the writer's in-RAM coalescing buffer, so on a slow device
+/// with big (64 MB) slow-profile buffers the controller saw RAM speed
+/// (~600 MB/s on a 77 MB/s drive) instead of device throughput.
+///
+/// The invariant the fix establishes: `bytes_acked` is incremented only
+/// *after* a `write(2)` to the output file returns, so at any moment it is
+/// bounded above by the bytes actually on disk. With the old counting this
+/// fails immediately — a whole megabyte gets "acked" into the 8 MB buffer
+/// while the file is still zero bytes.
+#[test]
+fn test_bytes_acked_never_exceeds_bytes_on_disk() {
+    let temp_dir = TempDir::new().unwrap();
+    let out_dir = temp_dir.path().to_path_buf();
+
+    // Small flush_chunk so the producer ships chunks promptly; big file_buf
+    // so shipped chunks sit in the writer-side RAM buffer for a long time —
+    // the exact configuration that maximized the old inflation.
+    let profile = WriterProfile {
+        writers: 1,
+        flush_chunk: 1024,
+        file_buf: 8 * 1024 * 1024,
+        stage_cap: 64 * 1024 * 1024,
+    };
+    let values = Arc::new(ProfileValues::new(&profile));
+    let mut writers =
+        ParallelWriters::new(out_dir.clone(), 1, 16, Compression::None, values).unwrap();
+
+    let stmt = format!("INSERT INTO t VALUES ('{}');", "x".repeat(200));
+    let mut shipped = 0u64;
+    for _ in 0..5000 {
+        writers.write("t", stmt.as_bytes(), b"");
+        shipped += stmt.len() as u64 + 1; // + newline
+    }
+
+    let file = out_dir.join("t.sql");
+    // Poll while the writer thread drains: the counter must never run ahead
+    // of the file. Reading the counter *before* the file size makes the race
+    // safe — the file can only have grown in between.
+    for _ in 0..50 {
+        let acked = writers.stats().bytes_acked;
+        let on_disk = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        assert!(
+            acked <= on_disk,
+            "bytes_acked ({acked}) ran ahead of bytes on disk ({on_disk}): \
+             counting buffered bytes as written"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // After finish() everything is flushed: the file must contain exactly
+    // what was shipped (the counter itself is consumed with the pool).
+    writers.finish().unwrap();
+    let on_disk = std::fs::metadata(&file).unwrap().len();
+    assert_eq!(on_disk, shipped, "flushed output size mismatch");
 }
