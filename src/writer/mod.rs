@@ -154,7 +154,12 @@ struct Chunk {
 /// must not react to it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriterStats {
-    /// Bytes fully handed to the output sinks by writer threads.
+    /// Bytes actually written to output files: counted after each `write(2)`
+    /// returns (pre-fsync), *not* when chunks are enqueued or land in a
+    /// sink's coalescing buffer — buffered bytes would measure RAM speed,
+    /// not the device. For compressed output this counts *compressed* bytes,
+    /// which is the right signal: it is the byte volume the device has to
+    /// absorb.
     pub bytes_acked: u64,
     /// Cumulative time the producer spent blocked on a full writer channel.
     pub send_stall: Duration,
@@ -213,15 +218,28 @@ struct ProfiledFile {
     buf: Vec<u8>,
     values: Arc<ProfileValues>,
     throttle: Option<Arc<Mutex<Throttle>>>,
+    /// Shared [`WriterStats::bytes_acked`] counter, incremented *after* the
+    /// `write(2)` to the output file returns (pre-fsync). Counting here — not
+    /// when a chunk is enqueued or copied into this coalescing buffer — is
+    /// what makes the controller's throughput signal reflect the device: with
+    /// 64 MB slow-profile buffers, counting buffer fills would measure RAM
+    /// speed (~600 MB/s on a 77 MB/s drive) and fake a fast device.
+    bytes_acked: Arc<AtomicU64>,
 }
 
 impl ProfiledFile {
-    fn new(file: File, values: Arc<ProfileValues>, throttle: Option<Arc<Mutex<Throttle>>>) -> Self {
+    fn new(
+        file: File,
+        values: Arc<ProfileValues>,
+        throttle: Option<Arc<Mutex<Throttle>>>,
+        bytes_acked: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             file,
             buf: Vec::new(),
             values,
             throttle,
+            bytes_acked,
         }
     }
 
@@ -231,7 +249,10 @@ impl ProfiledFile {
                 t.admit(data.len());
             }
         }
-        self.file.write_all(data)
+        self.file.write_all(data)?;
+        self.bytes_acked
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        Ok(())
     }
 
     fn flush_buf(&mut self) -> std::io::Result<()> {
@@ -295,9 +316,15 @@ impl TableSink {
         format: Compression,
         values: &Arc<ProfileValues>,
         throttle: &Option<Arc<Mutex<Throttle>>>,
+        bytes_acked: &Arc<AtomicU64>,
     ) -> std::io::Result<Self> {
         let path = dir.join(format!("{}.sql{}", table, format.output_extension()));
-        let file = ProfiledFile::new(File::create(&path)?, Arc::clone(values), throttle.clone());
+        let file = ProfiledFile::new(
+            File::create(&path)?,
+            Arc::clone(values),
+            throttle.clone(),
+            Arc::clone(bytes_acked),
+        );
         Ok(match format {
             Compression::None => TableSink::Raw(file),
             #[cfg(feature = "compression")]
@@ -604,7 +631,14 @@ fn writer_loop(
         let sink = match sinks.entry(Arc::clone(&chunk.table)) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
-                match TableSink::create(&output_dir, &chunk.table, format, &values, &throttle) {
+                match TableSink::create(
+                    &output_dir,
+                    &chunk.table,
+                    format,
+                    &values,
+                    &throttle,
+                    &bytes_acked,
+                ) {
                     Ok(s) => e.insert(s),
                     Err(err) => {
                         error_flag.store(true, Ordering::Relaxed);
@@ -614,14 +648,14 @@ fn writer_loop(
                 }
             }
         };
-        match sink.write_all(&chunk.data) {
-            Ok(()) => {
-                bytes_acked.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
-            }
-            Err(err) => {
-                error_flag.store(true, Ordering::Relaxed);
-                first_err = Some(err);
-            }
+        // `bytes_acked` is NOT counted here: this write may land in the
+        // sink's coalescing buffer (or a compressor's internal state), and
+        // counting buffered bytes as "written" would report RAM speed to the
+        // controller. The [`ProfiledFile`] at the bottom of every sink counts
+        // bytes as its `write(2)` calls to the output file return.
+        if let Err(err) = sink.write_all(&chunk.data) {
+            error_flag.store(true, Ordering::Relaxed);
+            first_err = Some(err);
         }
     }
 

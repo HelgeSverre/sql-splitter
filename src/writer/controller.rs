@@ -310,6 +310,59 @@ mod tests {
         assert_eq!(c.state(), ProfileKind::Fast);
     }
 
+    /// Regression for the 2026-07-16 field bug: `bytes_acked` used to count
+    /// bytes landing in the writer's RAM coalescing buffer, so a slow device
+    /// reported ~600 MB/s "throughput" alongside heavy producer stall. Per
+    /// the design doc, a FAST downgrade requires *both* low throughput and
+    /// high stall — high measured throughput must veto the downgrade no
+    /// matter how stalled the producer is.
+    #[test]
+    fn high_throughput_high_stall_never_downgrades_from_fast() {
+        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let epochs: Vec<_> = std::iter::repeat_n(epoch(612.0, 0.9), 20).collect();
+        assert_eq!(trace(&mut c, &epochs), vec![]);
+        assert_eq!(c.state(), ProfileKind::Fast);
+
+        // Same for SLOW_SEEK → SLOW_OPS: 40 MB/s + heavy stall is above the
+        // 15 MB/s line, so it must hold (and being above 2×15 for 3 epochs it
+        // legitimately upgrades instead — anything but a downgrade).
+        let mut c = Controller::new(ProfileKind::SlowSeek, 4);
+        let epochs: Vec<_> = std::iter::repeat_n(epoch(40.0, 0.9), 20).collect();
+        for (_, kind) in trace(&mut c, &epochs) {
+            assert_ne!(kind, ProfileKind::SlowOps, "downgrade despite 40 MB/s");
+        }
+    }
+
+    /// The value in the transition log line must be the exact value the
+    /// state machine compared against its thresholds: a downgrade decision
+    /// can therefore never carry a throughput above the downgrade line.
+    #[test]
+    fn logged_throughput_is_the_compared_throughput() {
+        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let script = [
+            epoch(500.0, 0.1), // warmup
+            epoch(30.0, 0.8),
+            epoch(28.0, 0.8), // → SLOW_SEEK
+        ];
+        for m in &script {
+            let d = c.on_epoch(m);
+            assert_eq!(
+                d.throughput_mbps,
+                m.throughput_mbps(),
+                "decision must carry the measured value it was computed from"
+            );
+            if d.transition == Some(ProfileKind::SlowSeek) {
+                assert!(
+                    d.throughput_mbps < FAST_DOWN_MBPS,
+                    "FAST downgrade fired at {} MB/s, above the {} MB/s line",
+                    d.throughput_mbps,
+                    FAST_DOWN_MBPS
+                );
+            }
+        }
+        assert_eq!(c.state(), ProfileKind::SlowSeek);
+    }
+
     #[test]
     fn input_bound_low_throughput_zero_stall_never_transitions() {
         // 5 MB/s but the producer never blocks on sends: the input (slow
