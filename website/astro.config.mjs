@@ -46,9 +46,6 @@ export default defineConfig({
         }),
         starlightGitHubAlerts(),
       ],
-      logo: {
-        src: "./src/assets/logo.svg",
-      },
       customCss: ["./src/styles/starlight-custom.css"],
       social: [
         {
