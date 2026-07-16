@@ -17,6 +17,7 @@ pub mod sample;
 pub mod schema;
 pub mod shard;
 pub mod splitter;
+pub mod transform_common;
 pub mod validate;
 pub mod writer;
 #[cfg(feature = "archive")]

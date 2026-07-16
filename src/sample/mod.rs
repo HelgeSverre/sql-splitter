@@ -11,23 +11,20 @@ mod reservoir;
 pub use config::{DefaultClassifier, GlobalTableMode, SampleYamlConfig, TableClassification};
 pub use reservoir::Reservoir;
 
-use crate::parser::mysql_insert::{
-    hash_pk_tuple, parse_insert_rows_with, ParsedRow, PkHashSet, RowExtraction,
+use crate::parser::mysql_insert::{hash_pk_tuple, PkHashSet, RowExtraction};
+use crate::parser::{Parser, SqlDialect};
+use crate::schema::{SchemaGraph, TableId};
+use crate::transform_common::{
+    build_schema_graph, for_each_data_row, quote_ident, split_to_temp_tables, write_dialect_footer,
+    write_dialect_header, write_insert_chunk, RowFlow, RowFormat, RowSpillReader, RowSpillWriter,
+    UnifiedRow,
 };
-use crate::parser::postgres_copy::{
-    parse_copy_columns, parse_postgres_copy_rows_with, ParsedCopyRow,
-};
-use crate::parser::{ContentFilter, Parser, SqlDialect, StatementType};
-use crate::schema::{SchemaBuilder, SchemaGraph, TableId};
-use crate::splitter::Splitter;
 use ahash::AHashMap;
-use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tempfile::TempDir;
 
 /// Sampling mode
 #[derive(Debug, Clone, Copy)]
@@ -146,33 +143,6 @@ struct TableRuntime {
     selected_temp_path: Option<PathBuf>,
 }
 
-/// Combined row representation for both MySQL INSERT and PostgreSQL COPY
-enum UnifiedRow {
-    Insert(ParsedRow),
-    Copy(ParsedCopyRow),
-}
-
-/// Row format indicator for output
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum RowFormat {
-    Insert,
-    Copy,
-}
-
-impl UnifiedRow {
-    fn fk_values(
-        &self,
-    ) -> &[(
-        crate::parser::mysql_insert::FkRef,
-        smallvec::SmallVec<[crate::parser::mysql_insert::PkValue; 2]>,
-    )] {
-        match self {
-            UnifiedRow::Insert(r) => &r.fk_values,
-            UnifiedRow::Copy(r) => &r.fk_values,
-        }
-    }
-}
-
 /// Run the sample command
 pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     // Load YAML config if provided
@@ -185,62 +155,17 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     let mut rng = StdRng::seed_from_u64(config.seed);
     let mut stats = SampleStats::default();
 
-    // Get file size for progress tracking
-    let file_size = std::fs::metadata(&config.input)?.len();
-
-    // Progress bar setup - byte-based for the split phase
-    let progress_bar = if config.progress {
-        let pb = ProgressBar::new(file_size);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb.set_message("Splitting dump...");
-        Some(pb)
-    } else {
-        None
-    };
-
     // Phase 0: Split into temp per-table files
-    let temp_dir = TempDir::new()?;
-    let tables_dir = temp_dir.path().join("tables");
-
-    let mut splitter = Splitter::new(config.input.clone(), tables_dir.clone())
-        .with_dialect(config.dialect)
-        .with_content_filter(ContentFilter::All);
-
-    if let Some(ref pb) = progress_bar {
-        let pb_clone = pb.clone();
-        splitter = splitter.with_progress(move |bytes| {
-            pb_clone.set_position(bytes);
-        });
-    }
-
-    let split_stats = splitter.split()?;
-
-    // Finish byte-based progress, switch to milestone messages
-    if let Some(ref pb) = progress_bar {
-        pb.finish_and_clear();
-    }
-
-    if config.progress {
-        eprintln!(
-            "Split complete: {} tables, {} statements",
-            split_stats.tables_found, split_stats.statements_processed
-        );
-    }
+    let split_phase = split_to_temp_tables(&config.input, config.dialect, config.progress)?;
+    let temp_dir = split_phase.temp_dir;
+    let tables_dir = split_phase.tables_dir;
 
     // Phase 1: Build schema graph
     if config.progress {
         eprintln!("Building schema graph...");
     }
 
-    let graph = build_schema_graph(&tables_dir, &config)?;
+    let graph = build_schema_graph(&tables_dir, config.dialect)?;
 
     let (topo_order, cyclic_tables) = graph.processing_order();
 
@@ -441,39 +366,6 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     Ok(stats)
 }
 
-/// Build schema graph from split table files
-fn build_schema_graph(tables_dir: &Path, config: &SampleConfig) -> anyhow::Result<SchemaGraph> {
-    let mut builder = SchemaBuilder::new();
-
-    for entry in fs::read_dir(tables_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().map(|e| e == "sql").unwrap_or(false) {
-            let file = File::open(&path)?;
-            let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
-
-            while let Some(stmt) = parser.read_statement()? {
-                let stmt_str = String::from_utf8_lossy(&stmt);
-                let (stmt_type, _) =
-                    Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
-
-                match stmt_type {
-                    StatementType::CreateTable => {
-                        builder.parse_create_table(&stmt_str);
-                    }
-                    StatementType::AlterTable => {
-                        builder.parse_alter_table(&stmt_str);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok(SchemaGraph::from_schema(builder.build()))
-}
-
 /// Determine table classification
 fn determine_classification(
     name: &str,
@@ -573,6 +465,38 @@ struct StreamingSampleResult {
     pk_hashes: Vec<u64>,
 }
 
+/// Apply the preserve-relations FK check to a row.
+///
+/// Returns `Ok(true)` if the row passes (or checking is disabled), `Ok(false)`
+/// if the row is an orphan that should be skipped, and an error when strict FK
+/// mode is enabled and an orphan is found.
+fn passes_fk_or_bail(
+    row: &UnifiedRow,
+    table_schema: &crate::schema::TableSchema,
+    table_id: TableId,
+    table_name: &str,
+    config: &SampleConfig,
+    runtimes: &AHashMap<TableId, TableRuntime>,
+    cyclic_set: &ahash::AHashSet<TableId>,
+) -> anyhow::Result<bool> {
+    if !config.preserve_relations {
+        return Ok(true);
+    }
+
+    let (passes, orphan) =
+        check_unified_fk_membership(row, table_schema, runtimes, cyclic_set, &table_id);
+    if !passes {
+        if orphan && config.strict_fk {
+            anyhow::bail!(
+                "FK integrity violation in table '{}': row references missing parent",
+                table_name
+            );
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// Stream-sample a table: parse rows, apply FK checks, sample inline, write to temp file.
 /// Returns StreamingSampleResult with stats and PK hashes.
 /// Uses Bernoulli sampling for --percent mode (single pass).
@@ -596,233 +520,94 @@ fn sample_table_streaming(
 
     // Temp file for selected rows
     let temp_path = selected_dir.join(format!("{}.rows", table_name));
-    let mut temp_writer: Option<BufWriter<File>> = None;
 
     // Track PKs of selected rows (for children's FK checks)
     let mut selected_pk_hashes: Vec<u64> = Vec::new();
-
-    // For PostgreSQL COPY, track the current column order
-    let mut copy_columns: Vec<String> = Vec::new();
 
     match sample_mode {
         SampleMode::Percent(p) => {
             // Bernoulli sampling: decide immediately for each row
             let prob = p as f64 / 100.0;
+            let mut spill: Option<RowSpillWriter> = None;
 
-            let file = File::open(table_file)?;
-            let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
+            for_each_data_row(
+                table_file,
+                table_schema,
+                config.dialect,
+                RowExtraction::PkFk,
+                |row| {
+                    rows_seen += 1;
 
-            while let Some(stmt) = parser.read_statement()? {
-                let (stmt_type, _) =
-                    Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
+                    // FK check
+                    if !passes_fk_or_bail(
+                        &row,
+                        table_schema,
+                        table_id,
+                        table_name,
+                        config,
+                        runtimes,
+                        cyclic_set,
+                    )? {
+                        fk_orphans += 1;
+                        return Ok(RowFlow::Continue);
+                    }
 
-                match stmt_type {
-                    StatementType::Insert => {
-                        let rows = parse_insert_rows_with(
-                            &stmt,
-                            table_schema,
-                            config.dialect,
-                            RowExtraction::PkFk,
-                        )?;
-                        for row in rows {
-                            rows_seen += 1;
-
-                            // FK check
-                            if config.preserve_relations {
-                                let unified = UnifiedRow::Insert(row.clone());
-                                let (passes, orphan) = check_unified_fk_membership(
-                                    &unified,
-                                    table_schema,
-                                    runtimes,
-                                    cyclic_set,
-                                    &table_id,
-                                );
-                                if !passes {
-                                    fk_orphans += 1;
-                                    if orphan && config.strict_fk {
-                                        anyhow::bail!(
-                                            "FK integrity violation in table '{}': row references missing parent",
-                                            table_name
-                                        );
-                                    }
-                                    continue;
-                                }
-                            }
-
-                            // Bernoulli sample
-                            if rng.random::<f64>() < prob {
-                                // Write to temp file
-                                if temp_writer.is_none() {
-                                    temp_writer = Some(BufWriter::new(File::create(&temp_path)?));
-                                }
-                                let writer = temp_writer.as_mut().unwrap();
-                                // Format: 1-byte type (0=insert, 1=copy), then row bytes, then newline
-                                writer.write_all(&[0u8])?;
-                                writer.write_all(&row.raw)?;
-                                writer.write_all(b"\n")?;
-
-                                // Track PK hash
-                                if let Some(pk) = &row.pk {
-                                    selected_pk_hashes.push(hash_pk_tuple(pk));
-                                }
-                                rows_selected += 1;
-                            }
+                    // Bernoulli sample
+                    if rng.random::<f64>() < prob {
+                        if spill.is_none() {
+                            spill = Some(RowSpillWriter::create(&temp_path)?);
                         }
-                    }
-                    StatementType::Copy => {
-                        let header = String::from_utf8_lossy(&stmt);
-                        copy_columns = parse_copy_columns(&header);
-                    }
-                    StatementType::Unknown if config.dialect == SqlDialect::Postgres => {
-                        if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
-                            let rows = parse_postgres_copy_rows_with(
-                                &stmt,
-                                table_schema,
-                                copy_columns.clone(),
-                                RowExtraction::PkFk,
-                            )?;
-                            for row in rows {
-                                rows_seen += 1;
+                        spill.as_mut().unwrap().write_row(row.format(), row.raw())?;
 
-                                if config.preserve_relations {
-                                    let unified = UnifiedRow::Copy(row.clone());
-                                    let (passes, orphan) = check_unified_fk_membership(
-                                        &unified,
-                                        table_schema,
-                                        runtimes,
-                                        cyclic_set,
-                                        &table_id,
-                                    );
-                                    if !passes {
-                                        fk_orphans += 1;
-                                        if orphan && config.strict_fk {
-                                            anyhow::bail!(
-                                                "FK integrity violation in table '{}': row references missing parent",
-                                                table_name
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                }
-
-                                if rng.random::<f64>() < prob {
-                                    if temp_writer.is_none() {
-                                        temp_writer =
-                                            Some(BufWriter::new(File::create(&temp_path)?));
-                                    }
-                                    let writer = temp_writer.as_mut().unwrap();
-                                    writer.write_all(&[1u8])?;
-                                    writer.write_all(&row.raw)?;
-                                    writer.write_all(b"\n")?;
-
-                                    if let Some(pk) = &row.pk {
-                                        selected_pk_hashes.push(hash_pk_tuple(pk));
-                                    }
-                                    rows_selected += 1;
-                                }
-                            }
+                        // Track PK hash
+                        if let Some(pk) = row.pk() {
+                            selected_pk_hashes.push(hash_pk_tuple(pk));
                         }
+                        rows_selected += 1;
                     }
-                    _ => {}
-                }
+
+                    Ok(RowFlow::Continue)
+                },
+            )?;
+
+            if let Some(spill) = spill {
+                spill.finish()?;
             }
         }
         SampleMode::Rows(n) => {
             // Reservoir sampling: collect eligible row indices in first pass,
             // then write selected rows in second pass
-            let mut reservoir: Reservoir<(u64, RowFormat, Option<u64>)> =
+            let mut reservoir: Reservoir<(u64, Option<u64>)> =
                 Reservoir::new(n, StdRng::from_rng(&mut *rng));
 
-            // First pass: build reservoir of (row_index, format, pk_hash)
-            let file = File::open(table_file)?;
-            let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
+            // First pass: build reservoir of (row_index, pk_hash)
+            for_each_data_row(
+                table_file,
+                table_schema,
+                config.dialect,
+                RowExtraction::PkFk,
+                |row| {
+                    let current_idx = rows_seen;
+                    rows_seen += 1;
 
-            while let Some(stmt) = parser.read_statement()? {
-                let (stmt_type, _) =
-                    Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
-
-                match stmt_type {
-                    StatementType::Insert => {
-                        let rows = parse_insert_rows_with(
-                            &stmt,
-                            table_schema,
-                            config.dialect,
-                            RowExtraction::PkFk,
-                        )?;
-                        for row in rows {
-                            let current_idx = rows_seen;
-                            rows_seen += 1;
-
-                            if config.preserve_relations {
-                                let unified = UnifiedRow::Insert(row.clone());
-                                let (passes, orphan) = check_unified_fk_membership(
-                                    &unified,
-                                    table_schema,
-                                    runtimes,
-                                    cyclic_set,
-                                    &table_id,
-                                );
-                                if !passes {
-                                    fk_orphans += 1;
-                                    if orphan && config.strict_fk {
-                                        anyhow::bail!(
-                                            "FK integrity violation in table '{}': row references missing parent",
-                                            table_name
-                                        );
-                                    }
-                                    continue;
-                                }
-                            }
-
-                            let pk_hash = row.pk.as_ref().map(hash_pk_tuple);
-                            reservoir.consider((current_idx, RowFormat::Insert, pk_hash));
-                        }
+                    if !passes_fk_or_bail(
+                        &row,
+                        table_schema,
+                        table_id,
+                        table_name,
+                        config,
+                        runtimes,
+                        cyclic_set,
+                    )? {
+                        fk_orphans += 1;
+                        return Ok(RowFlow::Continue);
                     }
-                    StatementType::Copy => {
-                        let header = String::from_utf8_lossy(&stmt);
-                        copy_columns = parse_copy_columns(&header);
-                    }
-                    StatementType::Unknown if config.dialect == SqlDialect::Postgres => {
-                        if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
-                            let rows = parse_postgres_copy_rows_with(
-                                &stmt,
-                                table_schema,
-                                copy_columns.clone(),
-                                RowExtraction::PkFk,
-                            )?;
-                            for row in rows {
-                                let current_idx = rows_seen;
-                                rows_seen += 1;
 
-                                if config.preserve_relations {
-                                    let unified = UnifiedRow::Copy(row.clone());
-                                    let (passes, orphan) = check_unified_fk_membership(
-                                        &unified,
-                                        table_schema,
-                                        runtimes,
-                                        cyclic_set,
-                                        &table_id,
-                                    );
-                                    if !passes {
-                                        fk_orphans += 1;
-                                        if orphan && config.strict_fk {
-                                            anyhow::bail!(
-                                                "FK integrity violation in table '{}': row references missing parent",
-                                                table_name
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                }
-
-                                let pk_hash = row.pk.as_ref().map(hash_pk_tuple);
-                                reservoir.consider((current_idx, RowFormat::Copy, pk_hash));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+                    let pk_hash = row.pk().map(hash_pk_tuple);
+                    reservoir.consider((current_idx, pk_hash));
+                    Ok(RowFlow::Continue)
+                },
+            )?;
 
             // Extract selected indices and PKs from reservoir
             let selected_items = reservoir.into_items();
@@ -836,89 +621,41 @@ fn sample_table_streaming(
             }
 
             // Collect PK hashes and sort indices for second pass
-            let mut selected_indices: Vec<(u64, RowFormat)> =
-                Vec::with_capacity(selected_items.len());
-            for (idx, format, pk_hash) in selected_items {
+            let mut selected_indices: Vec<u64> = Vec::with_capacity(selected_items.len());
+            for (idx, pk_hash) in selected_items {
                 if let Some(h) = pk_hash {
                     selected_pk_hashes.push(h);
                 }
-                selected_indices.push((idx, format));
+                selected_indices.push(idx);
             }
-            selected_indices.sort_by_key(|(idx, _)| *idx);
+            selected_indices.sort_unstable();
 
             // Second pass: write selected rows to temp file
-            let file = File::open(table_file)?;
-            let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
+            let mut spill = RowSpillWriter::create(&temp_path)?;
             let mut current_row_idx = 0u64;
             let mut select_iter = selected_indices.iter().peekable();
 
-            temp_writer = Some(BufWriter::new(File::create(&temp_path)?));
-            let writer = temp_writer.as_mut().unwrap();
-
-            while let Some(stmt) = parser.read_statement()? {
-                if select_iter.peek().is_none() {
-                    break; // All selected rows written
-                }
-
-                let (stmt_type, _) =
-                    Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
-
-                match stmt_type {
-                    StatementType::Insert => {
-                        let rows = parse_insert_rows_with(
-                            &stmt,
-                            table_schema,
-                            config.dialect,
-                            RowExtraction::PkFk,
-                        )?;
-                        for row in rows {
-                            if let Some((next_idx, _)) = select_iter.peek() {
-                                if current_row_idx == *next_idx {
-                                    writer.write_all(&[0u8])?;
-                                    writer.write_all(&row.raw)?;
-                                    writer.write_all(b"\n")?;
-                                    rows_selected += 1;
-                                    select_iter.next();
-                                }
-                            }
-                            current_row_idx += 1;
-                        }
+            for_each_data_row(
+                table_file,
+                table_schema,
+                config.dialect,
+                RowExtraction::PkFk,
+                |row| {
+                    let Some(&&next_idx) = select_iter.peek() else {
+                        return Ok(RowFlow::Stop); // All selected rows written
+                    };
+                    if current_row_idx == next_idx {
+                        spill.write_row(row.format(), row.raw())?;
+                        rows_selected += 1;
+                        select_iter.next();
                     }
-                    StatementType::Copy => {
-                        let header = String::from_utf8_lossy(&stmt);
-                        copy_columns = parse_copy_columns(&header);
-                    }
-                    StatementType::Unknown if config.dialect == SqlDialect::Postgres => {
-                        if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
-                            let rows = parse_postgres_copy_rows_with(
-                                &stmt,
-                                table_schema,
-                                copy_columns.clone(),
-                                RowExtraction::PkFk,
-                            )?;
-                            for row in rows {
-                                if let Some((next_idx, _)) = select_iter.peek() {
-                                    if current_row_idx == *next_idx {
-                                        writer.write_all(&[1u8])?;
-                                        writer.write_all(&row.raw)?;
-                                        writer.write_all(b"\n")?;
-                                        rows_selected += 1;
-                                        select_iter.next();
-                                    }
-                                }
-                                current_row_idx += 1;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+                    current_row_idx += 1;
+                    Ok(RowFlow::Continue)
+                },
+            )?;
+
+            spill.finish()?;
         }
-    }
-
-    // Flush temp file
-    if let Some(mut writer) = temp_writer {
-        writer.flush()?;
     }
 
     Ok(StreamingSampleResult {
@@ -1032,40 +769,16 @@ fn write_output(
         writeln!(writer, "\n-- Data: {} ({} rows)", table_name, row_count)?;
 
         // Get the table name quoting based on dialect
-        let quoted_name = match config.dialect {
-            SqlDialect::MySql => format!("`{}`", table_name),
-            SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", table_name),
-            SqlDialect::Mssql => format!("[{}]", table_name),
-        };
+        let quoted_name = quote_ident(config.dialect, table_name);
 
         // Read rows from temp file and write INSERTs in chunks
         let temp_path = runtime.selected_temp_path.as_ref().unwrap();
-        let temp_file = File::open(temp_path)?;
-        let reader = std::io::BufReader::new(temp_file);
-        use std::io::BufRead;
+        let mut spill_reader = RowSpillReader::open(temp_path)?;
 
         const CHUNK_SIZE: usize = 1000;
         let mut chunk_buffer: Vec<(RowFormat, Vec<u8>)> = Vec::with_capacity(CHUNK_SIZE);
 
-        for line in reader.lines() {
-            let line = line?;
-            if line.is_empty() {
-                continue;
-            }
-
-            let bytes = line.as_bytes();
-            if bytes.is_empty() {
-                continue;
-            }
-
-            // First byte is format indicator (0=insert, 1=copy)
-            let format = if bytes[0] == 0 {
-                RowFormat::Insert
-            } else {
-                RowFormat::Copy
-            };
-            let row_bytes = bytes[1..].to_vec();
-
+        while let Some((format, row_bytes)) = spill_reader.next_row()? {
             chunk_buffer.push((format, row_bytes));
 
             if chunk_buffer.len() >= CHUNK_SIZE {
@@ -1143,183 +856,4 @@ fn write_header<W: Write>(
     writeln!(writer)?;
 
     Ok(())
-}
-
-/// Write dialect-specific header
-fn write_dialect_header<W: Write>(writer: &mut W, dialect: SqlDialect) -> std::io::Result<()> {
-    match dialect {
-        SqlDialect::MySql => {
-            writeln!(writer, "SET NAMES utf8mb4;")?;
-            writeln!(writer, "SET FOREIGN_KEY_CHECKS = 0;")?;
-        }
-        SqlDialect::Postgres => {
-            writeln!(writer, "SET client_encoding = 'UTF8';")?;
-            writeln!(writer, "SET session_replication_role = replica;")?;
-        }
-        SqlDialect::Sqlite => {
-            writeln!(writer, "PRAGMA foreign_keys = OFF;")?;
-        }
-        SqlDialect::Mssql => {
-            writeln!(writer, "SET ANSI_NULLS ON;")?;
-            writeln!(writer, "SET QUOTED_IDENTIFIER ON;")?;
-            writeln!(writer, "SET NOCOUNT ON;")?;
-        }
-    }
-    writeln!(writer)?;
-    Ok(())
-}
-
-/// Write dialect-specific footer
-fn write_dialect_footer<W: Write>(writer: &mut W, dialect: SqlDialect) -> std::io::Result<()> {
-    writeln!(writer)?;
-    match dialect {
-        SqlDialect::MySql => {
-            writeln!(writer, "SET FOREIGN_KEY_CHECKS = 1;")?;
-        }
-        SqlDialect::Postgres => {
-            writeln!(writer, "SET session_replication_role = DEFAULT;")?;
-        }
-        SqlDialect::Sqlite => {
-            writeln!(writer, "PRAGMA foreign_keys = ON;")?;
-        }
-        SqlDialect::Mssql => {
-            // No footer needed
-        }
-    }
-    Ok(())
-}
-
-/// Write a chunk of rows as an INSERT statement
-fn write_insert_chunk<W: Write>(
-    writer: &mut W,
-    quoted_name: &str,
-    chunk: &[(RowFormat, Vec<u8>)],
-    dialect: SqlDialect,
-) -> std::io::Result<()> {
-    writeln!(writer, "INSERT INTO {} VALUES", quoted_name)?;
-
-    for (i, (format, row_bytes)) in chunk.iter().enumerate() {
-        if i > 0 {
-            writer.write_all(b",\n")?;
-        }
-
-        let values = match format {
-            RowFormat::Insert => match dialect {
-                SqlDialect::Postgres => convert_row_to_postgres(row_bytes),
-                _ => row_bytes.clone(),
-            },
-            RowFormat::Copy => convert_copy_to_insert_values(row_bytes, dialect),
-        };
-        writer.write_all(&values)?;
-    }
-
-    writer.write_all(b";\n")?;
-    Ok(())
-}
-
-/// Convert a MySQL-style row to PostgreSQL syntax
-fn convert_row_to_postgres(row: &[u8]) -> Vec<u8> {
-    // Simple conversion: just replace escaped quotes
-    // A full implementation would handle more edge cases
-    let mut result = Vec::with_capacity(row.len());
-    let mut i = 0;
-
-    while i < row.len() {
-        if row[i] == b'\\' && i + 1 < row.len() && row[i + 1] == b'\'' {
-            // MySQL: \' -> PostgreSQL: ''
-            result.push(b'\'');
-            result.push(b'\'');
-            i += 2;
-        } else {
-            result.push(row[i]);
-            i += 1;
-        }
-    }
-
-    result
-}
-
-/// Convert PostgreSQL COPY format (tab-separated) to INSERT VALUES format
-fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8> {
-    let mut result = Vec::with_capacity(row.len() + 20);
-    result.push(b'(');
-
-    let fields: Vec<&[u8]> = row.split(|&b| b == b'\t').collect();
-
-    for (i, field) in fields.iter().enumerate() {
-        if i > 0 {
-            result.extend_from_slice(b", ");
-        }
-
-        // Check for NULL marker
-        if *field == b"\\N" {
-            result.extend_from_slice(b"NULL");
-        } else if field.is_empty() {
-            // Empty string
-            match dialect {
-                SqlDialect::MySql => result.extend_from_slice(b"''"),
-                SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {
-                    result.extend_from_slice(b"''")
-                }
-            }
-        } else if is_numeric(field) {
-            // Numeric value - no quotes needed
-            result.extend_from_slice(field);
-        } else {
-            // String value - needs quoting
-            result.push(b'\'');
-            for &b in *field {
-                match b {
-                    b'\'' => {
-                        // Escape single quote
-                        match dialect {
-                            SqlDialect::MySql => result.extend_from_slice(b"\\'"),
-                            SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {
-                                result.extend_from_slice(b"''")
-                            }
-                        }
-                    }
-                    b'\\' if dialect == SqlDialect::MySql => {
-                        // Escape backslash in MySQL
-                        result.extend_from_slice(b"\\\\");
-                    }
-                    _ => result.push(b),
-                }
-            }
-            result.push(b'\'');
-        }
-    }
-
-    result.push(b')');
-    result
-}
-
-/// Check if a byte slice represents a numeric value
-fn is_numeric(s: &[u8]) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-
-    let mut has_digit = false;
-    let mut has_dot = false;
-    let mut start = 0;
-
-    // Handle leading sign
-    if s[0] == b'-' || s[0] == b'+' {
-        start = 1;
-    }
-
-    for &b in &s[start..] {
-        match b {
-            b'0'..=b'9' => has_digit = true,
-            b'.' if !has_dot => has_dot = true,
-            b'e' | b'E' => {
-                // Scientific notation - just check rest is digits
-                continue;
-            }
-            _ => return false,
-        }
-    }
-
-    has_digit
 }

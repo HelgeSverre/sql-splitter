@@ -20,6 +20,7 @@ mod sample;
 mod schema;
 mod shard;
 mod splitter;
+mod transform_common;
 mod validate;
 mod writer;
 #[cfg(feature = "archive")]
