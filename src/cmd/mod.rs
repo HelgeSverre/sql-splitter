@@ -314,71 +314,7 @@ pub enum Commands {
   sql-splitter diff old.sql new.sql --format sql -o migration.sql
   sql-splitter diff old.sql new.sql --verbose --ignore-columns \"*.updated_at\"
   sql-splitter diff old.sql new.sql --primary-key logs:timestamp+message")]
-    Diff {
-        /// Original SQL dump file
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        old_file: PathBuf,
-
-        /// Updated SQL dump file
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        new_file: PathBuf,
-
-        /// Output file (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Only compare these tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        tables: Option<String>,
-
-        /// Exclude these tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        exclude: Option<String>,
-
-        /// Ignore columns matching glob patterns (e.g., *.updated_at)
-        #[arg(long, help_heading = FILTERING)]
-        ignore_columns: Option<String>,
-
-        /// Compare schema only, skip data
-        #[arg(long, conflicts_with = "data_only", help_heading = MODE)]
-        schema_only: bool,
-
-        /// Compare data only, skip schema
-        #[arg(long, conflicts_with = "schema_only", help_heading = MODE)]
-        data_only: bool,
-
-        /// Override primary key (format: table:col1+col2,table2:col)
-        #[arg(long, help_heading = MODE)]
-        primary_key: Option<String>,
-
-        /// Compare tables without PK using all columns as key
-        #[arg(long, help_heading = BEHAVIOR)]
-        allow_no_pk: bool,
-
-        /// Ignore column order differences in schema
-        #[arg(long, help_heading = BEHAVIOR)]
-        ignore_order: bool,
-
-        /// Max PK entries per table (limits memory)
-        #[arg(long, default_value = "10000000", help_heading = LIMITS)]
-        max_pk_entries: usize,
-
-        /// Output format: text, json, sql
-        #[arg(short, long, default_value = "text", help_heading = OUTPUT_FORMAT)]
-        format: Option<String>,
-
-        /// Show sample PK values for changes
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        verbose: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-    },
+    Diff(diff::DiffArgs),
 
     /// Redact sensitive data (PII) from SQL dumps
     #[command(visible_alias = "rd")]
@@ -660,41 +596,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 fail_fast,
             )
         }
-        Commands::Diff {
-            old_file,
-            new_file,
-            output,
-            tables,
-            exclude,
-            schema_only,
-            data_only,
-            format,
-            dialect,
-            verbose,
-            progress,
-            max_pk_entries,
-            allow_no_pk,
-            ignore_order,
-            primary_key,
-            ignore_columns,
-        } => diff::run(
-            old_file,
-            new_file,
-            output,
-            tables,
-            exclude,
-            schema_only,
-            data_only,
-            format,
-            dialect,
-            verbose,
-            progress,
-            max_pk_entries,
-            allow_no_pk,
-            ignore_order,
-            primary_key,
-            ignore_columns,
-        ),
+        Commands::Diff(args) => diff::run(args),
         Commands::Redact(args) => redact::run(args),
         Commands::Graph {
             file,
