@@ -1,5 +1,7 @@
+use super::common::{BEHAVIOR, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::analyzer::Analyzer;
 use crate::splitter::Compression;
+use clap::{Args, ValueHint};
 use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -68,13 +70,37 @@ pub(crate) struct AnalyzeFileResult {
     error: Option<String>,
 }
 
-pub fn run(
+#[derive(Args)]
+pub struct AnalyzeArgs {
+    /// Input SQL file or glob pattern
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     file: PathBuf,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
     dialect: Option<String>,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
     progress: bool,
-    fail_fast: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
     json: bool,
-) -> anyhow::Result<()> {
+
+    /// Stop on first error (for glob patterns)
+    #[arg(long, help_heading = BEHAVIOR)]
+    fail_fast: bool,
+}
+
+pub fn run(args: AnalyzeArgs) -> anyhow::Result<()> {
+    let AnalyzeArgs {
+        file,
+        dialect,
+        progress,
+        json,
+        fail_fast,
+    } = args;
     let expanded = expand_file_pattern(&file)?;
 
     if expanded.files.len() == 1 {

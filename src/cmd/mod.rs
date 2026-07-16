@@ -76,27 +76,7 @@ pub enum Commands {
   sql-splitter analyze dump.sql
   sql-splitter analyze dump.sql.gz --progress
   sql-splitter analyze \"dumps/*.sql\" --json")]
-    Analyze {
-        /// Input SQL file or glob pattern
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Stop on first error (for glob patterns)
-        #[arg(long, help_heading = BEHAVIOR)]
-        fail_fast: bool,
-    },
+    Analyze(analyze::AnalyzeArgs),
 
     /// Merge split SQL files back into a single dump
     #[command(visible_alias = "mg")]
@@ -376,13 +356,7 @@ use common::dash_is_stdout;
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Split(args) => split::run(args),
-        Commands::Analyze {
-            file,
-            dialect,
-            progress,
-            fail_fast,
-            json,
-        } => analyze::run(file, dialect, progress, fail_fast, json),
+        Commands::Analyze(args) => analyze::run(args),
         Commands::Merge {
             input_dir,
             output,
