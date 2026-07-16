@@ -1,8 +1,13 @@
+mod epoch;
+
+pub use epoch::advance_epoch_boundary;
+use epoch::EpochDriver;
+
 use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
 use crate::writer::{
-    env_writer_count, probe_output_dir, Clock, Controller, EpochMeasurement, IoStrategy,
-    ParallelWriters, ProfileKind, ProfileValues, RealClock, WriterProfile,
+    env_writer_count, probe_output_dir, Clock, Controller, IoStrategy, ParallelWriters,
+    ProfileKind, ProfileValues, RealClock, WriterProfile,
 };
 use ahash::AHashSet;
 use anyhow::Context;
@@ -250,20 +255,6 @@ pub fn estimate_uncompressed_size(file_size: u64, compression: Compression) -> u
     }
 }
 
-/// Advance the adaptive-I/O epoch boundary past `processed`, skipping every
-/// boundary a single oversized statement crossed in one step. Exactly one
-/// measurement fires per crossing, and the returned boundary is always
-/// strictly ahead of `processed` — so the next statement can never trigger a
-/// degenerate back-to-back (zero-ish duration) epoch.
-#[doc(hidden)]
-pub fn advance_epoch_boundary(mut next_epoch: u64, epoch_bytes: u64, processed: u64) -> u64 {
-    let epoch_bytes = epoch_bytes.max(1);
-    while next_epoch <= processed {
-        next_epoch += epoch_bytes;
-    }
-    next_epoch
-}
-
 pub struct Splitter {
     input_file: PathBuf,
     output_dir: PathBuf,
@@ -383,7 +374,7 @@ impl Splitter {
             Some(kind) => kind,
             // The fsync probe picks auto's *opening* state only; the feedback
             // controller owns the truth once the pipeline runs.
-            None if adaptive => probe_output_dir(&self.output_dir).0,
+            None if adaptive => probe_output_dir(&self.output_dir),
             None => ProfileKind::Ssd,
         };
         let profile =
@@ -433,26 +424,30 @@ impl Splitter {
             )
         };
 
-        // Hidden debugging aid: dump per-epoch measurements to stderr (the
-        // phase-0 "io stats" seam from the design doc).
-        let io_debug = std::env::var("SQL_SPLITTER_IO_DEBUG").is_ok();
-        let mut controller = adaptive.then(|| {
+        // The adaptive feedback loop, evaluated at every epoch boundary
+        // (measurement + controller decision + writer retuning) — see
+        // `epoch::EpochDriver`.
+        let mut epoch_driver = adaptive.then(|| {
             let ctrl = Controller::new(opening_kind, fast_writers);
-            if compressing {
+            let ctrl = if compressing {
                 ctrl.for_compressed_output()
             } else {
                 ctrl
-            }
+            };
+            let clock: Arc<dyn Clock> = self
+                .config
+                .io_clock
+                .take()
+                .unwrap_or_else(|| Arc::new(RealClock::new()));
+            EpochDriver::new(
+                ctrl,
+                clock,
+                Arc::clone(&values),
+                epoch_bytes,
+                cores,
+                compressing,
+            )
         });
-        let clock: Arc<dyn Clock> = self
-            .config
-            .io_clock
-            .take()
-            .unwrap_or_else(|| Arc::new(RealClock::new()));
-        let mut epoch_start_time = clock.now();
-        let mut epoch_acked = 0u64;
-        let mut epoch_stall = std::time::Duration::ZERO;
-        let mut next_epoch = epoch_bytes;
 
         let mut tables_seen: AHashSet<String> = AHashSet::new();
         let mut stats = Stats {
@@ -554,60 +549,13 @@ impl Splitter {
             stats.statements_processed += 1;
             stats.bytes_processed += stmt.len() as u64;
 
-            // Adaptive-I/O epoch boundary: byte-based (see module docs), so
-            // the controller's decisions are a pure function of measured
-            // data, not wall-clock scheduling.
-            if let Some(ctrl) = controller.as_mut() {
-                if stats.bytes_processed >= next_epoch {
-                    // Catch up past every boundary this statement crossed: a
-                    // single statement larger than `epoch_bytes` would
-                    // otherwise leave `next_epoch` behind `bytes_processed`,
-                    // firing a degenerate (microsecond) epoch on the very
-                    // next statement.
-                    next_epoch =
-                        advance_epoch_boundary(next_epoch, epoch_bytes, stats.bytes_processed);
-                    // `writers` is always `Some` when `controller` is `Some`
-                    // (adaptive requires `!dry_run`, see above).
-                    if let Some(w) = writers.as_mut() {
-                        let snapshot = w.stats();
-                        let measurement = EpochMeasurement {
-                            bytes: snapshot.bytes_acked.saturating_sub(epoch_acked),
-                            duration: clock.now().saturating_sub(epoch_start_time),
-                            send_stall: snapshot.send_stall.saturating_sub(epoch_stall),
-                        };
-                        epoch_acked = snapshot.bytes_acked;
-                        epoch_stall = snapshot.send_stall;
-                        epoch_start_time = clock.now();
-
-                        if io_debug {
-                            eprintln!(
-                                "epoch: bytes={} dur={:?} stall={:?} tp={:.1} stall_frac={:.2}",
-                                measurement.bytes,
-                                measurement.duration,
-                                measurement.send_stall,
-                                measurement.throughput_mbps(),
-                                measurement.stall_fraction()
-                            );
-                        }
-                        let decision = ctrl.on_epoch(&measurement);
-                        if let Some(kind) = decision.transition {
-                            let new_profile = WriterProfile::for_kind(kind, cores, compressing)
-                                .with_env_overrides();
-                            values.apply(&new_profile);
-                            let line = format!(
-                                "output device sustaining ~{:.0} MB/s — switching to {} write profile",
-                                decision.throughput_mbps,
-                                kind.label()
-                            );
-                            eprintln!("{line}");
-                            stats.io_transitions.push(line);
-                        }
-                        if decision.target_writers > w.writer_count() {
-                            w.grow_to(decision.target_writers);
-                        }
-                        stats.writers_used = w.writer_count();
-                    }
-                }
+            // Adaptive-I/O epoch boundary: byte-based (see epoch module
+            // docs), so the controller's decisions are a pure function of
+            // measured data, not wall-clock scheduling. `writers` is always
+            // `Some` when the driver is `Some` (adaptive requires
+            // `!dry_run`, see above).
+            if let (Some(driver), Some(w)) = (epoch_driver.as_mut(), writers.as_mut()) {
+                driver.on_bytes(w, &mut stats);
             }
         }
 

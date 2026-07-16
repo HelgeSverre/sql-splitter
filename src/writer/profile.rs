@@ -222,26 +222,25 @@ const PROBE_BYTES: usize = 8 * MIB;
 ///
 /// Errors are swallowed into a `Fast` verdict: a probe failure (exotic
 /// filesystem, permissions race) must never fail the actual split.
-pub fn probe_output_dir(dir: &Path) -> (ProfileKind, f64) {
+pub fn probe_output_dir(dir: &Path) -> ProfileKind {
     if let Ok(forced) = std::env::var("SQL_SPLITTER_IO_PROBE") {
         if let Ok(profile) = IoStrategy::parse(&forced) {
             if let Some(kind) = profile.pinned() {
-                return (kind, f64::NAN);
+                return kind;
             }
         }
     }
     match run_probe(dir) {
         Ok(mbps) => {
-            let kind = if mbps > 80.0 {
+            if mbps > 80.0 {
                 ProfileKind::Ssd
             } else if mbps >= 10.0 {
                 ProfileKind::SlowSeek
             } else {
                 ProfileKind::SlowOps
-            };
-            (kind, mbps)
+            }
         }
-        Err(_) => (ProfileKind::Ssd, f64::NAN),
+        Err(_) => ProfileKind::Ssd,
     }
 }
 
