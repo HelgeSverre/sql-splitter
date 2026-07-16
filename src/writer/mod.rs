@@ -5,10 +5,11 @@ use std::collections::hash_map::Entry;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Size of the BufWriter buffer per table file. Sits at the top of the
 /// sequential-write plateau (64KB–256KB); overridable via
@@ -140,6 +141,22 @@ struct Chunk {
     data: Vec<u8>,
 }
 
+/// Point-in-time snapshot of the writer pipeline's instrumentation counters.
+///
+/// These are the two signals the adaptive I/O controller samples per epoch
+/// (see `docs/features/ADAPTIVE_IO_PROFILES.md`): how fast the writer threads
+/// actually drain (`bytes_acked`) and how long the producer sat blocked
+/// shipping chunks (`send_stall`). Near-zero stall combined with low
+/// throughput means the *input* side is the bottleneck, so the write profile
+/// must not react to it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriterStats {
+    /// Bytes fully handed to the output sinks by writer threads.
+    pub bytes_acked: u64,
+    /// Cumulative time the producer spent blocked on a full writer channel.
+    pub send_stall: Duration,
+}
+
 /// A per-table output stream: a plain file, or a streaming compressor over one.
 /// Compressing per file keeps every output independent, so the writer pool
 /// still runs fully in parallel — and the compression work parallelizes with it.
@@ -236,6 +253,13 @@ pub struct ParallelWriters {
     stage: AHashMap<Arc<str>, Vec<u8>>,
     /// Total bytes currently staged across all tables (see [`STAGE_TOTAL_CAP`]).
     staged_bytes: usize,
+    /// Bytes written to sinks by the writer threads (shared, monotonically
+    /// increasing). One atomic add per ~256KB chunk, so contention is nil.
+    bytes_acked: Arc<AtomicU64>,
+    /// Nanoseconds the producer spent blocked on full writer channels.
+    /// Producer-only, so a plain counter; timing happens only on the slow
+    /// path (channel already full), keeping the hot path free of clock reads.
+    stall_nanos: u64,
 }
 
 impl ParallelWriters {
@@ -251,6 +275,7 @@ impl ParallelWriters {
         fs::create_dir_all(&output_dir)?;
         let n = num_writers.max(1);
         let error_flag = Arc::new(AtomicBool::new(false));
+        let bytes_acked = Arc::new(AtomicU64::new(0));
         let mut senders = Vec::with_capacity(n);
         let mut handles = Vec::with_capacity(n);
         for _ in 0..n {
@@ -258,7 +283,10 @@ impl ParallelWriters {
             senders.push(tx);
             let dir = output_dir.clone();
             let ef = Arc::clone(&error_flag);
-            handles.push(std::thread::spawn(move || writer_loop(rx, dir, ef, format)));
+            let acked = Arc::clone(&bytes_acked);
+            handles.push(std::thread::spawn(move || {
+                writer_loop(rx, dir, ef, format, acked)
+            }));
         }
         Ok(Self {
             senders,
@@ -267,7 +295,18 @@ impl ParallelWriters {
             intern: AHashMap::new(),
             stage: AHashMap::new(),
             staged_bytes: 0,
+            bytes_acked,
+            stall_nanos: 0,
         })
+    }
+
+    /// Snapshot the pipeline's instrumentation counters (monotonic since
+    /// construction). Cheap enough to call at every epoch boundary.
+    pub fn stats(&self) -> WriterStats {
+        WriterStats {
+            bytes_acked: self.bytes_acked.load(Ordering::Relaxed),
+            send_stall: Duration::from_nanos(self.stall_nanos),
+        }
     }
 
     /// True once any writer thread has hit an I/O error, so the producer can
@@ -310,14 +349,26 @@ impl ParallelWriters {
         }
     }
 
-    fn ship(&self, table: &Arc<str>, data: Vec<u8>) {
+    fn ship(&mut self, table: &Arc<str>, data: Vec<u8>) {
         let shard = shard_index(table, self.senders.len());
-        // A dead writer's receiver is dropped, so `send` errors; the real error
-        // is surfaced by `finish`, so ignore send failures here.
-        let _ = self.senders[shard].send(Chunk {
+        let chunk = Chunk {
             table: Arc::clone(table),
             data,
-        });
+        };
+        // Fast path: the channel has room, no clock read at all. Only when the
+        // writer is backed up do we time the blocking send — that time *is*
+        // the `send_stall` backpressure signal. A dead writer's receiver is
+        // dropped, so sends error; the real error is surfaced by `finish`,
+        // so send failures are ignored here.
+        match self.senders[shard].try_send(chunk) {
+            Ok(()) => {}
+            Err(TrySendError::Full(chunk)) => {
+                let blocked = Instant::now();
+                let _ = self.senders[shard].send(chunk);
+                self.stall_nanos += blocked.elapsed().as_nanos() as u64;
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
     }
 
     /// Flush all staged data, join the writer threads, and return the first
@@ -368,6 +419,7 @@ fn writer_loop(
     output_dir: PathBuf,
     error_flag: Arc<AtomicBool>,
     format: Compression,
+    bytes_acked: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
     // Chunks are already ~256KB, so write straight to the sink (each write is a
     // large syscall / compressor input) with no extra buffering layer.
@@ -389,9 +441,14 @@ fn writer_loop(
                 }
             },
         };
-        if let Err(err) = sink.write_all(&chunk.data) {
-            error_flag.store(true, Ordering::Relaxed);
-            first_err = Some(err);
+        match sink.write_all(&chunk.data) {
+            Ok(()) => {
+                bytes_acked.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
+            }
+            Err(err) => {
+                error_flag.store(true, Ordering::Relaxed);
+                first_err = Some(err);
+            }
         }
     }
 
