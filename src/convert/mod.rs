@@ -18,8 +18,7 @@ pub use copy_to_insert::{
 };
 
 use crate::parser::{Parser, SqlDialect, StatementType};
-use crate::progress::ProgressReader;
-use crate::splitter::Compression;
+use crate::splitter::{open_input, open_input_with_progress};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
@@ -1465,17 +1464,16 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     // Create converter
     let mut converter = Converter::new(from_dialect, config.to_dialect).with_strict(config.strict);
 
-    // Open input file with optional progress tracking
-    let file = File::open(&config.input)?;
-    let compression = Compression::from_path(&config.input);
+    // Open input, transparently handling any supported compression format
+    // (including zip archives), with optional progress tracking.
     let reader: Box<dyn Read> = if let Some(ref pb) = progress_bar {
         let pb_clone = pb.clone();
-        let progress_reader = ProgressReader::new(file, move |bytes| {
-            pb_clone.set_position(bytes);
-        });
-        compression.wrap_reader(Box::new(progress_reader))?
+        open_input_with_progress(
+            &config.input,
+            Box::new(move |bytes| pb_clone.set_position(bytes)),
+        )?
     } else {
-        compression.wrap_reader(Box::new(file))?
+        open_input(&config.input)?
     };
     let mut parser = Parser::with_dialect(reader, 64 * 1024, from_dialect);
 

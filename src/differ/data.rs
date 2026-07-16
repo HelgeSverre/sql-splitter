@@ -8,14 +8,12 @@ use crate::parser::{
     determine_buffer_size, mysql_insert, postgres_copy, Parser, SqlDialect, StatementType,
 };
 use crate::pk::{hash_pk_values, PkHash};
-use crate::progress::ProgressReader;
 use crate::schema::Schema;
-use crate::splitter::Compression;
+use crate::splitter::{open_input, open_input_with_progress};
 use ahash::AHashMap;
 use glob::Pattern;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::PathBuf;
@@ -351,19 +349,19 @@ impl DataDiffer {
         byte_offset: u64,
         total_bytes: u64,
     ) -> anyhow::Result<()> {
-        let file = File::open(path)?;
-        let file_size = file.metadata()?.len();
+        let file_size = std::fs::metadata(path)?.len();
         let buffer_size = determine_buffer_size(file_size);
-        let compression = Compression::from_path(path);
 
+        // Open the input, transparently handling any supported compression
+        // format (including zip archives).
         let reader: Box<dyn Read> = if let Some(ref cb) = progress_fn {
             let cb = Arc::clone(cb);
-            let progress_reader = ProgressReader::new(file, move |bytes| {
-                cb(byte_offset + bytes, total_bytes);
-            });
-            compression.wrap_reader(Box::new(progress_reader))?
+            open_input_with_progress(
+                path,
+                Box::new(move |bytes| cb(byte_offset + bytes, total_bytes)),
+            )?
         } else {
-            compression.wrap_reader(Box::new(file))?
+            open_input(path)?
         };
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
