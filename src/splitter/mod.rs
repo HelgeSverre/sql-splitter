@@ -451,9 +451,8 @@ impl Splitter {
 
                         let decision = ctrl.on_epoch(&measurement);
                         if let Some(kind) = decision.transition {
-                            let new_profile =
-                                WriterProfile::for_kind(kind, cores, compressing)
-                                    .with_env_overrides();
+                            let new_profile = WriterProfile::for_kind(kind, cores, compressing)
+                                .with_env_overrides();
                             values.apply(&new_profile);
                             let line = format!(
                                 "output device sustaining ~{:.0} MB/s — switching to {} write profile",

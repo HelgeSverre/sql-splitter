@@ -3,7 +3,11 @@
 pub mod controller;
 pub mod profile;
 
-pub use controller::{Clock, Controller, EpochDecision, EpochMeasurement, MockClock, RealClock};
+// `MockClock` is the deterministic-test seam for `Splitter::with_io_clock`
+// (see docs/features/ADAPTIVE_IO_PROFILES.md): only integration tests name
+// it, so the `sql-splitter` bin target sees it as unused.
+#[allow(unused_imports)]
+pub use controller::{Clock, Controller, EpochMeasurement, MockClock, RealClock};
 pub use profile::{
     env_writer_count, probe_output_dir, IoProfile, ProfileKind, ProfileValues, WriterProfile,
 };
