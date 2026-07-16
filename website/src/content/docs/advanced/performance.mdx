@@ -50,9 +50,24 @@ ExFAT, 124MB–3.8GB fixtures, reading and writing on the same spindle):
 These numbers are indicative for similar hardware, not a general claim —
 run-to-run variance of ±25% was observed on this drive alone, and different
 devices, filesystems, and workloads will land elsewhere. Verify on your own
-target with `scripts/verify-io-profiles.sh`. Output is byte-identical in every
-profile. Pin with `--io-profile hdd` or `minimal-ops` (very slow flash /
-network mounts) when you already know the target device.
+target with `scripts/verify-io-profiles.sh`.
+
+**What the profiles actually do.** Each profile is three concrete settings —
+writer thread count, the size of each write operation, and how much data is
+staged in memory between writes. Output is byte-identical in every profile;
+only the scheduling of bytes onto the device changes.
+
+| Profile       | Writer threads              | Write size            | Staging memory | Device class it's built for |
+| ------------- | --------------------------- | --------------------- | -------------- | --------------------------- |
+| `ssd`         | up to 4 (all cores when compressing) | 256 KB       | 32 MB          | SSD/NVMe: high IOPS and internal parallelism — many small concurrent writes keep the device's queues full |
+| `hdd`         | 1                           | 8 MB chunks, coalesced up to 64 MB | 256 MB | Spinning disks: parallel writers make the head seek between files, so one writer issues long sequential writes that amortize head movement |
+| `minimal-ops` | 1                           | 32 MB chunks, coalesced up to 64 MB | 512 MB | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible |
+| `auto` (default) | starts at 1, grows to `ssd`'s count if the device proves fast | adapts | adapts | Unknown targets: an 8 MB fsync probe picks the opening profile, then runtime backpressure monitoring switches between the rows above |
+
+Pin `hdd` for spinning disks or `minimal-ops` for slow-per-operation devices
+when you already know the target; `ssd` (alias: `fast`) pins today's defaults.
+Expert env overrides `SQL_SPLITTER_WRITERS` / `SQL_SPLITTER_WRITE_BUF` beat
+every profile.
 
 ### vs. Shell Alternatives
 

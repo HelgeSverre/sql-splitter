@@ -303,7 +303,7 @@ sql-splitter split big_dump.sql \
 - `--schema-only`: Only DDL (CREATE TABLE, indexes)
 - `--data-only`: Only DML (INSERT, COPY statements)
 - `--compress`: Compress each output file (gzip, zstd, bzip2, xz) — writes `<table>.sql.gz` etc.
-- `--io-profile`: Output device I/O profile (auto, fast, hdd, minimal-ops); auto detects slow output devices (HDDs/USB sticks/network mounts) and switches to a seek-friendly write strategy (observed ~1.5–2.5× on one USB spinning drive; device-dependent, output byte-identical in all profiles)
+- `--io-profile`: Output device I/O profile (auto, ssd, hdd, minimal-ops); auto detects slow output devices (HDDs/USB sticks/network mounts) and switches to a seek-friendly write strategy (observed ~1.5–2.5× on one USB spinning drive; device-dependent, output byte-identical in all profiles)
 - Archive output: `-o dump.tar.gz` (also `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`, `.zip`) writes a single archive instead of a directory
 
 **Merge options:**

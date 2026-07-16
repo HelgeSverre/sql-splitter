@@ -32,10 +32,12 @@ pub enum ProfileKind {
 
 impl ProfileKind {
     /// Human-readable name used in transition log lines and `--io-profile`.
+    /// `ssd` (not "fast") because it names the device class the settings are
+    /// tuned for — on a spinning disk the SSD settings are the *slow* choice.
     pub fn label(self) -> &'static str {
         match self {
-            ProfileKind::Fast => "fast",
-            ProfileKind::SlowSeek => "HDD",
+            ProfileKind::Fast => "ssd",
+            ProfileKind::SlowSeek => "hdd",
             ProfileKind::SlowOps => "minimal-ops",
         }
     }
@@ -57,11 +59,12 @@ impl IoProfile {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "auto" | "" => Ok(IoProfile::Auto),
-            "fast" => Ok(IoProfile::Fast),
+            // `fast` is a compatibility alias for `ssd` (the pre-rename name).
+            "ssd" | "fast" => Ok(IoProfile::Fast),
             "hdd" => Ok(IoProfile::Hdd),
             "minimal-ops" | "minimal_ops" | "minimalops" => Ok(IoProfile::MinimalOps),
             other => Err(format!(
-                "Unknown I/O profile '{other}'. Valid: auto, fast, hdd, minimal-ops"
+                "Unknown I/O profile '{other}'. Valid: auto, ssd, hdd, minimal-ops"
             )),
         }
     }

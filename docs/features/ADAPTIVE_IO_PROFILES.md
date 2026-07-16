@@ -92,7 +92,7 @@ Small explicit state machine, evaluated at epoch boundaries:
 ### CLI
 
 ```
---io-profile auto|fast|hdd|minimal-ops     (default: auto)
+--io-profile auto|ssd|hdd|minimal-ops     (default: auto)
 ```
 
 Explicit names pin the profile (no controller, no probe) — for scripting,

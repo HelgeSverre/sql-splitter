@@ -267,7 +267,7 @@ fn test_throttled_sink_triggers_hdd_downgrade() {
         stats.io_transitions
     );
     assert!(
-        stats.io_transitions[0].contains("switching to HDD write profile"),
+        stats.io_transitions[0].contains("switching to hdd write profile"),
         "first transition should be to the HDD profile: {:?}",
         stats.io_transitions
     );
