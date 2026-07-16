@@ -149,12 +149,10 @@ fn download_file(url: &str, dest: &Path) -> io::Result<()> {
         .output()?;
 
     if !output.status.success() {
-        return Err(io::Error::other(
-            format!(
-                "Download failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "Download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     Ok(())
@@ -192,9 +190,10 @@ fn extract_file(cmd: &str, archive: &Path, dest_dir: &Path) -> io::Result<()> {
     };
 
     if !status.success() {
-        return Err(io::Error::other(
-            format!("Extraction failed with status: {}", status),
-        ));
+        return Err(io::Error::other(format!(
+            "Extraction failed with status: {}",
+            status
+        )));
     }
 
     Ok(())
