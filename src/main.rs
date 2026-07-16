@@ -6,6 +6,7 @@ mod analyzer;
 mod archive;
 mod cmd;
 mod convert;
+mod copy_data;
 mod differ;
 #[cfg(feature = "duckdb-query")]
 mod duckdb;

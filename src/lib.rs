@@ -3,6 +3,7 @@ pub mod analyzer;
 pub mod archive;
 pub mod cmd;
 pub mod convert;
+pub mod copy_data;
 pub mod differ;
 #[cfg(feature = "duckdb-query")]
 pub mod duckdb;
