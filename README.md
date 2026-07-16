@@ -264,10 +264,12 @@ only to directory output (for an archive the codec comes from the extension).
 **Slow output devices.** The write path is tuned for SSDs by default. When the
 output lands on a spinning disk, USB stick, or network mount, `--io-profile
 auto` (the default) detects it — a quick startup probe plus runtime
-backpressure monitoring — and switches to a seek-friendly write strategy;
-measured on a USB HDD this runs **1.5–2.5× faster** than the SSD settings. Pin
-a profile with `--io-profile hdd` (or `minimal-ops` for very slow flash) if
-you already know the target; output is byte-identical in every mode.
+backpressure monitoring — and switches to a seek-friendly write strategy. In
+our tests on a single USB 3.0 spinning drive (ExFAT), this ran roughly 1.5–2.5×
+faster than the SSD settings; treat that as indicative for similar hardware,
+not a guarantee — the gain depends on the device, filesystem, and workload.
+Pin a profile with `--io-profile hdd` (or `minimal-ops` for very slow flash)
+if you already know the target; output is byte-identical in every mode.
 
 ### Merge Options
 

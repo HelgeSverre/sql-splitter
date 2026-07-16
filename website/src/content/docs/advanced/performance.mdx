@@ -36,17 +36,23 @@ The write path is SSD-tuned by default; on spinning disks and cheap flash the
 same settings cause seek thrash. `split --io-profile auto` (the default)
 detects slow output devices — an 8MB fsync probe picks the starting strategy,
 then runtime backpressure monitoring adapts — and switches to a seek-friendly
-write profile. Measured on a 1TB USB HDD (124MB→3.8GB fixtures):
+write profile.
 
-| Profile               | Throughput (same-spindle split) |
+What we observed on one specific device (a 1TB Seagate USB 3.0 spinning drive,
+ExFAT, 124MB–3.8GB fixtures, reading and writing on the same spindle):
+
+| Profile               | Observed throughput             |
 | --------------------- | ------------------------------- |
 | `fast` (SSD defaults) | 22–43 MB/s                      |
-| `hdd` (pinned)        | 55–77 MB/s (**1.5–2.5×**)       |
-| `auto`                | matches or beats pinned `hdd`   |
+| `hdd` (pinned)        | 55–77 MB/s                      |
+| `auto`                | matched or beat pinned `hdd`    |
 
-Output is byte-identical in every profile. Pin with `--io-profile hdd` or
-`minimal-ops` (very slow flash / network mounts) when you already know the
-target device.
+These numbers are indicative for similar hardware, not a general claim —
+run-to-run variance of ±25% was observed on this drive alone, and different
+devices, filesystems, and workloads will land elsewhere. Verify on your own
+target with `scripts/verify-io-profiles.sh`. Output is byte-identical in every
+profile. Pin with `--io-profile hdd` or `minimal-ops` (very slow flash /
+network mounts) when you already know the target device.
 
 ### vs. Shell Alternatives
 
