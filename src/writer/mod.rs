@@ -12,131 +12,17 @@ pub use profile::{
     env_writer_count, probe_output_dir, IoStrategy, ProfileKind, ProfileValues, WriterProfile,
 };
 
+use crate::splitter::Compression;
 use ahash::AHashMap;
 use std::collections::hash_map::Entry;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-
-/// Size of the BufWriter buffer per table file. Sits at the top of the
-/// sequential-write plateau (64KB–256KB); overridable via
-/// `SQL_SPLITTER_WRITE_BUF` (bytes) for tuning.
-pub const WRITER_BUFFER_SIZE: usize = 256 * 1024;
-
-/// Resolve the per-file write buffer size, honoring the env override.
-pub fn write_buffer_size() -> usize {
-    std::env::var("SQL_SPLITTER_WRITE_BUF")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n >= 4096)
-        .unwrap_or(WRITER_BUFFER_SIZE)
-}
-
-/// Buffered writer for a single table's SQL file.
-pub struct TableWriter {
-    writer: BufWriter<File>,
-}
-
-impl TableWriter {
-    /// Create a new table writer for the given file path.
-    pub fn new(filename: &Path) -> std::io::Result<Self> {
-        let file = File::create(filename)?;
-        let writer = BufWriter::with_capacity(write_buffer_size(), file);
-        Ok(Self { writer })
-    }
-
-    /// Write a SQL statement followed by a newline. The `BufWriter` flushes
-    /// itself only when its buffer fills (and on close), so writes coalesce
-    /// into large syscalls instead of one per ~100 statements.
-    pub fn write_statement(&mut self, stmt: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(stmt)?;
-        self.writer.write_all(b"\n")
-    }
-
-    /// Write a SQL statement with a custom suffix and newline.
-    pub fn write_statement_with_suffix(
-        &mut self,
-        stmt: &[u8],
-        suffix: &[u8],
-    ) -> std::io::Result<()> {
-        self.writer.write_all(stmt)?;
-        self.writer.write_all(suffix)?;
-        self.writer.write_all(b"\n")
-    }
-
-    /// Flush the internal buffer to the OS.
-    pub fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
-}
-
-/// Pool of per-table writers, creating files on demand.
-pub struct WriterPool {
-    output_dir: PathBuf,
-    writers: AHashMap<String, TableWriter>,
-}
-
-impl WriterPool {
-    /// Create a new writer pool targeting the given output directory.
-    pub fn new(output_dir: PathBuf) -> Self {
-        Self {
-            output_dir,
-            writers: AHashMap::new(),
-        }
-    }
-
-    /// Create the output directory if it does not exist.
-    pub fn ensure_output_dir(&self) -> std::io::Result<()> {
-        fs::create_dir_all(&self.output_dir)
-    }
-
-    /// Get or create a writer for the given table name.
-    pub fn get_writer(&mut self, table_name: &str) -> std::io::Result<&mut TableWriter> {
-        use std::collections::hash_map::Entry;
-
-        // Use entry API to avoid separate contains_key + get_mut (eliminates unwrap)
-        match self.writers.entry(table_name.to_string()) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let filename = self.output_dir.join(format!("{}.sql", table_name));
-                let writer = TableWriter::new(&filename)?;
-                Ok(entry.insert(writer))
-            }
-        }
-    }
-
-    /// Write a statement to the file for the given table.
-    pub fn write_statement(&mut self, table_name: &str, stmt: &[u8]) -> std::io::Result<()> {
-        let writer = self.get_writer(table_name)?;
-        writer.write_statement(stmt)
-    }
-
-    /// Write a statement with suffix to the file for the given table.
-    pub fn write_statement_with_suffix(
-        &mut self,
-        table_name: &str,
-        stmt: &[u8],
-        suffix: &[u8],
-    ) -> std::io::Result<()> {
-        let writer = self.get_writer(table_name)?;
-        writer.write_statement_with_suffix(stmt, suffix)
-    }
-
-    /// Flush and close all writers.
-    pub fn close_all(&mut self) -> std::io::Result<()> {
-        for writer in self.writers.values_mut() {
-            writer.flush()?;
-        }
-        Ok(())
-    }
-}
-
-use crate::splitter::Compression;
 
 /// A batched write job: pre-assembled bytes for one table.
 struct Chunk {
@@ -402,7 +288,7 @@ impl TableSink {
 /// synchronous thread doesn't bottleneck a fast SSD (queue depth > 1). Batching
 /// into large chunks keeps per-statement channel overhead negligible.
 ///
-/// Output is byte-identical to the single-threaded [`WriterPool`]: each table's
+/// Output is byte-identical to a single-threaded writer: each table's
 /// file is written by exactly one thread, in input order. A table's shard is
 /// assigned once (on first ship) and never changes, so growing the pool
 /// mid-run ([`grow_to`](Self::grow_to)) preserves per-table ordering by

@@ -1,126 +1,144 @@
-//! Unit tests for writer module, extracted from src/writer/mod.rs
+//! Unit tests for the writer module's production pipeline (`ParallelWriters`).
+//!
+//! The legacy single-threaded `TableWriter`/`WriterPool` were removed once
+//! `split` moved entirely to `ParallelWriters`; the output-shape assertions
+//! they carried live on here against the real writer.
 
 use sql_splitter::splitter::Compression;
-use sql_splitter::writer::{
-    ParallelWriters, ProfileValues, TableWriter, WriterPool, WriterProfile,
-};
+use sql_splitter::writer::{ParallelWriters, ProfileKind, ProfileValues, WriterProfile};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-#[test]
-fn test_table_writer() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test.sql");
-
-    let mut writer = TableWriter::new(&file_path).unwrap();
-    writer
-        .write_statement(b"CREATE TABLE t1 (id INT);")
-        .unwrap();
-    writer
-        .write_statement(b"INSERT INTO t1 VALUES (1);")
-        .unwrap();
-    writer.flush().unwrap();
-
-    let content = std::fs::read_to_string(&file_path).unwrap();
-    assert!(content.contains("CREATE TABLE t1"));
-    assert!(content.contains("INSERT INTO t1"));
+/// A small writer pool with the default (SSD) profile values.
+fn pool(dir: &std::path::Path, num_writers: usize) -> ParallelWriters {
+    let profile = WriterProfile::for_kind(ProfileKind::Ssd, 4, false);
+    let values = Arc::new(ProfileValues::new(&profile));
+    ParallelWriters::new(
+        dir.to_path_buf(),
+        num_writers,
+        16,
+        Compression::None,
+        values,
+    )
+    .unwrap()
 }
 
 #[test]
-fn test_writer_pool() {
+fn test_single_table_output() {
     let temp_dir = TempDir::new().unwrap();
-    let mut pool = WriterPool::new(temp_dir.path().to_path_buf());
-    pool.ensure_output_dir().unwrap();
+    let mut writers = pool(temp_dir.path(), 1);
 
-    pool.write_statement("users", b"CREATE TABLE users (id INT);")
-        .unwrap();
-    pool.write_statement("posts", b"CREATE TABLE posts (id INT);")
-        .unwrap();
-    pool.write_statement("users", b"INSERT INTO users VALUES (1);")
-        .unwrap();
+    writers.write("t1", b"CREATE TABLE t1 (id INT);", b"");
+    writers.write("t1", b"INSERT INTO t1 VALUES (1);", b"");
+    writers.finish().unwrap();
 
-    pool.close_all().unwrap();
-
-    // Verify both table files were created
-    let users_content = std::fs::read_to_string(temp_dir.path().join("users.sql")).unwrap();
-    assert!(users_content.contains("CREATE TABLE users"));
-    assert!(users_content.contains("INSERT INTO users"));
-
-    let posts_content = std::fs::read_to_string(temp_dir.path().join("posts.sql")).unwrap();
-    assert!(posts_content.contains("CREATE TABLE posts"));
+    let content = std::fs::read_to_string(temp_dir.path().join("t1.sql")).unwrap();
+    assert_eq!(
+        content,
+        "CREATE TABLE t1 (id INT);\nINSERT INTO t1 VALUES (1);\n"
+    );
 }
 
 #[test]
-fn test_table_writer_flush_after_buffer_count() {
+fn test_statements_preserve_input_order_per_table() {
     let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test.sql");
-    let mut writer = TableWriter::new(&file_path).unwrap();
+    let mut writers = pool(temp_dir.path(), 4);
+
     for i in 0..150 {
-        writer
-            .write_statement(format!("INSERT INTO t VALUES ({});", i).as_bytes())
-            .unwrap();
+        writers.write(
+            "t",
+            format!("INSERT INTO t VALUES ({});", i).as_bytes(),
+            b"",
+        );
     }
-    writer.flush().unwrap();
-    let content = std::fs::read_to_string(&file_path).unwrap();
+    writers.finish().unwrap();
+
+    let content = std::fs::read_to_string(temp_dir.path().join("t.sql")).unwrap();
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 150);
+    for (i, line) in lines.iter().enumerate() {
+        assert_eq!(*line, format!("INSERT INTO t VALUES ({});", i));
+    }
 }
 
 #[test]
-fn test_table_writer_write_statement_with_suffix() {
+fn test_write_with_suffix() {
     let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("test.sql");
-    let mut writer = TableWriter::new(&file_path).unwrap();
-    writer
-        .write_statement_with_suffix(b"INSERT INTO t VALUES (1)", b";")
-        .unwrap();
-    writer.flush().unwrap();
-    let content = std::fs::read_to_string(&file_path).unwrap();
-    assert!(content.contains("INSERT INTO t VALUES (1);"));
+    let mut writers = pool(temp_dir.path(), 1);
+
+    writers.write("users", b"INSERT INTO users VALUES (1)", b";");
+    writers.finish().unwrap();
+
+    let content = std::fs::read_to_string(temp_dir.path().join("users.sql")).unwrap();
+    assert_eq!(content, "INSERT INTO users VALUES (1);\n");
 }
 
 #[test]
-fn test_writer_pool_creates_output_dir() {
+fn test_creates_output_dir() {
     let temp_dir = TempDir::new().unwrap();
     let output_dir = temp_dir.path().join("nested").join("output");
-    let pool = WriterPool::new(output_dir.clone());
-    pool.ensure_output_dir().unwrap();
+    let writers = pool(&output_dir, 1);
     assert!(output_dir.exists());
+    writers.finish().unwrap();
 }
 
 #[test]
-fn test_writer_pool_multiple_tables() {
+fn test_multiple_tables_get_their_own_files() {
     let temp_dir = TempDir::new().unwrap();
-    let mut pool = WriterPool::new(temp_dir.path().to_path_buf());
-    pool.ensure_output_dir().unwrap();
+    let mut writers = pool(temp_dir.path(), 4);
 
     for table in &["users", "posts", "comments", "tags", "categories"] {
-        pool.write_statement(
+        writers.write(
             table,
             format!("CREATE TABLE {} (id INT);", table).as_bytes(),
-        )
-        .unwrap();
+            b"",
+        );
     }
-    pool.close_all().unwrap();
+    writers.finish().unwrap();
 
     for table in &["users", "posts", "comments", "tags", "categories"] {
         let path = temp_dir.path().join(format!("{}.sql", table));
         assert!(path.exists(), "File for table {} should exist", table);
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(&format!("CREATE TABLE {}", table)));
+        assert_eq!(content, format!("CREATE TABLE {} (id INT);\n", table));
     }
 }
 
+/// Growing the pool mid-run must not disturb per-table ordering: tables seen
+/// before the growth keep their owner thread (sticky shard assignment).
 #[test]
-fn test_writer_pool_write_statement_with_suffix() {
+fn test_grow_to_preserves_per_table_order() {
     let temp_dir = TempDir::new().unwrap();
-    let mut pool = WriterPool::new(temp_dir.path().to_path_buf());
-    pool.ensure_output_dir().unwrap();
-    pool.write_statement_with_suffix("users", b"INSERT INTO users VALUES (1)", b";")
-        .unwrap();
-    pool.close_all().unwrap();
-    let content = std::fs::read_to_string(temp_dir.path().join("users.sql")).unwrap();
-    assert!(content.contains("INSERT INTO users VALUES (1);"));
+    let mut writers = pool(temp_dir.path(), 1);
+
+    for i in 0..50 {
+        writers.write(
+            "a",
+            format!("INSERT INTO a VALUES ({});", i).as_bytes(),
+            b"",
+        );
+    }
+    writers.grow_to(4);
+    assert_eq!(writers.writer_count(), 4);
+    for i in 50..100 {
+        writers.write(
+            "a",
+            format!("INSERT INTO a VALUES ({});", i).as_bytes(),
+            b"",
+        );
+        writers.write(
+            "b",
+            format!("INSERT INTO b VALUES ({});", i).as_bytes(),
+            b"",
+        );
+    }
+    writers.finish().unwrap();
+
+    let a = std::fs::read_to_string(temp_dir.path().join("a.sql")).unwrap();
+    let expected: String = (0..100)
+        .map(|i| format!("INSERT INTO a VALUES ({});\n", i))
+        .collect();
+    assert_eq!(a, expected);
 }
 
 /// Regression for the 2026-07-16 field bug: `bytes_acked` counted bytes
