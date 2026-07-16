@@ -1,8 +1,10 @@
+use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::parser::ContentFilter;
 use crate::splitter::{Compression, Splitter};
 use crate::writer::IoStrategy;
 #[allow(unused_imports)]
 use anyhow::Context;
+use clap::{Args, ValueHint};
 use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -70,22 +72,77 @@ pub(crate) struct SplitFileResult {
     error: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
+#[derive(Args)]
+pub struct SplitArgs {
+    /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     file: PathBuf,
+
+    /// Output directory, or archive path (.tar.gz/.tgz/.tar.zst/.tar.bz2/.tar.xz/.tar/.zip)
+    #[arg(short, long, default_value = "output", value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
     output: PathBuf,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
     dialect: Option<String>,
-    verbose: bool,
-    dry_run: bool,
-    progress: bool,
+
+    /// Only split specific tables (comma-separated)
+    #[arg(short, long, help_heading = FILTERING)]
     tables: Option<String>,
+
+    /// Only include schema statements (CREATE, ALTER, DROP)
+    #[arg(long, conflicts_with = "data_only", help_heading = FILTERING)]
     schema_only: bool,
+
+    /// Only include data statements (INSERT, COPY)
+    #[arg(long, conflicts_with = "schema_only", help_heading = FILTERING)]
     data_only: bool,
-    fail_fast: bool,
+
+    /// Show verbose output
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    verbose: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
     json: bool,
+
+    /// Compress each output file: none, gzip, zstd, bzip2, xz
+    #[arg(long, default_value = "none", value_name = "FORMAT", help_heading = INPUT_OUTPUT)]
     compress: String,
+
+    /// Output device I/O strategy: auto, ssd, hdd, cheap
+    #[arg(long, default_value = "auto", value_name = "STRATEGY", help_heading = BEHAVIOR)]
     io_strategy: String,
-) -> anyhow::Result<()> {
+
+    /// Preview without writing files
+    #[arg(long, help_heading = BEHAVIOR)]
+    dry_run: bool,
+
+    /// Stop on first error (for glob patterns)
+    #[arg(long, help_heading = BEHAVIOR)]
+    fail_fast: bool,
+}
+
+pub fn run(args: SplitArgs) -> anyhow::Result<()> {
+    let SplitArgs {
+        file,
+        output,
+        dialect,
+        tables,
+        schema_only,
+        data_only,
+        verbose,
+        progress,
+        json,
+        compress,
+        io_strategy,
+        dry_run,
+        fail_fast,
+    } = args;
     let out_compression = Compression::parse_output(&compress).map_err(|e| anyhow::anyhow!(e))?;
     let io_strategy = IoStrategy::parse(&io_strategy).map_err(|e| anyhow::anyhow!(e))?;
     let expanded = expand_file_pattern(&file)?;

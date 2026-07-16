@@ -68,59 +68,7 @@ pub enum Commands {
   sql-splitter split dump.sql -o dump.tar.gz
   sql-splitter split dump.sql -o /mnt/usb/tables/ --io-strategy hdd
   sql-splitter split \"backups/*.sql\" -o out/ --fail-fast")]
-    Split {
-        /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output directory, or archive path (.tar.gz/.tgz/.tar.zst/.tar.bz2/.tar.xz/.tar/.zip)
-        #[arg(short, long, default_value = "output", value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
-        output: PathBuf,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Only split specific tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        tables: Option<String>,
-
-        /// Only include schema statements (CREATE, ALTER, DROP)
-        #[arg(long, conflicts_with = "data_only", help_heading = FILTERING)]
-        schema_only: bool,
-
-        /// Only include data statements (INSERT, COPY)
-        #[arg(long, conflicts_with = "schema_only", help_heading = FILTERING)]
-        data_only: bool,
-
-        /// Show verbose output
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        verbose: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Compress each output file: none, gzip, zstd, bzip2, xz
-        #[arg(long, default_value = "none", value_name = "FORMAT", help_heading = INPUT_OUTPUT)]
-        compress: String,
-
-        /// Output device I/O strategy: auto, ssd, hdd, cheap
-        #[arg(long, default_value = "auto", value_name = "STRATEGY", help_heading = BEHAVIOR)]
-        io_strategy: String,
-
-        /// Preview without writing files
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-
-        /// Stop on first error (for glob patterns)
-        #[arg(long, help_heading = BEHAVIOR)]
-        fail_fast: bool,
-    },
+    Split(split::SplitArgs),
 
     /// Analyze a SQL dump and display table statistics
     #[command(visible_alias = "an")]
@@ -427,35 +375,7 @@ use common::dash_is_stdout;
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Split {
-            file,
-            output,
-            dialect,
-            verbose,
-            dry_run,
-            progress,
-            tables,
-            schema_only,
-            data_only,
-            fail_fast,
-            json,
-            compress,
-            io_strategy,
-        } => split::run(
-            file,
-            output,
-            dialect,
-            verbose,
-            dry_run,
-            progress,
-            tables,
-            schema_only,
-            data_only,
-            fail_fast,
-            json,
-            compress,
-            io_strategy,
-        ),
+        Commands::Split(args) => split::run(args),
         Commands::Analyze {
             file,
             dialect,
