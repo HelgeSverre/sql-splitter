@@ -1,6 +1,6 @@
 # Adaptive I/O Profiles
 
-**Status**: Planned (v1.16.0)
+**Status**: Implemented (2026-07-16, unreleased — ships in v1.16.0)
 **Effort**: ~2–3 days including tests
 **Motivation**: Measured 2026-07-15/16 on a Seagate Expansion 1TB USB HDD (ExFAT):
 same-spindle `split` runs at 21–33 MB/s with default settings, but

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`split --io-profile auto|fast|hdd|minimal-ops`** — adaptive write strategy for slow output devices. The default (`auto`) probes the output directory at startup and monitors the pipeline's own backpressure at runtime, switching to seek-friendly settings (single writer, large coalesced writes) when the device warrants it; measured 1.5–2.5× faster on a USB spinning disk, with byte-identical output in every profile. Slow profiles also cap compressed output at one writer (the all-cores compression default was measured *slower* than plain output on HDDs due to seek thrash). Explicit names pin the profile; `SQL_SPLITTER_WRITERS`/`SQL_SPLITTER_WRITE_BUF` still override everything.
+
 ## [1.15.0] - 2026-07-15
 
 ### Added

@@ -242,6 +242,7 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `-t, --tables`   | Only split these tables (comma-separated)           | —           |
 | `--compress`     | Compress each output file: `gzip`, `zstd`, `bzip2`, `xz` | `none`  |
+| `--io-profile`   | Output device I/O profile: `auto`, `fast`, `hdd`, `minimal-ops` | `auto` |
 | `-p, --progress` | Show progress bar                                   | —           |
 | `--dry-run`      | Preview without writing files                       | —           |
 | `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)           | —           |
@@ -259,6 +260,14 @@ archive path (`dump.tar.gz`, `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`,
 or `.zip`) to pack **all** tables into a single archive of `<table>.sql`
 entries. Archive output requires a single input file, and `--compress` applies
 only to directory output (for an archive the codec comes from the extension).
+
+**Slow output devices.** The write path is tuned for SSDs by default. When the
+output lands on a spinning disk, USB stick, or network mount, `--io-profile
+auto` (the default) detects it — a quick startup probe plus runtime
+backpressure monitoring — and switches to a seek-friendly write strategy;
+measured on a USB HDD this runs **1.5–2.5× faster** than the SSD settings. Pin
+a profile with `--io-profile hdd` (or `minimal-ops` for very slow flash) if
+you already know the target; output is byte-identical in every mode.
 
 ### Merge Options
 

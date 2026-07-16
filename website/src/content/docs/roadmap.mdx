@@ -30,7 +30,7 @@ All core features have been released:
 
 ## Upcoming Features
 
-### v1.16.0 — Zip Input Support
+### v1.16.0 — Zip Input + Adaptive I/O Profiles
 
 Accept `.zip` dumps as input across all commands — real-world exports often arrive as `dump.sql.zip`:
 
@@ -38,11 +38,27 @@ Accept `.zip` dumps as input across all commands — real-world exports often ar
 sql-splitter split reflow_latest.sql.zip -o tables/
 ```
 
-**Features:**
+**Zip input:**
 
 - Streams the zip's `.sql` member through the existing decompression pipeline (no full extraction)
 - Exactly-one-`.sql`-member policy, with clear errors for multi-member or encrypted archives
 - No new dependencies — reuses the `zip` crate already powering archive output
+
+**Adaptive I/O profiles** — measured on a USB spinning disk, the default
+(SSD-tuned) write path runs at ~22–33 MB/s while a single writer with large
+buffers reaches ~55 MB/s (2.5×, near the drive's physical ceiling):
+
+```bash
+sql-splitter split dump.sql -o tables/ --io-profile auto   # default
+sql-splitter split dump.sql -o tables/ --io-profile hdd    # pin it
+```
+
+- An fsync probe picks the opening profile; after that, a feedback loop driven
+  by the pipeline's own backpressure steps between fast/HDD/slow-flash
+  profiles — no device fingerprinting, works for network mounts and cheap
+  USB sticks too
+- Output stays byte-identical across all profiles (verified by cross-profile
+  hash tests)
 
 ### v1.17.0 — Enum Type Conversion
 

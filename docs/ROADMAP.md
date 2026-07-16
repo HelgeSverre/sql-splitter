@@ -38,7 +38,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Next (v1.16+):**
 
-- v1.16.0: Zip Input — Accept `.zip` dumps as input across all commands
+- v1.16.0: Zip Input + Adaptive I/O — `.zip` dump input; `--io-profile` auto-tuning for HDDs/slow media
 - v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.18.0: Migrate — Schema migration generation
 - v1.19.0: DBML — Import/export DBML schema definitions
@@ -533,13 +533,28 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 
 ---
 
-### v1.16.0 — Zip Input Support
+### v1.16.0 — Zip Input + Adaptive I/O Profiles
 
-**Theme**: Consume real-world dump archives directly
+**Theme**: Real-world inputs, real-world devices
 
-| Feature   | Effort | Notes                                    |
-| --------- | ------ | ---------------------------------------- |
-| Zip input | ~6–8h  | No new deps; `zip` crate already present |
+| Feature            | Effort   | Notes                                       |
+| ------------------ | -------- | ------------------------------------------- |
+| Zip input          | ~6–8h    | No new deps; `zip` crate already present    |
+| Adaptive I/O       | ~2–3 days| `--io-profile auto\|fast\|hdd\|minimal-ops` |
+
+**Adaptive I/O profiles** — measured 2026-07-15/16: same-spindle split on a
+USB HDD runs at 21–33 MB/s with defaults but 54.7 MB/s (2.52×) with
+`WRITERS=1` + 64MB buffers; cheap flash wants fewest write *operations*
+instead. Design: don't identify the device, respond to it — an fsync probe
+picks the opening profile, then a state machine driven by the pipeline's own
+backpressure counters (bytes-acked throughput + parser send-stall ratio,
+sampled at byte-based epochs) steps between FAST / SLOW_SEEK / SLOW_OPS
+profiles with asymmetric hysteresis. Writer count only ever grows (start W=1,
+spawn after the device proves fast) so per-table ordering and byte-identical
+output are preserved by construction. Full design, implementation phases, and
+the deterministic test plan (mock-clock controller tests, throttled-sink
+integration tests, cross-profile sha256 golden invariant, real-hardware
+acceptance script): [ADAPTIVE_IO_PROFILES.md](features/ADAPTIVE_IO_PROFILES.md)
 
 Zip is an archive (multiple members) rather than a stream compression, and the
 `zip` crate's reader needs `Read + Seek`, so it can't just be another
@@ -801,7 +816,7 @@ Zip is an archive (multiple members) rather than a stream compression, and the
 
 | Version | Features        | Status      |
 | ------- | --------------- | ----------- |
-| v1.16.0 | Zip Input       | Planned     |
+| v1.16.0 | Zip Input + Adaptive I/O | Planned |
 | v1.17.0 | Enum Conversion | Planned     |
 | v1.18.0 | Migrate         | Planned     |
 | v1.19.0 | DBML            | Planned     |
@@ -896,7 +911,7 @@ Zip is an archive (multiple members) rather than a stream compression, and the
     - Docs: Library Usage + Known Limitations pages, full accuracy sweep, Astro 7
     - Planned roadmap features bumped +1 minor version
 
-17. 🟡 **v1.16.0 — Zip Input** — Planned
+17. 🟡 **v1.16.0 — Zip Input + Adaptive I/O** — Planned
     - `.zip` dumps accepted as input across all commands
     - Central-directory locate + streamed deflate (no new deps)
     - Single-`.sql`-member policy; clear errors for multi-member/encrypted
