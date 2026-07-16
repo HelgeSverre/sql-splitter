@@ -76,7 +76,20 @@ impl FakeStrategy {
             "zip" | "zip_code" | "postal_code" => {
                 generate_semantic(SemanticKind::AddressPostcode, Locale::En, rng)
             }
-            "country" => "United States".to_string(), // Simplified for now
+            "country" => {
+                // Simplified for now — no `fake` crate draw needed for a
+                // fixed value, but pre-refactor every branch (including this
+                // one) drew one 32-byte block unconditionally before the
+                // match. `ValueRewriter` threads one shared, advancing RNG
+                // across every redacted cell in a run, so skipping this draw
+                // would shift every later fake/random value for any config
+                // that redacts a `country` column before another random
+                // column — preserve the draw to keep the shared stream in
+                // lockstep with the pre-refactor implementation.
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                "United States".to_string()
+            }
 
             // Business generators
             "company" | "company_name" => {
