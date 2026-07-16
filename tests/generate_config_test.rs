@@ -169,11 +169,22 @@ tables:
 
 #[test]
 fn complete_model_example_parses() {
-    // Adapted from the "Complete model example" in
-    // docs/superpowers/specs/2026-07-16-synthetic-data-generation-design.md.
-    // The design doc uses a `type: bigint` schema shorthand for readability;
-    // this test uses `PortableColumn`'s actual `source_type`/`family` fields
-    // since the model reuses that type directly (see task-3-report.md).
+    // Copied from the "Complete model example" in
+    // docs/superpowers/specs/2026-07-16-synthetic-data-generation-design.md,
+    // including its `type:` schema shorthand — see design decision D1 and
+    // `PortableColumn`'s `#[serde(try_from = "PortableColumnInput")]` in
+    // src/synthetic/schema.rs, which derives `family` from `type`/
+    // `source_type` when it is absent.
+    //
+    // One byte-for-byte deviation: `type: decimal(12,2)` is quoted here as
+    // `type: "decimal(12,2)"`. Unquoted, the embedding flow mapping
+    // `{ name: ..., type: decimal(12,2), nullable: false }` is not valid
+    // YAML — the comma inside the unquoted scalar is a flow-mapping
+    // separator, so every conformant YAML parser (confirmed against both
+    // serde_yaml_ng and Python's PyYAML) splits `decimal(12,2)` into a
+    // `type: decimal(12` pair and a stray `2)` key. This is a pre-existing
+    // quoting gap in the design doc's example, unrelated to fix #2; it is
+    // flagged in task-3-report.md rather than silently worked around.
     let yaml = r#"
 version: 1
 kind: model
@@ -181,18 +192,18 @@ kind: model
 source:
   dialect: mysql
   fingerprint: sha256:0123456789abcdef
-  fingerprint_policy: warn
+  fingerprint_policy: warn        # ignore | warn | require
 
 output:
   dialect: postgres
-  mode: schema_and_data
-  inserts: auto
+  mode: schema_and_data            # schema_and_data | schema_only | data_only
+  inserts: auto                    # auto | insert | copy
   batch_size: 1000
 
 seed: 840219
 
 defaults:
-  inference: disabled
+  inference: disabled              # schema | disabled
 
 tables:
   customers:
@@ -200,9 +211,9 @@ tables:
     schema:
       name: customers
       columns:
-        - { name: id, source_type: bigint, family: big_integer, nullable: false, primary_key: true }
-        - { name: email, source_type: "varchar(255)", family: text, nullable: false, unique: true }
-        - { name: status, source_type: "varchar(32)", family: text, nullable: false }
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: email, type: varchar(255), nullable: false, unique: true }
+        - { name: status, type: varchar(32), nullable: false }
     columns:
       id:
         generator: { kind: sequence, start: 1 }
@@ -219,7 +230,7 @@ tables:
             - { value: closed, weight: 0.05 }
 
   orders:
-    seed: null
+    seed: null                      # random even though the model has a seed
     rows:
       kind: relation.children
       parent: customers
@@ -228,11 +239,11 @@ tables:
     schema:
       name: orders
       columns:
-        - { name: id, source_type: bigint, family: big_integer, nullable: false, primary_key: true }
-        - { name: customer_id, source_type: bigint, family: big_integer, nullable: false }
-        - { name: subtotal, source_type: "decimal(12,2)", family: decimal, nullable: false }
-        - { name: tax_total, source_type: "decimal(12,2)", family: decimal, nullable: false }
-        - { name: grand_total, source_type: "decimal(12,2)", family: decimal, nullable: false }
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+        - { name: subtotal, type: "decimal(12,2)", nullable: false }
+        - { name: tax_total, type: "decimal(12,2)", nullable: false }
+        - { name: grand_total, type: "decimal(12,2)", nullable: false }
     relationships:
       - name: orders_customer
         columns: [customer_id]
@@ -268,12 +279,12 @@ tables:
     schema:
       name: order_items
       columns:
-        - { name: id, source_type: bigint, family: big_integer, nullable: false, primary_key: true }
-        - { name: order_id, source_type: bigint, family: big_integer, nullable: false }
-        - { name: quantity, source_type: integer, family: integer, nullable: false }
-        - { name: unit_price, source_type: "decimal(12,2)", family: decimal, nullable: false }
-        - { name: tax_amount, source_type: "decimal(12,2)", family: decimal, nullable: false }
-        - { name: line_total, source_type: "decimal(12,2)", family: decimal, nullable: false }
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(12,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(12,2)", nullable: false }
+        - { name: line_total, type: "decimal(12,2)", nullable: false }
     relationships:
       - name: order_items_order
         columns: [order_id]
@@ -283,6 +294,7 @@ tables:
         generator: { kind: sequence, start: 1 }
       order_id:
         generator: { kind: relation.foreign_key, relationship: order_items_order }
+      # quantity, prices, tax, and line_total are owned by commerce.order_family.
 
 profiles:
   customers.status:
@@ -301,7 +313,7 @@ profiles:
         .unwrap();
 
     assert_eq!(model.seed, Some(840219));
-    assert_eq!(model.output.dialect, "postgres");
+    assert_eq!(model.output.dialect.as_deref(), Some("postgres"));
     assert_eq!(model.tables.len(), 3);
     assert_eq!(model.tables["orders"].seed, TableSeed::Random);
     assert_eq!(
@@ -319,11 +331,77 @@ profiles:
     );
     assert_eq!(model.profiles["customers.status"].distinct_estimate, 3);
 
+    // The `type:` shorthand columns resolved to the canonical fields.
+    let customers_schema = &model.tables["customers"].schema;
+    let id_column = customers_schema
+        .columns
+        .iter()
+        .find(|c| c.name == "id")
+        .unwrap();
+    assert_eq!(id_column.source_type, "bigint");
+    assert_eq!(
+        id_column.family,
+        sql_splitter::synthetic::SqlTypeFamily::BigInteger
+    );
+
     // Round-trip: re-serialize and re-parse without loss of the values we
-    // depend on downstream (the compiler task).
+    // depend on downstream (the compiler task). Re-serialization always
+    // emits the canonical source_type/family form, never the `type:`
+    // shorthand this test parsed.
     let rendered = serde_yaml_ng::to_string(&model).unwrap();
+    assert!(rendered.contains("source_type: bigint"));
     let reparsed: sql_splitter::synthetic::SyntheticModel =
         serde_yaml_ng::from_str(&rendered).unwrap();
     assert_eq!(reparsed.tables.len(), model.tables.len());
     assert_eq!(reparsed.tables["orders"].seed, TableSeed::Random);
+}
+
+#[test]
+fn rows_and_child_distribution_reject_unknown_fields() {
+    let yaml = "version: 1\nkind: model\ndefaults: { inference: disabled }\noutput: { dialect: mysql }\ntables:\n  t: { rows: { kind: fixed, count: 1, bogus: true }, schema: { name: t, columns: [] } }\n";
+    let err = SyntheticFile::parse_str(yaml).unwrap_err();
+    assert!(err.to_string().contains("unknown field"));
+
+    let yaml = "version: 1\nkind: model\ndefaults: { inference: disabled }\noutput: { dialect: mysql }\ntables:\n  t: { rows: { kind: relation.children, parent: p, count: 1, distribution: { kind: observed, mean: 1.0, min: 0.0, max: 1.0, bogus: true } }, schema: { name: t, columns: [] } }\n";
+    let err = SyntheticFile::parse_str(yaml).unwrap_err();
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
+fn minimal_model_without_output_or_defaults_parses() {
+    let yaml = "version: 1\nkind: model\ntables: {}\n";
+    let model = SyntheticFile::parse_str(yaml)
+        .unwrap()
+        .into_model()
+        .unwrap();
+
+    assert_eq!(
+        model.defaults.inference,
+        sql_splitter::synthetic::InferenceMode::Disabled
+    );
+    assert_eq!(model.output.dialect, None);
+}
+
+#[test]
+fn overrides_with_defaults_and_source_parses() {
+    let yaml = r#"
+version: 1
+kind: overrides
+
+source:
+  dialect: mysql
+
+defaults:
+  inference: schema
+"#;
+    let overrides = SyntheticFile::parse_str(yaml)
+        .unwrap()
+        .into_overrides()
+        .unwrap();
+
+    assert_eq!(overrides.source.unwrap().dialect, "mysql");
+    assert_eq!(
+        overrides.defaults.unwrap().inference,
+        sql_splitter::synthetic::InferenceMode::Schema
+    );
 }

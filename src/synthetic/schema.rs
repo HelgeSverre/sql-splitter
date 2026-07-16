@@ -38,27 +38,53 @@ impl SqlTypeFamily {
             ColumnType::Text => SqlTypeFamily::Text,
             ColumnType::Uuid => SqlTypeFamily::Uuid,
             ColumnType::DateTime => SqlTypeFamily::DateTime,
-            ColumnType::Other(_) => {
-                let lower = column.source_type.to_lowercase();
-                if lower.contains("json") {
-                    SqlTypeFamily::Json
-                } else if lower.contains("blob")
-                    || lower.contains("binary")
-                    || lower.contains("bytea")
-                {
-                    SqlTypeFamily::Bytes
-                } else {
-                    SqlTypeFamily::Other
-                }
-            }
+            ColumnType::Other(_) => Self::from_unclassified_source_type(&column.source_type),
+        }
+    }
+
+    /// Classify a raw SQL type name (e.g. `"bigint"`, `"varchar(255)"`)
+    /// using the same coarse mapping as [`Self::from_column`], for callers
+    /// that only have a type name and not a fully parsed [`Column`] — namely
+    /// the hand-authored `type:` shorthand accepted by [`PortableColumn`].
+    fn from_source_type(source_type: &str) -> Self {
+        use crate::schema::ColumnType;
+
+        match ColumnType::from_sql_type(source_type) {
+            ColumnType::Int => SqlTypeFamily::Integer,
+            ColumnType::BigInt => SqlTypeFamily::BigInteger,
+            ColumnType::Decimal => SqlTypeFamily::Decimal,
+            ColumnType::Bool => SqlTypeFamily::Boolean,
+            ColumnType::Text => SqlTypeFamily::Text,
+            ColumnType::Uuid => SqlTypeFamily::Uuid,
+            ColumnType::DateTime => SqlTypeFamily::DateTime,
+            ColumnType::Other(_) => Self::from_unclassified_source_type(source_type),
+        }
+    }
+
+    /// Shared JSON/blob sniffing for the `ColumnType::Other` fallback,
+    /// used by both [`Self::from_column`] and [`Self::from_source_type`].
+    fn from_unclassified_source_type(source_type: &str) -> Self {
+        let lower = source_type.to_lowercase();
+        if lower.contains("json") {
+            SqlTypeFamily::Json
+        } else if lower.contains("blob") || lower.contains("binary") || lower.contains("bytea") {
+            SqlTypeFamily::Bytes
+        } else {
+            SqlTypeFamily::Other
         }
     }
 }
 
 /// Portable column: everything a generation strategy needs to know about a
 /// single column, independent of the source SQL dialect.
+///
+/// Deserialization accepts a concise hand-authored shorthand: `type:` as an
+/// alias for `source_type`, with `family` derived automatically when it is
+/// absent (see [`PortableColumnInput`]). Serialization always emits the
+/// canonical `source_type` + `family` fields; `--emit-config` never writes
+/// the `type:` shorthand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "PortableColumnInput")]
 pub struct PortableColumn {
     pub name: String,
     pub source_type: String,
@@ -91,6 +117,54 @@ impl PortableColumn {
             generated: column.is_generated,
             identity: column.is_identity,
             collation: column.collation.clone(),
+        }
+    }
+}
+
+/// The input-only shape [`PortableColumn`] deserializes through: `type:` is
+/// accepted as an alias for `source_type`, and `family` is optional, derived
+/// from `source_type` via [`SqlTypeFamily::from_source_type`] when absent.
+/// `#[serde(deny_unknown_fields)]` lives here, not on `PortableColumn`
+/// itself, since this shadow struct is what actually parses YAML keys.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortableColumnInput {
+    name: String,
+    #[serde(alias = "type")]
+    source_type: String,
+    #[serde(default)]
+    family: Option<SqlTypeFamily>,
+    nullable: bool,
+    #[serde(default)]
+    primary_key: bool,
+    #[serde(default)]
+    unique: bool,
+    #[serde(default)]
+    default_sql: Option<String>,
+    #[serde(default)]
+    generated: bool,
+    #[serde(default)]
+    identity: bool,
+    #[serde(default)]
+    collation: Option<String>,
+}
+
+impl From<PortableColumnInput> for PortableColumn {
+    fn from(input: PortableColumnInput) -> Self {
+        let family = input
+            .family
+            .unwrap_or_else(|| SqlTypeFamily::from_source_type(&input.source_type));
+        Self {
+            name: input.name,
+            source_type: input.source_type,
+            family,
+            nullable: input.nullable,
+            primary_key: input.primary_key,
+            unique: input.unique,
+            default_sql: input.default_sql,
+            generated: input.generated,
+            identity: input.identity,
+            collation: input.collation,
         }
     }
 }
@@ -254,5 +328,54 @@ impl PortableSchema {
             dialect: dialect.to_string(),
             tables,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Design decision D1: hand-authored column entries may use a concise
+    /// `type:` shorthand for `source_type`, with `family` derived
+    /// automatically. `--emit-config` never emits this shorthand; see
+    /// `portable_column_canonical_form_round_trips` for the emitted shape.
+    #[test]
+    fn portable_column_accepts_type_shorthand_and_derives_family() {
+        let yaml = "{ name: id, type: bigint, nullable: false, primary_key: true }";
+        let column: PortableColumn = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(column.source_type, "bigint");
+        assert_eq!(column.family, SqlTypeFamily::BigInteger);
+        assert!(column.primary_key);
+    }
+
+    #[test]
+    fn portable_column_canonical_form_round_trips() {
+        let column = PortableColumn {
+            name: "id".to_string(),
+            source_type: "bigint".to_string(),
+            family: SqlTypeFamily::BigInteger,
+            nullable: false,
+            primary_key: true,
+            unique: false,
+            default_sql: None,
+            generated: false,
+            identity: false,
+            collation: None,
+        };
+
+        let rendered = serde_yaml_ng::to_string(&column).unwrap();
+        assert!(rendered.contains("source_type: bigint"));
+        assert!(rendered.contains("family: big_integer"));
+        assert!(!rendered.contains("\ntype:"));
+
+        let reparsed: PortableColumn = serde_yaml_ng::from_str(&rendered).unwrap();
+        assert_eq!(reparsed, column);
+    }
+
+    #[test]
+    fn portable_column_rejects_unknown_fields_even_with_shorthand() {
+        let yaml = "{ name: id, type: bigint, nullable: false, bogus: true }";
+        let err = serde_yaml_ng::from_str::<PortableColumn>(yaml).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
     }
 }

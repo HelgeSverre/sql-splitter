@@ -106,9 +106,11 @@ pub struct SyntheticModel {
     pub imports: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceModel>,
+    #[serde(default)]
     pub defaults: ModelDefaults,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
     pub output: OutputModel,
     pub tables: BTreeMap<String, TableModel>,
     #[serde(default)]
@@ -137,26 +139,38 @@ pub enum FingerprintPolicy {
 }
 
 /// Inherited table/column behavior defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Both `output` and `defaults` are spec-optional on a `kind: model`
+/// document (see the "Top-level fields" table); a model that omits
+/// `defaults` gets [`InferenceMode::Disabled`], matching what
+/// `--emit-config` always writes explicitly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelDefaults {
+    #[serde(default)]
     pub inference: InferenceMode,
 }
 
 /// Whether columns without an explicit owner may fall back to schema-based
 /// heuristics, or must always be explicit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InferenceMode {
     Schema,
+    #[default]
     Disabled,
 }
 
 /// Dialect and renderer defaults (`output:` in the complete model example).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// A model that omits `output` entirely preserves the source/base dialect
+/// (`dialect: None`); see [`ModelDefaults`] for why this field is
+/// `#[serde(default)]` on [`SyntheticModel`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputModel {
-    pub dialect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<OutputMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,7 +264,7 @@ where
 
 /// How many rows a table produces, and how those rows are derived.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RowsModel {
     Fixed {
         count: u64,
@@ -274,7 +288,7 @@ pub enum RowsModel {
 /// The fan-out distribution used to allocate a relationship child's rows
 /// across its parents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChildDistribution {
     Observed { mean: f64, min: f64, max: f64 },
     Fixed { mean: f64, min: f64, max: f64 },

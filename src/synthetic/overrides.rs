@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::model::{
-    ChildDistribution, GeneratorConfig, InsertMode, ModifierConfig, OutputMode, PlannerConfig,
-    RelationshipModel,
+    ChildDistribution, GeneratorConfig, InsertMode, ModelDefaults, ModifierConfig, OutputMode,
+    PlannerConfig, RelationshipModel, SourceModel,
 };
 
 /// Marker type accepting only the literal `kind: overrides` tag.
@@ -30,6 +30,10 @@ pub struct SyntheticOverrides {
     pub kind: OverridesKind,
     #[serde(default)]
     pub imports: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<ModelDefaults>,
     #[serde(
         default,
         deserialize_with = "deserialize_root_seed_override",
