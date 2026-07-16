@@ -91,7 +91,11 @@ fn dir_snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     snapshot
 }
 
-fn split_with(input: &Path, out_dir: PathBuf, profile: IoStrategy) -> sql_splitter::splitter::Stats {
+fn split_with(
+    input: &Path,
+    out_dir: PathBuf,
+    profile: IoStrategy,
+) -> sql_splitter::splitter::Stats {
     Splitter::new(input.to_path_buf(), out_dir)
         .with_io_profile(profile)
         .split()
@@ -113,10 +117,7 @@ fn test_all_profiles_produce_byte_identical_output() {
     assert!(reference.tables_found == 24);
     assert!(!reference_snapshot.is_empty());
 
-    for (label, profile) in [
-        ("hdd", IoStrategy::Hdd),
-        ("cheap", IoStrategy::Cheap),
-    ] {
+    for (label, profile) in [("hdd", IoStrategy::Hdd), ("cheap", IoStrategy::Cheap)] {
         let out = temp.path().join(label);
         split_with(&input, out.clone(), profile);
         assert_eq!(

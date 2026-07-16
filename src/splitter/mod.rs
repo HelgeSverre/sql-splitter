@@ -1,5 +1,6 @@
 mod epoch;
 
+#[allow(unused_imports)] // Public API re-export used by integration tests
 pub use epoch::advance_epoch_boundary;
 use epoch::EpochDriver;
 
