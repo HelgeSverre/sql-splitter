@@ -153,20 +153,20 @@ where
                 let header = String::from_utf8_lossy(&stmt);
                 copy_columns = parse_copy_columns(&header);
             }
-            StatementType::Unknown if dialect == SqlDialect::Postgres => {
-                if is_copy_data_block(&stmt) {
-                    let rows = parse_postgres_copy_rows_with(
-                        &stmt,
-                        table_schema,
-                        copy_columns.clone(),
-                        extraction,
-                    )?;
-                    for row in rows {
-                        match f(UnifiedRow::Copy(row))? {
-                            RowFlow::Continue => {}
-                            RowFlow::SkipStatement => break,
-                            RowFlow::Stop => return Ok(()),
-                        }
+            StatementType::Unknown
+                if dialect == SqlDialect::Postgres && is_copy_data_block(&stmt) =>
+            {
+                let rows = parse_postgres_copy_rows_with(
+                    &stmt,
+                    table_schema,
+                    copy_columns.clone(),
+                    extraction,
+                )?;
+                for row in rows {
+                    match f(UnifiedRow::Copy(row))? {
+                        RowFlow::Continue => {}
+                        RowFlow::SkipStatement => break,
+                        RowFlow::Stop => return Ok(()),
                     }
                 }
             }

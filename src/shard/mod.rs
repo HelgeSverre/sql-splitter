@@ -18,9 +18,9 @@ use crate::parser::mysql_insert::{PkSet, PkValue, RowExtraction};
 use crate::parser::{Parser, SqlDialect};
 use crate::schema::{SchemaGraph, TableId, TableSchema};
 use crate::transform_common::{
-    build_schema_graph, for_each_data_row, quote_ident, split_to_temp_tables,
-    write_dialect_footer, write_dialect_header, write_insert_chunk, RowFlow, RowFormat,
-    RowSpillReader, RowSpillWriter, UnifiedRow,
+    build_schema_graph, for_each_data_row, quote_ident, split_to_temp_tables, write_dialect_footer,
+    write_dialect_header, write_insert_chunk, RowFlow, RowFormat, RowSpillReader, RowSpillWriter,
+    UnifiedRow,
 };
 use ahash::{AHashMap, AHashSet};
 use std::fs::{self, File};
@@ -814,4 +814,3 @@ fn write_header<W: Write>(
 
     Ok(())
 }
-

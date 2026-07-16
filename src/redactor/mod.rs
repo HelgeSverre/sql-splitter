@@ -93,15 +93,9 @@ impl Redactor {
         })
     }
 
-    /// Open the input file, transparently decompressing .gz/.bz2/.xz/.zst and
-    /// zip archives (see `crate::splitter::open_input`).
-    fn open_input(input: &Path) -> anyhow::Result<Box<dyn std::io::Read>> {
-        crate::splitter::open_input(input)
-    }
-
     /// Build schema from input file
     fn build_schema(input: &Path, dialect: SqlDialect) -> anyhow::Result<Schema> {
-        let reader = Self::open_input(input)?;
+        let reader = crate::splitter::open_input(input)?;
         let mut parser = Parser::with_dialect(reader, 64 * 1024, dialect);
         let mut builder = SchemaBuilder::new();
 
@@ -124,11 +118,12 @@ impl Redactor {
             return self.dry_run();
         }
 
-        // Open output
+        // Open output (buffered in both cases; bare stdout would issue a
+        // write syscall per statement when piped)
         let output: Box<dyn Write> = if let Some(ref path) = self.config.output {
             Box::new(BufWriter::new(File::create(path)?))
         } else {
-            Box::new(std::io::stdout())
+            Box::new(BufWriter::new(std::io::stdout()))
         };
 
         self.process_file(output)?;
@@ -138,7 +133,7 @@ impl Redactor {
 
     /// Dry run - analyze without writing
     fn dry_run(&mut self) -> anyhow::Result<RedactStats> {
-        let reader = Self::open_input(&self.config.input)?;
+        let reader = crate::splitter::open_input(&self.config.input)?;
         let mut parser = Parser::with_dialect(reader, 64 * 1024, self.config.dialect);
 
         let mut tables_seen: AHashMap<String, u64> = AHashMap::new();
@@ -176,7 +171,7 @@ impl Redactor {
 
     /// Process the file and write redacted output
     fn process_file(&mut self, mut output: Box<dyn Write>) -> anyhow::Result<()> {
-        let reader = Self::open_input(&self.config.input)?;
+        let reader = crate::splitter::open_input(&self.config.input)?;
         let mut parser = Parser::with_dialect(reader, 64 * 1024, self.config.dialect);
 
         while let Some(stmt) = parser.read_statement()? {
@@ -232,6 +227,34 @@ impl Redactor {
         Ok(())
     }
 
+    /// Record per-run and per-table counters after a statement was redacted
+    fn record_stats(&mut self, table_name: &str, rows_redacted: u64, cols_redacted: u64) {
+        if rows_redacted == 0 {
+            return;
+        }
+
+        self.stats.rows_redacted += rows_redacted;
+        self.stats.columns_redacted += cols_redacted;
+
+        // Find or create table stats entry
+        if let Some(ts) = self
+            .stats
+            .table_stats
+            .iter_mut()
+            .find(|t| t.name == table_name)
+        {
+            ts.rows_processed += rows_redacted;
+            ts.columns_redacted += cols_redacted;
+        } else {
+            self.stats.tables_processed += 1;
+            self.stats.table_stats.push(TableRedactStats {
+                name: table_name.to_string(),
+                rows_processed: rows_redacted,
+                columns_redacted: cols_redacted,
+            });
+        }
+    }
+
     /// Redact an INSERT statement
     fn redact_insert(&mut self, stmt: &[u8], table_name: &str) -> anyhow::Result<Vec<u8>> {
         // Skip if table should be excluded
@@ -261,29 +284,7 @@ impl Redactor {
             self.rewriter
                 .rewrite_insert(stmt, table_name, table, &strategies)?;
 
-        // Update stats
-        if rows_redacted > 0 {
-            self.stats.rows_redacted += rows_redacted;
-            self.stats.columns_redacted += cols_redacted;
-
-            // Find or create table stats entry
-            if let Some(ts) = self
-                .stats
-                .table_stats
-                .iter_mut()
-                .find(|t| t.name == table_name)
-            {
-                ts.rows_processed += rows_redacted;
-                ts.columns_redacted += cols_redacted;
-            } else {
-                self.stats.tables_processed += 1;
-                self.stats.table_stats.push(TableRedactStats {
-                    name: table_name.to_string(),
-                    rows_processed: rows_redacted,
-                    columns_redacted: cols_redacted,
-                });
-            }
-        }
+        self.record_stats(table_name, rows_redacted, cols_redacted);
 
         Ok(redacted)
     }
@@ -317,29 +318,7 @@ impl Redactor {
             self.rewriter
                 .rewrite_copy(stmt, table_name, table, &strategies)?;
 
-        // Update stats
-        if rows_redacted > 0 {
-            self.stats.rows_redacted += rows_redacted;
-            self.stats.columns_redacted += cols_redacted;
-
-            // Find or create table stats entry
-            if let Some(ts) = self
-                .stats
-                .table_stats
-                .iter_mut()
-                .find(|t| t.name == table_name)
-            {
-                ts.rows_processed += rows_redacted;
-                ts.columns_redacted += cols_redacted;
-            } else {
-                self.stats.tables_processed += 1;
-                self.stats.table_stats.push(TableRedactStats {
-                    name: table_name.to_string(),
-                    rows_processed: rows_redacted,
-                    columns_redacted: cols_redacted,
-                });
-            }
-        }
+        self.record_stats(table_name, rows_redacted, cols_redacted);
 
         Ok(redacted)
     }
@@ -387,28 +366,7 @@ impl Redactor {
             self.rewriter
                 .rewrite_copy_data(data_block, table, &strategies, &pending.columns)?;
 
-        // Update stats
-        if rows_redacted > 0 {
-            self.stats.rows_redacted += rows_redacted;
-            self.stats.columns_redacted += cols_redacted;
-
-            if let Some(ts) = self
-                .stats
-                .table_stats
-                .iter_mut()
-                .find(|t| t.name == *table_name)
-            {
-                ts.rows_processed += rows_redacted;
-                ts.columns_redacted += cols_redacted;
-            } else {
-                self.stats.tables_processed += 1;
-                self.stats.table_stats.push(TableRedactStats {
-                    name: table_name.to_string(),
-                    rows_processed: rows_redacted,
-                    columns_redacted: cols_redacted,
-                });
-            }
-        }
+        self.record_stats(&pending.table_name, rows_redacted, cols_redacted);
 
         // Combine header + redacted data
         // The header typically doesn't end with newline, so add one

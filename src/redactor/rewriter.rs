@@ -4,7 +4,7 @@
 //! the redacted values back to SQL with proper dialect-aware escaping.
 
 use crate::parser::mysql_insert::{InsertParser, ParsedValue, RowExtraction};
-use crate::parser::postgres_copy::{parse_copy_columns, CopyParser};
+use crate::parser::postgres_copy::{decode_copy_escapes, parse_copy_columns, CopyParser};
 use crate::parser::SqlDialect;
 use crate::redactor::strategy::{
     ConstantStrategy, FakeStrategy, HashStrategy, MaskStrategy, NullStrategy, RedactValue,
@@ -109,6 +109,9 @@ impl ValueRewriter {
     }
 
     /// Rewrite a COPY statement with redacted values (PostgreSQL)
+    ///
+    /// Splits the statement into header line and data block, then delegates
+    /// the row redaction loop to [`Self::rewrite_copy_data`].
     pub fn rewrite_copy(
         &mut self,
         stmt: &[u8],
@@ -119,68 +122,25 @@ impl ValueRewriter {
         // COPY statements include the header and data block
         // Format: COPY table (cols) FROM stdin;\ndata\n\.\n
 
-        let stmt_str = String::from_utf8_lossy(stmt);
-
         // Find the header line (ends with "FROM stdin;" or similar)
-        let header_end = stmt_str
-            .find('\n')
+        let header_end = stmt
+            .iter()
+            .position(|&b| b == b'\n')
             .ok_or_else(|| anyhow::anyhow!("Invalid COPY statement: no newline"))?;
-        let header = &stmt_str[..header_end];
+        let header = &stmt[..header_end];
         let data_block = &stmt[header_end + 1..];
 
         // Parse column list from header
-        let columns = parse_copy_columns(header);
+        let columns = parse_copy_columns(&String::from_utf8_lossy(header));
 
-        // Parse data rows
-        let mut parser = CopyParser::new(data_block)
-            .with_schema(table)
-            .with_column_order(columns.clone())
-            .with_extraction(RowExtraction::ValuesOnly);
-        let rows = parser.parse_rows()?;
+        let (redacted_data, rows_redacted, columns_redacted) =
+            self.rewrite_copy_data(data_block, table, strategies, &columns)?;
 
-        if rows.is_empty() {
-            return Ok((stmt.to_vec(), 0, 0));
-        }
-
-        // Build result: header + redacted data + terminator
-        let mut result = Vec::with_capacity(stmt.len());
-        result.extend_from_slice(header.as_bytes());
+        // Build result: header + redacted data (including terminator)
+        let mut result = Vec::with_capacity(header.len() + 1 + redacted_data.len());
+        result.extend_from_slice(header);
         result.push(b'\n');
-
-        let mut rows_redacted = 0u64;
-        let mut columns_redacted = 0u64;
-
-        for row in &rows {
-            let mut row_had_redaction = false;
-            let mut first = true;
-
-            // Parse the raw values from the row
-            let values = self.parse_copy_row_values(&row.raw);
-
-            for (col_idx, value) in values.iter().enumerate() {
-                if !first {
-                    result.push(b'\t');
-                }
-                first = false;
-
-                let strategy = strategies.get(col_idx).unwrap_or(&StrategyKind::Skip);
-                let (redacted, was_redacted) = self.redact_copy_value(value, strategy);
-                result.extend_from_slice(&redacted);
-
-                if was_redacted {
-                    columns_redacted += 1;
-                    row_had_redaction = true;
-                }
-            }
-
-            result.push(b'\n');
-            if row_had_redaction {
-                rows_redacted += 1;
-            }
-        }
-
-        // Add terminator
-        result.extend_from_slice(b"\\.\n");
+        result.extend_from_slice(&redacted_data);
 
         Ok((result, rows_redacted, columns_redacted))
     }
@@ -291,8 +251,9 @@ impl ValueRewriter {
         let redact_value = match value {
             CopyValueRef::Null => RedactValue::Null,
             CopyValueRef::Text(t) => {
-                // Decode escape sequences first
-                let decoded = self.decode_copy_escapes(t);
+                // Decode escape sequences first (canonical COPY decoder lives
+                // in the parser module)
+                let decoded = decode_copy_escapes(t);
                 RedactValue::String(String::from_utf8_lossy(&decoded).into_owned())
             }
         };
@@ -309,37 +270,6 @@ impl ValueRewriter {
         };
 
         (bytes, true)
-    }
-
-    /// Decode PostgreSQL COPY escape sequences
-    fn decode_copy_escapes(&self, value: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(value.len());
-        let mut i = 0;
-
-        while i < value.len() {
-            if value[i] == b'\\' && i + 1 < value.len() {
-                let next = value[i + 1];
-                let decoded = match next {
-                    b'n' => b'\n',
-                    b'r' => b'\r',
-                    b't' => b'\t',
-                    b'\\' => b'\\',
-                    _ => {
-                        result.push(b'\\');
-                        result.push(next);
-                        i += 2;
-                        continue;
-                    }
-                };
-                result.push(decoded);
-                i += 2;
-            } else {
-                result.push(value[i]);
-                i += 1;
-            }
-        }
-
-        result
     }
 
     /// Encode string for COPY format (escape special characters)
@@ -385,11 +315,7 @@ impl ValueRewriter {
 
     /// Quote an identifier based on dialect
     fn quote_identifier(&self, name: &str) -> String {
-        match self.dialect {
-            SqlDialect::MySql => format!("`{}`", name),
-            SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name),
-            SqlDialect::Mssql => format!("[{}]", name),
-        }
+        crate::transform_common::quote_ident(self.dialect, name)
     }
 
     /// Redact a parsed value and format it for SQL output
