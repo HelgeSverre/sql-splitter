@@ -456,6 +456,54 @@ fn unique_modifier_rejects_widen_for_families_without_a_mutation_strategy() {
 }
 
 #[test]
+fn unique_modifier_errors_when_the_max_tracked_budget_is_exhausted() {
+    // Memory must not grow proportionally with total input rows: `unique`
+    // remembers claimed values only up to an explicit `max_tracked` budget,
+    // never an unbounded set. A tiny budget of 3 lets this test trip that
+    // budget deterministically without emitting millions of rows.
+    let column = portable_column("code", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![column.clone()]);
+    let config =
+        modifier_yaml("{ kind: unique, max_attempts: 0, max_tracked: 3, on_exhaustion: error }");
+    let mut modifier = compile_modifier("unique", config, &column, &table, 1).unwrap();
+    let empty = EmptyRow;
+    let row = RowContext::new(0, &empty);
+
+    // Three distinct values exactly fill the tracking budget.
+    for text in ["a", "b", "c"] {
+        let mut value = GeneratedValue::Text(text.to_string());
+        modifier.apply(&row, &mut value).unwrap();
+    }
+    // A fourth, never-before-seen value has no room left to be tracked, even
+    // though it is not itself a duplicate.
+    let mut value = GeneratedValue::Text("d".to_string());
+    let err = modifier.apply(&row, &mut value).unwrap_err();
+    assert!(matches!(err, GenerateError::Exhausted(_)));
+    assert!(err.to_string().contains("max_tracked"));
+}
+
+#[test]
+fn unique_modifier_accepts_the_value_on_warn_when_the_max_tracked_budget_is_exhausted() {
+    let column = portable_column("code", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![column.clone()]);
+    let config =
+        modifier_yaml("{ kind: unique, max_attempts: 0, max_tracked: 3, on_exhaustion: warn }");
+    let mut modifier = compile_modifier("unique", config, &column, &table, 1).unwrap();
+    let empty = EmptyRow;
+    let row = RowContext::new(0, &empty);
+
+    for text in ["a", "b", "c"] {
+        let mut value = GeneratedValue::Text(text.to_string());
+        modifier.apply(&row, &mut value).unwrap();
+    }
+    // The budget is exhausted, but `warn` passes the value through instead
+    // of erroring.
+    let mut value = GeneratedValue::Text("d".to_string());
+    modifier.apply(&row, &mut value).unwrap();
+    assert_eq!(value, GeneratedValue::Text("d".to_string()));
+}
+
+#[test]
 fn modifiers_apply_in_the_configured_order() {
     let column = portable_column("code", SqlTypeFamily::Text, true);
     let table = portable_table("t", vec![column.clone()]);
@@ -543,6 +591,46 @@ fn weighted_choice_rejects_a_negative_weight() {
     )
     .unwrap_err();
     assert!(err.contains("GEN-WEIGHTED-CHOICE-INVALID-WEIGHT"));
+}
+
+#[test]
+fn weighted_choice_rejects_a_nan_weight() {
+    let err = generate_three(
+        "weighted_choice",
+        yaml("{ kind: weighted_choice, choices: [{ value: a, weight: .nan }, { value: b, weight: 1 }] }"),
+        SqlTypeFamily::Text,
+        1,
+    )
+    .unwrap_err();
+    assert!(err.contains("GEN-WEIGHTED-CHOICE-INVALID-WEIGHT"));
+}
+
+#[test]
+fn weighted_choice_rejects_an_infinite_weight() {
+    let err = generate_three(
+        "weighted_choice",
+        yaml("{ kind: weighted_choice, choices: [{ value: a, weight: .inf }, { value: b, weight: 1 }] }"),
+        SqlTypeFamily::Text,
+        1,
+    )
+    .unwrap_err();
+    assert!(err.contains("GEN-WEIGHTED-CHOICE-INVALID-WEIGHT"));
+}
+
+#[test]
+fn null_rate_modifier_requires_a_rate_argument() {
+    let column = portable_column("note", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![column.clone()]);
+    let err = compile_modifier(
+        "null_rate",
+        modifier_yaml("{ kind: null_rate }"),
+        &column,
+        &table,
+        1,
+    )
+    .err()
+    .expect("null_rate with no rate must fail to compile, not silently no-op");
+    assert!(err.contains("GEN-NULL-RATE-MISSING-RATE"));
 }
 
 #[test]

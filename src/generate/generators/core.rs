@@ -1429,7 +1429,14 @@ impl ModifierFactory for NullRateFactory {
         context: &CompileContext<'_>,
     ) -> Result<Box<dyn CompiledModifier>, DiagnosticBag> {
         let mut bag = DiagnosticBag::default();
-        let rate = config.args.get("rate").and_then(parse_f64).unwrap_or(0.0);
+        let Some(rate) = config.args.get("rate").and_then(parse_f64) else {
+            bag.error(
+                "GEN-NULL-RATE-MISSING-RATE",
+                context.path(),
+                "`null_rate` requires a numeric `rate`",
+            );
+            return Err(bag);
+        };
         if !(0.0..=1.0).contains(&rate) {
             bag.error(
                 "GEN-NULL-RATE-RANGE",
@@ -1503,15 +1510,32 @@ fn mutate_candidate(value: &GeneratedValue, attempt: i128) -> Option<GeneratedVa
     }
 }
 
+/// Default cap on how many distinct values the `unique` modifier will
+/// remember, when `max_tracked` is not configured. Global uniqueness
+/// genuinely requires remembering every value claimed so far — there is no
+/// way to check "have I seen this before" without a history — so instead of
+/// letting that history grow without bound (which would violate the
+/// generator's memory budget on a large table), the budget is made explicit
+/// and finite. A column that needs more distinct values than this should use
+/// an inherently-unique generator (`sequence`, `uuid`, `identifier.*`)
+/// instead of leaning on `unique` to deduplicate a huge value space.
+const DEFAULT_UNIQUE_MAX_TRACKED: usize = 1_000_000;
+
 /// The `unique` modifier: ensures every emitted value is distinct from every
-/// value already seen (a bounded set), retrying up to `max_attempts` times by
-/// mutating the candidate before resolving via `on_exhaustion`.
+/// value already seen, up to an explicit tracking budget (`max_tracked`) —
+/// the full history of claimed values is kept, up to that cap, not an
+/// unbounded set. Within that budget, a collision retries up to
+/// `max_attempts` times by mutating the candidate before resolving via
+/// `on_exhaustion`; a candidate that would grow the tracked history past
+/// `max_tracked` resolves via `on_exhaustion` too, since there is no room
+/// left to remember it.
 pub struct UniqueFactory;
 
 static UNIQUE_DESCRIPTOR: ModifierDescriptor = ModifierDescriptor {
     kind: "unique",
     aliases: &[],
-    summary: "Ensures every emitted value is distinct from every value already seen.",
+    summary: "Ensures every emitted value is distinct from every value already seen, \
+              within an explicit tracking budget (max_tracked).",
     arguments: &[
         ArgumentSpec {
             name: "max_attempts",
@@ -1523,6 +1547,12 @@ static UNIQUE_DESCRIPTOR: ModifierDescriptor = ModifierDescriptor {
             required: false,
             summary: "`error` | `warn` | `widen`; defaults to `error`.",
         },
+        ArgumentSpec {
+            name: "max_tracked",
+            required: false,
+            summary: "Maximum number of distinct values remembered; defaults to 1,000,000. \
+                      Reaching this budget resolves via on_exhaustion, the same as a collision.",
+        },
     ],
     accepts: ALL_FAMILIES,
     writes: ColumnScope::OwnColumn,
@@ -1532,10 +1562,57 @@ static UNIQUE_DESCRIPTOR: ModifierDescriptor = ModifierDescriptor {
     verification: Verification::Supported,
 };
 
+/// The outcome of trying to claim a candidate value for uniqueness tracking.
+enum Claim {
+    /// Not seen before, and there was room left in the tracking budget.
+    Tracked,
+    /// Already claimed by an earlier row.
+    Collision,
+    /// Not seen before, but `max_tracked` distinct values are already
+    /// tracked — there is no room to remember a new one.
+    BudgetExceeded,
+}
+
 struct UniqueState {
     seen: HashSet<String>,
     max_attempts: usize,
+    max_tracked: usize,
     on_exhaustion: OnExhaustion,
+}
+
+impl UniqueState {
+    /// Try to claim `key` against the tracking budget.
+    fn claim(&mut self, key: String) -> Claim {
+        if self.seen.contains(&key) {
+            return Claim::Collision;
+        }
+        if self.seen.len() >= self.max_tracked {
+            return Claim::BudgetExceeded;
+        }
+        self.seen.insert(key);
+        Claim::Tracked
+    }
+
+    /// Resolve a candidate that could not be claimed (a collision that
+    /// survived every mutation attempt, or a budget exhaustion), per
+    /// `on_exhaustion`.
+    fn resolve(
+        &self,
+        value: &mut GeneratedValue,
+        fallback: GeneratedValue,
+        reason: &str,
+    ) -> Result<(), GenerateError> {
+        match self.on_exhaustion {
+            OnExhaustion::Error => Err(GenerateError::Exhausted(format!(
+                "`unique` {reason}; consider an inherently-unique generator \
+                 (`sequence`, `uuid`, `identifier.*`) for large unique columns"
+            ))),
+            OnExhaustion::Warn | OnExhaustion::Widen => {
+                *value = fallback;
+                Ok(())
+            }
+        }
+    }
 }
 
 impl CompiledModifier for UniqueState {
@@ -1544,8 +1621,21 @@ impl CompiledModifier for UniqueState {
         _context: &RowContext<'_>,
         value: &mut GeneratedValue,
     ) -> Result<(), GenerateError> {
-        if self.seen.insert(value_key(value)) {
-            return Ok(());
+        match self.claim(value_key(value)) {
+            Claim::Tracked => return Ok(()),
+            Claim::BudgetExceeded => {
+                let fallback = value.clone();
+                return self.resolve(
+                    value,
+                    fallback,
+                    &format!(
+                        "could not track a new value: the max_tracked budget of {} distinct \
+                         values has been reached",
+                        self.max_tracked
+                    ),
+                );
+            }
+            Claim::Collision => {}
         }
 
         let attempts = match self.on_exhaustion {
@@ -1558,23 +1648,33 @@ impl CompiledModifier for UniqueState {
             let Some(candidate) = mutate_candidate(value, attempt as i128) else {
                 break;
             };
-            let key = value_key(&candidate);
-            if self.seen.insert(key) {
-                *value = candidate;
-                return Ok(());
+            match self.claim(value_key(&candidate)) {
+                Claim::Tracked => {
+                    *value = candidate;
+                    return Ok(());
+                }
+                Claim::BudgetExceeded => {
+                    return self.resolve(
+                        value,
+                        candidate,
+                        &format!(
+                            "could not track a new value: the max_tracked budget of {} \
+                             distinct values has been reached",
+                            self.max_tracked
+                        ),
+                    );
+                }
+                Claim::Collision => {
+                    last_candidate = candidate;
+                }
             }
-            last_candidate = candidate;
         }
 
-        match self.on_exhaustion {
-            OnExhaustion::Error => Err(GenerateError::Exhausted(format!(
-                "`unique` could not produce a distinct value within {attempts} attempts"
-            ))),
-            OnExhaustion::Warn | OnExhaustion::Widen => {
-                *value = last_candidate;
-                Ok(())
-            }
-        }
+        self.resolve(
+            value,
+            last_candidate,
+            &format!("could not produce a distinct value within {attempts} attempts"),
+        )
     }
 }
 
@@ -1594,6 +1694,11 @@ impl ModifierFactory for UniqueFactory {
             .get("max_attempts")
             .and_then(parse_usize)
             .unwrap_or(10);
+        let max_tracked = config
+            .args
+            .get("max_tracked")
+            .and_then(parse_usize)
+            .unwrap_or(DEFAULT_UNIQUE_MAX_TRACKED);
         let on_exhaustion = match config.args.get("on_exhaustion").and_then(|v| v.as_str()) {
             None | Some("error") => OnExhaustion::Error,
             Some("warn") => OnExhaustion::Warn,
@@ -1625,6 +1730,7 @@ impl ModifierFactory for UniqueFactory {
         bag.into_result(Box::new(UniqueState {
             seen: HashSet::new(),
             max_attempts,
+            max_tracked,
             on_exhaustion,
         }) as Box<dyn CompiledModifier>)
     }
