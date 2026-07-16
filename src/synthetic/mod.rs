@@ -11,11 +11,13 @@
 //! [`crate::schema::Schema`] with [`schema::PortableSchema::from_runtime`].
 
 pub mod config;
+pub mod merge;
 pub mod model;
 pub mod overrides;
 pub mod schema;
 
 pub use config::{merge_yaml, ConfigLoader};
+pub use merge::ModelMerger;
 pub use model::{
     ChildDistribution, ColumnRule, FingerprintPolicy, GeneratorConfig, InferenceMode, InsertMode,
     ModelDefaults, ModelKind, ModifierConfig, OutputMode, OutputModel, PlannerConfig,

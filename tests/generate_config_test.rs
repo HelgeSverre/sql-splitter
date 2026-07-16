@@ -5,7 +5,8 @@
 use std::fs;
 
 use sql_splitter::synthetic::{
-    ConfigLoader, RootSeedOverride, SyntheticFile, SyntheticOverrides, TableSeed, TableSeedOverride,
+    ConfigLoader, ModelMerger, RootSeedOverride, SyntheticFile, SyntheticModel, SyntheticOverrides,
+    TableSeed, TableSeedOverride,
 };
 
 #[test]
@@ -616,4 +617,316 @@ fn imports_writing_disjoint_nested_keys_under_shared_map_paths_merge_cleanly() {
     let overrides = loaded.into_overrides().unwrap();
     assert_eq!(overrides.tables["users"].seed, TableSeedOverride::Fixed(1));
     assert_eq!(overrides.tables["orders"].seed, TableSeedOverride::Fixed(2));
+}
+
+// --- ModelMerger: merging a base model with a typed overrides patch ---
+//
+// `PortableTableOverride` (src/synthetic/overrides.rs) carries only `name`
+// and `create_statement` — there is no column-level type/nullability/key
+// field to override at all, so the type system alone already forecloses
+// column-structural overrides. The one table-level structural fact these
+// tests can assert-and-reject is `schema.name`: an override may assert it
+// matches the base, but not silently rename the table.
+
+fn base_users_model(email_type: &str) -> SyntheticModel {
+    let yaml = format!(
+        r#"
+version: 1
+kind: model
+tables:
+  users:
+    rows: {{ kind: fixed, count: 10 }}
+    schema:
+      name: users
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: email, type: "{email_type}", nullable: false }}
+    columns:
+      email:
+        generator: {{ kind: static, value: "a@example.com" }}
+"#
+    );
+    SyntheticFile::parse_str(&yaml)
+        .unwrap()
+        .into_model()
+        .unwrap()
+}
+
+fn overrides_from_yaml(yaml: &str) -> SyntheticOverrides {
+    SyntheticFile::parse_str(yaml)
+        .unwrap()
+        .into_overrides()
+        .unwrap()
+}
+
+#[test]
+fn overrides_change_rules_but_not_source_schema() {
+    let base = base_users_model("varchar(255)");
+
+    let rules = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  users:
+    columns:
+      email:
+        generator: { kind: internet.email }
+"#,
+    );
+    let merged = ModelMerger::merge(base.clone(), rules).unwrap();
+    assert_eq!(
+        merged.tables["users"].columns["email"]
+            .generator
+            .as_ref()
+            .unwrap()
+            .kind,
+        "internet.email"
+    );
+
+    let structural = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  users:
+    schema: { name: people }
+"#,
+    );
+    let err = ModelMerger::merge(base, structural).unwrap_err();
+    assert!(err.to_string().contains("GEN-SCHEMA-MISMATCH"));
+}
+
+#[test]
+fn overrides_referencing_missing_table_report_diagnostic() {
+    let base = base_users_model("varchar(255)");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  ghosts:
+    seed: 1
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-MISSING-TABLE"));
+    assert!(rendered.contains("tables.ghosts"));
+}
+
+#[test]
+fn overrides_referencing_missing_column_report_diagnostic() {
+    let base = base_users_model("varchar(255)");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  users:
+    columns:
+      bogus:
+        semantic: name
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-MISSING-COLUMN"));
+    assert!(rendered.contains("tables.users.columns.bogus"));
+}
+
+#[test]
+fn merge_gathers_independent_diagnostics_rather_than_stopping_at_the_first() {
+    let base = base_users_model("varchar(255)");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  users:
+    columns:
+      bogus:
+        semantic: name
+  ghosts:
+    seed: 1
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-MISSING-COLUMN"));
+    assert!(rendered.contains("GEN-MISSING-TABLE"));
+}
+
+fn base_orders_model() -> SyntheticModel {
+    let yaml = r#"
+version: 1
+kind: model
+tables:
+  customers:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+  orders:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+    relationships:
+      - name: orders_customer
+        columns: [customer_id]
+        references: { table: customers, columns: [id] }
+"#;
+    SyntheticFile::parse_str(yaml)
+        .unwrap()
+        .into_model()
+        .unwrap()
+}
+
+#[test]
+fn table_override_relationships_replace_rather_than_append() {
+    let base = base_orders_model();
+    assert_eq!(base.tables["orders"].relationships.len(), 1);
+
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  orders:
+    relationships:
+      - columns: [warehouse_id]
+        references: { table: warehouses, columns: [id] }
+"#,
+    );
+    let merged = ModelMerger::merge(base, overrides).unwrap();
+    let relationships = &merged.tables["orders"].relationships;
+    assert_eq!(relationships.len(), 1);
+    assert_eq!(relationships[0].columns, vec!["warehouse_id".to_string()]);
+    assert!(relationships[0].name.is_none());
+}
+
+#[test]
+fn table_override_seed_and_rows_apply_over_base() {
+    let base = base_orders_model();
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  orders:
+    seed: 7
+    rows: { kind: fixed, count: 500 }
+"#,
+    );
+    let merged = ModelMerger::merge(base, overrides).unwrap();
+    assert_eq!(merged.tables["orders"].seed, TableSeed::Fixed(7));
+    assert_eq!(
+        merged.tables["orders"].rows,
+        sql_splitter::synthetic::RowsModel::Fixed { count: 500 }
+    );
+}
+
+fn base_with_source(policy: &str) -> SyntheticModel {
+    let yaml = format!(
+        r#"
+version: 1
+kind: model
+source:
+  dialect: mysql
+  fingerprint: "sha256:aaa"
+  fingerprint_policy: {policy}
+tables: {{}}
+"#
+    );
+    SyntheticFile::parse_str(&yaml)
+        .unwrap()
+        .into_model()
+        .unwrap()
+}
+
+fn overrides_with_new_fingerprint() -> SyntheticOverrides {
+    overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+source:
+  dialect: mysql
+  fingerprint: "sha256:bbb"
+"#,
+    )
+}
+
+#[test]
+fn fingerprint_mismatch_under_ignore_policy_applies_silently() {
+    let base = base_with_source("ignore");
+    let merged = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+    assert_eq!(
+        merged.source.unwrap().fingerprint.as_deref(),
+        Some("sha256:bbb")
+    );
+}
+
+#[test]
+fn fingerprint_mismatch_under_warn_policy_does_not_block_the_merge() {
+    let base = base_with_source("warn");
+    let merged = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+    assert_eq!(
+        merged.source.unwrap().fingerprint.as_deref(),
+        Some("sha256:bbb")
+    );
+}
+
+#[test]
+fn fingerprint_mismatch_under_warn_policy_is_reported_alongside_other_errors() {
+    // A successful `Ok(SyntheticModel)` merge drops warnings (see
+    // `DiagnosticBag::into_result`), so a warning is only observable
+    // through the public API when paired with an unrelated hard error that
+    // forces the `Err` path, which keeps every diagnostic.
+    let base = base_with_source("warn");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+source:
+  dialect: mysql
+  fingerprint: "sha256:bbb"
+tables:
+  ghosts:
+    seed: 1
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-SOURCE-FINGERPRINT"));
+    assert!(rendered.contains("GEN-MISSING-TABLE"));
+}
+
+#[test]
+fn fingerprint_mismatch_under_require_policy_blocks_the_merge() {
+    let base = base_with_source("require");
+    let err = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap_err();
+    assert!(err.to_string().contains("GEN-SOURCE-FINGERPRINT"));
+}
+
+#[test]
+fn matching_fingerprint_produces_no_diagnostic_even_under_require_policy() {
+    let base = base_with_source("require");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+source:
+  dialect: mysql
+  fingerprint: "sha256:aaa"
+"#,
+    );
+    let merged = ModelMerger::merge(base, overrides).unwrap();
+    assert_eq!(
+        merged.source.unwrap().fingerprint.as_deref(),
+        Some("sha256:aaa")
+    );
 }
