@@ -81,6 +81,20 @@ impl StreamId {
         }
     }
 
+    /// Stream for a table's stochastic row-count rounding decision.
+    ///
+    /// The row compiler resolves an exact integer count per table; when the
+    /// resolved target is fractional (e.g. a `--scale` that lands on 1.5), the
+    /// remainder is rounded up with probability equal to the fraction. Keying
+    /// the stream on the table name (behind the `rows.rounding` prefix) keeps
+    /// that decision stable and independent of every other stream in the run.
+    pub fn rounding(table: impl Into<String>) -> Self {
+        Self {
+            kind: "rows.rounding",
+            parts: vec![table.into()],
+        }
+    }
+
     /// Stream for a specific generator operator invocation, independent of
     /// any particular column (e.g. a shared lookup pool).
     pub fn operator(

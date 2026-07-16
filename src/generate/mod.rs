@@ -5,13 +5,20 @@
 //! seed, and a dialect-agnostic value representation ([`value`]) that
 //! generators produce instead of writing SQL literals directly.
 
+pub mod compiler;
 pub mod generators;
+pub mod plan;
 pub mod planners;
 pub mod registry;
 pub mod seed;
 pub mod value;
 
+pub use compiler::{CompileOptions, ModelCompiler, TableCountKind, TableCountOverride};
 pub use generators::ConstantFactory;
+pub use plan::{
+    ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
+    PlanEstimates, PlannedColumn, PlannedTable, ResolvedTableSeed,
+};
 pub use registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,
     CompiledPlanner, Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory,

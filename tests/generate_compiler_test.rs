@@ -274,3 +274,315 @@ fn standard_registry_installs_the_constant_generator() {
         "constant"
     );
 }
+
+// --- Model compiler: selection and exact row counts -------------------------
+
+use sql_splitter::generate::{
+    ColumnOwner, CompileOptions, ExecutionPhase, GenerationPlan, ModelCompiler, TableCountOverride,
+};
+use sql_splitter::synthetic::{SyntheticFile, SyntheticModel};
+
+/// A compiler backed by the standard registry, matching the brief's `compiler()`.
+fn compiler() -> ModelCompiler {
+    ModelCompiler::standard()
+}
+
+/// Parse a `kind: model` YAML document into a [`SyntheticModel`].
+fn model_from_yaml(yaml: &str) -> SyntheticModel {
+    SyntheticFile::parse_str(yaml)
+        .expect("valid model YAML")
+        .into_model()
+        .expect("document is a model")
+}
+
+/// A two-table `customers` (root, `fixed`) → `orders` (`relation.children`)
+/// model. `mean` is the fan-out; the child's minimum is one per parent so the
+/// impossibility check has teeth.
+fn customers_orders_model(customers: u64, orders_base: u64, mean: f64) -> SyntheticModel {
+    model_from_yaml(&format!(
+        r#"
+version: 1
+kind: model
+source:
+  dialect: postgres
+seed: 7
+tables:
+  customers:
+    rows: {{ kind: fixed, count: {customers} }}
+    schema:
+      name: customers
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: {orders_base}
+      distribution: {{ kind: fixed, mean: {mean:?}, min: 1.0, max: 1000000.0 }}
+    schema:
+      name: orders
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: customer_id, type: bigint, nullable: false }}
+      relationships:
+        - {{ columns: [customer_id], referenced_table: customers, referenced_columns: [id] }}
+"#
+    ))
+}
+
+/// A single root `users` table with a `fixed` row count and no source.
+fn users_model(users: u64) -> SyntheticModel {
+    model_from_yaml(&format!(
+        r#"
+version: 1
+kind: model
+seed: 7
+tables:
+  users:
+    rows: {{ kind: fixed, count: {users} }}
+    schema:
+      name: users
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+"#
+    ))
+}
+
+#[test]
+fn child_counts_are_not_scaled_twice() {
+    let model = customers_orders_model(1_000, 4_000, 4.0);
+    let options = CompileOptions {
+        scale: Some(0.1),
+        ..Default::default()
+    };
+    let plan = compiler().compile(model, options).unwrap();
+    assert_eq!(plan.table("customers").unwrap().rows, 100);
+    assert_eq!(plan.table("orders").unwrap().rows, 400);
+}
+
+#[test]
+fn absolute_table_rows_win_and_max_rows_is_last() {
+    let options = CompileOptions {
+        scale: Some(0.1),
+        table_rows: vec![TableCountOverride::rows("users", 500)],
+        max_rows: Some(300),
+        ..Default::default()
+    };
+    assert_eq!(
+        compiler()
+            .compile(users_model(10_000), options)
+            .unwrap()
+            .table("users")
+            .unwrap()
+            .rows,
+        300
+    );
+}
+
+#[test]
+fn count_scale_and_rows_controls_conflict() {
+    let options = CompileOptions {
+        scale: Some(0.1),
+        rows: Some(500),
+        ..Default::default()
+    };
+    let err = compiler()
+        .compile(users_model(10_000), options)
+        .unwrap_err();
+    assert!(err.to_string().contains("GEN-COUNT-CONTROL-CONFLICT"));
+}
+
+#[test]
+fn table_rows_and_table_scale_conflict_on_the_same_table() {
+    let options = CompileOptions {
+        table_rows: vec![
+            TableCountOverride::rows("users", 500),
+            TableCountOverride::scale("users", 2.0),
+        ],
+        ..Default::default()
+    };
+    let err = compiler()
+        .compile(users_model(10_000), options)
+        .unwrap_err();
+    assert!(err.to_string().contains("GEN-TABLE-COUNT-CONFLICT"));
+}
+
+#[test]
+fn child_table_scale_multiplies_the_derived_count() {
+    let options = CompileOptions {
+        table_rows: vec![TableCountOverride::scale("orders", 0.5)],
+        ..Default::default()
+    };
+    let plan = compiler()
+        .compile(customers_orders_model(1_000, 4_000, 4.0), options)
+        .unwrap();
+    assert_eq!(plan.table("customers").unwrap().rows, 1_000);
+    // 1000 parents * 4.0 fan-out = 4000, then * 0.5 table-scale = 2000.
+    assert_eq!(plan.table("orders").unwrap().rows, 2_000);
+}
+
+#[test]
+fn child_count_derives_from_the_distribution_mean() {
+    let plan = compiler()
+        .compile(
+            customers_orders_model(500, 4_000, 3.0),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.table("orders").unwrap().rows, 1_500);
+}
+
+#[test]
+fn minimum_child_count_impossibility_is_an_error() {
+    // 1000 parents with a minimum of one child each need >= 1000 children;
+    // forcing 500 is impossible.
+    let options = CompileOptions {
+        table_rows: vec![TableCountOverride::rows("orders", 500)],
+        ..Default::default()
+    };
+    let err = compiler()
+        .compile(customers_orders_model(1_000, 4_000, 4.0), options)
+        .unwrap_err();
+    assert!(err.to_string().contains("GEN-CHILD-COUNT-IMPOSSIBLE"));
+}
+
+#[test]
+fn stochastic_rounding_is_deterministic_before_emission() {
+    let model = || {
+        model_from_yaml(
+            r#"
+version: 1
+kind: model
+seed: 7
+tables:
+  widgets:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: widgets
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+"#,
+        )
+    };
+    let options = || CompileOptions {
+        scale: Some(0.15),
+        ..Default::default()
+    };
+    // 10 * 0.15 = 1.5 -> stochastically rounds to 1 or 2, but stably so.
+    let first = compiler()
+        .compile(model(), options())
+        .unwrap()
+        .table("widgets")
+        .unwrap()
+        .rows;
+    let second = compiler()
+        .compile(model(), options())
+        .unwrap()
+        .table("widgets")
+        .unwrap()
+        .rows;
+    assert_eq!(first, second);
+    assert!(first == 1 || first == 2, "expected 1 or 2, got {first}");
+}
+
+#[test]
+fn observed_rows_resolve_from_an_attached_source_count() {
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+source:
+  dialect: mysql
+tables:
+  events:
+    rows: { kind: observed, count: 3200 }
+    schema:
+      name: events
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+"#,
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    assert_eq!(plan.table("events").unwrap().rows, 3200);
+}
+
+#[test]
+fn observed_rows_without_a_source_count_are_an_error() {
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+tables:
+  events:
+    rows: { kind: observed, count: 3200 }
+    schema:
+      name: events
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+"#,
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("GEN-ROWS-OBSERVED-MISSING"));
+}
+
+#[test]
+fn excluded_required_dependency_reports_the_parent_path() {
+    let options = CompileOptions {
+        exclude: vec!["customers".to_string()],
+        ..Default::default()
+    };
+    let err = compiler()
+        .compile(customers_orders_model(1_000, 4_000, 4.0), options)
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("GEN-EXCLUDED-DEPENDENCY"));
+    assert!(text.contains("orders"));
+    assert!(text.contains("customers"));
+}
+
+#[test]
+fn max_rows_cap_emits_a_warning_that_survives_a_successful_compile() {
+    let options = CompileOptions {
+        max_rows: Some(300),
+        ..Default::default()
+    };
+    let plan = compiler().compile(users_model(10_000), options).unwrap();
+    assert_eq!(plan.table("users").unwrap().rows, 300);
+    assert!(plan
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "GEN-MAX-ROWS-CAPPED"));
+}
+
+#[test]
+fn phases_and_columns_are_ordered_and_initially_unowned() {
+    let plan = compiler()
+        .compile(
+            customers_orders_model(1_000, 4_000, 4.0),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let phases: Vec<&str> = plan
+        .phases
+        .iter()
+        .map(|phase| match phase {
+            ExecutionPhase::Table(name) => name.as_str(),
+        })
+        .collect();
+    assert_eq!(phases, vec!["customers", "orders"]);
+
+    let customers = plan.table("customers").unwrap();
+    assert_eq!(customers.columns.len(), 1);
+    assert!(matches!(customers.columns[0].owner, ColumnOwner::Unowned));
+}
+
+/// Type stubs forward-referenced by the plan (`GenerationPlan`) must exist and
+/// be constructible so downstream tasks (10, 13, 22) can extend them.
+#[allow(dead_code)]
+fn plan_type_is_debuggable(plan: &GenerationPlan) -> String {
+    format!("{plan:?}")
+}
