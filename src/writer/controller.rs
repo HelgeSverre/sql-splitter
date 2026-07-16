@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn steady_fast_stays_fast() {
         let mut c = Controller::new(ProfileKind::Fast, 4);
-        let epochs: Vec<_> = std::iter::repeat(epoch(500.0, 0.05)).take(50).collect();
+        let epochs: Vec<_> = std::iter::repeat_n(epoch(500.0, 0.05), 50).collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
         assert_eq!(c.state(), ProfileKind::Fast);
     }
@@ -315,13 +315,13 @@ mod tests {
         // 5 MB/s but the producer never blocks on sends: the input (slow
         // decompression, other device) is the bottleneck, not the output.
         let mut c = Controller::new(ProfileKind::Fast, 4);
-        let epochs: Vec<_> = std::iter::repeat(epoch(5.0, 0.0)).take(20).collect();
+        let epochs: Vec<_> = std::iter::repeat_n(epoch(5.0, 0.0), 20).collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
         assert_eq!(c.state(), ProfileKind::Fast);
 
         // Same holds for the SLOW_SEEK → SLOW_OPS downgrade.
         let mut c = Controller::new(ProfileKind::SlowSeek, 4);
-        let epochs: Vec<_> = std::iter::repeat(epoch(5.0, 0.0)).take(20).collect();
+        let epochs: Vec<_> = std::iter::repeat_n(epoch(5.0, 0.0), 20).collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
         assert_eq!(c.state(), ProfileKind::SlowSeek);
     }
