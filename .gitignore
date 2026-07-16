@@ -18,6 +18,9 @@ flamegraph.svg
 .vscode/
 *.swp
 
+# Local Git worktrees
+/.worktrees/
+
 # OS
 .DS_Store
 
