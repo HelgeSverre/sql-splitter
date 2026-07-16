@@ -210,6 +210,33 @@ fn open_input_impl(
         .with_context(|| format!("Failed to initialize {compression} decompression for {path:?}"))
 }
 
+/// Estimated decompressed size of an input file, for adaptive-I/O gating and
+/// epoch sizing. Exact for uncompressed input; for compressed/zip input a
+/// deliberately conservative 4× multiplier is applied (SQL text typically
+/// compresses 4–10×) so a small-but-dense archive doesn't silently pin the
+/// SSD profile for hundreds of MB of output.
+#[doc(hidden)]
+pub fn estimate_uncompressed_size(file_size: u64, compression: Compression) -> u64 {
+    match compression {
+        Compression::None => file_size,
+        _ => file_size.saturating_mul(4),
+    }
+}
+
+/// Advance the adaptive-I/O epoch boundary past `processed`, skipping every
+/// boundary a single oversized statement crossed in one step. Exactly one
+/// measurement fires per crossing, and the returned boundary is always
+/// strictly ahead of `processed` — so the next statement can never trigger a
+/// degenerate back-to-back (zero-ish duration) epoch.
+#[doc(hidden)]
+pub fn advance_epoch_boundary(mut next_epoch: u64, epoch_bytes: u64, processed: u64) -> u64 {
+    let epoch_bytes = epoch_bytes.max(1);
+    while next_epoch <= processed {
+        next_epoch += epoch_bytes;
+    }
+    next_epoch
+}
+
 pub struct Splitter {
     input_file: PathBuf,
     output_dir: PathBuf,
@@ -312,14 +339,20 @@ impl Splitter {
         // input the run is over before the controller could act, so `auto`
         // just pins FAST (today's defaults) and skips the 8MB probe. An
         // explicit epoch override (tests) engages the full machinery.
+        // Compressed inputs are gated (and epoch-sized) on an estimate of the
+        // *decompressed* volume: run length is governed by how much SQL comes
+        // out of the archive, not by its on-disk size, and `bytes_processed`
+        // (which epoch boundaries compare against) counts decompressed bytes.
         const DEFAULT_EPOCH_BYTES: u64 = 256 * 1024 * 1024;
         const AUTO_MIN_FILE_SIZE: u64 = 64 * 1024 * 1024;
+        let input_size_estimate =
+            estimate_uncompressed_size(file_size, Compression::from_path(&self.input_file));
         let adaptive = self.config.io_strategy == IoStrategy::Auto
             && !self.config.dry_run
-            && (epoch_bytes.is_some() || file_size >= AUTO_MIN_FILE_SIZE);
+            && (epoch_bytes.is_some() || input_size_estimate >= AUTO_MIN_FILE_SIZE);
         // Aim for at least 4 epochs per file so short runs still measure.
-        let epoch_bytes =
-            epoch_bytes.unwrap_or_else(|| DEFAULT_EPOCH_BYTES.min((file_size / 4).max(1)));
+        let epoch_bytes = epoch_bytes
+            .unwrap_or_else(|| DEFAULT_EPOCH_BYTES.min((input_size_estimate / 4).max(1)));
 
         let opening_kind = match self.config.io_strategy.pinned() {
             Some(kind) => kind,
@@ -335,7 +368,14 @@ impl Splitter {
         // writer count once the device proves fast: on NVMe the W=1 opening
         // costs ~15% for one epoch; on slow media it avoids ever thrashing.
         // SQL_SPLITTER_WRITERS pins the count and disables growth entirely.
-        let initial_writers = if adaptive {
+        //
+        // Compressed output can never deliver that proof: throughput is
+        // measured in *compressed* bytes beneath the encoders (a lone gzip
+        // writer never shows 150 MB/s compressed) and a CPU-bound encoder
+        // stalls the producer exactly like a slow device. Such runs open
+        // with the probe-chosen profile's full writer count and freeze the
+        // controller (see `Controller::for_compressed_output`).
+        let initial_writers = if adaptive && !compressing {
             env_writer_count().unwrap_or(1)
         } else {
             profile.writers
@@ -371,7 +411,14 @@ impl Splitter {
         // Hidden debugging aid: dump per-epoch measurements to stderr (the
         // phase-0 "io stats" seam from the design doc).
         let io_debug = std::env::var("SQL_SPLITTER_IO_DEBUG").is_ok();
-        let mut controller = adaptive.then(|| Controller::new(opening_kind, fast_writers));
+        let mut controller = adaptive.then(|| {
+            let ctrl = Controller::new(opening_kind, fast_writers);
+            if compressing {
+                ctrl.for_compressed_output()
+            } else {
+                ctrl
+            }
+        });
         let clock: Arc<dyn Clock> = self
             .config
             .io_clock
@@ -487,7 +534,13 @@ impl Splitter {
             // data, not wall-clock scheduling.
             if let Some(ctrl) = controller.as_mut() {
                 if stats.bytes_processed >= next_epoch {
-                    next_epoch += epoch_bytes;
+                    // Catch up past every boundary this statement crossed: a
+                    // single statement larger than `epoch_bytes` would
+                    // otherwise leave `next_epoch` behind `bytes_processed`,
+                    // firing a degenerate (microsecond) epoch on the very
+                    // next statement.
+                    next_epoch =
+                        advance_epoch_boundary(next_epoch, epoch_bytes, stats.bytes_processed);
                     // `writers` is always `Some` when `controller` is `Some`
                     // (adaptive requires `!dry_run`, see above).
                     if let Some(w) = writers.as_mut() {
