@@ -53,12 +53,7 @@ pub struct Cli {
 }
 
 // Help heading constants for consistency
-const INPUT_OUTPUT: &str = "Input/Output";
-const FILTERING: &str = "Filtering";
-const MODE: &str = "Mode";
-const BEHAVIOR: &str = "Behavior";
-const LIMITS: &str = "Limits";
-const OUTPUT_FORMAT: &str = "Output";
+use common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -532,83 +527,7 @@ pub enum Commands {
   sql-splitter redact dump.sql -o safe.sql --null \"*.ssn\" --hash \"*.email\"
   sql-splitter redact dump.sql --generate-config -o redact.yaml
   sql-splitter redact dump.sql -o safe.sql --config redact.yaml --seed 42")]
-    Redact {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output file (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// YAML config file for redaction rules
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        config: Option<PathBuf>,
-
-        /// Generate annotated YAML config by analyzing input file
-        #[arg(long, help_heading = MODE)]
-        generate_config: bool,
-
-        /// Columns to set to NULL (glob patterns, comma-separated)
-        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
-        null: Vec<String>,
-
-        /// Columns to hash with SHA256 (glob patterns)
-        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
-        hash: Vec<String>,
-
-        /// Columns to replace with fake data (glob patterns)
-        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
-        fake: Vec<String>,
-
-        /// Columns to mask (format: pattern=column, e.g., "****-XXXX=*.credit_card")
-        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
-        mask: Vec<String>,
-
-        /// Column=value pairs for constant replacement
-        #[arg(long, value_delimiter = ',', help_heading = "Inline Strategies")]
-        constant: Vec<String>,
-
-        /// Random seed for reproducible redaction
-        #[arg(long, help_heading = MODE)]
-        seed: Option<u64>,
-
-        /// Locale for fake data generation (default: en)
-        #[arg(long, default_value = "en", help_heading = MODE)]
-        locale: String,
-
-        /// Only redact specific tables (comma-separated)
-        #[arg(short, long, value_delimiter = ',', help_heading = FILTERING)]
-        tables: Vec<String>,
-
-        /// Exclude specific tables (comma-separated)
-        #[arg(short = 'x', long, value_delimiter = ',', help_heading = FILTERING)]
-        exclude: Vec<String>,
-
-        /// Fail on warnings (e.g., unsupported locale)
-        #[arg(long, help_heading = BEHAVIOR)]
-        strict: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Preview without writing files
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Validate config only, don't process
-        #[arg(long, help_heading = BEHAVIOR)]
-        validate: bool,
-    },
+    Redact(redact::RedactArgs),
 
     /// Generate Entity Relationship Diagram (ERD) from SQL dump
     #[command(visible_alias = "gr")]
@@ -768,10 +687,7 @@ pub enum Commands {
     },
 }
 
-/// Treat an output path of `-` as "write to stdout" (Unix convention).
-fn dash_is_stdout(output: Option<PathBuf>) -> Option<PathBuf> {
-    output.filter(|p| p.as_os_str() != "-")
-}
+use common::dash_is_stdout;
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
@@ -1005,47 +921,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             primary_key,
             ignore_columns,
         ),
-        Commands::Redact {
-            file,
-            output,
-            dialect,
-            config,
-            generate_config,
-            null,
-            hash,
-            fake,
-            mask,
-            constant,
-            seed,
-            locale,
-            tables,
-            exclude,
-            strict,
-            progress,
-            dry_run,
-            json,
-            validate,
-        } => redact::run(
-            file,
-            dash_is_stdout(output),
-            dialect,
-            config,
-            generate_config,
-            null,
-            hash,
-            fake,
-            mask,
-            constant,
-            seed,
-            locale,
-            tables,
-            exclude,
-            strict,
-            progress,
-            dry_run,
-            json,
-            validate,
-        ),
+        Commands::Redact(args) => redact::run(args),
         Commands::Graph {
             file,
             output,

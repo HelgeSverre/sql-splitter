@@ -1,7 +1,20 @@
 //! Shared helpers for the CLI command layer.
 
 use crate::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+// Help heading constants shared by the per-command clap Args structs.
+pub(crate) const INPUT_OUTPUT: &str = "Input/Output";
+pub(crate) const FILTERING: &str = "Filtering";
+pub(crate) const MODE: &str = "Mode";
+pub(crate) const BEHAVIOR: &str = "Behavior";
+pub(crate) const LIMITS: &str = "Limits";
+pub(crate) const OUTPUT_FORMAT: &str = "Output";
+
+/// Treat an output path of `-` as "write to stdout" (Unix convention).
+pub(crate) fn dash_is_stdout(output: Option<PathBuf>) -> Option<PathBuf> {
+    output.filter(|p| p.as_os_str() != "-")
+}
 
 /// Resolve the SQL dialect for `file`, returning the detection confidence.
 ///
