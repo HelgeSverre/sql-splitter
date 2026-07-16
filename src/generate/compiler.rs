@@ -15,6 +15,16 @@
 //!   override and cap. Fractional targets are stochastically rounded on a
 //!   stable per-table [`StreamId::rounding`] stream, so a run is reproducible.
 //!
+//! * **Ownership, types, and dependencies** — every column gets exactly one
+//!   owner: an explicit generator, a table planner, a declared relationship, a
+//!   database default, or the database itself (identity/serial, computed, or a
+//!   bare integer primary key). Two owners claiming one column is a
+//!   `GEN-COLUMN-OWNER-CONFLICT`; a column no rule or structural schema fact can
+//!   supply is a `GEN-COLUMN-OWNER-MISSING`. Generators/modifiers are
+//!   type-checked against their descriptor's accepted families, and the
+//!   column/planner read→write graph is scanned for cycles
+//!   (`GEN-COLUMN-CYCLE`), except a cycle a single planner owns end-to-end.
+//!
 //! Errors are gathered, not short-circuited: a model with a count conflict and
 //! three excluded dependencies reports all four. Warnings (e.g. a `--max-rows`
 //! cap) survive a successful compile via [`GenerationPlan::diagnostics`].
@@ -24,16 +34,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use glob::Pattern;
 use rand::RngExt;
 
-use crate::diagnostic::{DiagnosticBag, Severity};
+use crate::diagnostic::{DiagnosticBag, Severity, SourceLocation};
 use crate::synthetic::model::{
-    ChildDistribution, RelationshipModel, RowsModel, SyntheticModel, TableModel, TableSeed,
+    ChildDistribution, InferenceMode, PlannerConfig, RelationshipModel, RowsModel, SyntheticModel,
+    TableModel, TableSeed,
 };
+use crate::synthetic::schema::{PortableColumn, SqlTypeFamily};
 
 use super::plan::{
     ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
     PlanEstimates, PlannedColumn, PlannedTable, ResolvedTableSeed,
 };
-use super::registry::ExtensionRegistry;
+use super::registry::{ColumnScope, CompileContext, CompiledPlanner, ExtensionRegistry};
 use super::seed::{SeedRoot, StreamId};
 
 /// A single per-table count override from the CLI (`--table-rows` or
@@ -178,7 +190,14 @@ impl ModelCompiler {
                 &mut bag,
             );
             resolved.insert(name.clone(), count);
-            tables.push(build_planned_table(name, table, count, root_seed));
+            tables.push(self.plan_table(
+                name,
+                table,
+                count,
+                root_seed,
+                model.defaults.inference,
+                &mut bag,
+            ));
             phases.push(ExecutionPhase::Table(name.clone()));
         }
 
@@ -422,6 +441,331 @@ impl ModelCompiler {
         }
         count
     }
+
+    /// Build a [`PlannedTable`]: resolve seed and relationships, compile every
+    /// declared planner, assign exactly one owner to each column, type-check
+    /// generators/modifiers, and report read/write dependency cycles. All
+    /// diagnostics are appended to `bag`.
+    fn plan_table(
+        &self,
+        name: &str,
+        table: &TableModel,
+        rows: u64,
+        root_seed: Option<u64>,
+        inference: InferenceMode,
+        bag: &mut DiagnosticBag,
+    ) -> PlannedTable {
+        let seed = resolve_seed(&table.seed, root_seed);
+        let compile_seed = seed_root_of(&seed);
+        let relationships: Vec<CompiledRelationship> = table
+            .relationships
+            .iter()
+            .map(compile_relationship)
+            .collect();
+
+        let planners = self.compile_planners(name, table, compile_seed, bag);
+        let claims = collect_claims(table, &planners);
+
+        let columns: Vec<PlannedColumn> = table
+            .schema
+            .columns
+            .iter()
+            .map(|column| {
+                let owner = self.resolve_owner(
+                    name,
+                    table,
+                    column,
+                    claims.get(&column.name).map(Vec::as_slice).unwrap_or(&[]),
+                    &planners,
+                    compile_seed,
+                    inference,
+                    bag,
+                );
+                self.check_modifiers(name, table, column, bag);
+                PlannedColumn {
+                    schema: column.clone(),
+                    owner,
+                }
+            })
+            .collect();
+
+        report_dependency_cycles(name, table, &columns, &planners, bag);
+
+        // On a successful compile every planner resolved and compiled, so this
+        // filter keeps them all in declaration order and a `ColumnOwner::
+        // Planner`'s `planner_index` stays valid. If any planner failed, the
+        // bag holds an error and the plan is discarded before it is observed.
+        let compiled_planners = planners.into_iter().filter_map(|p| p.compiled).collect();
+
+        PlannedTable {
+            name: name.to_string(),
+            rows,
+            schema: table.schema.clone(),
+            seed,
+            columns,
+            relationships,
+            planners: compiled_planners,
+        }
+    }
+
+    /// Resolve and compile every declared planner, collecting `GEN-PLANNER-*`
+    /// diagnostics and the read/write column sets each planner declares.
+    fn compile_planners(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        seed: SeedRoot,
+        bag: &mut DiagnosticBag,
+    ) -> Vec<PlannerInfo> {
+        let relationship_names = relationship_names(table);
+        table
+            .planners
+            .iter()
+            .enumerate()
+            .map(|(index, config)| {
+                let path = format!("tables.{table_name}.planners[{index}]");
+                let Some(factory) = self.registry.planner(&config.kind) else {
+                    bag.error(
+                        "GEN-PLANNER-UNKNOWN",
+                        path,
+                        format!("no planner registered for kind `{}`", config.kind),
+                    );
+                    return PlannerInfo::unresolved(&config.kind);
+                };
+                let descriptor = factory.descriptor();
+
+                let writes = match descriptor.writes {
+                    ColumnScope::Configured => configured_columns(config, &["columns", "writes"]),
+                    _ => Vec::new(),
+                };
+                let reads = match descriptor.reads {
+                    ColumnScope::Configured => configured_columns(config, &["reads"]),
+                    _ => Vec::new(),
+                };
+
+                if let Some(referenced) = string_arg(config, "relationship") {
+                    if !relationship_names.iter().any(|n| n == referenced) {
+                        bag.error(
+                            "GEN-RELATIONSHIP-UNKNOWN",
+                            format!("{path}.relationship"),
+                            format!(
+                                "planner `{}` references relationship `{referenced}`, which is not declared on table `{table_name}`",
+                                config.kind
+                            ),
+                        );
+                    }
+                }
+
+                let context = CompileContext::for_table(&table.schema, seed, &path);
+                let compiled = match factory.compile(config, &context) {
+                    Ok(compiled) => Some(compiled),
+                    Err(errors) => {
+                        bag.diagnostics.extend(errors.diagnostics);
+                        None
+                    }
+                };
+
+                PlannerInfo {
+                    kind: descriptor.kind.to_string(),
+                    writes,
+                    reads,
+                    compiled,
+                }
+            })
+            .collect()
+    }
+
+    /// Assign the single owner for `column`, given its recorded claimants.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_owner(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        column: &PortableColumn,
+        claimants: &[Claim],
+        planners: &[PlannerInfo],
+        seed: SeedRoot,
+        inference: InferenceMode,
+        bag: &mut DiagnosticBag,
+    ) -> ColumnOwner {
+        if claimants.len() > 1 {
+            let diagnostic = bag.error(
+                "GEN-COLUMN-OWNER-CONFLICT",
+                format!("tables.{table_name}.columns.{}", column.name),
+                format!(
+                    "tables.{table_name}.columns.{} is produced by more than one owner",
+                    column.name
+                ),
+            );
+            diagnostic.related = claimants
+                .iter()
+                .map(|claim| SourceLocation {
+                    path: claim.path.clone(),
+                    description: claim.description.clone(),
+                })
+                .collect();
+            diagnostic.help = Some(format!(
+                "keep a single owner for `{}`: remove the column generator or drop it from the planner mapping",
+                column.name
+            ));
+            return ColumnOwner::GeneratedByDatabase;
+        }
+
+        if let Some(claim) = claimants.first() {
+            return match &claim.source {
+                ClaimSource::Generator => {
+                    self.compile_generator(table_name, table, column, seed, bag)
+                }
+                ClaimSource::Planner { index } => ColumnOwner::Planner {
+                    kind: planners[*index].kind.clone(),
+                    planner_index: *index,
+                },
+            };
+        }
+
+        self.infer_structural_owner(table_name, table, column, inference, bag)
+    }
+
+    /// Resolve, type-check, and compile the explicit generator on `column`.
+    fn compile_generator(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        column: &PortableColumn,
+        seed: SeedRoot,
+        bag: &mut DiagnosticBag,
+    ) -> ColumnOwner {
+        let path = format!("tables.{table_name}.columns.{}.generator", column.name);
+        let config = table.columns[&column.name]
+            .generator
+            .as_ref()
+            .expect("generator claim implies a generator rule");
+
+        let Some(factory) = self.registry.generator(&config.kind) else {
+            bag.error(
+                "GEN-GENERATOR-UNKNOWN",
+                path,
+                format!("no generator registered for kind `{}`", config.kind),
+            );
+            return ColumnOwner::GeneratedByDatabase;
+        };
+        let descriptor = factory.descriptor();
+
+        if !descriptor.accepts.contains(&column.family) {
+            bag.error(
+                "GEN-GENERATOR-TYPE",
+                path,
+                format!(
+                    "generator `{}` cannot produce column `{}` of type family {:?}",
+                    config.kind, column.name, column.family
+                ),
+            );
+            return ColumnOwner::GeneratedByDatabase;
+        }
+
+        let context = CompileContext::for_column(&table.schema, column, seed, &path);
+        match factory.compile(config, &context) {
+            Ok(compiled) => ColumnOwner::Generator {
+                kind: descriptor.kind.to_string(),
+                compiled,
+            },
+            Err(errors) => {
+                bag.diagnostics.extend(errors.diagnostics);
+                ColumnOwner::GeneratedByDatabase
+            }
+        }
+    }
+
+    /// Owner for a column with no generator and no planner claim, from
+    /// structural schema facts alone (no data observation). A column that no
+    /// structural rule can supply is `GEN-COLUMN-OWNER-MISSING`.
+    fn infer_structural_owner(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        column: &PortableColumn,
+        inference: InferenceMode,
+        bag: &mut DiagnosticBag,
+    ) -> ColumnOwner {
+        // Database-supplied values, in precedence order. These are pure schema
+        // facts, so they resolve identically under `disabled` and `schema`.
+        if column.generated || column.identity {
+            return ColumnOwner::GeneratedByDatabase;
+        }
+        if foreign_key_columns(table).contains(&column.name) {
+            return ColumnOwner::Relationship {
+                relationship: relationship_of(table, &column.name),
+            };
+        }
+        if column.default_sql.is_some() {
+            return ColumnOwner::DatabaseDefault;
+        }
+        // A bare integer primary key is a database sequence by convention.
+        if column.primary_key
+            && matches!(
+                column.family,
+                SqlTypeFamily::Integer | SqlTypeFamily::BigInteger
+            )
+        {
+            return ColumnOwner::GeneratedByDatabase;
+        }
+
+        // Nothing structural applies. Richer name/constraint heuristics under
+        // `schema` inference arrive in Task 20; for now both modes report the
+        // column as unowned so a run never invents values silently.
+        let note = match inference {
+            InferenceMode::Schema => {
+                " (schema inference has no rule for it yet; richer heuristics arrive later)"
+            }
+            InferenceMode::Disabled => "",
+        };
+        bag.error(
+            "GEN-COLUMN-OWNER-MISSING",
+            format!("tables.{table_name}.columns.{}", column.name),
+            format!(
+                "column `{}` on table `{table_name}` has no generator, planner, relationship, or database default to produce its value{note}",
+                column.name
+            ),
+        );
+        ColumnOwner::GeneratedByDatabase
+    }
+
+    /// Type-check each modifier declared on `column` against the registry.
+    fn check_modifiers(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        column: &PortableColumn,
+        bag: &mut DiagnosticBag,
+    ) {
+        let Some(rule) = table.columns.get(&column.name) else {
+            return;
+        };
+        for (index, modifier) in rule.modifiers.iter().enumerate() {
+            let path = format!(
+                "tables.{table_name}.columns.{}.modifiers[{index}]",
+                column.name
+            );
+            let Some(factory) = self.registry.modifier(&modifier.kind) else {
+                bag.error(
+                    "GEN-MODIFIER-UNKNOWN",
+                    path,
+                    format!("no modifier registered for kind `{}`", modifier.kind),
+                );
+                continue;
+            };
+            if !factory.descriptor().accepts.contains(&column.family) {
+                bag.error(
+                    "GEN-MODIFIER-TYPE",
+                    path,
+                    format!(
+                        "modifier `{}` cannot transform column `{}` of type family {:?}",
+                        modifier.kind, column.name, column.family
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// The per-table override view folded from the flat CLI list.
@@ -601,37 +945,350 @@ fn topo_order(
     (order, cyclic)
 }
 
-/// Build a [`PlannedTable`] with resolved count, seed, unowned columns, and
-/// compiled relationships. Planners stay empty until Task 22.
-fn build_planned_table(
-    name: &str,
-    table: &TableModel,
-    rows: u64,
-    root_seed: Option<u64>,
-) -> PlannedTable {
-    let columns = table
-        .schema
-        .columns
-        .iter()
-        .map(|column| PlannedColumn {
-            schema: column.clone(),
-            owner: ColumnOwner::Unowned,
-        })
-        .collect();
-    let relationships = table
+/// A declared planner after resolution: its resolved kind, the column sets it
+/// reads and writes, and its compiled form (absent if resolution or compile
+/// failed — the corresponding diagnostic is already recorded).
+struct PlannerInfo {
+    kind: String,
+    writes: Vec<String>,
+    reads: Vec<String>,
+    compiled: Option<Box<dyn CompiledPlanner>>,
+}
+
+impl PlannerInfo {
+    /// A planner whose kind did not resolve in the registry.
+    fn unresolved(kind: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            writes: Vec::new(),
+            reads: Vec::new(),
+            compiled: None,
+        }
+    }
+}
+
+/// One recorded claim of ownership over a column, for conflict reporting.
+struct Claim {
+    source: ClaimSource,
+    path: String,
+    description: Option<String>,
+}
+
+/// Who a [`Claim`] comes from.
+enum ClaimSource {
+    /// The column's own explicit generator rule.
+    Generator,
+    /// A planner, by its index in the table's compiled planner list.
+    Planner { index: usize },
+}
+
+/// Record every ownership claim over each column: an explicit generator plus
+/// each planner that names the column in its `columns`/`writes` set. A column
+/// with more than one claim is a `GEN-COLUMN-OWNER-CONFLICT`.
+fn collect_claims(table: &TableModel, planners: &[PlannerInfo]) -> BTreeMap<String, Vec<Claim>> {
+    let mut claims: BTreeMap<String, Vec<Claim>> = BTreeMap::new();
+    for (name, rule) in &table.columns {
+        if rule.generator.is_some() {
+            claims.entry(name.clone()).or_default().push(Claim {
+                source: ClaimSource::Generator,
+                path: format!("columns.{name}.generator"),
+                description: None,
+            });
+        }
+    }
+    for (index, planner) in planners.iter().enumerate() {
+        for column in &planner.writes {
+            claims.entry(column.clone()).or_default().push(Claim {
+                source: ClaimSource::Planner { index },
+                path: format!("planners[{index}]"),
+                description: Some(planner.kind.clone()),
+            });
+        }
+    }
+    claims
+}
+
+/// The column names a planner config names under any of `keys`. Each key's
+/// value may be a sequence of names or a mapping whose values are names (the
+/// `role: column` planner mapping shape).
+fn configured_columns(config: &PlannerConfig, keys: &[&str]) -> Vec<String> {
+    let mut columns = Vec::new();
+    for key in keys {
+        match config.args.get(*key) {
+            Some(serde_yaml_ng::Value::Sequence(items)) => columns.extend(
+                items
+                    .iter()
+                    .filter_map(serde_yaml_ng::Value::as_str)
+                    .map(str::to_string),
+            ),
+            Some(serde_yaml_ng::Value::Mapping(map)) => columns.extend(
+                map.values()
+                    .filter_map(serde_yaml_ng::Value::as_str)
+                    .map(str::to_string),
+            ),
+            _ => {}
+        }
+    }
+    columns
+}
+
+/// A single string-valued planner argument, if present.
+fn string_arg<'a>(config: &'a PlannerConfig, key: &str) -> Option<&'a str> {
+    config.args.get(key).and_then(serde_yaml_ng::Value::as_str)
+}
+
+/// Every declared relationship name on a table, from both the generation
+/// relationships and the portable schema's foreign keys.
+fn relationship_names(table: &TableModel) -> Vec<String> {
+    table
         .relationships
         .iter()
-        .map(compile_relationship)
-        .collect();
-    PlannedTable {
-        name: name.to_string(),
-        rows,
-        schema: table.schema.clone(),
-        seed: resolve_seed(&table.seed, root_seed),
-        columns,
-        relationships,
-        planners: Vec::new(),
+        .filter_map(|relationship| relationship.name.clone())
+        .chain(
+            table
+                .schema
+                .relationships
+                .iter()
+                .filter_map(|relationship| relationship.name.clone()),
+        )
+        .collect()
+}
+
+/// Every column that participates in a declared foreign key, from both the
+/// generation relationships and the portable schema.
+fn foreign_key_columns(table: &TableModel) -> BTreeSet<String> {
+    table
+        .relationships
+        .iter()
+        .flat_map(|relationship| relationship.columns.iter().cloned())
+        .chain(
+            table
+                .schema
+                .relationships
+                .iter()
+                .flat_map(|relationship| relationship.columns.iter().cloned()),
+        )
+        .collect()
+}
+
+/// The name of the first relationship that covers `column`, if any.
+fn relationship_of(table: &TableModel, column: &str) -> Option<String> {
+    table
+        .relationships
+        .iter()
+        .find(|relationship| relationship.columns.iter().any(|c| c == column))
+        .and_then(|relationship| relationship.name.clone())
+        .or_else(|| {
+            table
+                .schema
+                .relationships
+                .iter()
+                .find(|relationship| relationship.columns.iter().any(|c| c == column))
+                .and_then(|relationship| relationship.name.clone())
+        })
+}
+
+/// The [`SeedRoot`] a resolved seed compiles operators against; a `Random`
+/// table has no fixed root, so operators compile against the zero seed and
+/// draw fresh entropy at run time.
+fn seed_root_of(seed: &ResolvedTableSeed) -> SeedRoot {
+    match seed {
+        ResolvedTableSeed::Inherited(root) | ResolvedTableSeed::Fixed(root) => *root,
+        ResolvedTableSeed::Random => SeedRoot::new(0),
     }
+}
+
+/// A node in a table's column/planner dependency graph.
+#[derive(Clone, PartialEq, Eq)]
+enum DepNode {
+    Column(String),
+    Planner(usize),
+}
+
+/// Build the read/write dependency graph and report each strongly connected
+/// component that forms a real cycle as `GEN-COLUMN-CYCLE` — unless a single
+/// registered planner owns every column in it (the planner resolves those
+/// values jointly).
+fn report_dependency_cycles(
+    table_name: &str,
+    table: &TableModel,
+    columns: &[PlannedColumn],
+    planners: &[PlannerInfo],
+    bag: &mut DiagnosticBag,
+) {
+    let mut nodes: Vec<DepNode> = columns
+        .iter()
+        .map(|column| DepNode::Column(column.schema.name.clone()))
+        .collect();
+    nodes.extend((0..planners.len()).map(DepNode::Planner));
+
+    let index_of = |node: &DepNode| nodes.iter().position(|candidate| candidate == node);
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    let add_edge = |from: &DepNode, to: &DepNode, edges: &mut Vec<Vec<usize>>| {
+        if let (Some(from), Some(to)) = (index_of(from), index_of(to)) {
+            edges[from].push(to);
+        }
+    };
+
+    // A generator that reads sibling columns depends on them: read -> column.
+    for planned in columns {
+        if matches!(planned.owner, ColumnOwner::Generator { .. }) {
+            for read in generator_reads(table, &planned.schema.name) {
+                add_edge(
+                    &DepNode::Column(read),
+                    &DepNode::Column(planned.schema.name.clone()),
+                    &mut edges,
+                );
+            }
+        }
+    }
+    // A planner depends on the columns it reads and produces the ones it
+    // writes: read -> planner -> write.
+    for (index, planner) in planners.iter().enumerate() {
+        for read in &planner.reads {
+            add_edge(
+                &DepNode::Column(read.clone()),
+                &DepNode::Planner(index),
+                &mut edges,
+            );
+        }
+        for write in &planner.writes {
+            add_edge(
+                &DepNode::Planner(index),
+                &DepNode::Column(write.clone()),
+                &mut edges,
+            );
+        }
+    }
+
+    for component in strongly_connected_components(&edges) {
+        let self_loop = component.len() == 1 && edges[component[0]].contains(&component[0]);
+        if component.len() <= 1 && !self_loop {
+            continue;
+        }
+        let cycle_columns: Vec<String> = component
+            .iter()
+            .filter_map(|&node| match &nodes[node] {
+                DepNode::Column(name) => Some(name.clone()),
+                DepNode::Planner(_) => None,
+            })
+            .collect();
+        if owned_by_single_planner(&cycle_columns, columns) {
+            continue;
+        }
+        bag.error(
+            "GEN-COLUMN-CYCLE",
+            format!("tables.{table_name}.columns"),
+            format!(
+                "columns on table `{table_name}` form a read/write dependency cycle: {}",
+                cycle_columns.join(", ")
+            ),
+        );
+    }
+}
+
+/// The sibling columns a compiled column generator reads, from its config
+/// `reads` sequence (only meaningful when the generator declares
+/// `reads: Configured`).
+fn generator_reads(table: &TableModel, column: &str) -> Vec<String> {
+    table
+        .columns
+        .get(column)
+        .and_then(|rule| rule.generator.as_ref())
+        .map(|config| match config.args.get("reads") {
+            Some(serde_yaml_ng::Value::Sequence(items)) => items
+                .iter()
+                .filter_map(serde_yaml_ng::Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// Whether every column in a cycle is owned by one and the same planner.
+fn owned_by_single_planner(cycle_columns: &[String], columns: &[PlannedColumn]) -> bool {
+    let mut planner: Option<usize> = None;
+    for name in cycle_columns {
+        let owner = columns
+            .iter()
+            .find(|planned| &planned.schema.name == name)
+            .map(|planned| &planned.owner);
+        match owner {
+            Some(ColumnOwner::Planner { planner_index, .. }) => {
+                if planner.is_some_and(|existing| existing != *planner_index) {
+                    return false;
+                }
+                planner = Some(*planner_index);
+            }
+            _ => return false,
+        }
+    }
+    planner.is_some()
+}
+
+/// Tarjan's strongly connected components over an adjacency list. Returns one
+/// vector of node indices per component.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    struct State<'a> {
+        edges: &'a [Vec<usize>],
+        index: usize,
+        indices: Vec<Option<usize>>,
+        low: Vec<usize>,
+        on_stack: Vec<bool>,
+        stack: Vec<usize>,
+        components: Vec<Vec<usize>>,
+    }
+
+    fn connect(state: &mut State, v: usize) {
+        state.indices[v] = Some(state.index);
+        state.low[v] = state.index;
+        state.index += 1;
+        state.stack.push(v);
+        state.on_stack[v] = true;
+
+        for &w in &state.edges[v] {
+            match state.indices[w] {
+                None => {
+                    connect(state, w);
+                    state.low[v] = state.low[v].min(state.low[w]);
+                }
+                Some(w_index) if state.on_stack[w] => {
+                    state.low[v] = state.low[v].min(w_index);
+                }
+                Some(_) => {}
+            }
+        }
+
+        if state.low[v] == state.indices[v].expect("v was assigned an index") {
+            let mut component = Vec::new();
+            while let Some(w) = state.stack.pop() {
+                state.on_stack[w] = false;
+                component.push(w);
+                if w == v {
+                    break;
+                }
+            }
+            state.components.push(component);
+        }
+    }
+
+    let n = edges.len();
+    let mut state = State {
+        edges,
+        index: 0,
+        indices: vec![None; n],
+        low: vec![0; n],
+        on_stack: vec![false; n],
+        stack: Vec::new(),
+        components: Vec::new(),
+    };
+    for v in 0..n {
+        if state.indices[v].is_none() {
+            connect(&mut state, v);
+        }
+    }
+    state.components
 }
 
 /// Capture a declared relationship's referential shape. Task 13 completes it

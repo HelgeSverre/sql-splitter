@@ -142,6 +142,13 @@ impl DiagnosticBag {
         self.errors().next().is_some()
     }
 
+    /// True if any diagnostic (of any severity) carries `code`.
+    pub fn has_code(&self, code: &str) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == code)
+    }
+
     /// Converts the bag into a `Result`: `Ok(value)` if no error-severity
     /// diagnostic was recorded, otherwise `Err(self)` with all diagnostics
     /// (including warnings) intact for reporting.

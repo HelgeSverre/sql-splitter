@@ -278,13 +278,218 @@ fn standard_registry_installs_the_constant_generator() {
 // --- Model compiler: selection and exact row counts -------------------------
 
 use sql_splitter::generate::{
-    ColumnOwner, CompileOptions, ExecutionPhase, GenerationPlan, ModelCompiler, TableCountOverride,
+    ColumnOwner, CompileOptions, CompiledPlanner, ExecutionPhase, GenerateError, GenerationPlan,
+    ModelCompiler, PlanContext, PlannerDescriptor, PlannerFactory, TableCountOverride,
 };
-use sql_splitter::synthetic::{SyntheticFile, SyntheticModel};
+use sql_splitter::synthetic::{
+    ColumnRule, GeneratorConfig as GenConfig, PlannerConfig, SyntheticFile, SyntheticModel,
+};
 
-/// A compiler backed by the standard registry, matching the brief's `compiler()`.
+// --- Task 10 test operators -------------------------------------------------
+//
+// The standard registry only ships the family-agnostic `constant` generator,
+// so ownership/type/cycle validation needs a few narrow test operators: a
+// generator that accepts only integer families (to trigger `GEN-GENERATOR-TYPE`
+// against a text column), a generator that reads a sibling column (to build
+// read/write cycles), and a planner that owns and reads columns named in its
+// config (to trigger conflicts and planner-owned cycles).
+
+/// A generator that only accepts integer families.
+struct IntegerOnlyFactory;
+
+static INTEGER_ONLY_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
+    kind: "integer",
+    aliases: &[],
+    summary: "test integer-only generator",
+    arguments: &[],
+    accepts: &[SqlTypeFamily::Integer, SqlTypeFamily::BigInteger],
+    writes: ColumnScope::OwnColumn,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Unsupported,
+};
+
+impl GeneratorFactory for IntegerOnlyFactory {
+    fn descriptor(&self) -> &'static GeneratorDescriptor {
+        &INTEGER_ONLY_DESCRIPTOR
+    }
+    fn compile(
+        &self,
+        _config: &GeneratorConfig,
+        _context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledGenerator>, DiagnosticBag> {
+        Ok(Box::new(NoopGenerator))
+    }
+}
+
+/// A generator that reads one sibling column named in its `reads` argument.
+struct CopyOfFactory;
+
+static COPY_OF_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
+    kind: "copy_of",
+    aliases: &[],
+    summary: "test cross-column generator",
+    arguments: &[],
+    accepts: &[
+        SqlTypeFamily::Integer,
+        SqlTypeFamily::BigInteger,
+        SqlTypeFamily::Text,
+    ],
+    writes: ColumnScope::OwnColumn,
+    reads: ColumnScope::Configured,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Unsupported,
+};
+
+impl GeneratorFactory for CopyOfFactory {
+    fn descriptor(&self) -> &'static GeneratorDescriptor {
+        &COPY_OF_DESCRIPTOR
+    }
+    fn compile(
+        &self,
+        _config: &GeneratorConfig,
+        _context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledGenerator>, DiagnosticBag> {
+        Ok(Box::new(NoopGenerator))
+    }
+}
+
+/// A planner that owns and reads the columns named in its config.
+struct TestFamilyFactory;
+
+static TEST_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "test.family",
+    aliases: &[],
+    summary: "test column-owning planner",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::Configured,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Unsupported,
+};
+
+struct NoopPlanner;
+
+impl CompiledPlanner for NoopPlanner {
+    fn plan(&mut self, _context: &PlanContext<'_>) -> Result<(), GenerateError> {
+        Ok(())
+    }
+}
+
+impl PlannerFactory for TestFamilyFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &TEST_FAMILY_DESCRIPTOR
+    }
+    fn compile(
+        &self,
+        _config: &PlannerConfig,
+        _context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        Ok(Box::new(NoopPlanner))
+    }
+}
+
+/// A compiler backed by the standard registry plus the Task 10 test operators.
+/// The extra operators are inert for the Task 9 count/selection tests.
 fn compiler() -> ModelCompiler {
-    ModelCompiler::standard()
+    let mut registry = ExtensionRegistry::standard();
+    registry
+        .register_generator(Box::new(IntegerOnlyFactory))
+        .unwrap();
+    registry
+        .register_generator(Box::new(CopyOfFactory))
+        .unwrap();
+    registry
+        .register_planner(Box::new(TestFamilyFactory))
+        .unwrap();
+    ModelCompiler::new(registry)
+}
+
+/// A `GeneratorConfig` for the named generator kind, with no arguments.
+fn generator(kind: &str) -> GenConfig {
+    GenConfig {
+        kind: kind.to_string(),
+        args: Default::default(),
+    }
+}
+
+/// A `test.family` planner whose `columns` mapping claims ownership of `column`.
+fn order_planner_owning(column: &str) -> PlannerConfig {
+    let mut columns = serde_yaml_ng::Mapping::new();
+    columns.insert(
+        serde_yaml_ng::Value::from("total"),
+        serde_yaml_ng::Value::from(column),
+    );
+    let mut args = std::collections::BTreeMap::new();
+    args.insert(
+        "columns".to_string(),
+        serde_yaml_ng::Value::Mapping(columns),
+    );
+    PlannerConfig {
+        kind: "test.family".to_string(),
+        args,
+    }
+}
+
+/// A two-table model (`users` with `id`/`email`, `orders` with `id`/`total`)
+/// whose non-key columns carry empty rules so tests can attach generators and
+/// planners. Every table's `id` is a bare integer primary key (a database
+/// sequence), so the baseline model is otherwise owner-complete.
+fn invalid_model() -> SyntheticModel {
+    let mut model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+seed: 7
+tables:
+  users:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: users
+      columns:
+        - { name: id, type: integer, nullable: false, primary_key: true }
+        - { name: email, type: text, nullable: false }
+    columns:
+      email: {}
+  orders:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: integer, nullable: false, primary_key: true }
+        - { name: total, type: integer, nullable: false }
+    columns:
+      total: {}
+"#,
+    );
+    // Ensure the mutable column entries the headline test indexes exist.
+    model
+        .tables
+        .get_mut("orders")
+        .unwrap()
+        .columns
+        .entry("total".to_string())
+        .or_insert_with(empty_rule);
+    model
+        .tables
+        .get_mut("users")
+        .unwrap()
+        .columns
+        .entry("email".to_string())
+        .or_insert_with(empty_rule);
+    model
+}
+
+/// An empty column rule (no semantic, generator, or modifiers).
+fn empty_rule() -> ColumnRule {
+    ColumnRule {
+        semantic: None,
+        generator: None,
+        modifiers: Vec::new(),
+    }
 }
 
 /// Parse a `kind: model` YAML document into a [`SyntheticModel`].
@@ -577,7 +782,11 @@ fn phases_and_columns_are_ordered_and_initially_unowned() {
 
     let customers = plan.table("customers").unwrap();
     assert_eq!(customers.columns.len(), 1);
-    assert!(matches!(customers.columns[0].owner, ColumnOwner::Unowned));
+    // The bare bigint primary key is a database sequence.
+    assert!(matches!(
+        customers.columns[0].owner,
+        ColumnOwner::GeneratedByDatabase
+    ));
 }
 
 #[test]
@@ -668,4 +877,159 @@ fn root_table_scale_replaces_the_global_scale() {
 #[allow(dead_code)]
 fn plan_type_is_debuggable(plan: &GenerationPlan) -> String {
     format!("{plan:?}")
+}
+
+// --- Task 10: ownership, types, and dependency graphs -----------------------
+
+#[test]
+fn compiler_reports_all_independent_ownership_and_type_errors() {
+    let mut model = invalid_model();
+    model
+        .tables
+        .get_mut("orders")
+        .unwrap()
+        .columns
+        .get_mut("total")
+        .unwrap()
+        .generator = Some(generator("integer"));
+    model
+        .tables
+        .get_mut("orders")
+        .unwrap()
+        .planners
+        .push(order_planner_owning("total"));
+    model
+        .tables
+        .get_mut("users")
+        .unwrap()
+        .columns
+        .get_mut("email")
+        .unwrap()
+        .generator = Some(generator("integer"));
+
+    let err = compiler().compile(model, Default::default()).unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-OWNER-CONFLICT"));
+    assert!(err.has_code("GEN-GENERATOR-TYPE"));
+    assert_eq!(err.errors().count(), 2);
+}
+
+/// A single-table model with `id` (integer PK) plus the supplied extra column
+/// lines and per-column/planner rules, for the focused ownership cases.
+fn ownership_model(columns: &str, rules: &str) -> SyntheticModel {
+    model_from_yaml(&format!(
+        r#"
+version: 1
+kind: model
+seed: 7
+tables:
+  t:
+    rows: {{ kind: fixed, count: 5 }}
+    schema:
+      name: t
+      columns:
+        - {{ name: id, type: integer, nullable: false, primary_key: true }}
+{columns}
+{rules}
+"#
+    ))
+}
+
+#[test]
+fn ownership_reports_missing_owner_under_disabled_inference() {
+    let model = ownership_model("        - { name: note, type: text, nullable: false }", "");
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-OWNER-MISSING"));
+    assert_eq!(err.errors().count(), 1);
+}
+
+#[test]
+fn ownership_reports_generator_type_mismatch() {
+    let model = ownership_model(
+        "        - { name: label, type: text, nullable: false }",
+        "    columns:\n      label:\n        generator: { kind: integer }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-GENERATOR-TYPE"));
+    assert_eq!(err.errors().count(), 1);
+}
+
+#[test]
+fn ownership_reports_unknown_generator_kind() {
+    let model = ownership_model(
+        "        - { name: label, type: text, nullable: false }",
+        "    columns:\n      label:\n        generator: { kind: nonesuch }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-GENERATOR-UNKNOWN"));
+    assert_eq!(err.errors().count(), 1);
+}
+
+#[test]
+fn ownership_reports_unresolved_planner_relationship() {
+    let model = ownership_model(
+        "",
+        "    planners:\n      - { kind: test.family, relationship: nope }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-RELATIONSHIP-UNKNOWN"));
+    assert_eq!(err.errors().count(), 1);
+}
+
+#[test]
+fn ownership_reports_column_read_write_cycle() {
+    let model = ownership_model(
+        "        - { name: a, type: integer, nullable: false }\n        - { name: b, type: integer, nullable: false }",
+        "    columns:\n      a:\n        generator: { kind: copy_of, reads: [b] }\n      b:\n        generator: { kind: copy_of, reads: [a] }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-CYCLE"));
+    assert_eq!(err.errors().count(), 1);
+}
+
+#[test]
+fn ownership_allows_cycle_owned_by_one_planner() {
+    let model = ownership_model(
+        "        - { name: a, type: integer, nullable: false }\n        - { name: b, type: integer, nullable: false }",
+        "    planners:\n      - { kind: test.family, columns: { x: a, y: b }, reads: [a, b] }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    let a = table.columns.iter().find(|c| c.schema.name == "a").unwrap();
+    assert!(matches!(
+        a.owner,
+        ColumnOwner::Planner {
+            planner_index: 0,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn ownership_allows_database_default_column() {
+    let model = ownership_model(
+        "        - { name: created_at, type: timestamptz, nullable: false, default_sql: \"now()\" }",
+        "",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    let created = table
+        .columns
+        .iter()
+        .find(|c| c.schema.name == "created_at")
+        .unwrap();
+    assert!(matches!(created.owner, ColumnOwner::DatabaseDefault));
 }

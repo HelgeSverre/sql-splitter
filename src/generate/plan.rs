@@ -26,7 +26,7 @@ use crate::parser::SqlDialect;
 use crate::synthetic::model::{InsertMode, OutputMode};
 use crate::synthetic::schema::{PortableColumn, PortableTable};
 
-use super::registry::CompiledPlanner;
+use super::registry::{CompiledGenerator, CompiledPlanner};
 use super::seed::SeedRoot;
 
 /// A fully compiled generation plan: the immutable contract every downstream
@@ -94,13 +94,15 @@ pub struct PlannedTable {
     pub schema: PortableTable,
     /// The table's resolved seed.
     pub seed: ResolvedTableSeed,
-    /// Every schema column, paired with its owner. Task 9 lists them
-    /// [`ColumnOwner::Unowned`]; Task 10 assigns real owners.
+    /// Every schema column, paired with the owner that produces its values.
     pub columns: Vec<PlannedColumn>,
     /// Compiled relationships to parent tables. Task 9 records the shape;
     /// Task 13 completes fan-out assignment.
     pub relationships: Vec<CompiledRelationship>,
-    /// Compiled table-level planners. Populated by Task 22; empty here.
+    /// Compiled table-level planners, in declaration order. A
+    /// [`ColumnOwner::Planner`]'s `planner_index` indexes into this vector.
+    /// The planner *runtime* behavior is filled by Task 22; Task 10 compiles
+    /// the declared planners so ownership can reference them.
     pub planners: Vec<Box<dyn CompiledPlanner>>,
 }
 
@@ -124,7 +126,10 @@ impl fmt::Debug for PlannedTable {
 }
 
 /// A schema column paired with the operator that owns its values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Cannot derive `Clone`/`PartialEq`: a [`ColumnOwner::Generator`] holds a
+/// `Box<dyn CompiledGenerator>` trait object.
+#[derive(Debug)]
 pub struct PlannedColumn {
     /// The column's portable schema.
     pub schema: PortableColumn,
@@ -134,13 +139,66 @@ pub struct PlannedColumn {
 
 /// What produces a column's values.
 ///
-/// Task 9 only ever assigns [`ColumnOwner::Unowned`]; Task 10 introduces the
-/// generator/planner/relationship owners and the completeness check that every
-/// generated column has one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Exactly one owner is assigned to every non-omitted column during
+/// compilation (Task 10). Two generators or planners claiming the same column
+/// is a `GEN-COLUMN-OWNER-CONFLICT`; a column that no rule and no structural
+/// schema fact can supply is a `GEN-COLUMN-OWNER-MISSING`.
 pub enum ColumnOwner {
-    /// No owner resolved yet (Task 10 resolves ownership).
-    Unowned,
+    /// An explicit column generator produces the value. Holds the compiled
+    /// generator so the row hot path never re-resolves the registry.
+    Generator {
+        /// The resolved generator kind (canonical, not an alias).
+        kind: String,
+        /// The compiled generator, ready to run per row.
+        compiled: Box<dyn CompiledGenerator>,
+    },
+    /// A table-level planner coordinates this column with others. Indexes
+    /// into [`PlannedTable::planners`].
+    Planner {
+        /// The resolved planner kind.
+        kind: String,
+        /// The owning planner's index in [`PlannedTable::planners`].
+        planner_index: usize,
+    },
+    /// A declared relationship supplies this foreign-key column's value. The
+    /// per-row parent assignment is completed by Task 13.
+    Relationship {
+        /// The owning relationship's declared name, if any.
+        relationship: Option<String>,
+    },
+    /// The column's own `DEFAULT` expression supplies the value; the renderer
+    /// emits `DEFAULT` and the database fills it.
+    DatabaseDefault,
+    /// The database produces the value itself — an `IDENTITY`/serial sequence,
+    /// a `GENERATED` computed column, or a bare integer primary key.
+    GeneratedByDatabase,
+}
+
+impl fmt::Debug for ColumnOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `CompiledGenerator` is not `Debug`; describe the owner by kind so the
+        // plan stays observable without pretending the operator is printable.
+        match self {
+            ColumnOwner::Generator { kind, .. } => f
+                .debug_struct("Generator")
+                .field("kind", kind)
+                .finish_non_exhaustive(),
+            ColumnOwner::Planner {
+                kind,
+                planner_index,
+            } => f
+                .debug_struct("Planner")
+                .field("kind", kind)
+                .field("planner_index", planner_index)
+                .finish(),
+            ColumnOwner::Relationship { relationship } => f
+                .debug_struct("Relationship")
+                .field("relationship", relationship)
+                .finish(),
+            ColumnOwner::DatabaseDefault => f.write_str("DatabaseDefault"),
+            ColumnOwner::GeneratedByDatabase => f.write_str("GeneratedByDatabase"),
+        }
+    }
 }
 
 /// A compiled relationship from a child table to a parent table.
