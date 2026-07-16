@@ -52,9 +52,6 @@ pub struct Cli {
     pub command: Commands,
 }
 
-// Help heading constants for consistency
-use common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
-
 #[derive(Subcommand)]
 pub enum Commands {
     /// Split a SQL dump into individual table files
@@ -158,31 +155,7 @@ pub enum Commands {
   sql-splitter order dump.sql --check
   sql-splitter order dump.sql --dry-run
   sql-splitter order dump.sql --reverse")]
-    Order {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output file (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Verify ordering without writing output
-        #[arg(long, help_heading = BEHAVIOR)]
-        check: bool,
-
-        /// Show order without rewriting the file
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-
-        /// Order children before parents (for DROP operations)
-        #[arg(long, help_heading = BEHAVIOR)]
-        reverse: bool,
-    },
+    Order(order::OrderArgs),
 
     /// Query SQL dumps using DuckDB's analytical engine
     #[cfg(feature = "duckdb-query")]
@@ -239,8 +212,6 @@ pub enum Commands {
     },
 }
 
-use common::dash_is_stdout;
-
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Split(args) => split::run(args),
@@ -253,21 +224,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Diff(args) => diff::run(args),
         Commands::Redact(args) => redact::run(args),
         Commands::Graph(args) => graph::run(args),
-        Commands::Order {
-            file,
-            output,
-            dialect,
-            check,
-            dry_run,
-            reverse,
-        } => order::run(
-            file,
-            dash_is_stdout(output),
-            dialect,
-            check,
-            dry_run,
-            reverse,
-        ),
+        Commands::Order(args) => order::run(args),
         #[cfg(feature = "duckdb-query")]
         Commands::Query(args) => query::run(args),
         Commands::Schema {

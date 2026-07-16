@@ -1,23 +1,54 @@
 //! Order command - output SQL dump with tables in topological order.
 
+use super::common::{BEHAVIOR, INPUT_OUTPUT};
 use crate::parser::{Parser, StatementType};
 use crate::schema::{SchemaBuilder, SchemaGraph};
 use ahash::AHashMap;
 use anyhow::{bail, Result};
+use clap::{Args, ValueHint};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 
-/// Run the order command
-#[allow(clippy::too_many_arguments)]
-pub fn run(
+#[derive(Args)]
+pub struct OrderArgs {
+    /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     file: PathBuf,
+
+    /// Output file (default: stdout)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     output: Option<PathBuf>,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
     dialect: Option<String>,
+
+    /// Verify ordering without writing output
+    #[arg(long, help_heading = BEHAVIOR)]
     check: bool,
+
+    /// Show order without rewriting the file
+    #[arg(long, help_heading = BEHAVIOR)]
     dry_run: bool,
+
+    /// Order children before parents (for DROP operations)
+    #[arg(long, help_heading = BEHAVIOR)]
     reverse: bool,
-) -> Result<()> {
+}
+
+/// Run the order command
+pub fn run(args: OrderArgs) -> Result<()> {
+    let OrderArgs {
+        file,
+        output,
+        dialect,
+        check,
+        dry_run,
+        reverse,
+    } = args;
+    let output = super::common::dash_is_stdout(output);
+
     if !file.exists() {
         bail!("input file does not exist: {}", file.display());
     }
