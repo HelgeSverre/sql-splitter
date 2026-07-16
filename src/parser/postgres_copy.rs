@@ -3,16 +3,15 @@
 //! Parses COPY ... FROM stdin data blocks to extract individual rows
 //! and optionally extract PK/FK column values for dependency tracking.
 
-use crate::schema::{ColumnId, ColumnType, TableSchema};
-use smallvec::SmallVec;
+use crate::schema::{ColumnId, TableSchema};
 use std::borrow::Cow;
 use std::sync::Arc;
 
 // Re-use types from mysql_insert for consistency
-use super::mysql_insert::{FkRef, PkValue, RowExtraction};
+use super::mysql_insert::{coerce_text_pk, FkRef, PkValue, RowExtraction};
 
-/// Tuple of PK values for composite primary keys
-pub type PkTuple = SmallVec<[PkValue; 2]>;
+// Re-export (rather than re-declare) the shared PK tuple type.
+pub use super::mysql_insert::PkTuple;
 
 /// A parsed row from a COPY data block
 #[derive(Debug, Clone)]
@@ -102,18 +101,9 @@ impl<'a> CopyParser<'a> {
                     .collect()
             };
 
-            // Precompute the reverse column map once for the whole block;
-            // rows share it via Arc instead of cloning it per row.
-            let mut map = vec![None; schema.columns.len()];
-            for (val_idx, col_id_opt) in self.column_order.iter().enumerate() {
-                if let Some(col_id) = col_id_opt {
-                    let ord = col_id.0 as usize;
-                    if ord < map.len() {
-                        map[ord] = Some(val_idx);
-                    }
-                }
-            }
-            self.col_to_value = map.into();
+            // Precompute the reverse column map once for the whole block.
+            self.col_to_value =
+                super::mysql_insert::build_col_to_value(&self.column_order, schema.columns.len());
         }
 
         // An empty line is a legitimate single empty-string value only for a
@@ -146,9 +136,7 @@ impl<'a> CopyParser<'a> {
             }
 
             // Parse the row
-            if let Some(row) = self.parse_row(line)? {
-                rows.push(row);
-            }
+            rows.push(self.parse_row(line));
 
             pos = line_end + 1;
         }
@@ -156,8 +144,8 @@ impl<'a> CopyParser<'a> {
         Ok(rows)
     }
 
-    /// Parse a single tab-separated row
-    fn parse_row(&self, line: &[u8]) -> anyhow::Result<Option<ParsedCopyRow>> {
+    /// Parse a single tab-separated row (infallible: any line is a valid row)
+    fn parse_row(&self, line: &[u8]) -> ParsedCopyRow {
         let raw = line.to_vec();
 
         // Split, parse and extract PK/FK only when the caller wants them;
@@ -170,13 +158,13 @@ impl<'a> CopyParser<'a> {
             _ => (None, Vec::new(), Vec::new()),
         };
 
-        Ok(Some(ParsedCopyRow {
+        ParsedCopyRow {
             raw,
             pk,
             fk_values,
             all_values,
             column_map: Arc::clone(&self.col_to_value),
-        }))
+        }
     }
 
     /// Split line by tabs and parse each value
@@ -210,7 +198,7 @@ impl<'a> CopyParser<'a> {
         let decoded: Cow<'b, [u8]> = if memchr::memchr(b'\\', value).is_none() {
             Cow::Borrowed(value)
         } else {
-            Cow::Owned(self.decode_copy_escapes(value))
+            Cow::Owned(decode_copy_escapes(value))
         };
 
         // Try to parse as integer, but only when the text is the *canonical*
@@ -231,43 +219,12 @@ impl<'a> CopyParser<'a> {
         CopyValue::Text(decoded)
     }
 
-    /// Decode PostgreSQL COPY escape sequences
+    /// Decode PostgreSQL COPY escape sequences.
+    ///
+    /// Thin wrapper kept for API compatibility; the implementation lives in
+    /// the free function [`decode_copy_escapes`].
     pub fn decode_copy_escapes(&self, value: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(value.len());
-        let mut i = 0;
-
-        while i < value.len() {
-            if value[i] == b'\\' && i + 1 < value.len() {
-                let next = value[i + 1];
-                let decoded = match next {
-                    b'n' => b'\n',
-                    b'r' => b'\r',
-                    b't' => b'\t',
-                    b'\\' => b'\\',
-                    b'N' => {
-                        // This shouldn't happen here since we check for \N above
-                        result.push(b'\\');
-                        result.push(b'N');
-                        i += 2;
-                        continue;
-                    }
-                    _ => {
-                        // Unknown escape, keep as-is
-                        result.push(b'\\');
-                        result.push(next);
-                        i += 2;
-                        continue;
-                    }
-                };
-                result.push(decoded);
-                i += 2;
-            } else {
-                result.push(value[i]);
-                i += 1;
-            }
-        }
-
-        result
+        decode_copy_escapes(value)
     }
 
     /// Extract PK, FK, and all values from parsed values
@@ -296,23 +253,8 @@ impl<'a> CopyParser<'a> {
                 let s = String::from_utf8_lossy(bytes);
 
                 // Check if this might be an integer stored as text
-                if let Some(col) = col {
-                    match col.col_type {
-                        ColumnType::Int => {
-                            if let Ok(n) = s.parse::<i64>() {
-                                return PkValue::Int(n);
-                            }
-                        }
-                        ColumnType::BigInt => {
-                            if let Ok(n) = s.parse::<i128>() {
-                                return PkValue::BigInt(n);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                PkValue::Text(s.into_owned().into_boxed_str())
+                coerce_text_pk(&s, col)
+                    .unwrap_or_else(|| PkValue::Text(s.into_owned().into_boxed_str()))
             }
         }
     }
@@ -326,6 +268,52 @@ enum CopyValue<'a> {
     Integer(i64),
     BigInteger(i128),
     Text(Cow<'a, [u8]>),
+}
+
+/// Decode PostgreSQL COPY escape sequences (`\t`, `\n`, `\r`, `\\`; a `\N`
+/// or unknown escape passes through verbatim).
+///
+/// This is the canonical decoder for the COPY text wire format — consumers
+/// elsewhere in the crate (e.g. the redactor's `ValueRewriter` in
+/// `src/redactor/rewriter.rs`) should call this instead of keeping their own
+/// copy, so escape-handling fixes land in exactly one place.
+pub fn decode_copy_escapes(value: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(value.len());
+    let mut i = 0;
+
+    while i < value.len() {
+        if value[i] == b'\\' && i + 1 < value.len() {
+            let next = value[i + 1];
+            let decoded = match next {
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'\\' => b'\\',
+                b'N' => {
+                    // \N is the NULL marker, not an escape; callers filter it
+                    // out before decoding, so keep it verbatim here.
+                    result.push(b'\\');
+                    result.push(b'N');
+                    i += 2;
+                    continue;
+                }
+                _ => {
+                    // Unknown escape, keep as-is
+                    result.push(b'\\');
+                    result.push(next);
+                    i += 2;
+                    continue;
+                }
+            };
+            result.push(decoded);
+            i += 2;
+        } else {
+            result.push(value[i]);
+            i += 1;
+        }
+    }
+
+    result
 }
 
 /// True when `s` is the canonical decimal rendering of an integer — digits
