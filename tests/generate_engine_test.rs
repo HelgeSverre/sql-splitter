@@ -968,3 +968,77 @@ fn descriptors_declare_the_families_they_accept() {
     let port = registry.generator("network.port").unwrap().descriptor();
     assert!(port.accepts.contains(&SqlTypeFamily::Integer));
 }
+
+/// Every catalog kind the Task 12 brief lists must be registered — a
+/// regression here means a kind silently dropped out of `register_all`.
+#[test]
+fn every_brief_catalog_kind_is_registered() {
+    const EXPECTED: &[&str] = &[
+        "person.first_name",
+        "person.last_name",
+        "person.full_name",
+        "person.username",
+        "person.title",
+        "internet.email",
+        "internet.domain",
+        "internet.url",
+        "internet.ipv4",
+        "internet.ipv6",
+        "internet.user_agent",
+        "phone.number",
+        "phone.country_code",
+        "company.name",
+        "company.department",
+        "company.job_title",
+        "address.line1",
+        "address.line2",
+        "address.city",
+        "address.region",
+        "address.postcode",
+        "address.country",
+        "address.latitude",
+        "address.longitude",
+        "commerce.product_name",
+        "commerce.sku",
+        "commerce.currency",
+        "commerce.money",
+        "commerce.quantity",
+        "text.word",
+        "text.sentence",
+        "text.paragraph",
+        "text.slug",
+        "identifier.ulid",
+        "identifier.nanoid",
+        "identifier.token",
+        "identifier.hash",
+        "file.name",
+        "file.extension",
+        "file.mime_type",
+        "file.size",
+        "network.mac",
+        "network.port",
+        "credential.password_hash",
+        "credential.token",
+        "credential.api_key",
+        "credential.secret",
+        "credential.placeholder",
+        "date",
+        "time",
+        "datetime",
+        "duration",
+        "before",
+        "after",
+    ];
+    let registry = ExtensionRegistry::standard();
+    for kind in EXPECTED {
+        assert!(
+            registry.generator(kind).is_some(),
+            "`{kind}` from the Task 12 catalog is not registered"
+        );
+    }
+    assert_eq!(
+        EXPECTED.len(),
+        54,
+        "the brief's catalog has exactly 54 kinds"
+    );
+}
