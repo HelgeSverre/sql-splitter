@@ -196,43 +196,7 @@ pub enum Commands {
   sql-splitter validate dump.sql --strict
   sql-splitter validate \"dumps/*.sql\" --json --fail-fast
   sql-splitter validate dump.sql --no-fk-checks")]
-    Validate {
-        /// Input SQL file or glob pattern
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Treat warnings as errors (exit code 1)
-        #[arg(long, help_heading = BEHAVIOR)]
-        strict: bool,
-
-        /// Skip PK/FK data integrity checks
-        #[arg(long, help_heading = BEHAVIOR)]
-        no_fk_checks: bool,
-
-        /// Stop on first error (for glob patterns)
-        #[arg(long, help_heading = BEHAVIOR)]
-        fail_fast: bool,
-
-        /// Max rows per table for PK/FK checks (0 = unlimited)
-        #[arg(long, default_value = "1000000", help_heading = LIMITS)]
-        max_rows_per_table: usize,
-
-        /// Disable row limit for PK/FK checks
-        #[arg(long, help_heading = LIMITS)]
-        no_limit: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-    },
+    Validate(validate::ValidateArgs),
 
     /// Compare two SQL dumps and report schema + data differences
     #[command(visible_alias = "df")]
@@ -403,33 +367,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             fail_fast,
             json,
         ),
-        Commands::Validate {
-            file,
-            dialect,
-            progress,
-            strict,
-            json,
-            max_rows_per_table,
-            no_limit,
-            no_fk_checks,
-            fail_fast,
-        } => {
-            let effective_limit = if no_limit || max_rows_per_table == 0 {
-                usize::MAX
-            } else {
-                max_rows_per_table
-            };
-            validate::run(
-                file,
-                dialect,
-                progress,
-                strict,
-                json,
-                effective_limit,
-                no_fk_checks,
-                fail_fast,
-            )
-        }
+        Commands::Validate(args) => validate::run(args),
         Commands::Diff(args) => diff::run(args),
         Commands::Redact(args) => redact::run(args),
         Commands::Graph(args) => graph::run(args),

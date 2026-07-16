@@ -1,22 +1,69 @@
 use crate::splitter::Compression;
 use crate::validate::{ValidateOptions, Validator};
+use clap::{Args, ValueHint};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use super::common::{BEHAVIOR, INPUT_OUTPUT, LIMITS, OUTPUT_FORMAT};
 use super::glob_util::{expand_file_pattern, MultiFileResult};
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
+#[derive(Args)]
+pub struct ValidateArgs {
+    /// Input SQL file or glob pattern
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     file: PathBuf,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
     dialect: Option<String>,
-    progress: bool,
+
+    /// Treat warnings as errors (exit code 1)
+    #[arg(long, help_heading = BEHAVIOR)]
     strict: bool,
-    json: bool,
-    max_rows_per_table: usize,
+
+    /// Skip PK/FK data integrity checks
+    #[arg(long, help_heading = BEHAVIOR)]
     no_fk_checks: bool,
+
+    /// Stop on first error (for glob patterns)
+    #[arg(long, help_heading = BEHAVIOR)]
     fail_fast: bool,
-) -> anyhow::Result<()> {
+
+    /// Max rows per table for PK/FK checks (0 = unlimited)
+    #[arg(long, default_value = "1000000", help_heading = LIMITS)]
+    max_rows_per_table: usize,
+
+    /// Disable row limit for PK/FK checks
+    #[arg(long, help_heading = LIMITS)]
+    no_limit: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
+    json: bool,
+}
+
+pub fn run(args: ValidateArgs) -> anyhow::Result<()> {
+    let ValidateArgs {
+        file,
+        dialect,
+        strict,
+        no_fk_checks,
+        fail_fast,
+        max_rows_per_table,
+        no_limit,
+        progress,
+        json,
+    } = args;
+    let max_rows_per_table = if no_limit || max_rows_per_table == 0 {
+        usize::MAX
+    } else {
+        max_rows_per_table
+    };
     let expanded = expand_file_pattern(&file)?;
 
     if expanded.files.len() == 1 {
