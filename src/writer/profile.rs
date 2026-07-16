@@ -1,4 +1,4 @@
-//! Adaptive I/O profiles: named writer configurations plus the shared,
+//! Adaptive I/O strategys: named writer configurations plus the shared,
 //! atomically-swappable runtime values that let the controller retune the
 //! write pipeline mid-run without stopping writer threads.
 //!
@@ -6,7 +6,7 @@
 //! serve NVMe (wants parallel writers, small buffers), spinning disks (wants
 //! one writer, huge sequential writes), and cheap flash / network mounts
 //! (wants the fewest write *operations*). The three named profiles capture
-//! those device classes; `--io-profile auto` opens with a probe-chosen
+//! those device classes; `--io-strategy auto` opens with a probe-chosen
 //! profile and lets the feedback controller own the truth afterwards.
 
 use std::io::Write;
@@ -31,7 +31,7 @@ pub enum ProfileKind {
 }
 
 impl ProfileKind {
-    /// Human-readable name used in transition log lines and `--io-profile`.
+    /// Human-readable name used in transition log lines and `--io-strategy`.
     /// `ssd` (not "fast") because it names the device class the settings are
     /// tuned for — on a spinning disk the SSD settings are the *slow* choice.
     pub fn label(self) -> &'static str {
@@ -43,10 +43,10 @@ impl ProfileKind {
     }
 }
 
-/// The `--io-profile` CLI choice: a pinned named profile, or `auto`
+/// The `--io-strategy` CLI choice: a pinned named profile, or `auto`
 /// (probe + feedback controller).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IoProfile {
+pub enum IoStrategy {
     #[default]
     Auto,
     Ssd,
@@ -54,20 +54,20 @@ pub enum IoProfile {
     Cheap,
 }
 
-impl IoProfile {
-    /// Parse the `--io-profile` flag value.
+impl IoStrategy {
+    /// Parse the `--io-strategy` flag value.
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
-            "auto" | "" => Ok(IoProfile::Auto),
+            "auto" | "" => Ok(IoStrategy::Auto),
             // `fast` is a compatibility alias for `ssd` (the pre-rename name).
-            "ssd" => Ok(IoProfile::Ssd),
-            "hdd" => Ok(IoProfile::Hdd),
+            "ssd" => Ok(IoStrategy::Ssd),
+            "hdd" => Ok(IoStrategy::Hdd),
             // The honest name. The aliases are for everyone who has ever fought
             // a no-name USB stick from a conference and knows exactly which
             // profile they need.
-            "cheap" | "potato" => Ok(IoProfile::Cheap),
+            "cheap" | "potato" => Ok(IoStrategy::Cheap),
             other => Err(format!(
-                "Unknown I/O profile '{other}'. Valid: auto, ssd, hdd, cheap"
+                "Unknown I/O strategy '{other}'. Valid: auto, ssd, hdd, cheap"
             )),
         }
     }
@@ -75,10 +75,10 @@ impl IoProfile {
     /// The pinned profile kind, or `None` for `auto`.
     pub fn pinned(self) -> Option<ProfileKind> {
         match self {
-            IoProfile::Auto => None,
-            IoProfile::Ssd => Some(ProfileKind::Ssd),
-            IoProfile::Hdd => Some(ProfileKind::SlowSeek),
-            IoProfile::Cheap => Some(ProfileKind::SlowOps),
+            IoStrategy::Auto => None,
+            IoStrategy::Ssd => Some(ProfileKind::Ssd),
+            IoStrategy::Hdd => Some(ProfileKind::SlowSeek),
+            IoStrategy::Cheap => Some(ProfileKind::SlowOps),
         }
     }
 }
@@ -224,7 +224,7 @@ const PROBE_BYTES: usize = 8 * MIB;
 /// filesystem, permissions race) must never fail the actual split.
 pub fn probe_output_dir(dir: &Path) -> (ProfileKind, f64) {
     if let Ok(forced) = std::env::var("SQL_SPLITTER_IO_PROBE") {
-        if let Ok(profile) = IoProfile::parse(&forced) {
+        if let Ok(profile) = IoStrategy::parse(&forced) {
             if let Some(kind) = profile.pinned() {
                 return (kind, f64::NAN);
             }
@@ -327,11 +327,11 @@ mod tests {
 
     #[test]
     fn io_profile_parsing() {
-        assert_eq!(IoProfile::parse("auto"), Ok(IoProfile::Auto));
-        assert_eq!(IoProfile::parse("ssd"), Ok(IoProfile::Ssd));
-        assert_eq!(IoProfile::parse("HDD"), Ok(IoProfile::Hdd));
-        assert_eq!(IoProfile::parse("potato"), Ok(IoProfile::Cheap));
-        assert!(IoProfile::parse("turbo").is_err());
+        assert_eq!(IoStrategy::parse("auto"), Ok(IoStrategy::Auto));
+        assert_eq!(IoStrategy::parse("ssd"), Ok(IoStrategy::Ssd));
+        assert_eq!(IoStrategy::parse("HDD"), Ok(IoStrategy::Hdd));
+        assert_eq!(IoStrategy::parse("potato"), Ok(IoStrategy::Cheap));
+        assert!(IoStrategy::parse("turbo").is_err());
     }
 
     #[test]

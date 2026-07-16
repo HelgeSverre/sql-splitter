@@ -38,7 +38,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Shipped (v1.16.0):**
 
-- ✅ `.zip` dump input (single `.sql` member, all input commands); `--io-profile` auto-tuning for HDDs/slow media
+- ✅ `.zip` dump input (single `.sql` member, all input commands); `--io-strategy` auto-tuning for HDDs/slow media
 
 **Next:**
 
@@ -543,9 +543,9 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | Feature            | Effort   | Status  | Notes                                       |
 | ------------------ | -------- | ------- | -------------------------------------------- |
 | Zip input          | ~6–8h    | ✅ Done | No new deps; `zip` crate already present    |
-| Adaptive I/O       | ~2–3 days| ✅ Done | `--io-profile auto\|ssd\|hdd\|cheap`        |
+| Adaptive I/O       | ~2–3 days| ✅ Done | `--io-strategy auto\|ssd\|hdd\|cheap`        |
 
-**Adaptive I/O profiles** — measured 2026-07-15/16: same-spindle split on a
+**Adaptive I/O strategys** — measured 2026-07-15/16: same-spindle split on a
 USB HDD runs at 21–33 MB/s with defaults but 54.7 MB/s (2.52×) with
 `WRITERS=1` + 64MB buffers; cheap flash wants fewest write *operations*
 instead. Design: don't identify the device, respond to it — an fsync probe

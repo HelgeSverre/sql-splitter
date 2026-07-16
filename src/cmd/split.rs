@@ -1,6 +1,6 @@
 use crate::parser::{detect_dialect_from_file, ContentFilter, DialectConfidence, SqlDialect};
 use crate::splitter::{Compression, Splitter};
-use crate::writer::IoProfile;
+use crate::writer::IoStrategy;
 #[allow(unused_imports)]
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -82,10 +82,10 @@ pub fn run(
     fail_fast: bool,
     json: bool,
     compress: String,
-    io_profile: String,
+    io_strategy: String,
 ) -> anyhow::Result<()> {
     let out_compression = Compression::parse_output(&compress).map_err(|e| anyhow::anyhow!(e))?;
-    let io_profile = IoProfile::parse(&io_profile).map_err(|e| anyhow::anyhow!(e))?;
+    let io_strategy = IoStrategy::parse(&io_strategy).map_err(|e| anyhow::anyhow!(e))?;
     let expanded = expand_file_pattern(&file)?;
 
     #[cfg(feature = "archive")]
@@ -111,7 +111,7 @@ pub fn run(
             data_only,
             json,
             out_compression,
-            io_profile,
+            io_strategy,
         )
     } else {
         run_multi(
@@ -127,7 +127,7 @@ pub fn run(
             fail_fast,
             json,
             out_compression,
-            io_profile,
+            io_strategy,
         )
     }
 }
@@ -145,7 +145,7 @@ fn run_single(
     data_only: bool,
     json: bool,
     out_compression: Compression,
-    io_profile: IoProfile,
+    io_strategy: IoStrategy,
 ) -> anyhow::Result<()> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
@@ -277,7 +277,7 @@ fn run_single(
         .with_dry_run(dry_run)
         .with_content_filter(content_filter)
         .with_output_compression(out_compression)
-        .with_io_profile(io_profile);
+        .with_io_profile(io_strategy);
 
     if !table_filter.is_empty() {
         splitter = splitter.with_table_filter(table_filter);
@@ -401,7 +401,7 @@ fn run_multi(
     fail_fast: bool,
     json: bool,
     out_compression: Compression,
-    io_profile: IoProfile,
+    io_strategy: IoStrategy,
 ) -> anyhow::Result<()> {
     let total = files.len();
     let mut result = MultiFileResult::new();
@@ -510,7 +510,7 @@ fn run_multi(
             .with_dry_run(dry_run)
             .with_content_filter(content_filter)
             .with_output_compression(out_compression)
-            .with_io_profile(io_profile);
+            .with_io_profile(io_strategy);
 
         if !table_filter.is_empty() {
             splitter = splitter.with_table_filter(table_filter);

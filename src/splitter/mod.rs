@@ -1,7 +1,7 @@
 use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
 use crate::writer::{
-    env_writer_count, probe_output_dir, Clock, Controller, EpochMeasurement, IoProfile,
+    env_writer_count, probe_output_dir, Clock, Controller, EpochMeasurement, IoStrategy,
     ParallelWriters, ProfileKind, ProfileValues, RealClock, WriterProfile,
 };
 use ahash::AHashSet;
@@ -48,8 +48,8 @@ pub struct SplitterConfig {
     pub content_filter: ContentFilter,
     /// Per-table output compression (default `None` → plain `.sql`).
     pub output_compression: Compression,
-    /// I/O profile for output writing (default `Auto`).
-    pub io_profile: IoProfile,
+    /// I/O strategy for output writing (default `Auto`).
+    pub io_strategy: IoStrategy,
     /// Clock driving epoch measurements (None → wall clock). Test seam: a
     /// stepping mock clock makes the adaptive controller fully deterministic.
     pub io_clock: Option<Arc<dyn Clock>>,
@@ -257,11 +257,11 @@ impl Splitter {
         self
     }
 
-    /// Choose the I/O profile for output writing (`--io-profile`). Explicit
+    /// Choose the I/O strategy for output writing (`--io-strategy`). Explicit
     /// profiles pin the writer configuration; `Auto` (the default) probes the
     /// output device and adapts at runtime.
-    pub fn with_io_profile(mut self, profile: IoProfile) -> Self {
-        self.config.io_profile = profile;
+    pub fn with_io_profile(mut self, profile: IoStrategy) -> Self {
+        self.config.io_strategy = profile;
         self
     }
 
@@ -292,9 +292,9 @@ impl Splitter {
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
         // Parallel, pipelined writers (skipped for dry runs), configured by
-        // the selected I/O profile (see docs/features/ADAPTIVE_IO_PROFILES.md).
+        // the selected I/O strategy (see docs/features/ADAPTIVE_IO_PROFILES.md).
         // Precedence: SQL_SPLITTER_WRITERS / SQL_SPLITTER_WRITE_BUF env vars >
-        // explicit --io-profile > auto.
+        // explicit --io-strategy > auto.
         let out_compression = self.config.output_compression;
         let compressing = out_compression != Compression::None;
         let cores = std::thread::available_parallelism()
@@ -314,14 +314,14 @@ impl Splitter {
         // explicit epoch override (tests) engages the full machinery.
         const DEFAULT_EPOCH_BYTES: u64 = 256 * 1024 * 1024;
         const AUTO_MIN_FILE_SIZE: u64 = 64 * 1024 * 1024;
-        let adaptive = self.config.io_profile == IoProfile::Auto
+        let adaptive = self.config.io_strategy == IoStrategy::Auto
             && !self.config.dry_run
             && (epoch_bytes.is_some() || file_size >= AUTO_MIN_FILE_SIZE);
         // Aim for at least 4 epochs per file so short runs still measure.
         let epoch_bytes =
             epoch_bytes.unwrap_or_else(|| DEFAULT_EPOCH_BYTES.min((file_size / 4).max(1)));
 
-        let opening_kind = match self.config.io_profile.pinned() {
+        let opening_kind = match self.config.io_strategy.pinned() {
             Some(kind) => kind,
             // The fsync probe picks auto's *opening* state only; the feedback
             // controller owns the truth once the pipeline runs.

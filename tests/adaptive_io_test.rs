@@ -1,4 +1,4 @@
-//! Integration tests for adaptive I/O profiles
+//! Integration tests for adaptive I/O strategys
 //! (see docs/features/ADAPTIVE_IO_PROFILES.md, "Deterministic testing &
 //! verification" sections 3 and 4).
 //!
@@ -10,7 +10,7 @@
 use sha2::{Digest, Sha256};
 use sql_splitter::parser::SqlDialect;
 use sql_splitter::splitter::Splitter;
-use sql_splitter::writer::{IoProfile, MockClock};
+use sql_splitter::writer::{IoStrategy, MockClock};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -76,7 +76,7 @@ fn hash_output_dir(dir: &std::path::Path) -> BTreeMap<String, String> {
 }
 
 /// The golden invariant (design doc, deterministic-testing section 3): every
-/// I/O profile — and `auto`, driven through several small epochs so the
+/// I/O strategy — and `auto`, driven through several small epochs so the
 /// controller actually transitions and the writer pool actually grows —
 /// must produce byte-identical output for the same input.
 #[test]
@@ -97,10 +97,10 @@ fn golden_invariant_all_profiles_byte_identical() {
     let mut all_hashes: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
 
     for (label, profile) in [
-        ("ssd", IoProfile::Ssd),
-        ("hdd", IoProfile::Hdd),
-        ("cheap", IoProfile::Cheap),
-        ("auto", IoProfile::Auto),
+        ("ssd", IoStrategy::Ssd),
+        ("hdd", IoStrategy::Hdd),
+        ("cheap", IoStrategy::Cheap),
+        ("auto", IoStrategy::Auto),
     ] {
         let out_dir = temp.path().join(format!("out_{label}"));
         let stats = Splitter::new(input.clone(), out_dir.clone())
@@ -146,7 +146,7 @@ fn ordering_survives_mid_run_writer_growth() {
 
     let stats = Splitter::new(input, out_dir.clone())
         .with_dialect(SqlDialect::MySql)
-        .with_io_profile(IoProfile::Auto)
+        .with_io_profile(IoStrategy::Auto)
         .split()
         .unwrap();
 
@@ -195,7 +195,7 @@ fn mock_clock_end_to_end_matches_baseline() {
     let baseline_dir = temp.path().join("baseline");
     Splitter::new(input.clone(), baseline_dir.clone())
         .with_dialect(SqlDialect::MySql)
-        .with_io_profile(IoProfile::Ssd)
+        .with_io_profile(IoStrategy::Ssd)
         .split()
         .unwrap();
 
@@ -205,7 +205,7 @@ fn mock_clock_end_to_end_matches_baseline() {
     let clock = Arc::new(MockClock::stepping(Duration::from_millis(10)));
     let stats = Splitter::new(input, mock_dir.clone())
         .with_dialect(SqlDialect::MySql)
-        .with_io_profile(IoProfile::Auto)
+        .with_io_profile(IoStrategy::Auto)
         .with_io_clock(clock)
         .split()
         .unwrap();

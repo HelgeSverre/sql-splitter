@@ -30,10 +30,10 @@ becomes the limit before the parser does.
 | 248 MB (MySQL)           | 0.23s    | ~1.1 GB/s                      |
 | 1 GB (MySQL, 100 tables) | 1.2–2.5s | 0.4–0.9 GB/s (disk-write bound) |
 
-### Slow Output Devices (`--io-profile`)
+### Slow Output Devices (`--io-strategy`)
 
 The write path is SSD-tuned by default; on spinning disks and cheap flash the
-same settings cause seek thrash. `split --io-profile auto` (the default)
+same settings cause seek thrash. `split --io-strategy auto` (the default)
 detects slow output devices — an 8MB fsync probe picks the starting strategy,
 then runtime backpressure monitoring adapts — and switches to a seek-friendly
 write profile.
@@ -50,7 +50,7 @@ ExFAT, 124MB–3.8GB fixtures, reading and writing on the same spindle):
 These numbers are indicative for similar hardware, not a general claim —
 run-to-run variance of ±25% was observed on this drive alone, and different
 devices, filesystems, and workloads will land elsewhere. Verify on your own
-target with `scripts/verify-io-profiles.sh`.
+target with `scripts/verify-io-strategys.sh`.
 
 **What the profiles actually do.** Each profile is three concrete settings —
 writer thread count, the size of each write operation, and how much data is

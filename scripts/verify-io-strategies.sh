@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Real-hardware acceptance test for --io-profile (see
+# Real-hardware acceptance test for --io-strategy (see
 # docs/features/ADAPTIVE_IO_PROFILES.md, "Real-hardware acceptance").
 #
-# Usage: ./scripts/verify-io-profiles.sh <output-mount> [fixture-size-gb]
+# Usage: ./scripts/verify-io-strategys.sh <output-mount> [fixture-size-gb]
 #
-# Runs split with --io-profile fast / hdd / auto against a generated fixture
+# Runs split with --io-strategy fast / hdd / auto against a generated fixture
 # on the target mount and checks the RATIO gates (absolute MB/s varies run to
 # run on real drives — ±25% observed on ExFAT USB HDDs):
 #   - rotational media: hdd >= 1.5x fast; auto >= 0.85x hdd
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-MOUNT="${1:?usage: verify-io-profiles.sh <output-mount> [size-gb]}"
+MOUNT="${1:?usage: verify-io-strategys.sh <output-mount> [size-gb]}"
 SIZE_GB="${2:-4}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/sql-splitter"
@@ -32,7 +32,7 @@ echo "generating ${SIZE_GB}GB fixture on $MOUNT ..."
 declare -A MBPS
 for p in fast hdd auto; do
   rm -rf "$T/out"
-  out=$("$BIN" split "$T/fixture.sql" -o "$T/out" --io-profile "$p" 2>&1 | grep -Eo 'Throughput: [0-9.]+' | grep -Eo '[0-9.]+')
+  out=$("$BIN" split "$T/fixture.sql" -o "$T/out" --io-strategy "$p" 2>&1 | grep -Eo 'Throughput: [0-9.]+' | grep -Eo '[0-9.]+')
   MBPS[$p]=$out
   echo "  $p: ${out} MB/s"
   rm -rf "$T/out"

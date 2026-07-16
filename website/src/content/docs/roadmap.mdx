@@ -27,7 +27,7 @@ All core features have been released:
 | v1.13.x | Library feature flags, Docker images, convert fixes | Released |
 | v1.14.0 | `-o -` stdout support, redact compression fix | Released |
 | v1.15.0 | Output compression (`--compress`), archive output (tar.*/zip), 2.4–4.4× split speedup | Released |
-| v1.16.0 | Zip input (all commands), adaptive `--io-profile` for slow devices | Released |
+| v1.16.0 | Zip input (all commands), adaptive `--io-strategy` for slow devices | Released |
 
 ## Upcoming Features
 
@@ -45,13 +45,13 @@ sql-splitter split reflow_latest.sql.zip -o tables/
 - Exactly-one-`.sql`-member policy, with clear errors for multi-member or encrypted archives
 - No new dependencies — reuses the `zip` crate already powering archive output
 
-**Adaptive I/O profiles** — measured on a USB spinning disk, the default
+**Adaptive I/O strategys** — measured on a USB spinning disk, the default
 (SSD-tuned) write path runs at ~22–33 MB/s while a single writer with large
 buffers reaches ~55 MB/s (2.5×, near the drive's physical ceiling):
 
 ```bash
-sql-splitter split dump.sql -o tables/ --io-profile auto   # default
-sql-splitter split dump.sql -o tables/ --io-profile hdd    # pin it
+sql-splitter split dump.sql -o tables/ --io-strategy auto   # default
+sql-splitter split dump.sql -o tables/ --io-strategy hdd    # pin it
 ```
 
 - An fsync probe picks the opening profile; after that, a feedback loop driven

@@ -92,7 +92,7 @@ Small explicit state machine, evaluated at epoch boundaries:
 ### CLI
 
 ```
---io-profile auto|ssd|hdd|cheap     (default: auto)
+--io-strategy auto|ssd|hdd|cheap     (default: auto)
 ```
 
 Explicit names pin the profile (no controller, no probe) — for scripting,
@@ -104,10 +104,10 @@ everything (documented as expert knobs).
 | Phase | Work | Size |
 | ----- | ---- | ---- |
 | 0 | Instrumentation: bytes-acked + send-stall counters in `ParallelWriters`; hidden `--io-stats` JSON dump for debugging | ~80 lines |
-| 1 | `WriterProfile` struct; replace `STAGE_FLUSH`/`STAGE_TOTAL_CAP` consts with profile values; explicit `--io-profile ssd\|hdd\|cheap` | ~120 lines |
+| 1 | `WriterProfile` struct; replace `STAGE_FLUSH`/`STAGE_TOTAL_CAP` consts with profile values; explicit `--io-strategy ssd\|hdd\|cheap` | ~120 lines |
 | 2 | Controller: `Clock` trait (real + mock), byte-based epochs, state machine, atomic profile swap, deferred writer spawn | ~200 lines |
 | 3 | fsync probe + `auto` default wiring + transition log lines | ~60 lines |
-| 4 | Docs (README, website performance page), benchmark script `scripts/verify-io-profiles.sh` | — |
+| 4 | Docs (README, website performance page), benchmark script `scripts/verify-io-strategys.sh` | — |
 
 Order matters: phases 0–1 are independently shippable (explicit profiles alone
 would have captured the 2.5× on the HDD).
@@ -165,7 +165,7 @@ on symmetric fixtures.
 
 ### 5. Real-hardware acceptance (manual, per release, not CI)
 
-`scripts/verify-io-profiles.sh <slow-mount>`: runs defaults vs `--io-profile
+`scripts/verify-io-strategys.sh <slow-mount>`: runs defaults vs `--io-strategy
 hdd` vs `auto` on a 4 GB fixture on the target mount. Acceptance criteria:
 
 - On rotational media: `hdd` ≥ 1.8× `fast`; `auto` within 15% of `hdd`.

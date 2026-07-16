@@ -9,7 +9,7 @@ pub mod profile;
 #[allow(unused_imports)]
 pub use controller::{Clock, Controller, EpochMeasurement, MockClock, RealClock};
 pub use profile::{
-    env_writer_count, probe_output_dir, IoProfile, ProfileKind, ProfileValues, WriterProfile,
+    env_writer_count, probe_output_dir, IoStrategy, ProfileKind, ProfileValues, WriterProfile,
 };
 
 use ahash::AHashMap;

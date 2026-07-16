@@ -1,4 +1,4 @@
-//! Integration tests for the adaptive I/O profiles feature
+//! Integration tests for the adaptive I/O strategys feature
 //! (docs/features/ADAPTIVE_IO_PROFILES.md).
 //!
 //! The golden invariant: every profile and every adaptation path must produce
@@ -8,7 +8,7 @@
 //! token-bucket throttle) rather than from real hardware behavior.
 
 use sql_splitter::splitter::{Compression, Splitter};
-use sql_splitter::writer::{IoProfile, MockClock};
+use sql_splitter::writer::{IoStrategy, MockClock};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -91,7 +91,7 @@ fn dir_snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     snapshot
 }
 
-fn split_with(input: &Path, out_dir: PathBuf, profile: IoProfile) -> sql_splitter::splitter::Stats {
+fn split_with(input: &Path, out_dir: PathBuf, profile: IoStrategy) -> sql_splitter::splitter::Stats {
     Splitter::new(input.to_path_buf(), out_dir)
         .with_io_profile(profile)
         .split()
@@ -108,14 +108,14 @@ fn test_all_profiles_produce_byte_identical_output() {
     write_staggered_fixture(&input, 24, 80);
 
     // Reference: pinned fast (today's default configuration).
-    let reference = split_with(&input, temp.path().join("fast"), IoProfile::Ssd);
+    let reference = split_with(&input, temp.path().join("fast"), IoStrategy::Ssd);
     let reference_snapshot = dir_snapshot(&temp.path().join("fast"));
     assert!(reference.tables_found == 24);
     assert!(!reference_snapshot.is_empty());
 
     for (label, profile) in [
-        ("hdd", IoProfile::Hdd),
-        ("cheap", IoProfile::Cheap),
+        ("hdd", IoStrategy::Hdd),
+        ("cheap", IoStrategy::Cheap),
     ] {
         let out = temp.path().join(label);
         split_with(&input, out.clone(), profile);
@@ -135,7 +135,7 @@ fn test_all_profiles_produce_byte_identical_output() {
     ]);
     let out = temp.path().join("auto");
     let stats = Splitter::new(input.clone(), out.clone())
-        .with_io_profile(IoProfile::Auto)
+        .with_io_profile(IoStrategy::Auto)
         .with_io_clock(Arc::new(MockClock::stepping(Duration::from_millis(1))))
         .split()
         .expect("auto split");
@@ -175,7 +175,7 @@ fn test_deferred_writer_spawn_preserves_per_table_order() {
 
     let out = temp.path().join("out");
     let stats = Splitter::new(input.clone(), out.clone())
-        .with_io_profile(IoProfile::Auto)
+        .with_io_profile(IoStrategy::Auto)
         .with_io_clock(Arc::new(MockClock::stepping(Duration::from_millis(1))))
         .split()
         .expect("auto split");
@@ -248,7 +248,7 @@ fn test_throttled_sink_triggers_hdd_downgrade() {
 
     // Reference run without any seams.
     let reference_dir = temp.path().join("fast");
-    split_with(&input, reference_dir.clone(), IoProfile::Ssd);
+    split_with(&input, reference_dir.clone(), IoStrategy::Ssd);
 
     let _env = EnvGuard::set(&[
         ("SQL_SPLITTER_IO_PROBE", "ssd"),
@@ -257,7 +257,7 @@ fn test_throttled_sink_triggers_hdd_downgrade() {
     ]);
     let out = temp.path().join("auto-throttled");
     let stats = Splitter::new(input.clone(), out.clone())
-        .with_io_profile(IoProfile::Auto)
+        .with_io_profile(IoStrategy::Auto)
         .split()
         .expect("throttled auto split");
 
@@ -289,7 +289,7 @@ fn test_env_writers_overrides_profile() {
     let input = temp.path().join("in.sql");
     write_staggered_fixture(&input, 8, 10);
 
-    let stats = split_with(&input, temp.path().join("out"), IoProfile::Hdd);
+    let stats = split_with(&input, temp.path().join("out"), IoStrategy::Hdd);
     assert_eq!(
         stats.writers_used, 2,
         "env var must beat the hdd profile's W=1"
@@ -306,7 +306,7 @@ fn test_hdd_profile_caps_compression_writers_at_one() {
     write_staggered_fixture(&input, 8, 10);
 
     let stats = Splitter::new(input, temp.path().join("out"))
-        .with_io_profile(IoProfile::Hdd)
+        .with_io_profile(IoStrategy::Hdd)
         .with_output_compression(Compression::Zstd)
         .split()
         .expect("compressed hdd split");

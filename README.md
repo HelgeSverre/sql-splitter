@@ -245,7 +245,7 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `-t, --tables`   | Only split these tables (comma-separated)           | —           |
 | `--compress`     | Compress each output file: `gzip`, `zstd`, `bzip2`, `xz` | `none`  |
-| `--io-profile`   | Output device I/O profile: `auto`, `ssd`, `hdd`, `cheap` | `auto` |
+| `--io-strategy`   | Output device I/O strategy: `auto`, `ssd`, `hdd`, `cheap` | `auto` |
 | `-p, --progress` | Show progress bar                                   | —           |
 | `--dry-run`      | Preview without writing files                       | —           |
 | `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)           | —           |
@@ -269,7 +269,7 @@ entries. Archive output requires a single input file, and `--compress` applies
 only to directory output (for an archive the codec comes from the extension).
 
 **Slow output devices.** The write path is tuned for SSDs by default. When the
-output lands on a spinning disk, USB stick, or network mount, `--io-profile
+output lands on a spinning disk, USB stick, or network mount, `--io-strategy
 auto` (the default) detects it — a quick startup probe plus runtime
 backpressure monitoring — and adjusts how writes are scheduled. In our tests
 on a single USB 3.0 spinning drive (ExFAT), this ran roughly 1.5–2.5× faster

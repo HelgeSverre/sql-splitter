@@ -70,7 +70,7 @@ pub enum Commands {
   sql-splitter split dump.sql -o schema/ --schema-only
   sql-splitter split dump.sql -o tables/ --compress zstd
   sql-splitter split dump.sql -o dump.tar.gz
-  sql-splitter split dump.sql -o /mnt/usb/tables/ --io-profile hdd
+  sql-splitter split dump.sql -o /mnt/usb/tables/ --io-strategy hdd
   sql-splitter split \"backups/*.sql\" -o out/ --fail-fast")]
     Split {
         /// Input SQL file or glob pattern (e.g., *.sql, dumps/**/*.sql)
@@ -113,9 +113,9 @@ pub enum Commands {
         #[arg(long, default_value = "none", value_name = "FORMAT", help_heading = INPUT_OUTPUT)]
         compress: String,
 
-        /// Output device I/O profile: auto, ssd, hdd, cheap
-        #[arg(long, default_value = "auto", value_name = "PROFILE", help_heading = BEHAVIOR)]
-        io_profile: String,
+        /// Output device I/O strategy: auto, ssd, hdd, cheap
+        #[arg(long, default_value = "auto", value_name = "STRATEGY", help_heading = BEHAVIOR)]
+        io_strategy: String,
 
         /// Preview without writing files
         #[arg(long, help_heading = BEHAVIOR)]
@@ -787,7 +787,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             fail_fast,
             json,
             compress,
-            io_profile,
+            io_strategy,
         } => split::run(
             file,
             output,
@@ -801,7 +801,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             fail_fast,
             json,
             compress,
-            io_profile,
+            io_strategy,
         ),
         Commands::Analyze {
             file,
