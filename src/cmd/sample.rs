@@ -1,12 +1,93 @@
 //! Sample command CLI handler.
 
+use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
 use crate::parser::SqlDialect;
 use crate::sample::{
     self, GlobalTableMode, SampleConfig, SampleMode, SampleStats, TableClassification,
 };
+use clap::{Args, ValueHint};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
+
+#[derive(Args)]
+pub struct SampleArgs {
+    /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    file: PathBuf,
+
+    /// Output SQL file (default: stdout)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    output: Option<PathBuf>,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
+    dialect: Option<String>,
+
+    /// YAML config file for per-table settings
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    config: Option<PathBuf>,
+
+    /// Sample percentage of rows (1-100)
+    #[arg(long, conflicts_with = "rows", help_heading = MODE)]
+    percent: Option<u32>,
+
+    /// Sample fixed number of rows per table
+    #[arg(long, conflicts_with = "percent", help_heading = MODE)]
+    rows: Option<usize>,
+
+    /// Random seed for reproducible sampling
+    #[arg(long, help_heading = MODE)]
+    seed: Option<u64>,
+
+    /// Only sample specific tables (comma-separated)
+    #[arg(short, long, help_heading = FILTERING)]
+    tables: Option<String>,
+
+    /// Exclude specific tables (comma-separated)
+    #[arg(short, long, help_heading = FILTERING)]
+    exclude: Option<String>,
+
+    /// Tables to start sampling from (comma-separated)
+    #[arg(long, help_heading = FILTERING)]
+    root_tables: Option<String>,
+
+    /// Handle lookup tables: none, lookups, all
+    #[arg(long, default_value = "lookups", help_heading = FILTERING)]
+    include_global: Option<String>,
+
+    /// Maintain FK integrity by including referenced rows
+    #[arg(long, help_heading = BEHAVIOR)]
+    preserve_relations: bool,
+
+    /// Fail on FK integrity violations
+    #[arg(long, help_heading = BEHAVIOR)]
+    strict_fk: bool,
+
+    /// Exclude CREATE TABLE statements from output
+    #[arg(long, help_heading = BEHAVIOR)]
+    no_schema: bool,
+
+    /// Max total rows to sample (0 = unlimited)
+    #[arg(long, help_heading = LIMITS)]
+    max_total_rows: Option<usize>,
+
+    /// Disable row limit
+    #[arg(long, help_heading = LIMITS)]
+    no_limit: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
+    json: bool,
+
+    /// Preview without writing files
+    #[arg(long, help_heading = BEHAVIOR)]
+    dry_run: bool,
+}
 
 /// JSON output for sample command
 #[derive(Serialize, JsonSchema)]
@@ -49,27 +130,35 @@ pub(crate) struct TableSampleJson {
     sample_rate_percent: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    file: PathBuf,
-    output: Option<PathBuf>,
-    dialect: Option<String>,
-    percent: Option<u32>,
-    rows: Option<usize>,
-    preserve_relations: bool,
-    tables: Option<String>,
-    exclude: Option<String>,
-    root_tables: Option<String>,
-    include_global: Option<String>,
-    seed: Option<u64>,
-    config: Option<PathBuf>,
-    max_total_rows: Option<usize>,
-    strict_fk: bool,
-    no_schema: bool,
-    progress: bool,
-    dry_run: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+pub fn run(args: SampleArgs) -> anyhow::Result<()> {
+    let SampleArgs {
+        file,
+        output,
+        dialect,
+        config,
+        percent,
+        rows,
+        seed,
+        tables,
+        exclude,
+        root_tables,
+        include_global,
+        preserve_relations,
+        strict_fk,
+        no_schema,
+        max_total_rows,
+        no_limit,
+        progress,
+        json,
+        dry_run,
+    } = args;
+    let output = super::common::dash_is_stdout(output);
+    let max_total_rows = if no_limit || max_total_rows == Some(0) {
+        None
+    } else {
+        max_total_rows
+    };
+
     // Validate sampling mode - exactly one must be specified (or from config)
     let mode = match (percent, rows) {
         (Some(p), None) => {

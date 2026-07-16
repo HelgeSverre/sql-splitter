@@ -206,83 +206,7 @@ pub enum Commands {
   sql-splitter sample dump.sql -o dev.sql --rows 1000 --preserve-relations
   sql-splitter sample dump.sql -o dev.sql --percent 5 --seed 42
   sql-splitter sample dump.sql -o dev.sql --tables users,orders --percent 20")]
-    Sample {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output SQL file (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// YAML config file for per-table settings
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        config: Option<PathBuf>,
-
-        /// Sample percentage of rows (1-100)
-        #[arg(long, conflicts_with = "rows", help_heading = MODE)]
-        percent: Option<u32>,
-
-        /// Sample fixed number of rows per table
-        #[arg(long, conflicts_with = "percent", help_heading = MODE)]
-        rows: Option<usize>,
-
-        /// Random seed for reproducible sampling
-        #[arg(long, help_heading = MODE)]
-        seed: Option<u64>,
-
-        /// Only sample specific tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        tables: Option<String>,
-
-        /// Exclude specific tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        exclude: Option<String>,
-
-        /// Tables to start sampling from (comma-separated)
-        #[arg(long, help_heading = FILTERING)]
-        root_tables: Option<String>,
-
-        /// Handle lookup tables: none, lookups, all
-        #[arg(long, default_value = "lookups", help_heading = FILTERING)]
-        include_global: Option<String>,
-
-        /// Maintain FK integrity by including referenced rows
-        #[arg(long, help_heading = BEHAVIOR)]
-        preserve_relations: bool,
-
-        /// Fail on FK integrity violations
-        #[arg(long, help_heading = BEHAVIOR)]
-        strict_fk: bool,
-
-        /// Exclude CREATE TABLE statements from output
-        #[arg(long, help_heading = BEHAVIOR)]
-        no_schema: bool,
-
-        /// Max total rows to sample (0 = unlimited)
-        #[arg(long, help_heading = LIMITS)]
-        max_total_rows: Option<usize>,
-
-        /// Disable row limit
-        #[arg(long, help_heading = LIMITS)]
-        no_limit: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Preview without writing files
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-    },
+    Sample(sample::SampleArgs),
 
     /// Extract tenant-specific data from a multi-tenant dump
     #[command(visible_alias = "sh")]
@@ -750,53 +674,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             json,
         ),
-        Commands::Sample {
-            file,
-            output,
-            dialect,
-            percent,
-            rows,
-            preserve_relations,
-            tables,
-            exclude,
-            root_tables,
-            include_global,
-            seed,
-            config,
-            max_total_rows,
-            no_limit,
-            strict_fk,
-            no_schema,
-            progress,
-            dry_run,
-            json,
-        } => {
-            let effective_limit = if no_limit || max_total_rows == Some(0) {
-                None
-            } else {
-                max_total_rows
-            };
-            sample::run(
-                file,
-                dash_is_stdout(output),
-                dialect,
-                percent,
-                rows,
-                preserve_relations,
-                tables,
-                exclude,
-                root_tables,
-                include_global,
-                seed,
-                config,
-                effective_limit,
-                strict_fk,
-                no_schema,
-                progress,
-                dry_run,
-                json,
-            )
-        }
+        Commands::Sample(args) => sample::run(args),
         Commands::Shard {
             file,
             output,
