@@ -1120,7 +1120,7 @@ let inference = ModelInference::infer(&profile, &registry, InferenceOptions::def
 let model = inference.model;
 
 // If overrides are present, merge them before compiling:
-let model = ModelMerger::merge(model, overrides)?;
+let (model, _merge_warnings) = ModelMerger::merge(model, overrides)?;
 
 let plan = ModelCompiler::new(&registry).compile(model, CompileOptions::default())?;
 let report = GenerationEngine::new(plan).run(renderer)?;

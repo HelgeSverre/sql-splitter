@@ -208,7 +208,7 @@ git commit -m "feat(generate): add typed extension registry"
 - Test: `tests/generate_config_test.rs`
 
 **Interfaces:**
-- Produces: `ModelMerger::merge(base: SyntheticModel, overrides: SyntheticOverrides) -> Result<SyntheticModel, DiagnosticBag>`
+- Produces: `ModelMerger::merge(base: SyntheticModel, overrides: SyntheticOverrides) -> Result<(SyntheticModel, DiagnosticBag), DiagnosticBag>` — on success returns the merged model plus a warning-only bag (e.g. fingerprint `warn`), so warnings survive a successful merge; on any error-severity diagnostic returns `Err(bag)`. (Design-audit fix: `into_result` discards the bag on success, which would silently drop the fingerprint `warn` diagnostic.)
 - Produces: compatibility diagnostics for tables, columns, and types
 - Consumes: portable schema conversion and partial override types
 
@@ -219,7 +219,7 @@ git commit -m "feat(generate): add typed extension registry"
 fn overrides_change_rules_but_not_source_schema() {
     let base = model_with_users_email("varchar(255)");
     let rules = overrides_with_email_generator("internet.email");
-    let merged = ModelMerger::merge(base.clone(), rules).unwrap();
+    let (merged, _warnings) = ModelMerger::merge(base.clone(), rules).unwrap();
     assert_eq!(merged.tables["users"].columns["email"].generator.kind(), "internet.email");
 
     let structural = overrides_with_email_type("bigint");
@@ -340,6 +340,16 @@ pub struct GenerationPlan {
     pub diagnostics: Vec<Diagnostic>,
     pub estimates: PlanEstimates,
 }
+```
+
+`plan.diagnostics` accumulates non-error diagnostics that must survive a
+successful compile: the compiler drains the warning-only bag returned by
+`ModelMerger::merge` (fingerprint `warn`, etc.) into it, then appends its own
+compile-stage warnings. Warnings therefore reach the CLI/JSON report even when
+compilation succeeds; error-severity diagnostics still abort via `Err(bag)`.
+
+```rust
+// (struct continues)
 
 pub struct PlannedTable {
     pub name: String,
