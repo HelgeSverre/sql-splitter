@@ -4,9 +4,8 @@ use crate::graph::{
     cyclic_tables, find_cycles, to_dot, to_html, to_json, to_mermaid, Cycle, GraphView, Layout,
     OutputFormat,
 };
-use crate::parser::{detect_dialect_from_file, Parser, StatementType};
+use crate::parser::{Parser, StatementType};
 use crate::schema::{SchemaBuilder, SchemaGraph};
-use crate::splitter::Compression;
 use anyhow::{bail, Result};
 use glob::Pattern;
 use std::fs::File;
@@ -66,15 +65,14 @@ pub fn run(
     }
 
     // Detect dialect
-    let compression = Compression::from_path(&file);
-    let dialect = resolve_dialect(&file, dialect, compression)?;
+    let dialect = super::common::resolve_dialect(&file, dialect.as_deref(), false)?;
 
     if !matches!(format, OutputFormat::Json) {
         eprintln!("Generating ERD: {} [dialect: {}]", file.display(), dialect);
     }
 
     // Build schema graph from file
-    let graph = build_schema_graph_from_file(&file, dialect, compression)?;
+    let graph = build_schema_graph_from_file(&file, dialect)?;
 
     if graph.is_empty() {
         if !matches!(format, OutputFormat::Json) {
@@ -183,7 +181,6 @@ pub fn run(
 fn build_schema_graph_from_file(
     path: &Path,
     dialect: crate::parser::SqlDialect,
-    _compression: Compression,
 ) -> Result<SchemaGraph> {
     let reader: Box<dyn Read> = crate::splitter::open_input(path)?;
 
@@ -247,35 +244,6 @@ fn render_with_graphviz(dot_source: &str, output_path: &Path) -> Result<()> {
 
     eprintln!("Rendered to: {}", output_path.display());
     Ok(())
-}
-
-/// Resolve SQL dialect
-fn resolve_dialect(
-    file: &Path,
-    dialect: Option<String>,
-    _compression: Compression,
-) -> Result<crate::parser::SqlDialect> {
-    use crate::parser::DialectConfidence;
-
-    match dialect {
-        Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
-        None => {
-            // `detect_dialect_from_file` opens through `open_input`, so it
-            // transparently handles compressed/zipped input on its own.
-            let result = detect_dialect_from_file(file)?;
-
-            let confidence_str = match result.confidence {
-                DialectConfidence::High => "high confidence",
-                DialectConfidence::Medium => "medium confidence",
-                DialectConfidence::Low => "low confidence",
-            };
-            eprintln!(
-                "Auto-detected dialect: {} ({})",
-                result.dialect, confidence_str
-            );
-            Ok(result.dialect)
-        }
-    }
 }
 
 /// Display cycles in a user-friendly format

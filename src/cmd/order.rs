@@ -1,8 +1,7 @@
 //! Order command - output SQL dump with tables in topological order.
 
-use crate::parser::{detect_dialect_from_file, DialectConfidence, Parser, StatementType};
+use crate::parser::{Parser, StatementType};
 use crate::schema::{SchemaBuilder, SchemaGraph};
-use crate::splitter::Compression;
 use ahash::AHashMap;
 use anyhow::{bail, Result};
 use std::fs::File;
@@ -23,14 +22,12 @@ pub fn run(
         bail!("input file does not exist: {}", file.display());
     }
 
-    let compression = Compression::from_path(&file);
-    let sql_dialect = resolve_dialect(&file, dialect, compression)?;
+    let sql_dialect = super::common::resolve_dialect(&file, dialect.as_deref(), false)?;
 
     eprintln!("Analyzing schema for topological order...");
 
     // First pass: build schema graph
-    let (graph, table_statements, other_statements) =
-        collect_statements(&file, sql_dialect, compression)?;
+    let (graph, table_statements, other_statements) = collect_statements(&file, sql_dialect)?;
 
     if graph.is_empty() {
         eprintln!("No tables found in the file.");
@@ -132,9 +129,8 @@ struct CollectedStatements {
 
 /// Collect and categorize statements from the file
 fn collect_statements(
-    path: &PathBuf,
+    path: &std::path::Path,
     dialect: crate::parser::SqlDialect,
-    _compression: Compression,
 ) -> Result<(SchemaGraph, CollectedStatements, Vec<String>)> {
     let reader: Box<dyn Read> = crate::splitter::open_input(path)?;
 
@@ -249,31 +245,4 @@ fn write_ordered_output(
 
     writer.flush()?;
     Ok(())
-}
-
-/// Resolve SQL dialect
-fn resolve_dialect(
-    file: &std::path::Path,
-    dialect: Option<String>,
-    _compression: Compression,
-) -> Result<crate::parser::SqlDialect> {
-    match dialect {
-        Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
-        None => {
-            // `detect_dialect_from_file` opens through `open_input`, so it
-            // transparently handles compressed/zipped input on its own.
-            let result = detect_dialect_from_file(file)?;
-
-            let confidence_str = match result.confidence {
-                DialectConfidence::High => "high confidence",
-                DialectConfidence::Medium => "medium confidence",
-                DialectConfidence::Low => "low confidence",
-            };
-            eprintln!(
-                "Auto-detected dialect: {} ({})",
-                result.dialect, confidence_str
-            );
-            Ok(result.dialect)
-        }
-    }
 }

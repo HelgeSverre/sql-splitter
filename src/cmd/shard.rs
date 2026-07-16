@@ -102,19 +102,7 @@ pub fn run(
     }
 
     // Parse dialect
-    let dialect_resolved = if let Some(d) = dialect {
-        d.parse::<SqlDialect>()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-    } else {
-        let result = crate::parser::detect_dialect_from_file(&file)?;
-        if progress && !json {
-            eprintln!(
-                "Auto-detected dialect: {} (confidence: {:?})",
-                result.dialect, result.confidence
-            );
-        }
-        result.dialect
-    };
+    let dialect_resolved = super::common::resolve_dialect(&file, dialect.as_deref(), json)?;
 
     // Parse root tables
     let root_tables_list: Vec<String> = root_tables

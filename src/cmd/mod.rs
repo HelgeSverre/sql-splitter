@@ -1,4 +1,5 @@
 pub(crate) mod analyze;
+mod common;
 pub(crate) mod convert;
 mod diff;
 mod glob_util;

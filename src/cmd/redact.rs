@@ -1,6 +1,5 @@
 //! CLI handler for the redact command.
 
-use crate::parser::{detect_dialect_from_file, SqlDialect};
 use crate::redactor::{RedactConfig, RedactStats, Redactor};
 use std::path::PathBuf;
 
@@ -27,25 +26,11 @@ pub fn run(
     json: bool,
     validate_only: bool,
 ) -> anyhow::Result<()> {
-    // Determine dialect
-    let dialect = if let Some(d) = dialect {
-        match d.to_lowercase().as_str() {
-            "mysql" | "mariadb" => SqlDialect::MySql,
-            "postgres" | "postgresql" => SqlDialect::Postgres,
-            "sqlite" => SqlDialect::Sqlite,
-            "mssql" | "sqlserver" | "sql_server" | "tsql" => SqlDialect::Mssql,
-            _ => anyhow::bail!(
-                "Unknown dialect: {}. Use: mysql, postgres, sqlite, mssql",
-                d
-            ),
-        }
-    } else {
-        // Auto-detect from file content
-        match detect_dialect_from_file(&file) {
-            Ok(result) => result.dialect,
-            Err(_) => SqlDialect::MySql, // Default to MySQL if detection fails
-        }
-    };
+    // Determine dialect. Unlike the old hand-rolled resolver, a detection
+    // failure is now reported as an error instead of silently defaulting to
+    // MySQL (which could corrupt Postgres/MSSQL dumps by redacting with the
+    // wrong quoting rules).
+    let dialect = super::common::resolve_dialect(&file, dialect.as_deref(), json)?;
 
     // Build config from YAML file and/or CLI options
     let redact_config = RedactConfig::builder()

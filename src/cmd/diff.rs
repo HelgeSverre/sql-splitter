@@ -1,5 +1,4 @@
 use crate::differ::{format_diff, DiffConfig, DiffOutputFormat, Differ};
-use crate::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::io::Write;
@@ -53,7 +52,7 @@ pub fn run(
     let is_json = matches!(output_format, DiffOutputFormat::Json);
 
     // Resolve dialect
-    let resolved_dialect = resolve_dialect(&old_file, dialect.clone())?;
+    let resolved_dialect = super::common::resolve_dialect(&old_file, dialect.as_deref(), false)?;
 
     // Parse table filters
     let tables_filter: Vec<String> = tables
@@ -174,26 +173,4 @@ pub fn run(
     }
 
     Ok(())
-}
-
-fn resolve_dialect(file: &std::path::Path, dialect: Option<String>) -> anyhow::Result<SqlDialect> {
-    match dialect {
-        Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
-        None => {
-            // `detect_dialect_from_file` opens through `open_input`, so it
-            // transparently handles compressed/zipped input on its own.
-            let result = detect_dialect_from_file(file)?;
-
-            let confidence_str = match result.confidence {
-                DialectConfidence::High => "high confidence",
-                DialectConfidence::Medium => "medium confidence",
-                DialectConfidence::Low => "low confidence",
-            };
-            eprintln!(
-                "Auto-detected dialect: {} ({})",
-                result.dialect, confidence_str
-            );
-            Ok(result.dialect)
-        }
-    }
 }

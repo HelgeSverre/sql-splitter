@@ -1,4 +1,4 @@
-use crate::parser::{detect_dialect_from_file, ContentFilter, DialectConfidence, SqlDialect};
+use crate::parser::ContentFilter;
 use crate::splitter::{Compression, Splitter};
 use crate::writer::IoStrategy;
 #[allow(unused_imports)]
@@ -167,19 +167,7 @@ fn run_single(
     };
 
     let (dialect_resolved, dialect_confidence) =
-        resolve_dialect_with_confidence(&file, dialect.clone(), compression)?;
-
-    if !json && dialect.is_none() {
-        let confidence_str = match dialect_confidence {
-            DialectConfidence::High => "high confidence",
-            DialectConfidence::Medium => "medium confidence",
-            DialectConfidence::Low => "low confidence",
-        };
-        println!(
-            "Auto-detected dialect: {} ({})",
-            dialect_resolved, confidence_str
-        );
-    }
+        super::common::resolve_dialect_with_confidence(&file, dialect.as_deref(), json)?;
 
     let content_filter = if schema_only {
         ContentFilter::SchemaOnly
@@ -460,8 +448,8 @@ fn run_multi(
         };
         let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let compression = Compression::from_path(file);
-        let resolved_dialect = match resolve_dialect(file, dialect.clone(), compression) {
+        let resolved_dialect = match super::common::resolve_dialect(file, dialect.as_deref(), true)
+        {
             Ok(d) => d,
             Err(e) => {
                 if !json {
@@ -650,33 +638,4 @@ fn run_multi(
     }
 
     Ok(())
-}
-
-fn resolve_dialect(
-    file: &std::path::Path,
-    dialect: Option<String>,
-    compression: Compression,
-) -> anyhow::Result<SqlDialect> {
-    let (dialect, _) = resolve_dialect_with_confidence(file, dialect, compression)?;
-    Ok(dialect)
-}
-
-fn resolve_dialect_with_confidence(
-    file: &std::path::Path,
-    dialect: Option<String>,
-    _compression: Compression,
-) -> anyhow::Result<(SqlDialect, DialectConfidence)> {
-    match dialect {
-        Some(d) => {
-            let parsed: SqlDialect = d.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            Ok((parsed, DialectConfidence::High))
-        }
-        None => {
-            // `detect_dialect_from_file` opens through `open_input`, so it
-            // transparently handles compressed/zipped input on its own.
-            let result = detect_dialect_from_file(file)?;
-
-            Ok((result.dialect, result.confidence))
-        }
-    }
 }

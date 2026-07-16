@@ -1,4 +1,3 @@
-use crate::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
 use crate::splitter::Compression;
 use crate::validate::{ValidateOptions, Validator};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -61,7 +60,7 @@ fn run_single(
     let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
     let compression = Compression::from_path(&file);
-    let dialect = resolve_dialect(&file, dialect, compression)?;
+    let dialect = super::common::resolve_dialect(&file, dialect.as_deref(), false)?;
 
     if !json {
         if compression != Compression::None {
@@ -215,8 +214,8 @@ fn run_multi(
         };
         let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let compression = Compression::from_path(file);
-        let resolved_dialect = match resolve_dialect(file, dialect.clone(), compression) {
+        let resolved_dialect = match super::common::resolve_dialect(file, dialect.as_deref(), false)
+        {
             Ok(d) => d,
             Err(e) => {
                 result.record_failure(file.clone(), e.to_string());
@@ -338,30 +337,4 @@ fn run_multi(
     }
 
     Ok(())
-}
-
-fn resolve_dialect(
-    file: &std::path::Path,
-    dialect: Option<String>,
-    _compression: Compression,
-) -> anyhow::Result<SqlDialect> {
-    match dialect {
-        Some(d) => d.parse().map_err(|e: String| anyhow::anyhow!(e)),
-        None => {
-            // `detect_dialect_from_file` opens through `open_input`, so it
-            // transparently handles compressed/zipped input on its own.
-            let result = detect_dialect_from_file(file)?;
-
-            let confidence_str = match result.confidence {
-                DialectConfidence::High => "high confidence",
-                DialectConfidence::Medium => "medium confidence",
-                DialectConfidence::Low => "low confidence",
-            };
-            eprintln!(
-                "Auto-detected dialect: {} ({})",
-                result.dialect, confidence_str
-            );
-            Ok(result.dialect)
-        }
-    }
 }
