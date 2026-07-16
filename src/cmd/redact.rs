@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct RedactArgs {
-    /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+    /// Input SQL file (supports .gz, .bz2, .xz, .zst, .zip)
     #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     file: PathBuf,
 
