@@ -72,6 +72,91 @@ pub fn expand_file_pattern(pattern: &Path) -> anyhow::Result<ExpandedFiles> {
     })
 }
 
+/// Per-file outcome produced by a multi-file command's worker closure.
+pub enum FileOutcome<P> {
+    /// The file was processed successfully; `P` is the per-file JSON payload.
+    Success(P),
+    /// The file failed. `payload` is an optional per-file JSON entry (some
+    /// commands report failures in their JSON results, some only aggregate).
+    Failure { payload: Option<P>, error: String },
+}
+
+/// Aggregate results of a multi-file run driven by [`drive_multi_file`].
+pub struct MultiRun<P> {
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    /// Files never attempted because `fail_fast` stopped the run early.
+    pub skipped: usize,
+    pub elapsed: std::time::Duration,
+    pub errors: Vec<(PathBuf, String)>,
+    /// Per-file JSON payloads, in input order.
+    pub payloads: Vec<P>,
+}
+
+impl<P> MultiRun<P> {
+    pub fn has_failures(&self) -> bool {
+        self.failed > 0
+    }
+}
+
+/// Drive a multi-file (glob) command run: iterate `files`, delegate each file
+/// to `per_file`, and own the success/failure bookkeeping, `fail_fast` early
+/// exit, elapsed timing, and skipped-tail accounting that every glob-capable
+/// command previously duplicated.
+///
+/// `on_skipped` builds an optional payload entry for files never attempted
+/// because `fail_fast` broke out of the loop (so JSON reports can stay
+/// self-consistent); return `None` to omit skipped files from the payloads.
+pub fn drive_multi_file<P>(
+    files: &[PathBuf],
+    fail_fast: bool,
+    mut per_file: impl FnMut(usize, &Path) -> FileOutcome<P>,
+    mut on_skipped: impl FnMut(&Path) -> Option<P>,
+) -> MultiRun<P> {
+    let start = std::time::Instant::now();
+    let mut run = MultiRun {
+        total: files.len(),
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        elapsed: std::time::Duration::ZERO,
+        errors: Vec::new(),
+        payloads: Vec::new(),
+    };
+
+    let mut attempted = 0;
+    for (idx, file) in files.iter().enumerate() {
+        attempted = idx + 1;
+        match per_file(idx, file) {
+            FileOutcome::Success(payload) => {
+                run.succeeded += 1;
+                run.payloads.push(payload);
+            }
+            FileOutcome::Failure { payload, error } => {
+                run.failed += 1;
+                run.errors.push((file.clone(), error));
+                if let Some(payload) = payload {
+                    run.payloads.push(payload);
+                }
+                if fail_fast {
+                    break;
+                }
+            }
+        }
+    }
+
+    run.skipped = files.len() - attempted;
+    for file in files.iter().skip(attempted) {
+        if let Some(payload) = on_skipped(file) {
+            run.payloads.push(payload);
+        }
+    }
+
+    run.elapsed = start.elapsed();
+    run
+}
+
 /// Result type for multi-file command execution.
 #[derive(Debug, Default)]
 pub struct MultiFileResult {

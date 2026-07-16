@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::glob_util::{expand_file_pattern, MultiFileResult};
+use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
 
 /// JSON output for single file analyze
 #[derive(Serialize, JsonSchema)]
@@ -213,185 +213,168 @@ fn run_multi(
     json: bool,
 ) -> anyhow::Result<()> {
     let total = files.len();
-    let mut result = MultiFileResult::new();
-    result.total_files = total;
 
     if !json {
         println!("Analyzing {} files...\n", total);
     }
 
-    let start_time = Instant::now();
-    let mut json_results: Vec<AnalyzeFileResult> = Vec::new();
+    let failed_entry = |file: &std::path::Path,
+                        size_mb: Option<f64>,
+                        dialect: Option<String>,
+                        error: &anyhow::Error| AnalyzeFileResult {
+        file: file.display().to_string(),
+        size_mb,
+        dialect,
+        tables_count: None,
+        total_inserts: None,
+        total_size_mb: None,
+        tables: None,
+        status: "failed".to_string(),
+        error: Some(error.to_string()),
+    };
 
-    for (idx, file) in files.iter().enumerate() {
-        if !json {
-            println!(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
-                idx + 1,
-                total,
-                file.display()
-            );
-        }
-
-        let file_size = match std::fs::metadata(file) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                if !json {
-                    println!("  Error: {}\n", e);
-                }
-                json_results.push(AnalyzeFileResult {
-                    file: file.display().to_string(),
-                    size_mb: None,
-                    dialect: None,
-                    tables_count: None,
-                    total_inserts: None,
-                    total_size_mb: None,
-                    tables: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
+    let run = drive_multi_file(
+        &files,
+        fail_fast,
+        |idx, file| {
+            if !json {
+                println!(
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
+                    idx + 1,
+                    total,
+                    file.display()
+                );
             }
-        };
-        let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let resolved_dialect = match super::common::resolve_dialect(file, dialect.as_deref(), json)
-        {
-            Ok(d) => d,
-            Err(e) => {
-                if !json {
-                    println!("  Error: {}\n", e);
+            let file_size = match std::fs::metadata(file) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    let e = anyhow::Error::from(e);
+                    if !json {
+                        println!("  Error: {}\n", e);
+                    }
+                    return FileOutcome::Failure {
+                        payload: Some(failed_entry(file, None, None, &e)),
+                        error: e.to_string(),
+                    };
                 }
-                json_results.push(AnalyzeFileResult {
-                    file: file.display().to_string(),
-                    size_mb: Some(file_size_mb),
-                    dialect: None,
-                    tables_count: None,
-                    total_inserts: None,
-                    total_size_mb: None,
-                    tables: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
+            };
+            let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
+
+            let resolved_dialect =
+                match super::common::resolve_dialect(file, dialect.as_deref(), json) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        if !json {
+                            println!("  Error: {}\n", e);
+                        }
+                        return FileOutcome::Failure {
+                            payload: Some(failed_entry(file, Some(file_size_mb), None, &e)),
+                            error: e.to_string(),
+                        };
+                    }
+                };
+
+            if !json {
+                println!(
+                    "  Size: {:.2} MB | Dialect: {}",
+                    file_size_mb, resolved_dialect
+                );
             }
-        };
 
-        if !json {
-            println!(
-                "  Size: {:.2} MB | Dialect: {}",
-                file_size_mb, resolved_dialect
-            );
-        }
+            let analyzer = Analyzer::new(file.to_path_buf()).with_dialect(resolved_dialect);
+            let stats = if progress && !json {
+                let pb = super::common::compact_progress_bar(file_size);
 
-        let analyzer = Analyzer::new(file.clone()).with_dialect(resolved_dialect);
-        let stats = if progress && !json {
-            let pb = super::common::compact_progress_bar(file_size);
+                let pb_clone = pb.clone();
+                let result = analyzer.analyze_with_progress(move |bytes| {
+                    pb_clone.set_position(bytes);
+                });
 
-            let pb_clone = pb.clone();
-            let result = analyzer.analyze_with_progress(move |bytes| {
-                pb_clone.set_position(bytes);
-            });
+                pb.finish_and_clear();
+                result
+            } else {
+                analyzer.analyze()
+            };
 
-            pb.finish_and_clear();
-            result
-        } else {
-            analyzer.analyze()
-        };
+            match stats {
+                Ok(stats) => {
+                    let total_inserts: u64 = stats.iter().map(|s| s.insert_count).sum();
+                    let total_bytes: u64 = stats.iter().map(|s| s.total_bytes).sum();
 
-        match stats {
-            Ok(stats) => {
-                let total_inserts: u64 = stats.iter().map(|s| s.insert_count).sum();
-                let total_bytes: u64 = stats.iter().map(|s| s.total_bytes).sum();
+                    if !json {
+                        println!(
+                            "  Tables: {} | INSERTs: {} | Data: {:.2} MB\n",
+                            stats.len(),
+                            total_inserts,
+                            total_bytes as f64 / (1024.0 * 1024.0)
+                        );
+                    }
 
-                if !json {
-                    println!(
-                        "  Tables: {} | INSERTs: {} | Data: {:.2} MB\n",
-                        stats.len(),
-                        total_inserts,
-                        total_bytes as f64 / (1024.0 * 1024.0)
-                    );
-                }
+                    let tables: Vec<TableAnalysis> = stats
+                        .iter()
+                        .map(|s| TableAnalysis {
+                            name: s.table_name.clone(),
+                            inserts: s.insert_count,
+                            creates: s.create_count,
+                            statements: s.statement_count,
+                            bytes: s.total_bytes,
+                            size_mb: s.total_bytes as f64 / (1024.0 * 1024.0),
+                        })
+                        .collect();
 
-                let tables: Vec<TableAnalysis> = stats
-                    .iter()
-                    .map(|s| TableAnalysis {
-                        name: s.table_name.clone(),
-                        inserts: s.insert_count,
-                        creates: s.create_count,
-                        statements: s.statement_count,
-                        bytes: s.total_bytes,
-                        size_mb: s.total_bytes as f64 / (1024.0 * 1024.0),
+                    FileOutcome::Success(AnalyzeFileResult {
+                        file: file.display().to_string(),
+                        size_mb: Some(file_size_mb),
+                        dialect: Some(resolved_dialect.to_string()),
+                        tables_count: Some(stats.len()),
+                        total_inserts: Some(total_inserts),
+                        total_size_mb: Some(total_bytes as f64 / (1024.0 * 1024.0)),
+                        tables: Some(tables),
+                        status: "success".to_string(),
+                        error: None,
                     })
-                    .collect();
-
-                json_results.push(AnalyzeFileResult {
-                    file: file.display().to_string(),
-                    size_mb: Some(file_size_mb),
-                    dialect: Some(resolved_dialect.to_string()),
-                    tables_count: Some(stats.len()),
-                    total_inserts: Some(total_inserts),
-                    total_size_mb: Some(total_bytes as f64 / (1024.0 * 1024.0)),
-                    tables: Some(tables),
-                    status: "success".to_string(),
-                    error: None,
-                });
-                result.record_success();
-            }
-            Err(e) => {
-                if !json {
-                    println!("  Error: {}\n", e);
                 }
-                json_results.push(AnalyzeFileResult {
-                    file: file.display().to_string(),
-                    size_mb: Some(file_size_mb),
-                    dialect: Some(resolved_dialect.to_string()),
-                    tables_count: None,
-                    total_inserts: None,
-                    total_size_mb: None,
-                    tables: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
+                Err(e) => {
+                    if !json {
+                        println!("  Error: {}\n", e);
+                    }
+                    FileOutcome::Failure {
+                        payload: Some(failed_entry(
+                            file,
+                            Some(file_size_mb),
+                            Some(resolved_dialect.to_string()),
+                            &e,
+                        )),
+                        error: e.to_string(),
+                    }
                 }
             }
-        }
-    }
-
-    let elapsed = start_time.elapsed();
+        },
+        |_| None,
+    );
 
     if json {
         let output = MultiAnalyzeJsonOutput {
-            total_files: total,
-            succeeded: result.succeeded,
-            failed: result.failed,
-            elapsed_secs: elapsed.as_secs_f64(),
-            results: json_results,
+            total_files: run.total,
+            succeeded: run.succeeded,
+            failed: run.failed,
+            elapsed_secs: run.elapsed.as_secs_f64(),
+            results: run.payloads,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Analysis Summary:");
-        println!("  Total files: {}", total);
-        println!("  Succeeded: {}", result.succeeded);
-        println!("  Failed: {}", result.failed);
-        println!("  Time: {:.3?}", elapsed);
+        println!("  Total files: {}", run.total);
+        println!("  Succeeded: {}", run.succeeded);
+        println!("  Failed: {}", run.failed);
+        println!("  Time: {:.3?}", run.elapsed);
 
-        if result.has_failures() {
+        if run.has_failures() {
             println!();
             println!("Failed files:");
-            for (path, error) in &result.errors {
+            for (path, error) in &run.errors {
                 println!("  - {}: {}", path.display(), error);
             }
             std::process::exit(1);

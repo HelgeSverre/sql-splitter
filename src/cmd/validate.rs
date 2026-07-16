@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::common::{BEHAVIOR, INPUT_OUTPUT, LIMITS, OUTPUT_FORMAT};
-use super::glob_util::{expand_file_pattern, MultiFileResult};
+use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
 
 #[derive(Args)]
 pub struct ValidateArgs {
@@ -223,140 +223,137 @@ fn run_multi(
     fail_fast: bool,
 ) -> anyhow::Result<()> {
     let total = files.len();
-    let mut result = MultiFileResult::new();
-    result.total_files = total;
 
     if !json {
         eprintln!("Validating {} files...\n", total);
     }
 
-    let start_time = Instant::now();
     let mut all_passed = true;
-    let mut json_results: Vec<serde_json::Value> = Vec::new();
 
-    for (idx, file) in files.iter().enumerate() {
-        if !json {
-            eprintln!("[{}/{}] Validating: {}", idx + 1, total, file.display());
-        }
-
-        let file_size = match std::fs::metadata(file) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
+    let run = drive_multi_file(
+        &files,
+        fail_fast,
+        |idx, file| {
+            if !json {
+                eprintln!("[{}/{}] Validating: {}", idx + 1, total, file.display());
             }
-        };
-        let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let resolved_dialect = match super::common::resolve_dialect(file, dialect.as_deref(), false)
-        {
-            Ok(d) => d,
-            Err(e) => {
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
+            let file_size = match std::fs::metadata(file) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    return FileOutcome::Failure {
+                        payload: None,
+                        error: e.to_string(),
+                    }
                 }
-                continue;
-            }
-        };
+            };
+            let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let options = ValidateOptions {
-            path: file.clone(),
-            dialect: Some(resolved_dialect),
-            progress: false,
-            strict,
-            json,
-            max_rows_per_table,
-            fk_checks_enabled: !no_fk_checks,
-            max_pk_fk_keys: None,
-        };
+            let resolved_dialect =
+                match super::common::resolve_dialect(file, dialect.as_deref(), false) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return FileOutcome::Failure {
+                            payload: None,
+                            error: e.to_string(),
+                        }
+                    }
+                };
 
-        let validator = Validator::new(options);
-        let summary = match validator.validate() {
-            Ok(s) => s,
-            Err(e) => {
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
-            }
-        };
-
-        let file_passed = !(summary.has_errors() || strict && summary.has_warnings());
-
-        if json {
-            json_results.push(serde_json::json!({
-                "file": file.display().to_string(),
-                "size_mb": file_size_mb,
-                "passed": file_passed,
-                "summary": summary
-            }));
-        } else {
-            let status = if summary.has_errors() {
-                "FAILED"
-            } else if summary.has_warnings() && strict {
-                "FAILED (strict)"
-            } else if summary.has_warnings() {
-                "PASSED (warnings)"
-            } else {
-                "PASSED"
+            let options = ValidateOptions {
+                path: file.to_path_buf(),
+                dialect: Some(resolved_dialect),
+                progress: false,
+                strict,
+                json,
+                max_rows_per_table,
+                fk_checks_enabled: !no_fk_checks,
+                max_pk_fk_keys: None,
             };
 
-            eprintln!(
-                "  {} ({:.2} MB): {} errors, {} warnings - {}",
-                file.file_name().unwrap_or_default().to_string_lossy(),
-                file_size_mb,
-                summary.summary.errors,
-                summary.summary.warnings,
-                status
-            );
-        }
+            let validator = Validator::new(options);
+            let summary = match validator.validate() {
+                Ok(s) => s,
+                Err(e) => {
+                    return FileOutcome::Failure {
+                        payload: None,
+                        error: e.to_string(),
+                    }
+                }
+            };
 
-        if file_passed {
-            result.record_success();
-        } else {
-            all_passed = false;
-            result.record_failure(
-                file.clone(),
-                format!(
-                    "{} errors, {} warnings",
-                    summary.summary.errors, summary.summary.warnings
-                ),
-            );
-            if fail_fast {
-                break;
+            let file_passed = !(summary.has_errors() || strict && summary.has_warnings());
+
+            let payload = if json {
+                Some(serde_json::json!({
+                    "file": file.display().to_string(),
+                    "size_mb": file_size_mb,
+                    "passed": file_passed,
+                    "summary": summary
+                }))
+            } else {
+                let status = if summary.has_errors() {
+                    "FAILED"
+                } else if summary.has_warnings() && strict {
+                    "FAILED (strict)"
+                } else if summary.has_warnings() {
+                    "PASSED (warnings)"
+                } else {
+                    "PASSED"
+                };
+
+                eprintln!(
+                    "  {} ({:.2} MB): {} errors, {} warnings - {}",
+                    file.file_name().unwrap_or_default().to_string_lossy(),
+                    file_size_mb,
+                    summary.summary.errors,
+                    summary.summary.warnings,
+                    status
+                );
+                None
+            };
+
+            if file_passed {
+                match payload {
+                    Some(p) => FileOutcome::Success(p),
+                    None => FileOutcome::Success(serde_json::Value::Null),
+                }
+            } else {
+                all_passed = false;
+                FileOutcome::Failure {
+                    payload,
+                    error: format!(
+                        "{} errors, {} warnings",
+                        summary.summary.errors, summary.summary.warnings
+                    ),
+                }
             }
-        }
-    }
-
-    let elapsed = start_time.elapsed();
+        },
+        |_| None,
+    );
 
     if json {
         let aggregate = serde_json::json!({
-            "total_files": total,
-            "passed": result.succeeded,
-            "failed": result.failed,
-            "elapsed_secs": elapsed.as_secs_f64(),
-            "results": json_results
+            "total_files": run.total,
+            "passed": run.succeeded,
+            "failed": run.failed,
+            "elapsed_secs": run.elapsed.as_secs_f64(),
+            "results": run.payloads
         });
         println!("{}", serde_json::to_string_pretty(&aggregate)?);
     } else {
         eprintln!();
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("Validation Summary:");
-        eprintln!("  Total files: {}", total);
-        eprintln!("  Passed: {}", result.succeeded);
-        eprintln!("  Failed: {}", result.failed);
-        eprintln!("  Time: {:.3?}", elapsed);
+        eprintln!("  Total files: {}", run.total);
+        eprintln!("  Passed: {}", run.succeeded);
+        eprintln!("  Failed: {}", run.failed);
+        eprintln!("  Time: {:.3?}", run.elapsed);
 
-        if !result.errors.is_empty() {
+        if !run.errors.is_empty() {
             eprintln!();
             eprintln!("Failed files:");
-            for (path, error) in &result.errors {
+            for (path, error) in &run.errors {
                 eprintln!("  - {}: {}", path.display(), error);
             }
         }
@@ -369,7 +366,7 @@ fn run_multi(
         }
     }
 
-    if result.has_failures() {
+    if run.has_failures() {
         std::process::exit(1);
     }
 

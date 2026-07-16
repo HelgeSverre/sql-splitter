@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::glob_util::{expand_file_pattern, MultiFileResult};
+use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
 
 /// JSON output for single file split
 #[derive(Serialize, JsonSchema)]
@@ -437,233 +437,218 @@ fn run_multi(
     io_strategy: IoStrategy,
 ) -> anyhow::Result<()> {
     let total = files.len();
-    let mut result = MultiFileResult::new();
-    result.total_files = total;
 
     if !json {
         println!("Splitting {} files...\n", total);
     }
 
-    let start_time = Instant::now();
-    let mut json_results: Vec<SplitFileResult> = Vec::new();
-
-    for (idx, file) in files.iter().enumerate() {
-        if !json {
-            println!(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
-                idx + 1,
-                total,
-                file.display()
-            );
-        }
-
-        let file_stem = file
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("file_{}", idx));
-        let output_dir = base_output.join(&file_stem);
-
-        let file_size = match std::fs::metadata(file) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                if !json {
-                    println!("  Error: {}\n", e);
-                }
-                json_results.push(SplitFileResult {
-                    file: file.display().to_string(),
-                    size_mb: None,
-                    dialect: None,
-                    output_dir: None,
-                    tables_found: None,
-                    statements_processed: None,
-                    tables: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
-            }
-        };
-        let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
-
-        let resolved_dialect = match super::common::resolve_dialect(file, dialect.as_deref(), true)
-        {
-            Ok(d) => d,
-            Err(e) => {
-                if !json {
-                    println!("  Error: {}\n", e);
-                }
-                json_results.push(SplitFileResult {
-                    file: file.display().to_string(),
-                    size_mb: Some(file_size_mb),
-                    dialect: None,
-                    output_dir: None,
-                    tables_found: None,
-                    statements_processed: None,
-                    tables: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
-            }
-        };
-
-        if !json {
-            println!(
-                "  Size: {:.2} MB | Dialect: {}",
-                file_size_mb, resolved_dialect
-            );
-            if !dry_run {
-                println!("  Output: {}", output_dir.display());
-            }
-        }
-
-        let content_filter = if schema_only {
-            ContentFilter::SchemaOnly
-        } else if data_only {
-            ContentFilter::DataOnly
-        } else {
-            ContentFilter::All
-        };
-
-        let table_filter: Vec<String> = tables
-            .clone()
-            .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default();
-
-        let mut splitter = Splitter::new(file.clone(), output_dir.clone())
-            .with_dialect(resolved_dialect)
-            .with_dry_run(dry_run)
-            .with_content_filter(content_filter)
-            .with_output_compression(out_compression)
-            .with_io_profile(io_strategy);
-
-        if !table_filter.is_empty() {
-            splitter = splitter.with_table_filter(table_filter);
-        }
-
-        let split_result = if progress && !json {
-            // See run_single: zip input streams only the .sql member's bytes.
-            let pb = super::common::compact_progress_bar(crate::splitter::input_progress_len(file));
-
-            let pb_clone = pb.clone();
-            splitter = splitter.with_progress(move |bytes| {
-                pb_clone.set_position(bytes);
-            });
-
-            let result = splitter.split();
-            pb.finish_and_clear();
-            result
-        } else {
-            splitter.split()
-        };
-
-        match split_result {
-            Ok(stats) => {
-                if !json {
-                    println!(
-                        "  Tables: {} | Statements: {} | {}\n",
-                        stats.tables_found,
-                        stats.statements_processed,
-                        if dry_run { "(dry run)" } else { "✓" }
-                    );
-                    if verbose {
-                        for name in &stats.table_names {
-                            println!("    - {}.sql", name);
-                        }
-                        println!();
-                    }
-                }
-                json_results.push(SplitFileResult {
-                    file: file.display().to_string(),
-                    size_mb: Some(file_size_mb),
-                    dialect: Some(resolved_dialect.to_string()),
-                    output_dir: Some(output_dir.display().to_string()),
-                    tables_found: Some(stats.tables_found),
-                    statements_processed: Some(stats.statements_processed),
-                    tables: Some(stats.table_names),
-                    status: "success".to_string(),
-                    error: None,
-                });
-                result.record_success();
-            }
-            Err(e) => {
-                if !json {
-                    println!("  Error: {}\n", e);
-                }
-                json_results.push(SplitFileResult {
-                    file: file.display().to_string(),
-                    size_mb: Some(file_size_mb),
-                    dialect: Some(resolved_dialect.to_string()),
-                    output_dir: None,
-                    tables_found: None,
-                    statements_processed: None,
-                    tables: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-            }
-        }
-    }
-
-    let elapsed = start_time.elapsed();
-
-    // Files never attempted because --fail-fast broke out of the loop.
-    // Recording them keeps the JSON self-consistent: every input file has a
-    // results entry and succeeded + failed + skipped == total_files.
-    let skipped = total - json_results.len();
-    for file in files.iter().skip(json_results.len()) {
-        json_results.push(SplitFileResult {
+    let failed_entry =
+        |file: &std::path::Path, size_mb: Option<f64>, error: &anyhow::Error| SplitFileResult {
             file: file.display().to_string(),
-            size_mb: None,
+            size_mb,
             dialect: None,
             output_dir: None,
             tables_found: None,
             statements_processed: None,
             tables: None,
-            status: "skipped".to_string(),
-            error: None,
-        });
-    }
+            status: "failed".to_string(),
+            error: Some(error.to_string()),
+        };
+
+    let run = drive_multi_file(
+        &files,
+        fail_fast,
+        |idx, file| {
+            if !json {
+                println!(
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[{}/{}] {}",
+                    idx + 1,
+                    total,
+                    file.display()
+                );
+            }
+
+            let file_stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("file_{}", idx));
+            let output_dir = base_output.join(&file_stem);
+
+            let file_size = match std::fs::metadata(file) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    let e = anyhow::Error::from(e);
+                    if !json {
+                        println!("  Error: {}\n", e);
+                    }
+                    return FileOutcome::Failure {
+                        payload: Some(failed_entry(file, None, &e)),
+                        error: e.to_string(),
+                    };
+                }
+            };
+            let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
+
+            let resolved_dialect =
+                match super::common::resolve_dialect(file, dialect.as_deref(), true) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        if !json {
+                            println!("  Error: {}\n", e);
+                        }
+                        return FileOutcome::Failure {
+                            payload: Some(failed_entry(file, Some(file_size_mb), &e)),
+                            error: e.to_string(),
+                        };
+                    }
+                };
+
+            if !json {
+                println!(
+                    "  Size: {:.2} MB | Dialect: {}",
+                    file_size_mb, resolved_dialect
+                );
+                if !dry_run {
+                    println!("  Output: {}", output_dir.display());
+                }
+            }
+
+            let content_filter = if schema_only {
+                ContentFilter::SchemaOnly
+            } else if data_only {
+                ContentFilter::DataOnly
+            } else {
+                ContentFilter::All
+            };
+
+            let table_filter: Vec<String> = tables
+                .clone()
+                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_default();
+
+            let mut splitter = Splitter::new(file.to_path_buf(), output_dir.clone())
+                .with_dialect(resolved_dialect)
+                .with_dry_run(dry_run)
+                .with_content_filter(content_filter)
+                .with_output_compression(out_compression)
+                .with_io_profile(io_strategy);
+
+            if !table_filter.is_empty() {
+                splitter = splitter.with_table_filter(table_filter);
+            }
+
+            let split_result = if progress && !json {
+                // See run_single: zip input streams only the .sql member's bytes.
+                let pb =
+                    super::common::compact_progress_bar(crate::splitter::input_progress_len(file));
+
+                let pb_clone = pb.clone();
+                splitter = splitter.with_progress(move |bytes| {
+                    pb_clone.set_position(bytes);
+                });
+
+                let result = splitter.split();
+                pb.finish_and_clear();
+                result
+            } else {
+                splitter.split()
+            };
+
+            match split_result {
+                Ok(stats) => {
+                    if !json {
+                        println!(
+                            "  Tables: {} | Statements: {} | {}\n",
+                            stats.tables_found,
+                            stats.statements_processed,
+                            if dry_run { "(dry run)" } else { "✓" }
+                        );
+                        if verbose {
+                            for name in &stats.table_names {
+                                println!("    - {}.sql", name);
+                            }
+                            println!();
+                        }
+                    }
+                    FileOutcome::Success(SplitFileResult {
+                        file: file.display().to_string(),
+                        size_mb: Some(file_size_mb),
+                        dialect: Some(resolved_dialect.to_string()),
+                        output_dir: Some(output_dir.display().to_string()),
+                        tables_found: Some(stats.tables_found),
+                        statements_processed: Some(stats.statements_processed),
+                        tables: Some(stats.table_names),
+                        status: "success".to_string(),
+                        error: None,
+                    })
+                }
+                Err(e) => {
+                    if !json {
+                        println!("  Error: {}\n", e);
+                    }
+                    FileOutcome::Failure {
+                        payload: Some(SplitFileResult {
+                            file: file.display().to_string(),
+                            size_mb: Some(file_size_mb),
+                            dialect: Some(resolved_dialect.to_string()),
+                            output_dir: None,
+                            tables_found: None,
+                            statements_processed: None,
+                            tables: None,
+                            status: "failed".to_string(),
+                            error: Some(e.to_string()),
+                        }),
+                        error: e.to_string(),
+                    }
+                }
+            }
+        },
+        // Files never attempted because --fail-fast broke out of the loop get
+        // a "skipped" entry so the JSON stays self-consistent: every input
+        // file has a results entry and succeeded + failed + skipped == total.
+        |file| {
+            Some(SplitFileResult {
+                file: file.display().to_string(),
+                size_mb: None,
+                dialect: None,
+                output_dir: None,
+                tables_found: None,
+                statements_processed: None,
+                tables: None,
+                status: "skipped".to_string(),
+                error: None,
+            })
+        },
+    );
 
     if json {
+        let has_failures = run.has_failures();
         let output_json = MultiSplitJsonOutput {
-            total_files: total,
-            succeeded: result.succeeded,
-            failed: result.failed,
-            skipped,
-            elapsed_secs: elapsed.as_secs_f64(),
-            results: json_results,
+            total_files: run.total,
+            succeeded: run.succeeded,
+            failed: run.failed,
+            skipped: run.skipped,
+            elapsed_secs: run.elapsed.as_secs_f64(),
+            results: run.payloads,
         };
         println!("{}", serde_json::to_string_pretty(&output_json)?);
         // Match the non-JSON branch: a batch with failures must exit non-zero
         // so scripted pipelines don't have to parse the JSON to detect it.
-        if result.has_failures() {
+        if has_failures {
             std::process::exit(1);
         }
     } else {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Split Summary:");
-        println!("  Total files: {}", total);
-        println!("  Succeeded: {}", result.succeeded);
-        println!("  Failed: {}", result.failed);
-        println!("  Time: {:.3?}", elapsed);
+        println!("  Total files: {}", run.total);
+        println!("  Succeeded: {}", run.succeeded);
+        println!("  Failed: {}", run.failed);
+        println!("  Time: {:.3?}", run.elapsed);
 
-        if result.has_failures() {
+        if run.has_failures() {
             println!();
             println!("Failed files:");
-            for (path, error) in &result.errors {
+            for (path, error) in &run.errors {
                 println!("  - {}: {}", path.display(), error);
             }
             std::process::exit(1);

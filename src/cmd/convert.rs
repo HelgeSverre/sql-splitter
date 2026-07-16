@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use super::common::{BEHAVIOR, INPUT_OUTPUT, MODE, OUTPUT_FORMAT};
-use super::glob_util::{expand_file_pattern, MultiFileResult};
+use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
 
 #[derive(Args)]
 pub struct ConvertArgs {
@@ -245,12 +245,19 @@ fn run_multi(
     json: bool,
 ) -> anyhow::Result<()> {
     let total = files.len();
-    let mut result = MultiFileResult::new();
-    result.total_files = total;
 
     let to = to_dialect
         .parse::<SqlDialect>()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let from = if let Some(ref d) = from_dialect {
+        Some(
+            d.parse::<SqlDialect>()
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+        )
+    } else {
+        None
+    };
 
     if !dry_run {
         std::fs::create_dir_all(&output_dir)?;
@@ -260,7 +267,6 @@ fn run_multi(
         eprintln!("Converting {} files to {}...\n", total, to);
     }
 
-    let mut json_results: Vec<ConvertFileResult> = Vec::new();
     let mut aggregate = AggregateConvertStats {
         statements_processed: 0,
         statements_converted: 0,
@@ -269,138 +275,123 @@ fn run_multi(
         total_warnings: 0,
     };
 
-    for (idx, file) in files.iter().enumerate() {
-        if !json {
-            eprintln!("[{}/{}] Converting: {}", idx + 1, total, file.display());
-        }
+    let failed_entry =
+        |file: &std::path::Path, size_mb: Option<f64>, error: &anyhow::Error| ConvertFileResult {
+            file: file.display().to_string(),
+            output_file: None,
+            size_mb,
+            statements_converted: None,
+            statements_unchanged: None,
+            warnings_count: None,
+            status: "failed".to_string(),
+            error: Some(error.to_string()),
+        };
 
-        let file_size = match std::fs::metadata(file) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                if !json {
-                    eprintln!("  Error: {}\n", e);
-                }
-                json_results.push(ConvertFileResult {
-                    file: file.display().to_string(),
-                    output_file: None,
-                    size_mb: None,
-                    statements_converted: None,
-                    statements_unchanged: None,
-                    warnings_count: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-                continue;
+    let run = drive_multi_file(
+        &files,
+        fail_fast,
+        |idx, file| {
+            if !json {
+                eprintln!("[{}/{}] Converting: {}", idx + 1, total, file.display());
             }
-        };
-        let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let from = if let Some(ref d) = from_dialect {
-            Some(
-                d.parse::<SqlDialect>()
-                    .map_err(|e| anyhow::anyhow!("{}", e))?,
-            )
-        } else {
-            None
-        };
+            let file_size = match std::fs::metadata(file) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    let e = anyhow::Error::from(e);
+                    if !json {
+                        eprintln!("  Error: {}\n", e);
+                    }
+                    return FileOutcome::Failure {
+                        payload: Some(failed_entry(file, None, &e)),
+                        error: e.to_string(),
+                    };
+                }
+            };
+            let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
-        let output_file = if dry_run {
-            None
-        } else {
-            let file_name = file
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("output_{}.sql", idx));
-            Some(output_dir.join(file_name))
-        };
+            let output_file = if dry_run {
+                None
+            } else {
+                let file_name = file
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("output_{}.sql", idx));
+                Some(output_dir.join(file_name))
+            };
 
-        let config = ConvertConfig {
-            input: file.clone(),
-            output: output_file.clone(),
-            from_dialect: from,
-            to_dialect: to,
-            dry_run,
-            progress: false,
-            strict,
-        };
+            let config = ConvertConfig {
+                input: file.to_path_buf(),
+                output: output_file.clone(),
+                from_dialect: from,
+                to_dialect: to,
+                dry_run,
+                progress: false,
+                strict,
+            };
 
-        match convert::run(config) {
-            Ok(stats) => {
-                if !json {
-                    let warning_str = if stats.warnings.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({} warnings)", stats.warnings.len())
+            match convert::run(config) {
+                Ok(stats) => {
+                    if !json {
+                        let warning_str = if stats.warnings.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({} warnings)", stats.warnings.len())
+                        };
+
+                        eprintln!(
+                            "  {:.2} MB → {} converted, {} unchanged{}",
+                            file_size_mb,
+                            stats.statements_converted,
+                            stats.statements_unchanged,
+                            warning_str
+                        );
+
+                        if let Some(ref out) = output_file {
+                            eprintln!("  → {}", out.display());
+                        }
+                        eprintln!();
+                    }
+
+                    aggregate.statements_processed += stats.statements_processed;
+                    aggregate.statements_converted += stats.statements_converted;
+                    aggregate.statements_unchanged += stats.statements_unchanged;
+                    aggregate.statements_skipped += stats.statements_skipped;
+                    aggregate.total_warnings += stats.warnings.len();
+
+                    let payload = ConvertFileResult {
+                        file: file.display().to_string(),
+                        output_file: output_file.as_ref().map(|p| p.display().to_string()),
+                        size_mb: Some(file_size_mb),
+                        statements_converted: Some(stats.statements_converted),
+                        statements_unchanged: Some(stats.statements_unchanged),
+                        warnings_count: Some(stats.warnings.len()),
+                        status: "success".to_string(),
+                        error: None,
                     };
 
-                    eprintln!(
-                        "  {:.2} MB → {} converted, {} unchanged{}",
-                        file_size_mb,
-                        stats.statements_converted,
-                        stats.statements_unchanged,
-                        warning_str
-                    );
-
-                    if let Some(ref out) = output_file {
-                        eprintln!("  → {}", out.display());
+                    if strict && !stats.warnings.is_empty() {
+                        FileOutcome::Failure {
+                            payload: Some(payload),
+                            error: format!("{} warnings in strict mode", stats.warnings.len()),
+                        }
+                    } else {
+                        FileOutcome::Success(payload)
                     }
-                    eprintln!();
                 }
-
-                aggregate.statements_processed += stats.statements_processed;
-                aggregate.statements_converted += stats.statements_converted;
-                aggregate.statements_unchanged += stats.statements_unchanged;
-                aggregate.statements_skipped += stats.statements_skipped;
-                aggregate.total_warnings += stats.warnings.len();
-
-                json_results.push(ConvertFileResult {
-                    file: file.display().to_string(),
-                    output_file: output_file.as_ref().map(|p| p.display().to_string()),
-                    size_mb: Some(file_size_mb),
-                    statements_converted: Some(stats.statements_converted),
-                    statements_unchanged: Some(stats.statements_unchanged),
-                    warnings_count: Some(stats.warnings.len()),
-                    status: "success".to_string(),
-                    error: None,
-                });
-
-                if strict && !stats.warnings.is_empty() {
-                    result.record_failure(
-                        file.clone(),
-                        format!("{} warnings in strict mode", stats.warnings.len()),
-                    );
-                    if fail_fast {
-                        break;
+                Err(e) => {
+                    if !json {
+                        eprintln!("  Error: {}\n", e);
                     }
-                } else {
-                    result.record_success();
+                    FileOutcome::Failure {
+                        payload: Some(failed_entry(file, Some(file_size_mb), &e)),
+                        error: e.to_string(),
+                    }
                 }
             }
-            Err(e) => {
-                if !json {
-                    eprintln!("  Error: {}\n", e);
-                }
-                json_results.push(ConvertFileResult {
-                    file: file.display().to_string(),
-                    output_file: None,
-                    size_mb: Some(file_size_mb),
-                    statements_converted: None,
-                    statements_unchanged: None,
-                    warnings_count: None,
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                });
-                result.record_failure(file.clone(), e.to_string());
-                if fail_fast {
-                    break;
-                }
-            }
-        }
-    }
+        },
+        |_| None,
+    );
 
     if json {
         let from_str = from_dialect
@@ -408,28 +399,28 @@ fn run_multi(
             .unwrap_or_else(|| "auto".to_string());
 
         let output_json = MultiConvertJsonOutput {
-            total_files: total,
-            succeeded: result.succeeded,
-            failed: result.failed,
+            total_files: run.total,
+            succeeded: run.succeeded,
+            failed: run.failed,
             conversion: ConversionInfo {
                 from: from_str,
                 to: to.to_string(),
             },
             aggregate_stats: aggregate,
-            results: json_results,
+            results: run.payloads,
         };
         println!("{}", serde_json::to_string_pretty(&output_json)?);
     } else {
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("Conversion Summary:");
-        eprintln!("  Total files: {}", total);
-        eprintln!("  Succeeded: {}", result.succeeded);
-        eprintln!("  Failed: {}", result.failed);
+        eprintln!("  Total files: {}", run.total);
+        eprintln!("  Succeeded: {}", run.succeeded);
+        eprintln!("  Failed: {}", run.failed);
 
-        if result.has_failures() {
+        if run.has_failures() {
             eprintln!();
             eprintln!("Failed files:");
-            for (path, error) in &result.errors {
+            for (path, error) in &run.errors {
                 eprintln!("  - {}: {}", path.display(), error);
             }
             std::process::exit(1);
