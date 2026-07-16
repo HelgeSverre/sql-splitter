@@ -1,8 +1,12 @@
 //! Buffered file writers for splitting SQL statements into per-table files.
 
+pub mod controller;
 pub mod profile;
 
-pub use profile::{probe_output_dir, IoProfile, ProfileKind, ProfileValues, WriterProfile};
+pub use controller::{Clock, Controller, EpochDecision, EpochMeasurement, MockClock, RealClock};
+pub use profile::{
+    env_writer_count, probe_output_dir, IoProfile, ProfileKind, ProfileValues, WriterProfile,
+};
 
 use ahash::AHashMap;
 use std::collections::hash_map::Entry;

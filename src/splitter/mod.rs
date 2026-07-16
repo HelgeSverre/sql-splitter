@@ -1,6 +1,9 @@
 use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
-use crate::writer::{IoProfile, ParallelWriters, ProfileKind, ProfileValues, WriterProfile};
+use crate::writer::{
+    env_writer_count, probe_output_dir, Clock, Controller, EpochMeasurement, IoProfile,
+    ParallelWriters, ProfileKind, ProfileValues, RealClock, WriterProfile,
+};
 use ahash::AHashSet;
 use anyhow::Context;
 use serde::Serialize;
@@ -20,6 +23,14 @@ pub struct Stats {
     pub bytes_processed: u64,
     /// Names of all tables found.
     pub table_names: Vec<String>,
+    /// Number of writer threads at the end of the run (observability for the
+    /// adaptive controller's deferred writer spawn; not part of JSON output).
+    #[serde(skip)]
+    pub writers_used: usize,
+    /// Adaptive I/O transition log lines emitted during the run, in order
+    /// (observability for tests and debugging; not part of JSON output).
+    #[serde(skip)]
+    pub io_transitions: Vec<String>,
 }
 
 /// Configuration for the splitter.
@@ -39,6 +50,9 @@ pub struct SplitterConfig {
     pub output_compression: Compression,
     /// I/O profile for output writing (default `Auto`).
     pub io_profile: IoProfile,
+    /// Clock driving epoch measurements (None → wall clock). Test seam: a
+    /// stepping mock clock makes the adaptive controller fully deterministic.
+    pub io_clock: Option<Arc<dyn Clock>>,
 }
 
 /// Compression format detected from file extension
@@ -187,6 +201,15 @@ impl Splitter {
         self
     }
 
+    /// Override the clock used for adaptive-I/O epoch measurements.
+    /// Deterministic-test seam; production code always uses the default
+    /// wall clock.
+    #[doc(hidden)]
+    pub fn with_io_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.config.io_clock = Some(clock);
+        self
+    }
+
     pub fn split(mut self) -> anyhow::Result<Stats> {
         let file = File::open(&self.input_file)
             .with_context(|| format!("Failed to open input file: {:?}", self.input_file))?;
@@ -228,9 +251,53 @@ impl Splitter {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let opening_kind = self.config.io_profile.pinned().unwrap_or(ProfileKind::Fast);
+
+        // Epoch length for the adaptive controller: byte-based so controller
+        // decisions are a pure function of (bytes, measured durations). The
+        // hidden env override is the deterministic-test seam.
+        let epoch_bytes = std::env::var("SQL_SPLITTER_EPOCH_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&n| n > 0);
+        // Adaptation only pays off at scale: below ~4 default epochs' worth of
+        // input the run is over before the controller could act, so `auto`
+        // just pins FAST (today's defaults) and skips the 8MB probe. An
+        // explicit epoch override (tests) engages the full machinery.
+        const DEFAULT_EPOCH_BYTES: u64 = 256 * 1024 * 1024;
+        const AUTO_MIN_FILE_SIZE: u64 = 64 * 1024 * 1024;
+        let adaptive = self.config.io_profile == IoProfile::Auto
+            && !self.config.dry_run
+            && (epoch_bytes.is_some() || file_size >= AUTO_MIN_FILE_SIZE);
+        // Aim for at least 4 epochs per file so short runs still measure.
+        let epoch_bytes =
+            epoch_bytes.unwrap_or_else(|| DEFAULT_EPOCH_BYTES.min((file_size / 4).max(1)));
+
+        let opening_kind = match self.config.io_profile.pinned() {
+            Some(kind) => kind,
+            // The fsync probe picks auto's *opening* state only; the feedback
+            // controller owns the truth once the pipeline runs.
+            None if adaptive => probe_output_dir(&self.output_dir).0,
+            None => ProfileKind::Fast,
+        };
         let profile =
             WriterProfile::for_kind(opening_kind, cores, compressing).with_env_overrides();
+
+        // In auto mode, open at W=1 and let the controller spawn up to FAST's
+        // writer count once the device proves fast: on NVMe the W=1 opening
+        // costs ~15% for one epoch; on slow media it avoids ever thrashing.
+        // SQL_SPLITTER_WRITERS pins the count and disables growth entirely.
+        let initial_writers = if adaptive {
+            env_writer_count().unwrap_or(1)
+        } else {
+            profile.writers
+        };
+        let fast_writers = if env_writer_count().is_some() {
+            initial_writers
+        } else {
+            WriterProfile::for_kind(ProfileKind::Fast, cores, compressing).writers
+        };
+
+        let values = Arc::new(ProfileValues::new(&profile));
         let mut writers = if self.config.dry_run {
             None
         } else {
@@ -238,14 +305,13 @@ impl Splitter {
             // the same ballpark as the profile's stage cap: FAST keeps the
             // historical 64 × 256KB; the slow profiles get fewer, bigger slots.
             let capacity = (profile.stage_cap / profile.flush_chunk.max(1)).clamp(4, 64);
-            let values = Arc::new(ProfileValues::new(&profile));
             Some(
                 ParallelWriters::new(
                     self.output_dir.clone(),
-                    profile.writers,
+                    initial_writers,
                     capacity,
                     out_compression,
-                    values,
+                    Arc::clone(&values),
                 )
                 .with_context(|| {
                     format!("Failed to create output directory: {:?}", self.output_dir)
@@ -253,12 +319,25 @@ impl Splitter {
             )
         };
 
+        let mut controller = adaptive.then(|| Controller::new(opening_kind, fast_writers));
+        let clock: Arc<dyn Clock> = self
+            .config
+            .io_clock
+            .take()
+            .unwrap_or_else(|| Arc::new(RealClock::new()));
+        let mut epoch_start_time = clock.now();
+        let mut epoch_acked = 0u64;
+        let mut epoch_stall = std::time::Duration::ZERO;
+        let mut next_epoch = epoch_bytes;
+
         let mut tables_seen: AHashSet<String> = AHashSet::new();
         let mut stats = Stats {
             statements_processed: 0,
             tables_found: 0,
             bytes_processed: 0,
             table_names: Vec::new(),
+            writers_used: initial_writers,
+            io_transitions: Vec::new(),
         };
 
         // Track the last COPY table for PostgreSQL COPY data blocks
@@ -350,6 +429,47 @@ impl Splitter {
 
             stats.statements_processed += 1;
             stats.bytes_processed += stmt.len() as u64;
+
+            // Adaptive-I/O epoch boundary: byte-based (see module docs), so
+            // the controller's decisions are a pure function of measured
+            // data, not wall-clock scheduling.
+            if let Some(ctrl) = controller.as_mut() {
+                if stats.bytes_processed >= next_epoch {
+                    next_epoch += epoch_bytes;
+                    // `writers` is always `Some` when `controller` is `Some`
+                    // (adaptive requires `!dry_run`, see above).
+                    if let Some(w) = writers.as_mut() {
+                        let snapshot = w.stats();
+                        let measurement = EpochMeasurement {
+                            bytes: snapshot.bytes_acked.saturating_sub(epoch_acked),
+                            duration: clock.now().saturating_sub(epoch_start_time),
+                            send_stall: snapshot.send_stall.saturating_sub(epoch_stall),
+                        };
+                        epoch_acked = snapshot.bytes_acked;
+                        epoch_stall = snapshot.send_stall;
+                        epoch_start_time = clock.now();
+
+                        let decision = ctrl.on_epoch(&measurement);
+                        if let Some(kind) = decision.transition {
+                            let new_profile =
+                                WriterProfile::for_kind(kind, cores, compressing)
+                                    .with_env_overrides();
+                            values.apply(&new_profile);
+                            let line = format!(
+                                "output device sustaining ~{:.0} MB/s — switching to {} write profile",
+                                decision.throughput_mbps,
+                                kind.label()
+                            );
+                            eprintln!("{line}");
+                            stats.io_transitions.push(line);
+                        }
+                        if decision.target_writers > w.writer_count() {
+                            w.grow_to(decision.target_writers);
+                        }
+                        stats.writers_used = w.writer_count();
+                    }
+                }
+            }
         }
 
         if let Some(w) = writers {

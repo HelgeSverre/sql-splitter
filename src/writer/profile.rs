@@ -131,7 +131,7 @@ impl WriterProfile {
     /// - `SQL_SPLITTER_WRITERS`: writer count (also disables deferred growth).
     /// - `SQL_SPLITTER_WRITE_BUF`: per-file output buffer size in bytes.
     pub fn with_env_overrides(mut self) -> Self {
-        if let Some(n) = env_usize("SQL_SPLITTER_WRITERS").filter(|&n| n >= 1) {
+        if let Some(n) = env_writer_count() {
             self.writers = n;
         }
         if let Some(n) = env_usize("SQL_SPLITTER_WRITE_BUF").filter(|&n| n >= 4096) {
@@ -139,6 +139,13 @@ impl WriterProfile {
         }
         self
     }
+}
+
+/// The `SQL_SPLITTER_WRITERS` env override, if set to a valid count. When
+/// present it pins the writer count in every mode, which also disables the
+/// controller's deferred writer growth.
+pub fn env_writer_count() -> Option<usize> {
+    env_usize("SQL_SPLITTER_WRITERS").filter(|&n| n >= 1)
 }
 
 /// Parse an env var as `usize`, treating absence and garbage the same.
