@@ -443,6 +443,7 @@ fn invalid_model() -> SyntheticModel {
         r#"
 version: 1
 kind: model
+defaults: { inference: schema }
 seed: 7
 tables:
   users:
@@ -508,6 +509,7 @@ fn customers_orders_model(customers: u64, orders_base: u64, mean: f64) -> Synthe
         r#"
 version: 1
 kind: model
+defaults: {{ inference: schema }}
 source:
   dialect: postgres
 seed: 7
@@ -541,6 +543,7 @@ fn users_model(users: u64) -> SyntheticModel {
         r#"
 version: 1
 kind: model
+defaults: {{ inference: schema }}
 seed: 7
 tables:
   users:
@@ -658,6 +661,7 @@ fn stochastic_rounding_is_deterministic_before_emission() {
             r#"
 version: 1
 kind: model
+defaults: { inference: schema }
 seed: 7
 tables:
   widgets:
@@ -696,6 +700,7 @@ fn observed_rows_resolve_from_an_attached_source_count() {
         r#"
 version: 1
 kind: model
+defaults: { inference: schema }
 source:
   dialect: mysql
 tables:
@@ -719,6 +724,7 @@ fn observed_rows_without_a_source_count_are_an_error() {
         r#"
 version: 1
 kind: model
+defaults: { inference: schema }
 tables:
   events:
     rows: { kind: observed, count: 3200 }
@@ -839,6 +845,7 @@ fn self_referential_relationship_is_not_a_cycle() {
         r#"
 version: 1
 kind: model
+defaults: { inference: schema }
 seed: 7
 tables:
   employees:
@@ -913,8 +920,10 @@ fn compiler_reports_all_independent_ownership_and_type_errors() {
     assert_eq!(err.errors().count(), 2);
 }
 
-/// A single-table model with `id` (integer PK) plus the supplied extra column
-/// lines and per-column/planner rules, for the focused ownership cases.
+/// A single-table model with an `id` identity primary key (owner-complete in
+/// both inference modes as a hard schema fact) plus the supplied extra column
+/// lines and per-column/planner rules, for the focused ownership cases. Uses
+/// the default `inference: disabled`, so any unowned extra column surfaces.
 fn ownership_model(columns: &str, rules: &str) -> SyntheticModel {
     model_from_yaml(&format!(
         r#"
@@ -927,7 +936,7 @@ tables:
     schema:
       name: t
       columns:
-        - {{ name: id, type: integer, nullable: false, primary_key: true }}
+        - {{ name: id, type: integer, nullable: false, primary_key: true, identity: true }}
 {columns}
 {rules}
 "#
@@ -942,6 +951,75 @@ fn ownership_reports_missing_owner_under_disabled_inference() {
         .unwrap_err();
     assert!(err.has_code("GEN-COLUMN-OWNER-MISSING"));
     assert_eq!(err.errors().count(), 1);
+}
+
+/// A single bare integer primary key (no identity/serial flag, no generator),
+/// under the supplied inference mode.
+fn bare_pk_model(inference: &str) -> SyntheticModel {
+    model_from_yaml(&format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: {inference} }}
+seed: 7
+tables:
+  t:
+    rows: {{ kind: fixed, count: 5 }}
+    schema:
+      name: t
+      columns:
+        - {{ name: id, type: integer, nullable: false, primary_key: true }}
+"#
+    ))
+}
+
+#[test]
+fn ownership_bare_primary_key_is_missing_under_disabled_inference() {
+    // `disabled` demands an explicit owner: a bare integer PK is not a declared
+    // DB fact, so it has no owner and must be reported.
+    let err = compiler()
+        .compile(bare_pk_model("disabled"), CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-OWNER-MISSING"));
+    assert_eq!(err.errors().count(), 1);
+}
+
+#[test]
+fn ownership_bare_primary_key_is_owner_complete_under_schema_inference() {
+    // `schema` inference applies the bare-integer-PK sequence convention, so
+    // the same column is owner-complete and the compile succeeds.
+    let plan = compiler()
+        .compile(bare_pk_model("schema"), CompileOptions::default())
+        .unwrap();
+    let id = &plan.table("t").unwrap().columns[0];
+    assert!(matches!(id.owner, ColumnOwner::GeneratedByDatabase));
+}
+
+#[test]
+fn ownership_dedupes_a_single_planner_double_claim() {
+    // One planner naming `a` under both `columns` and `writes` claims it once,
+    // so it does not falsely conflict with itself.
+    let model = ownership_model(
+        "        - { name: a, type: integer, nullable: false }",
+        "    planners:\n      - { kind: test.family, columns: { x: a }, writes: [a] }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let a = plan
+        .table("t")
+        .unwrap()
+        .columns
+        .iter()
+        .find(|c| c.schema.name == "a")
+        .unwrap();
+    assert!(matches!(
+        a.owner,
+        ColumnOwner::Planner {
+            planner_index: 0,
+            ..
+        }
+    ));
 }
 
 #[test]

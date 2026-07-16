@@ -687,8 +687,9 @@ impl ModelCompiler {
         inference: InferenceMode,
         bag: &mut DiagnosticBag,
     ) -> ColumnOwner {
-        // Database-supplied values, in precedence order. These are pure schema
-        // facts, so they resolve identically under `disabled` and `schema`.
+        // HARD schema facts — genuine database-supplied values, honored in BOTH
+        // `disabled` and `schema` modes because they are declared in the DDL,
+        // not inferred by convention.
         if column.generated || column.identity {
             return ColumnOwner::GeneratedByDatabase;
         }
@@ -700,8 +701,20 @@ impl ModelCompiler {
         if column.default_sql.is_some() {
             return ColumnOwner::DatabaseDefault;
         }
-        // A bare integer primary key is a database sequence by convention.
-        if column.primary_key
+
+        // CONVENTION — a bare integer primary key (no identity/serial flag, no
+        // explicit owner) is treated as a database sequence. This is inference,
+        // not a declared fact, so it runs ONLY under `schema` mode; under
+        // `disabled` every generated column needs an explicit owner, so a bare
+        // PK falls through to `GEN-COLUMN-OWNER-MISSING`.
+        //
+        // PLACEHOLDER: `GeneratedByDatabase` here means "the DB fills it", but a
+        // plain integer PK has no sequence to fill from. Once the `sequence`
+        // generator is registered (Task 11) and real inference lands (Task 20),
+        // a schema-mode bare PK should receive a sequence generator that renders
+        // an actual value. Closing that gap is not this task's job.
+        if matches!(inference, InferenceMode::Schema)
+            && column.primary_key
             && matches!(
                 column.family,
                 SqlTypeFamily::Integer | SqlTypeFamily::BigInteger
@@ -711,8 +724,8 @@ impl ModelCompiler {
         }
 
         // Nothing structural applies. Richer name/constraint heuristics under
-        // `schema` inference arrive in Task 20; for now both modes report the
-        // column as unowned so a run never invents values silently.
+        // `schema` inference arrive in Task 20; for now the column is reported
+        // as unowned so a run never invents values silently.
         let note = match inference {
             InferenceMode::Schema => {
                 " (schema inference has no rule for it yet; richer heuristics arrive later)"
@@ -997,7 +1010,14 @@ fn collect_claims(table: &TableModel, planners: &[PlannerInfo]) -> BTreeMap<Stri
         }
     }
     for (index, planner) in planners.iter().enumerate() {
+        // A single planner claims each column once, even if it lists the column
+        // under more than one config key (`columns` and `writes`); otherwise it
+        // would falsely conflict with itself.
+        let mut claimed: BTreeSet<&str> = BTreeSet::new();
         for column in &planner.writes {
+            if !claimed.insert(column.as_str()) {
+                continue;
+            }
             claims.entry(column.clone()).or_default().push(Claim {
                 source: ClaimSource::Planner { index },
                 path: format!("planners[{index}]"),
