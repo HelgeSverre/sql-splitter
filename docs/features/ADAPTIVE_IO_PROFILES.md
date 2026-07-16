@@ -196,3 +196,16 @@ profiles is unconditional, compression or not.
 
 Wall-clock-based assertions on real devices in CI (flaky by construction),
 and absolute MB/s thresholds anywhere except the manual acceptance script.
+
+## Known bounds (2026-07-16 review)
+
+- **In-flight memory after a mid-run downgrade**: channel depth is fixed at
+  construction from the opening profile (a `sync_channel` can't be resized).
+  A FAST-opened run (64 slots) that downgrades to 8 MB chunks can hold up to
+  512 MB in flight per writer. Bounded, and it only fills when the output
+  device is the bottleneck; revisit if it ever matters in practice.
+- **Writers never shrink**: a device that proves fast and then collapses
+  (e.g. a DRAM-less NVMe hitting its SLC-cache cliff) finishes in
+  "grown writers + slow-profile buffers" (measured 44.9 MB/s on the reference
+  HDD vs 54.7 for W=1) — still ~2× better than untuned defaults. Inherent to
+  the per-table ordering guarantee.
