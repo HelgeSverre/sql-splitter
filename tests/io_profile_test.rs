@@ -108,14 +108,14 @@ fn test_all_profiles_produce_byte_identical_output() {
     write_staggered_fixture(&input, 24, 80);
 
     // Reference: pinned fast (today's default configuration).
-    let reference = split_with(&input, temp.path().join("fast"), IoProfile::Fast);
+    let reference = split_with(&input, temp.path().join("fast"), IoProfile::Ssd);
     let reference_snapshot = dir_snapshot(&temp.path().join("fast"));
     assert!(reference.tables_found == 24);
     assert!(!reference_snapshot.is_empty());
 
     for (label, profile) in [
         ("hdd", IoProfile::Hdd),
-        ("minimal-ops", IoProfile::MinimalOps),
+        ("cheap", IoProfile::Cheap),
     ] {
         let out = temp.path().join(label);
         split_with(&input, out.clone(), profile);
@@ -130,7 +130,7 @@ fn test_all_profiles_produce_byte_identical_output() {
     // device fast (256 KB per 1 ms step = 256 MB/s), and grows writers
     // mid-run — the deferred-spawn path must still be byte-identical.
     let _env = EnvGuard::set(&[
-        ("SQL_SPLITTER_IO_PROBE", "fast"),
+        ("SQL_SPLITTER_IO_PROBE", "ssd"),
         ("SQL_SPLITTER_EPOCH_BYTES", "262144"),
     ]);
     let out = temp.path().join("auto");
@@ -164,7 +164,7 @@ fn test_all_profiles_produce_byte_identical_output() {
 fn test_deferred_writer_spawn_preserves_per_table_order() {
     let _lock = env_lock();
     let _env = EnvGuard::set(&[
-        ("SQL_SPLITTER_IO_PROBE", "fast"),
+        ("SQL_SPLITTER_IO_PROBE", "ssd"),
         ("SQL_SPLITTER_EPOCH_BYTES", "262144"),
     ]);
 
@@ -248,10 +248,10 @@ fn test_throttled_sink_triggers_hdd_downgrade() {
 
     // Reference run without any seams.
     let reference_dir = temp.path().join("fast");
-    split_with(&input, reference_dir.clone(), IoProfile::Fast);
+    split_with(&input, reference_dir.clone(), IoProfile::Ssd);
 
     let _env = EnvGuard::set(&[
-        ("SQL_SPLITTER_IO_PROBE", "fast"),
+        ("SQL_SPLITTER_IO_PROBE", "ssd"),
         ("SQL_SPLITTER_EPOCH_BYTES", "4194304"),
         ("SQL_SPLITTER_TEST_THROTTLE_MBPS", "16"),
     ]);

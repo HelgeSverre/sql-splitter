@@ -171,7 +171,7 @@ impl Controller {
     fn decision(&self, transition: Option<ProfileKind>, mbps: f64) -> EpochDecision {
         EpochDecision {
             transition,
-            target_writers: if self.state == ProfileKind::Fast && self.proven_fast {
+            target_writers: if self.state == ProfileKind::Ssd && self.proven_fast {
                 self.fast_writers
             } else {
                 1
@@ -194,7 +194,7 @@ impl Controller {
         let mut transition = None;
 
         match self.state {
-            ProfileKind::Fast => {
+            ProfileKind::Ssd => {
                 if mbps < FAST_DOWN_MBPS && stalled {
                     self.down_streak += 1;
                     if self.down_streak >= DOWN_EPOCHS {
@@ -218,7 +218,7 @@ impl Controller {
                     self.down_streak = 0;
                     self.up_streak += 1;
                     if self.up_streak >= UP_EPOCHS {
-                        transition = self.enter(ProfileKind::Fast);
+                        transition = self.enter(ProfileKind::Ssd);
                         // The upgrade evidence (3 epochs > 300 MB/s) is
                         // exactly what "proven fast" means.
                         self.proven_fast = true;
@@ -283,17 +283,17 @@ mod tests {
 
     #[test]
     fn steady_fast_stays_fast() {
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let epochs: Vec<_> = std::iter::repeat_n(epoch(500.0, 0.05), 50).collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
-        assert_eq!(c.state(), ProfileKind::Fast);
+        assert_eq!(c.state(), ProfileKind::Ssd);
     }
 
     #[test]
     fn degradation_transitions_exactly_at_epoch_three() {
         // 500, 30, 28 MB/s with high stall: epoch 1 is warmup, epochs 2 and 3
         // qualify, so the FAST→SLOW_SEEK transition lands exactly at epoch 3.
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let epochs = [epoch(500.0, 0.8), epoch(30.0, 0.8), epoch(28.0, 0.8)];
         assert_eq!(trace(&mut c, &epochs), vec![(3, ProfileKind::SlowSeek)]);
     }
@@ -302,12 +302,12 @@ mod tests {
     fn oscillation_around_threshold_never_flaps() {
         // 100/200 MB/s alternating straddles the 150 MB/s downgrade line but
         // never sustains it for 2 consecutive epochs — hysteresis holds.
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let epochs: Vec<_> = (0..40)
             .map(|i| epoch(if i % 2 == 0 { 100.0 } else { 200.0 }, 0.8))
             .collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
-        assert_eq!(c.state(), ProfileKind::Fast);
+        assert_eq!(c.state(), ProfileKind::Ssd);
     }
 
     /// Regression for the 2026-07-16 field bug: `bytes_acked` used to count
@@ -318,10 +318,10 @@ mod tests {
     /// matter how stalled the producer is.
     #[test]
     fn high_throughput_high_stall_never_downgrades_from_fast() {
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let epochs: Vec<_> = std::iter::repeat_n(epoch(612.0, 0.9), 20).collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
-        assert_eq!(c.state(), ProfileKind::Fast);
+        assert_eq!(c.state(), ProfileKind::Ssd);
 
         // Same for SLOW_SEEK → SLOW_OPS: 40 MB/s + heavy stall is above the
         // 15 MB/s line, so it must hold (and being above 2×15 for 3 epochs it
@@ -338,7 +338,7 @@ mod tests {
     /// can therefore never carry a throughput above the downgrade line.
     #[test]
     fn logged_throughput_is_the_compared_throughput() {
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let script = [
             epoch(500.0, 0.1), // warmup
             epoch(30.0, 0.8),
@@ -367,10 +367,10 @@ mod tests {
     fn input_bound_low_throughput_zero_stall_never_transitions() {
         // 5 MB/s but the producer never blocks on sends: the input (slow
         // decompression, other device) is the bottleneck, not the output.
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let epochs: Vec<_> = std::iter::repeat_n(epoch(5.0, 0.0), 20).collect();
         assert_eq!(trace(&mut c, &epochs), vec![]);
-        assert_eq!(c.state(), ProfileKind::Fast);
+        assert_eq!(c.state(), ProfileKind::Ssd);
 
         // Same holds for the SLOW_SEEK → SLOW_OPS downgrade.
         let mut c = Controller::new(ProfileKind::SlowSeek, 4);
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn double_downgrade_fast_to_slow_seek_to_slow_ops() {
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         let epochs = [
             epoch(400.0, 0.1), // warmup (discarded)
             epoch(30.0, 0.8),
@@ -409,7 +409,7 @@ mod tests {
             epoch(400.0, 0.0),
             epoch(400.0, 0.0), // third consecutive → FAST
         ];
-        assert_eq!(trace(&mut c, &epochs), vec![(7, ProfileKind::Fast)]);
+        assert_eq!(trace(&mut c, &epochs), vec![(7, ProfileKind::Ssd)]);
 
         // SLOW_OPS recovers to SLOW_SEEK above 2× 15 MB/s.
         let mut c = Controller::new(ProfileKind::SlowOps, 4);
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn writer_growth_waits_for_proven_fast() {
-        let mut c = Controller::new(ProfileKind::Fast, 4);
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
         // Warmup epoch: not proof, stay at 1 writer.
         assert_eq!(c.on_epoch(&epoch(500.0, 0.0)).target_writers, 1);
         // First measured fast epoch proves the device: grow to FAST's count.
@@ -448,7 +448,7 @@ mod tests {
         c.on_epoch(&epoch(400.0, 0.0));
         c.on_epoch(&epoch(400.0, 0.0));
         let d = c.on_epoch(&epoch(400.0, 0.0));
-        assert_eq!(d.transition, Some(ProfileKind::Fast));
+        assert_eq!(d.transition, Some(ProfileKind::Ssd));
         assert_eq!(d.target_writers, 4);
     }
 

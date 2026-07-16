@@ -112,7 +112,7 @@ pub enum Commands {
         #[arg(long, default_value = "none", value_name = "FORMAT", help_heading = INPUT_OUTPUT)]
         compress: String,
 
-        /// Output device I/O profile: auto, ssd, hdd, minimal-ops
+        /// Output device I/O profile: auto, ssd, hdd, cheap
         #[arg(long, default_value = "auto", value_name = "PROFILE", help_heading = BEHAVIOR)]
         io_profile: String,
 

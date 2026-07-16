@@ -97,9 +97,9 @@ fn golden_invariant_all_profiles_byte_identical() {
     let mut all_hashes: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
 
     for (label, profile) in [
-        ("fast", IoProfile::Fast),
+        ("ssd", IoProfile::Ssd),
         ("hdd", IoProfile::Hdd),
-        ("minimal-ops", IoProfile::MinimalOps),
+        ("cheap", IoProfile::Cheap),
         ("auto", IoProfile::Auto),
     ] {
         let out_dir = temp.path().join(format!("out_{label}"));
@@ -195,7 +195,7 @@ fn mock_clock_end_to_end_matches_baseline() {
     let baseline_dir = temp.path().join("baseline");
     Splitter::new(input.clone(), baseline_dir.clone())
         .with_dialect(SqlDialect::MySql)
-        .with_io_profile(IoProfile::Fast)
+        .with_io_profile(IoProfile::Ssd)
         .split()
         .unwrap();
 

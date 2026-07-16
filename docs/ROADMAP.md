@@ -540,7 +540,7 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | Feature            | Effort   | Notes                                       |
 | ------------------ | -------- | ------------------------------------------- |
 | Zip input          | ~6–8h    | No new deps; `zip` crate already present    |
-| Adaptive I/O       | ~2–3 days| `--io-profile auto\|fast\|hdd\|minimal-ops` |
+| Adaptive I/O       | ~2–3 days| `--io-profile auto\|ssd\|hdd\|cheap` |
 
 **Adaptive I/O profiles** — measured 2026-07-15/16: same-spindle split on a
 USB HDD runs at 21–33 MB/s with defaults but 54.7 MB/s (2.52×) with

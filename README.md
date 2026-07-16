@@ -242,7 +242,7 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 | `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
 | `-t, --tables`   | Only split these tables (comma-separated)           | —           |
 | `--compress`     | Compress each output file: `gzip`, `zstd`, `bzip2`, `xz` | `none`  |
-| `--io-profile`   | Output device I/O profile: `auto`, `ssd`, `hdd`, `minimal-ops` | `auto` |
+| `--io-profile`   | Output device I/O profile: `auto`, `ssd`, `hdd`, `cheap` | `auto` |
 | `-p, --progress` | Show progress bar                                   | —           |
 | `--dry-run`      | Preview without writing files                       | —           |
 | `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)           | —           |
@@ -277,7 +277,7 @@ output. Pin one when you already know the target device:
 | ------------- | ------- | ----------- | ------- | ------------------------------------------------------------------------- |
 | `ssd`         | up to 4 | 256 KB      | 32 MB   | SSD/NVMe — high-IOPS devices that like many small parallel writes         |
 | `hdd`         | 1       | up to 64 MB | 256 MB  | Spinning disks — one writer avoids competing seeks; big sequential writes amortize head movement |
-| `minimal-ops` | 1       | up to 64 MB | 512 MB  | Cheap USB flash, network mounts — every write *operation* is expensive regardless of locality, so issue the fewest, largest ones |
+| `cheap`       | 1       | up to 64 MB | 512 MB  | Cheap USB flash, network mounts — every write *operation* is expensive regardless of locality, so issue the fewest, largest ones. (Also answers to `shit` and `potato`.) |
 | `auto`        | adapts  | adapts      | adapts  | Unknown targets — probes the output dir at startup, then switches between the profiles above based on observed backpressure |
 
 ### Merge Options

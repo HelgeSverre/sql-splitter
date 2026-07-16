@@ -277,7 +277,7 @@ impl Splitter {
             // The fsync probe picks auto's *opening* state only; the feedback
             // controller owns the truth once the pipeline runs.
             None if adaptive => probe_output_dir(&self.output_dir).0,
-            None => ProfileKind::Fast,
+            None => ProfileKind::Ssd,
         };
         let profile =
             WriterProfile::for_kind(opening_kind, cores, compressing).with_env_overrides();
@@ -294,7 +294,7 @@ impl Splitter {
         let fast_writers = if env_writer_count().is_some() {
             initial_writers
         } else {
-            WriterProfile::for_kind(ProfileKind::Fast, cores, compressing).writers
+            WriterProfile::for_kind(ProfileKind::Ssd, cores, compressing).writers
         };
 
         let values = Arc::new(ProfileValues::new(&profile));

@@ -92,7 +92,7 @@ Small explicit state machine, evaluated at epoch boundaries:
 ### CLI
 
 ```
---io-profile auto|ssd|hdd|minimal-ops     (default: auto)
+--io-profile auto|ssd|hdd|cheap     (default: auto)
 ```
 
 Explicit names pin the profile (no controller, no probe) — for scripting,
@@ -104,7 +104,7 @@ everything (documented as expert knobs).
 | Phase | Work | Size |
 | ----- | ---- | ---- |
 | 0 | Instrumentation: bytes-acked + send-stall counters in `ParallelWriters`; hidden `--io-stats` JSON dump for debugging | ~80 lines |
-| 1 | `WriterProfile` struct; replace `STAGE_FLUSH`/`STAGE_TOTAL_CAP` consts with profile values; explicit `--io-profile fast\|hdd\|minimal-ops` | ~120 lines |
+| 1 | `WriterProfile` struct; replace `STAGE_FLUSH`/`STAGE_TOTAL_CAP` consts with profile values; explicit `--io-profile ssd\|hdd\|cheap` | ~120 lines |
 | 2 | Controller: `Clock` trait (real + mock), byte-based epochs, state machine, atomic profile swap, deferred writer spawn | ~200 lines |
 | 3 | fsync probe + `auto` default wiring + transition log lines | ~60 lines |
 | 4 | Docs (README, website performance page), benchmark script `scripts/verify-io-profiles.sh` | — |
@@ -146,7 +146,7 @@ reproducible across machines because it's the *limiter*, not the machine.
 Every profile and every adaptation path must produce **identical output**:
 
 ```
-for profile in fast hdd minimal-ops auto auto+throttle(10MB/s) auto+throttle(60MB/s):
+for profile in ssd hdd cheap auto auto+throttle(10MB/s) auto+throttle(60MB/s):
     split fixture → sha256 every output file
 assert all runs produce the same set of hashes
 ```

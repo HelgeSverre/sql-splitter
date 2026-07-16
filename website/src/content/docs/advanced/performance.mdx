@@ -43,7 +43,7 @@ ExFAT, 124MB–3.8GB fixtures, reading and writing on the same spindle):
 
 | Profile               | Observed throughput             |
 | --------------------- | ------------------------------- |
-| `fast` (SSD defaults) | 22–43 MB/s                      |
+| `ssd` (SSD defaults)  | 22–43 MB/s                      |
 | `hdd` (pinned)        | 55–77 MB/s                      |
 | `auto`                | matched or beat pinned `hdd`    |
 
@@ -61,11 +61,11 @@ only the scheduling of bytes onto the device changes.
 | ------------- | --------------------------- | --------------------- | -------------- | --------------------------- |
 | `ssd`         | up to 4 (all cores when compressing) | 256 KB       | 32 MB          | SSD/NVMe: high IOPS and internal parallelism — many small concurrent writes keep the device's queues full |
 | `hdd`         | 1                           | 8 MB chunks, coalesced up to 64 MB | 256 MB | Spinning disks: parallel writers make the head seek between files, so one writer issues long sequential writes that amortize head movement |
-| `minimal-ops` | 1                           | 32 MB chunks, coalesced up to 64 MB | 512 MB | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible |
+| `cheap`       | 1                           | 32 MB chunks, coalesced up to 64 MB | 512 MB | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible (aliases: `shit`, `potato` — we know what it is like out there) |
 | `auto` (default) | starts at 1, grows to `ssd`'s count if the device proves fast | adapts | adapts | Unknown targets: an 8 MB fsync probe picks the opening profile, then runtime backpressure monitoring switches between the rows above |
 
-Pin `hdd` for spinning disks or `minimal-ops` for slow-per-operation devices
-when you already know the target; `ssd` (alias: `fast`) pins today's defaults.
+Pin `hdd` for spinning disks or `cheap` for slow-per-operation devices
+when you already know the target; `ssd` pins today's defaults.
 Expert env overrides `SQL_SPLITTER_WRITERS` / `SQL_SPLITTER_WRITE_BUF` beat
 every profile.
 

@@ -21,7 +21,7 @@ const MIB: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileKind {
     /// NVMe/SSD: parallel writers, small buffers (today's defaults).
-    Fast,
+    Ssd,
     /// Rotational media / same-spindle read+write: one writer, big
     /// sequential writes so the head seeks as rarely as possible.
     SlowSeek,
@@ -36,9 +36,9 @@ impl ProfileKind {
     /// tuned for — on a spinning disk the SSD settings are the *slow* choice.
     pub fn label(self) -> &'static str {
         match self {
-            ProfileKind::Fast => "ssd",
+            ProfileKind::Ssd => "ssd",
             ProfileKind::SlowSeek => "hdd",
-            ProfileKind::SlowOps => "minimal-ops",
+            ProfileKind::SlowOps => "cheap",
         }
     }
 }
@@ -49,9 +49,9 @@ impl ProfileKind {
 pub enum IoProfile {
     #[default]
     Auto,
-    Fast,
+    Ssd,
     Hdd,
-    MinimalOps,
+    Cheap,
 }
 
 impl IoProfile {
@@ -60,11 +60,14 @@ impl IoProfile {
         match s.to_lowercase().as_str() {
             "auto" | "" => Ok(IoProfile::Auto),
             // `fast` is a compatibility alias for `ssd` (the pre-rename name).
-            "ssd" | "fast" => Ok(IoProfile::Fast),
+            "ssd" => Ok(IoProfile::Ssd),
             "hdd" => Ok(IoProfile::Hdd),
-            "minimal-ops" | "minimal_ops" | "minimalops" => Ok(IoProfile::MinimalOps),
+            // The honest name. The aliases are for everyone who has ever fought
+            // a no-name USB stick from a conference and knows exactly which
+            // profile they need.
+            "cheap" | "shit" | "potato" => Ok(IoProfile::Cheap),
             other => Err(format!(
-                "Unknown I/O profile '{other}'. Valid: auto, ssd, hdd, minimal-ops"
+                "Unknown I/O profile '{other}'. Valid: auto, ssd, hdd, cheap"
             )),
         }
     }
@@ -73,9 +76,9 @@ impl IoProfile {
     pub fn pinned(self) -> Option<ProfileKind> {
         match self {
             IoProfile::Auto => None,
-            IoProfile::Fast => Some(ProfileKind::Fast),
+            IoProfile::Ssd => Some(ProfileKind::Ssd),
             IoProfile::Hdd => Some(ProfileKind::SlowSeek),
-            IoProfile::MinimalOps => Some(ProfileKind::SlowOps),
+            IoProfile::Cheap => Some(ProfileKind::SlowOps),
         }
     }
 }
@@ -106,7 +109,7 @@ impl WriterProfile {
     /// than plain output (measured 22.1 vs 34.5 MB/s at 100 GB scale).
     pub fn for_kind(kind: ProfileKind, cores: usize, compressing: bool) -> Self {
         match kind {
-            ProfileKind::Fast => Self {
+            ProfileKind::Ssd => Self {
                 writers: if compressing { cores } else { cores.min(4) },
                 flush_chunk: 256 * KIB,
                 file_buf: 256 * KIB,
@@ -213,7 +216,7 @@ const PROBE_BYTES: usize = 8 * MIB;
 /// feedback controller owns the truth once the pipeline is running. Costs
 /// ~100 ms on NVMe; on slow media the cost is itself the signal.
 ///
-/// The hidden env `SQL_SPLITTER_IO_PROBE` (`fast` | `hdd` | `minimal-ops`)
+/// The hidden env `SQL_SPLITTER_IO_PROBE` (`ssd` | `hdd` | `cheap`)
 /// forces the verdict without touching the disk — the deterministic seam the
 /// integration tests use.
 ///
@@ -230,7 +233,7 @@ pub fn probe_output_dir(dir: &Path) -> (ProfileKind, f64) {
     match run_probe(dir) {
         Ok(mbps) => {
             let kind = if mbps > 80.0 {
-                ProfileKind::Fast
+                ProfileKind::Ssd
             } else if mbps >= 10.0 {
                 ProfileKind::SlowSeek
             } else {
@@ -238,7 +241,7 @@ pub fn probe_output_dir(dir: &Path) -> (ProfileKind, f64) {
             };
             (kind, mbps)
         }
-        Err(_) => (ProfileKind::Fast, f64::NAN),
+        Err(_) => (ProfileKind::Ssd, f64::NAN),
     }
 }
 
@@ -268,7 +271,7 @@ mod tests {
 
     #[test]
     fn profile_table_matches_design_doc() {
-        let fast = WriterProfile::for_kind(ProfileKind::Fast, 8, false);
+        let fast = WriterProfile::for_kind(ProfileKind::Ssd, 8, false);
         assert_eq!(fast.writers, 4);
         assert_eq!(fast.flush_chunk, 256 * KIB);
         assert_eq!(fast.file_buf, 256 * KIB);
@@ -300,11 +303,11 @@ mod tests {
     #[test]
     fn fast_profile_uses_all_cores_when_compressing() {
         assert_eq!(
-            WriterProfile::for_kind(ProfileKind::Fast, 8, true).writers,
+            WriterProfile::for_kind(ProfileKind::Ssd, 8, true).writers,
             8
         );
         assert_eq!(
-            WriterProfile::for_kind(ProfileKind::Fast, 2, false).writers,
+            WriterProfile::for_kind(ProfileKind::Ssd, 2, false).writers,
             2
         );
     }
@@ -325,15 +328,15 @@ mod tests {
     #[test]
     fn io_profile_parsing() {
         assert_eq!(IoProfile::parse("auto"), Ok(IoProfile::Auto));
-        assert_eq!(IoProfile::parse("fast"), Ok(IoProfile::Fast));
+        assert_eq!(IoProfile::parse("ssd"), Ok(IoProfile::Ssd));
         assert_eq!(IoProfile::parse("HDD"), Ok(IoProfile::Hdd));
-        assert_eq!(IoProfile::parse("minimal-ops"), Ok(IoProfile::MinimalOps));
+        assert_eq!(IoProfile::parse("shit"), Ok(IoProfile::Cheap));
         assert!(IoProfile::parse("turbo").is_err());
     }
 
     #[test]
     fn profile_values_swap() {
-        let fast = WriterProfile::for_kind(ProfileKind::Fast, 4, false);
+        let fast = WriterProfile::for_kind(ProfileKind::Ssd, 4, false);
         let seek = WriterProfile::for_kind(ProfileKind::SlowSeek, 4, false);
         let values = ProfileValues::new(&fast);
         assert_eq!(values.flush_chunk(), fast.flush_chunk);
