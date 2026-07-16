@@ -29,11 +29,14 @@ mod zip_input;
 use clap::Parser;
 use cmd::Cli;
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    if let Err(e) = cmd::run(cli) {
-        eprintln!("{e}");
-        std::process::exit(1);
+    match cmd::run(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

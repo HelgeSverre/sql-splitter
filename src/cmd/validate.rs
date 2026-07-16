@@ -2,6 +2,7 @@ use crate::splitter::Compression;
 use crate::validate::{ValidateOptions, Validator};
 use clap::{Args, ValueHint};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Instant;
 
 use super::common::{BEHAVIOR, INPUT_OUTPUT, LIMITS, OUTPUT_FORMAT};
@@ -46,7 +47,7 @@ pub struct ValidateArgs {
     json: bool,
 }
 
-pub fn run(args: ValidateArgs) -> anyhow::Result<()> {
+pub fn run(args: ValidateArgs) -> anyhow::Result<ExitCode> {
     let ValidateArgs {
         file,
         dialect,
@@ -97,7 +98,7 @@ fn run_single(
     json: bool,
     max_rows_per_table: usize,
     no_fk_checks: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
     }
@@ -205,10 +206,10 @@ fn run_single(
     }
 
     if summary.has_errors() || (strict && summary.has_warnings()) {
-        std::process::exit(1);
+        return Ok(ExitCode::FAILURE);
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -221,7 +222,7 @@ fn run_multi(
     max_rows_per_table: usize,
     no_fk_checks: bool,
     fail_fast: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     let total = files.len();
 
     if !json {
@@ -367,8 +368,8 @@ fn run_multi(
     }
 
     if run.has_failures() {
-        std::process::exit(1);
+        return Ok(ExitCode::FAILURE);
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }

@@ -8,6 +8,7 @@ use clap::{Args, ValueHint};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Instant;
 
 use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
@@ -124,7 +125,7 @@ pub struct SplitArgs {
     fail_fast: bool,
 }
 
-pub fn run(args: SplitArgs) -> anyhow::Result<()> {
+pub fn run(args: SplitArgs) -> anyhow::Result<ExitCode> {
     let SplitArgs {
         file,
         output,
@@ -202,7 +203,7 @@ fn run_single(
     json: bool,
     out_compression: Compression,
     io_strategy: IoStrategy,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
     }
@@ -417,7 +418,7 @@ fn run_single(
         }
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,7 +436,7 @@ fn run_multi(
     json: bool,
     out_compression: Compression,
     io_strategy: IoStrategy,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     let total = files.len();
 
     if !json {
@@ -621,8 +622,8 @@ fn run_multi(
         },
     );
 
+    let has_failures = run.has_failures();
     if json {
-        let has_failures = run.has_failures();
         let output_json = MultiSplitJsonOutput {
             total_files: run.total,
             succeeded: run.succeeded,
@@ -632,11 +633,6 @@ fn run_multi(
             results: run.payloads,
         };
         println!("{}", serde_json::to_string_pretty(&output_json)?);
-        // Match the non-JSON branch: a batch with failures must exit non-zero
-        // so scripted pipelines don't have to parse the JSON to detect it.
-        if has_failures {
-            std::process::exit(1);
-        }
     } else {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Split Summary:");
@@ -645,15 +641,20 @@ fn run_multi(
         println!("  Failed: {}", run.failed);
         println!("  Time: {:.3?}", run.elapsed);
 
-        if run.has_failures() {
+        if has_failures {
             println!();
             println!("Failed files:");
             for (path, error) in &run.errors {
                 println!("  - {}: {}", path.display(), error);
             }
-            std::process::exit(1);
         }
     }
 
-    Ok(())
+    // A batch with failures must exit non-zero (in both JSON and text mode)
+    // so scripted pipelines don't have to parse the output to detect it.
+    if has_failures {
+        Ok(ExitCode::FAILURE)
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
 }

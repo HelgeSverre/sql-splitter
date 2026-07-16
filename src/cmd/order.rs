@@ -9,6 +9,7 @@ use clap::{Args, ValueHint};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Args)]
 pub struct OrderArgs {
@@ -38,7 +39,7 @@ pub struct OrderArgs {
 }
 
 /// Run the order command
-pub fn run(args: OrderArgs) -> Result<()> {
+pub fn run(args: OrderArgs) -> Result<ExitCode> {
     let OrderArgs {
         file,
         output,
@@ -62,7 +63,7 @@ pub fn run(args: OrderArgs) -> Result<()> {
 
     if graph.is_empty() {
         eprintln!("No tables found in the file.");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Get topological order
@@ -81,7 +82,7 @@ pub fn run(args: OrderArgs) -> Result<()> {
         if check {
             eprintln!("Check FAILED: Cannot determine valid ordering due to cycles.");
             eprintln!("Use 'sql-splitter graph --cycles-only' to analyze cycles.");
-            std::process::exit(1);
+            return Ok(ExitCode::FAILURE);
         }
     }
 
@@ -110,7 +111,7 @@ pub fn run(args: OrderArgs) -> Result<()> {
         for (i, table) in ordered_tables.iter().enumerate() {
             eprintln!("  {}. {}", i + 1, table);
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Dry run: just show the order
@@ -119,7 +120,7 @@ pub fn run(args: OrderArgs) -> Result<()> {
         for (i, table) in ordered_tables.iter().enumerate() {
             eprintln!("  {}. {}", i + 1, table);
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Write output
@@ -145,7 +146,7 @@ pub fn run(args: OrderArgs) -> Result<()> {
         ordered_tables.len()
     );
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Collected statements from the SQL file

@@ -5,6 +5,7 @@ use clap::{Args, ValueHint};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Instant;
 
 use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
@@ -90,7 +91,7 @@ pub struct AnalyzeArgs {
     fail_fast: bool,
 }
 
-pub fn run(args: AnalyzeArgs) -> anyhow::Result<()> {
+pub fn run(args: AnalyzeArgs) -> anyhow::Result<ExitCode> {
     let AnalyzeArgs {
         file,
         dialect,
@@ -117,7 +118,7 @@ fn run_single(
     dialect: Option<String>,
     progress: bool,
     json: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("input file does not exist: {}", file.display());
     }
@@ -196,13 +197,13 @@ fn run_single(
 
         if stats.is_empty() {
             println!("No tables found in SQL file.");
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
 
         print_stats(&stats);
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_multi(
@@ -211,7 +212,7 @@ fn run_multi(
     progress: bool,
     fail_fast: bool,
     json: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     let total = files.len();
 
     if !json {
@@ -354,6 +355,7 @@ fn run_multi(
         |_| None,
     );
 
+    let has_failures = run.has_failures();
     if json {
         let output = MultiAnalyzeJsonOutput {
             total_files: run.total,
@@ -371,17 +373,22 @@ fn run_multi(
         println!("  Failed: {}", run.failed);
         println!("  Time: {:.3?}", run.elapsed);
 
-        if run.has_failures() {
+        if has_failures {
             println!();
             println!("Failed files:");
             for (path, error) in &run.errors {
                 println!("  - {}: {}", path.display(), error);
             }
-            std::process::exit(1);
         }
     }
 
-    Ok(())
+    // A batch with failures exits non-zero in both JSON and text mode so
+    // scripted pipelines don't have to parse the output to detect it.
+    if has_failures {
+        Ok(ExitCode::FAILURE)
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
 }
 
 fn print_stats(stats: &[crate::analyzer::TableStats]) {

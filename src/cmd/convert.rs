@@ -6,6 +6,7 @@ use clap::{Args, ValueHint};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use super::common::{BEHAVIOR, INPUT_OUTPUT, MODE, OUTPUT_FORMAT};
 use super::glob_util::{drive_multi_file, expand_file_pattern, FileOutcome};
@@ -113,7 +114,7 @@ pub(crate) struct ConvertFileResult {
     error: Option<String>,
 }
 
-pub fn run(args: ConvertArgs) -> anyhow::Result<()> {
+pub fn run(args: ConvertArgs) -> anyhow::Result<ExitCode> {
     let ConvertArgs {
         file,
         output,
@@ -173,7 +174,7 @@ fn run_single(
     progress: bool,
     dry_run: bool,
     json: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     let from = if let Some(d) = from_dialect.clone() {
         Some(
             d.parse::<SqlDialect>()
@@ -229,7 +230,7 @@ fn run_single(
         anyhow::bail!("Strict mode: {} warnings generated", stats.warnings.len());
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -243,7 +244,7 @@ fn run_multi(
     dry_run: bool,
     fail_fast: bool,
     json: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitCode> {
     let total = files.len();
 
     let to = to_dialect
@@ -393,6 +394,7 @@ fn run_multi(
         |_| None,
     );
 
+    let has_failures = run.has_failures();
     if json {
         let from_str = from_dialect
             .map(|d| d.to_string())
@@ -417,17 +419,22 @@ fn run_multi(
         eprintln!("  Succeeded: {}", run.succeeded);
         eprintln!("  Failed: {}", run.failed);
 
-        if run.has_failures() {
+        if has_failures {
             eprintln!();
             eprintln!("Failed files:");
             for (path, error) in &run.errors {
                 eprintln!("  - {}: {}", path.display(), error);
             }
-            std::process::exit(1);
         }
     }
 
-    Ok(())
+    // A batch with failures exits non-zero in both JSON and text mode so
+    // scripted pipelines don't have to parse the output to detect it.
+    if has_failures {
+        Ok(ExitCode::FAILURE)
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
 }
 
 fn print_stats(stats: &ConvertStats, dry_run: bool, progress: bool) {

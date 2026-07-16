@@ -18,6 +18,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::{generate, Shell};
 use std::io;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
   Split a dump into per-table files:
@@ -212,27 +213,33 @@ pub enum Commands {
     },
 }
 
-pub fn run(cli: Cli) -> anyhow::Result<()> {
+/// Dispatch to the selected subcommand, returning the process exit code.
+///
+/// Commands that can partially fail (multi-file batches, validation, order
+/// --check) report failure through the returned [`ExitCode`] instead of
+/// calling `std::process::exit`, so destructors (tempdir cleanup, buffered
+/// writers) always run and the cmd layer stays usable as a library.
+pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Commands::Split(args) => split::run(args),
         Commands::Analyze(args) => analyze::run(args),
-        Commands::Merge(args) => merge::run(args),
-        Commands::Sample(args) => sample::run(args),
-        Commands::Shard(args) => shard::run(args),
+        Commands::Merge(args) => merge::run(args).map(|()| ExitCode::SUCCESS),
+        Commands::Sample(args) => sample::run(args).map(|()| ExitCode::SUCCESS),
+        Commands::Shard(args) => shard::run(args).map(|()| ExitCode::SUCCESS),
         Commands::Convert(args) => convert::run(args),
         Commands::Validate(args) => validate::run(args),
-        Commands::Diff(args) => diff::run(args),
-        Commands::Redact(args) => redact::run(args),
-        Commands::Graph(args) => graph::run(args),
+        Commands::Diff(args) => diff::run(args).map(|()| ExitCode::SUCCESS),
+        Commands::Redact(args) => redact::run(args).map(|()| ExitCode::SUCCESS),
+        Commands::Graph(args) => graph::run(args).map(|()| ExitCode::SUCCESS),
         Commands::Order(args) => order::run(args),
         #[cfg(feature = "duckdb-query")]
-        Commands::Query(args) => query::run(args),
+        Commands::Query(args) => query::run(args).map(|()| ExitCode::SUCCESS),
         Commands::Schema {
             output,
             command,
             stdout,
             list,
-        } => run_schema(output, command, stdout, list),
+        } => run_schema(output, command, stdout, list).map(|()| ExitCode::SUCCESS),
         Commands::Completions { shell } => {
             generate(
                 shell,
@@ -240,7 +247,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                 "sql-splitter",
                 &mut io::stdout(),
             );
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
