@@ -1,7 +1,9 @@
 //! Shared helpers for the CLI command layer.
 
 use crate::parser::{detect_dialect_from_file, DialectConfidence, SqlDialect};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 // Help heading constants shared by the per-command clap Args structs.
 pub(crate) const INPUT_OUTPUT: &str = "Input/Output";
@@ -14,6 +16,35 @@ pub(crate) const OUTPUT_FORMAT: &str = "Output";
 /// Treat an output path of `-` as "write to stdout" (Unix convention).
 pub(crate) fn dash_is_stdout(output: Option<PathBuf>) -> Option<PathBuf> {
     output.filter(|p| p.as_os_str() != "-")
+}
+
+/// Full-width byte progress bar used by single-file command runs.
+pub(crate) fn byte_progress_bar(len: u64) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
+        )
+        .expect("progress template is static and valid")
+        .progress_chars("█▓▒░  ")
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb
+}
+
+/// Compact indented byte progress bar used per file by multi-file (glob) runs.
+pub(crate) fn compact_progress_bar(len: u64) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
+        )
+        .expect("progress template is static and valid")
+        .progress_chars("█▓▒░  "),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb
 }
 
 /// Resolve the SQL dialect for `file`, returning the detection confidence.

@@ -1,7 +1,6 @@
 use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
 use crate::differ::{format_diff, DiffConfig, DiffOutputFormat, Differ};
 use clap::{Args, ValueHint};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -156,16 +155,7 @@ pub fn run(args: DiffArgs) -> anyhow::Result<()> {
 
     // Set up progress bar
     let pb = if progress && !is_json {
-        let pb = ProgressBar::new(total_bytes);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        let pb = super::common::byte_progress_bar(total_bytes);
         pb.set_message("Comparing...");
         Some(pb)
     } else {

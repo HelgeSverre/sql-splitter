@@ -1,7 +1,6 @@
 use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::parser::SqlDialect;
 use clap::{Args, ValueHint};
-use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -333,16 +332,7 @@ fn merge_files<W: Write>(
         .sum();
 
     let pb = if show_progress {
-        let pb = ProgressBar::new(total_size);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  "),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(pb)
+        Some(super::common::byte_progress_bar(total_size))
     } else {
         None
     };

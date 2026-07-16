@@ -5,12 +5,9 @@ use crate::writer::IoStrategy;
 #[allow(unused_imports)]
 use anyhow::Context;
 use clap::{Args, ValueHint};
-use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 use super::glob_util::{expand_file_pattern, MultiFileResult};
@@ -335,23 +332,10 @@ fn run_single(
     let stats = if progress && !json {
         // For zip input only the .sql member's compressed bytes are streamed,
         // so the bar total must be that member's size, not the archive's.
-        let pb = ProgressBar::new(crate::splitter::input_progress_len(&file));
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        let pb = super::common::byte_progress_bar(crate::splitter::input_progress_len(&file));
 
-        let bytes_read = Arc::new(AtomicU64::new(0));
-        let bytes_read_clone = bytes_read.clone();
         let pb_clone = pb.clone();
-
         splitter = splitter.with_progress(move |bytes| {
-            bytes_read_clone.store(bytes, Ordering::Relaxed);
             pb_clone.set_position(bytes);
         });
 
@@ -567,15 +551,7 @@ fn run_multi(
 
         let split_result = if progress && !json {
             // See run_single: zip input streams only the .sql member's bytes.
-            let pb = ProgressBar::new(crate::splitter::input_progress_len(file));
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "  {spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
-                )
-                .unwrap()
-                .progress_chars("█▓▒░  "),
-            );
-            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            let pb = super::common::compact_progress_bar(crate::splitter::input_progress_len(file));
 
             let pb_clone = pb.clone();
             splitter = splitter.with_progress(move |bytes| {

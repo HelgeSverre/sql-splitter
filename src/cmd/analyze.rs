@@ -2,12 +2,9 @@ use super::common::{BEHAVIOR, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::analyzer::Analyzer;
 use crate::splitter::Compression;
 use clap::{Args, ValueHint};
-use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 use super::glob_util::{expand_file_pattern, MultiFileResult};
@@ -148,24 +145,11 @@ fn run_single(
     let start_time = Instant::now();
 
     let stats = if progress && !json {
-        let pb = ProgressBar::new(file_size);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        let pb = super::common::byte_progress_bar(file_size);
 
-        let bytes_read = Arc::new(AtomicU64::new(0));
-        let bytes_read_clone = bytes_read.clone();
         let pb_clone = pb.clone();
-
         let analyzer = Analyzer::new(file.clone()).with_dialect(dialect);
         let stats = analyzer.analyze_with_progress(move |bytes| {
-            bytes_read_clone.store(bytes, Ordering::Relaxed);
             pb_clone.set_position(bytes);
         })?;
 
@@ -310,15 +294,7 @@ fn run_multi(
 
         let analyzer = Analyzer::new(file.clone()).with_dialect(resolved_dialect);
         let stats = if progress && !json {
-            let pb = ProgressBar::new(file_size);
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "  {spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
-                )
-                .unwrap()
-                .progress_chars("█▓▒░  "),
-            );
-            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            let pb = super::common::compact_progress_bar(file_size);
 
             let pb_clone = pb.clone();
             let result = analyzer.analyze_with_progress(move |bytes| {

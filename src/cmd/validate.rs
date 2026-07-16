@@ -1,7 +1,6 @@
 use crate::splitter::Compression;
 use crate::validate::{ValidateOptions, Validator};
 use clap::{Args, ValueHint};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -125,16 +124,7 @@ fn run_single(
     let start_time = Instant::now();
 
     let pb = if progress && !json {
-        let pb = ProgressBar::new(file_size);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        let pb = super::common::byte_progress_bar(file_size);
         pb.set_message("Validating...");
         Some(pb)
     } else {
