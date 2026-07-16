@@ -352,13 +352,17 @@ pub struct PlannedTable {
 }
 ```
 
+Task 9 also defines the referenced types so the plan compiles: `PlannedColumn`, `ColumnOwner`, `ExecutionPhase` (initially the `Table` variant; `Family`/`DeferredConstraints` added in Task 22), and `CompiledRelationship`. Tasks 10, 13, and 22 populate and extend these. `CompiledRelationship` is produced here and completed in Task 13.
+
+`PlanEstimates` fields for temporary-storage and verification cost are populated incrementally; family-state/spool estimates (Task 22) and verification cost (Task 26) fill in during Phase 3.
+
 Keep plan fields read-only after construction. If trait-object fields prevent `Debug`, implement a manual descriptor-based `Debug` rather than dropping plan observability.
 
 - [ ] **Step 4: Implement count traversal in dependency order**
 
 Resolve root counts first; apply global control, root per-table override, then max. Traverse `SchemaGraph`; derive children from final parents, apply child override and max, validate distribution bounds, then continue to descendants. Use a stable seeded rounding stream named `rows.rounding`; emitted models store the resulting integer.
 
-Define compiler completeness explicitly: every selected table has a portable schema, a resolvable row rule, and—after Task 10—an owner for each generated column. `kind: overrides` is never complete by itself. `rows.kind: observed` resolves only from an attached source/profile count; without one it is `GEN-ROWS-OBSERVED-MISSING`. Resolved/emitted models replace it with `RowsModel::Fixed`. `relation.children.distribution` is mandatory in a complete model and may be omitted only in an override that inherits it from a base.
+Define compiler completeness explicitly: every selected table has a portable schema, a resolvable row rule, and—after Task 10—an owner for each generated column. `kind: overrides` is never complete by itself. `rows.kind: observed` resolves only from an attached source/profile count; without one it is `GEN-ROWS-OBSERVED-MISSING`. Resolved/emitted models retain `kind: observed` and store the resolved integer `count` (matching the spec's emitted-model example); they do not convert the rule to `fixed`. `relation.children.distribution` is mandatory in a complete model and may be omitted only in an override that inherits it from a base.
 
 - [ ] **Step 5: Implement table selection/exclusion**
 
@@ -787,6 +791,7 @@ git commit -m "feat(generate): render model-driven SQL"
 
 **Interfaces:**
 - Produces: `Generate`, `GenerateBuilder`, `GenerateReport`
+- Produces: `RunMode::{Generate,Check,DryRun}`
 - Re-exports: `SyntheticModel`, `ExtensionRegistry`, `ModelCompiler`, `GenerationEngine`, renderer types; Task 19 adds `DumpProfiler`
 - Consumes: model loader/compiler/engine/renderer
 
@@ -837,7 +842,7 @@ The builder validates only request shape. Model diagnostics remain structured an
 
 - [ ] **Step 4: Keep staged APIs independently usable**
 
-Add doctests that compile the staged API shown in the spec. Accept `Read`/`Write` in profiler/engine/renderer constructors; path methods are conveniences.
+Add doctests for the Phase-1-reachable staged API subset (registry → `ModelCompiler` → `GenerationEngine` → renderer). The profiler/inference portion of the staged snippet (`DumpProfiler`, `ModelInference`) is delivered and doctested in Phase 2 (Tasks 19–20), so it is not doctested here. Accept `Read`/`Write` in profiler/engine/renderer constructors; path methods are conveniences.
 
 - [ ] **Step 5: Verify public API under minimal features**
 
@@ -966,11 +971,13 @@ pub struct GenerateArgs {
 }
 ```
 
-`ProfileDepthArg` contains exactly `Basic` and `Full`; schema-only profiling remains a library/internal mode. `try_into_request` additionally rejects `--verify` without a filesystem output, `--check` without a complete config, stdout ownership collisions (including `--json --emit-config -` and simultaneous SQL/model stdout), zero batch sizes, malformed table patterns, unsupported dialect/format combinations, and `--quiet --progress`.
+`ProfileDepthArg` contains exactly `Basic` and `Full`; schema-only profiling remains a library/internal mode. `try_into_request` additionally rejects `--verify` without a filesystem output, `--check` without a complete config, stdout ownership collisions (including `--json --emit-config -` and simultaneous SQL/model stdout), zero batch sizes, malformed table patterns, unsupported dialect/format combinations, `--quiet --progress`, and `--compress` with stdout output (`-o -` / no file). If the clap struct can express `--quiet`/`--progress` via `conflicts_with`, prefer that; otherwise enforce in `try_into_request`.
+
+The input/profiling flags (`[INPUT]`, `--profile-depth`, `--profile-sample`) parse in Phase 1 but return a clear "requires Phase 2 profiling" error until Tasks 19–21 wire dump profiling; only complete-model paths are functional at the Phase 1 checkpoint.
 
 - [ ] **Step 4: Route stdout and exit codes exactly**
 
-JSON reports own stdout. Generated SQL defaults to stdout only without `--json` and without model-only emission. `--check`/`--dry-run` produce no SQL. Return `ExitCode::SUCCESS`, `ExitCode::FAILURE`, or Clap's usage exit `2`; do not add phase-specific process exit codes.
+JSON reports own stdout. Generated SQL defaults to stdout only without `--json` and without model-only emission. `--check`/`--dry-run` produce no SQL. Return `ExitCode::SUCCESS`, `ExitCode::FAILURE`, or Clap's usage exit `2`; do not add phase-specific process exit codes. `try_into_request` returns a typed usage error (not a generic `anyhow::Error`); `run()` maps that usage error to Clap's usage exit code `2`, not `1`, so post-clap conflicts match the spec's exit-code table.
 
 ```rust
 pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
@@ -1247,6 +1254,12 @@ git commit -m "feat(generate): add structured diagnostics"
 - Produces: `SyntheticFile::parse_str` and role-specific, unknown-field-safe document structs
 - Produces: `TableSeed::{Inherit, Random, Fixed(u64)}` with missing/null/integer YAML semantics
 - Produces: complete and partial row/schema/rule types used by the compiler
+
+**Resolution note (design audit):**
+- `PortableColumn` accepts a `type:` input alias for `source_type`; `family` is `#[serde(default)]`-derived from `source_type` when absent; emit is always canonical.
+- `SyntheticModel.output` and `SyntheticModel.defaults` take `#[serde(default)]` (default inference = disabled; default output = preserve source dialect) so a minimal `kind: model` per the spec's optional-field table parses.
+- `SyntheticOverrides` includes `defaults: Option<ModelDefaults>` and `source: Option<SourceModel>` (both spec-optional for overrides).
+- `RowsModel` and `ChildDistribution` carry `#[serde(deny_unknown_fields)]`.
 
 - [ ] **Step 1: Write failing role, unknown-field, and seed tests**
 
@@ -1912,7 +1925,7 @@ Statistical tests use tolerant shape assertions and exact seed-repeatability ass
 
 - [ ] **Step 5: Ensure emitted models are self-contained**
 
-Convert observed row counts to `RowsModel::Fixed`, persist explicit rule arguments and exact bounded distributions, set `defaults.inference: disabled`, and omit retained raw samples. The CLI emitter includes bounded non-literal explanation summaries; a library `EmitOptions::include_profiles(false)` removes those summaries. Literal values required by an explicit resolved rule remain in that rule and trigger the source-derived warning; there is no “safe to store” inference mode.
+Freeze observed row counts as the resolved integer `count` while retaining `kind: observed` (do not rewrite to `fixed`), persist explicit rule arguments and exact bounded distributions, set `defaults.inference: disabled`, and omit retained raw samples. The CLI emitter includes bounded non-literal explanation summaries; a library `EmitOptions::include_profiles(false)` removes those summaries. Literal values required by an explicit resolved rule remain in that rule and trigger the source-derived warning; there is no “safe to store” inference mode.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -1933,7 +1946,7 @@ git commit -m "feat(generate): infer explicit rules from dump profiles"
 - Modify: `tests/generate_profile_test.rs`
 
 **Interfaces:**
-- Produces: `RunMode::{Generate,Check,DryRun,EmitModel}`
+- Produces: `RunMode::EmitModel` (extends the Phase 1 `RunMode` with the emit-model mode)
 - Produces: source-literal risk scan and `--explain` report
 - Consumes: `DumpProfiler`, `ModelInference`, merge/compiler/engine pipeline
 
@@ -2138,7 +2151,7 @@ Expected: compile failure because `OrderFamilyFactory` is absent.
 
 - [ ] **Step 3: Compile the normative structured YAML only**
 
-Require `children`, `relationship`, `columns`, `child_columns`, `currency_scale`, `rounding`, and typed tax configuration. The child's required `rows.distribution` is the sole line-count source. Reject the old flat planner form as an unknown-field error.
+Require `children`, `relationship`, `columns` (with at least subtotal+total), `child_columns`, `currency_scale`, and `rounding`. `tax`, and the discount/shipping column mappings, are optional with defaults (default: zero tax, no discount, no shipping), so the spec's normative example (which omits `tax:`, discount, and shipping) compiles. The child's required `rows.distribution` is the sole line-count source. Reject the old flat planner form as an unknown-field error.
 
 - [ ] **Step 4: Plan parent and children as one family**
 
@@ -2195,6 +2208,8 @@ git commit -m "feat(generate): verify output before publication"
 ```
 
 ### Task 27: Add common temporal lifecycle planners
+
+This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part of the initial release rather than following the spec's softer "may ship incrementally" hedge.
 
 **Files:**
 - Create: `src/generate/planners/structural.rs`
@@ -2283,7 +2298,7 @@ Expected: at least the required-dependency and detached-FK cases fail before the
 
 - [ ] **Step 3: Compile a filtered portable schema before rendering**
 
-Exact names beat globs within an include or exclude list; exclude always wins between lists. A retained non-null/required data dependency on an excluded table is `GEN-FILTER-REQUIRED-DEPENDENCY`. An explicitly detachable optional relationship removes its FK/standalone reference and warns; `--strict` promotes that warning to exit `1`. Keep local indexes unless an indexed expression references an absent object.
+Exact names beat globs within an include or exclude list; exclude always wins between lists. A retained non-null/required data dependency on an excluded table is `GEN-EXCLUDED-DEPENDENCY` (the same code Task 9 uses for the "excluded required dependency" condition, so one stable code covers the condition; the message may differ between selection-time (Task 9) and DDL-render-time (Task 30) but the code is shared). An explicitly detachable optional relationship removes its FK/standalone reference and warns; `--strict` promotes that warning to exit `1`. Keep local indexes unless an indexed expression references an absent object.
 
 - [ ] **Step 4: Render only normalized affected DDL**
 

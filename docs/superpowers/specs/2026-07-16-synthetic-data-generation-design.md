@@ -300,6 +300,8 @@ Selection resolution is also exact:
 
 If no seed is present, generation uses fresh entropy. A top-level seed makes inheriting tables deterministic. Each table can inherit, override, or opt out:
 
+This fragment omits each table's required `rows`/`schema` for brevity and is illustrative, not a complete document.
+
 ```yaml
 seed: 42
 
@@ -380,7 +382,7 @@ Structured diagnostics and JSON report fields distinguish failure categories. A 
 
 ## YAML specification
 
-The first schema version is `1`. Unknown fields and duplicate keys are errors. New optional fields may be added within a version; breaking changes require a new version and upgrader.
+The first schema version is `1`. Unknown fields and duplicate keys are errors. New optional fields may be added within a version; breaking changes require a new version and upgrader. This strictness applies to the typed document structure; registry-owned generator/modifier/planner **argument** payloads are validated against their descriptor at compile time rather than at YAML parse time, so an unknown argument key is reported as a compile diagnostic, not a parse error.
 
 ### Complete model example
 
@@ -593,6 +595,8 @@ rows:
 
 Each table stores its normalized name, original DDL when available, ordered columns, primary key, unique constraints, indexes, checks, and relationships. Columns store normalized and source types, nullability, default, generated/identity status, collation, and optional semantic annotation.
 
+Hand-authored column entries may use a concise `type:` form (e.g. `{ name: id, type: bigint }`) as shorthand for `source_type`, with the `SqlTypeFamily` derived automatically; emitted models (`--emit-config`) always write the canonical `source_type` + `family` fields.
+
 Original DDL is preferred only when the source and output dialect match and the selected schema set is unchanged. Cross-dialect output and affected tables use normalized schema rendering.
 
 ### Column rules
@@ -625,20 +629,9 @@ relationships:
   - name: category_parent
     columns: [parent_id]
     references: { table: categories, columns: [id] }
-    shape:
-      kind: tree
-      roots: 0.08
-      max_depth: 6
-      branching: { kind: poisson, mean: 3.0 }
-
-  - name: comment_subject
-    polymorphic:
-      type_column: subject_type
-      id_column: subject_id
-      targets:
-        - { value: order, table: orders, columns: [id], weight: 0.7 }
-        - { value: ticket, table: tickets, columns: [id], weight: 0.3 }
 ```
+
+Tree hierarchies and polymorphic references are configured on planners, not on relationships: self-referential tree shape (roots ratio, max depth, branching) is owned by the `hierarchy.tree` planner reading a plain self-FK relationship by name; polymorphic type/id pairs are owned by the `relation.polymorphic_pair` planner via its own argument payload (no `relationships:` entry). Relationship-level shape sugar is not part of v1.
 
 Relationships referenced by a generator or planner require explicit names. Anonymous relationships are allowed only when no rule refers to them. Names must be unique within the table.
 
@@ -1117,15 +1110,19 @@ println!("{} rows generated", report.rows_written);
 Staged API:
 
 ```rust
-let profile = DumpProfiler::builder().depth(ProfileDepth::Basic).run(reader)?;
-let model = SyntheticModel::from_profile(profile, &StandardHeuristics::new())?;
-
 let mut registry = ExtensionRegistry::standard();
 registry.register_generator(MyDomainIdFactory::new())?;
 registry.register_planner(MyLedgerPlannerFactory::new())?;
 registry.register_heuristic(MyDomainHeuristic::new())?;
 
-let plan = ModelCompiler::new(&registry).compile(model, overrides)?;
+let profile = DumpProfiler::builder().depth(ProfileDepth::Basic).run(reader)?;
+let inference = ModelInference::infer(&profile, &registry, InferenceOptions::default())?;
+let model = inference.model;
+
+// If overrides are present, merge them before compiling:
+let model = ModelMerger::merge(model, overrides)?;
+
+let plan = ModelCompiler::new(&registry).compile(model, CompileOptions::default())?;
 let report = GenerationEngine::new(plan).run(renderer)?;
 ```
 
