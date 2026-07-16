@@ -10,6 +10,18 @@
 //! [`schema::PortableSchema`] is that snapshot. Build one from a parsed
 //! [`crate::schema::Schema`] with [`schema::PortableSchema::from_runtime`].
 
+pub mod model;
+pub mod overrides;
 pub mod schema;
 
+pub use model::{
+    ChildDistribution, ColumnRule, FingerprintPolicy, GeneratorConfig, InferenceMode, InsertMode,
+    ModelDefaults, ModelKind, ModifierConfig, OutputMode, OutputModel, PlannerConfig,
+    ProfileInference, ProfileMetadata, RelationshipModel, RelationshipReference, RowsModel,
+    SourceModel, SyntheticFile, SyntheticModel, TableModel, TableSeed,
+};
+pub use overrides::{
+    ColumnRuleOverride, OutputOverride, OverridesKind, PortableTableOverride, RootSeedOverride,
+    RowsKind, RowsOverride, SyntheticOverrides, TableOverride, TableSeedOverride,
+};
 pub use schema::{PortableColumn, PortableSchema, PortableTable, SqlTypeFamily};
