@@ -381,6 +381,21 @@ static INSERT_FLEXIBLE_RE: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Result of peeking at the byte after position `i` for a two-byte token
+/// (`--`, `/*`, `*/`, `]]`). See [`Parser::peek2`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Peek2 {
+    /// The next byte is present and matches: the token is complete.
+    Hit,
+    /// The next byte differs, or input ended at EOF (a dangling first byte at
+    /// the tail is treated as a literal byte).
+    Miss,
+    /// The buffer ends here but more input may arrive: the caller must pause
+    /// the scan (`break 'scan`) with its state intact so the token can never
+    /// straddle a refill (see the `buf` field docs).
+    NeedMore,
+}
+
 pub struct Parser<R: Read> {
     reader: BufReader<R>,
     dialect: SqlDialect,
@@ -428,6 +443,19 @@ impl<R: Read> Parser<R> {
         let n = chunk.len();
         self.reader.consume(n);
         Ok((keep_from, true))
+    }
+
+    /// Classify the byte after `i` against the second byte of a two-byte
+    /// token. Centralizes the boundary handling shared by every such token in
+    /// [`read_statement`](Self::read_statement) and `read_statement_mssql`.
+    #[inline(always)]
+    fn peek2(&self, i: usize, expected: u8, at_eof: bool) -> Peek2 {
+        match self.buf.get(i + 1) {
+            Some(&c) if c == expected => Peek2::Hit,
+            Some(_) => Peek2::Miss,
+            None if at_eof => Peek2::Miss,
+            None => Peek2::NeedMore,
+        }
     }
 
     pub fn read_statement(&mut self) -> std::io::Result<Option<Vec<u8>>> {
@@ -483,21 +511,17 @@ impl<R: Read> Parser<R> {
                 // Inside a /* */ block comment: only the closing */ ends it.
                 if in_block_comment {
                     if b == b'*' {
-                        match self.buf.get(i + 1) {
-                            Some(b'/') => {
+                        match self.peek2(i, b'/', at_eof) {
+                            Peek2::Hit => {
                                 in_block_comment = false;
                                 i += 2;
                                 continue;
                             }
-                            Some(_) => {
+                            Peek2::Miss => {
                                 i += 1;
                                 continue;
                             }
-                            None if at_eof => {
-                                i += 1;
-                                continue;
-                            }
-                            None => break 'scan,
+                            Peek2::NeedMore => break 'scan,
                         }
                     }
                     i += 1;
@@ -583,8 +607,8 @@ impl<R: Read> Parser<R> {
                     }
                     // -- line comment
                     if b == b'-' {
-                        match self.buf.get(i + 1) {
-                            Some(b'-') => {
+                        match self.peek2(i, b'-', at_eof) {
+                            Peek2::Hit => {
                                 // MySQL requires whitespace/EOL after `--` for it
                                 // to be a comment; `a--b` is arithmetic. Other
                                 // dialects always treat `--` as a comment.
@@ -617,15 +641,11 @@ impl<R: Read> Parser<R> {
                                 i += 2;
                                 continue;
                             }
-                            Some(_) => {
+                            Peek2::Miss => {
                                 i += 1;
                                 continue;
                             }
-                            None if at_eof => {
-                                i += 1;
-                                continue;
-                            }
-                            None => break 'scan,
+                            Peek2::NeedMore => break 'scan,
                         }
                     }
                     // MySQL # line comment
@@ -636,21 +656,17 @@ impl<R: Read> Parser<R> {
                     }
                     // /* block comment
                     if b == b'/' {
-                        match self.buf.get(i + 1) {
-                            Some(b'*') => {
+                        match self.peek2(i, b'*', at_eof) {
+                            Peek2::Hit => {
                                 in_block_comment = true;
                                 i += 2;
                                 continue;
                             }
-                            Some(_) => {
+                            Peek2::Miss => {
                                 i += 1;
                                 continue;
                             }
-                            None if at_eof => {
-                                i += 1;
-                                continue;
-                            }
-                            None => break 'scan,
+                            Peek2::NeedMore => break 'scan,
                         }
                     }
                 }
@@ -849,21 +865,17 @@ impl<R: Read> Parser<R> {
 
                 if in_block_comment {
                     if b == b'*' {
-                        match self.buf.get(i + 1) {
-                            Some(b'/') => {
+                        match self.peek2(i, b'/', at_eof) {
+                            Peek2::Hit => {
                                 in_block_comment = false;
                                 i += 2;
                                 continue;
                             }
-                            Some(_) => {
+                            Peek2::Miss => {
                                 i += 1;
                                 continue;
                             }
-                            None if at_eof => {
-                                i += 1;
-                                continue;
-                            }
-                            None => break 'scan,
+                            Peek2::NeedMore => break 'scan,
                         }
                     }
                     i += 1;
@@ -881,23 +893,18 @@ impl<R: Read> Parser<R> {
 
                 if inside_bracket_quote {
                     if b == b']' {
-                        match self.buf.get(i + 1) {
+                        match self.peek2(i, b']', at_eof) {
                             // Escaped ]] stays inside the identifier (bug #8)
-                            Some(b']') => {
+                            Peek2::Hit => {
                                 i += 2;
                                 continue;
                             }
-                            Some(_) => {
+                            Peek2::Miss => {
                                 inside_bracket_quote = false;
                                 i += 1;
                                 continue;
                             }
-                            None if at_eof => {
-                                inside_bracket_quote = false;
-                                i += 1;
-                                continue;
-                            }
-                            None => break 'scan,
+                            Peek2::NeedMore => break 'scan,
                         }
                     }
                     i += 1;
@@ -924,39 +931,31 @@ impl<R: Read> Parser<R> {
 
                 // Outside strings/comments.
                 if b == b'-' {
-                    match self.buf.get(i + 1) {
-                        Some(b'-') => {
+                    match self.peek2(i, b'-', at_eof) {
+                        Peek2::Hit => {
                             in_line_comment = true;
                             i += 2;
                             continue;
                         }
-                        Some(_) => {
+                        Peek2::Miss => {
                             i += 1;
                             continue;
                         }
-                        None if at_eof => {
-                            i += 1;
-                            continue;
-                        }
-                        None => break 'scan,
+                        Peek2::NeedMore => break 'scan,
                     }
                 }
                 if b == b'/' {
-                    match self.buf.get(i + 1) {
-                        Some(b'*') => {
+                    match self.peek2(i, b'*', at_eof) {
+                        Peek2::Hit => {
                             in_block_comment = true;
                             i += 2;
                             continue;
                         }
-                        Some(_) => {
+                        Peek2::Miss => {
                             i += 1;
                             continue;
                         }
-                        None if at_eof => {
-                            i += 1;
-                            continue;
-                        }
-                        None => break 'scan,
+                        Peek2::NeedMore => break 'scan,
                     }
                 }
                 if b == b'\'' {
@@ -1180,7 +1179,7 @@ fn trim_ascii_start(data: &[u8]) -> &[u8] {
 
 /// Strip leading whitespace and SQL line comments (`-- ...`) from a statement.
 /// This makes parsing robust to pg_dump-style comment blocks before statements.
-fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
+pub(crate) fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
     loop {
         // First trim leading ASCII whitespace
         data = trim_ascii_start(data);
@@ -1244,7 +1243,11 @@ fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
 /// - Schema-qualified names (schema.table)
 /// - Both backtick and double-quote quoting
 #[inline]
-fn extract_table_name_flexible(stmt: &[u8], offset: usize, dialect: SqlDialect) -> Option<String> {
+pub(crate) fn extract_table_name_flexible(
+    stmt: &[u8],
+    offset: usize,
+    dialect: SqlDialect,
+) -> Option<String> {
     let mut i = offset;
 
     // Skip whitespace
