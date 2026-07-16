@@ -1,4 +1,6 @@
+use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::parser::SqlDialect;
+use clap::{Args, ValueHint};
 use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -7,6 +9,49 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
+
+#[derive(Args)]
+pub struct MergeArgs {
+    /// Directory containing split SQL files
+    #[arg(value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
+    input_dir: PathBuf,
+
+    /// Output SQL file (default: stdout)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    output: Option<PathBuf>,
+
+    /// SQL dialect for output formatting
+    #[arg(short, long, default_value = "mysql", help_heading = INPUT_OUTPUT)]
+    dialect: Option<String>,
+
+    /// Only merge specific tables (comma-separated)
+    #[arg(short, long, help_heading = FILTERING)]
+    tables: Option<String>,
+
+    /// Exclude specific tables (comma-separated)
+    #[arg(short, long, help_heading = FILTERING)]
+    exclude: Option<String>,
+
+    /// Wrap output in BEGIN/COMMIT transaction
+    #[arg(long, help_heading = BEHAVIOR)]
+    transaction: bool,
+
+    /// Omit header comments
+    #[arg(long, help_heading = BEHAVIOR)]
+    no_header: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
+    json: bool,
+
+    /// Preview without writing files
+    #[arg(long, help_heading = BEHAVIOR)]
+    dry_run: bool,
+}
 
 /// Statistics from merge operation
 #[derive(Debug, Default, Serialize)]
@@ -44,19 +89,21 @@ pub(crate) struct MergeOptions {
     header: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    input_dir: PathBuf,
-    output: Option<PathBuf>,
-    dialect: Option<String>,
-    tables: Option<String>,
-    exclude: Option<String>,
-    transaction: bool,
-    no_header: bool,
-    progress: bool,
-    dry_run: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+pub fn run(args: MergeArgs) -> anyhow::Result<()> {
+    let MergeArgs {
+        input_dir,
+        output,
+        dialect,
+        tables,
+        exclude,
+        transaction,
+        no_header,
+        progress,
+        json,
+        dry_run,
+    } = args;
+    let output = super::common::dash_is_stdout(output);
+
     // Validate input directory
     if !input_dir.exists() {
         anyhow::bail!("input directory does not exist: {}", input_dir.display());

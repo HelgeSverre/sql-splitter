@@ -85,47 +85,7 @@ pub enum Commands {
   sql-splitter merge tables/ -o restored.sql --transaction
   sql-splitter merge tables/ -o partial.sql --tables users,orders
   sql-splitter merge tables/ -o clean.sql --exclude logs,cache")]
-    Merge {
-        /// Directory containing split SQL files
-        #[arg(value_hint = ValueHint::DirPath, help_heading = INPUT_OUTPUT)]
-        input_dir: PathBuf,
-
-        /// Output SQL file (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// SQL dialect for output formatting
-        #[arg(short, long, default_value = "mysql", help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Only merge specific tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        tables: Option<String>,
-
-        /// Exclude specific tables (comma-separated)
-        #[arg(short, long, help_heading = FILTERING)]
-        exclude: Option<String>,
-
-        /// Wrap output in BEGIN/COMMIT transaction
-        #[arg(long, help_heading = BEHAVIOR)]
-        transaction: bool,
-
-        /// Omit header comments
-        #[arg(long, help_heading = BEHAVIOR)]
-        no_header: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Preview without writing files
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-    },
+    Merge(merge::MergeArgs),
 
     /// Create a reduced dataset preserving FK relationships
     #[command(visible_alias = "sa")]
@@ -285,29 +245,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Split(args) => split::run(args),
         Commands::Analyze(args) => analyze::run(args),
-        Commands::Merge {
-            input_dir,
-            output,
-            dialect,
-            tables,
-            exclude,
-            transaction,
-            no_header,
-            progress,
-            dry_run,
-            json,
-        } => merge::run(
-            input_dir,
-            dash_is_stdout(output),
-            dialect,
-            tables,
-            exclude,
-            transaction,
-            no_header,
-            progress,
-            dry_run,
-            json,
-        ),
+        Commands::Merge(args) => merge::run(args),
         Commands::Sample(args) => sample::run(args),
         Commands::Shard(args) => shard::run(args),
         Commands::Convert(args) => convert::run(args),
