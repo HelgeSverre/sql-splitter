@@ -1,9 +1,14 @@
 //! Tests for stable seed derivation and typed generated values in
-//! `sql_splitter::generate`.
+//! `sql_splitter::generate`, and for the allocation-lean renderer primitives
+//! in `sql_splitter::render`.
 
 use rand::Rng;
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use sql_splitter::generate::seed::{derive_seed, SeedRoot, StreamId};
 use sql_splitter::generate::value::{GenerateError, GeneratedValue};
+use sql_splitter::parser::SqlDialect;
+use sql_splitter::render::{RandomBlock, RowBatch, SqlString};
 
 #[test]
 fn unrelated_streams_do_not_perturb_existing_values() {
@@ -74,4 +79,50 @@ fn generated_value_accessors_return_typed_errors_instead_of_panicking() {
 
     assert!(GeneratedValue::Null.is_null());
     assert!(!GeneratedValue::Integer(0).is_null());
+}
+
+#[test]
+fn sql_string_escapes_each_dialect_without_intermediate_contract_changes() {
+    let input = "a'b\\c\n\r\t";
+    assert_eq!(
+        SqlString::new(SqlDialect::MySql, input).to_string(),
+        "'a\\'b\\\\c\\n\\r\\t'"
+    );
+    assert_eq!(
+        SqlString::new(SqlDialect::Postgres, input).to_string(),
+        "'a''b\\c\n\r\t'"
+    );
+    assert_eq!(
+        SqlString::new(SqlDialect::Sqlite, input).to_string(),
+        "'a''b\\c\n\r\t'"
+    );
+    assert_eq!(
+        SqlString::new(SqlDialect::Mssql, input).to_string(),
+        "N'a''b\\c\n\r\t'"
+    );
+}
+
+#[test]
+fn row_batch_reuses_capacity_after_clear() {
+    let mut batch = RowBatch::with_capacity(4, 256);
+    batch.push_fmt(format_args!("(1, 'a')")).unwrap();
+    batch.push_fmt(format_args!("(2, 'b')")).unwrap();
+    let capacity = batch.capacity();
+    assert_eq!(batch.as_str(), "(1, 'a'),\n(2, 'b')");
+    batch.clear();
+    assert!(batch.capacity() >= capacity);
+}
+
+#[test]
+fn random_block_samples_stay_in_alphabet_and_are_seed_reproducible() {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
+
+    let mut a = RandomBlock::new(ChaCha8Rng::from_seed([7u8; 32]));
+    let mut b = RandomBlock::new(ChaCha8Rng::from_seed([7u8; 32]));
+
+    let bytes_a: Vec<u8> = (0..10_000).map(|_| a.next_alphanumeric()).collect();
+    let bytes_b: Vec<u8> = (0..10_000).map(|_| b.next_alphanumeric()).collect();
+
+    assert!(bytes_a.iter().all(|byte| ALPHABET.contains(byte)));
+    assert_eq!(bytes_a, bytes_b);
 }

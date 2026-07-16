@@ -16,6 +16,7 @@ pub mod parser;
 pub mod pk;
 pub mod progress;
 pub mod redactor;
+pub mod render;
 pub mod sample;
 pub mod schema;
 pub mod shard;

@@ -100,6 +100,10 @@ harness = false
 name = "sample_bench"
 harness = false
 
+[[bench]]
+name = "generate_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
