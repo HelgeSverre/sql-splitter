@@ -44,6 +44,8 @@ pub(crate) struct MultiSplitJsonOutput {
     total_files: usize,
     succeeded: usize,
     failed: usize,
+    /// Files never attempted because `--fail-fast` stopped the run early.
+    skipped: usize,
     elapsed_secs: f64,
     results: Vec<SplitFileResult>,
 }
@@ -286,7 +288,9 @@ fn run_single(
     let start_time = Instant::now();
 
     let stats = if progress && !json {
-        let pb = ProgressBar::new(file_size);
+        // For zip input only the .sql member's compressed bytes are streamed,
+        // so the bar total must be that member's size, not the archive's.
+        let pb = ProgressBar::new(crate::splitter::input_progress_len(&file));
         pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
@@ -517,7 +521,8 @@ fn run_multi(
         }
 
         let split_result = if progress && !json {
-            let pb = ProgressBar::new(file_size);
+            // See run_single: zip input streams only the .sql member's bytes.
+            let pb = ProgressBar::new(crate::splitter::input_progress_len(file));
             pb.set_style(
                 ProgressStyle::with_template(
                     "  {spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
@@ -593,15 +598,39 @@ fn run_multi(
 
     let elapsed = start_time.elapsed();
 
+    // Files never attempted because --fail-fast broke out of the loop.
+    // Recording them keeps the JSON self-consistent: every input file has a
+    // results entry and succeeded + failed + skipped == total_files.
+    let skipped = total - json_results.len();
+    for file in files.iter().skip(json_results.len()) {
+        json_results.push(SplitFileResult {
+            file: file.display().to_string(),
+            size_mb: None,
+            dialect: None,
+            output_dir: None,
+            tables_found: None,
+            statements_processed: None,
+            tables: None,
+            status: "skipped".to_string(),
+            error: None,
+        });
+    }
+
     if json {
         let output_json = MultiSplitJsonOutput {
             total_files: total,
             succeeded: result.succeeded,
             failed: result.failed,
+            skipped,
             elapsed_secs: elapsed.as_secs_f64(),
             results: json_results,
         };
         println!("{}", serde_json::to_string_pretty(&output_json)?);
+        // Match the non-JSON branch: a batch with failures must exit non-zero
+        // so scripted pipelines don't have to parse the JSON to detect it.
+        if result.has_failures() {
+            std::process::exit(1);
+        }
     } else {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Split Summary:");
