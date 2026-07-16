@@ -147,7 +147,7 @@ fn single_error(code: &str, path: &str, err: &impl std::fmt::Display) -> Diagnos
 pub fn merge_yaml(root: Value, imports: Vec<(PathBuf, Value)>) -> Result<Value, DiagnosticBag> {
     let mut bag = DiagnosticBag::default();
     let mut merged = Value::Mapping(Default::default());
-    let mut occupied = BTreeMap::<String, PathBuf>::new();
+    let mut occupied = BTreeMap::<String, (PathBuf, NodeShape)>::new();
 
     for (source, value) in imports {
         let content = strip_envelope_keys(value);
@@ -157,6 +157,31 @@ pub fn merge_yaml(root: Value, imports: Vec<(PathBuf, Value)>) -> Result<Value, 
 
     merge_root(&mut merged, root);
     Ok(merged)
+}
+
+/// The shape a config path was last assigned by an import: a terminal
+/// value (scalar, `null`, or a whole list — lists always replace
+/// wholesale, never merge) or a map whose children may still be extended
+/// by another import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeShape {
+    Leaf,
+    Map,
+}
+
+/// Whether writing `incoming_shape` at a path already occupied with
+/// `prior_shape` (by a *different* import) constitutes a collision.
+///
+/// A leaf write always collides — it silently clobbers whatever the other
+/// import defined there, whether that was itself a leaf or a whole
+/// subtree. A map write only collides if the path was previously a leaf:
+/// two imports both contributing a map at the same path is the ordinary,
+/// legal case of merging disjoint child keys.
+fn shape_collision(prior_shape: NodeShape, incoming_shape: NodeShape) -> bool {
+    match incoming_shape {
+        NodeShape::Leaf => true,
+        NodeShape::Map => prior_shape == NodeShape::Leaf,
+    }
 }
 
 /// Removes the envelope-only keys (`version`, `kind`, `imports`) from an
@@ -175,24 +200,35 @@ fn strip_envelope_keys(value: Value) -> Value {
     Value::Mapping(mapping)
 }
 
-/// Merges one import's content into the shared accumulator, recording
-/// every leaf path it touches in `occupied` so a later import that
-/// redefines the same path is reported as [`DiagnosticBag`] error
-/// `GEN-IMPORT-COLLISION` naming both source files and the exact path.
+/// Merges one import's content into the shared accumulator, recording the
+/// shape ([`NodeShape`]) of every path it touches — leaf or map — in
+/// `occupied`. A later import that redefines the same path with an
+/// incompatible shape (see [`shape_collision`]) is reported as
+/// [`DiagnosticBag`] error `GEN-IMPORT-COLLISION` naming both source files
+/// and the exact path. Two imports contributing disjoint keys to the same
+/// map path is not a collision — that is the ordinary case this function
+/// exists to support.
 fn merge_import(
     target: &mut Value,
     incoming: Value,
     path: &str,
-    occupied: &mut BTreeMap<String, PathBuf>,
+    occupied: &mut BTreeMap<String, (PathBuf, NodeShape)>,
     source: &Path,
     bag: &mut DiagnosticBag,
 ) {
     let Value::Mapping(incoming_map) = incoming else {
-        record_leaf_collision(path, source, occupied, bag);
+        check_path_collision(path, NodeShape::Leaf, occupied, source, bag);
+        occupied
+            .entry(path.to_string())
+            .or_insert_with(|| (source.to_path_buf(), NodeShape::Leaf));
         *target = incoming;
-        occupied.insert(path.to_string(), source.to_path_buf());
         return;
     };
+
+    check_path_collision(path, NodeShape::Map, occupied, source, bag);
+    occupied
+        .entry(path.to_string())
+        .or_insert_with(|| (source.to_path_buf(), NodeShape::Map));
 
     if !target.is_mapping() {
         *target = Value::Mapping(Default::default());
@@ -206,31 +242,40 @@ fn merge_import(
     }
 }
 
-fn record_leaf_collision(
+/// Reports `GEN-IMPORT-COLLISION` if `path` was already assigned by a
+/// *different* import with a shape incompatible with `incoming_shape` (see
+/// [`shape_collision`]). Does nothing if `path` is unoccupied, was set by
+/// the same import (impossible within one import — `serde_yaml_ng` already
+/// rejects duplicate keys — but harmless to check), or was set by a
+/// different import with a compatible shape.
+fn check_path_collision(
     path: &str,
+    incoming_shape: NodeShape,
+    occupied: &BTreeMap<String, (PathBuf, NodeShape)>,
     source: &Path,
-    occupied: &BTreeMap<String, PathBuf>,
     bag: &mut DiagnosticBag,
 ) {
-    if let Some(prior_source) = occupied.get(path) {
-        if prior_source != source {
-            bag.error(
-                "GEN-IMPORT-COLLISION",
-                path,
-                format!("`{path}` is defined by more than one import"),
-            )
-            .related = vec![
-                SourceLocation {
-                    path: prior_source.display().to_string(),
-                    description: None,
-                },
-                SourceLocation {
-                    path: source.display().to_string(),
-                    description: None,
-                },
-            ];
-        }
+    let Some((prior_source, prior_shape)) = occupied.get(path) else {
+        return;
+    };
+    if prior_source == source || !shape_collision(*prior_shape, incoming_shape) {
+        return;
     }
+    bag.error(
+        "GEN-IMPORT-COLLISION",
+        path,
+        format!("`{path}` is defined by more than one import"),
+    )
+    .related = vec![
+        SourceLocation {
+            path: prior_source.display().to_string(),
+            description: None,
+        },
+        SourceLocation {
+            path: source.display().to_string(),
+            description: None,
+        },
+    ];
 }
 
 /// Merges the root document on top of the already-merged imports. Unlike

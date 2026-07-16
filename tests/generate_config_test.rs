@@ -538,3 +538,82 @@ fn root_lists_replace_rather_than_concatenate_imported_lists() {
     assert_eq!(relationships.len(), 1);
     assert_eq!(relationships[0].columns, vec!["warehouse_id".to_string()]);
 }
+
+#[test]
+fn imports_disagreeing_on_shape_at_a_shared_path_collide_leaf_then_map() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    schema: null\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    schema: { name: users }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [a.yaml, b.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let err = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-IMPORT-COLLISION"));
+    assert!(rendered.contains("tables.users.schema"));
+    assert!(rendered.contains("a.yaml"));
+    assert!(rendered.contains("b.yaml"));
+}
+
+#[test]
+fn imports_disagreeing_on_shape_at_a_shared_path_collide_map_then_leaf() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    schema: { name: users }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    schema: null\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [a.yaml, b.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let err = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-IMPORT-COLLISION"));
+    assert!(rendered.contains("tables.users.schema"));
+    assert!(rendered.contains("a.yaml"));
+    assert!(rendered.contains("b.yaml"));
+}
+
+#[test]
+fn imports_writing_disjoint_nested_keys_under_shared_map_paths_merge_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  users:\n    seed: 1\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.yaml"),
+        "version: 1\nkind: overrides\ntables:\n  orders:\n    seed: 2\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [a.yaml, b.yaml]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let loaded = ConfigLoader::load(&dir.path().join("root.yaml")).unwrap();
+    let overrides = loaded.into_overrides().unwrap();
+    assert_eq!(overrides.tables["users"].seed, TableSeedOverride::Fixed(1));
+    assert_eq!(overrides.tables["orders"].seed, TableSeedOverride::Fixed(2));
+}
