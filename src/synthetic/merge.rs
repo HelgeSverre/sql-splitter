@@ -35,17 +35,20 @@ impl ModelMerger {
     ///
     /// Diagnostics are gathered rather than short-circuited: a missing
     /// table, a missing column, and a structural schema mismatch on three
-    /// unrelated tables all get reported together. See
-    /// [`DiagnosticBag::into_result`] for how warnings (e.g. a fingerprint
-    /// mismatch under `warn` policy) still surface even when the merge as a
-    /// whole succeeds — reported alongside the returned model is not
-    /// possible with this `Result<SyntheticModel, DiagnosticBag>` shape, so
-    /// a successful merge with only warnings drops them; only the `Err`
-    /// path retains every diagnostic, warnings included.
+    /// unrelated tables all get reported together.
+    ///
+    /// On success, the returned `DiagnosticBag` carries any warnings
+    /// produced along the way (e.g. a `GEN-SOURCE-FINGERPRINT` warning
+    /// under `warn` policy) — it may be empty, but it is never discarded.
+    /// This is why the success type is `(SyntheticModel, DiagnosticBag)`
+    /// rather than plain `SyntheticModel`: a bag with no error-severity
+    /// diagnostic still deserves to be seen by the caller. On failure (any
+    /// error-severity diagnostic), `Err(bag)` carries every diagnostic,
+    /// warnings included, same as before.
     pub fn merge(
         mut base: SyntheticModel,
         patch: SyntheticOverrides,
-    ) -> Result<SyntheticModel, DiagnosticBag> {
+    ) -> Result<(SyntheticModel, DiagnosticBag), DiagnosticBag> {
         let mut bag = DiagnosticBag::default();
 
         match patch.seed {
@@ -82,7 +85,11 @@ impl ModelMerger {
             }
         }
 
-        bag.into_result(base)
+        if bag.has_errors() {
+            Err(bag)
+        } else {
+            Ok((base, bag))
+        }
     }
 }
 

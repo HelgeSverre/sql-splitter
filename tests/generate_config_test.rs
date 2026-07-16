@@ -674,7 +674,8 @@ tables:
         generator: { kind: internet.email }
 "#,
     );
-    let merged = ModelMerger::merge(base.clone(), rules).unwrap();
+    let (merged, warnings) = ModelMerger::merge(base.clone(), rules).unwrap();
+    assert!(warnings.diagnostics.is_empty());
     assert_eq!(
         merged.tables["users"].columns["email"]
             .generator
@@ -802,7 +803,8 @@ tables:
         references: { table: warehouses, columns: [id] }
 "#,
     );
-    let merged = ModelMerger::merge(base, overrides).unwrap();
+    let (merged, warnings) = ModelMerger::merge(base, overrides).unwrap();
+    assert!(warnings.diagnostics.is_empty());
     let relationships = &merged.tables["orders"].relationships;
     assert_eq!(relationships.len(), 1);
     assert_eq!(relationships[0].columns, vec!["warehouse_id".to_string()]);
@@ -822,7 +824,8 @@ tables:
     rows: { kind: fixed, count: 500 }
 "#,
     );
-    let merged = ModelMerger::merge(base, overrides).unwrap();
+    let (merged, warnings) = ModelMerger::merge(base, overrides).unwrap();
+    assert!(warnings.diagnostics.is_empty());
     assert_eq!(merged.tables["orders"].seed, TableSeed::Fixed(7));
     assert_eq!(
         merged.tables["orders"].rows,
@@ -863,7 +866,8 @@ source:
 #[test]
 fn fingerprint_mismatch_under_ignore_policy_applies_silently() {
     let base = base_with_source("ignore");
-    let merged = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+    let (merged, warnings) = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+    assert!(warnings.diagnostics.is_empty());
     assert_eq!(
         merged.source.unwrap().fingerprint.as_deref(),
         Some("sha256:bbb")
@@ -873,7 +877,8 @@ fn fingerprint_mismatch_under_ignore_policy_applies_silently() {
 #[test]
 fn fingerprint_mismatch_under_warn_policy_does_not_block_the_merge() {
     let base = base_with_source("warn");
-    let merged = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+    let (merged, warnings) = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+    assert!(!warnings.diagnostics.is_empty());
     assert_eq!(
         merged.source.unwrap().fingerprint.as_deref(),
         Some("sha256:bbb")
@@ -881,11 +886,32 @@ fn fingerprint_mismatch_under_warn_policy_does_not_block_the_merge() {
 }
 
 #[test]
+fn fingerprint_warn_on_successful_merge_surfaces_warning() {
+    // The signature is `Result<(SyntheticModel, DiagnosticBag), DiagnosticBag>`
+    // specifically so a `warn`-policy mismatch is observable even when
+    // nothing else about the merge fails: the model comes back in `Ok`,
+    // and so does the warning, rather than the warning being silently
+    // dropped by an `Ok(SyntheticModel)`-only success type.
+    let base = base_with_source("warn");
+    let (merged, warnings) = ModelMerger::merge(base, overrides_with_new_fingerprint()).unwrap();
+
+    assert!(!warnings.has_errors());
+    assert_eq!(
+        merged.source.unwrap().fingerprint.as_deref(),
+        Some("sha256:bbb")
+    );
+    assert!(warnings
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "GEN-SOURCE-FINGERPRINT"));
+}
+
+#[test]
 fn fingerprint_mismatch_under_warn_policy_is_reported_alongside_other_errors() {
-    // A successful `Ok(SyntheticModel)` merge drops warnings (see
-    // `DiagnosticBag::into_result`), so a warning is only observable
-    // through the public API when paired with an unrelated hard error that
-    // forces the `Err` path, which keeps every diagnostic.
+    // Even when a warning would already surface on its own (see
+    // `fingerprint_warn_on_successful_merge_surfaces_warning`), an
+    // unrelated hard error must still force the `Err` path and keep every
+    // diagnostic, warnings included.
     let base = base_with_source("warn");
     let overrides = overrides_from_yaml(
         r#"
@@ -924,9 +950,137 @@ source:
   fingerprint: "sha256:aaa"
 "#,
     );
-    let merged = ModelMerger::merge(base, overrides).unwrap();
+    let (merged, warnings) = ModelMerger::merge(base, overrides).unwrap();
+    assert!(warnings.diagnostics.is_empty());
     assert_eq!(
         merged.source.unwrap().fingerprint.as_deref(),
         Some("sha256:aaa")
+    );
+}
+
+// --- GEN-INCOMPLETE-ROWS: a `rows:` override switching `kind` without
+// supplying every field that kind needs, with no base value of the same
+// kind to fall back on. One test per `RowsKind` branch that can emit it. ---
+
+fn base_with_rows(rows_yaml: &str) -> SyntheticModel {
+    let yaml = format!(
+        r#"
+version: 1
+kind: model
+tables:
+  t:
+    rows: {rows_yaml}
+    schema:
+      name: t
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+"#
+    );
+    SyntheticFile::parse_str(&yaml)
+        .unwrap()
+        .into_model()
+        .unwrap()
+}
+
+#[test]
+fn rows_override_switching_to_fixed_without_count_is_incomplete() {
+    // Base rows are `observed`, not `fixed`, so there is no base count to
+    // fall back on.
+    let base = base_with_rows("{ kind: observed, count: 100 }");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  t:
+    rows: { kind: fixed }
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-INCOMPLETE-ROWS"));
+    assert!(rendered.contains("tables.t.rows"));
+}
+
+#[test]
+fn rows_override_switching_to_observed_without_count_or_scale_is_incomplete() {
+    // Base rows are `fixed`, not `observed`, so there is no base observed
+    // count for a `scale` to multiply, and no `count` is given either.
+    let base = base_with_rows("{ kind: fixed, count: 10 }");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  t:
+    rows: { kind: observed }
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-INCOMPLETE-ROWS"));
+    assert!(rendered.contains("tables.t.rows"));
+}
+
+#[test]
+fn rows_override_switching_to_scale_without_base_or_factor_is_incomplete() {
+    let base = base_with_rows("{ kind: fixed, count: 10 }");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  t:
+    rows: { kind: scale }
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-INCOMPLETE-ROWS"));
+    assert!(rendered.contains("tables.t.rows"));
+}
+
+#[test]
+fn rows_override_switching_to_relation_children_without_required_fields_is_incomplete() {
+    let base = base_with_rows("{ kind: fixed, count: 10 }");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  t:
+    rows: { kind: relation.children }
+"#,
+    );
+    let err = ModelMerger::merge(base, overrides).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("GEN-INCOMPLETE-ROWS"));
+    assert!(rendered.contains("tables.t.rows"));
+}
+
+#[test]
+fn rows_override_switching_kind_with_all_required_fields_succeeds() {
+    // The counterpart to the four incomplete-rows tests above: supplying
+    // every field the new `kind` needs is legal even though the base is a
+    // different `kind`.
+    let base = base_with_rows("{ kind: fixed, count: 10 }");
+    let overrides = overrides_from_yaml(
+        r#"
+version: 1
+kind: overrides
+tables:
+  t:
+    rows: { kind: scale, base: 10, factor: 2.5 }
+"#,
+    );
+    let (merged, warnings) = ModelMerger::merge(base, overrides).unwrap();
+    assert!(warnings.diagnostics.is_empty());
+    assert_eq!(
+        merged.tables["t"].rows,
+        sql_splitter::synthetic::RowsModel::Scale {
+            base: 10,
+            factor: 2.5,
+            count: 25,
+        }
     );
 }
