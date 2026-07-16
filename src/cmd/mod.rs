@@ -333,67 +333,7 @@ pub enum Commands {
   sql-splitter graph dump.sql -o schema.png --render
   sql-splitter graph dump.sql --cycles-only
   sql-splitter graph dump.sql --table users --transitive")]
-    Graph {
-        /// Input SQL file (supports .gz, .bz2, .xz, .zst)
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output file (.html, .dot, .mmd, .json, .png, .svg)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// Output format: html, dot, mermaid, json
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        format: Option<String>,
-
-        /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
-        #[arg(short, long, help_heading = INPUT_OUTPUT)]
-        dialect: Option<String>,
-
-        /// Layout direction: lr (left-right), tb (top-bottom)
-        #[arg(long, default_value = "lr", help_heading = OUTPUT_FORMAT)]
-        layout: Option<String>,
-
-        /// Show only tables involved in circular dependencies
-        #[arg(long, help_heading = FILTERING)]
-        cycles_only: bool,
-
-        /// Focus on a specific table
-        #[arg(long, help_heading = FILTERING)]
-        table: Option<String>,
-
-        /// Show transitive dependencies (parents of parents)
-        #[arg(long, help_heading = FILTERING)]
-        transitive: bool,
-
-        /// Show reverse dependencies (who references this table)
-        #[arg(long, help_heading = FILTERING)]
-        reverse: bool,
-
-        /// Only include these tables (comma-separated, supports globs)
-        #[arg(short, long, help_heading = FILTERING)]
-        tables: Option<String>,
-
-        /// Exclude these tables (comma-separated, supports globs)
-        #[arg(short, long, help_heading = FILTERING)]
-        exclude: Option<String>,
-
-        /// Maximum depth for transitive dependencies
-        #[arg(long, help_heading = FILTERING)]
-        max_depth: Option<usize>,
-
-        /// Render DOT to PNG/SVG using Graphviz
-        #[arg(long, help_heading = BEHAVIOR)]
-        render: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-    },
+    Graph(graph::GraphArgs),
 
     /// Output SQL dump with tables in topological FK order
     #[command(visible_alias = "ord")]
@@ -598,39 +538,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Diff(args) => diff::run(args),
         Commands::Redact(args) => redact::run(args),
-        Commands::Graph {
-            file,
-            output,
-            format,
-            dialect,
-            layout,
-            cycles_only,
-            table,
-            transitive,
-            reverse,
-            tables,
-            exclude,
-            max_depth,
-            render,
-            progress,
-            json,
-        } => graph::run(
-            file,
-            output,
-            format,
-            dialect,
-            layout,
-            cycles_only,
-            table,
-            transitive,
-            reverse,
-            tables,
-            exclude,
-            max_depth,
-            render,
-            progress,
-            json,
-        ),
+        Commands::Graph(args) => graph::run(args),
         Commands::Order {
             file,
             output,

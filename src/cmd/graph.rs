@@ -1,5 +1,6 @@
 //! Graph command implementation for ERD generation.
 
+use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::graph::{
     cyclic_tables, find_cycles, to_dot, to_html, to_json, to_mermaid, Cycle, GraphView, Layout,
     OutputFormat,
@@ -7,31 +8,96 @@ use crate::graph::{
 use crate::parser::{Parser, StatementType};
 use crate::schema::{SchemaBuilder, SchemaGraph};
 use anyhow::{bail, Result};
+use clap::{Args, ValueHint};
 use glob::Pattern;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run the graph command
-#[allow(clippy::too_many_arguments)]
-pub fn run(
+#[derive(Args)]
+pub struct GraphArgs {
+    /// Input SQL file (supports .gz, .bz2, .xz, .zst)
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     file: PathBuf,
+
+    /// Output file (.html, .dot, .mmd, .json, .png, .svg)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     output: Option<PathBuf>,
+
+    /// Output format: html, dot, mermaid, json
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
     format: Option<String>,
+
+    /// SQL dialect: mysql, postgres, sqlite, mssql (auto-detected if omitted)
+    #[arg(short, long, help_heading = INPUT_OUTPUT)]
     dialect: Option<String>,
+
+    /// Layout direction: lr (left-right), tb (top-bottom)
+    #[arg(long, default_value = "lr", help_heading = OUTPUT_FORMAT)]
     layout: Option<String>,
+
+    /// Show only tables involved in circular dependencies
+    #[arg(long, help_heading = FILTERING)]
     cycles_only: bool,
+
+    /// Focus on a specific table
+    #[arg(long, help_heading = FILTERING)]
     table: Option<String>,
+
+    /// Show transitive dependencies (parents of parents)
+    #[arg(long, help_heading = FILTERING)]
     transitive: bool,
+
+    /// Show reverse dependencies (who references this table)
+    #[arg(long, help_heading = FILTERING)]
     reverse: bool,
+
+    /// Only include these tables (comma-separated, supports globs)
+    #[arg(short, long, help_heading = FILTERING)]
     tables: Option<String>,
+
+    /// Exclude these tables (comma-separated, supports globs)
+    #[arg(short, long, help_heading = FILTERING)]
     exclude: Option<String>,
+
+    /// Maximum depth for transitive dependencies
+    #[arg(long, help_heading = FILTERING)]
     max_depth: Option<usize>,
+
+    /// Render DOT to PNG/SVG using Graphviz
+    #[arg(long, help_heading = BEHAVIOR)]
     render: bool,
-    _progress: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
     json: bool,
-) -> Result<()> {
+}
+
+/// Run the graph command
+pub fn run(args: GraphArgs) -> Result<()> {
+    let GraphArgs {
+        file,
+        output,
+        format,
+        dialect,
+        layout,
+        cycles_only,
+        table,
+        transitive,
+        reverse,
+        tables,
+        exclude,
+        max_depth,
+        render,
+        progress: _progress,
+        json,
+    } = args;
+
     // Parse format
     let format = if json {
         OutputFormat::Json
