@@ -444,9 +444,9 @@ tables:
       columns:
         - { name: id, type: bigint, nullable: false, primary_key: true }
         - { name: customer_id, type: bigint, nullable: false }
-        - { name: subtotal, type: decimal(12,2), nullable: false }
-        - { name: tax_total, type: decimal(12,2), nullable: false }
-        - { name: grand_total, type: decimal(12,2), nullable: false }
+        - { name: subtotal, type: "decimal(12,2)", nullable: false }
+        - { name: tax_total, type: "decimal(12,2)", nullable: false }
+        - { name: grand_total, type: "decimal(12,2)", nullable: false }
     relationships:
       - name: orders_customer
         columns: [customer_id]
@@ -485,9 +485,9 @@ tables:
         - { name: id, type: bigint, nullable: false, primary_key: true }
         - { name: order_id, type: bigint, nullable: false }
         - { name: quantity, type: integer, nullable: false }
-        - { name: unit_price, type: decimal(12,2), nullable: false }
-        - { name: tax_amount, type: decimal(12,2), nullable: false }
-        - { name: line_total, type: decimal(12,2), nullable: false }
+        - { name: unit_price, type: "decimal(12,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(12,2)", nullable: false }
+        - { name: line_total, type: "decimal(12,2)", nullable: false }
     relationships:
       - name: order_items_order
         columns: [order_id]
