@@ -541,13 +541,15 @@ impl ExtensionRegistry {
         }
     }
 
-    /// A registry preloaded with every factory implemented so far. As later
-    /// phases land their catalogs (Tasks 11/12/22), they register here.
+    /// A registry preloaded with every factory implemented so far: Task 7's
+    /// `constant` exemplar plus the full Phase 1 core catalog (Task 11). Later
+    /// phases (Tasks 12/22) register their own catalogs here in turn.
     pub fn standard() -> Self {
         let mut registry = Self::new();
         registry
             .register_generator(Box::new(super::generators::ConstantFactory))
             .expect("built-in generator kinds are collision-free");
+        super::generators::register_all(&mut registry);
         registry
     }
 

@@ -287,18 +287,20 @@ use sql_splitter::synthetic::{
 
 // --- Task 10 test operators -------------------------------------------------
 //
-// The standard registry only ships the family-agnostic `constant` generator,
-// so ownership/type/cycle validation needs a few narrow test operators: a
-// generator that accepts only integer families (to trigger `GEN-GENERATOR-TYPE`
-// against a text column), a generator that reads a sibling column (to build
-// read/write cycles), and a planner that owns and reads columns named in its
-// config (to trigger conflicts and planner-owned cycles).
+// The standard registry ships the family-agnostic `constant` generator plus
+// the full Phase 1 core catalog (Task 11), so ownership/type/cycle validation
+// needs a few narrow test operators under kinds the core catalog doesn't
+// claim: a generator that accepts only integer families (to trigger
+// `GEN-GENERATOR-TYPE` against a text column), a generator that reads a
+// sibling column (to build read/write cycles), and a planner that owns and
+// reads columns named in its config (to trigger conflicts and planner-owned
+// cycles).
 
 /// A generator that only accepts integer families.
 struct IntegerOnlyFactory;
 
 static INTEGER_ONLY_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
-    kind: "integer",
+    kind: "test.integer_only",
     aliases: &[],
     summary: "test integer-only generator",
     arguments: &[],
@@ -898,7 +900,7 @@ fn compiler_reports_all_independent_ownership_and_type_errors() {
         .columns
         .get_mut("total")
         .unwrap()
-        .generator = Some(generator("integer"));
+        .generator = Some(generator("test.integer_only"));
     model
         .tables
         .get_mut("orders")
@@ -912,7 +914,7 @@ fn compiler_reports_all_independent_ownership_and_type_errors() {
         .columns
         .get_mut("email")
         .unwrap()
-        .generator = Some(generator("integer"));
+        .generator = Some(generator("test.integer_only"));
 
     let err = compiler().compile(model, Default::default()).unwrap_err();
     assert!(err.has_code("GEN-COLUMN-OWNER-CONFLICT"));

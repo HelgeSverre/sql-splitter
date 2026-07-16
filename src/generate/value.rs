@@ -8,6 +8,8 @@
 
 use std::fmt;
 
+use crate::synthetic::schema::SqlTypeFamily;
+
 /// A single value produced by a generator, independent of any target SQL
 /// dialect's literal syntax.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +104,37 @@ impl GeneratedValue {
         }
     }
 
+    /// Whether this value is a legal payload for a column of `family`,
+    /// independent of any particular generator. `Null` and `Default` are
+    /// legal for every family; every other variant is checked against the
+    /// one or two families it can represent (e.g. a `Uuid`-family column is
+    /// represented as `Text`, since [`GeneratedValue`] has no dedicated
+    /// UUID variant).
+    pub fn compatible_with(&self, family: &SqlTypeFamily) -> bool {
+        match self {
+            GeneratedValue::Null | GeneratedValue::Default => true,
+            GeneratedValue::Boolean(_) => matches!(family, SqlTypeFamily::Boolean),
+            GeneratedValue::Integer(_) => {
+                matches!(family, SqlTypeFamily::Integer | SqlTypeFamily::BigInteger)
+            }
+            GeneratedValue::Decimal { .. } => matches!(family, SqlTypeFamily::Decimal),
+            GeneratedValue::Text(_) => matches!(
+                family,
+                SqlTypeFamily::Text | SqlTypeFamily::Uuid | SqlTypeFamily::Other
+            ),
+            GeneratedValue::Bytes(_) => matches!(family, SqlTypeFamily::Bytes),
+            GeneratedValue::DateTime(_) => matches!(family, SqlTypeFamily::DateTime),
+            GeneratedValue::Json(_) => matches!(family, SqlTypeFamily::Json),
+        }
+    }
+
+    /// The name of this value's variant, for error messages built outside
+    /// this module (e.g. a modifier reporting a type mismatch it detected
+    /// itself, rather than through one of the `as_*` accessors above).
+    pub fn type_name(&self) -> &'static str {
+        self.kind_name()
+    }
+
     /// The name of this value's variant, used in error messages.
     fn kind_name(&self) -> &'static str {
         match self {
@@ -118,7 +151,7 @@ impl GeneratedValue {
     }
 }
 
-/// Errors returned by [`GeneratedValue`]'s typed accessors.
+/// Errors returned while running a compiled generator or modifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerateError {
     /// A typed accessor was called on a value of a different variant.
@@ -126,6 +159,12 @@ pub enum GenerateError {
         expected: &'static str,
         found: &'static str,
     },
+    /// A generator's internal state (e.g. a `sequence`'s counter) could not
+    /// advance without wrapping past its representable range.
+    Overflow(String),
+    /// A modifier (e.g. `unique`) could not satisfy its constraint within
+    /// its configured attempt budget.
+    Exhausted(String),
 }
 
 impl GenerateError {
@@ -143,6 +182,8 @@ impl fmt::Display for GenerateError {
             GenerateError::TypeMismatch { expected, found } => {
                 write!(f, "expected a {expected} value, found {found}")
             }
+            GenerateError::Overflow(message) => write!(f, "{message}"),
+            GenerateError::Exhausted(message) => write!(f, "{message}"),
         }
     }
 }
@@ -194,5 +235,19 @@ mod tests {
         assert!(GeneratedValue::Null.is_null());
         assert!(!GeneratedValue::Default.is_null());
         assert!(!GeneratedValue::Integer(0).is_null());
+    }
+
+    #[test]
+    fn compatible_with_accepts_null_and_default_for_every_family() {
+        assert!(GeneratedValue::Null.compatible_with(&SqlTypeFamily::Integer));
+        assert!(GeneratedValue::Default.compatible_with(&SqlTypeFamily::Json));
+    }
+
+    #[test]
+    fn compatible_with_matches_variant_to_family() {
+        assert!(GeneratedValue::Integer(1).compatible_with(&SqlTypeFamily::BigInteger));
+        assert!(!GeneratedValue::Integer(1).compatible_with(&SqlTypeFamily::Text));
+        assert!(GeneratedValue::Text("id".into()).compatible_with(&SqlTypeFamily::Uuid));
+        assert!(!GeneratedValue::Json("{}".into()).compatible_with(&SqlTypeFamily::Text));
     }
 }

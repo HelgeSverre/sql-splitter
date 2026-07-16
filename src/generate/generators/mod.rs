@@ -1,10 +1,17 @@
 //! Built-in generator factories.
 //!
-//! This module is the home of the generator catalog. Task 7 seeds it with a
-//! single exemplar, [`ConstantFactory`], so the registry has something real to
-//! register and downstream tasks have a worked pattern to copy. The full
-//! generator catalog (identifiers, names, numbers, dates, ...) lands in
-//! Tasks 11/12.
+//! This module is the home of the generator catalog. Task 7 seeded it with a
+//! single exemplar, [`ConstantFactory`]. [`core`] adds the rest of the Phase 1
+//! catalog: the other literal/structural generators (`null`, `sequence`,
+//! `copy`, `template`, `pattern`, `database_default`, `json_value`), the
+//! typed random generators (`integer`, `decimal`, `boolean`, `string`,
+//! `bytes`, `uuid`), `choice`/`weighted_choice`, and the Phase 1 modifiers.
+//! Semantic/temporal/credential generators are Task 12; `relation.foreign_key`
+//! is Task 13.
+
+mod core;
+
+pub(crate) use core::register_all;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::model::GeneratorConfig;
