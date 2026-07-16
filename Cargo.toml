@@ -34,6 +34,7 @@ default = ["duckdb-query", "compression", "archive"]
 duckdb-query = ["dep:duckdb", "compression"]
 compression = ["dep:flate2", "dep:bzip2", "dep:xz2", "dep:zstd"]
 archive = ["compression", "dep:tar", "dep:zip"]
+man-pages = ["dep:clap_mangen"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -65,15 +66,13 @@ duckdb = { version = "1.10503", features = ["bundled"], optional = true }
 dirs = "6"
 rustyline = "17"
 schemars = "1"
+clap_mangen = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 test_data_gen = { path = "crates/test_data_gen" }
 jsonschema = "0.46"
-
-[dev-dependencies.clap_mangen]
-version = "0.3"
 
 [[bench]]
 name = "parser_bench"
