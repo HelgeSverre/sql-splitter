@@ -7,7 +7,6 @@ use crate::convert::copy_to_insert::{copy_to_inserts, parse_copy_header, CopyHea
 use crate::parser::{
     detect_dialect_from_file, parse_insert_for_bulk, Parser, SqlDialect, StatementType,
 };
-use crate::progress::ProgressReader;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -64,16 +63,21 @@ impl<'a> DumpLoader<'a> {
 
         // Open file with compression detection (including zip archives,
         // which need the two-phase open in `crate::splitter::open_input`).
-        let reader: Box<dyn Read> =
-            crate::splitter::open_input(dump_path).context("Failed to open dump file")?;
-
-        let reader: Box<dyn Read> = if let Some(ref pb) = progress_bar {
-            let pb_clone = pb.clone();
-            Box::new(ProgressReader::new(reader, move |bytes| {
-                pb_clone.set_position(bytes);
-            }))
-        } else {
-            reader
+        // Progress goes through `open_input_with_progress` so the callback
+        // reports raw *compressed* bytes read from disk — the same unit as
+        // the bar's `file_size` total — matching every other call site.
+        // (Wrapping ProgressReader around the decompressed stream made the
+        // bar overshoot its total and pin at 100% for most of the run.)
+        let reader: Box<dyn Read> = match &progress_bar {
+            Some(pb) => {
+                let pb = pb.clone();
+                crate::splitter::open_input_with_progress(
+                    dump_path,
+                    Box::new(move |bytes| pb.set_position(bytes)),
+                )
+                .context("Failed to open dump file")?
+            }
+            None => crate::splitter::open_input(dump_path).context("Failed to open dump file")?,
         };
 
         let buf_reader = BufReader::with_capacity(256 * 1024, reader);
