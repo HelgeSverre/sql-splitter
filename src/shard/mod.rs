@@ -14,17 +14,18 @@ pub use config::{
     DefaultShardClassifier, GlobalTableMode, ShardTableClassification, ShardYamlConfig,
 };
 
-use crate::parser::mysql_insert::{parse_insert_rows, ParsedRow, PkSet, PkTuple, PkValue};
-use crate::parser::postgres_copy::{parse_copy_columns, parse_postgres_copy_rows, ParsedCopyRow};
-use crate::parser::{ContentFilter, Parser, SqlDialect, StatementType};
-use crate::schema::{SchemaBuilder, SchemaGraph, TableId, TableSchema};
-use crate::splitter::Splitter;
+use crate::parser::mysql_insert::{PkSet, PkValue, RowExtraction};
+use crate::parser::{Parser, SqlDialect};
+use crate::schema::{SchemaGraph, TableId, TableSchema};
+use crate::transform_common::{
+    build_schema_graph, for_each_data_row, quote_ident, split_to_temp_tables,
+    write_dialect_footer, write_dialect_header, write_insert_chunk, RowFlow, RowFormat,
+    RowSpillReader, RowSpillWriter, UnifiedRow,
+};
 use ahash::{AHashMap, AHashSet};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tempfile::TempDir;
 
 /// Configuration for the shard command
 #[derive(Debug)]
@@ -113,12 +114,12 @@ pub struct TableShardStats {
 struct TableRuntime {
     /// Table name
     name: String,
-    /// Selected rows (raw INSERT format)
-    selected_rows: Vec<SelectedRow>,
     /// Primary key set for FK membership checks
     pk_set: PkSet,
     /// Rows seen count
     rows_seen: u64,
+    /// Rows selected count
+    rows_selected: u64,
     /// Whether to skip this table
     skip: bool,
     /// Table classification
@@ -127,54 +128,8 @@ struct TableRuntime {
     fk_orphans: u64,
     /// Column index for tenant column (if this is a tenant root)
     tenant_column_index: Option<usize>,
-}
-
-/// Row format indicator
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum RowFormat {
-    Insert,
-    Copy,
-}
-
-/// Selected row with format metadata
-struct SelectedRow {
-    raw: Vec<u8>,
-    format: RowFormat,
-}
-
-/// Combined row representation for both MySQL INSERT and PostgreSQL COPY
-enum UnifiedRow {
-    Insert(ParsedRow),
-    Copy(ParsedCopyRow),
-}
-
-impl UnifiedRow {
-    fn pk(&self) -> Option<&PkTuple> {
-        match self {
-            UnifiedRow::Insert(r) => r.pk.as_ref(),
-            UnifiedRow::Copy(r) => r.pk.as_ref(),
-        }
-    }
-
-    fn fk_values(&self) -> &[(crate::parser::mysql_insert::FkRef, PkTuple)] {
-        match self {
-            UnifiedRow::Insert(r) => &r.fk_values,
-            UnifiedRow::Copy(r) => &r.fk_values,
-        }
-    }
-
-    fn into_selected(self) -> SelectedRow {
-        match self {
-            UnifiedRow::Insert(r) => SelectedRow {
-                raw: r.raw,
-                format: RowFormat::Insert,
-            },
-            UnifiedRow::Copy(r) => SelectedRow {
-                raw: r.raw,
-                format: RowFormat::Copy,
-            },
-        }
-    }
+    /// Path to temp file containing selected row bytes (None if no rows selected)
+    selected_temp_path: Option<PathBuf>,
 }
 
 /// Run the shard command
@@ -187,62 +142,17 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
 
     let mut stats = ShardStats::default();
 
-    // Get file size for progress tracking
-    let file_size = std::fs::metadata(&config.input)?.len();
-
-    // Progress bar setup - byte-based for the split phase
-    let progress_bar = if config.progress {
-        let pb = ProgressBar::new(file_size);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb.set_message("Splitting dump...");
-        Some(pb)
-    } else {
-        None
-    };
-
     // Phase 0: Split into temp per-table files
-    let temp_dir = TempDir::new()?;
-    let tables_dir = temp_dir.path().join("tables");
-
-    let mut splitter = Splitter::new(config.input.clone(), tables_dir.clone())
-        .with_dialect(config.dialect)
-        .with_content_filter(ContentFilter::All);
-
-    if let Some(ref pb) = progress_bar {
-        let pb_clone = pb.clone();
-        splitter = splitter.with_progress(move |bytes| {
-            pb_clone.set_position(bytes);
-        });
-    }
-
-    let split_stats = splitter.split()?;
-
-    // Finish byte-based progress, switch to milestone messages
-    if let Some(ref pb) = progress_bar {
-        pb.finish_and_clear();
-    }
-
-    if config.progress {
-        eprintln!(
-            "Split complete: {} tables, {} statements",
-            split_stats.tables_found, split_stats.statements_processed
-        );
-    }
+    let split_phase = split_to_temp_tables(&config.input, config.dialect, config.progress)?;
+    let temp_dir = split_phase.temp_dir;
+    let tables_dir = split_phase.tables_dir;
 
     // Phase 1: Build schema graph
     if config.progress {
         eprintln!("Building schema graph...");
     }
 
-    let graph = build_schema_graph(&tables_dir, &config)?;
+    let graph = build_schema_graph(&tables_dir, config.dialect)?;
 
     // Detect or use configured tenant column
     let tenant_column = detect_tenant_column(&config, &yaml_config, &graph)?;
@@ -302,16 +212,21 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
             table.id,
             TableRuntime {
                 name: table.name.clone(),
-                selected_rows: Vec::new(),
                 pk_set: PkSet::default(),
                 rows_seen: 0,
+                rows_selected: 0,
                 skip,
                 classification,
                 fk_orphans: 0,
                 tenant_column_index,
+                selected_temp_path: None,
             },
         );
     }
+
+    // Create directory for selected row temp files
+    let selected_dir = temp_dir.path().join("selected");
+    fs::create_dir_all(&selected_dir)?;
 
     // Phase 3: Process tables in dependency order
     if config.progress {
@@ -377,135 +292,92 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
             continue;
         }
 
-        let file = File::open(&table_file)?;
-        let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
+        let temp_path = selected_dir.join(format!("{}.rows", table_name));
+        let mut spill: Option<RowSpillWriter> = None;
 
         let mut rows_seen = 0u64;
         let mut fk_orphans = 0u64;
-        let mut copy_columns: Vec<String> = Vec::new();
+        let mut rows_selected = 0u64;
 
-        while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, _) =
-                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
+        for_each_data_row(
+            &table_file,
+            table_schema,
+            config.dialect,
+            RowExtraction::Full,
+            |row| {
+                rows_seen += 1;
 
-            match stmt_type {
-                StatementType::Insert => {
-                    let rows = parse_insert_rows(&stmt, table_schema, config.dialect)?;
+                let should_include = include_all
+                    || should_include_row(
+                        &row,
+                        table_schema,
+                        classification,
+                        tenant_col_idx,
+                        &tenant_pk_value,
+                        &runtimes,
+                        &cyclic_set,
+                        &table_id,
+                    );
 
-                    for row in rows {
-                        rows_seen += 1;
-                        let unified = UnifiedRow::Insert(row);
+                if !should_include {
+                    if classification == ShardTableClassification::TenantDependent {
+                        fk_orphans += 1;
+                    }
+                    return Ok(RowFlow::Continue);
+                }
 
-                        let should_include = if include_all {
-                            true
-                        } else {
-                            should_include_row(
-                                &unified,
-                                table_schema,
-                                classification,
-                                tenant_col_idx,
-                                &tenant_pk_value,
-                                &runtimes,
-                                &cyclic_set,
-                                &table_id,
-                            )
-                        };
-
-                        if !should_include {
-                            if classification == ShardTableClassification::TenantDependent {
-                                fk_orphans += 1;
-                            }
-                            continue;
+                // Check max_selected_rows guard
+                if let Some(max) = config.max_selected_rows {
+                    if total_selected >= max as u64 {
+                        if row.format() == RowFormat::Insert {
+                            stats.warnings.push(format!(
+                                "Reached max_selected_rows limit ({}) at table '{}'",
+                                max, table_name
+                            ));
                         }
-
-                        // Check max_selected_rows guard
-                        if let Some(max) = config.max_selected_rows {
-                            if total_selected >= max as u64 {
-                                stats.warnings.push(format!(
-                                    "Reached max_selected_rows limit ({}) at table '{}'",
-                                    max, table_name
-                                ));
-                                break;
-                            }
-                        }
-
-                        total_selected += 1;
-
-                        let runtime = runtimes.get_mut(&table_id).unwrap();
-                        if let Some(pk) = unified.pk() {
-                            runtime.pk_set.insert(pk.clone());
-                        }
-                        runtime.selected_rows.push(unified.into_selected());
+                        return Ok(RowFlow::SkipStatement);
                     }
                 }
-                StatementType::Copy => {
-                    let header = String::from_utf8_lossy(&stmt);
-                    copy_columns = parse_copy_columns(&header);
+
+                total_selected += 1;
+
+                let runtime = runtimes.get_mut(&table_id).unwrap();
+                if let Some(pk) = row.pk() {
+                    runtime.pk_set.insert(pk.clone());
                 }
-                StatementType::Unknown if config.dialect == SqlDialect::Postgres => {
-                    if stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n") {
-                        let rows =
-                            parse_postgres_copy_rows(&stmt, table_schema, copy_columns.clone())?;
 
-                        for row in rows {
-                            rows_seen += 1;
-                            let unified = UnifiedRow::Copy(row);
-
-                            let should_include = if include_all {
-                                true
-                            } else {
-                                should_include_row(
-                                    &unified,
-                                    table_schema,
-                                    classification,
-                                    tenant_col_idx,
-                                    &tenant_pk_value,
-                                    &runtimes,
-                                    &cyclic_set,
-                                    &table_id,
-                                )
-                            };
-
-                            if !should_include {
-                                if classification == ShardTableClassification::TenantDependent {
-                                    fk_orphans += 1;
-                                }
-                                continue;
-                            }
-
-                            if let Some(max) = config.max_selected_rows {
-                                if total_selected >= max as u64 {
-                                    break;
-                                }
-                            }
-
-                            total_selected += 1;
-
-                            let runtime = runtimes.get_mut(&table_id).unwrap();
-                            if let Some(pk) = unified.pk() {
-                                runtime.pk_set.insert(pk.clone());
-                            }
-                            runtime.selected_rows.push(unified.into_selected());
-                        }
-                    }
+                // Spill the selected row to a temp file (bounded memory)
+                if spill.is_none() {
+                    spill = Some(RowSpillWriter::create(&temp_path)?);
                 }
-                _ => {}
-            }
+                spill.as_mut().unwrap().write_row(row.format(), row.raw())?;
+                rows_selected += 1;
+
+                Ok(RowFlow::Continue)
+            },
+        )?;
+
+        if let Some(spill) = spill {
+            spill.finish()?;
         }
 
         let runtime = runtimes.get_mut(&table_id).unwrap();
         runtime.rows_seen = rows_seen;
         runtime.fk_orphans = fk_orphans;
+        runtime.rows_selected = rows_selected;
+        if rows_selected > 0 && temp_path.exists() {
+            runtime.selected_temp_path = Some(temp_path);
+        }
         stats.fk_orphans_skipped += fk_orphans;
 
-        if !runtime.selected_rows.is_empty() {
+        if rows_selected > 0 {
             stats.tables_with_data += 1;
         }
 
         stats.table_stats.push(TableShardStats {
             name: runtime.name.clone(),
             rows_seen: runtime.rows_seen,
-            rows_selected: runtime.selected_rows.len() as u64,
+            rows_selected: runtime.rows_selected,
             classification: runtime.classification,
         });
     }
@@ -529,40 +401,6 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     write_output(&config, &graph, &all_tables, &runtimes, &tables_dir, &stats)?;
 
     Ok(stats)
-}
-
-/// Build schema graph from split table files
-fn build_schema_graph(tables_dir: &Path, config: &ShardConfig) -> anyhow::Result<SchemaGraph> {
-    let mut builder = SchemaBuilder::new();
-
-    for entry in fs::read_dir(tables_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().is_some_and(|e| e == "sql") {
-            let file = File::open(&path)?;
-            let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
-
-            while let Some(stmt) = parser.read_statement()? {
-                let (stmt_type, _) =
-                    Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
-
-                match stmt_type {
-                    StatementType::CreateTable => {
-                        let stmt_str = String::from_utf8_lossy(&stmt);
-                        builder.parse_create_table(&stmt_str);
-                    }
-                    StatementType::AlterTable => {
-                        let stmt_str = String::from_utf8_lossy(&stmt);
-                        builder.parse_alter_table(&stmt_str);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok(SchemaGraph::from_schema(builder.build()))
 }
 
 /// Detect tenant column from config or by scanning schema
@@ -783,17 +621,8 @@ fn should_include_row(
         ShardTableClassification::TenantRoot => {
             // Check tenant column value using column_map for correct mapping
             if let Some(idx) = tenant_column_index {
-                match row {
-                    UnifiedRow::Insert(r) => {
-                        if let Some(val) = r.get_column_value(idx) {
-                            return val == tenant_value;
-                        }
-                    }
-                    UnifiedRow::Copy(r) => {
-                        if let Some(val) = r.get_column_value(idx) {
-                            return val == tenant_value;
-                        }
-                    }
+                if let Some(val) = row.get_column_value(idx) {
+                    return val == tenant_value;
                 }
             }
             false
@@ -867,7 +696,7 @@ fn write_output(
     if config.include_schema {
         for &table_id in table_order {
             let runtime = match runtimes.get(&table_id) {
-                Some(r) if !r.skip && !r.selected_rows.is_empty() => r,
+                Some(r) if !r.skip && r.rows_selected > 0 => r,
                 _ => continue,
             };
 
@@ -891,45 +720,39 @@ fn write_output(
         }
     }
 
-    // Write data for each table
+    // Write data for each table (reading from temp files instead of memory)
     for &table_id in table_order {
         let runtime = match runtimes.get(&table_id) {
-            Some(r) if !r.skip && !r.selected_rows.is_empty() => r,
+            Some(r) if !r.skip && r.rows_selected > 0 && r.selected_temp_path.is_some() => r,
             _ => continue,
         };
 
         let table_name = &runtime.name;
-        let row_count = runtime.selected_rows.len();
+        let row_count = runtime.rows_selected;
 
         writeln!(writer, "\n-- Data: {} ({} rows)", table_name, row_count)?;
 
+        let quoted_name = quote_ident(config.dialect, table_name);
+
+        // Read rows from temp file and write INSERTs in chunks
+        let temp_path = runtime.selected_temp_path.as_ref().unwrap();
+        let mut spill_reader = RowSpillReader::open(temp_path)?;
+
         const CHUNK_SIZE: usize = 1000;
+        let mut chunk_buffer: Vec<(RowFormat, Vec<u8>)> = Vec::with_capacity(CHUNK_SIZE);
 
-        let quoted_name = match config.dialect {
-            SqlDialect::MySql => format!("`{}`", table_name),
-            SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", table_name),
-            SqlDialect::Mssql => format!("[{}]", table_name),
-        };
+        while let Some((format, row_bytes)) = spill_reader.next_row()? {
+            chunk_buffer.push((format, row_bytes));
 
-        for chunk in runtime.selected_rows.chunks(CHUNK_SIZE) {
-            writeln!(writer, "INSERT INTO {} VALUES", quoted_name)?;
-
-            for (i, row) in chunk.iter().enumerate() {
-                if i > 0 {
-                    writer.write_all(b",\n")?;
-                }
-
-                let values = match row.format {
-                    RowFormat::Insert => match config.dialect {
-                        SqlDialect::Postgres => convert_row_to_postgres(&row.raw),
-                        _ => row.raw.clone(),
-                    },
-                    RowFormat::Copy => convert_copy_to_insert_values(&row.raw, config.dialect),
-                };
-                writer.write_all(&values)?;
+            if chunk_buffer.len() >= CHUNK_SIZE {
+                write_insert_chunk(&mut writer, &quoted_name, &chunk_buffer, config.dialect)?;
+                chunk_buffer.clear();
             }
+        }
 
-            writer.write_all(b";\n")?;
+        // Write remaining rows
+        if !chunk_buffer.is_empty() {
+            write_insert_chunk(&mut writer, &quoted_name, &chunk_buffer, config.dialect)?;
         }
     }
 
@@ -992,133 +815,3 @@ fn write_header<W: Write>(
     Ok(())
 }
 
-/// Write dialect-specific header
-fn write_dialect_header<W: Write>(writer: &mut W, dialect: SqlDialect) -> std::io::Result<()> {
-    match dialect {
-        SqlDialect::MySql => {
-            writeln!(writer, "SET NAMES utf8mb4;")?;
-            writeln!(writer, "SET FOREIGN_KEY_CHECKS = 0;")?;
-        }
-        SqlDialect::Postgres => {
-            writeln!(writer, "SET client_encoding = 'UTF8';")?;
-            writeln!(writer, "SET session_replication_role = replica;")?;
-        }
-        SqlDialect::Sqlite => {
-            writeln!(writer, "PRAGMA foreign_keys = OFF;")?;
-        }
-        SqlDialect::Mssql => {
-            writeln!(writer, "SET ANSI_NULLS ON;")?;
-            writeln!(writer, "SET QUOTED_IDENTIFIER ON;")?;
-            writeln!(writer, "SET NOCOUNT ON;")?;
-        }
-    }
-    writeln!(writer)?;
-    Ok(())
-}
-
-/// Write dialect-specific footer
-fn write_dialect_footer<W: Write>(writer: &mut W, dialect: SqlDialect) -> std::io::Result<()> {
-    writeln!(writer)?;
-    match dialect {
-        SqlDialect::MySql => {
-            writeln!(writer, "SET FOREIGN_KEY_CHECKS = 1;")?;
-        }
-        SqlDialect::Postgres => {
-            writeln!(writer, "SET session_replication_role = DEFAULT;")?;
-        }
-        SqlDialect::Sqlite => {
-            writeln!(writer, "PRAGMA foreign_keys = ON;")?;
-        }
-        SqlDialect::Mssql => {
-            // No footer needed
-        }
-    }
-    Ok(())
-}
-
-/// Convert a MySQL-style row to PostgreSQL syntax
-fn convert_row_to_postgres(row: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(row.len());
-    let mut i = 0;
-
-    while i < row.len() {
-        if row[i] == b'\\' && i + 1 < row.len() && row[i + 1] == b'\'' {
-            result.push(b'\'');
-            result.push(b'\'');
-            i += 2;
-        } else {
-            result.push(row[i]);
-            i += 1;
-        }
-    }
-
-    result
-}
-
-/// Convert PostgreSQL COPY format to INSERT VALUES format
-fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8> {
-    let mut result = Vec::with_capacity(row.len() + 20);
-    result.push(b'(');
-
-    let fields: Vec<&[u8]> = row.split(|&b| b == b'\t').collect();
-
-    for (i, field) in fields.iter().enumerate() {
-        if i > 0 {
-            result.extend_from_slice(b", ");
-        }
-
-        if *field == b"\\N" {
-            result.extend_from_slice(b"NULL");
-        } else if field.is_empty() {
-            result.extend_from_slice(b"''");
-        } else if is_numeric(field) {
-            result.extend_from_slice(field);
-        } else {
-            result.push(b'\'');
-            for &b in *field {
-                match b {
-                    b'\'' => match dialect {
-                        SqlDialect::MySql => result.extend_from_slice(b"\\'"),
-                        SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {
-                            result.extend_from_slice(b"''")
-                        }
-                    },
-                    b'\\' if dialect == SqlDialect::MySql => {
-                        result.extend_from_slice(b"\\\\");
-                    }
-                    _ => result.push(b),
-                }
-            }
-            result.push(b'\'');
-        }
-    }
-
-    result.push(b')');
-    result
-}
-
-/// Check if a byte slice represents a numeric value
-fn is_numeric(s: &[u8]) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-
-    let mut has_digit = false;
-    let mut has_dot = false;
-    let mut start = 0;
-
-    if s[0] == b'-' || s[0] == b'+' {
-        start = 1;
-    }
-
-    for &b in &s[start..] {
-        match b {
-            b'0'..=b'9' => has_digit = true,
-            b'.' if !has_dot => has_dot = true,
-            b'e' | b'E' => continue,
-            _ => return false,
-        }
-    }
-
-    has_digit
-}
