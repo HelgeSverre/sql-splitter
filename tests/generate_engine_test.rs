@@ -2,6 +2,7 @@
 //! `sql_splitter::generate`, and for the allocation-lean renderer primitives
 //! in `sql_splitter::render`.
 
+use chrono::Datelike;
 use rand::Rng;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -712,4 +713,258 @@ fn same_seed_reproduces_the_same_generator_sequence() {
     };
 
     assert_eq!(run(), run());
+}
+
+// --- Task 12: semantic, credential, and temporal generators -----------------
+
+/// Compile `kind` with `config` against a single `Text`-family column and
+/// generate `count` rows, returning each row's text. Every Task 12 catalog
+/// generator emits `Text` when its column's family is `Text` (numeric- and
+/// timestamp-shaped generators fall back to a formatted string), so this one
+/// helper covers the whole catalog for shape assertions.
+fn generate_text_with(kind: &str, seed: u64, count: usize, config: GeneratorConfig) -> Vec<String> {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry
+        .generator(kind)
+        .unwrap_or_else(|| panic!("no generator registered for `{kind}`"));
+    let column = portable_column("value", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![column.clone()]);
+    let path = "tables.t.columns.value.generator".to_string();
+    let context = CompileContext::for_column(&table, &column, SeedRoot::new(seed), &path);
+    let mut compiled = factory
+        .compile(&config, &context)
+        .unwrap_or_else(|bag| panic!("`{kind}` failed to compile: {bag}"));
+    let empty = EmptyRow;
+    (0..count as u64)
+        .map(|i| {
+            let row = RowContext::new(i, &empty);
+            let mut output = GeneratedValue::Null;
+            compiled
+                .generate(&row, &mut output)
+                .unwrap_or_else(|error| panic!("`{kind}` failed to generate: {error}"));
+            output
+                .as_text()
+                .unwrap_or_else(|_| panic!("`{kind}` did not emit Text"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// [`generate_text_with`] with `{ kind: <kind> }` as the config — every
+/// argument left at its default.
+fn generate_text(kind: &str, seed: u64, count: usize) -> Vec<String> {
+    generate_text_with(kind, seed, count, yaml(&format!("{{ kind: {kind} }}")))
+}
+
+#[test]
+fn semantic_generators_are_seeded_and_shape_valid() {
+    let a = generate_text("internet.email", 42, 20);
+    let b = generate_text("internet.email", 42, 20);
+    assert_eq!(a, b);
+    assert!(a.iter().all(|value| value.contains('@')));
+
+    let token = generate_text_with(
+        "credential.token",
+        42,
+        1,
+        yaml("{ kind: credential.token, length: 64, alphabet: alphanumeric }"),
+    );
+    assert_eq!(token[0].len(), 64);
+    assert!(token[0].chars().all(|c| c.is_ascii_alphanumeric()));
+}
+
+/// `(kind, shape predicate)` pairs for
+/// [`every_catalog_family_has_a_shape_valid_representative`].
+type CatalogShapeCase = (&'static str, fn(&str) -> bool);
+
+#[test]
+fn every_catalog_family_has_a_shape_valid_representative() {
+    // One assertion per Phase 1 catalog family from the task brief, proving
+    // every family is registered and produces a plausible shape.
+    let cases: &[CatalogShapeCase] = &[
+        ("person.full_name", |v| v.contains(' ')),
+        ("internet.email", |v| v.contains('@')),
+        ("phone.number", |v| !v.is_empty()),
+        ("company.name", |v| !v.is_empty()),
+        ("address.city", |v| !v.is_empty()),
+        ("commerce.product_name", |v| v.contains(' ')),
+        ("text.word", |v| !v.is_empty()),
+        ("identifier.ulid", |v| v.len() == 26),
+        ("file.name", |v| !v.is_empty()),
+        ("network.mac", |v| v.contains(':')),
+        ("credential.password_hash", |v| {
+            v.starts_with("$synthetic$") && v.len() == "$synthetic$".len() + 64
+        }),
+        ("date", |v| v.len() == 10 && v.matches('-').count() == 2),
+    ];
+    for (kind, shape_ok) in cases {
+        let values = generate_text(kind, 7, 3);
+        assert_eq!(values.len(), 3, "`{kind}` did not produce 3 rows");
+        for value in &values {
+            assert!(
+                shape_ok(value),
+                "`{kind}` produced an unexpected shape: {value:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_locale_is_a_compile_failure_not_a_runtime_one() {
+    // `sql_splitter::fake_data::Locale` is a closed, crate-private enum with
+    // a single `En` variant today; naming any other locale (`Locale::De`,
+    // etc.) does not compile. There is nothing to assert at the integration-
+    // test level for a crate-private type, so this test documents the
+    // property: every semantic generator kind resolves and generates without
+    // ever accepting a locale argument that could name an unsupported value.
+    let values = generate_text("person.first_name", 1, 1);
+    assert_eq!(values.len(), 1);
+}
+
+#[test]
+fn credential_placeholder_is_unmistakably_not_a_valid_private_key() {
+    let values = generate_text("credential.placeholder", 1, 3);
+    for value in values {
+        assert!(
+            !value.contains("-----BEGIN"),
+            "looks like a real PEM header: {value}"
+        );
+        assert!(
+            !value.contains("-----END"),
+            "looks like a real PEM footer: {value}"
+        );
+        assert!(
+            value.to_uppercase().contains("PLACEHOLDER")
+                || value.to_uppercase().contains("SYNTHETIC"),
+            "placeholder does not self-identify as synthetic: {value}"
+        );
+    }
+}
+
+#[test]
+fn date_and_datetime_generators_stay_within_bounds() {
+    for value in generate_text("date", 3, 50) {
+        let parsed = chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+            .unwrap_or_else(|_| panic!("`date` produced an unparsable value: {value}"));
+        assert!(parsed.year() >= 1970 && parsed.year() <= 2035);
+    }
+    for value in generate_text("datetime", 3, 50) {
+        chrono::NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S")
+            .unwrap_or_else(|_| panic!("`datetime` produced an unparsable value: {value}"));
+    }
+    for value in generate_text("time", 3, 50) {
+        chrono::NaiveTime::parse_from_str(&value, "%H:%M:%S")
+            .unwrap_or_else(|_| panic!("`time` produced an unparsable value: {value}"));
+    }
+}
+
+/// Compile `kind` (`before` or `after`) against a two-column table — a
+/// `source` timestamp column and the relative column under test — and
+/// generate one row, reading `source` from a fixed [`StubRow`].
+fn generate_relative(kind: &str, config: GeneratorConfig, source_value: &str, seed: u64) -> String {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry
+        .generator(kind)
+        .unwrap_or_else(|| panic!("no generator registered for `{kind}`"));
+    let source = portable_column("created_at", SqlTypeFamily::Text, true);
+    let relative = portable_column("value", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![source.clone(), relative.clone()]);
+    let path = "tables.t.columns.value.generator".to_string();
+    let context = CompileContext::for_column(&table, &relative, SeedRoot::new(seed), &path);
+    let mut compiled = factory
+        .compile(&config, &context)
+        .unwrap_or_else(|bag| panic!("`{kind}` failed to compile: {bag}"));
+    let mut siblings = BTreeMap::new();
+    siblings.insert(
+        "created_at".to_string(),
+        GeneratedValue::Text(source_value.to_string()),
+    );
+    let row = StubRow(siblings);
+    let mut output = GeneratedValue::Null;
+    compiled
+        .generate(&RowContext::new(0, &row), &mut output)
+        .unwrap_or_else(|error| panic!("`{kind}` failed to generate: {error}"));
+    output.as_text().unwrap().to_string()
+}
+
+#[test]
+fn after_generates_a_timestamp_at_or_past_its_source() {
+    let source = "2024-01-15 10:00:00";
+    let source_ts = chrono::NaiveDateTime::parse_from_str(source, "%Y-%m-%d %H:%M:%S").unwrap();
+    for seed in 0..10u64 {
+        let value = generate_relative(
+            "after",
+            yaml("{ kind: after, source: created_at, min_seconds: 1, max_seconds: 1000 }"),
+            source,
+            seed,
+        );
+        let ts = chrono::NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S").unwrap();
+        assert!(
+            ts >= source_ts,
+            "`after` value {ts} is not >= source {source_ts}"
+        );
+    }
+}
+
+#[test]
+fn before_generates_a_timestamp_at_or_before_its_source() {
+    let source = "2024-01-15 10:00:00";
+    let source_ts = chrono::NaiveDateTime::parse_from_str(source, "%Y-%m-%d %H:%M:%S").unwrap();
+    for seed in 0..10u64 {
+        let value = generate_relative(
+            "before",
+            yaml("{ kind: before, source: created_at, min_seconds: 1, max_seconds: 1000 }"),
+            source,
+            seed,
+        );
+        let ts = chrono::NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S").unwrap();
+        assert!(
+            ts <= source_ts,
+            "`before` value {ts} is not <= source {source_ts}"
+        );
+    }
+}
+
+#[test]
+fn relative_generator_requires_a_declared_source_column() {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry.generator("after").unwrap();
+    let column = portable_column("value", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![column.clone()]);
+    let path = "tables.t.columns.value.generator".to_string();
+    let context = CompileContext::for_column(&table, &column, SeedRoot::new(1), &path);
+    let err = factory
+        .compile(&yaml("{ kind: after }"), &context)
+        .err()
+        .expect("`after` with no `source` must fail to compile");
+    assert!(err.to_string().contains("GEN-RELATIVE-MISSING-SOURCE"));
+}
+
+#[test]
+fn relative_generator_rejects_an_unknown_source_column() {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry.generator("before").unwrap();
+    let column = portable_column("value", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![column.clone()]);
+    let path = "tables.t.columns.value.generator".to_string();
+    let context = CompileContext::for_column(&table, &column, SeedRoot::new(1), &path);
+    let err = factory
+        .compile(&yaml("{ kind: before, source: missing_column }"), &context)
+        .err()
+        .expect("`before` referencing an unknown column must fail to compile");
+    assert!(err.to_string().contains("GEN-RELATIVE-UNKNOWN-SOURCE"));
+}
+
+#[test]
+fn descriptors_declare_the_families_they_accept() {
+    let registry = ExtensionRegistry::standard();
+    let email = registry.generator("internet.email").unwrap().descriptor();
+    assert!(email.accepts.contains(&SqlTypeFamily::Text));
+
+    let latitude = registry.generator("address.latitude").unwrap().descriptor();
+    assert!(latitude.accepts.contains(&SqlTypeFamily::Decimal));
+    assert!(latitude.accepts.contains(&SqlTypeFamily::Text));
+
+    let port = registry.generator("network.port").unwrap().descriptor();
+    assert!(port.accepts.contains(&SqlTypeFamily::Integer));
 }

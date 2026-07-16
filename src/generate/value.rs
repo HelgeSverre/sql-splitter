@@ -165,6 +165,9 @@ pub enum GenerateError {
     /// A modifier (e.g. `unique`) could not satisfy its constraint within
     /// its configured attempt budget.
     Exhausted(String),
+    /// A generator could not make sense of a value it depends on at row
+    /// time (e.g. `before`/`after` reading an unparsable source column).
+    InvalidInput(String),
 }
 
 impl GenerateError {
@@ -184,6 +187,7 @@ impl fmt::Display for GenerateError {
             }
             GenerateError::Overflow(message) => write!(f, "{message}"),
             GenerateError::Exhausted(message) => write!(f, "{message}"),
+            GenerateError::InvalidInput(message) => write!(f, "{message}"),
         }
     }
 }

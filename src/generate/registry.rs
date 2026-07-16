@@ -550,6 +550,7 @@ impl ExtensionRegistry {
             .register_generator(Box::new(super::generators::ConstantFactory))
             .expect("built-in generator kinds are collision-free");
         super::generators::register_all(&mut registry);
+        super::generators::semantic::register_all(&mut registry);
         registry
     }
 

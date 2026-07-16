@@ -10,6 +10,7 @@ mod copy_data;
 mod differ;
 #[cfg(feature = "duckdb-query")]
 mod duckdb;
+mod fake_data;
 mod graph;
 mod json_schema;
 mod merger;
