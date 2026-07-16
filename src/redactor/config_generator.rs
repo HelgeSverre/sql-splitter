@@ -3,10 +3,9 @@
 //! Analyzes the input file schema and suggests redaction strategies
 //! based on column names and types.
 
-use crate::parser::{Parser, SqlDialect, StatementType};
+use crate::parser::SqlDialect;
 use crate::redactor::config::RedactConfig;
 use crate::redactor::StrategyKind;
-use crate::schema::SchemaBuilder;
 use std::fs::File;
 use std::io::Write;
 
@@ -71,22 +70,8 @@ fn analyze_for_config(
     input: &std::path::Path,
     dialect: SqlDialect,
 ) -> anyhow::Result<Vec<ColumnAnalysis>> {
-    let file = File::open(input)?;
-    let mut parser = Parser::with_dialect(file, 64 * 1024, dialect);
-    let mut builder = SchemaBuilder::new();
-
-    // Build schema
-    while let Some(stmt) = parser.read_statement()? {
-        let (stmt_type, _table_name) =
-            Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
-
-        if stmt_type == StatementType::CreateTable {
-            let stmt_str = String::from_utf8_lossy(&stmt);
-            builder.parse_create_table(&stmt_str);
-        }
-    }
-
-    let schema = builder.build();
+    // Build schema (handles compressed/zip input transparently)
+    let schema = crate::schema::Schema::from_sql_file(input, dialect, None)?;
 
     // Analyze each column
     let mut analyses = Vec::new();

@@ -14,12 +14,10 @@ pub use data::*;
 pub use output::*;
 pub use schema::*;
 
-use crate::parser::{determine_buffer_size, Parser, SqlDialect, StatementType};
-use crate::schema::{Schema, SchemaBuilder};
-use crate::splitter::{open_input, open_input_with_progress};
+use crate::parser::SqlDialect;
+use crate::schema::Schema;
 use glob::Pattern;
 use serde::Serialize;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -227,49 +225,12 @@ impl Differ {
         byte_offset: u64,
         total_bytes: u64,
     ) -> anyhow::Result<Schema> {
-        let file_size = std::fs::metadata(path)?.len();
-        let buffer_size = determine_buffer_size(file_size);
-
-        // Open the input, transparently handling any supported compression
-        // format (including zip archives).
-        let reader: Box<dyn Read> = if let Some(ref cb) = self.progress_fn {
+        let progress_fn: Option<Box<dyn Fn(u64)>> = self.progress_fn.as_ref().map(|cb| {
             let cb = Arc::clone(cb);
-            open_input_with_progress(
-                path,
-                Box::new(move |bytes| cb(byte_offset + bytes, total_bytes)),
-            )?
-        } else {
-            open_input(path)?
-        };
+            Box::new(move |bytes| cb(byte_offset + bytes, total_bytes)) as Box<dyn Fn(u64)>
+        });
 
-        let mut parser = Parser::with_dialect(reader, buffer_size, self.dialect);
-        let mut builder = SchemaBuilder::new();
-
-        while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, _table_name) =
-                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, self.dialect);
-
-            match stmt_type {
-                StatementType::CreateTable => {
-                    if let Ok(stmt_str) = std::str::from_utf8(&stmt) {
-                        builder.parse_create_table(stmt_str);
-                    }
-                }
-                StatementType::AlterTable => {
-                    if let Ok(stmt_str) = std::str::from_utf8(&stmt) {
-                        builder.parse_alter_table(stmt_str);
-                    }
-                }
-                StatementType::CreateIndex => {
-                    if let Ok(stmt_str) = std::str::from_utf8(&stmt) {
-                        builder.parse_create_index(stmt_str);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Ok(builder.build())
+        Schema::from_sql_file(path, self.dialect, progress_fn)
     }
 
     /// Compare data between two SQL files

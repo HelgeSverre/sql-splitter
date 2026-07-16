@@ -10,7 +10,9 @@ pub mod analysis;
 pub mod format;
 pub mod view;
 
-pub use analysis::{cyclic_tables, find_cycles, Cycle};
+#[allow(unused_imports)] // Public API re-exports used by external consumers and tests
+pub use analysis::Cycle;
+pub use analysis::{cyclic_tables, find_cycles};
 pub use format::{to_dot, to_html, to_json, to_mermaid, Layout, OutputFormat};
 pub use view::GraphView;
 #[allow(unused_imports)] // Public API re-exports used by external consumers and tests

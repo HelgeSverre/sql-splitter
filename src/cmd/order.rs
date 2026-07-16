@@ -180,15 +180,16 @@ fn collect_statements(
         let stmt_str = String::from_utf8_lossy(&stmt).to_string();
         let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
 
+        // Feed DDL into the schema builder (no-op for other statement types)
+        builder.ingest(stmt_type, &stmt_str);
+
         match stmt_type {
             StatementType::CreateTable => {
-                builder.parse_create_table(&stmt_str);
                 if !table_name.is_empty() {
                     collected.create_statements.insert(table_name, stmt_str);
                 }
             }
             StatementType::AlterTable => {
-                builder.parse_alter_table(&stmt_str);
                 if !table_name.is_empty() {
                     collected
                         .other_table_statements
@@ -198,7 +199,6 @@ fn collect_statements(
                 }
             }
             StatementType::CreateIndex => {
-                builder.parse_create_index(&stmt_str);
                 // Try to extract table name from CREATE INDEX
                 if !table_name.is_empty() {
                     collected

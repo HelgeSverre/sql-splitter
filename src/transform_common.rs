@@ -319,19 +319,7 @@ pub fn build_schema_graph(tables_dir: &Path, dialect: SqlDialect) -> anyhow::Res
             let mut parser = Parser::with_dialect(file, 64 * 1024, dialect);
 
             while let Some(stmt) = parser.read_statement()? {
-                let (stmt_type, _) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
-
-                match stmt_type {
-                    StatementType::CreateTable => {
-                        let stmt_str = String::from_utf8_lossy(&stmt);
-                        builder.parse_create_table(&stmt_str);
-                    }
-                    StatementType::AlterTable => {
-                        let stmt_str = String::from_utf8_lossy(&stmt);
-                        builder.parse_alter_table(&stmt_str);
-                    }
-                    _ => {}
-                }
+                builder.ingest_statement(&stmt, dialect);
             }
         }
     }

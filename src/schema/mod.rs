@@ -6,6 +6,7 @@
 //! - Dependency graph construction with topological sorting
 //! - Cycle detection for handling circular FK relationships
 
+mod build;
 mod ddl;
 mod graph;
 

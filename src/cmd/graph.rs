@@ -2,16 +2,15 @@
 
 use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::graph::{
-    cyclic_tables, find_cycles, to_dot, to_html, to_json, to_mermaid, Cycle, GraphView, Layout,
+    cyclic_tables, find_cycles, to_dot, to_html, to_json, to_mermaid, GraphView, Layout,
     OutputFormat,
 };
-use crate::parser::{Parser, StatementType};
-use crate::schema::{SchemaBuilder, SchemaGraph};
+use crate::schema::{Schema, SchemaGraph};
 use anyhow::{bail, Result};
 use clap::{Args, ValueHint};
 use glob::Pattern;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -248,30 +247,9 @@ fn build_schema_graph_from_file(
     path: &Path,
     dialect: crate::parser::SqlDialect,
 ) -> Result<SchemaGraph> {
-    let reader: Box<dyn Read> = crate::splitter::open_input(path)?;
-
-    let mut parser = Parser::with_dialect(reader, 64 * 1024, dialect);
-    let mut builder = SchemaBuilder::new();
-
-    while let Some(stmt) = parser.read_statement()? {
-        let stmt_str = String::from_utf8_lossy(&stmt);
-        let (stmt_type, _) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
-
-        match stmt_type {
-            StatementType::CreateTable => {
-                builder.parse_create_table(&stmt_str);
-            }
-            StatementType::AlterTable => {
-                builder.parse_alter_table(&stmt_str);
-            }
-            StatementType::CreateIndex => {
-                builder.parse_create_index(&stmt_str);
-            }
-            _ => {}
-        }
-    }
-
-    Ok(SchemaGraph::from_schema(builder.build()))
+    Ok(SchemaGraph::from_schema(Schema::from_sql_file(
+        path, dialect, None,
+    )?))
 }
 
 /// Render DOT to PNG/SVG/PDF using Graphviz
@@ -310,18 +288,4 @@ fn render_with_graphviz(dot_source: &str, output_path: &Path) -> Result<()> {
 
     eprintln!("Rendered to: {}", output_path.display());
     Ok(())
-}
-
-/// Display cycles in a user-friendly format
-#[allow(dead_code)]
-pub fn display_cycles(cycles: &[Cycle]) {
-    if cycles.is_empty() {
-        eprintln!("No cycles detected in the schema.");
-        return;
-    }
-
-    eprintln!("Cycles detected ({}):", cycles.len());
-    for (i, cycle) in cycles.iter().enumerate() {
-        eprintln!("  {}. {}", i + 1, cycle.display());
-    }
 }

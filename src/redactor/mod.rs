@@ -23,7 +23,7 @@ pub use strategy::StrategyKind;
 
 use crate::parser::postgres_copy::parse_copy_columns;
 use crate::parser::{Parser, SqlDialect, StatementType};
-use crate::schema::{Schema, SchemaBuilder};
+use crate::schema::Schema;
 use ahash::AHashMap;
 use schemars::JsonSchema;
 use std::fs::File;
@@ -95,21 +95,7 @@ impl Redactor {
 
     /// Build schema from input file
     fn build_schema(input: &Path, dialect: SqlDialect) -> anyhow::Result<Schema> {
-        let reader = crate::splitter::open_input(input)?;
-        let mut parser = Parser::with_dialect(reader, 64 * 1024, dialect);
-        let mut builder = SchemaBuilder::new();
-
-        while let Some(stmt) = parser.read_statement()? {
-            let (stmt_type, _table_name) =
-                Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
-
-            if stmt_type == StatementType::CreateTable {
-                let stmt_str = String::from_utf8_lossy(&stmt);
-                builder.parse_create_table(&stmt_str);
-            }
-        }
-
-        Ok(builder.build())
+        Schema::from_sql_file(input, dialect, None)
     }
 
     /// Run the redaction process
