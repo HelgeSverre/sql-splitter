@@ -84,10 +84,14 @@ pub struct EpochMeasurement {
 
 impl EpochMeasurement {
     /// Writer throughput in MB/s (MiB, matching the measurement notes).
+    ///
+    /// A zero-duration epoch is unmeasurable, not infinitely fast (two epoch
+    /// boundaries can land on the same clock tick); it reports `0.0` and
+    /// [`Controller::on_epoch`] discards the epoch entirely.
     pub fn throughput_mbps(&self) -> f64 {
         let secs = self.duration.as_secs_f64();
         if secs <= 0.0 {
-            return f64::INFINITY;
+            return 0.0;
         }
         self.bytes as f64 / (1024.0 * 1024.0) / secs
     }
@@ -147,6 +151,13 @@ pub struct Controller {
     /// Set once a measured epoch shows FAST-class throughput; gates the
     /// deferred writer spawn so slow media is never thrashed at all.
     proven_fast: bool,
+    /// Output is compressed: throughput is measured in *compressed* bytes
+    /// beneath the encoders, so the raw-media thresholds are meaningless and
+    /// a CPU-bound encoder stalls the producer exactly like a slow device.
+    /// The state is frozen at the probe-chosen opening profile, and the SSD
+    /// opening requests its full writer count immediately (compression wants
+    /// cores; a lone encoder could never "prove" 150 MB/s compressed).
+    compressed_output: bool,
 }
 
 impl Controller {
@@ -160,7 +171,16 @@ impl Controller {
             down_streak: 0,
             up_streak: 0,
             proven_fast: false,
+            compressed_output: false,
         }
+    }
+
+    /// Freeze the controller for compressed-output runs: no transitions (the
+    /// epoch signals cannot distinguish a CPU-bound encoder from a slow
+    /// device) and immediate writer growth when the opening state is SSD.
+    pub fn for_compressed_output(mut self) -> Self {
+        self.compressed_output = true;
+        self
     }
 
     /// Current state.
@@ -171,7 +191,9 @@ impl Controller {
     fn decision(&self, transition: Option<ProfileKind>, mbps: f64) -> EpochDecision {
         EpochDecision {
             transition,
-            target_writers: if self.state == ProfileKind::Ssd && self.proven_fast {
+            target_writers: if self.state == ProfileKind::Ssd
+                && (self.proven_fast || self.compressed_output)
+            {
                 self.fast_writers
             } else {
                 1
@@ -184,9 +206,26 @@ impl Controller {
     pub fn on_epoch(&mut self, m: &EpochMeasurement) -> EpochDecision {
         let mbps = m.throughput_mbps();
 
+        // A zero-duration epoch is unmeasurable, not infinitely fast: two
+        // boundary evaluations can land on the same clock tick (coarse or
+        // injected clocks). Discard it entirely — updating `proven_fast` or
+        // either streak from a non-measurement would fake throughput or
+        // reset legitimate hysteresis.
+        if m.duration.is_zero() {
+            return self.decision(None, mbps);
+        }
+
         // First epoch is page-cache warmup: measure nothing from it.
         if !self.warmup_done {
             self.warmup_done = true;
+            return self.decision(None, mbps);
+        }
+
+        // Compressed output: the measurement is compressed MB/s from a
+        // CPU-bound encoder, meaningless against the raw-media thresholds
+        // (and its stall signature mimics a slow device). State stays frozen
+        // at the probe-chosen opening profile.
+        if self.compressed_output {
             return self.decision(None, mbps);
         }
 
@@ -450,6 +489,89 @@ mod tests {
         let d = c.on_epoch(&epoch(400.0, 0.0));
         assert_eq!(d.transition, Some(ProfileKind::Ssd));
         assert_eq!(d.target_writers, 4);
+    }
+
+    /// A zero-duration epoch used to report `f64::INFINITY` MB/s, instantly
+    /// setting `proven_fast` (spurious writer growth on a slow device) or
+    /// counting toward an upgrade streak. It must be discarded instead.
+    #[test]
+    fn zero_duration_epoch_is_discarded_not_infinite() {
+        let zero = EpochMeasurement {
+            bytes: 64 * 1024 * 1024,
+            duration: Duration::ZERO,
+            send_stall: Duration::ZERO,
+        };
+        assert_eq!(zero.throughput_mbps(), 0.0, "unmeasurable, not infinite");
+
+        // SSD opening: a zero-duration epoch must never prove the device
+        // fast — the deferred writer spawn stays deferred.
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
+        c.on_epoch(&epoch(500.0, 0.0)); // warmup
+        assert_eq!(
+            c.on_epoch(&zero).target_writers,
+            1,
+            "zero-duration epoch proved the device fast"
+        );
+
+        // SLOW_SEEK: zero-duration epochs must not count toward an upgrade.
+        let mut c = Controller::new(ProfileKind::SlowSeek, 4);
+        c.on_epoch(&epoch(30.0, 0.1)); // warmup
+        for _ in 0..10 {
+            assert_eq!(c.on_epoch(&zero).transition, None);
+        }
+        assert_eq!(c.state(), ProfileKind::SlowSeek);
+    }
+
+    /// The companion hazard: a degenerate epoch must also not *reset* an
+    /// in-progress downgrade streak (that would block legitimate downgrades
+    /// on genuinely slow media).
+    #[test]
+    fn zero_duration_epoch_does_not_reset_downgrade_streak() {
+        let zero = EpochMeasurement {
+            bytes: 0,
+            duration: Duration::ZERO,
+            send_stall: Duration::ZERO,
+        };
+        let mut c = Controller::new(ProfileKind::Ssd, 4);
+        c.on_epoch(&epoch(500.0, 0.1)); // warmup
+        assert_eq!(c.on_epoch(&epoch(30.0, 0.8)).transition, None); // streak 1
+        assert_eq!(c.on_epoch(&zero).transition, None); // degenerate boundary
+        assert_eq!(
+            c.on_epoch(&epoch(28.0, 0.8)).transition,
+            Some(ProfileKind::SlowSeek),
+            "degenerate epoch reset the downgrade streak"
+        );
+    }
+
+    /// Compressed output: throughput is compressed MB/s from a CPU-bound
+    /// encoder. A lone gzip writer emits ~20-30 MB/s compressed while the
+    /// producer stalls on full channels — exactly the old downgrade
+    /// signature. The frozen controller must neither downgrade nor wait for
+    /// an unreachable 150 MB/s "proof" before growing writers.
+    #[test]
+    fn compressed_output_grows_immediately_and_never_downgrades() {
+        let mut c = Controller::new(ProfileKind::Ssd, 8).for_compressed_output();
+        // Even the warmup decision requests the full compression writer count.
+        assert_eq!(c.on_epoch(&epoch(25.0, 0.9)).target_writers, 8);
+        for _ in 0..20 {
+            let d = c.on_epoch(&epoch(25.0, 0.9));
+            assert_eq!(d.transition, None, "downgraded on CPU-bound compression");
+            assert_eq!(d.target_writers, 8);
+        }
+        assert_eq!(c.state(), ProfileKind::Ssd);
+    }
+
+    /// A slow probe verdict still holds under compressed output: one writer,
+    /// and no upgrade no matter what the (meaningless) numbers say.
+    #[test]
+    fn compressed_output_on_slow_opening_stays_single_writer() {
+        let mut c = Controller::new(ProfileKind::SlowSeek, 8).for_compressed_output();
+        for _ in 0..10 {
+            let d = c.on_epoch(&epoch(400.0, 0.0));
+            assert_eq!(d.transition, None);
+            assert_eq!(d.target_writers, 1);
+        }
+        assert_eq!(c.state(), ProfileKind::SlowSeek);
     }
 
     #[test]
