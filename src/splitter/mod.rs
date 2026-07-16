@@ -319,6 +319,9 @@ impl Splitter {
             )
         };
 
+        // Hidden debugging aid: dump per-epoch measurements to stderr (the
+        // phase-0 "io stats" seam from the design doc).
+        let io_debug = std::env::var("SQL_SPLITTER_IO_DEBUG").is_ok();
         let mut controller = adaptive.then(|| Controller::new(opening_kind, fast_writers));
         let clock: Arc<dyn Clock> = self
             .config
@@ -449,6 +452,16 @@ impl Splitter {
                         epoch_stall = snapshot.send_stall;
                         epoch_start_time = clock.now();
 
+                        if io_debug {
+                            eprintln!(
+                                "epoch: bytes={} dur={:?} stall={:?} tp={:.1} stall_frac={:.2}",
+                                measurement.bytes,
+                                measurement.duration,
+                                measurement.send_stall,
+                                measurement.throughput_mbps(),
+                                measurement.stall_fraction()
+                            );
+                        }
                         let decision = ctrl.on_epoch(&measurement);
                         if let Some(kind) = decision.transition {
                             let new_profile = WriterProfile::for_kind(kind, cores, compressing)
