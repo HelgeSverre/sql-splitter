@@ -1,5 +1,9 @@
 //! Buffered file writers for splitting SQL statements into per-table files.
 
+pub mod profile;
+
+pub use profile::{probe_output_dir, IoProfile, ProfileKind, ProfileValues, WriterProfile};
+
 use ahash::AHashMap;
 use std::collections::hash_map::Entry;
 use std::fs::{self, File};
@@ -7,7 +11,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -126,15 +130,6 @@ impl WriterPool {
 
 use crate::splitter::Compression;
 
-/// Threshold at which a table's staging buffer is shipped to its writer thread.
-const STAGE_FLUSH: usize = 256 * 1024;
-
-/// Cap on the *total* bytes staged across all tables. Individual buffers ship
-/// at [`STAGE_FLUSH`], but a dump with thousands of tables could otherwise
-/// stage up to `tables × STAGE_FLUSH`; crossing this cap flushes every staged
-/// buffer so producer-side memory stays bounded regardless of table count.
-const STAGE_TOTAL_CAP: usize = 32 * 1024 * 1024;
-
 /// A batched write job: pre-assembled bytes for one table.
 struct Chunk {
     table: Arc<str>,
@@ -157,26 +152,144 @@ pub struct WriterStats {
     pub send_stall: Duration,
 }
 
+/// Test-only rate limiter (token bucket) shared by all sinks of one pool.
+///
+/// Enabled by the hidden env `SQL_SPLITTER_TEST_THROTTLE_MBPS`; it makes the
+/// *output device* deterministic for adaptation tests, because the throttle —
+/// not the machine — becomes the limiter. Never active in normal use.
+struct Throttle {
+    bytes_per_sec: f64,
+    start: Instant,
+    written: u64,
+}
+
+impl Throttle {
+    fn from_env() -> Option<Arc<Mutex<Self>>> {
+        std::env::var("SQL_SPLITTER_TEST_THROTTLE_MBPS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&r| r > 0.0)
+            .map(|mbps| {
+                Arc::new(Mutex::new(Self {
+                    bytes_per_sec: mbps * 1024.0 * 1024.0,
+                    start: Instant::now(),
+                    written: 0,
+                }))
+            })
+    }
+
+    /// Account `len` bytes and sleep until the global rate permits them.
+    fn admit(&mut self, len: usize) {
+        self.written += len as u64;
+        let due = self.written as f64 / self.bytes_per_sec;
+        let elapsed = self.start.elapsed().as_secs_f64();
+        if due > elapsed {
+            std::thread::sleep(Duration::from_secs_f64(due - elapsed));
+        }
+    }
+}
+
+/// A `File` that coalesces writes into [`ProfileValues::file_buf`]-sized
+/// operations. On rotational and op-limited media the size of each write
+/// *operation* dominates throughput (64 MB writes measured 2.3× faster than
+/// 256 KB writes on a USB HDD), so the buffer threshold is read from the
+/// shared profile values at every write — an atomic swap by the controller
+/// retunes open files mid-run.
+///
+/// The buffer grows lazily (a cold table that only ever receives 10 KB uses
+/// 10 KB, not a preallocated 64 MB), and writes at or above the threshold
+/// bypass it entirely, so the FAST profile behaves like the previous
+/// unbuffered code.
+struct ProfiledFile {
+    file: File,
+    buf: Vec<u8>,
+    values: Arc<ProfileValues>,
+    throttle: Option<Arc<Mutex<Throttle>>>,
+}
+
+impl ProfiledFile {
+    fn new(file: File, values: Arc<ProfileValues>, throttle: Option<Arc<Mutex<Throttle>>>) -> Self {
+        Self {
+            file,
+            buf: Vec::new(),
+            values,
+            throttle,
+        }
+    }
+
+    fn write_to_file(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if let Some(throttle) = &self.throttle {
+            if let Ok(mut t) = throttle.lock() {
+                t.admit(data.len());
+            }
+        }
+        self.file.write_all(data)
+    }
+
+    fn flush_buf(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            // Split the borrow: move the buffer out so write_to_file can take
+            // &mut self without cloning the data.
+            let pending = std::mem::take(&mut self.buf);
+            let result = self.write_to_file(&pending);
+            // Keep the allocation for the next fill.
+            self.buf = pending;
+            self.buf.clear();
+            result?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for ProfiledFile {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let cap = self.values.file_buf();
+        if self.buf.len() + data.len() > cap {
+            self.flush_buf()?;
+        }
+        if data.len() >= cap {
+            self.write_to_file(data)?;
+        } else {
+            self.buf.extend_from_slice(data);
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_buf()?;
+        self.file.flush()
+    }
+}
+
 /// A per-table output stream: a plain file, or a streaming compressor over one.
 /// Compressing per file keeps every output independent, so the writer pool
 /// still runs fully in parallel — and the compression work parallelizes with it.
+///
+/// Every variant bottoms out in a [`ProfiledFile`], so the physical write size
+/// follows the active profile for compressed output too.
 enum TableSink {
-    Raw(File),
+    Raw(ProfiledFile),
     #[cfg(feature = "compression")]
-    Gzip(flate2::write::GzEncoder<File>),
+    Gzip(flate2::write::GzEncoder<ProfiledFile>),
     #[cfg(feature = "compression")]
-    Bzip2(bzip2::write::BzEncoder<File>),
+    Bzip2(bzip2::write::BzEncoder<ProfiledFile>),
     #[cfg(feature = "compression")]
-    Xz(xz2::write::XzEncoder<File>),
+    Xz(xz2::write::XzEncoder<ProfiledFile>),
     #[cfg(feature = "compression")]
-    Zstd(zstd::stream::write::Encoder<'static, File>),
+    Zstd(zstd::stream::write::Encoder<'static, ProfiledFile>),
 }
 
 impl TableSink {
     /// Create the `<table>.sql[.ext]` file and wrap it in the chosen encoder.
-    fn create(dir: &Path, table: &str, format: Compression) -> std::io::Result<Self> {
+    fn create(
+        dir: &Path,
+        table: &str,
+        format: Compression,
+        values: &Arc<ProfileValues>,
+        throttle: &Option<Arc<Mutex<Throttle>>>,
+    ) -> std::io::Result<Self> {
         let path = dir.join(format!("{}.sql{}", table, format.output_extension()));
-        let file = File::create(&path)?;
+        let file = ProfiledFile::new(File::create(&path)?, Arc::clone(values), throttle.clone());
         Ok(match format {
             Compression::None => TableSink::Raw(file),
             #[cfg(feature = "compression")]
@@ -218,18 +331,19 @@ impl TableSink {
     }
 
     /// Finalize the stream, flushing the compressor's epilogue (required for a
-    /// valid archive — especially zstd, which writes a frame footer).
+    /// valid archive — especially zstd, which writes a frame footer) and then
+    /// draining the coalescing buffer beneath it.
     fn finish(self) -> std::io::Result<()> {
         match self {
             TableSink::Raw(mut f) => f.flush(),
             #[cfg(feature = "compression")]
-            TableSink::Gzip(e) => e.finish().map(|_| ()),
+            TableSink::Gzip(e) => e.finish().and_then(|mut f| f.flush()),
             #[cfg(feature = "compression")]
-            TableSink::Bzip2(e) => e.finish().map(|_| ()),
+            TableSink::Bzip2(e) => e.finish().and_then(|mut f| f.flush()),
             #[cfg(feature = "compression")]
-            TableSink::Xz(e) => e.finish().map(|_| ()),
+            TableSink::Xz(e) => e.finish().and_then(|mut f| f.flush()),
             #[cfg(feature = "compression")]
-            TableSink::Zstd(e) => e.finish().map(|_| ()),
+            TableSink::Zstd(e) => e.finish().and_then(|mut f| f.flush()),
         }
     }
 }
@@ -244,14 +358,21 @@ impl TableSink {
 /// into large chunks keeps per-statement channel overhead negligible.
 ///
 /// Output is byte-identical to the single-threaded [`WriterPool`]: each table's
-/// file is written by exactly one thread, in input order.
+/// file is written by exactly one thread, in input order. A table's shard is
+/// assigned once (on first ship) and never changes, so growing the pool
+/// mid-run ([`grow_to`](Self::grow_to)) preserves per-table ordering by
+/// construction: already-seen tables keep their owner, only tables first seen
+/// after the growth hash across the new shard count.
 pub struct ParallelWriters {
     senders: Vec<SyncSender<Chunk>>,
     handles: Vec<JoinHandle<std::io::Result<()>>>,
     error_flag: Arc<AtomicBool>,
     intern: AHashMap<String, Arc<str>>,
     stage: AHashMap<Arc<str>, Vec<u8>>,
-    /// Total bytes currently staged across all tables (see [`STAGE_TOTAL_CAP`]).
+    /// Sticky table → shard assignment (fixed at first ship).
+    shards: AHashMap<Arc<str>, usize>,
+    /// Total bytes currently staged across all tables (bounded by
+    /// [`ProfileValues::stage_cap`]).
     staged_bytes: usize,
     /// Bytes written to sinks by the writer threads (shared, monotonically
     /// increasing). One atomic add per ~256KB chunk, so contention is nil.
@@ -260,44 +381,77 @@ pub struct ParallelWriters {
     /// Producer-only, so a plain counter; timing happens only on the slow
     /// path (channel already full), keeping the hot path free of clock reads.
     stall_nanos: u64,
+    /// Runtime-swappable profile values shared with the writer threads.
+    values: Arc<ProfileValues>,
+    /// Everything needed to spawn additional writers later (grow-only).
+    output_dir: PathBuf,
+    format: Compression,
+    capacity: usize,
+    throttle: Option<Arc<Mutex<Throttle>>>,
 }
 
 impl ParallelWriters {
     /// Spawn `num_writers` writer threads targeting `output_dir`, compressing
     /// each per-table file with `format`. `capacity` is the per-shard channel
-    /// depth (chunks in flight).
+    /// depth (chunks in flight); `values` carries the active profile's
+    /// staging/buffer sizes and may be retuned mid-run by the controller.
     pub fn new(
         output_dir: PathBuf,
         num_writers: usize,
         capacity: usize,
         format: Compression,
+        values: Arc<ProfileValues>,
     ) -> std::io::Result<Self> {
         fs::create_dir_all(&output_dir)?;
-        let n = num_writers.max(1);
-        let error_flag = Arc::new(AtomicBool::new(false));
-        let bytes_acked = Arc::new(AtomicU64::new(0));
-        let mut senders = Vec::with_capacity(n);
-        let mut handles = Vec::with_capacity(n);
-        for _ in 0..n {
-            let (tx, rx) = sync_channel::<Chunk>(capacity.max(1));
-            senders.push(tx);
-            let dir = output_dir.clone();
-            let ef = Arc::clone(&error_flag);
-            let acked = Arc::clone(&bytes_acked);
-            handles.push(std::thread::spawn(move || {
-                writer_loop(rx, dir, ef, format, acked)
-            }));
-        }
-        Ok(Self {
-            senders,
-            handles,
-            error_flag,
+        let mut writers = Self {
+            senders: Vec::new(),
+            handles: Vec::new(),
+            error_flag: Arc::new(AtomicBool::new(false)),
             intern: AHashMap::new(),
             stage: AHashMap::new(),
+            shards: AHashMap::new(),
             staged_bytes: 0,
-            bytes_acked,
+            bytes_acked: Arc::new(AtomicU64::new(0)),
             stall_nanos: 0,
-        })
+            values,
+            output_dir,
+            format,
+            capacity: capacity.max(1),
+            throttle: Throttle::from_env(),
+        };
+        for _ in 0..num_writers.max(1) {
+            writers.spawn_writer();
+        }
+        Ok(writers)
+    }
+
+    fn spawn_writer(&mut self) {
+        let (tx, rx) = sync_channel::<Chunk>(self.capacity);
+        self.senders.push(tx);
+        let dir = self.output_dir.clone();
+        let ef = Arc::clone(&self.error_flag);
+        let acked = Arc::clone(&self.bytes_acked);
+        let values = Arc::clone(&self.values);
+        let throttle = self.throttle.clone();
+        let format = self.format;
+        self.handles.push(std::thread::spawn(move || {
+            writer_loop(rx, dir, ef, format, acked, values, throttle)
+        }));
+    }
+
+    /// Number of writer threads currently running.
+    pub fn writer_count(&self) -> usize {
+        self.senders.len()
+    }
+
+    /// Grow the pool to `n` writer threads (never shrinks — a table's owner
+    /// thread must not change mid-run, see the type-level docs). Used by the
+    /// adaptive controller's deferred writer spawn: auto mode opens at W=1
+    /// and only pays for parallelism once the device has proven fast.
+    pub fn grow_to(&mut self, n: usize) {
+        while self.senders.len() < n {
+            self.spawn_writer();
+        }
     }
 
     /// Snapshot the pipeline's instrumentation counters (monotonic since
@@ -327,16 +481,18 @@ impl ParallelWriters {
                 a
             }
         };
+        let flush_chunk = self.values.flush_chunk();
+        let stage_cap = self.values.stage_cap();
         let buf = self.stage.entry(Arc::clone(&arc)).or_default();
         buf.extend_from_slice(stmt);
         buf.extend_from_slice(suffix);
         buf.push(b'\n');
         self.staged_bytes += stmt.len() + suffix.len() + 1;
-        if buf.len() >= STAGE_FLUSH {
+        if buf.len() >= flush_chunk {
             let data = std::mem::take(buf);
             self.staged_bytes -= data.len();
             self.ship(&arc, data);
-        } else if self.staged_bytes >= STAGE_TOTAL_CAP {
+        } else if self.staged_bytes >= stage_cap {
             // Many tables, each under the per-table threshold: flush everything
             // so total staging memory stays bounded by the cap.
             let stage = std::mem::take(&mut self.stage);
@@ -350,7 +506,12 @@ impl ParallelWriters {
     }
 
     fn ship(&mut self, table: &Arc<str>, data: Vec<u8>) {
-        let shard = shard_index(table, self.senders.len());
+        // Sticky assignment: hash against the shard count at first ship, then
+        // stay put forever — this is what makes grow_to() ordering-safe.
+        let shard = match self.shards.entry(Arc::clone(table)) {
+            Entry::Occupied(e) => *e.get(),
+            Entry::Vacant(e) => *e.insert(shard_index(table, self.senders.len())),
+        };
         let chunk = Chunk {
             table: Arc::clone(table),
             data,
@@ -420,9 +581,11 @@ fn writer_loop(
     error_flag: Arc<AtomicBool>,
     format: Compression,
     bytes_acked: Arc<AtomicU64>,
+    values: Arc<ProfileValues>,
+    throttle: Option<Arc<Mutex<Throttle>>>,
 ) -> std::io::Result<()> {
-    // Chunks are already ~256KB, so write straight to the sink (each write is a
-    // large syscall / compressor input) with no extra buffering layer.
+    // Chunks arrive pre-batched at the profile's flush size; the ProfiledFile
+    // beneath each sink coalesces them further up to the profile's file_buf.
     let mut sinks: AHashMap<Arc<str>, TableSink> = AHashMap::new();
     let mut first_err: Option<std::io::Error> = None;
 
@@ -432,14 +595,16 @@ fn writer_loop(
         }
         let sink = match sinks.entry(Arc::clone(&chunk.table)) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => match TableSink::create(&output_dir, &chunk.table, format) {
-                Ok(s) => e.insert(s),
-                Err(err) => {
-                    error_flag.store(true, Ordering::Relaxed);
-                    first_err = Some(err);
-                    continue;
+            Entry::Vacant(e) => {
+                match TableSink::create(&output_dir, &chunk.table, format, &values, &throttle) {
+                    Ok(s) => e.insert(s),
+                    Err(err) => {
+                        error_flag.store(true, Ordering::Relaxed);
+                        first_err = Some(err);
+                        continue;
+                    }
                 }
-            },
+            }
         };
         match sink.write_all(&chunk.data) {
             Ok(()) => {

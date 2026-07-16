@@ -1,12 +1,13 @@
 use crate::parser::{determine_buffer_size, ContentFilter, Parser, SqlDialect, StatementType};
 use crate::progress::ProgressReader;
-use crate::writer::ParallelWriters;
+use crate::writer::{IoProfile, ParallelWriters, ProfileKind, ProfileValues, WriterProfile};
 use ahash::AHashSet;
 use anyhow::Context;
 use serde::Serialize;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Statistics from a split operation.
 #[derive(Serialize)]
@@ -36,6 +37,8 @@ pub struct SplitterConfig {
     pub content_filter: ContentFilter,
     /// Per-table output compression (default `None` → plain `.sql`).
     pub output_compression: Compression,
+    /// I/O profile for output writing (default `Auto`).
+    pub io_profile: IoProfile,
 }
 
 /// Compression format detected from file extension
@@ -176,6 +179,14 @@ impl Splitter {
         self
     }
 
+    /// Choose the I/O profile for output writing (`--io-profile`). Explicit
+    /// profiles pin the writer configuration; `Auto` (the default) probes the
+    /// output device and adapts at runtime.
+    pub fn with_io_profile(mut self, profile: IoProfile) -> Self {
+        self.config.io_profile = profile;
+        self
+    }
+
     pub fn split(mut self) -> anyhow::Result<Stats> {
         let file = File::open(&self.input_file)
             .with_context(|| format!("Failed to open input file: {:?}", self.input_file))?;
@@ -208,32 +219,37 @@ impl Splitter {
 
         let mut parser = Parser::with_dialect(reader, buffer_size, dialect);
 
-        // Parallel, pipelined writers (skipped for dry runs). Writer count is
-        // overridable with SQL_SPLITTER_WRITERS; otherwise use all cores when
-        // compressing (CPU-bound) and min(4, cores) for raw writes (I/O-bound).
+        // Parallel, pipelined writers (skipped for dry runs), configured by
+        // the selected I/O profile (see docs/features/ADAPTIVE_IO_PROFILES.md).
+        // Precedence: SQL_SPLITTER_WRITERS / SQL_SPLITTER_WRITE_BUF env vars >
+        // explicit --io-profile > auto.
         let out_compression = self.config.output_compression;
+        let compressing = out_compression != Compression::None;
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let opening_kind = self.config.io_profile.pinned().unwrap_or(ProfileKind::Fast);
+        let profile =
+            WriterProfile::for_kind(opening_kind, cores, compressing).with_env_overrides();
         let mut writers = if self.config.dry_run {
             None
         } else {
-            let cores = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
-            let num_writers = std::env::var("SQL_SPLITTER_WRITERS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|&n| n >= 1)
-                .unwrap_or_else(|| {
-                    if out_compression == Compression::None {
-                        cores.min(4)
-                    } else {
-                        cores
-                    }
-                });
+            // Channel depth scales with chunk size so in-flight bytes stay in
+            // the same ballpark as the profile's stage cap: FAST keeps the
+            // historical 64 × 256KB; the slow profiles get fewer, bigger slots.
+            let capacity = (profile.stage_cap / profile.flush_chunk.max(1)).clamp(4, 64);
+            let values = Arc::new(ProfileValues::new(&profile));
             Some(
-                ParallelWriters::new(self.output_dir.clone(), num_writers, 64, out_compression)
-                    .with_context(|| {
-                        format!("Failed to create output directory: {:?}", self.output_dir)
-                    })?,
+                ParallelWriters::new(
+                    self.output_dir.clone(),
+                    profile.writers,
+                    capacity,
+                    out_compression,
+                    values,
+                )
+                .with_context(|| {
+                    format!("Failed to create output directory: {:?}", self.output_dir)
+                })?,
             )
         };
 
