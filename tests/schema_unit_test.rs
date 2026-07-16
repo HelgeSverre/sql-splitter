@@ -265,6 +265,114 @@ mod ddl_tests {
     }
 
     #[test]
+    fn mysql_auto_increment_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE `widgets` (`id` int NOT NULL AUTO_INCREMENT PRIMARY KEY);",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn sqlite_autoincrement_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT);");
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn postgres_serial_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE widgets (id SERIAL PRIMARY KEY);");
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn postgres_bigserial_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE widgets (id BIGSERIAL PRIMARY KEY);");
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn postgres_generated_always_as_identity_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE widgets (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY);",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        let id = table.get_column("id").unwrap();
+        assert!(id.is_identity);
+        // This is identity, not a computed/generated column.
+        assert!(!id.is_generated);
+    }
+
+    #[test]
+    fn table_level_unique_constraint_marks_column_and_is_recorded() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(255), UNIQUE (email));",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("users").expect("table");
+
+        assert!(table.get_column("email").unwrap().is_unique);
+        assert_eq!(table.unique_constraints.len(), 1);
+        assert_eq!(
+            table.unique_constraints[0].columns,
+            vec!["email".to_string()]
+        );
+    }
+
+    #[test]
+    fn table_level_check_constraint_preserves_raw_expression_with_nested_parens_and_comma() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE orders (\
+             qty INT, \
+             price DECIMAL(10,2), \
+             CONSTRAINT chk_price CHECK (price > 0 AND (qty > 0 OR qty IS NULL)));",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("orders").expect("table");
+
+        assert_eq!(table.check_constraints.len(), 1);
+        assert_eq!(
+            table.check_constraints[0].expression,
+            "price > 0 AND (qty > 0 OR qty IS NULL)"
+        );
+    }
+
+    #[test]
+    fn collate_populates_column_collation() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE users (name VARCHAR(255) COLLATE utf8mb4_unicode_ci);",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("users").expect("table");
+
+        assert_eq!(
+            table.get_column("name").unwrap().collation.as_deref(),
+            Some("utf8mb4_unicode_ci")
+        );
+    }
+
+    #[test]
     fn test_split_table_body() {
         use sql_splitter::schema::split_table_body;
 
