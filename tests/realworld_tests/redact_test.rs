@@ -219,7 +219,7 @@ fn all_redact_tests() {
             .null_patterns(vec!["*.password".to_string()])
             .build();
 
-        match config.and_then(|c| Redactor::new(c)) {
+        match config.and_then(Redactor::new) {
             Ok(mut redactor) => match redactor.run() {
                 Ok(stats) => {
                     eprintln!("✓ {} ({} redacted)", case.name, stats.columns_redacted);

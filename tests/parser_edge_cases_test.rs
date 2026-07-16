@@ -115,7 +115,7 @@ mod read_statement_tests {
 
         let stmt = parser.read_statement().unwrap().unwrap();
         // Note: \; is not a standard escape, but backslash escapes the next char
-        assert!(stmt.len() > 0);
+        assert!(!stmt.is_empty());
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod read_statement_tests {
         let stmt = parser.read_statement().unwrap().unwrap();
         // Parser may split early at the semicolon inside backticks
         // This test documents current behavior
-        assert!(stmt.len() > 0);
+        assert!(!stmt.is_empty());
     }
 
     // A.3 Multi-line and formatting
@@ -179,7 +179,7 @@ mod read_statement_tests {
 
         let stmt1 = parser.read_statement().unwrap().unwrap();
         // Current behavior: splits at semicolon inside comment
-        assert!(stmt1.len() > 0);
+        assert!(!stmt1.is_empty());
     }
 
     // A.5 Truncation, malformed strings, EOF
@@ -239,7 +239,7 @@ mod read_statement_tests {
         let mut parser = Parser::new(&sql[..], 1024);
 
         let stmt = parser.read_statement().unwrap().unwrap();
-        assert!(stmt.len() > 0);
+        assert!(!stmt.is_empty());
     }
 
     #[test]
@@ -891,7 +891,7 @@ mod mysql_tests {
         let mut parser = Parser::with_dialect(&sql[..], 1024, SqlDialect::MySql);
 
         let mut count = 0;
-        while let Some(_) = parser.read_statement().unwrap() {
+        while parser.read_statement().unwrap().is_some() {
             count += 1;
         }
         assert_eq!(count, 3);
@@ -1049,7 +1049,7 @@ mod cross_dialect_tests {
         let mut parser = Parser::new(&sql[..], 1024);
 
         let mut count = 0;
-        while let Some(_) = parser.read_statement().unwrap() {
+        while parser.read_statement().unwrap().is_some() {
             count += 1;
         }
         // Should handle empty statements between semicolons

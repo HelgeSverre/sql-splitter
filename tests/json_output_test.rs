@@ -50,7 +50,7 @@ INSERT INTO orders VALUES (1, 1);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("input_file").is_some());
@@ -124,7 +124,7 @@ INSERT INTO orders VALUES (1), (2);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("input_file").is_some());
@@ -182,7 +182,7 @@ fn test_merge_json_output() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("input_dir").is_some());
@@ -255,7 +255,7 @@ INSERT INTO users VALUES (5, 'Eve');
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("input_file").is_some());
@@ -336,7 +336,7 @@ INSERT INTO users VALUES (3, 2, 'Charlie');
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("input_file").is_some());
@@ -385,7 +385,7 @@ INSERT INTO `users` VALUES (1, 'Alice');
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("input_file").is_some());
@@ -450,7 +450,7 @@ INSERT INTO users VALUES (2, 'Bob');
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect(&format!("Failed to parse JSON: {}", stdout));
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
 
     // Verify structure
     assert!(json.get("dialect").is_some());

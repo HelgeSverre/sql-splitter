@@ -693,7 +693,7 @@ fn test_validate_multiple_fk_violations() {
         .iter()
         .filter(|i| i.code == "FK_MISSING_PARENT")
         .collect();
-    assert!(fk_issues.len() >= 1, "Should detect FK violations");
+    assert!(!fk_issues.is_empty(), "Should detect FK violations");
 }
 
 #[test]
