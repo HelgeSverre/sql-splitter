@@ -2,11 +2,52 @@
 
 use crate::convert::{self, ConvertConfig, ConvertStats};
 use crate::parser::SqlDialect;
+use clap::{Args, ValueHint};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 
+use super::common::{BEHAVIOR, INPUT_OUTPUT, MODE, OUTPUT_FORMAT};
 use super::glob_util::{expand_file_pattern, MultiFileResult};
+
+#[derive(Args)]
+pub struct ConvertArgs {
+    /// Input SQL file or glob pattern
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    file: PathBuf,
+
+    /// Output SQL file or directory (default: stdout)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    output: Option<PathBuf>,
+
+    /// Source dialect (auto-detected if omitted)
+    #[arg(long, help_heading = MODE)]
+    from: Option<String>,
+
+    /// Target dialect (required)
+    #[arg(long, help_heading = MODE)]
+    to: String,
+
+    /// Fail on unsupported features instead of warning
+    #[arg(long, help_heading = BEHAVIOR)]
+    strict: bool,
+
+    /// Show progress bar
+    #[arg(short, long, help_heading = OUTPUT_FORMAT)]
+    progress: bool,
+
+    /// Output results as JSON
+    #[arg(long, help_heading = OUTPUT_FORMAT)]
+    json: bool,
+
+    /// Preview without writing files
+    #[arg(long, help_heading = BEHAVIOR)]
+    dry_run: bool,
+
+    /// Stop on first error (for glob patterns)
+    #[arg(long, help_heading = BEHAVIOR)]
+    fail_fast: bool,
+}
 
 /// JSON output for single file convert
 #[derive(Serialize, JsonSchema)]
@@ -72,18 +113,19 @@ pub(crate) struct ConvertFileResult {
     error: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    file: PathBuf,
-    output: Option<PathBuf>,
-    from_dialect: Option<String>,
-    to_dialect: String,
-    strict: bool,
-    progress: bool,
-    dry_run: bool,
-    fail_fast: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+pub fn run(args: ConvertArgs) -> anyhow::Result<()> {
+    let ConvertArgs {
+        file,
+        output,
+        from: from_dialect,
+        to: to_dialect,
+        strict,
+        progress,
+        json,
+        dry_run,
+        fail_fast,
+    } = args;
+    let output = super::common::dash_is_stdout(output);
     let expanded = expand_file_pattern(&file)?;
 
     if expanded.files.len() == 1 {

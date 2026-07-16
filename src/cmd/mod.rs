@@ -151,43 +151,7 @@ pub enum Commands {
   sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
   sql-splitter convert dump.sql --from mysql --to sqlite -o sqlite.sql
   sql-splitter convert mysql.sql --to postgres | psql mydb")]
-    Convert {
-        /// Input SQL file or glob pattern
-        #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        file: PathBuf,
-
-        /// Output SQL file or directory (default: stdout)
-        #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
-        output: Option<PathBuf>,
-
-        /// Source dialect (auto-detected if omitted)
-        #[arg(long, help_heading = MODE)]
-        from: Option<String>,
-
-        /// Target dialect (required)
-        #[arg(long, help_heading = MODE)]
-        to: String,
-
-        /// Fail on unsupported features instead of warning
-        #[arg(long, help_heading = BEHAVIOR)]
-        strict: bool,
-
-        /// Show progress bar
-        #[arg(short, long, help_heading = OUTPUT_FORMAT)]
-        progress: bool,
-
-        /// Output results as JSON
-        #[arg(long, help_heading = OUTPUT_FORMAT)]
-        json: bool,
-
-        /// Preview without writing files
-        #[arg(long, help_heading = BEHAVIOR)]
-        dry_run: bool,
-
-        /// Stop on first error (for glob patterns)
-        #[arg(long, help_heading = BEHAVIOR)]
-        fail_fast: bool,
-    },
+    Convert(convert::ConvertArgs),
 
     /// Validate SQL dump syntax, encoding, and data integrity
     #[command(visible_alias = "val")]
@@ -346,27 +310,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         ),
         Commands::Sample(args) => sample::run(args),
         Commands::Shard(args) => shard::run(args),
-        Commands::Convert {
-            file,
-            output,
-            from,
-            to,
-            strict,
-            progress,
-            dry_run,
-            fail_fast,
-            json,
-        } => convert::run(
-            file,
-            dash_is_stdout(output),
-            from,
-            to,
-            strict,
-            progress,
-            dry_run,
-            fail_fast,
-            json,
-        ),
+        Commands::Convert(args) => convert::run(args),
         Commands::Validate(args) => validate::run(args),
         Commands::Diff(args) => diff::run(args),
         Commands::Redact(args) => redact::run(args),
