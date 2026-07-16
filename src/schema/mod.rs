@@ -111,12 +111,24 @@ pub struct Column {
     pub name: String,
     /// Column type
     pub col_type: ColumnType,
+    /// Raw SQL type as written in the DDL (e.g. `"VARCHAR(255)"`)
+    pub source_type: String,
     /// Position in table (0-indexed)
     pub ordinal: ColumnId,
     /// Whether this column is part of the primary key
     pub is_primary_key: bool,
     /// Whether this column allows NULL values
     pub is_nullable: bool,
+    /// Whether this column has a single-column UNIQUE constraint
+    pub is_unique: bool,
+    /// Raw DEFAULT expression, if any (e.g. `"'active'"`, `"(NOW())"`)
+    pub default_sql: Option<String>,
+    /// Whether this is a generated/computed column (`GENERATED ALWAYS AS (...)`)
+    pub is_generated: bool,
+    /// Whether this column is an auto-generated identity/auto-increment column
+    pub is_identity: bool,
+    /// Explicit column collation, if declared (`COLLATE ...`)
+    pub collation: Option<String>,
 }
 
 /// Index definition
@@ -130,6 +142,24 @@ pub struct IndexDef {
     pub is_unique: bool,
     /// Index type (BTREE, HASH, GIN, etc.)
     pub index_type: Option<String>,
+}
+
+/// Table-level UNIQUE constraint, covering one or more columns
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueConstraint {
+    /// Constraint name, if named explicitly
+    pub name: Option<String>,
+    /// Columns covered by the constraint, in declaration order
+    pub columns: Vec<String>,
+}
+
+/// CHECK constraint, with its raw SQL expression preserved verbatim
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckConstraint {
+    /// Constraint name, if named explicitly
+    pub name: Option<String>,
+    /// Raw CHECK expression (without the enclosing parentheses)
+    pub expression: String,
 }
 
 /// Foreign key constraint definition
@@ -162,6 +192,10 @@ pub struct TableSchema {
     pub primary_key: Vec<ColumnId>,
     /// Foreign key constraints
     pub foreign_keys: Vec<ForeignKey>,
+    /// Table-level UNIQUE constraints (single- and multi-column)
+    pub unique_constraints: Vec<UniqueConstraint>,
+    /// CHECK constraints (table-level and inline column-level)
+    pub check_constraints: Vec<CheckConstraint>,
     /// Index definitions
     pub indexes: Vec<IndexDef>,
     /// Raw CREATE TABLE statement (for output)
@@ -177,6 +211,8 @@ impl TableSchema {
             columns: Vec::new(),
             primary_key: Vec::new(),
             foreign_keys: Vec::new(),
+            unique_constraints: Vec::new(),
+            check_constraints: Vec::new(),
             indexes: Vec::new(),
             create_statement: None,
         }

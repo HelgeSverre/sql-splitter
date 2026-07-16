@@ -45,16 +45,28 @@ mod mod_tests {
         table.columns.push(Column {
             name: "id".to_string(),
             col_type: ColumnType::Int,
+            source_type: "INT".to_string(),
             ordinal: ColumnId(0),
             is_primary_key: true,
             is_nullable: false,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         });
         table.columns.push(Column {
             name: "email".to_string(),
             col_type: ColumnType::Text,
+            source_type: "VARCHAR(255)".to_string(),
             ordinal: ColumnId(1),
             is_primary_key: false,
             is_nullable: true,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         });
         table.primary_key = vec![ColumnId(0)];
 
@@ -224,6 +236,35 @@ mod ddl_tests {
     }
 
     #[test]
+    fn parse_column_preserves_generation_evidence() {
+        let mut builder = SchemaBuilder::new();
+        builder
+            .parse_create_table(
+                "CREATE TABLE users (\
+                 id BIGINT IDENTITY(1,1) PRIMARY KEY, \
+                 email VARCHAR(255) NOT NULL UNIQUE, \
+                 state VARCHAR(20) DEFAULT 'active', \
+                 slug VARCHAR(255) GENERATED ALWAYS AS (LOWER(email)) STORED);",
+            )
+            .unwrap();
+        let schema = builder.build();
+        let table = schema.get_table("users").expect("table");
+
+        let id = table.get_column("id").unwrap();
+        assert_eq!(id.source_type, "BIGINT");
+        assert!(id.is_identity);
+
+        let email = table.get_column("email").unwrap();
+        assert_eq!(email.source_type, "VARCHAR(255)");
+        assert!(email.is_unique);
+
+        let state = table.get_column("state").unwrap();
+        assert_eq!(state.default_sql.as_deref(), Some("'active'"));
+
+        assert!(table.get_column("slug").unwrap().is_generated);
+    }
+
+    #[test]
     fn test_split_table_body() {
         use sql_splitter::schema::split_table_body;
 
@@ -265,9 +306,15 @@ mod graph_tests {
         users.columns.push(Column {
             name: "company_id".to_string(),
             col_type: ColumnType::Int,
+            source_type: "INT".to_string(),
             ordinal: ColumnId(1),
             is_primary_key: false,
             is_nullable: true,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         });
         users.foreign_keys.push(ForeignKey {
             name: None,

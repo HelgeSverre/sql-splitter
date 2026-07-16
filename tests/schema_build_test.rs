@@ -2,6 +2,7 @@
 
 use sql_splitter::parser::{SqlDialect, StatementType};
 use sql_splitter::schema::{Schema, SchemaBuilder};
+use sql_splitter::synthetic::schema::PortableSchema;
 use std::io::Write;
 
 fn write_temp_sql(content: &str) -> tempfile::NamedTempFile {
@@ -85,6 +86,35 @@ fn ingest_dispatches_only_ddl() {
     let schema = builder.build();
     assert_eq!(schema.len(), 1);
     assert!(schema.get_table("t").is_some());
+}
+
+#[test]
+fn portable_schema_keeps_order_and_raw_ddl() {
+    let sql = r#"
+CREATE TABLE users (
+  id INT NOT NULL,
+  email VARCHAR(255),
+  PRIMARY KEY (id)
+);
+"#;
+    let f = write_temp_sql(sql);
+
+    let schema = Schema::from_sql_file(f.path(), SqlDialect::MySql, None).unwrap();
+    let portable = PortableSchema::from_runtime(&schema, SqlDialect::MySql);
+    let users = portable.tables.get("users").unwrap();
+    assert_eq!(
+        users
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "email"]
+    );
+    assert!(users
+        .create_statement
+        .as_deref()
+        .unwrap()
+        .contains("CREATE TABLE"));
 }
 
 #[test]
