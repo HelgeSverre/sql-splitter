@@ -1042,3 +1042,302 @@ fn every_brief_catalog_kind_is_registered() {
         "the brief's catalog has exactly 54 kinds"
     );
 }
+
+// --- Task 13: relational execution engine -----------------------------------
+
+use sql_splitter::generate::{
+    CompileOptions, GeneratedRow, GenerationEngine, GenerationPlan, ModelCompiler, PlannedTable,
+    RowSink,
+};
+use sql_splitter::synthetic::SyntheticFile;
+use std::collections::HashSet;
+
+/// A [`RowSink`] that records table order and every generated row, so tests can
+/// assert on referential integrity and per-column value sets.
+#[derive(Default)]
+struct CollectingSink {
+    order: Vec<String>,
+    columns: BTreeMap<String, Vec<String>>,
+    rows: BTreeMap<String, Vec<Vec<GeneratedValue>>>,
+}
+
+impl RowSink for CollectingSink {
+    fn begin_table(&mut self, table: &PlannedTable) -> Result<(), GenerateError> {
+        self.order.push(table.name.clone());
+        self.columns.insert(
+            table.name.clone(),
+            table
+                .columns
+                .iter()
+                .map(|c| c.schema.name.clone())
+                .collect(),
+        );
+        self.rows.insert(table.name.clone(), Vec::new());
+        Ok(())
+    }
+
+    fn write_row(&mut self, table: &PlannedTable, row: &GeneratedRow) -> Result<(), GenerateError> {
+        self.rows
+            .get_mut(&table.name)
+            .expect("table was begun before rows were written")
+            .push(row.values.clone());
+        Ok(())
+    }
+
+    fn end_table(&mut self, _table: &PlannedTable) -> Result<(), GenerateError> {
+        Ok(())
+    }
+}
+
+impl CollectingSink {
+    fn table_order(&self) -> Vec<&str> {
+        self.order.iter().map(String::as_str).collect()
+    }
+
+    fn column_index(&self, table: &str, column: &str) -> usize {
+        self.columns[table]
+            .iter()
+            .position(|c| c == column)
+            .unwrap_or_else(|| panic!("no column `{column}` in table `{table}`"))
+    }
+
+    fn values<'a>(
+        &'a self,
+        table: &str,
+        column: &str,
+    ) -> impl Iterator<Item = &'a GeneratedValue> + 'a {
+        let idx = self.column_index(table, column);
+        self.rows[table].iter().map(move |row| &row[idx])
+    }
+
+    fn integers(&self, table: &str, column: &str) -> Vec<i128> {
+        self.values(table, column)
+            .map(|v| v.as_integer().expect("integer column"))
+            .collect()
+    }
+}
+
+/// Parse and compile a model to a plan against the standard registry.
+fn compile(model_yaml: &str) -> GenerationPlan {
+    let model = SyntheticFile::parse_str(model_yaml)
+        .expect("valid model YAML")
+        .into_model()
+        .expect("document is a model");
+    ModelCompiler::standard()
+        .compile(model, CompileOptions::default())
+        .expect("model compiles cleanly")
+}
+
+/// A `customers` (10 rows) → `orders` (fan-out 4 = 40 rows) model whose FK is a
+/// generation relationship carrying an optional assignment `distribution`.
+fn customers_orders(seed: u64, distribution: Option<&str>) -> String {
+    let dist = distribution
+        .map(|d| format!(", distribution: {d}"))
+        .unwrap_or_default();
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  customers:
+    rows: {{ kind: fixed, count: 10 }}
+    schema:
+      name: customers
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 40
+      distribution: {{ kind: fixed, mean: 4.0, min: 1.0, max: 1000000.0 }}
+    schema:
+      name: orders
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: customer_id, type: bigint, nullable: false }}
+    relationships:
+      - {{ columns: [customer_id], references: {{ table: customers, columns: [id] }}{dist} }}
+"#
+    )
+}
+
+fn run_customer_ids(seed: u64, distribution: Option<&str>) -> Vec<i128> {
+    let plan = compile(&customers_orders(seed, distribution));
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+    sink.integers("orders", "customer_id")
+}
+
+#[test]
+fn engine_generates_parent_before_child_with_valid_foreign_keys() {
+    let plan = compile(&customers_orders(7, None));
+    let mut sink = CollectingSink::default();
+    let report = GenerationEngine::new(plan).run(&mut sink).unwrap();
+
+    assert_eq!(report.rows_written, 50);
+    assert_eq!(sink.table_order(), ["customers", "orders"]);
+
+    let customer_ids: HashSet<i128> = sink.integers("customers", "id").into_iter().collect();
+    assert_eq!(customer_ids.len(), 10);
+    assert!(sink
+        .integers("orders", "customer_id")
+        .iter()
+        .all(|id| customer_ids.contains(id)));
+}
+
+#[test]
+fn sequential_distribution_assigns_parent_by_child_row_modulo_parent_count() {
+    let ids = run_customer_ids(7, Some("sequential"));
+    assert_eq!(ids.len(), 40);
+    for (row, id) in ids.iter().enumerate() {
+        // Dense parent ids are 1..=10, so row r references parent (r % 10) + 1.
+        assert_eq!(*id, 1 + (row as i128 % 10));
+    }
+}
+
+#[test]
+fn uniform_distribution_produces_valid_and_reproducible_keys() {
+    let a = run_customer_ids(7, Some("uniform"));
+    let b = run_customer_ids(7, Some("uniform"));
+    assert_eq!(a, b, "same seed must reproduce the same assignment");
+    assert!(a.iter().all(|id| (1..=10).contains(id)));
+    // Uniform spreads across parents rather than collapsing to one.
+    assert!(a.iter().any(|id| *id != a[0]));
+}
+
+#[test]
+fn weighted_distribution_is_valid_reproducible_and_skewed() {
+    let a = run_customer_ids(7, Some("weighted"));
+    let b = run_customer_ids(7, Some("weighted"));
+    assert_eq!(
+        a, b,
+        "same seed must reproduce the same weighted assignment"
+    );
+    assert!(a.iter().all(|id| (1..=10).contains(id)));
+
+    // A bounded histogram concentrates mass: the busiest parent takes far more
+    // than the uniform expectation of 4 of the 40 children.
+    let mut counts = [0usize; 11];
+    for id in &a {
+        counts[*id as usize] += 1;
+    }
+    let max = *counts.iter().max().unwrap();
+    assert!(max >= 8, "weighted assignment is not skewed: {counts:?}");
+}
+
+#[test]
+fn composite_key_selection_is_atomic_across_components() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  cells:
+    rows: { kind: fixed, count: 6 }
+    schema:
+      name: cells
+      columns:
+        - { name: x, type: bigint, nullable: false, primary_key: true }
+        - { name: y, type: bigint, nullable: false, primary_key: true }
+  readings:
+    rows:
+      kind: relation.children
+      parent: cells
+      count: 18
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: readings
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: cell_x, type: bigint, nullable: false }
+        - { name: cell_y, type: bigint, nullable: false }
+    relationships:
+      - { columns: [cell_x, cell_y], references: { table: cells, columns: [x, y] } }
+"#;
+    let plan = compile(model);
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+
+    let parent_pairs: HashSet<(i128, i128)> = sink
+        .integers("cells", "x")
+        .into_iter()
+        .zip(sink.integers("cells", "y"))
+        .collect();
+    let child_x = sink.integers("readings", "cell_x");
+    let child_y = sink.integers("readings", "cell_y");
+    assert_eq!(child_x.len(), 18);
+    for (x, y) in child_x.iter().zip(&child_y) {
+        // Both components come from one chosen parent row, so the pair always
+        // exists among the parents. Independent per-component choice would break
+        // this because the parent pairs are the diagonal (x == y).
+        assert!(
+            parent_pairs.contains(&(*x, *y)),
+            "child pair ({x}, {y}) is not a parent row"
+        );
+        assert_eq!(x, y, "composite components must share one parent row index");
+    }
+}
+
+#[test]
+fn nullable_foreign_key_mixes_nulls_and_valid_keys() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  customers:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 40
+      distribution: { kind: fixed, mean: 4.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: true }
+    columns:
+      customer_id:
+        generator: { kind: relation.foreign_key, relationship: fk_cust, null_rate: 0.5 }
+    relationships:
+      - { name: fk_cust, columns: [customer_id], references: { table: customers, columns: [id] } }
+"#;
+    let plan = compile(model);
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+
+    let values: Vec<&GeneratedValue> = sink.values("orders", "customer_id").collect();
+    let nulls = values.iter().filter(|v| v.is_null()).count();
+    assert!(
+        nulls > 0 && nulls < values.len(),
+        "expected a mix of nulls and keys, got {nulls} nulls of {}",
+        values.len()
+    );
+    assert!(values
+        .iter()
+        .filter(|v| !v.is_null())
+        .all(|v| (1..=10).contains(&v.as_integer().unwrap())));
+}
+
+#[test]
+fn same_seed_reproduces_and_different_seed_diverges() {
+    assert_eq!(
+        run_customer_ids(7, Some("uniform")),
+        run_customer_ids(7, Some("uniform"))
+    );
+    assert_ne!(
+        run_customer_ids(7, Some("uniform")),
+        run_customer_ids(9, Some("uniform"))
+    );
+}

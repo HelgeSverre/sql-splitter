@@ -10,6 +10,7 @@
 //! is Task 13.
 
 mod core;
+pub(crate) mod relation;
 pub(crate) mod semantic;
 
 pub(crate) use core::register_all;

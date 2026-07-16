@@ -201,10 +201,29 @@ impl fmt::Debug for ColumnOwner {
     }
 }
 
-/// A compiled relationship from a child table to a parent table.
+/// How a relationship distributes children across parent rows.
 ///
-/// Task 9 captures the referential shape declared in the model; Task 13
-/// completes it with the per-row parent assignment strategy.
+/// This is the *value-assignment* distribution (which parent each child points
+/// to), distinct from the *count* distribution ([`crate::synthetic::model::
+/// ChildDistribution`]) that decides how many children a table has. `Weighted`
+/// and `Observed` both compile to a bounded histogram over parent row-index
+/// buckets at run time; they never enumerate a per-value list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelationshipDistribution {
+    /// Each child maps a uniformly random index into `[0, parent_count)`.
+    #[default]
+    Uniform,
+    /// Child row `r` references parent `r % parent_count`.
+    Sequential,
+    /// A bounded, seed-derived histogram concentrates children on some parents.
+    Weighted,
+    /// Same mechanism as [`Self::Weighted`]; named for provenance from an
+    /// observed source profile.
+    Observed,
+}
+
+/// A compiled relationship from a child table to a parent table, including the
+/// per-row parent assignment strategy the engine (Task 13) executes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledRelationship {
     /// The relationship's declared name, if any.
@@ -215,6 +234,12 @@ pub struct CompiledRelationship {
     pub parent_table: String,
     /// The referenced parent columns.
     pub parent_columns: Vec<String>,
+    /// How children are distributed across parent rows.
+    pub distribution: RelationshipDistribution,
+    /// Fraction of children (in parts-per-thousand) whose foreign key is `NULL`,
+    /// applied only when the child columns are nullable. Stored as an integer so
+    /// [`CompiledRelationship`] keeps `Eq`.
+    pub null_permille: u16,
 }
 
 /// A table's seed, resolved against the run's root seed and CLI overrides.

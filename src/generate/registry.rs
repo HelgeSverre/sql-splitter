@@ -552,6 +552,12 @@ impl ExtensionRegistry {
         super::generators::register_all(&mut registry);
         super::generators::semantic::register_all(&mut registry);
         registry
+            .register_generator(Box::new(super::generators::relation::ForeignKeyFactory))
+            .expect("built-in generator kinds are collision-free");
+        registry
+            .register_generator(Box::new(super::generators::relation::CompositeKeyFactory))
+            .expect("built-in generator kinds are collision-free");
+        registry
     }
 
     /// Register a generator factory.

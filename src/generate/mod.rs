@@ -6,6 +6,7 @@
 //! generators produce instead of writing SQL literals directly.
 
 pub mod compiler;
+pub mod engine;
 pub mod generators;
 pub mod plan;
 pub mod planners;
@@ -14,10 +15,14 @@ pub mod seed;
 pub mod value;
 
 pub use compiler::{CompileOptions, ModelCompiler, TableCountKind, TableCountOverride};
+pub use engine::{
+    DenseIntegerKey, GenerateReport, GeneratedRow, GenerationEngine, KeyDomain,
+    RandomAccessKeyGenerator, RowSink,
+};
 pub use generators::ConstantFactory;
 pub use plan::{
     ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
-    PlanEstimates, PlannedColumn, PlannedTable, ResolvedTableSeed,
+    PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
 };
 pub use registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,

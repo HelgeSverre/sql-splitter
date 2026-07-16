@@ -43,7 +43,7 @@ use crate::synthetic::schema::{PortableColumn, SqlTypeFamily};
 
 use super::plan::{
     ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
-    PlanEstimates, PlannedColumn, PlannedTable, ResolvedTableSeed,
+    PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
 };
 use super::registry::{ColumnScope, CompileContext, CompiledPlanner, ExtensionRegistry};
 use super::seed::{SeedRoot, StreamId};
@@ -457,11 +457,32 @@ impl ModelCompiler {
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
         let compile_seed = seed_root_of(&seed);
-        let relationships: Vec<CompiledRelationship> = table
+        let mut relationships: Vec<CompiledRelationship> = table
             .relationships
             .iter()
             .map(compile_relationship)
             .collect();
+        // Foreign keys declared only in the portable schema (the common shape
+        // for FKs recovered from a parsed dump) are compiled too, so the engine
+        // can assign their values. A generation relationship on the same columns
+        // wins, since it can carry an explicit assignment distribution.
+        for schema_rel in &table.schema.relationships {
+            if relationships
+                .iter()
+                .any(|existing| existing.columns == schema_rel.columns)
+            {
+                continue;
+            }
+            relationships.push(CompiledRelationship {
+                name: schema_rel.name.clone(),
+                columns: schema_rel.columns.clone(),
+                parent_table: schema_rel.referenced_table.clone(),
+                parent_columns: schema_rel.referenced_columns.clone(),
+                distribution: RelationshipDistribution::default(),
+                null_permille: 0,
+            });
+        }
+        fold_foreign_key_generators(table, &mut relationships);
 
         let planners = self.compile_planners(name, table, compile_seed, bag);
         let claims = collect_claims(table, &planners);
@@ -1311,14 +1332,56 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
     state.components
 }
 
-/// Capture a declared relationship's referential shape. Task 13 completes it
-/// with per-row parent assignment.
+/// Capture a declared relationship's referential shape and value-assignment
+/// distribution. The per-row parent assignment itself is executed by Task 13's
+/// engine.
 fn compile_relationship(relationship: &RelationshipModel) -> CompiledRelationship {
     CompiledRelationship {
         name: relationship.name.clone(),
         columns: relationship.columns.clone(),
         parent_table: relationship.references.table.clone(),
         parent_columns: relationship.references.columns.clone(),
+        distribution: parse_distribution(relationship.distribution.as_deref()),
+        null_permille: 0,
+    }
+}
+
+/// Parse a relationship's assignment distribution name. An absent or
+/// unrecognized name falls back to [`RelationshipDistribution::Uniform`].
+fn parse_distribution(name: Option<&str>) -> RelationshipDistribution {
+    match name {
+        Some("sequential") => RelationshipDistribution::Sequential,
+        Some("weighted") => RelationshipDistribution::Weighted,
+        Some("observed") => RelationshipDistribution::Observed,
+        _ => RelationshipDistribution::Uniform,
+    }
+}
+
+/// Fold the arguments of any explicit `relation.foreign_key` /
+/// `relation.composite_key` column generator into the matching relationship, so
+/// an inferred FK (owner `Relationship`) and an explicit FK generator (owner
+/// `Generator`) converge on the same compiled relationship the engine executes.
+/// Recognizes `distribution` (a name) and `null_rate` (a `0.0..=1.0` fraction).
+fn fold_foreign_key_generators(table: &TableModel, relationships: &mut [CompiledRelationship]) {
+    for (column, rule) in &table.columns {
+        let Some(generator) = &rule.generator else {
+            continue;
+        };
+        if generator.kind != "relation.foreign_key" && generator.kind != "relation.composite_key" {
+            continue;
+        }
+        let Some(relationship) = relationships
+            .iter_mut()
+            .find(|relationship| relationship.columns.iter().any(|c| c == column))
+        else {
+            continue;
+        };
+        if let Some(name) = generator.args.get("distribution").and_then(|v| v.as_str()) {
+            relationship.distribution = parse_distribution(Some(name));
+        }
+        if let Some(rate) = generator.args.get("null_rate").and_then(|v| v.as_f64()) {
+            relationship.null_permille = (rate.clamp(0.0, 1.0) * 1000.0).round() as u16;
+        }
     }
 }
 
