@@ -2682,6 +2682,39 @@ fn file_metadata_name_extension_and_mime_are_coherent_for_many_rows() {
 }
 
 #[test]
+fn file_metadata_mime_matches_hardcoded_known_pairs() {
+    // `known_mime_for_extension` above is a verbatim copy of the planner's own
+    // `FILE_TYPE_CATALOG`, so it can only catch planner-vs-itself drift, never
+    // a wrong MIME value baked into the catalog. These are independent,
+    // hand-verified assertions of well-known extension/MIME pairs.
+    let overrides = "        extensions: [jpg, png, pdf, json]\n";
+    let sink = run(&file_metadata_model(
+        11,
+        4_000,
+        FULL_FILE_COLUMNS,
+        overrides,
+    ));
+    for (extension, mime) in sink
+        .column("file_extension")
+        .zip(sink.column("file_mime_type"))
+    {
+        let extension = extension.as_text().expect("text extension");
+        let mime = mime.as_text().expect("text mime");
+        let expected = match extension {
+            "jpg" => "image/jpeg",
+            "png" => "image/png",
+            "pdf" => "application/pdf",
+            "json" => "application/json",
+            other => panic!("unexpected extension `{other}` outside the configured allow-list"),
+        };
+        assert_eq!(
+            mime, expected,
+            "extension `{extension}` produced mime `{mime}`, expected `{expected}`"
+        );
+    }
+}
+
+#[test]
 fn file_metadata_size_is_nonnegative_for_many_rows() {
     let sink = run(&file_metadata_model(2, 5_000, FULL_FILE_COLUMNS, ""));
     for size in sink.column("file_size") {
@@ -2743,6 +2776,62 @@ fn file_metadata_impossible_size_range_is_a_compile_error() {
     let overrides = "        size:\n          min: 100\n          max: 10\n";
     let yaml = file_metadata_model(1, 10, FULL_FILE_COLUMNS, overrides);
     assert!(compile_err_code(&yaml).contains(&"GEN-FILE-SIZE-RANGE".to_string()));
+}
+
+#[test]
+fn file_metadata_impossible_size_range_is_a_compile_error_even_without_a_size_column() {
+    // The `size:` block is validated unconditionally: a nonsensical range is
+    // an error even when no `size` column is wired to consume it, rather than
+    // silently accepting a dead-but-wrong config.
+    let columns_block = "          name: file_name\n";
+    let overrides = "        size:\n          min: 100\n          max: 10\n";
+    let yaml = file_metadata_model(1, 10, columns_block, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-FILE-SIZE-RANGE".to_string()));
+}
+
+#[test]
+fn file_metadata_unknown_extension_in_allow_list_is_a_compile_error() {
+    let overrides = "        extensions: [xyz]\n";
+    let yaml = file_metadata_model(1, 10, FULL_FILE_COLUMNS, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-FILE-EXTENSIONS".to_string()));
+}
+
+#[test]
+fn file_metadata_extensions_allow_list_restricts_every_drawn_extension() {
+    let overrides = "        extensions: [jpg, png]\n";
+    let sink = run(&file_metadata_model(4, 5_000, FULL_FILE_COLUMNS, overrides));
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (i, ((name, extension), mime)) in sink
+        .column("file_name")
+        .zip(sink.column("file_extension"))
+        .zip(sink.column("file_mime_type"))
+        .enumerate()
+    {
+        let name = name.as_text().expect("text name");
+        let extension = extension.as_text().expect("text extension");
+        let mime = mime.as_text().expect("text mime");
+        assert!(
+            ["jpg", "png"].contains(&extension),
+            "row {i}: extension `{extension}` outside the configured allow-list [jpg, png]"
+        );
+        assert!(
+            name.ends_with(&format!(".{extension}")),
+            "row {i}: name `{name}` does not end with `.{extension}`"
+        );
+        let expected_mime = known_mime_for_extension(extension).expect("known extension");
+        assert_eq!(
+            mime, expected_mime,
+            "row {i}: mime `{mime}` inconsistent with extension `{extension}`"
+        );
+        seen.insert(extension);
+    }
+    // Over 5,000 rows a two-extension allow-list should hit both members —
+    // otherwise the allow-list might not really be restricting the draw pool.
+    assert_eq!(
+        seen.len(),
+        2,
+        "expected both allow-listed extensions to appear, saw {seen:?}"
+    );
 }
 
 #[test]

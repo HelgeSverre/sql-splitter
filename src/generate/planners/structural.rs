@@ -2976,21 +2976,22 @@ fn compile_file_metadata(
         .and_then(|s| s.get("max"))
         .and_then(as_i128)
         .unwrap_or(10_000_000);
-    if size_col.is_some() {
-        if size_min < 0 {
-            bag.error(
-                SIZE_CODE,
-                format!("{path}.size.min"),
-                format!("file.metadata `size.min` {size_min} must be >= 0"),
-            );
-        }
-        if size_max < size_min {
-            bag.error(
-                SIZE_CODE,
-                format!("{path}.size.max"),
-                format!("file.metadata `size.max` {size_max} is below `size.min` {size_min}"),
-            );
-        }
+    // Validated unconditionally — a nonsensical `size:` block is a user error
+    // worth reporting even when no `size` column is wired to consume it (the
+    // disconnect itself is worth surfacing, not silently accepting).
+    if size_min < 0 {
+        bag.error(
+            SIZE_CODE,
+            format!("{path}.size.min"),
+            format!("file.metadata `size.min` {size_min} must be >= 0"),
+        );
+    }
+    if size_max < size_min {
+        bag.error(
+            SIZE_CODE,
+            format!("{path}.size.max"),
+            format!("file.metadata `size.max` {size_max} is below `size.min` {size_min}"),
+        );
     }
 
     let hash_kind_name = config
