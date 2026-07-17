@@ -30,10 +30,10 @@ Benchmarks run inside Docker for reproducibility across different machines.
 
 ```bash
 # Build the Docker image (first time only)
-make docker-build
+just docker-build
 
 # Run benchmark with generated 100MB test file
-make docker-bench
+just docker-bench
 
 # Run with custom size (e.g., 200MB)
 ./docker/run-benchmark.sh --generate 200

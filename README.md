@@ -41,7 +41,7 @@ Optional features:
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install  # Installs binary + shell completions + man pages
+just install  # Installs binary + shell completions + man pages
 ```
 
 Or download pre-built binaries from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases).
@@ -55,7 +55,7 @@ For `cargo install` users, install man pages manually:
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install-man
+just install-man
 ```
 
 ## Usage
@@ -194,7 +194,7 @@ sql-splitter query dump.sql "SELECT ..." --cache  # Cache imported database
 sql-splitter query --list-cache                   # Show cached databases
 sql-splitter query --clear-cache                  # Clear all cached databases
 
-# Generate shell completions (auto-installed with make install)
+# Generate shell completions (auto-installed with just install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
 sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
@@ -202,14 +202,14 @@ sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
 
 ### Shell Completions
 
-Shell completions are automatically installed when using `make install`. For manual installation:
+Shell completions are automatically installed when using `just install`. For manual installation:
 
 ```bash
 # Install for current shell only
-make install-completions
+just install-completions
 
 # Install for all shells (bash, zsh, fish)
-make install-completions-all
+just install-completions-all
 ```
 
 ## Why sql-splitter?
@@ -556,7 +556,7 @@ See [BENCHMARKS.md](BENCHMARKS.md) for detailed comparisons.
 cargo nextest run
 
 # Verify against real-world SQL dumps (MySQL, PostgreSQL, WordPress, etc.)
-make verify-realworld
+just verify-realworld
 ```
 
 ## AI Agent Integration

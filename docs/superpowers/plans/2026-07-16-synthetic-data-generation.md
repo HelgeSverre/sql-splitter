@@ -2465,7 +2465,7 @@ Regenerate clap help, man pages, and completions through the repository's genera
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `make man && cargo test --test cli_help_test && cargo test --doc`
+Run: `just man && cargo test --test cli_help_test && cargo test --doc`
 
 ```bash
 git add README.md CHANGELOG.md docs website skills man src tests
@@ -2504,7 +2504,7 @@ Correctness: all exact constraints/planner properties pass. Memory: generation r
 
 - [ ] **Step 6: Verify and commit**
 
-Run: `cargo bench --bench generate_bench && ./scripts/benchmark-generate.sh && make profile && make verify-realworld`
+Run: `cargo bench --bench generate_bench && ./scripts/benchmark-generate.sh && just profile && just verify-realworld`
 
 ```bash
 git add benches/generate_bench.rs scripts benchmark-results/generate-baseline.md docs/generate tests/fixtures
@@ -2516,7 +2516,7 @@ git commit -m "perf(generate): benchmark and harden generation"
 - [ ] Run `cargo fmt --check`.
 - [ ] Run `cargo clippy --all-targets -- -D warnings`.
 - [ ] Run `cargo test --all-features` and `cargo test --no-default-features`.
-- [ ] Run `make schemas`, `make man`, `make verify-realworld`, and `make profile`.
+- [ ] Run `just schemas`, `just man`, `just verify-realworld`, and `just profile`.
 - [ ] Run `rg 'test_data_gen|gen-fixtures' Cargo.toml Cargo.lock src tests scripts README.md docs website skills` and confirm remaining matches occur only in changelog/history/supersession notes.
 - [ ] Confirm every CLI example in docs runs successfully against a release build.
 - [ ] Confirm a source-derived warning survives `--quiet` and no human/JSON diagnostic prints the source value.
@@ -2536,7 +2536,6 @@ git commit -m "perf(generate): benchmark and harden generation"
 - Modify: `tests/json_schema_tests.rs`
 - Create: `schemas/generate-config.schema.json`
 - Create: `website/public/schemas/generate-config.schema.json`
-- Modify: `Makefile`
 - Modify: `justfile`
 - Modify: `docs/generate/model-reference.md`
 - Modify: `website/src/content/docs/commands/generate.mdx`
@@ -2557,7 +2556,7 @@ Use `schemars` on the typed model/override structs. Registry-owned `arguments` c
 
 - [ ] **Step 4: Fold config schemas into the existing command**
 
-Extend `sql-splitter schema` so `make schemas` emits JSON output schemas plus `generate-config.schema.json`, validates fixtures, formats files, and copies them to the website. Do not add a second schema-generation pipeline.
+Extend `sql-splitter schema` so `just schemas` emits JSON output schemas plus `generate-config.schema.json`, validates fixtures, formats files, and copies them to the website. Do not add a second schema-generation pipeline.
 
 - [ ] **Step 5: Add editor discovery**
 
@@ -2565,10 +2564,10 @@ Document the public schema URL and YAML-language-server header example. Do not r
 
 - [ ] **Step 6: Verify and commit**
 
-Run: `make schemas && cargo test --test json_schema_tests`
+Run: `just schemas && cargo test --test json_schema_tests`
 
 ```bash
-git add src/synthetic src/json_schema.rs src/cmd/schema.rs tests/json_schema_tests.rs schemas website/public/schemas Makefile justfile docs/generate website/src/content/docs/commands/generate.mdx
+git add src/synthetic src/json_schema.rs src/cmd/schema.rs tests/json_schema_tests.rs schemas website/public/schemas justfile docs/generate website/src/content/docs/commands/generate.mdx
 git commit -m "feat(generate): publish synthetic model schema"
 ```
 
@@ -2586,7 +2585,7 @@ git commit -m "feat(generate): publish synthetic model schema"
 
 ### Phase 5 checkpoint
 
-- [ ] Run `make schemas` twice and assert no diff.
+- [ ] Run `just schemas` twice and assert no diff.
 - [ ] Validate every generate YAML fixture with both `jsonschema` tests and a common YAML language server.
 - [ ] Confirm runtime validation remains authoritative and produces the same or better path-specific diagnostics.
 - [ ] Confirm schema publication introduced no dependency or parsing work in the generation hot path.
@@ -2690,7 +2689,7 @@ The restored `wip/ORIGINAL-PLAN-DATAGENERATOR.md` was reviewed as historical inp
 - [ ] Review every task diff before advancing; do not combine unrelated task commits.
 - [ ] At the end of each phase, update checkbox state and record benchmark/diagnostic deviations directly under that checkpoint.
 - [ ] Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features`, and `cargo test --no-default-features`.
-- [ ] Run `make schemas`, `make man`, `make verify-realworld`, and the generation benchmark/profile scripts.
+- [ ] Run `just schemas`, `just man`, `just verify-realworld`, and the generation benchmark/profile scripts.
 - [ ] Inspect `git diff --check`, generated artifacts, public API docs, help/man/completion output, website docs, `llms.txt`, Agent Skill, changelog, and roadmap.
 - [ ] Confirm no config compiler diagnostic occurs after output publication begins.
 - [ ] Confirm all exact verification checks pass for each dialect and every planner fixture.

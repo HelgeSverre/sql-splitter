@@ -63,7 +63,7 @@ import { TabItem, Tabs } from "@astrojs/starlight/components";
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install # Installs binary + shell completions + man pages
+just install # Installs binary + shell completions + man pages
 ```
 
 Or straight from the repository without cloning:
@@ -90,7 +90,7 @@ This should output `sql-splitter` followed by the version number.
 
 ## Shell Completions
 
-Shell completions are automatically installed with `make install`. For manual installation:
+Shell completions are automatically installed with `just install`. For manual installation:
 
 ```bash
 # Bash (user)
@@ -114,7 +114,7 @@ For `cargo install` users, install man pages manually:
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install-man
+just install-man
 ```
 
 ## Use as a Rust Library

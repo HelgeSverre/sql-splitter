@@ -2298,3 +2298,51 @@ fn family_child_rows_reference_their_producing_parent() {
         "parent rows render before child rows"
     );
 }
+
+/// Real-test equivalent of the former staged-API doctest in
+/// `src/generate/mod.rs`: assemble the four public stages by hand
+/// (registry -> compiler -> engine -> renderer) and render into an in-memory
+/// sink.
+#[test]
+fn staged_api_renders_inserts() {
+    let model = sql_splitter::synthetic::SyntheticFile::parse_str(
+        r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 1
+tables:
+  users:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: users
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: name, type: "varchar(50)", nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 3, max_length: 8 }
+"#,
+    )
+    .expect("parses")
+    .into_model()
+    .expect("is a complete model");
+
+    let registry = sql_splitter::generate::ExtensionRegistry::standard();
+    let plan = sql_splitter::generate::ModelCompiler::new(registry)
+        .compile(model, sql_splitter::generate::CompileOptions::default())
+        .expect("compiles");
+
+    let mut renderer = SqlRenderer::new(Vec::new(), RenderOptions::default());
+    GenerationEngine::new(plan)
+        .run(&mut renderer)
+        .expect("generates");
+    let bytes = renderer.finish().expect("finish flushes cleanly");
+
+    assert!(String::from_utf8(bytes)
+        .expect("rendered SQL is valid UTF-8")
+        .contains("INSERT INTO"));
+}

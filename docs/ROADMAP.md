@@ -335,13 +335,13 @@ evidence without freezing profiler internals around an unbuilt consumer.
 | └─ Both --percent and --rows   | ✅ Done | All modes optimized          |
 | **Profiling infrastructure**   | ✅ Done |                              |
 | ├─ profile-memory.sh script    | ✅ Done | Automated profiling          |
-| ├─ make profile targets        | ✅ Done | medium, large, mega, giga    |
+| ├─ just profile targets        | ✅ Done | medium, large, mega, giga    |
 | └─ Size presets                | ✅ Done | 0.5MB to 10GB                |
 
 **Delivered:**
 
 - 2.9 GB file: 8.2 GB → 114 MB peak RSS
-- `make profile` / `make profile-large` / `make profile-mega` / `make profile-giga`
+- `just profile` / `just profile-large` / `just profile-mega` / `just profile-giga`
 - `scripts/profile-memory.sh` with 8 size presets (tiny to giga)
 - Memory profiling documentation in AGENTS.md
 

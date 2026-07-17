@@ -1,142 +1,175 @@
-# sql-splitter justfile
-# Run `just` to see available commands
+# sql-splitter justfile — run `just` (or `just --list`) to see grouped commands.
+# External tools: coverage → cargo-llvm-cov; flamegraph/samply → cargo-flamegraph / samply.
+# Website recipes auto-install npm deps on first use (see the private `_website-deps`).
 
-# Show available commands (default target)
+# Show available commands (default)
 default:
     @just --list
 
 # Debug build
+[group('build')]
 build:
     cargo build
 
 # Release build
+[group('build')]
 release:
     cargo build --release
 
-# Optimized build for current CPU (best performance)
+# Release build tuned for the current CPU
+[group('build')]
 native:
     RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-# Run all tests
-test:
-    cargo nextest run
-
-# Code coverage — HTML report (cargo-llvm-cov + nextest; install: cargo install cargo-llvm-cov)
-coverage:
-    cargo llvm-cov nextest --html --open
-
-# Code coverage — summary printed to the terminal
-coverage-summary:
-    cargo llvm-cov nextest --summary-only
-
-# Code coverage — lcov report for CI / Codecov (writes ./lcov.info)
-coverage-lcov:
-    cargo llvm-cov nextest --lcov --output-path lcov.info
-
-# Run criterion benchmarks
-bench:
-    cargo bench
-
-# Benchmark against competitor tools (generates 100MB test data if no file provided)
-bench-competitors file="":
-    ./scripts/benchmark-competitors.sh {{ file }}
-
-# Docker benchmark (generates test data of specified size in MB)
-docker-bench size="100":
-    ./docker/run-benchmark.sh --generate {{ size }}
-
-# Docker benchmark with a specific file
-docker-bench-file file:
-    ./docker/run-benchmark.sh {{ file }}
-
-# Build Docker benchmark container
-docker-build:
-    docker compose -f docker/docker-compose.benchmark.yml build
-
-# Memory profile all commands (medium dataset)
-profile: release
-    ./scripts/profile-memory.sh --size medium --output benchmark-results/profile-medium.txt
-
-# Memory profile with large dataset (~125MB)
-profile-large: release
-    ./scripts/profile-memory.sh --size large --output benchmark-results/profile-large.txt
-
-# Stress test memory profile (~1GB: 100 tables × 100k rows)
-profile-mega: release
-    ./scripts/profile-memory.sh --size mega --output benchmark-results/profile-mega.txt
-
-# Extreme stress test (~10GB MySQL only)
-profile-giga: release
-    ./scripts/profile-memory.sh --size giga --output benchmark-results/profile-giga.txt
-
-# Build with profiling symbols (for flamegraph/samply)
+# Build with profiling symbols (flamegraph/samply)
+[group('build')]
 build-profiling:
     cargo build --profile profiling
 
-# Generate flamegraph for split command
-flamegraph file: build-profiling
-    @mkdir -p benchmark-results
-    cargo flamegraph --profile profiling --bin sql-splitter -o benchmark-results/flamegraph-split.svg -- split {{ file }}
-
-# Profile split command with samply (opens Firefox Profiler)
-samply file: build-profiling
-    samply record ./target/profiling/sql-splitter split {{ file }}
-
-# Save criterion benchmark baseline
-bench-baseline name="main":
-    cargo bench -- --save-baseline {{ name }}
-
-# Compare current benchmarks against a saved baseline
-bench-compare baseline="main":
-    cargo bench -- --baseline {{ baseline }}
-
 # Format code (Rust + Markdown)
+[group('lint')]
 fmt:
     cargo fmt
     npx prettier --write "**/*.md" --log-level warn
 
-# Check code without building
+# Type-check without building
+[group('lint')]
 check:
     cargo check
 
-# Run clippy lints
+# Run clippy (deny warnings)
+[group('lint')]
 clippy:
     cargo clippy -- -D warnings
 
 # Clean build artifacts
+[group('lint')]
 clean:
     cargo clean
 
-# Install locally (binary + shell completions + man pages)
+# Run all tests (nextest)
+[group('test')]
+test:
+    cargo nextest run
+
+# Coverage HTML report (opens in browser)
+[group('test')]
+coverage:
+    cargo llvm-cov nextest --html --open
+
+# Coverage summary in the terminal
+[group('test')]
+coverage-summary:
+    cargo llvm-cov nextest --summary-only
+
+# Coverage as ./lcov.info (for CI / Codecov)
+[group('test')]
+coverage-lcov:
+    cargo llvm-cov nextest --lcov --output-path lcov.info
+
+# Verify against real-world SQL dumps
+[group('test')]
+verify-realworld:
+    cargo nextest run --test realworld --run-ignored only
+
+# Run criterion benchmarks
+[group('bench')]
+bench:
+    cargo bench
+
+# Benchmark against competitor tools (optional file, else generates 100MB)
+[group('bench')]
+bench-competitors file="":
+    ./scripts/benchmark-competitors.sh {{ file }}
+
+# Save a criterion baseline
+[group('bench')]
+bench-baseline name="main":
+    cargo bench -- --save-baseline {{ name }}
+
+# Compare benchmarks against a saved baseline
+[group('bench')]
+bench-compare baseline="main":
+    cargo bench -- --baseline {{ baseline }}
+
+# Flamegraph for the split command
+[group('bench')]
+flamegraph file: build-profiling
+    @mkdir -p benchmark-results
+    cargo flamegraph --profile profiling --bin sql-splitter -o benchmark-results/flamegraph-split.svg -- split {{ file }}
+
+# Profile split with samply (opens Firefox Profiler)
+[group('bench')]
+samply file: build-profiling
+    samply record ./target/profiling/sql-splitter split {{ file }}
+
+# Memory profile, medium dataset
+[group('bench')]
+profile: release
+    ./scripts/profile-memory.sh --size medium --output benchmark-results/profile-medium.txt
+
+# Memory profile, large dataset (~125MB)
+[group('bench')]
+profile-large: release
+    ./scripts/profile-memory.sh --size large --output benchmark-results/profile-large.txt
+
+# Memory profile, mega dataset (~1GB: 100 tables × 100k rows)
+[group('bench')]
+profile-mega: release
+    ./scripts/profile-memory.sh --size mega --output benchmark-results/profile-mega.txt
+
+# Memory profile, giga dataset (~10GB, MySQL only)
+[group('bench')]
+profile-giga: release
+    ./scripts/profile-memory.sh --size giga --output benchmark-results/profile-giga.txt
+
+# Build the Docker benchmark container
+[group('docker')]
+docker-build:
+    docker compose -f docker/docker-compose.benchmark.yml build
+
+# Docker benchmark (generates data, size in MB)
+[group('docker')]
+docker-bench size="100":
+    ./docker/run-benchmark.sh --generate {{ size }}
+
+# Docker benchmark with a specific file
+[group('docker')]
+docker-bench-file file:
+    ./docker/run-benchmark.sh {{ file }}
+
+# Install locally (binary + completions + man pages)
+[group('install')]
 install: man
     cargo install --path .
     @echo ""
     @./scripts/install-completions.sh sql-splitter
     @./scripts/install-man.sh
 
-# Install completions only (for current shell)
+# Install completions for the current shell
+[group('install')]
 install-completions:
     @./scripts/install-completions.sh sql-splitter
 
 # Install completions for all supported shells
+[group('install')]
 install-completions-all:
     @./scripts/install-completions.sh sql-splitter all
 
 # Install man pages only
+[group('install')]
 install-man: man
     @./scripts/install-man.sh
 
-# Verify against real-world SQL dumps from public sources
-verify-realworld:
-    cargo nextest run --test realworld --run-ignored only
-
 # Generate man pages
+[group('install')]
 man:
     cargo run --example generate-man
     @echo ""
     @echo "Man pages generated in man/ directory"
 
-# Generate JSON schemas from Rust types, validate, and copy to website
+# Generate + validate JSON schemas, copy to website
+[group('schema')]
 schemas: release
     @echo "Generating JSON schemas from Rust types..."
     ./target/release/sql-splitter schema -o schemas/
@@ -152,92 +185,120 @@ schemas: release
     @echo ""
     @echo "✓ Schemas generated, formatted, validated, and copied to website/public/schemas/"
 
-# [website] Build website for production
-website-build:
+# Ensure website deps are installed (idempotent; installs only if missing)
+[group('website')]
+[private]
+_website-deps:
+    cd website && ( [ -d node_modules ] && [ -f package-lock.json ] || npm install )
+
+# Build website for production
+[group('website')]
+website-build: _website-deps
     cd website && npm run build
 
-# [website] Start development server with hot reload
-website-dev:
+# Start website dev server (hot reload)
+[group('website')]
+website-dev: _website-deps
     cd website && npm run dev
 
-# [website] Preview production build locally
-website-preview:
+# Preview the production build locally (builds first)
+[group('website')]
+website-preview: website-build
     cd website && npm run preview
 
-# [website] Deploy website to Vercel (production)
+# Deploy website to Vercel (production)
+[group('website')]
 website-deploy:
     cd website && vc --prod
 
-# [website] Check Astro project (type checking, diagnostics)
-website-check:
+# Check the Astro project (types, diagnostics)
+[group('website')]
+website-check: _website-deps
     cd website && npm run astro check
 
-# [website] Clean website build artifacts and caches
+# Clean website build artifacts and caches
+[group('website')]
 website-clean:
     cd website && rm -rf dist .astro node_modules/.cache
 
-# [website] Deep clean (including node_modules)
+# Deep clean (including node_modules)
+[group('website')]
 website-clean-all:
     cd website && rm -rf dist .astro node_modules
 
-# [website] Clean and rebuild website from scratch
+# Clean and rebuild the website from scratch
+[group('website')]
 website-rebuild: website-clean
     cd website && npm install && npm run build
 
-# [website] Install/update website dependencies
+# Install/update website dependencies
+[group('website')]
 website-install:
     cd website && npm install
 
-# [website] Update website dependencies to latest versions
-website-update:
+# Update website dependencies to latest
+[group('website')]
+website-update: _website-deps
     cd website && npm update
 
-# [website] Check for outdated website dependencies
-website-outdated:
+# Check for outdated website dependencies
+[group('website')]
+website-outdated: _website-deps
     cd website && npm outdated
 
-# [website] Audit website dependencies for vulnerabilities
-website-audit:
+# Audit website dependencies for vulnerabilities
+[group('website')]
+website-audit: _website-deps
     cd website && npm audit
 
-# [website] Fix website dependency vulnerabilities
-website-audit-fix:
+# Fix website dependency vulnerabilities
+[group('website')]
+website-audit-fix: _website-deps
     cd website && npm audit fix
 
-# [website] Generate OG image
-website-og-image:
+# Generate the OG image
+[group('website')]
+website-og-image: _website-deps
     cd website && node generate-og-image.js
 
-# [website] Validate internal links (built into starlight-links-validator during build)
+# Validate internal links (runs a build)
+[group('website')]
 website-validate-links: website-build
     @echo "✓ Links validated during build via starlight-links-validator"
 
-# [website] List all available npm scripts
+# List available website npm scripts
+[group('website')]
 website-scripts:
     cd website && npm run
 
-# [website] Open website in browser (localhost:4321)
+# Open the local website (localhost:4321)
+[group('website')]
 website-open:
     @echo "Opening http://localhost:4321"
     @open http://localhost:4321 || xdg-open http://localhost:4321 || echo "Please open http://localhost:4321 in your browser"
 
-# [website] Full website maintenance (audit, clean, install, build, check)
-website-maintain: website-audit website-clean website-install website-build website-check
+# Full website maintenance (clean, reinstall, audit, build, check)
+[group('website')]
+website-maintain: website-clean website-install website-audit website-build website-check
     @echo "✓ Website maintenance complete"
 
-# [website] Quick CI checks (build + validation)
+# Website CI checks (build + validation)
+[group('website')]
 website-ci: website-build
     @echo "✓ Website CI checks passed"
 
-# [website] Update version in website files from Cargo.toml
+# Sync website version from Cargo.toml
+[group('website')]
 website-update-version:
     cd website && npx tsx scripts/update-version.ts
 
-# Show current version from Cargo.toml
+# Show the current version from Cargo.toml
+[group('release')]
 version:
     @grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
 
-# Bump version (usage: just bump 1.14.0)
+# Bump the version (usage: just bump 1.14.0)
+[group('release')]
 bump new_version:
     @echo "Bumping version to {{ new_version }}..."
     awk -v new="{{ new_version }}" '!done && /^version = "/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 } { print }' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
@@ -248,7 +309,8 @@ bump new_version:
     @echo "  1. Update CHANGELOG.md"
     @echo "  2. Run: just release-prepare"
 
-# Prepare release (builds, tests, updates website version)
+# Prepare a release (build, test, schemas, website version)
+[group('release')]
 release-prepare: release test schemas website-update-version
     @echo ""
     @echo "✓ Release preparation complete"
@@ -261,7 +323,8 @@ release-prepare: release test schemas website-update-version
     @echo "  3. Push: git push origin main --tags"
     @echo "  4. Create GitHub release: gh release create v$(just version)"
 
-# Full release workflow (interactive)
+# Commit + tag a release (usage: just release-tag 1.14.0)
+[group('release')]
 release-tag version:
     @echo "Creating release v{{ version }}..."
     git add Cargo.toml Cargo.lock CHANGELOG.md

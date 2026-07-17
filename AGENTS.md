@@ -8,61 +8,61 @@ High-performance CLI tool written in Rust for splitting large SQL dump files int
 
 ## Available Commands
 
-### Makefile Commands
+### just Commands
 
-Run `make help` to see all available commands. Key commands:
+Run `just` (or `just --list`) to see all available commands, grouped. Key commands:
 
 | Command                 | Description                                                          |
 | ----------------------- | -------------------------------------------------------------------- |
-| `make build`            | Debug build                                                          |
-| `make release`          | Release build                                                        |
-| `make native`           | Optimized build for current CPU (best performance)                   |
-| `make test`             | Run all tests                                                        |
-| `make bench`            | Run criterion benchmarks                                             |
-| `make profile`          | Memory profile all commands (medium dataset)                         |
-| `make profile-large`    | Memory profile with large dataset (~250MB)                           |
-| `make profile-mega`     | Stress test profile (~2GB: 100 tables × 100k rows)                   |
-| `make fmt`              | Format code                                                          |
-| `make check`            | Check code without building                                          |
-| `make clippy`           | Run clippy lints                                                     |
-| `make clean`            | Clean build artifacts                                                |
-| `make install`          | Install locally (binary + shell completions)                         |
-| `make verify-realworld` | Verify against real-world SQL dumps                                  |
-| `make website-deploy`   | Deploy website to Vercel                                             |
-| `make docker-bench`     | Run benchmarks in Docker (generates 100MB test data)                 |
-| `make man`              | Generate man pages in man/ directory                                 |
-| `make schemas`          | Generate JSON schemas from Rust types, validate, and copy to website |
+| `just build`            | Debug build                                                          |
+| `just release`          | Release build                                                        |
+| `just native`           | Release build tuned for the current CPU                              |
+| `just test`             | Run all tests (nextest)                                              |
+| `just bench`            | Run criterion benchmarks                                             |
+| `just profile`          | Memory profile all commands (medium dataset)                         |
+| `just profile-large`    | Memory profile with large dataset (~125MB)                           |
+| `just profile-mega`     | Stress test profile (~1GB: 100 tables × 100k rows)                   |
+| `just fmt`              | Format code                                                          |
+| `just check`            | Type-check without building                                          |
+| `just clippy`           | Run clippy lints                                                     |
+| `just clean`            | Clean build artifacts                                                |
+| `just install`          | Install locally (binary + completions + man pages)                   |
+| `just verify-realworld` | Verify against real-world SQL dumps                                  |
+| `just website-deploy`   | Deploy website to Vercel                                             |
+| `just docker-bench`     | Run benchmarks in Docker (generates 100MB test data)                 |
+| `just man`              | Generate man pages in man/ directory                                 |
+| `just schemas`          | Generate JSON schemas from Rust types, validate, and copy to website |
 
 ### Building and Running
 
 ```bash
 # Build (debug)
 cargo build
-# or: make build
+# or: just build
 
 # Build (release)
 cargo build --release
-# or: make release
+# or: just release
 
 # Build optimized for current CPU (best for benchmarking)
 RUSTFLAGS="-C target-cpu=native" cargo build --release
-# or: make native
+# or: just native
 
 # Run tests
 cargo nextest run
-# or: make test
+# or: just test
 
 # Run benchmarks
 cargo bench
-# or: make bench
+# or: just bench
 
 # Run clippy lints
 cargo clippy -- -D warnings
-# or: make clippy
+# or: just clippy
 
 # Format code
 cargo fmt
-# or: make fmt
+# or: just fmt
 ```
 
 ### Main Commands
@@ -297,11 +297,7 @@ Follow these steps to create a new release. **Both a git tag AND a GitHub releas
 Use the automated release preparation command:
 
 ```bash
-# Using justfile (recommended)
 just release-prepare
-
-# Or using Makefile
-make release-prepare
 ```
 
 This runs: release build, tests, schema generation, and website version update.
