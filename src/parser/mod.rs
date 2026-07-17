@@ -396,6 +396,78 @@ enum Peek2 {
     NeedMore,
 }
 
+/// Control-flow signal returned by row/event visitors.
+///
+/// Lives in the parser layer (rather than a consumer module) so the streaming
+/// row visitors ([`crate::parser::mysql_insert::visit_insert_rows_with`],
+/// [`crate::parser::postgres_copy::visit_postgres_copy_rows_with`]) and
+/// [`Parser::visit_events`] can all speak the same vocabulary. Re-exported from
+/// `crate::transform_common` for the sample/shard consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowFlow {
+    /// Keep iterating.
+    Continue,
+    /// Skip the remaining rows of the current INSERT/COPY statement, then
+    /// resume with the next statement.
+    SkipStatement,
+    /// Stop the walk entirely.
+    Stop,
+}
+
+/// A single streaming event emitted by [`Parser::visit_events`].
+///
+/// Data rows are treated as stream boundaries: a multi-row INSERT is delivered
+/// as its shared header plus one [`ParserEvent::InsertRow`] per tuple, and a
+/// COPY block as [`ParserEvent::CopyStart`] / one [`ParserEvent::CopyRow`] per
+/// line / [`ParserEvent::CopyEnd`] — never buffering the whole block. All byte
+/// slices borrow from the parser's internal buffer (or, for `InsertRow.header`,
+/// a small owned copy of the header) and are only valid until the callback
+/// returns.
+pub enum ParserEvent<'a> {
+    /// A complete non-data statement (DDL / control), including its terminator.
+    Statement(&'a [u8]),
+    /// One INSERT `(...)` value tuple. `header` is the statement text up to and
+    /// including the `VALUES` keyword (so the column list can be recovered);
+    /// `first_in_statement` is true for the first row of each INSERT so callers
+    /// can rebuild per-statement column context exactly once.
+    InsertRow {
+        header: &'a [u8],
+        row: &'a [u8],
+        first_in_statement: bool,
+    },
+    /// The `COPY ... FROM stdin;` header line that opens a COPY data block.
+    CopyStart(&'a [u8]),
+    /// One raw COPY data line (newline stripped; a trailing `\r`, if any, is
+    /// left for the consumer to strip so it matches the collecting parser).
+    CopyRow(&'a [u8]),
+    /// The `\.` terminator that closes a COPY data block.
+    CopyEnd,
+}
+
+/// Configurable safety caps on how much a single buffered unit may grow before
+/// [`Parser::visit_events`] reports an error (rather than silently truncating
+/// or buffering without bound). Defaults are generous; they exist to turn a
+/// pathological/corrupt input into a diagnosable error instead of an OOM.
+#[derive(Debug, Clone, Copy)]
+pub struct ParserLimits {
+    /// Max bytes for one non-data statement (DDL/control).
+    pub max_ddl: usize,
+    /// Max bytes for an INSERT/COPY header before the first row.
+    pub max_header: usize,
+    /// Max bytes for a single INSERT tuple or COPY line.
+    pub max_row: usize,
+}
+
+impl Default for ParserLimits {
+    fn default() -> Self {
+        Self {
+            max_ddl: 256 * 1024 * 1024,
+            max_header: 64 * 1024 * 1024,
+            max_row: 256 * 1024 * 1024,
+        }
+    }
+}
+
 pub struct Parser<R: Read> {
     reader: BufReader<R>,
     dialect: SqlDialect,
@@ -409,6 +481,14 @@ pub struct Parser<R: Read> {
     /// (never per-statement) so scanning stays O(n) rather than O(n²).
     buf: Vec<u8>,
     buf_pos: usize,
+    /// Number of bytes dropped off the front of `buf` so far, so an absolute
+    /// input offset can be reported in [`Parser::visit_events`] diagnostics.
+    base: u64,
+    /// High-water mark of `buf.len()`, so tests can assert the streaming walker
+    /// keeps its working set bounded.
+    peak_buffered: usize,
+    /// Safety caps for [`Parser::visit_events`].
+    limits: ParserLimits,
 }
 
 impl<R: Read> Parser<R> {
@@ -424,7 +504,31 @@ impl<R: Read> Parser<R> {
             in_copy_data: false,
             buf: Vec::new(),
             buf_pos: 0,
+            base: 0,
+            peak_buffered: 0,
+            limits: ParserLimits::default(),
         }
+    }
+
+    /// Override the [`ParserLimits`] used by [`Parser::visit_events`].
+    #[allow(dead_code)]
+    pub fn with_limits(mut self, limits: ParserLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Total bytes currently buffered in memory. Used by tests to assert the
+    /// event walker keeps its working set bounded even for huge INSERT/COPY
+    /// blocks.
+    pub fn buffered_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// High-water mark of buffered bytes over this parser's lifetime. Used by
+    /// tests to assert [`Parser::visit_events`] never buffers a whole multi-row
+    /// INSERT/COPY block.
+    pub fn peak_buffered(&self) -> usize {
+        self.peak_buffered
     }
 
     /// Drop the already-returned prefix `buf[..keep_from]` and append the next
@@ -434,6 +538,7 @@ impl<R: Read> Parser<R> {
     fn grow_buffer(&mut self, keep_from: usize) -> std::io::Result<(usize, bool)> {
         if keep_from > 0 {
             self.buf.drain(..keep_from);
+            self.base += keep_from as u64;
         }
         let chunk = self.reader.fill_buf()?;
         if chunk.is_empty() {
@@ -442,6 +547,7 @@ impl<R: Read> Parser<R> {
         self.buf.extend_from_slice(chunk);
         let n = chunk.len();
         self.reader.consume(n);
+        self.peak_buffered = self.peak_buffered.max(self.buf.len());
         Ok((keep_from, true))
     }
 
@@ -840,6 +946,294 @@ impl<R: Read> Parser<R> {
                 let result = self.buf[start..].to_vec();
                 self.buf_pos = self.buf.len();
                 return Ok(Some(result));
+            }
+        }
+    }
+
+    /// Stream the input as [`ParserEvent`]s with bounded memory.
+    ///
+    /// Ordinary DDL/control statements are buffered whole (they are small) and
+    /// delivered as [`ParserEvent::Statement`]. A multi-row INSERT is delivered
+    /// as its header plus one [`ParserEvent::InsertRow`] per tuple, and a COPY
+    /// block as [`ParserEvent::CopyStart`] / [`ParserEvent::CopyRow`] per line /
+    /// [`ParserEvent::CopyEnd`] — the whole multi-row block is never buffered at
+    /// once. The callback must consume each borrowed slice before returning.
+    ///
+    /// Unlike [`read_statement`](Self::read_statement) (kept for compatibility),
+    /// data statements are not routed through it: their rows are streamed.
+    pub fn visit_events<F>(&mut self, mut on_event: F) -> anyhow::Result<()>
+    where
+        F: FnMut(ParserEvent<'_>) -> anyhow::Result<RowFlow>,
+    {
+        loop {
+            // Ensure at least one byte at/after buf_pos, or stop at EOF.
+            while self.buf_pos >= self.buf.len() {
+                let (removed, more) = self.grow_buffer(self.buf_pos)?;
+                self.buf_pos -= removed;
+                if !more {
+                    return Ok(());
+                }
+            }
+
+            if self.peek_is_insert()? {
+                if self.visit_insert_stmt(&mut on_event)? == RowFlow::Stop {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            // Non-INSERT: reuse read_statement to consume one DDL/control or
+            // COPY header statement (small). COPY data blocks are then streamed
+            // line-by-line rather than buffered whole.
+            let stmt = match self.read_statement()? {
+                Some(s) => s,
+                None => return Ok(()),
+            };
+            if self.in_copy_data {
+                self.in_copy_data = false;
+                if on_event(ParserEvent::CopyStart(&stmt))? == RowFlow::Stop {
+                    return Ok(());
+                }
+                if self.visit_copy_data(&mut on_event)? == RowFlow::Stop {
+                    return Ok(());
+                }
+            } else if on_event(ParserEvent::Statement(&stmt))? == RowFlow::Stop {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Peek whether the next statement (after leading comments/whitespace) is an
+    /// `INSERT INTO`/`INSERT ONLY`, growing the buffer just enough to decide.
+    fn peek_is_insert(&mut self) -> anyhow::Result<bool> {
+        loop {
+            let stripped = strip_leading_comments_and_whitespace(&self.buf[self.buf_pos..]);
+            if stripped.len() >= 11 {
+                return Ok(starts_with_insert(stripped));
+            }
+            if self.buf.len() - self.buf_pos > self.limits.max_header {
+                anyhow::bail!(
+                    "statement header exceeds max_header ({} bytes) at input offset {}",
+                    self.limits.max_header,
+                    self.base + self.buf_pos as u64
+                );
+            }
+            let (removed, more) = self.grow_buffer(self.buf_pos)?;
+            self.buf_pos -= removed;
+            if !more {
+                let stripped = strip_leading_comments_and_whitespace(&self.buf[self.buf_pos..]);
+                return Ok(starts_with_insert(stripped));
+            }
+        }
+    }
+
+    /// Stream one INSERT statement's tuples as [`ParserEvent::InsertRow`]s.
+    fn visit_insert_stmt<F>(&mut self, on_event: &mut F) -> anyhow::Result<RowFlow>
+    where
+        F: FnMut(ParserEvent<'_>) -> anyhow::Result<RowFlow>,
+    {
+        // Locate the VALUES keyword, buffering only the header (bounded).
+        let (header, values_abs) = loop {
+            let stripped_len =
+                strip_leading_comments_and_whitespace(&self.buf[self.buf_pos..]).len();
+            let start = self.buf.len() - stripped_len;
+            if let Some(vp) = mysql_insert::find_values_keyword_pos(&self.buf[start..]) {
+                let values_abs = start + vp;
+                break (self.buf[start..values_abs].to_vec(), values_abs);
+            }
+            if self.buf.len() - self.buf_pos > self.limits.max_header {
+                anyhow::bail!(
+                    "INSERT header exceeds max_header ({} bytes) at input offset {}",
+                    self.limits.max_header,
+                    self.base + self.buf_pos as u64
+                );
+            }
+            let (removed, more) = self.grow_buffer(self.buf_pos)?;
+            self.buf_pos -= removed;
+            if !more {
+                // No VALUES keyword (truncated / not a value INSERT): emit the
+                // remaining bytes as an opaque statement so nothing is lost.
+                let flow = on_event(ParserEvent::Statement(&self.buf[self.buf_pos..]))?;
+                self.buf_pos = self.buf.len();
+                return Ok(flow);
+            }
+        };
+
+        let mut cur = values_abs;
+        let mut first = true;
+        let mut skipping = false;
+
+        loop {
+            // Skip inter-tuple whitespace and commas.
+            loop {
+                while cur < self.buf.len()
+                    && matches!(self.buf[cur], b' ' | b'\t' | b'\n' | b'\r' | b',')
+                {
+                    cur += 1;
+                }
+                if cur < self.buf.len() {
+                    break;
+                }
+                let (removed, more) = self.grow_buffer(cur)?;
+                cur -= removed;
+                if !more {
+                    break;
+                }
+            }
+
+            if cur >= self.buf.len() {
+                self.buf_pos = self.buf.len();
+                return Ok(RowFlow::Continue);
+            }
+            match self.buf[cur] {
+                b';' => {
+                    self.buf_pos = cur + 1;
+                    return Ok(RowFlow::Continue);
+                }
+                b'(' => {}
+                // Anything else (e.g. an MSSQL GO batch line) ends the INSERT;
+                // leave it for the next statement.
+                _ => {
+                    self.buf_pos = cur;
+                    return Ok(RowFlow::Continue);
+                }
+            }
+
+            // Scan exactly one tuple, growing until it is complete or EOF.
+            let (tuple_end, complete) = loop {
+                if self.buf.len() - cur > self.limits.max_row {
+                    anyhow::bail!(
+                        "INSERT row exceeds max_row ({} bytes) at input offset {}",
+                        self.limits.max_row,
+                        self.base + cur as u64
+                    );
+                }
+                match mysql_insert::scan_insert_tuple(&self.buf[cur..], self.dialect) {
+                    Some((len, true)) => break (cur + len, true),
+                    Some(_) => {
+                        let (removed, more) = self.grow_buffer(cur)?;
+                        cur -= removed;
+                        if !more {
+                            break (self.buf.len(), false);
+                        }
+                    }
+                    None => {
+                        self.buf_pos = cur;
+                        return Ok(RowFlow::Continue);
+                    }
+                }
+            };
+
+            if skipping {
+                cur = tuple_end;
+            } else {
+                let flow = on_event(ParserEvent::InsertRow {
+                    header: &header,
+                    row: &self.buf[cur..tuple_end],
+                    first_in_statement: first,
+                })?;
+                first = false;
+                match flow {
+                    RowFlow::Continue => cur = tuple_end,
+                    RowFlow::SkipStatement => {
+                        skipping = true;
+                        cur = tuple_end;
+                    }
+                    RowFlow::Stop => {
+                        self.buf_pos = tuple_end;
+                        return Ok(RowFlow::Stop);
+                    }
+                }
+            }
+
+            if !complete {
+                self.buf_pos = self.buf.len();
+                return Ok(RowFlow::Continue);
+            }
+        }
+    }
+
+    /// Stream a COPY data block (positioned just past the header's `;`) as
+    /// [`ParserEvent::CopyRow`]s followed by [`ParserEvent::CopyEnd`].
+    fn visit_copy_data<F>(&mut self, on_event: &mut F) -> anyhow::Result<RowFlow>
+    where
+        F: FnMut(ParserEvent<'_>) -> anyhow::Result<RowFlow>,
+    {
+        // Consume the line terminator that ends the `COPY ... FROM stdin;`
+        // header line (read_statement stopped at the `;`), so the first emitted
+        // CopyRow is a real data line rather than a phantom empty one.
+        for &want in b"\r\n" {
+            while self.buf_pos >= self.buf.len() {
+                let (removed, more) = self.grow_buffer(self.buf_pos)?;
+                self.buf_pos -= removed;
+                if !more {
+                    return Ok(RowFlow::Continue);
+                }
+            }
+            if self.buf[self.buf_pos] == want {
+                self.buf_pos += 1;
+            }
+        }
+
+        let mut ls = self.buf_pos;
+        let mut skipping = false;
+
+        loop {
+            let nl = loop {
+                if let Some(rel) = memchr::memchr(b'\n', &self.buf[ls..]) {
+                    break Some(ls + rel);
+                }
+                if self.buf.len() - ls > self.limits.max_row {
+                    anyhow::bail!(
+                        "COPY line exceeds max_row ({} bytes) at input offset {}",
+                        self.limits.max_row,
+                        self.base + ls as u64
+                    );
+                }
+                let (removed, more) = self.grow_buffer(ls)?;
+                ls -= removed;
+                if !more {
+                    break None;
+                }
+            };
+
+            if nl.is_none() && ls >= self.buf.len() {
+                // EOF with no trailing data.
+                self.buf_pos = self.buf.len();
+                return Ok(RowFlow::Continue);
+            }
+
+            let line_end = nl.unwrap_or(self.buf.len());
+            let line = &self.buf[ls..line_end];
+            let check: &[u8] = if line.last() == Some(&b'\r') {
+                &line[..line.len() - 1]
+            } else {
+                line
+            };
+
+            if check == b"\\." {
+                let flow = on_event(ParserEvent::CopyEnd)?;
+                self.buf_pos = nl.map(|n| n + 1).unwrap_or(self.buf.len());
+                return Ok(flow);
+            }
+
+            if !skipping {
+                match on_event(ParserEvent::CopyRow(line))? {
+                    RowFlow::Continue => {}
+                    RowFlow::SkipStatement => skipping = true,
+                    RowFlow::Stop => {
+                        self.buf_pos = nl.map(|n| n + 1).unwrap_or(self.buf.len());
+                        return Ok(RowFlow::Stop);
+                    }
+                }
+            }
+
+            match nl {
+                Some(n) => ls = n + 1,
+                None => {
+                    self.buf_pos = self.buf.len();
+                    return Ok(RowFlow::Continue);
+                }
             }
         }
     }
@@ -1390,6 +1784,17 @@ pub(crate) fn extract_table_name_flexible(
 #[inline]
 fn is_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// True if `s` begins with an `INSERT INTO`/`INSERT ONLY` value statement (the
+/// forms that carry a `VALUES` list). `BULK INSERT` and other keywords are
+/// intentionally excluded so [`Parser::visit_events`] only enters tuple-
+/// streaming mode for statements it can actually stream.
+#[inline]
+fn starts_with_insert(s: &[u8]) -> bool {
+    s.len() >= 11
+        && (s[..11].eq_ignore_ascii_case(b"INSERT INTO")
+            || s[..11].eq_ignore_ascii_case(b"INSERT ONLY"))
 }
 
 /// A dollar-quote tag is either empty (`$$`) or an identifier
