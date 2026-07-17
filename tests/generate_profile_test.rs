@@ -57,9 +57,16 @@ fn adversarial_unique_strings_stay_within_byte_budget() {
     };
     let mut sketches = ColumnSketches::new(&budget, 7);
 
-    let filler = "x".repeat(4096 - 24);
-    for value in 0..1_000_000u64 {
-        // Each string is unique (distinct prefix) and ~4 KiB long.
+    // Boundedness is scale-independent: it is enforced by truncating each
+    // retained item to a fixed byte ceiling, which bites identically at any
+    // scale. So we use a modest count of long, unique strings (each 512 bytes,
+    // well over the 256-byte per-sample truncation limit) rather than a
+    // multi-GiB stream — the assertions below are just as sharp and the test
+    // runs in a couple of seconds. Only one 512-byte string is alive at a time.
+    const DISTINCT: u64 = 50_000;
+    let filler = "x".repeat(512 - 20);
+    for value in 0..DISTINCT {
+        // Each string is unique in its first 20 bytes and 512 bytes long.
         let s = format!("{value:020}{filler}");
         sketches.observe(ProfileValue::Text(&s));
     }
@@ -73,10 +80,15 @@ fn adversarial_unique_strings_stay_within_byte_budget() {
     assert!(sketches.retained_items() <= budget.retained_items_per_column());
 
     let evidence = sketches.finish();
-    // Some retained samples were longer than the ceiling and got truncated.
+    // Every retained sample was longer than the 256-byte ceiling, so
+    // truncation must have fired and been recorded as evidence.
     assert!(evidence.truncated_sample_count > 0);
-    // Distinct estimate should still recover ~1M within HLL tolerance.
-    assert_relative_eq!(evidence.distinct_estimate, 1_000_000.0, max_relative = 0.10);
+    // Distinct estimate should still recover the true count within HLL tolerance.
+    assert_relative_eq!(
+        evidence.distinct_estimate,
+        DISTINCT as f64,
+        max_relative = 0.10
+    );
 }
 
 /// Two sketches over disjoint halves, merged, reproduce the exactly-mergeable

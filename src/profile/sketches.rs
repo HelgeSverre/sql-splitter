@@ -651,7 +651,6 @@ impl StringShapeSketch {
     }
 
     fn common_suffix(a: &str, b: &str) -> (String, bool) {
-        let mut taken = 0usize;
         let mut bytes = 0usize;
         let mut ai = a.chars().rev();
         let mut bi = b.chars().rev();
@@ -662,12 +661,10 @@ impl StringShapeSketch {
                         return (a[a.len() - bytes..].to_owned(), true);
                     }
                     bytes += ca.len_utf8();
-                    taken += 1;
                 }
                 _ => break,
             }
         }
-        let _ = taken;
         (a[a.len() - bytes..].to_owned(), false)
     }
 }
