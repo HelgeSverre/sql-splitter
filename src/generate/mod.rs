@@ -319,9 +319,11 @@ fn run_generate(
 }
 
 /// A [`RowSink`] that counts rows (via [`GenerationEngine::run`]'s own
-/// bookkeeping) but writes nothing; backs [`RunMode::Check`]/[`RunMode::DryRun`]
-/// requests built directly with `OutputTarget::Discard` rather than through
-/// [`GenerateBuilder`] (which never runs the engine under those modes).
+/// bookkeeping) but writes nothing; backs a `RunMode::Generate` request built
+/// directly (bypassing [`GenerateBuilder`]) with `OutputTarget::Discard` —
+/// e.g. a caller that wants a real row count without paying for a render.
+/// [`GenerateBuilder`] itself never reaches this: it only produces `Discard`
+/// under `Check`/`DryRun`, and those modes never call [`run_generate`].
 struct DiscardSink;
 
 impl RowSink for DiscardSink {
