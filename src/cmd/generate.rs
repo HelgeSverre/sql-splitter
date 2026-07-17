@@ -25,11 +25,12 @@ use tempfile::NamedTempFile;
 
 use crate::diagnostic::{DiagnosticBag, Severity};
 use crate::generate::{
-    CompileOptions, Generate, GenerateError, GenerateReport, GenerateRequest, OutputTarget,
-    RenderOptions, RunMode, TableCountOverride,
+    CompileOptions, ExplainColumn, Generate, GenerateError, GenerateReport, GenerateRequest,
+    OutputTarget, RenderOptions, RunMode, SourceOptions, TableCountOverride,
 };
 use crate::parser::SqlDialect;
-use crate::synthetic::OutputMode;
+use crate::profile::ProfileDepth;
+use crate::synthetic::{OutputMode, SourceValueUse};
 
 use super::common::{dash_is_stdout, FILTERING};
 
@@ -48,6 +49,15 @@ pub enum ProfileDepthArg {
     #[default]
     Basic,
     Full,
+}
+
+impl ProfileDepthArg {
+    fn to_depth(self) -> ProfileDepth {
+        match self {
+            ProfileDepthArg::Basic => ProfileDepth::Basic,
+            ProfileDepthArg::Full => ProfileDepth::Full,
+        }
+    }
 }
 
 /// Output compression format for `--compress`. Accepted for forward
@@ -201,6 +211,8 @@ pub struct GenerateArgs {
 struct PreparedRequest {
     request: GenerateRequest,
     mode: RunMode,
+    /// Whether the human report should print the `--explain` inference detail.
+    explain: bool,
     json: bool,
     quiet: bool,
     strict: bool,
@@ -208,6 +220,9 @@ struct PreparedRequest {
     /// stdout [`OutputTarget`], so this stdout case renders to a temp file
     /// first and [`run`] streams it to stdout after a successful run.
     stdout_temp: Option<NamedTempFile>,
+    /// Present only when `--emit-config -` writes the model to stdout: the
+    /// resolved model is spooled to this temp file, then streamed to stdout.
+    emit_stdout_temp: Option<NamedTempFile>,
 }
 
 /// A problem with the CLI invocation itself, distinct from a model/runtime
@@ -261,10 +276,15 @@ impl GenerateArgs {
             ));
         }
 
+        // `--emit-config` with no SQL destination and no other preflight mode
+        // selects EmitModel: the resolved model is the sole output. With `-o`
+        // (or under check/dry-run) it stays an orthogonal side output.
         let mode = if self.check {
             RunMode::Check
         } else if self.dry_run {
             RunMode::DryRun
+        } else if self.emit_config.is_some() && self.output.is_none() {
+            RunMode::EmitModel
         } else {
             RunMode::Generate
         };
@@ -349,18 +369,10 @@ impl GenerateArgs {
             )));
         }
 
-        if self.emit_config.is_some() {
-            return Err(RequestError::unavailable(
-                "--emit-config is not available until Phase 3 (Task 21)",
-            ));
-        }
         if self.verify {
             return Err(RequestError::unavailable(
                 "--verify is not available until Phase 3 (Task 26)",
             ));
-        }
-        if self.explain {
-            return Err(RequestError::unavailable("--explain is not available yet"));
         }
         if self.mssql_production_style {
             return Err(RequestError::unavailable(
@@ -406,10 +418,10 @@ impl GenerateArgs {
         };
 
         let (output, stdout_temp) = match mode {
-            // `Generate::run` never reads `output` under Check/DryRun (it
-            // reports the plan directly), so any `-o` given alongside them
-            // is inert; discard rather than modeling a meaningless path.
-            RunMode::Check | RunMode::DryRun => (OutputTarget::Discard, None),
+            // `Generate::run` never reads `output` under Check/DryRun/EmitModel
+            // (they never render SQL), so any `-o` given alongside them is
+            // inert; discard rather than modeling a meaningless path.
+            RunMode::Check | RunMode::DryRun | RunMode::EmitModel => (OutputTarget::Discard, None),
             RunMode::Generate => match dash_is_stdout(self.output) {
                 Some(path) => (OutputTarget::Path(path), None),
                 None if self.json => (OutputTarget::Discard, None),
@@ -425,18 +437,45 @@ impl GenerateArgs {
             },
         };
 
+        // `--emit-config` writes to a real path; `--emit-config -` spools the
+        // model through a temp file that `run` streams to stdout afterward.
+        let (emit, emit_stdout_temp) = match self.emit_config {
+            None => (None, None),
+            Some(path) if path.as_os_str() == "-" => {
+                let temp = NamedTempFile::new().map_err(|error| {
+                    RequestError::unavailable(format!(
+                        "failed to create a temporary file for stdout emit-config: {error}"
+                    ))
+                })?;
+                let emit_path = temp.path().to_path_buf();
+                (Some(OutputTarget::Path(emit_path)), Some(temp))
+            }
+            Some(path) => (Some(OutputTarget::Path(path)), None),
+        };
+
+        let source = SourceOptions {
+            dialect: self.input_dialect,
+            depth: Some(self.profile_depth.to_depth()),
+            sample: self.profile_sample,
+        };
+
         let request = GenerateRequest {
             input: self.input,
             config: self.config,
             output,
+            emit,
             compile,
             render,
             mode,
+            explain: self.explain,
+            source,
         };
 
         Ok(PreparedRequest {
             request,
             mode,
+            explain: self.explain,
+            emit_stdout_temp,
             json: self.json,
             quiet: self.quiet,
             strict: self.strict,
@@ -483,10 +522,12 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
     let PreparedRequest {
         request,
         mode,
+        explain,
         json,
         quiet,
         strict,
         stdout_temp,
+        emit_stdout_temp,
     } = prepared;
 
     match Generate::run(request) {
@@ -494,6 +535,15 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
             if let Some(temp) = &stdout_temp {
                 stream_to_stdout(temp.path())?;
             }
+            if let Some(temp) = &emit_stdout_temp {
+                stream_to_stdout(temp.path())?;
+            }
+
+            // The conservative source-derived safety notice always reaches
+            // stderr — even under `--quiet` — and never carries values. It is
+            // deliberately kept out of the diagnostics bag, so `--strict` does
+            // not promote this allowed use to a blocking error.
+            print_source_values_notice(&report.source_values);
 
             let warnings_are_fatal = strict
                 && report
@@ -506,7 +556,7 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
                 write_diagnostics(&report.diagnostics, json)?;
                 Ok(ExitCode::FAILURE)
             } else {
-                write_report(&report, mode, json, quiet, stdout_temp.is_some())?;
+                write_report(&report, mode, explain, json, quiet, stdout_temp.is_some())?;
                 Ok(ExitCode::SUCCESS)
             }
         }
@@ -516,6 +566,25 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Print the single conservative `GEN-SOURCE-VALUES` safety notice to stderr
+/// when the resolved model replays any source-derived literals. Lists the rule
+/// locations and kinds; never the values themselves.
+fn print_source_values_notice(uses: &[SourceValueUse]) {
+    if uses.is_empty() {
+        return;
+    }
+    let locations = uses
+        .iter()
+        .map(|used| format!("{} ({})", used.path, used.rule_kind))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "warning[GEN-SOURCE-VALUES] {} rule(s) replay literal values derived from the source \
+         dump; review before sharing the output. Locations: {locations}",
+        uses.len()
+    );
 }
 
 /// Stream the SQL rendered to a temporary file (the stdout-output case; see
@@ -533,6 +602,7 @@ fn mode_label(mode: RunMode) -> &'static str {
         RunMode::Generate => "generate",
         RunMode::Check => "check",
         RunMode::DryRun => "dry_run",
+        RunMode::EmitModel => "emit_model",
     }
 }
 
@@ -542,6 +612,7 @@ fn summary_line(mode: RunMode, rows_written: u64) -> String {
         RunMode::Generate => format!("Generated {rows_written} row(s)."),
         RunMode::Check => "Check passed: the model compiles.".to_string(),
         RunMode::DryRun => format!("Dry run: the model would generate {rows_written} row(s)."),
+        RunMode::EmitModel => "Wrote resolved model.".to_string(),
     }
 }
 
@@ -553,6 +624,7 @@ fn summary_line(mode: RunMode, rows_written: u64) -> String {
 fn write_report(
     report: &GenerateReport,
     mode: RunMode,
+    explain: bool,
     json: bool,
     quiet: bool,
     sql_on_stdout: bool,
@@ -561,7 +633,14 @@ fn write_report(
         let payload = GenerateJsonOutput {
             mode: mode_label(mode).to_string(),
             rows_written: report.rows_written,
+            effective_seed: report.effective_seed,
             diagnostics: diagnostic_entries(&report.diagnostics),
+            source_values: source_value_entries(&report.source_values),
+            explain: if explain {
+                explain_entries(&report.explain)
+            } else {
+                Vec::new()
+            },
         };
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -580,7 +659,34 @@ fn write_report(
     for diagnostic in &report.diagnostics.diagnostics {
         eprintln!("{diagnostic}");
     }
+    if explain {
+        print_explain(&report.explain);
+    }
     Ok(())
+}
+
+/// Print the `--explain` inference detail to stderr (never values).
+fn print_explain(columns: &[ExplainColumn]) {
+    for column in columns {
+        eprintln!(
+            "explain[{}] {} via {} (confidence {}{})",
+            column.column,
+            column.reason,
+            column.generator_kind,
+            column.confidence,
+            if column.source_derived {
+                ", source-derived"
+            } else {
+                ""
+            },
+        );
+        for rejected in &column.rejected {
+            eprintln!(
+                "    rejected {} ({}, precedence {}, confidence {})",
+                rejected.generator_kind, rejected.reason, rejected.precedence, rejected.confidence,
+            );
+        }
+    }
 }
 
 /// Report a failed run's diagnostics ([`GenerateError::Diagnostics`], or a
@@ -602,7 +708,74 @@ fn write_diagnostics(bag: &DiagnosticBag, json: bool) -> anyhow::Result<()> {
 pub(crate) struct GenerateJsonOutput {
     mode: String,
     rows_written: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_seed: Option<u64>,
     diagnostics: Vec<DiagnosticEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    source_values: Vec<SourceValueEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    explain: Vec<ExplainEntry>,
+}
+
+/// One source-derived literal use, reshaped for JSON reporting. Carries the
+/// location and rule kind only — never the observed values.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SourceValueEntry {
+    path: String,
+    rule_kind: String,
+}
+
+fn source_value_entries(uses: &[SourceValueUse]) -> Vec<SourceValueEntry> {
+    uses.iter()
+        .map(|used| SourceValueEntry {
+            path: used.path.clone(),
+            rule_kind: used.rule_kind.clone(),
+        })
+        .collect()
+}
+
+/// One column's inference decision, reshaped for JSON `--explain` reporting.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ExplainEntry {
+    column: String,
+    reason: String,
+    confidence: String,
+    generator_kind: String,
+    source_derived: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rejected: Vec<ExplainRejectedEntry>,
+}
+
+/// One rejected inference alternative, reshaped for JSON reporting.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ExplainRejectedEntry {
+    generator_kind: String,
+    reason: String,
+    precedence: String,
+    confidence: String,
+}
+
+fn explain_entries(columns: &[ExplainColumn]) -> Vec<ExplainEntry> {
+    columns
+        .iter()
+        .map(|column| ExplainEntry {
+            column: column.column.clone(),
+            reason: column.reason.clone(),
+            confidence: column.confidence.clone(),
+            generator_kind: column.generator_kind.clone(),
+            source_derived: column.source_derived,
+            rejected: column
+                .rejected
+                .iter()
+                .map(|rejected| ExplainRejectedEntry {
+                    generator_kind: rejected.generator_kind.clone(),
+                    reason: rejected.reason.clone(),
+                    precedence: rejected.precedence.clone(),
+                    confidence: rejected.confidence.clone(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// One [`crate::diagnostic::Diagnostic`], reshaped for JSON reporting

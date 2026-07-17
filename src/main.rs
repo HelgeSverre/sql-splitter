@@ -28,6 +28,8 @@ mod json_schema;
 mod merger;
 mod parser;
 mod pk;
+#[allow(unused_imports)]
+mod profile;
 mod progress;
 mod redactor;
 #[allow(unused_imports)]

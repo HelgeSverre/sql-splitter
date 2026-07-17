@@ -1237,3 +1237,100 @@ fn observed_generators_reject_bad_params() {
         "GEN-MONOTONIC-STEP",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 21: dump-to-model and dump-to-SQL workflows via the public Generate API
+// ---------------------------------------------------------------------------
+
+use sql_splitter::generate::{Generate, RunMode};
+
+/// Profiling + inference through the facade produces a self-contained emitted
+/// model: `kind: observed` with a resolved integer count, `inference:
+/// disabled`, the seed recorded (seeded run), and no raw sample values.
+#[test]
+fn dump_emit_model_is_self_contained() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model.yaml");
+
+    let report = Generate::builder()
+        .input(MYSQL_FIXTURE)
+        .emit(&model)
+        .seed(42)
+        .mode(RunMode::EmitModel)
+        .run()
+        .expect("emit-model run succeeds");
+
+    assert_eq!(report.rows_written, 0);
+    assert_eq!(report.effective_seed, Some(42));
+
+    let yaml = std::fs::read_to_string(&model).unwrap();
+    assert!(yaml.contains("kind: model"), "yaml: {yaml}");
+    assert!(yaml.contains("inference: disabled"), "yaml: {yaml}");
+    assert!(yaml.contains("kind: observed"), "yaml: {yaml}");
+    assert!(yaml.contains("seed: 42"), "yaml: {yaml}");
+    // No raw retained samples ever leak into the emitted model.
+    assert!(
+        !yaml.contains("sample_values"),
+        "yaml leaked samples: {yaml}"
+    );
+    assert!(!yaml.contains("top_k"), "yaml leaked top-k: {yaml}");
+    // The emitted model reloads and compiles standalone.
+    let out = dir.path().join("synthetic.sql");
+    Generate::builder()
+        .config(&model)
+        .output(&out)
+        .run()
+        .expect("emitted model regenerates standalone");
+    assert!(std::fs::read_to_string(&out)
+        .unwrap()
+        .contains("INSERT INTO"));
+}
+
+/// An unseeded dump run records the effective seed in its report even though
+/// the run drew a fresh random root.
+#[test]
+fn dump_unseeded_run_records_effective_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("synthetic.sql");
+
+    let report = Generate::builder()
+        .input(MYSQL_FIXTURE)
+        .output(&out)
+        .run()
+        .expect("unseeded dump run succeeds");
+
+    assert!(report.effective_seed.is_some());
+    assert!(report.rows_written > 0);
+}
+
+/// The source-derived scan reports locations and rule kinds — the categorical
+/// `status` column persists observed literals — and never the values.
+#[test]
+fn dump_source_values_are_reported_without_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("synthetic.sql");
+
+    let report = Generate::builder()
+        .input(MYSQL_FIXTURE)
+        .output(&out)
+        .seed(42)
+        .run()
+        .expect("dump run succeeds");
+
+    assert!(
+        !report.source_values.is_empty(),
+        "expected source-derived uses"
+    );
+    // The categorical `status` column is flagged as a weighted_choice replay.
+    let status = report
+        .source_values
+        .iter()
+        .find(|u| u.path == "tables.orders.columns.status")
+        .expect("orders.status flagged");
+    assert_eq!(status.rule_kind, "weighted_choice");
+    // No observed value (e.g. `paid`) ever appears in the report's locations.
+    for used in &report.source_values {
+        assert!(!used.path.contains("paid"));
+        assert!(!used.rule_kind.contains("paid"));
+    }
+}

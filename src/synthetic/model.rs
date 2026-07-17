@@ -394,3 +394,93 @@ pub struct ProfileInference {
     #[serde(default)]
     pub reasons: Vec<String>,
 }
+
+/// One place a resolved model's rules persist literal values that originated in
+/// the source dump. Carries only the *location* and the *rule kind* — never the
+/// values themselves — so it is always safe to surface in a report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceValueUse {
+    /// Path to the rule, e.g. `tables.users.columns.status`.
+    pub path: String,
+    /// The rule kind that carries the literal(s): a generator kind such as
+    /// `weighted_choice`/`constant`/`observed_sample`, or the synthetic kinds
+    /// `source_default`/`check_constraint`.
+    pub rule_kind: String,
+}
+
+impl SyntheticModel {
+    /// Generator kinds that persist literal values drawn from the source dump.
+    /// A rule using one of these replays real observed values, so it must raise
+    /// the conservative source-derived safety notice.
+    pub const SOURCE_LITERAL_GENERATORS: &'static [&'static str] =
+        &["constant", "weighted_choice", "observed_sample"];
+
+    /// Scan every explicit and inferred rule for source-derived literal uses.
+    ///
+    /// This never returns the literal values themselves — only where they live
+    /// and what kind of rule carries them — so the result is safe to print or
+    /// serialize into a JSON report. Categorical/constant/observed-sample
+    /// generators, source `DEFAULT`s a column defers to, and verbatim CHECK
+    /// constraints all count.
+    pub fn source_value_uses(&self) -> Vec<SourceValueUse> {
+        let mut uses = Vec::new();
+        for (table_name, table) in &self.tables {
+            for (column_name, rule) in &table.columns {
+                let Some(generator) = &rule.generator else {
+                    continue;
+                };
+                let path = format!("tables.{table_name}.columns.{column_name}");
+                if Self::SOURCE_LITERAL_GENERATORS.contains(&generator.kind.as_str()) {
+                    uses.push(SourceValueUse {
+                        path,
+                        rule_kind: generator.kind.clone(),
+                    });
+                } else if generator.kind == "database_default"
+                    && column_has_source_default(table, column_name)
+                {
+                    uses.push(SourceValueUse {
+                        path,
+                        rule_kind: "source_default".to_string(),
+                    });
+                }
+            }
+            if !table.schema.check_constraints.is_empty() {
+                uses.push(SourceValueUse {
+                    path: format!("tables.{table_name}.schema.check_constraints"),
+                    rule_kind: "check_constraint".to_string(),
+                });
+            }
+        }
+        uses
+    }
+
+    /// Rewrite each table's `rows` count to the resolved value from a compiled
+    /// plan, keeping the original `kind`.
+    ///
+    /// An `observed` table stays `kind: observed` with a frozen integer count,
+    /// which is what `--emit-config` needs for a self-contained model that
+    /// reproduces the same row counts on reload without re-passing volume
+    /// flags. Tables absent from `resolved` are left untouched.
+    pub fn freeze_row_counts(&mut self, resolved: &BTreeMap<String, u64>) {
+        for (name, table) in &mut self.tables {
+            let Some(&count) = resolved.get(name) else {
+                continue;
+            };
+            match &mut table.rows {
+                RowsModel::Fixed { count: c }
+                | RowsModel::Observed { count: c }
+                | RowsModel::Scale { count: c, .. }
+                | RowsModel::RelationChildren { count: c, .. } => *c = count,
+            }
+        }
+    }
+}
+
+/// Whether `column` in `table` has a source `DEFAULT` recorded on its schema.
+fn column_has_source_default(table: &TableModel, column: &str) -> bool {
+    table
+        .schema
+        .columns
+        .iter()
+        .any(|c| c.name == column && c.default_sql.is_some())
+}

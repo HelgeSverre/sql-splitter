@@ -22,7 +22,7 @@ pub use model::{
     ChildDistribution, ColumnRule, FingerprintPolicy, GeneratorConfig, InferenceMode, InsertMode,
     ModelDefaults, ModelKind, ModifierConfig, OutputMode, OutputModel, PlannerConfig,
     ProfileInference, ProfileMetadata, RelationshipModel, RelationshipReference, RowsModel,
-    SourceModel, SyntheticFile, SyntheticModel, TableModel, TableSeed,
+    SourceModel, SourceValueUse, SyntheticFile, SyntheticModel, TableModel, TableSeed,
 };
 pub use overrides::{
     ColumnRuleOverride, OutputOverride, OverridesKind, PortableTableOverride, RootSeedOverride,

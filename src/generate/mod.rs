@@ -40,9 +40,10 @@
 //! [`GenerationEngine`] drives against any [`RowSink`], most commonly a
 //! [`crate::render::SqlRenderer`].
 //!
-//! (Profiling a model from a dump — [`ExtensionRegistry`] feeding a
-//! `DumpProfiler`/`ModelInference` stage ahead of the compiler — lands in
-//! Phase 2.)
+//! (Profiling a model from a dump — a `DumpProfiler`/`ModelInference` stage
+//! ahead of the compiler — is wired into [`Generate::run`] itself: pass
+//! [`GenerateBuilder::input`] to profile a dump into a base model, optionally
+//! merging a `kind: overrides` `.config()` on top.)
 //!
 //! ```
 //! use sql_splitter::generate::{CompileOptions, ExtensionRegistry, GenerationEngine, ModelCompiler};
@@ -94,12 +95,19 @@ pub mod registry;
 pub mod seed;
 pub mod value;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::DiagnosticBag;
-use crate::parser::SqlDialect;
-use crate::synthetic::{ConfigLoader, SyntheticFile};
+use crate::parser::{detect_dialect_from_file, SqlDialect};
+use crate::profile::evidence::DumpProfile;
+use crate::profile::{
+    Confidence, Decision, DumpProfiler, ModelInference, Precedence, ProfileBudget, ProfileDepth,
+};
+use crate::schema::Schema;
+use crate::synthetic::model::InferenceMode;
+use crate::synthetic::{ConfigLoader, ModelMerger, PortableSchema, SourceValueUse, SyntheticFile};
 
 // Re-exported so the staged API (registry -> compiler -> engine -> renderer)
 // is fully usable from `crate::generate` alone, without also reaching into
@@ -127,10 +135,12 @@ pub use value::{GenerateError, GeneratedValue};
 
 /// How a [`Generate::run`] call should treat the compiled model.
 ///
-/// `Check` and `DryRun` never write SQL; they exist so a caller can validate
-/// a model (or preview its resolved row counts) without paying for a full
-/// render. [`crate::generate::RunMode`] gains an `EmitModel` variant once
-/// dump profiling (Phase 2) can produce a model worth emitting.
+/// `Check`, `DryRun`, and `EmitModel` never write SQL; they exist so a caller
+/// can validate a model, preview its resolved row counts, or serialize the
+/// resolved model without paying for a full render. `--emit-config` is an
+/// orthogonal side output: it fires in *any* mode whose request carries an
+/// emit target, and [`RunMode::EmitModel`] is simply the mode selected when
+/// emitting the resolved model is the sole requested output (no SQL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
     /// Compile and generate a complete run, rendering SQL to `output`.
@@ -142,6 +152,9 @@ pub enum RunMode {
     /// Compile the model and report the resolved plan (its estimated row
     /// counts) without running generation or writing SQL.
     DryRun,
+    /// Compile the model and emit the resolved, self-contained model (via the
+    /// request's emit target); no generation, no SQL output.
+    EmitModel,
 }
 
 /// Where a [`Generate::run`] renders its SQL, or whether it renders none.
@@ -154,24 +167,42 @@ pub enum OutputTarget {
     Discard,
 }
 
+/// Controls for profiling a source dump named by [`GenerateRequest::input`].
+#[derive(Debug, Clone, Default)]
+pub struct SourceOptions {
+    /// Dialect the source dump is written in; auto-detected when `None`.
+    pub dialect: Option<SqlDialect>,
+    /// How deep to profile; the profiler's default (full) when `None`.
+    pub depth: Option<ProfileDepth>,
+    /// Per-column retained sample size; the profiler's default when `None`.
+    pub sample: Option<usize>,
+}
+
 /// One fully-specified generation request: everything [`Generate::run`]
 /// needs, assembled by a [`GenerateBuilder`] (or constructed directly by a
 /// caller that wants to bypass the builder).
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
-    /// A source dump to profile into a base model (Phase 2; not yet
-    /// implemented — see [`Generate::run`]).
+    /// A source dump to profile into a base model.
     pub input: Option<PathBuf>,
     /// A `kind: model` or `kind: overrides` YAML document.
     pub config: Option<PathBuf>,
     /// Where rendered SQL is written.
     pub output: OutputTarget,
+    /// Where the resolved, self-contained model is serialized (`--emit-config`),
+    /// or `None` to emit nothing.
+    pub emit: Option<OutputTarget>,
     /// Row-count and table-selection controls passed to [`ModelCompiler`].
     pub compile: CompileOptions,
     /// Dialect and formatting controls passed to [`crate::render::SqlRenderer`].
     pub render: RenderOptions,
-    /// Whether to fully generate, only validate, or only report the plan.
+    /// Whether to fully generate, only validate, only report the plan, or only
+    /// emit the resolved model.
     pub mode: RunMode,
+    /// Whether to build the `--explain` inference report.
+    pub explain: bool,
+    /// How to profile `input`, if given.
+    pub source: SourceOptions,
 }
 
 /// A summary of a completed [`Generate::run`].
@@ -183,12 +214,51 @@ pub struct GenerateRequest {
 #[derive(Debug, Clone, Default)]
 pub struct GenerateReport {
     /// Rows written across every table (`Generate` mode), or the compiled
-    /// plan's estimated total (`DryRun`); always `0` for `Check`.
+    /// plan's estimated total (`DryRun`); always `0` for `Check`/`EmitModel`.
     pub rows_written: u64,
+    /// The root seed the run actually used. Always `Some` — an unseeded run
+    /// draws a fresh random seed and records it here so the run is reproducible
+    /// after the fact, even though its emitted model records no seed.
+    pub effective_seed: Option<u64>,
     /// Every diagnostic collected while loading, merging, and compiling the
     /// model. Warning-only on success; see [`GenerateError::Diagnostics`]
     /// for the failure path.
     pub diagnostics: DiagnosticBag,
+    /// Every place the resolved model's rules replay literal values derived
+    /// from the source dump. Locations and rule kinds only, never values — the
+    /// conservative `GEN-SOURCE-VALUES` safety notice is built from this.
+    pub source_values: Vec<SourceValueUse>,
+    /// The per-column inference explanation, populated only when the request
+    /// asked for it (`--explain`). Never carries observed values.
+    pub explain: Vec<ExplainColumn>,
+}
+
+/// One column's inference decision, reshaped for `--explain` reporting. Carries
+/// the winning rule's reason/confidence and the rejected alternatives — never
+/// any observed values.
+#[derive(Debug, Clone)]
+pub struct ExplainColumn {
+    /// `"table.column"`.
+    pub column: String,
+    /// The winning candidate's stable reason code.
+    pub reason: String,
+    /// The winning candidate's confidence label.
+    pub confidence: String,
+    /// The resolved generator kind.
+    pub generator_kind: String,
+    /// Whether the winning rule embeds source-derived literal values.
+    pub source_derived: bool,
+    /// The alternatives that lost, most-relevant first.
+    pub rejected: Vec<ExplainRejected>,
+}
+
+/// One rejected alternative recorded for [`ExplainColumn`].
+#[derive(Debug, Clone)]
+pub struct ExplainRejected {
+    pub generator_kind: String,
+    pub reason: String,
+    pub precedence: String,
+    pub confidence: String,
 }
 
 /// The public generation facade: loads a model, compiles it, and — under
@@ -206,90 +276,320 @@ impl Generate {
 
     /// Run one fully-specified request end to end.
     ///
-    /// Loads the model named by `request.config` (`request.input` — profiling
-    /// a base model from a dump — is Phase 2 and reports a clear
-    /// `GEN-PROFILE-UNSUPPORTED` error today), compiles it, then generates and
-    /// renders under `request.mode`.
+    /// Resolves the model — profiling and inferring a base from `request.input`
+    /// when given, then merging a `kind: overrides` `request.config` on top —
+    /// compiles it **exactly once**, optionally serializes the resolved model
+    /// (`request.emit`) from that same plan, and optionally executes the same
+    /// plan under `request.mode`.
     ///
-    /// Structured problems (a missing/invalid config, a compile error) come
-    /// back as [`GenerateError::Diagnostics`]; a request that cannot be
-    /// satisfied at all (no config, or `kind: overrides` with no base model)
-    /// comes back as [`GenerateError::InvalidInput`].
+    /// Structured problems (a missing/invalid config, a compile error, a bad
+    /// merge) come back as [`GenerateError::Diagnostics`]; a request that
+    /// cannot be satisfied at all (no source, or `kind: overrides` with no
+    /// base model) comes back as [`GenerateError::InvalidInput`].
     pub fn run(request: GenerateRequest) -> Result<GenerateReport, GenerateError> {
         let GenerateRequest {
             input,
             config,
             output,
-            compile,
+            emit,
+            mut compile,
             render,
             mode,
+            explain,
+            source,
         } = request;
 
-        let model = load_model(input.as_deref(), config.as_deref())?;
+        let ResolvedModel {
+            model,
+            mut diagnostics,
+            decisions,
+        } = assemble_model(input.as_deref(), config.as_deref(), &source)?;
 
+        // Resolve the effective seed once so emit and execute share it. An
+        // unseeded run draws a fresh random root (kept reproducible-after-the
+        // -fact via the report) but its emitted model records no seed, so
+        // re-running that model is intentionally fresh again.
+        let explicit_seed = compile.seed.or(model.seed);
+        let effective_seed = explicit_seed.unwrap_or_else(rand::random);
+        compile.seed = Some(effective_seed);
+
+        // Compile EXACTLY once; both emit and execute read this one plan.
         let plan = ModelCompiler::standard()
-            .compile(model, compile)
+            .compile(model.clone(), compile)
             .map_err(GenerateError::Diagnostics)?;
-
-        let mut diagnostics = DiagnosticBag::default();
         diagnostics.diagnostics.extend(plan.diagnostics.clone());
 
+        // Scan the final resolved model (explicit + inferred rules) for
+        // source-derived literals, and emit the self-contained model if asked.
+        let source_values = model.source_value_uses();
+        if let Some(target) = &emit {
+            emit_model(&model, &plan, explicit_seed, target)?;
+        }
+
+        let explain = if explain {
+            build_explain(&decisions)
+        } else {
+            Vec::new()
+        };
+
+        let report = GenerateReport {
+            rows_written: 0,
+            effective_seed: Some(effective_seed),
+            diagnostics,
+            source_values,
+            explain,
+        };
+
         match mode {
-            RunMode::Check => Ok(GenerateReport {
-                rows_written: 0,
-                diagnostics,
-            }),
+            RunMode::Check | RunMode::EmitModel => Ok(report),
             RunMode::DryRun => Ok(GenerateReport {
                 rows_written: plan.estimates.total_rows,
-                diagnostics,
+                ..report
             }),
             RunMode::Generate => {
                 let engine_report = run_generate(GenerationEngine::new(plan), output, render)?;
                 Ok(GenerateReport {
                     rows_written: engine_report.rows_written,
-                    diagnostics,
+                    ..report
                 })
             }
         }
     }
 }
 
-/// Load a complete model for `request.config`, per the Phase 1 invocation
-/// rules: a `.config()` complete model works fully; a `.config()` overrides
-/// document with no base model, or any use of `.input()` (dump profiling)
-/// is a clear not-yet-supported error.
-fn load_model(
+/// A resolved base model plus the diagnostics and inference decisions gathered
+/// while assembling it.
+struct ResolvedModel {
+    model: SyntheticModel,
+    diagnostics: DiagnosticBag,
+    decisions: Vec<Decision>,
+}
+
+/// Resolve the model a request will compile: a pure `.config()` complete model,
+/// a profiled+inferred base from `.input()`, or that base with a `kind:
+/// overrides` `.config()` merged on top.
+fn assemble_model(
     input: Option<&Path>,
     config: Option<&Path>,
-) -> Result<SyntheticModel, GenerateError> {
+    source: &SourceOptions,
+) -> Result<ResolvedModel, GenerateError> {
     match (input, config) {
         (None, None) => Err(GenerateError::InvalidInput(
             "GEN-REQUEST-SOURCE: at least one of `.input()` or `.config()` is required".into(),
         )),
-        (Some(_), _) => Err(profiling_unsupported()),
         (None, Some(config_path)) => {
             match ConfigLoader::load(config_path).map_err(GenerateError::Diagnostics)? {
-                SyntheticFile::Model(model) => Ok(model),
+                SyntheticFile::Model(model) => Ok(ResolvedModel {
+                    model,
+                    diagnostics: DiagnosticBag::default(),
+                    decisions: Vec::new(),
+                }),
                 SyntheticFile::Overrides(_) => Err(GenerateError::InvalidInput(format!(
-                "GEN-OVERRIDES-NO-BASE: `{}` is a `kind: overrides` document but no base model \
-                 is available; merging overrides onto a profiled base (`.input()`) is not yet \
-                 supported (Phase 2, Tasks 19-21)",
-                config_path.display()
-            ))),
+                    "GEN-OVERRIDES-NO-BASE: `{}` is a `kind: overrides` document but no base \
+                     model is available; supply a source dump to profile (`.input()`) so the \
+                     overrides have a base to merge onto",
+                    config_path.display()
+                ))),
+            }
+        }
+        (Some(input_path), config) => {
+            let (schema, profile) = profile_source(input_path, source)?;
+            let inference = ModelInference::standard()
+                .infer(&schema, &profile)
+                .map_err(|error| {
+                    GenerateError::InvalidInput(format!("GEN-INFER-FAILED: {error}"))
+                })?;
+
+            let mut diagnostics = DiagnosticBag::default();
+            push_coded_warnings(&mut diagnostics, "GEN-PROFILE", &profile.warnings);
+            push_coded_warnings(&mut diagnostics, "GEN-INFER", &inference.warnings);
+
+            let base = inference.model;
+            let decisions = inference.decisions;
+
+            match config {
+                None => Ok(ResolvedModel {
+                    model: base,
+                    diagnostics,
+                    decisions,
+                }),
+                Some(config_path) => {
+                    match ConfigLoader::load(config_path).map_err(GenerateError::Diagnostics)? {
+                        SyntheticFile::Overrides(patch) => {
+                            let (merged, bag) = ModelMerger::merge(base, patch)
+                                .map_err(GenerateError::Diagnostics)?;
+                            diagnostics.diagnostics.extend(bag.diagnostics);
+                            Ok(ResolvedModel {
+                                model: merged,
+                                diagnostics,
+                                decisions,
+                            })
+                        }
+                        SyntheticFile::Model(model) => {
+                            // An explicit complete model alongside a source: the
+                            // model is authoritative and stands alone, so use it
+                            // and note that the profiled base was set aside.
+                            diagnostics.warning(
+                                "GEN-CONFIG-COMPLETE-MODEL",
+                                config_path.display().to_string(),
+                                "a complete `kind: model` config was supplied with a source dump; \
+                                 using the config model and ignoring the profiled base",
+                            );
+                            Ok(ResolvedModel {
+                                model,
+                                diagnostics,
+                                decisions: Vec::new(),
+                            })
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-/// The `GEN-PROFILE-UNSUPPORTED` error for any request naming `.input()`: dump
-/// profiling is Phase 2 (Tasks 19-21).
-fn profiling_unsupported() -> GenerateError {
-    GenerateError::InvalidInput(
-        "GEN-PROFILE-UNSUPPORTED: generating from `.input()` requires dump profiling, which is \
-         not yet implemented (Phase 2, Tasks 19-21); supply a complete `kind: model` document via \
-         `.config()` instead"
-            .into(),
-    )
+/// Profile `path` into its portable schema and value evidence. Runs two bounded
+/// passes over the dump: one to extract the DDL schema, one to sketch values.
+fn profile_source(
+    path: &Path,
+    source: &SourceOptions,
+) -> Result<(PortableSchema, DumpProfile), GenerateError> {
+    let dialect = match source.dialect {
+        Some(dialect) => dialect,
+        None => {
+            detect_dialect_from_file(path)
+                .map_err(source_error)?
+                .dialect
+        }
+    };
+
+    let runtime = Schema::from_sql_file(path, dialect, None).map_err(source_error)?;
+    let schema = PortableSchema::from_runtime(&runtime, dialect);
+
+    let mut builder = DumpProfiler::builder().dialect(dialect);
+    if let Some(depth) = source.depth {
+        builder = builder.depth(depth);
+    }
+    if let Some(sample) = source.sample {
+        builder = builder.budget(ProfileBudget {
+            sample_rows: sample,
+            ..ProfileBudget::default()
+        });
+    }
+    let profile = builder.build().profile_path(path).map_err(source_error)?;
+
+    Ok((schema, profile))
+}
+
+/// Wrap an I/O / profiling failure as a `GEN-SOURCE-IO` invalid-input error.
+fn source_error(error: impl std::fmt::Display) -> GenerateError {
+    GenerateError::InvalidInput(format!("GEN-SOURCE-IO: {error}"))
+}
+
+/// Fold plain-string warnings (whose message often already begins with a
+/// `GEN-*` code) into structured diagnostics, splitting the leading code off
+/// the message when present and falling back to `default_code` otherwise.
+fn push_coded_warnings(bag: &mut DiagnosticBag, default_code: &str, messages: &[String]) {
+    for message in messages {
+        match message.split_once(": ") {
+            Some((code, rest))
+                if code.starts_with("GEN-") && !code.contains(char::is_whitespace) =>
+            {
+                bag.warning(code.to_string(), String::new(), rest.to_string());
+            }
+            _ => {
+                bag.warning(default_code.to_string(), String::new(), message.clone());
+            }
+        }
+    }
+}
+
+/// Serialize the resolved model as a self-contained `--emit-config` document.
+///
+/// Freezes each table's resolved row count in place (keeping `kind: observed`),
+/// pins `defaults.inference: disabled`, and records the seed only when the run
+/// was explicitly seeded — an unseeded run emits no seed so reloading it is
+/// intentionally fresh. Inference already omits raw samples, so the emitted
+/// model carries only bounded, non-literal `profiles` metadata.
+fn emit_model(
+    model: &SyntheticModel,
+    plan: &GenerationPlan,
+    explicit_seed: Option<u64>,
+    target: &OutputTarget,
+) -> Result<(), GenerateError> {
+    let mut emit = model.clone();
+
+    let resolved: BTreeMap<String, u64> = plan
+        .tables
+        .iter()
+        .map(|t| (t.name.clone(), t.rows))
+        .collect();
+    emit.freeze_row_counts(&resolved);
+    emit.defaults.inference = InferenceMode::Disabled;
+    emit.seed = explicit_seed;
+
+    let yaml = serde_yaml_ng::to_string(&emit)
+        .map_err(|error| GenerateError::InvalidInput(format!("GEN-EMIT-SERIALIZE: {error}")))?;
+
+    match target {
+        OutputTarget::Path(path) => fs::write(path, yaml).map_err(|error| {
+            GenerateError::InvalidInput(format!(
+                "GEN-EMIT-IO: failed to write `{}`: {error}",
+                path.display()
+            ))
+        }),
+        // The builder/CLI only ever routes emit to a real path (a stdout emit
+        // is spooled through a temp file), so this arm is unreachable in
+        // practice; discard rather than panic if a caller wires it directly.
+        OutputTarget::Discard => Ok(()),
+    }
+}
+
+/// Reshape inference [`Decision`]s into the value-free `--explain` report.
+fn build_explain(decisions: &[Decision]) -> Vec<ExplainColumn> {
+    decisions
+        .iter()
+        .map(|decision| ExplainColumn {
+            column: decision.column.clone(),
+            reason: decision.reason.clone(),
+            confidence: confidence_label(decision.confidence).to_string(),
+            generator_kind: decision.generator_kind.clone(),
+            source_derived: decision.source_derived,
+            rejected: decision
+                .rejected
+                .iter()
+                .map(|rejected| ExplainRejected {
+                    generator_kind: rejected.generator_kind.clone(),
+                    reason: rejected.reason.clone(),
+                    precedence: precedence_label(rejected.precedence).to_string(),
+                    confidence: confidence_label(rejected.confidence).to_string(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Stable lowercase label for a [`Confidence`], for reporting.
+fn confidence_label(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Low => "low",
+        Confidence::Medium => "medium",
+        Confidence::High => "high",
+        Confidence::Certain => "certain",
+    }
+}
+
+/// Stable lowercase label for a [`Precedence`] class, for reporting.
+fn precedence_label(precedence: Precedence) -> &'static str {
+    match precedence {
+        Precedence::TypeFallback => "type_fallback",
+        Precedence::ObservedDistribution => "observed_distribution",
+        Precedence::StrongSemantic => "strong_semantic",
+        Precedence::Relationship => "relationship",
+        Precedence::CredentialGuard => "credential_guard",
+        Precedence::SchemaConstraint => "schema_constraint",
+        Precedence::ExplicitYaml => "explicit_yaml",
+    }
 }
 
 /// Run the engine under [`RunMode::Generate`], rendering to `output`.
@@ -353,14 +653,18 @@ pub struct GenerateBuilder {
     input: Option<PathBuf>,
     config: Option<PathBuf>,
     output: Option<PathBuf>,
+    emit: Option<PathBuf>,
     compile: CompileOptions,
     render: RenderOptions,
     mode: RunMode,
+    explain: bool,
+    source: SourceOptions,
 }
 
 impl GenerateBuilder {
-    /// A source dump to profile into a base model. Phase 2 (Tasks 19-21);
-    /// for now, using this always fails with `GEN-PROFILE-UNSUPPORTED`.
+    /// A source dump to profile into a base model. Profiling and inference run
+    /// automatically; combine with a `kind: overrides` `.config()` to patch
+    /// the profiled base.
     pub fn input(mut self, path: impl Into<PathBuf>) -> Self {
         self.input = Some(path.into());
         self
@@ -378,6 +682,32 @@ impl GenerateBuilder {
     /// never write SQL regardless.
     pub fn output(mut self, path: impl Into<PathBuf>) -> Self {
         self.output = Some(path.into());
+        self
+    }
+
+    /// The path the resolved, self-contained model is written to
+    /// (`--emit-config`). Emitting fires alongside whatever `mode` runs.
+    pub fn emit(mut self, path: impl Into<PathBuf>) -> Self {
+        self.emit = Some(path.into());
+        self
+    }
+
+    /// Whether to build the `--explain` inference report.
+    pub fn explain(mut self, explain: bool) -> Self {
+        self.explain = explain;
+        self
+    }
+
+    /// Force the dialect the source dump (`.input()`) is parsed as, instead of
+    /// auto-detecting it.
+    pub fn input_dialect(mut self, dialect: SqlDialect) -> Self {
+        self.source.dialect = Some(dialect);
+        self
+    }
+
+    /// Per-column retained sample size used while profiling `.input()`.
+    pub fn profile_sample(mut self, sample: usize) -> Self {
+        self.source.sample = Some(sample);
         self
     }
 
@@ -425,10 +755,10 @@ impl GenerateBuilder {
         self
     }
 
-    /// A profiling depth hint for `.input()`. Accepted for forward
-    /// compatibility with Phase 2 (Task 19); discarded until dump profiling
-    /// is implemented.
-    pub fn profile_depth(self, _depth: u32) -> Self {
+    /// The profiling depth for `.input()` (defaults to the profiler's full
+    /// depth when unset).
+    pub fn profile_depth(mut self, depth: ProfileDepth) -> Self {
+        self.source.depth = Some(depth);
         self
     }
 
@@ -449,17 +779,22 @@ impl GenerateBuilder {
                     "GEN-REQUEST-OUTPUT: `.output()` is required under `RunMode::Generate`".into(),
                 ))
             }
-            (RunMode::Check | RunMode::DryRun, Some(path)) => OutputTarget::Path(path),
-            (RunMode::Check | RunMode::DryRun, None) => OutputTarget::Discard,
+            (RunMode::Check | RunMode::DryRun | RunMode::EmitModel, Some(path)) => {
+                OutputTarget::Path(path)
+            }
+            (RunMode::Check | RunMode::DryRun | RunMode::EmitModel, None) => OutputTarget::Discard,
         };
 
         Ok(GenerateRequest {
             input: self.input,
             config: self.config,
             output,
+            emit: self.emit.map(OutputTarget::Path),
             compile: self.compile,
             render: self.render,
             mode: self.mode,
+            explain: self.explain,
+            source: self.source,
         })
     }
 
