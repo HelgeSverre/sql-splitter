@@ -1295,3 +1295,44 @@ fn order_family_old_flat_form_is_an_unknown_field_error() {
     let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, &extra);
     assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-UNKNOWN-FIELD".to_string()));
 }
+
+#[test]
+fn order_family_line_count_tracks_the_child_distribution_mean() {
+    // The child `rows.distribution` is the SOLE line-count source, and its SHAPE
+    // (kind + mean) — not just its bounds — must drive the draw. With
+    // `observed, mean: 3.4, min: 1, max: 50`, the average lines/order must track
+    // 3.4, NOT the midpoint (1+50)/2 = 25.5.
+    let dist = "{ kind: observed, mean: 3.4, min: 1.0, max: 50.0 }";
+    let extra = "        quantity: { min: 1, max: 5 }\n        unit_price: { min_minor: 100, max_minor: 50000 }\n        tax: { kind: fixed, rate: 0.08 }";
+    let sink = run_multi(&order_family_model(
+        2024,
+        5_000,
+        2,
+        "largest_remainder",
+        dist,
+        extra,
+    ));
+
+    let orders = sink.rows("orders").len();
+    let lines = sink.rows("order_items").len();
+    assert_eq!(orders, 5_000);
+    let avg = lines as f64 / orders as f64;
+    assert!(
+        (3.0..3.8).contains(&avg),
+        "average lines/order {avg} should track the declared mean 3.4, not the midpoint 25.5"
+    );
+    // Bounds are still respected per order (1..=50).
+    let c_order = sink.index("order_items", "order_id");
+    let o_id = sink.index("orders", "id");
+    let mut counts: BTreeMap<i128, usize> = BTreeMap::new();
+    for line in sink.rows("order_items") {
+        *counts.entry(int_of(&line[c_order])).or_default() += 1;
+    }
+    for order in sink.rows("orders") {
+        let id = int_of(&order[o_id]);
+        let n = counts.get(&id).copied().unwrap_or(0);
+        assert!((1..=50).contains(&n), "order {id}: {n} lines out of [1,50]");
+    }
+    // Money invariants must be unchanged for any line count.
+    assert_family_exact(&sink, false);
+}

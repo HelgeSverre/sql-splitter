@@ -2219,6 +2219,68 @@ fn family_output_is_byte_identical_across_a_tiny_and_a_huge_budget() {
         tiny.contains("INSERT INTO \"orders\""),
         "parent rows rendered"
     );
+
+    // Regression guard: prove the 1 KiB budget actually EXERCISES the spill path
+    // (a future byte-estimate change must not silently keep the family in memory
+    // while the byte-identical assertion above still passes). Push the real child
+    // rows the engine generated through a FamilyBuffer at each budget.
+    let child_rows = collect_family_child_rows(1 << 30);
+    assert!(!child_rows.is_empty(), "the family produced child rows");
+    let spool_rows = || {
+        child_rows.iter().enumerate().map(|(i, values)| SpooledRow {
+            table_id: 1,
+            row_index: i as u64,
+            values: values.clone(),
+        })
+    };
+    let mut tiny_buffer = FamilyBuffer::new(
+        FamilyBudget { max_bytes: 1024 },
+        1,
+        TempConfig::default(),
+        SpillKind::Child,
+    );
+    for row in spool_rows() {
+        tiny_buffer.push(row).unwrap();
+    }
+    assert!(
+        tiny_buffer.is_spilled(),
+        "the 1 KiB family budget must spill the child rows to a protected spool"
+    );
+    let mut huge_buffer = FamilyBuffer::new(
+        FamilyBudget { max_bytes: 1 << 30 },
+        1,
+        TempConfig::default(),
+        SpillKind::Child,
+    );
+    for row in spool_rows() {
+        huge_buffer.push(row).unwrap();
+    }
+    assert!(
+        !huge_buffer.is_spilled(),
+        "the 1 GiB family budget must keep the family in memory"
+    );
+}
+
+/// Compile the family model at `family_budget_bytes`, run it into a
+/// [`CollectingSink`], and return the actual `order_items` child rows the engine
+/// generated — the rows a [`FamilyBuffer`] would spool.
+fn collect_family_child_rows(family_budget_bytes: u64) -> Vec<Vec<GeneratedValue>> {
+    let model = SyntheticFile::parse_str(ORDER_FAMILY_MODEL)
+        .expect("valid model YAML")
+        .into_model()
+        .expect("document is a model");
+    let plan = ModelCompiler::standard()
+        .compile(
+            model,
+            CompileOptions {
+                family_budget_bytes: Some(family_budget_bytes),
+                ..CompileOptions::default()
+            },
+        )
+        .expect("model compiles cleanly");
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+    sink.rows["order_items"].clone()
 }
 
 #[test]

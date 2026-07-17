@@ -949,6 +949,18 @@ fn declared_count(rows: &RowsModel) -> Option<u64> {
     }
 }
 
+/// The kind name of a child fan-out distribution, so a family planner can honor
+/// its *shape* (not just its bounds) when drawing per-order line counts.
+fn distribution_kind(distribution: &ChildDistribution) -> &'static str {
+    match distribution {
+        ChildDistribution::Observed { .. } => "observed",
+        ChildDistribution::Fixed { .. } => "fixed",
+        ChildDistribution::Uniform { .. } => "uniform",
+        ChildDistribution::Poisson { .. } => "poisson",
+        ChildDistribution::Histogram { .. } => "histogram",
+    }
+}
+
 /// The `(mean, min, max)` fan-out bounds of any child distribution.
 fn distribution_bounds(distribution: &ChildDistribution) -> (f64, f64, f64) {
     match distribution {
@@ -1469,6 +1481,7 @@ fn collect_family_facts(model: &SyntheticModel, bag: &mut DiagnosticBag) -> Fami
 
                 if let RowsModel::RelationChildren { distribution, .. } = &child_model.rows {
                     let (mean, min, max) = distribution_bounds(distribution);
+                    facts.insert("dist_kind".into(), distribution_kind(distribution).into());
                     facts.insert("dist_mean".into(), mean.into());
                     facts.insert("dist_min".into(), min.into());
                     facts.insert("dist_max".into(), max.into());

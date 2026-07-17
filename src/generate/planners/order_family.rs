@@ -281,6 +281,77 @@ impl IntRange {
     }
 }
 
+/// How a per-order line count is drawn from the child table's `rows.distribution`
+/// — the SOLE source of line counts. The distribution's *shape* (its kind and
+/// mean), not just its `[min, max]` bounds, drives the draw so an order carries
+/// about `mean` lines, matching the fan-out the child table would have had.
+#[derive(Debug, Clone, Copy)]
+struct LineDist {
+    min: i128,
+    max: i128,
+    mean: f64,
+    kind: LineKind,
+}
+
+/// The line-count draw shape, mapped from the child fan-out distribution kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    /// A deterministic count of `round(mean)` (the `fixed` fan-out).
+    Fixed,
+    /// A uniform draw over `[min, max]` (the `uniform` fan-out).
+    Uniform,
+    /// A mean-respecting count around `mean` (`observed`/`poisson`/`histogram`).
+    MeanRespecting,
+}
+
+impl LineDist {
+    /// Draw one order's line count, honoring the distribution shape and clamped
+    /// to the inclusive `[min, max]` bounds.
+    fn draw(&self, rng: &mut rand_chacha::ChaCha8Rng) -> i128 {
+        let raw = match self.kind {
+            LineKind::Fixed => self.mean.round() as i128,
+            LineKind::Uniform => {
+                if self.max <= self.min {
+                    self.min
+                } else {
+                    rng.random_range(self.min..=self.max)
+                }
+            }
+            LineKind::MeanRespecting => poisson(rng, self.mean),
+        };
+        raw.clamp(self.min, self.max.max(self.min))
+    }
+}
+
+/// A Poisson draw with the given `mean`, so a family's per-order line count
+/// averages `mean` rather than the midpoint of its bounds. Knuth's method for a
+/// small mean (line counts are small); a normal approximation past 30 keeps a
+/// large mean from looping. Non-negative.
+fn poisson(rng: &mut rand_chacha::ChaCha8Rng, mean: f64) -> i128 {
+    if mean <= 0.0 {
+        return 0;
+    }
+    if mean < 30.0 {
+        let limit = (-mean).exp();
+        let mut k = 0i128;
+        let mut product = 1.0f64;
+        loop {
+            k += 1;
+            product *= rng.random::<f64>();
+            if product <= limit {
+                break;
+            }
+        }
+        k - 1
+    } else {
+        // Box–Muller standard normal, scaled to the Poisson's own variance.
+        let u1 = rng.random::<f64>().max(f64::MIN_POSITIVE);
+        let u2 = rng.random::<f64>();
+        let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+        (mean + z * mean.sqrt()).round().max(0.0) as i128
+    }
+}
+
 /// The compiled `commerce.order_family` planner.
 pub struct OrderFamilyPlanner {
     /// The parent table name (stream identity + family seeding).
@@ -306,8 +377,8 @@ pub struct OrderFamilyPlanner {
     rounding: Rounding,
     quantity: IntRange,
     unit_price_minor: IntRange,
-    /// Inclusive `[min, max]` line count per order.
-    lines: IntRange,
+    /// The child fan-out distribution the per-order line count is drawn from.
+    lines: LineDist,
     tax: RateChoice,
     discount: RateChoice,
     /// Fixed shipping charge in minor units (0 when unconfigured).
@@ -884,9 +955,10 @@ fn check_money_scale(
     }
 }
 
-/// Compile the injected child line-count distribution into an inclusive range,
-/// rejecting a zero maximum with a non-zero minimum.
-fn compile_line_range(facts: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> IntRange {
+/// Compile the injected child line-count distribution into a shape-aware
+/// [`LineDist`], honoring its kind and mean (not just its bounds), and rejecting
+/// a zero maximum with a non-zero minimum.
+fn compile_line_range(facts: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> LineDist {
     let min = facts
         .and_then(|f| f.get("dist_min"))
         .and_then(as_f64)
@@ -895,6 +967,18 @@ fn compile_line_range(facts: Option<&Value>, path: &str, bag: &mut DiagnosticBag
         .and_then(|f| f.get("dist_max"))
         .and_then(as_f64)
         .unwrap_or(min);
+    let mean = facts.and_then(|f| f.get("dist_mean")).and_then(as_f64);
+    let kind = match facts
+        .and_then(|f| f.get("dist_kind"))
+        .and_then(Value::as_str)
+    {
+        Some("fixed") => LineKind::Fixed,
+        Some("uniform") => LineKind::Uniform,
+        // `observed` / `poisson` / `histogram` all respect the declared mean; an
+        // absent distribution (a non-`relation.children` child) falls back to a
+        // fixed single line via the `mean` default below.
+        _ => LineKind::MeanRespecting,
+    };
     let min_lines = min.max(0.0).ceil() as i128;
     let max_lines = max.max(0.0).floor() as i128;
     if max_lines < min_lines || (max_lines == 0 && min_lines > 0) {
@@ -906,9 +990,18 @@ fn compile_line_range(facts: Option<&Value>, path: &str, bag: &mut DiagnosticBag
             ),
         );
     }
-    IntRange {
-        min: min_lines.max(0),
-        max: max_lines.max(min_lines.max(0)),
+    let min_lines = min_lines.max(0);
+    let max_lines = max_lines.max(min_lines);
+    // A mean clamped into the achievable band; default to the low bound when the
+    // child has no distribution to speak of.
+    let mean = mean
+        .unwrap_or(min_lines.max(1) as f64)
+        .clamp(min_lines as f64, max_lines as f64);
+    LineDist {
+        min: min_lines,
+        max: max_lines,
+        mean,
+        kind,
     }
 }
 
@@ -970,7 +1063,7 @@ fn compile_shipping(value: Option<&Value>, scale: u32) -> i128 {
 /// the largest tax) must fit every money column's declared precision.
 #[allow(clippy::too_many_arguments)]
 fn check_overflow(
-    lines: &IntRange,
+    lines: &LineDist,
     quantity: &IntRange,
     unit_price: &IntRange,
     tax: &RateChoice,
@@ -1002,6 +1095,11 @@ fn check_overflow(
     let subtotal_max = per_line.saturating_mul(lines.max.max(0));
     let tax_max = subtotal_max.saturating_mul(max_rate) / RATE_DEN;
     let grand_max = subtotal_max.saturating_add(tax_max);
+    // A single child line can carry at most its OWN tax, never the whole order's,
+    // so bound child columns by the per-line value (+ per-line tax) — bounding by
+    // the order-wide `tax_max` would spuriously reject valid configs.
+    let per_line_tax_max = per_line.saturating_mul(max_rate) / RATE_DEN;
+    let child_max = per_line.saturating_add(per_line_tax_max);
 
     // Parent money columns.
     for name in parent_writes {
@@ -1023,14 +1121,7 @@ fn check_overflow(
             .and_then(|types| types.get(name))
             .and_then(Value::as_str)
         {
-            report_capacity(
-                source_type,
-                per_line.saturating_add(tax_max),
-                name,
-                child_name,
-                path,
-                bag,
-            );
+            report_capacity(source_type, child_max, name, child_name, path, bag);
         }
     }
 }
