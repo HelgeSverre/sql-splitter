@@ -653,3 +653,456 @@ INSERT INTO metrics (id, qty) VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
     assert_eq!(metrics.row_count, Some(5));
     assert_eq!(column(metrics, "qty").total_count, 5);
 }
+
+// ---------------------------------------------------------------------------
+// Task 20: infer explicit models from a dump profile
+// ---------------------------------------------------------------------------
+
+use sql_splitter::generate::{
+    CompileOptions, GeneratedRow, GenerationEngine, ModelCompiler, PlannedTable, RowSink,
+};
+use sql_splitter::generate::{GenerateError, GeneratedValue};
+use sql_splitter::profile::evidence::{
+    BooleanEvidence, CharClasses, StringShapeEvidence, TopKEntry,
+};
+use sql_splitter::profile::{InferenceOptions, ModelInference};
+use sql_splitter::synthetic::model::RowsModel;
+use sql_splitter::synthetic::schema::{
+    PortableColumn, PortableSchema, PortableTable, SqlTypeFamily,
+};
+use sql_splitter::synthetic::{InferenceMode, SyntheticFile};
+use std::collections::BTreeMap;
+
+// --- evidence / schema builders --------------------------------------------
+
+fn portable_column(name: &str, source_type: &str, family: SqlTypeFamily) -> PortableColumn {
+    PortableColumn {
+        name: name.to_string(),
+        source_type: source_type.to_string(),
+        family,
+        nullable: false,
+        primary_key: false,
+        unique: false,
+        default_sql: None,
+        generated: false,
+        identity: false,
+        collation: None,
+    }
+}
+
+fn one_column_schema(table: &str, column: PortableColumn) -> PortableSchema {
+    let portable = PortableTable {
+        name: table.to_string(),
+        columns: vec![column],
+        primary_key: Vec::new(),
+        unique_constraints: Vec::new(),
+        check_constraints: Vec::new(),
+        indexes: Vec::new(),
+        create_statement: None,
+        relationships: Vec::new(),
+    };
+    let mut tables = BTreeMap::new();
+    tables.insert(table.to_string(), portable);
+    PortableSchema {
+        dialect: "mysql".to_string(),
+        tables,
+    }
+}
+
+fn blank_evidence(name: &str, total: u64) -> ColumnEvidence {
+    ColumnEvidence {
+        name: name.to_string(),
+        total_count: total,
+        null_count: 0,
+        null_rate: 0.0,
+        distinct_estimate: total as f64,
+        sample_values: Vec::new(),
+        truncated_sample_count: 0,
+        boolean: None,
+        numeric: None,
+        decimal_scale: None,
+        string_shape: None,
+        top_k: Vec::new(),
+        timestamp_range: None,
+        json_valid_rate: None,
+        confidence: 1.0,
+    }
+}
+
+fn one_column_profile(table: &str, evidence: ColumnEvidence, rows: u64) -> DumpProfile {
+    DumpProfile {
+        depth: ProfileDepth::Full,
+        tables: vec![TableEvidence {
+            table: table.to_string(),
+            row_count: Some(rows),
+            columns: vec![evidence],
+            relationships: Vec::new(),
+            confidence: 1.0,
+        }],
+        warnings: Vec::new(),
+    }
+}
+
+fn top(value: &str, count: u64) -> TopKEntry {
+    TopKEntry {
+        value: value.to_string(),
+        count,
+        error: 0,
+    }
+}
+
+fn generator_kind(
+    result: &sql_splitter::profile::InferenceResult,
+    table: &str,
+    col: &str,
+) -> String {
+    result
+        .column_rule(table, col)
+        .and_then(|r| r.generator.as_ref())
+        .map(|g| g.kind.clone())
+        .unwrap_or_default()
+}
+
+// --- Step 1: safety / precedence --------------------------------------------
+
+/// The credential guard beats a name/shape match and any observed-value replay:
+/// a `password` column holding real hashes emits a synthetic `password_hash`
+/// with no source literals, explained as `credential_name_guard`.
+#[test]
+fn explicit_schema_and_safety_rules_beat_weak_name_matches() {
+    let schema = one_column_schema(
+        "users",
+        portable_column("password", "varchar(255)", SqlTypeFamily::Text),
+    );
+    // Observed hashes look categorical/sample-able — the guard must still win.
+    let mut evidence = blank_evidence("password", 4);
+    evidence.distinct_estimate = 4.0;
+    evidence.sample_values = vec![
+        "$2y$10$abcdefghijklmnopqrstuv".to_string(),
+        "$2y$10$ABCDEFGHIJKLMNOPQRSTuv".to_string(),
+    ];
+    evidence.top_k = vec![top("$2y$10$abcdefghijklmnopqrstuv", 1)];
+    let profile = one_column_profile("users", evidence, 4);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+
+    assert_eq!(
+        generator_kind(&result, "users", "password"),
+        "credential.password_hash"
+    );
+    assert!(result.source_literals("users.password").is_empty());
+    let decision = result.decision("users.password").expect("decision");
+    assert_eq!(decision.reason, "credential_name_guard");
+    assert!(!decision.source_derived);
+}
+
+/// A declared identity column outranks even the credential guard, and a
+/// declared FK column is owned structurally (no column generator).
+#[test]
+fn schema_constraints_outrank_credential_and_fk_is_structural() {
+    // identity beats credential guard on the same column
+    let mut id = portable_column("secret_token", "bigint", SqlTypeFamily::Text);
+    id.family = SqlTypeFamily::BigInteger;
+    id.identity = true;
+    id.primary_key = true;
+    let schema = one_column_schema("t", id);
+    let profile = one_column_profile("t", blank_evidence("secret_token", 3), 3);
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    assert_eq!(generator_kind(&result, "t", "secret_token"), "sequence");
+    assert_eq!(
+        result.decision("t.secret_token").unwrap().reason,
+        "schema_identity"
+    );
+}
+
+/// An observed low-cardinality categorical beats the plain type fallback and is
+/// marked source-derived (it persists the observed category literals).
+#[test]
+fn observed_categorical_beats_type_fallback_and_is_source_derived() {
+    let schema = one_column_schema(
+        "orders",
+        portable_column("status", "varchar(16)", SqlTypeFamily::Text),
+    );
+    let mut evidence = blank_evidence("status", 100);
+    evidence.distinct_estimate = 3.0;
+    evidence.top_k = vec![top("paid", 60), top("pending", 30), top("void", 10)];
+    let profile = one_column_profile("orders", evidence, 100);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    assert_eq!(
+        generator_kind(&result, "orders", "status"),
+        "weighted_choice"
+    );
+    let literals = result.source_literals("orders.status");
+    assert!(literals.contains(&"paid".to_string()));
+    assert!(result.decision("orders.status").unwrap().source_derived);
+}
+
+/// A strong email name+shape wins; an ambiguous email column (named `email`
+/// but no `@` observed) stays conservative (low confidence, still explainable).
+#[test]
+fn ambiguous_email_stays_conservative() {
+    // strong: samples contain '@'
+    let schema = one_column_schema(
+        "u",
+        portable_column("email", "varchar(255)", SqlTypeFamily::Text),
+    );
+    let mut strong = blank_evidence("email", 50);
+    strong.distinct_estimate = 50.0;
+    strong.string_shape = Some(StringShapeEvidence {
+        count: 50,
+        empty_count: 0,
+        empty_rate: 0.0,
+        min_len: 8,
+        max_len: 30,
+        mean_len: 18.0,
+        classes: CharClasses {
+            lower: true,
+            upper: false,
+            digit: true,
+            whitespace: false,
+            punctuation: true,
+            non_ascii: false,
+        },
+        common_prefix: String::new(),
+        common_suffix: "@example.com".to_string(),
+        truncated_affix: false,
+    });
+    strong.sample_values = vec!["a@example.com".to_string()];
+    let result = ModelInference::standard()
+        .infer(&schema, &one_column_profile("u", strong, 50))
+        .unwrap();
+    assert_eq!(generator_kind(&result, "u", "email"), "internet.email");
+    assert_eq!(
+        result.decision("u.email").unwrap().confidence,
+        sql_splitter::profile::Confidence::High
+    );
+
+    // ambiguous: no '@' shape -> low confidence
+    let ambiguous = blank_evidence("email", 50);
+    let result = ModelInference::standard()
+        .infer(&schema, &one_column_profile("u", ambiguous, 50))
+        .unwrap();
+    assert_eq!(
+        result.decision("u.email").unwrap().confidence,
+        sql_splitter::profile::Confidence::Low
+    );
+}
+
+/// MySQL `TINYINT(1)` profiles as a two-valued 0/1 integer; the distribution
+/// heuristic recognizes the boolean convention and prefers a boolean generator.
+#[test]
+fn zero_one_integer_infers_boolean() {
+    let schema = one_column_schema(
+        "t",
+        portable_column("is_active", "tinyint(1)", SqlTypeFamily::Integer),
+    );
+    let mut evidence = blank_evidence("is_active", 100);
+    evidence.distinct_estimate = 2.0;
+    evidence.top_k = vec![top("1", 70), top("0", 30)];
+    let result = ModelInference::standard()
+        .infer(&schema, &one_column_profile("t", evidence, 100))
+        .unwrap();
+    assert_eq!(generator_kind(&result, "t", "is_active"), "boolean");
+    assert_eq!(
+        result.decision("t.is_active").unwrap().reason,
+        "observed_boolean_0_1"
+    );
+}
+
+// --- Step 5: emitted model is self-contained --------------------------------
+
+/// The emitted model retains `kind: observed` with the frozen count, sets
+/// `defaults.inference: disabled`, and dropping the `profiles` map does not
+/// change what the model generates.
+#[test]
+fn emitted_model_is_self_contained() {
+    let schema = one_column_schema(
+        "orders",
+        portable_column("status", "varchar(16)", SqlTypeFamily::Text),
+    );
+    let mut evidence = blank_evidence("status", 42);
+    evidence.distinct_estimate = 2.0;
+    evidence.top_k = vec![top("paid", 30), top("void", 12)];
+    let profile = one_column_profile("orders", evidence, 42);
+
+    let with_profiles = ModelInference::standard().infer(&schema, &profile).unwrap();
+    // Row count frozen but kind stays observed.
+    match &with_profiles.model.tables["orders"].rows {
+        RowsModel::Observed { count } => assert_eq!(*count, 42),
+        other => panic!("expected kind: observed, got {other:?}"),
+    }
+    assert_eq!(
+        with_profiles.model.defaults.inference,
+        InferenceMode::Disabled
+    );
+    assert!(!with_profiles.model.profiles.is_empty());
+
+    // Dropping the profiles map changes no generation input.
+    let without = ModelInference::new(
+        sql_splitter::generate::ExtensionRegistry::standard(),
+        InferenceOptions::default().include_profiles(false),
+    )
+    .infer(&schema, &profile)
+    .unwrap();
+    assert!(without.model.profiles.is_empty());
+    assert_eq!(
+        with_profiles.model.tables["orders"].columns,
+        without.model.tables["orders"].columns
+    );
+
+    // The self-contained model compiles and generates without the dump.
+    let plan = ModelCompiler::standard()
+        .compile(without.model.clone(), CompileOptions::default())
+        .expect("inferred model compiles standalone");
+    assert_eq!(plan.estimates.total_rows, 42);
+}
+
+// --- Step 4: observed / statistical generators ------------------------------
+
+/// Collect every generated value for the single table's single column.
+struct CollectSink {
+    rows: Vec<GeneratedValue>,
+}
+
+impl RowSink for CollectSink {
+    fn begin_table(&mut self, _t: &PlannedTable) -> Result<(), GenerateError> {
+        Ok(())
+    }
+    fn write_row(&mut self, _t: &PlannedTable, row: &GeneratedRow) -> Result<(), GenerateError> {
+        self.rows.push(row.values[0].clone());
+        Ok(())
+    }
+    fn end_table(&mut self, _t: &PlannedTable) -> Result<(), GenerateError> {
+        Ok(())
+    }
+}
+
+fn generate_column(kind_yaml: &str, rows: u64, seed: u64) -> Vec<GeneratedValue> {
+    let model = SyntheticFile::parse_str(&format!(
+        "version: 1\nkind: model\ndefaults: {{ inference: disabled }}\nseed: {seed}\n\
+         tables:\n  t:\n    rows: {{ kind: fixed, count: {rows} }}\n    schema:\n      \
+         name: t\n      columns:\n        - {{ name: v, type: bigint, nullable: false }}\n    \
+         columns:\n      v:\n        generator: {kind_yaml}\n"
+    ))
+    .expect("parse model")
+    .into_model()
+    .expect("model");
+    let plan = ModelCompiler::standard()
+        .compile(model, CompileOptions::default())
+        .expect("compile");
+    let mut sink = CollectSink { rows: Vec::new() };
+    GenerationEngine::new(plan).run(&mut sink).expect("run");
+    sink.rows
+}
+
+fn as_ints(values: &[GeneratedValue]) -> Vec<i128> {
+    values
+        .iter()
+        .map(|v| match v {
+            GeneratedValue::Integer(i) => *i,
+            other => panic!("expected integer, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn normal_generator_is_tolerant_shape_and_seed_repeatable() {
+    let cfg = "{ kind: normal, mean: 100, std: 15, min: 0, max: 200 }";
+    let a = as_ints(&generate_column(cfg, 2000, 7));
+    let b = as_ints(&generate_column(cfg, 2000, 7));
+    // Exact seed repeatability.
+    assert_eq!(a, b);
+    // Different seed diverges.
+    let c = as_ints(&generate_column(cfg, 2000, 99));
+    assert_ne!(a, c);
+    // Tolerant shape: sample mean near the configured mean, all within clamp.
+    let mean = a.iter().sum::<i128>() as f64 / a.len() as f64;
+    assert!((mean - 100.0).abs() < 5.0, "sample mean {mean} off");
+    assert!(a.iter().all(|&v| (0..=200).contains(&v)));
+}
+
+#[test]
+fn monotonic_generator_is_non_decreasing_and_seed_repeatable() {
+    let cfg = "{ kind: monotonic, start: 10, step: 2 }";
+    let a = as_ints(&generate_column(cfg, 100, 1));
+    let b = as_ints(&generate_column(cfg, 100, 1));
+    assert_eq!(a, b);
+    assert!(a.windows(2).all(|w| w[1] >= w[0]));
+    assert_eq!(a[0], 10);
+    assert_eq!(a[1], 12);
+}
+
+#[test]
+fn histogram_generator_stays_within_bins_and_repeats() {
+    let cfg = "{ kind: histogram, bins: [ { min: 0, max: 10, count: 90 }, \
+               { min: 10, max: 100, count: 10 } ] }";
+    let a = as_ints(&generate_column(cfg, 1000, 3));
+    let b = as_ints(&generate_column(cfg, 1000, 3));
+    assert_eq!(a, b);
+    assert!(a.iter().all(|&v| (0..=100).contains(&v)));
+    // The 90:10 weighting puts most samples in the low bin.
+    let low = a.iter().filter(|&&v| v <= 10).count();
+    assert!(low > a.len() * 6 / 10, "low-bin share too small: {low}");
+}
+
+#[test]
+fn observed_sample_replays_only_its_bounded_values() {
+    let cfg = "{ kind: observed_sample, values: [ { value: 3, weight: 1 }, \
+               { value: 7, weight: 1 } ] }";
+    let a = as_ints(&generate_column(cfg, 200, 5));
+    let b = as_ints(&generate_column(cfg, 200, 5));
+    assert_eq!(a, b);
+    assert!(a.iter().all(|&v| v == 3 || v == 7));
+}
+
+/// The `observed_sample` source-literal risk marker propagates into the
+/// inference warnings (and hence the report) whenever such a rule is chosen.
+#[test]
+fn observed_sample_source_literal_marker_propagates() {
+    // A high-cardinality, non-semantic text column with a retained sample and
+    // no stronger match falls back to observed_sample.
+    let schema = one_column_schema(
+        "logs",
+        portable_column("payload", "text", SqlTypeFamily::Text),
+    );
+    let mut evidence = blank_evidence("payload", 500);
+    evidence.distinct_estimate = 400.0;
+    evidence.top_k = vec![top("alpha", 3), top("beta", 2), top("gamma", 1)];
+    let result = ModelInference::standard()
+        .infer(&schema, &one_column_profile("logs", evidence, 500))
+        .unwrap();
+    assert_eq!(
+        generator_kind(&result, "logs", "payload"),
+        "observed_sample"
+    );
+    assert!(!result.source_literals("logs.payload").is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("GEN-INFER-SOURCE-DERIVED")),
+        "source-derived marker missing from warnings: {:?}",
+        result.warnings
+    );
+}
+
+/// A boolean column with observed true/false counts replays the observed rate.
+#[test]
+fn boolean_column_uses_schema_boolean() {
+    let schema = one_column_schema(
+        "t",
+        portable_column("flag", "boolean", SqlTypeFamily::Boolean),
+    );
+    let mut evidence = blank_evidence("flag", 100);
+    evidence.distinct_estimate = 2.0;
+    evidence.boolean = Some(BooleanEvidence {
+        true_count: 25,
+        false_count: 75,
+    });
+    let result = ModelInference::standard()
+        .infer(&schema, &one_column_profile("t", evidence, 100))
+        .unwrap();
+    assert_eq!(generator_kind(&result, "t", "flag"), "boolean");
+    assert_eq!(result.decision("t.flag").unwrap().reason, "schema_boolean");
+}
