@@ -23,6 +23,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$PROJECT_ROOT/target/release/sql-splitter"
 FIXTURES_DIR="$PROJECT_ROOT/tests/data/profile"
 RESULTS_DIR="$PROJECT_ROOT/benchmark-results"
+MODEL_10="$SCRIPT_DIR/fixtures/bench_chain_10.yaml"
+MODEL_100="$SCRIPT_DIR/fixtures/bench_chain_100.yaml"
 
 # Default options
 GENERATE_ONLY=false
@@ -58,6 +60,20 @@ get_size_tables() {
         mega)   echo 100 ;;
         giga)   echo 100 ;;
         *) echo 10 ;;
+    esac
+}
+
+# The `generate` command needs a static per-table schema (no "N generic
+# tables" flag), so the 10-table and 100-table chains are pre-built model
+# files under scripts/fixtures/ (see their header comments). Every table in
+# each model is a root table, so `--rows N` sets every table's row count to
+# N uniformly — reproducing the old fixture generator's uniform-rows-per-table
+# semantics exactly.
+get_model_file() {
+    case $1 in
+        10)  echo "$MODEL_10" ;;
+        100) echo "$MODEL_100" ;;
+        *) echo "Error: no committed model for $1 tables" >&2; exit 1 ;;
     esac
 }
 
@@ -133,13 +149,6 @@ if [[ ! -x "$BINARY" ]]; then
     cargo build --release --manifest-path "$PROJECT_ROOT/Cargo.toml"
 fi
 
-# Build generator
-GEN_BINARY="$PROJECT_ROOT/target/release/gen-fixtures"
-if [[ ! -x "$GEN_BINARY" ]]; then
-    echo "Building test data generator..."
-    cargo build --release -p test_data_gen --manifest-path "$PROJECT_ROOT/Cargo.toml"
-fi
-
 # Create directories
 mkdir -p "$FIXTURES_DIR" "$RESULTS_DIR"
 
@@ -155,28 +164,60 @@ get_file_size_mb() {
     echo "scale=2; $bytes / 1024 / 1024" | bc
 }
 
-# Generate test fixture using Rust gen-fixtures (streaming mode)
+# Generate test fixture using `sql-splitter generate` against the committed
+# chain model matching this size's table count (see get_model_file).
 generate_fixture() {
     local dialect=$1
     local rows=$(get_size_rows "$SIZE")
     local tables=$(get_size_tables "$SIZE")
+    local model=$(get_model_file "$tables")
     local output_file="$FIXTURES_DIR/${dialect}_${SIZE}.sql"
-    
+
     if [[ -f "$output_file" ]]; then
         echo "$output_file"
         return
     fi
-    
+
     echo "Generating $dialect fixture: $rows rows/table, $tables tables..." >&2
-    
-    "$GEN_BINARY" \
+
+    "$BINARY" generate \
+        --config "$model" \
         --dialect "$dialect" \
         --rows "$rows" \
-        --tables "$tables" \
         --seed "$SEED" \
-        --output "$output_file"
-    
+        --output "$output_file" \
+        --quiet
+
     echo "$output_file"
+}
+
+# Smoke-test MSSQL generation through the same model (Task 32 Step 1). The
+# main profiling matrix stays mysql/postgres/sqlite (MSSQL has no local
+# driver to profile against), but this still proves `generate --dialect
+# mssql` produces a dump that validates cleanly.
+smoke_test_mssql_generation() {
+    local model=$(get_model_file 10)
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local output_file="$tmp_dir/mssql_smoke.sql"
+
+    echo "Smoke-testing MSSQL generation..." >&2
+    "$BINARY" generate \
+        --config "$model" \
+        --dialect mssql \
+        --rows 50 \
+        --seed "$SEED" \
+        --output "$output_file" \
+        --quiet
+
+    if "$BINARY" validate "$output_file" --dialect mssql >/dev/null 2>&1; then
+        echo "  MSSQL smoke: PASSED" >&2
+    else
+        echo "  MSSQL smoke: FAILED" >&2
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+    rm -rf "$tmp_dir"
 }
 
 # Run a single profile test
@@ -373,6 +414,7 @@ main() {
                 echo "  MySQL:    $mysql_file ($(du -h "$mysql_file" | cut -f1))"
                 echo "  Postgres: $postgres_file ($(du -h "$postgres_file" | cut -f1))"
                 echo "  SQLite:   $sqlite_file ($(du -h "$sqlite_file" | cut -f1))"
+                smoke_test_mssql_generation
                 exit 0
             fi
             

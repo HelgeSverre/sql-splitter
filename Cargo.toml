@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/test_data_gen"]
+members = ["."]
 resolver = "2"
 
 [package]
@@ -79,7 +79,6 @@ libc = "0.2"
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
-test_data_gen = { path = "crates/test_data_gen" }
 jsonschema = "0.46"
 
 # Unix-only test support: set the umask and inspect file modes to prove the

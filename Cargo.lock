@@ -3120,7 +3120,6 @@ dependencies = [
  "smallvec",
  "tar",
  "tempfile",
- "test_data_gen",
  "xz2",
  "zip 2.4.2",
  "zstd",
@@ -3254,17 +3253,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "test_data_gen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "rand 0.10.2",
- "rand_chacha 0.10.0",
 ]
 
 [[package]]

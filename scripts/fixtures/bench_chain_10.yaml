@@ -1,0 +1,289 @@
+# Chain-of-10 generic benchmark model (Task 32).
+#
+# Replaces the old (now-removed) fixture-generator crate's streaming
+# generator's uniform table_000..table_NNN chain: N independent root tables
+# named table_NNN, each with id/name/value/description columns, and (for t
+# > 0) a parent_id column FK-referencing table_{t-1}'s id — a simple linear
+# FK chain, not a fan-out hierarchy. Row count per table is uniform and
+# controlled entirely by the
+# CLI's --rows override (every table_NNN here is a root table, so
+# `generate --rows N` sets every table's count to N — see
+# src/generate/compiler.rs::resolve_root_count). The `count: 1` placeholder
+# below is never used directly by the benchmark scripts, which always pass
+# --rows explicitly.
+#
+# Used by scripts/profile-memory.sh, scripts/bench-validate-memory.sh, and
+# scripts/verify-io-strategies.sh for the tiny/small/medium/large/xlarge/huge
+# presets (10 tables).
+
+version: 1
+kind: model
+source: { dialect: postgres }
+seed: 42
+defaults: { inference: disabled }
+
+tables:
+
+  table_000:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_000
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+
+  table_001:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_001
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_001_parent, columns: [parent_id], referenced_table: table_000, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_001_parent }
+    relationships:
+      - { name: fk_table_001_parent, columns: [parent_id], references: { table: table_000, columns: [id] } }
+
+  table_002:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_002
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_002_parent, columns: [parent_id], referenced_table: table_001, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_002_parent }
+    relationships:
+      - { name: fk_table_002_parent, columns: [parent_id], references: { table: table_001, columns: [id] } }
+
+  table_003:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_003
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_003_parent, columns: [parent_id], referenced_table: table_002, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_003_parent }
+    relationships:
+      - { name: fk_table_003_parent, columns: [parent_id], references: { table: table_002, columns: [id] } }
+
+  table_004:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_004
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_004_parent, columns: [parent_id], referenced_table: table_003, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_004_parent }
+    relationships:
+      - { name: fk_table_004_parent, columns: [parent_id], references: { table: table_003, columns: [id] } }
+
+  table_005:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_005
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_005_parent, columns: [parent_id], referenced_table: table_004, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_005_parent }
+    relationships:
+      - { name: fk_table_005_parent, columns: [parent_id], references: { table: table_004, columns: [id] } }
+
+  table_006:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_006
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_006_parent, columns: [parent_id], referenced_table: table_005, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_006_parent }
+    relationships:
+      - { name: fk_table_006_parent, columns: [parent_id], references: { table: table_005, columns: [id] } }
+
+  table_007:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_007
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_007_parent, columns: [parent_id], referenced_table: table_006, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_007_parent }
+    relationships:
+      - { name: fk_table_007_parent, columns: [parent_id], references: { table: table_006, columns: [id] } }
+
+  table_008:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_008
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_008_parent, columns: [parent_id], referenced_table: table_007, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_008_parent }
+    relationships:
+      - { name: fk_table_008_parent, columns: [parent_id], references: { table: table_007, columns: [id] } }
+
+  table_009:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: table_009
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: value, type: integer, nullable: false }
+        - { name: description, type: text, nullable: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: fk_table_009_parent, columns: [parent_id], referenced_table: table_008, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 40 }
+      value:
+        generator: { kind: integer, min: 0, max: 1000000 }
+      description:
+        generator: { kind: text.sentence }
+      parent_id:
+        generator: { kind: relation.foreign_key, relationship: fk_table_009_parent }
+    relationships:
+      - { name: fk_table_009_parent, columns: [parent_id], references: { table: table_008, columns: [id] } }
+

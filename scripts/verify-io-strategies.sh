@@ -19,7 +19,7 @@ MOUNT="${1:?usage: verify-io-strategys.sh <output-mount> [size-gb]}"
 SIZE_GB="${2:-4}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/sql-splitter"
-GEN="$ROOT/target/release/gen-fixtures"
+MODEL="$ROOT/scripts/fixtures/bench_chain_100.yaml"
 T="$MOUNT/sqlsplit-io-verify"
 
 [ -x "$BIN" ] || { echo "build first: cargo build --release"; exit 1; }
@@ -27,7 +27,7 @@ mkdir -p "$T"
 trap 'rm -rf "$T"' EXIT
 
 echo "generating ${SIZE_GB}GB fixture on $MOUNT ..."
-"$GEN" --rows "$((SIZE_GB * 100000))" --tables 100 -o "$T/fixture.sql"
+"$BIN" generate --config "$MODEL" --rows "$((SIZE_GB * 100000))" --seed 42 --output "$T/fixture.sql" --quiet
 
 declare -A MBPS
 for p in fast hdd auto; do
