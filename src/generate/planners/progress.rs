@@ -59,6 +59,7 @@ pub static WORKFLOW_PROGRESS_COUNTERS_DESCRIPTOR: PlannerDescriptor = PlannerDes
     determinism: Determinism::Deterministic,
     buffering: Buffering::Streaming,
     verification: Verification::Supported,
+    cross_table: false,
 };
 
 /// Factory for the `workflow.progress_counters` planner.

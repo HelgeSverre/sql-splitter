@@ -20,5 +20,7 @@ pub use interval::TemporalIntervalFactory;
 pub use order_family::OrderFamilyFactory;
 pub use progress::ProgressCountersFactory;
 pub use structural::{
-    TemporalLifecycleFactory, TemporalSoftDeleteFactory, TemporalTimestampsFactory,
+    HierarchyTreeFactory, RelationJunctionPairFactory, RelationPolymorphicPairFactory,
+    RelationTenantFamilyFactory, TemporalLifecycleFactory, TemporalSoftDeleteFactory,
+    TemporalTimestampsFactory,
 };

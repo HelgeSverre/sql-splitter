@@ -371,6 +371,7 @@ static TEST_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     determinism: Determinism::Deterministic,
     buffering: Buffering::Streaming,
     verification: Verification::Unsupported,
+    cross_table: false,
 };
 
 struct NoopPlanner;

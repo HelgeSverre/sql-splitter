@@ -183,7 +183,7 @@ impl ModelCompiler {
             );
         }
 
-        let family_ctx = collect_family_facts(&model, &mut bag);
+        let family_ctx = self.collect_family_facts(&model, &mut bag);
         let family_budget_bytes = options
             .family_budget_bytes
             .unwrap_or(DEFAULT_FAMILY_BUDGET_BYTES);
@@ -205,12 +205,14 @@ impl ModelCompiler {
             );
             resolved.insert(name.clone(), count);
             tables.push(self.plan_table(
+                &model,
                 name,
                 table,
                 count,
                 root_seed,
                 model.defaults.inference,
                 &family_ctx,
+                &resolved,
                 &mut bag,
             ));
         }
@@ -466,12 +468,14 @@ impl ModelCompiler {
     #[allow(clippy::too_many_arguments)]
     fn plan_table(
         &self,
+        model: &SyntheticModel,
         name: &str,
         table: &TableModel,
         rows: u64,
         root_seed: Option<u64>,
         inference: InferenceMode,
         family_ctx: &FamilyContext,
+        resolved: &BTreeMap<String, u64>,
         bag: &mut DiagnosticBag,
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
@@ -503,7 +507,8 @@ impl ModelCompiler {
         }
         fold_foreign_key_generators(name, table, &mut relationships, bag);
 
-        let planners = self.compile_planners(name, table, compile_seed, family_ctx, bag);
+        let planners =
+            self.compile_planners(model, name, table, compile_seed, family_ctx, resolved, bag);
         let claims = collect_claims(table, &planners);
 
         let columns: Vec<PlannedColumn> = table
@@ -553,15 +558,26 @@ impl ModelCompiler {
 
     /// Resolve and compile every declared planner, collecting `GEN-PLANNER-*`
     /// diagnostics and the read/write column sets each planner declares.
+    #[allow(clippy::too_many_arguments)]
     fn compile_planners(
         &self,
+        model: &SyntheticModel,
         table_name: &str,
         table: &TableModel,
         seed: SeedRoot,
         family_ctx: &FamilyContext,
+        resolved: &BTreeMap<String, u64>,
         bag: &mut DiagnosticBag,
     ) -> Vec<PlannerInfo> {
         let relationship_names = relationship_names(table);
+        // Cross-table FK-side planners (junction/tenant/polymorphic) reference
+        // OTHER tables' keys but the planner only sees its own table at compile.
+        // The compiler has the whole model plus the resolved counts (parents
+        // precede children in dependency order), so it injects the referenced
+        // tables' resolved counts and dense key recipes as facts — the same
+        // pattern the family planner uses, driven off the `cross_table`
+        // capability rather than any specific `kind`.
+        let relation_facts = build_relation_facts(model, table, resolved);
         table
             .planners
             .iter()
@@ -573,17 +589,31 @@ impl ModelCompiler {
                 // child facts to validate it there, so skip the same-table
                 // relationship check that would otherwise falsely reject it.
                 let is_family = config.args.contains_key("children");
+                let is_cross_table = self
+                    .registry
+                    .planner(&config.kind)
+                    .is_some_and(|factory| factory.descriptor().cross_table);
                 let injected;
-                let config = match family_ctx.facts.get(&(table_name.to_string(), index)) {
-                    Some(facts) => {
-                        let mut cloned = config.clone();
-                        cloned
-                            .args
-                            .insert(super::planners::order_family::FAMILY_FACTS_KEY.to_string(), facts.clone());
-                        injected = cloned;
-                        &injected
-                    }
-                    None => config,
+                let config = if let Some(facts) = family_ctx.facts.get(&(table_name.to_string(), index)) {
+                    let mut cloned = config.clone();
+                    cloned.args.insert(
+                        super::planners::order_family::FAMILY_FACTS_KEY.to_string(),
+                        facts.clone(),
+                    );
+                    injected = cloned;
+                    &injected
+                } else if is_cross_table && !is_family {
+                    // An FK-side cross-table planner: inject the resolved parent
+                    // key facts it needs to produce valid keys.
+                    let mut cloned = config.clone();
+                    cloned.args.insert(
+                        super::planners::structural::RELATION_FACTS_KEY.to_string(),
+                        relation_facts.clone(),
+                    );
+                    injected = cloned;
+                    &injected
+                } else {
+                    config
                 };
                 let Some(factory) = self.registry.planner(&config.kind) else {
                     bag.error(
@@ -996,6 +1026,20 @@ fn required_parents(model: &SyntheticModel) -> BTreeMap<String, BTreeSet<String>
                 .collect();
             if let RowsModel::RelationChildren { parent, .. } = &table.rows {
                 parents.insert(parent.clone());
+            }
+            // A polymorphic planner references its target tables by name (with no
+            // `relationships:` entry), so those targets are ordering dependencies
+            // too: their counts must be resolved before this table is planned.
+            for planner in &table.planners {
+                if let Some(serde_yaml_ng::Value::Sequence(items)) = planner.args.get("targets") {
+                    for item in items {
+                        if let Some(target) =
+                            item.get("table").and_then(serde_yaml_ng::Value::as_str)
+                        {
+                            parents.insert(target.to_string());
+                        }
+                    }
+                }
             }
             // A table never depends on itself for ordering purposes.
             parents.remove(name);
@@ -1448,16 +1492,49 @@ struct FamilyMembership {
     child: String,
 }
 
-/// Scan the model for `commerce.order_family` planners, validate the child-side
-/// facts each one cannot see (child existence and ownership conflicts on the
-/// child columns it claims), and gather the facts to inject plus the child
-/// column ownership the planner asserts. The parent-side and remaining
-/// child-side validation runs in the planner's own `compile`.
-fn collect_family_facts(model: &SyntheticModel, bag: &mut DiagnosticBag) -> FamilyContext {
+/// Whether a planner participates in the cross-table family child-spool pre-pass:
+/// its descriptor advertises the `cross_table` capability AND it declares a
+/// `children:` table (it produces that child's rows alongside its own). This is
+/// driven off the registered capability rather than any specific planner `kind`,
+/// so a new family planner joins the pre-pass by setting `cross_table` and
+/// declaring `children`. Cross-table planners that only *reference* other tables
+/// (junction/tenant/polymorphic FK-side planners) set `cross_table` too but do
+/// not declare `children`, so they receive parent-key facts in
+/// [`ModelCompiler::inject_relation_facts`] instead of spooling children here.
+fn is_family_producer(registry: &ExtensionRegistry, config: &PlannerConfig) -> bool {
+    registry
+        .planner(&config.kind)
+        .is_some_and(|factory| factory.descriptor().cross_table)
+        && config.args.contains_key("children")
+}
+
+impl ModelCompiler {
+    /// Scan the model for cross-table family planners, validate the child-side
+    /// facts each one cannot see (child existence and ownership conflicts on the
+    /// child columns it claims), and gather the facts to inject plus the child
+    /// column ownership the planner asserts. The parent-side and remaining
+    /// child-side validation runs in the planner's own `compile`.
+    ///
+    /// Which planners take part is decided by the [`is_family_producer`]
+    /// capability check, not a hardcoded `kind`.
+    fn collect_family_facts(
+        &self,
+        model: &SyntheticModel,
+        bag: &mut DiagnosticBag,
+    ) -> FamilyContext {
+        collect_family_facts(&self.registry, model, bag)
+    }
+}
+
+fn collect_family_facts(
+    registry: &ExtensionRegistry,
+    model: &SyntheticModel,
+    bag: &mut DiagnosticBag,
+) -> FamilyContext {
     let mut ctx = FamilyContext::default();
     for (parent_name, table) in &model.tables {
         for (index, config) in table.planners.iter().enumerate() {
-            if config.kind != "commerce.order_family" {
+            if !is_family_producer(registry, config) {
                 continue;
             }
             let child_name = config.args.get("children").and_then(|v| v.as_str());
@@ -1542,6 +1619,158 @@ fn collect_family_facts(model: &SyntheticModel, bag: &mut DiagnosticBag) -> Fami
         }
     }
     ctx
+}
+
+/// The dense integer key recipe `(start, step)` a parent column materializes as
+/// — row `n`'s key is `start + n * step`. Mirrors the engine's
+/// [`super::engine`] key-domain rules: a `sequence` generator carries its own
+/// `start`/`step`, and a bare integer primary key (no generator, not
+/// identity/generated) is the database sequence `1, 2, …`. Any other column
+/// (a UUID, a text key, a non-key) has no dense integer recipe and returns
+/// `None`, so an FK-side cross-table planner referencing it can reject the
+/// incompatible key at compile time.
+fn dense_key_recipe(table: &TableModel, column: &str) -> Option<(i128, i128)> {
+    if let Some(rule) = table.columns.get(column) {
+        if let Some(generator) = &rule.generator {
+            if generator.kind == "sequence" {
+                let start = generator
+                    .args
+                    .get("start")
+                    .and_then(serde_yaml_ng::Value::as_i64)
+                    .unwrap_or(0);
+                let step = generator
+                    .args
+                    .get("step")
+                    .and_then(serde_yaml_ng::Value::as_i64)
+                    .unwrap_or(1);
+                return Some((i128::from(start), i128::from(step)));
+            }
+            // Any other explicit generator is not a dense integer key.
+            return None;
+        }
+    }
+    let column = table.schema.columns.iter().find(|c| c.name == column)?;
+    if column.primary_key
+        && !column.identity
+        && !column.generated
+        && matches!(
+            column.family,
+            SqlTypeFamily::Integer | SqlTypeFamily::BigInteger
+        )
+    {
+        return Some((1, 1));
+    }
+    None
+}
+
+/// Build the `__relation_facts` payload injected into an FK-side cross-table
+/// planner: for every relationship the child declares, the resolved parent
+/// count and dense key recipe; and for every model table, its resolved count
+/// and the dense recipe of each of its columns (so a polymorphic planner can
+/// resolve a target table referenced only by name). Counts come from the
+/// already-resolved parents, which precede the child in dependency order.
+fn build_relation_facts(
+    model: &SyntheticModel,
+    table: &TableModel,
+    resolved: &BTreeMap<String, u64>,
+) -> serde_yaml_ng::Value {
+    use serde_yaml_ng::{Mapping, Value};
+
+    let recipe_map = |recipe: Option<(i128, i128)>| -> Mapping {
+        let mut m = Mapping::new();
+        match recipe {
+            Some((start, step)) => {
+                m.insert("dense".into(), true.into());
+                m.insert("start".into(), (start as i64).into());
+                m.insert("step".into(), (step as i64).into());
+            }
+            None => {
+                m.insert("dense".into(), false.into());
+            }
+        }
+        m
+    };
+
+    let mut relationships = Mapping::new();
+    let generation = table.relationships.iter().map(|rel| {
+        (
+            rel.name.clone(),
+            rel.references.table.clone(),
+            rel.references.columns.clone(),
+        )
+    });
+    let schema = table.schema.relationships.iter().map(|rel| {
+        (
+            rel.name.clone(),
+            rel.referenced_table.clone(),
+            rel.referenced_columns.clone(),
+        )
+    });
+    for (name, parent_table, parent_columns) in generation.chain(schema) {
+        let Some(name) = name else { continue };
+        let parent_column = parent_columns.first().cloned().unwrap_or_default();
+        let recipe = model
+            .tables
+            .get(&parent_table)
+            .and_then(|parent| dense_key_recipe(parent, &parent_column));
+        let mut entry = recipe_map(recipe);
+        entry.insert("parent_table".into(), parent_table.clone().into());
+        entry.insert("parent_column".into(), parent_column.into());
+        entry.insert(
+            "count".into(),
+            resolved.get(&parent_table).copied().unwrap_or(0).into(),
+        );
+        relationships.insert(name.into(), Value::Mapping(entry));
+    }
+
+    let mut tables = Mapping::new();
+    for (name, target) in &model.tables {
+        let count = resolved.get(name).copied().unwrap_or(0);
+        let mut keys = Mapping::new();
+        for column in &target.schema.columns {
+            if let Some(recipe) = dense_key_recipe(target, &column.name) {
+                let mut key_entry = recipe_map(Some(recipe));
+                // Carry the owning table's row count on each key entry so a
+                // polymorphic target resolved by column name still knows its
+                // domain size.
+                key_entry.insert("count".into(), count.into());
+                keys.insert(column.name.clone().into(), Value::Mapping(key_entry));
+            }
+        }
+        let mut entry = Mapping::new();
+        entry.insert("count".into(), count.into());
+        entry.insert("keys".into(), Value::Mapping(keys));
+        // The primary-key column: an explicit table-level PK, else a column
+        // flagged `primary_key` (the common single-column-PK shape).
+        let primary_key = target.schema.primary_key.first().cloned().or_else(|| {
+            target
+                .schema
+                .columns
+                .iter()
+                .find(|column| column.primary_key)
+                .map(|column| column.name.clone())
+        });
+        if let Some(primary_key) = primary_key {
+            entry.insert("primary_key".into(), primary_key.into());
+        }
+        tables.insert(name.clone().into(), Value::Mapping(entry));
+    }
+
+    let mut root = Mapping::new();
+    root.insert("relationships".into(), Value::Mapping(relationships));
+    root.insert("tables".into(), Value::Mapping(tables));
+    // The child's own resolved count (it is inserted into `resolved` before this
+    // table is planned), so a junction planner can reject a row count that
+    // exceeds the number of distinct parent pairs.
+    root.insert(
+        "self_count".into(),
+        resolved
+            .get(&table.schema.name)
+            .copied()
+            .unwrap_or(0)
+            .into(),
+    );
+    Value::Mapping(root)
 }
 
 /// Whether `child` declares a relationship named `name` that references

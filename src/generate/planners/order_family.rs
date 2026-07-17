@@ -69,6 +69,7 @@ pub static COMMERCE_ORDER_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescript
     determinism: Determinism::Deterministic,
     buffering: Buffering::Buffered,
     verification: Verification::Unsupported,
+    cross_table: true,
 };
 
 /// Factory for the `commerce.order_family` planner.

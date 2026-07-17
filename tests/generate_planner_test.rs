@@ -1806,3 +1806,554 @@ fn lifecycle_ownership_collision_is_a_compile_error() {
     );
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
+
+// === hierarchy.tree (Task 28) ===============================================
+//
+// A self-referential parent_id tree: roots (configurable ratio) carry a null
+// parent, and every non-root references an EARLIER row (parent-before-child by
+// generation order) within a bounded depth and branching factor.
+
+/// A `categories` self-tree model. `parent_type` toggles the parent column's
+/// nullability; `overrides` are extra indented planner keys.
+fn tree_model(seed: u64, rows: u64, parent_type: &str, overrides: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  categories:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: categories
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: parent_id, type: bigint, {parent_type} }}
+    relationships:
+      - name: category_parent
+        columns: [parent_id]
+        references: {{ table: categories, columns: [id] }}
+    planners:
+      - kind: hierarchy.tree
+        columns:
+          parent: parent_id
+        relationship: category_parent
+        root_ratio: 0.15
+        max_depth: 4
+{overrides}
+"#
+    )
+}
+
+/// The `(id -> parent_id option)` map of a generated `categories` tree.
+fn tree_edges(sink: &CollectingSink) -> BTreeMap<i128, Option<i128>> {
+    let ids = sink.index("id");
+    let parents = sink.index("parent_id");
+    sink.rows
+        .iter()
+        .map(|row| {
+            let id = row[ids].as_integer().expect("integer id");
+            let parent = match &row[parents] {
+                GeneratedValue::Null => None,
+                other => Some(other.as_integer().expect("integer parent")),
+            };
+            (id, parent)
+        })
+        .collect()
+}
+
+/// Depth of `id` by walking parents to a root; panics on a cycle.
+fn tree_depth(edges: &BTreeMap<i128, Option<i128>>, id: i128) -> u32 {
+    let mut depth = 0;
+    let mut current = id;
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(Some(parent)) = edges.get(&current) {
+        assert!(seen.insert(current), "cycle detected at {current}");
+        depth += 1;
+        current = *parent;
+        assert!(depth < 10_000, "runaway depth for {id}");
+    }
+    depth
+}
+
+#[test]
+fn tree_is_bounded_depth_with_roots_and_earlier_parents() {
+    let sink = run(&tree_model(
+        42,
+        5_000,
+        "nullable: true",
+        "        max_branching: 5",
+    ));
+    let edges = tree_edges(&sink);
+    assert_eq!(edges.len(), 5_000);
+
+    let mut roots = 0;
+    let mut child_counts: BTreeMap<i128, u32> = BTreeMap::new();
+    for (&id, &parent) in &edges {
+        match parent {
+            None => roots += 1,
+            Some(parent) => {
+                // Parent must be a valid, EARLIER id (parent-before-child).
+                assert!(
+                    edges.contains_key(&parent),
+                    "id {id}: parent {parent} absent"
+                );
+                assert!(parent < id, "id {id}: parent {parent} is not earlier");
+                *child_counts.entry(parent).or_default() += 1;
+            }
+        }
+        // Depth is bounded by max_depth.
+        assert!(tree_depth(&edges, id) <= 4, "id {id}: exceeds max depth 4");
+    }
+    // Branching is bounded, and both roots and non-roots appear.
+    assert!(
+        child_counts.values().all(|&c| c <= 5),
+        "a parent exceeded max_branching 5"
+    );
+    assert!(roots > 0, "a tree must have at least one root");
+    assert!(roots < 5_000, "not every row can be a root");
+}
+
+#[test]
+fn tree_seeded_output_repeats_and_differs_by_seed() {
+    let overrides = "        max_branching: 4";
+    let first = run(&tree_model(7, 2_000, "nullable: true", overrides));
+    let again = run(&tree_model(7, 2_000, "nullable: true", overrides));
+    let other = run(&tree_model(8, 2_000, "nullable: true", overrides));
+    assert_eq!(first.rows, again.rows, "same seed reproduces");
+    assert_ne!(first.rows, other.rows, "different seed diverges");
+}
+
+#[test]
+fn tree_returns_nonnegative_parent_predicate() {
+    use sql_splitter::generate::PlannerPredicate;
+    let plan =
+        compile_result(&tree_model(1, 10, "nullable: true", "")).expect("model compiles cleanly");
+    let predicates =
+        plan.table("categories").expect("categories").planners[0].verification_predicates();
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NonNegative { columns } if columns.contains(&"parent_id".to_string())
+    )));
+}
+
+#[test]
+fn tree_non_nullable_parent_is_a_required_cycle_compile_error() {
+    // A non-nullable self-FK cannot represent roots, so the tree is a required
+    // non-null cycle with no constructible seed.
+    let yaml = tree_model(1, 10, "nullable: false", "");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TREE-REQUIRED-CYCLE".to_string()));
+}
+
+#[test]
+fn tree_zero_max_depth_is_a_compile_error() {
+    let yaml = tree_model(1, 10, "nullable: true", "").replace("max_depth: 4", "max_depth: 0");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TREE-DEPTH".to_string()));
+}
+
+#[test]
+fn tree_root_ratio_out_of_range_is_a_compile_error() {
+    let yaml =
+        tree_model(1, 10, "nullable: true", "").replace("root_ratio: 0.15", "root_ratio: 1.5");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TREE-ROOT-RATIO".to_string()));
+}
+
+#[test]
+fn tree_missing_parent_column_is_a_compile_error() {
+    let yaml = tree_model(1, 10, "nullable: true", "").replace("parent: parent_id", "parent: nope");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TREE-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn tree_unknown_relationship_is_a_compile_error() {
+    // A same-table planner's `relationship` is validated by the compiler's
+    // generic relationship-reference check.
+    let yaml = tree_model(1, 10, "nullable: true", "")
+        .replace("relationship: category_parent", "relationship: nope");
+    assert!(compile_err_code(&yaml).contains(&"GEN-RELATIONSHIP-UNKNOWN".to_string()));
+}
+
+// === relation.junction_pair (Task 28) =======================================
+//
+// A junction row references two parents with UNIQUE (left, right) pairs. A
+// deterministic pair-index permutation makes uniqueness hold by construction.
+
+/// A `user_roles` junction between `users` and `roles`. `id_type` sets the
+/// parents' key type/generator so a key-domain error can be provoked.
+fn junction_model(seed: u64, users: u64, roles: u64, rows: u64, id_line: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  users:
+    rows: {{ kind: fixed, count: {users} }}
+    schema:
+      name: users
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  roles:
+    rows: {{ kind: fixed, count: {roles} }}
+    schema:
+      name: roles
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  user_roles:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: user_roles
+      columns:
+        - {{ name: user_id, type: bigint, nullable: false }}
+        - {id_line}
+    relationships:
+      - name: junction_user
+        columns: [user_id]
+        references: {{ table: users, columns: [id] }}
+      - name: junction_role
+        columns: [role_id]
+        references: {{ table: roles, columns: [id] }}
+    planners:
+      - kind: relation.junction_pair
+        columns:
+          left: user_id
+          right: role_id
+        left_relationship: junction_user
+        right_relationship: junction_role
+"#
+    )
+}
+
+const ROLE_ID_LINE: &str = "{ name: role_id, type: bigint, nullable: false }";
+
+#[test]
+fn junction_pairs_are_unique_and_valid() {
+    let sink = run_multi(&junction_model(42, 30, 20, 400, ROLE_ID_LINE));
+    let u = sink.index("user_roles", "user_id");
+    let r = sink.index("user_roles", "role_id");
+    let rows = sink.rows("user_roles");
+    assert_eq!(rows.len(), 400);
+
+    let mut seen = std::collections::BTreeSet::new();
+    for row in rows {
+        let user = int_of(&row[u]);
+        let role = int_of(&row[r]);
+        assert!((1..=30).contains(&user), "user_id {user} out of range");
+        assert!((1..=20).contains(&role), "role_id {role} out of range");
+        assert!(seen.insert((user, role)), "duplicate edge ({user}, {role})");
+    }
+    // 400 distinct edges must span a good fraction of both parents.
+    let users: std::collections::BTreeSet<i128> = rows.iter().map(|row| int_of(&row[u])).collect();
+    assert!(
+        users.len() > 10,
+        "edges should span many users, saw {}",
+        users.len()
+    );
+}
+
+#[test]
+fn junction_seeded_output_repeats_and_differs_by_seed() {
+    let first = run_multi(&junction_model(7, 25, 15, 200, ROLE_ID_LINE));
+    let again = run_multi(&junction_model(7, 25, 15, 200, ROLE_ID_LINE));
+    let other = run_multi(&junction_model(8, 25, 15, 200, ROLE_ID_LINE));
+    assert_eq!(
+        first.rows("user_roles"),
+        again.rows("user_roles"),
+        "same seed reproduces"
+    );
+    assert_ne!(
+        first.rows("user_roles"),
+        other.rows("user_roles"),
+        "different seed diverges"
+    );
+}
+
+#[test]
+fn junction_exhausted_pairs_is_a_compile_error() {
+    // 2 x 2 = 4 possible pairs, but 5 rows are requested.
+    let yaml = junction_model(1, 2, 2, 5, ROLE_ID_LINE);
+    assert!(compile_err_code(&yaml).contains(&"GEN-JUNCTION-EXHAUSTED".to_string()));
+}
+
+#[test]
+fn junction_missing_column_is_a_compile_error() {
+    let yaml = junction_model(1, 5, 5, 5, ROLE_ID_LINE).replace("left: user_id", "left: nope");
+    assert!(compile_err_code(&yaml).contains(&"GEN-JUNCTION-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn junction_unknown_relationship_is_a_compile_error() {
+    let yaml = junction_model(1, 5, 5, 5, ROLE_ID_LINE).replace(
+        "left_relationship: junction_user",
+        "left_relationship: nope",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-JUNCTION-RELATIONSHIP".to_string()));
+}
+
+#[test]
+fn junction_non_dense_key_is_a_compile_error() {
+    // A UUID parent key has no dense integer key domain.
+    let yaml = junction_model(1, 5, 5, 5, ROLE_ID_LINE)
+        .replace(
+            "        - { name: id, type: bigint, nullable: false, primary_key: true }\n    columns:\n      id: { generator: { kind: sequence, start: 1 } }\n  roles:",
+            "        - { name: id, type: uuid, nullable: false, primary_key: true }\n    columns:\n      id: { generator: { kind: uuid } }\n  roles:",
+        );
+    assert!(compile_err_code(&yaml).contains(&"GEN-JUNCTION-KEY-UNSUPPORTED".to_string()));
+}
+
+// === relation.polymorphic_pair (Task 28) ====================================
+//
+// A (type, id) pair where the type selects one of several target tables
+// (weighted) and the id is a VALID key in that target. Type and id are chosen
+// together, never independently.
+
+/// A `comments` table with a polymorphic (type, id) pair over `posts`/`photos`.
+fn polymorphic_model(seed: u64, posts: u64, photos: u64, rows: u64, targets: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  posts:
+    rows: {{ kind: fixed, count: {posts} }}
+    schema:
+      name: posts
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  photos:
+    rows: {{ kind: fixed, count: {photos} }}
+    schema:
+      name: photos
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  comments:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: comments
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: commentable_type, type: text, nullable: false }}
+        - {{ name: commentable_id, type: bigint, nullable: false }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+    planners:
+      - kind: relation.polymorphic_pair
+        columns:
+          type: commentable_type
+          id: commentable_id
+        targets:
+{targets}
+"#
+    )
+}
+
+const POLY_TARGETS: &str =
+    "          - { table: posts, type: \"Post\", weight: 3 }\n          - { table: photos, type: \"Photo\", weight: 1 }";
+
+#[test]
+fn polymorphic_type_and_id_are_valid_in_the_chosen_target() {
+    let sink = run_multi(&polymorphic_model(42, 20, 8, 2_000, POLY_TARGETS));
+    let t = sink.index("comments", "commentable_type");
+    let i = sink.index("comments", "commentable_id");
+    let rows = sink.rows("comments");
+    assert_eq!(rows.len(), 2_000);
+
+    let (mut posts_seen, mut photos_seen) = (0, 0);
+    for row in rows {
+        let type_name = row[t].as_text().expect("text type");
+        let id = int_of(&row[i]);
+        match type_name {
+            "Post" => {
+                assert!((1..=20).contains(&id), "Post id {id} out of range");
+                posts_seen += 1;
+            }
+            "Photo" => {
+                assert!((1..=8).contains(&id), "Photo id {id} out of range");
+                photos_seen += 1;
+            }
+            other => panic!("unexpected polymorphic type `{other}`"),
+        }
+    }
+    // Both targets appear, and the 3:1 weighting makes Post dominate.
+    assert!(photos_seen > 100, "photos should appear, saw {photos_seen}");
+    assert!(
+        posts_seen > photos_seen,
+        "Post ({posts_seen}) should outnumber Photo ({photos_seen}) at weight 3:1"
+    );
+}
+
+#[test]
+fn polymorphic_seeded_output_repeats_and_differs_by_seed() {
+    let first = run_multi(&polymorphic_model(7, 20, 8, 500, POLY_TARGETS));
+    let again = run_multi(&polymorphic_model(7, 20, 8, 500, POLY_TARGETS));
+    let other = run_multi(&polymorphic_model(8, 20, 8, 500, POLY_TARGETS));
+    assert_eq!(
+        first.rows("comments"),
+        again.rows("comments"),
+        "same seed reproduces"
+    );
+    assert_ne!(
+        first.rows("comments"),
+        other.rows("comments"),
+        "different seed diverges"
+    );
+}
+
+#[test]
+fn polymorphic_missing_column_is_a_compile_error() {
+    let yaml =
+        polymorphic_model(1, 5, 5, 5, POLY_TARGETS).replace("type: commentable_type", "type: nope");
+    assert!(compile_err_code(&yaml).contains(&"GEN-POLYMORPHIC-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn polymorphic_unknown_target_is_a_compile_error() {
+    let targets = "          - { table: nonexistent, type: \"X\", weight: 1 }";
+    let yaml = polymorphic_model(1, 5, 5, 5, targets);
+    assert!(compile_err_code(&yaml).contains(&"GEN-POLYMORPHIC-TARGET-UNKNOWN".to_string()));
+}
+
+#[test]
+fn polymorphic_non_dense_target_key_is_a_compile_error() {
+    // A UUID-keyed target has no dense integer id domain.
+    let yaml = polymorphic_model(1, 5, 5, 5, POLY_TARGETS).replace(
+        "        - { name: id, type: bigint, nullable: false, primary_key: true }\n    columns:\n      id: { generator: { kind: sequence, start: 1 } }\n  photos:",
+        "        - { name: id, type: uuid, nullable: false, primary_key: true }\n    columns:\n      id: { generator: { kind: uuid } }\n  photos:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-POLYMORPHIC-KEY-UNSUPPORTED".to_string()));
+}
+
+// === relation.tenant_family (Task 28) =======================================
+//
+// A child references a parent that shares the child's tenant: the parent rows
+// are partitioned into contiguous tenant blocks, and each child's FK is drawn
+// from the block of the child's own tenant.
+
+/// A `memberships` table whose FK to `customers` is drawn from the same tenant.
+fn tenant_model(seed: u64, customers: u64, rows: u64, num_tenants: u64) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  customers:
+    rows: {{ kind: fixed, count: {customers} }}
+    schema:
+      name: customers
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  memberships:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: memberships
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: tenant_id, type: bigint, nullable: false }}
+        - {{ name: customer_id, type: bigint, nullable: false }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+    relationships:
+      - name: membership_customer
+        columns: [customer_id]
+        references: {{ table: customers, columns: [id] }}
+    planners:
+      - kind: relation.tenant_family
+        columns:
+          tenant: tenant_id
+          parent: customer_id
+        relationship: membership_customer
+        num_tenants: {num_tenants}
+"#
+    )
+}
+
+#[test]
+fn tenant_family_selects_a_same_tenant_parent() {
+    // 100 customers, 5 tenants => contiguous blocks of 20 parent rows each.
+    let customers = 100u64;
+    let tenants = 5u64;
+    let sink = run_multi(&tenant_model(42, customers, 800, tenants));
+    let t = sink.index("memberships", "tenant_id");
+    let c = sink.index("memberships", "customer_id");
+    let rows = sink.rows("memberships");
+    assert_eq!(rows.len(), 800);
+
+    let mut tenants_seen = std::collections::BTreeSet::new();
+    for row in rows {
+        let tenant = int_of(&row[t]);
+        let customer = int_of(&row[c]);
+        assert!(
+            (1..=customers as i128).contains(&customer),
+            "customer {customer} out of range"
+        );
+        // The parent row index (0-based) is key - 1 (dense start 1, step 1);
+        // the parent's tenant is `p * T / count` (the contiguous block).
+        let parent_row = customer - 1;
+        let parent_tenant = parent_row * tenants as i128 / customers as i128;
+        assert_eq!(
+            tenant, parent_tenant,
+            "child tenant {tenant} != parent tenant {parent_tenant} for customer {customer}"
+        );
+        tenants_seen.insert(tenant);
+    }
+    assert_eq!(
+        tenants_seen.len(),
+        tenants as usize,
+        "every tenant should appear"
+    );
+}
+
+#[test]
+fn tenant_family_seeded_output_repeats_and_differs_by_seed() {
+    let first = run_multi(&tenant_model(7, 60, 300, 4));
+    let again = run_multi(&tenant_model(7, 60, 300, 4));
+    let other = run_multi(&tenant_model(8, 60, 300, 4));
+    assert_eq!(
+        first.rows("memberships"),
+        again.rows("memberships"),
+        "same seed reproduces"
+    );
+    assert_ne!(
+        first.rows("memberships"),
+        other.rows("memberships"),
+        "different seed diverges"
+    );
+}
+
+#[test]
+fn tenant_family_missing_column_is_a_compile_error() {
+    let yaml = tenant_model(1, 20, 10, 4).replace("tenant: tenant_id", "tenant: nope");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TENANT-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn tenant_family_too_many_tenants_is_a_compile_error() {
+    // More tenants than parent rows leaves a tenant with no parent to reference.
+    let yaml = tenant_model(1, 3, 10, 8);
+    assert!(compile_err_code(&yaml).contains(&"GEN-TENANT-PARTITION".to_string()));
+}
+
+#[test]
+fn tenant_family_non_dense_key_is_a_compile_error() {
+    let yaml = tenant_model(1, 20, 10, 4).replace(
+        "        - { name: id, type: bigint, nullable: false, primary_key: true }\n    columns:\n      id: { generator: { kind: sequence, start: 1 } }\n  memberships:",
+        "        - { name: id, type: uuid, nullable: false, primary_key: true }\n    columns:\n      id: { generator: { kind: uuid } }\n  memberships:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-TENANT-KEY-UNSUPPORTED".to_string()));
+}

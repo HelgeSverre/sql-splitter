@@ -171,6 +171,15 @@ pub struct PlannerDescriptor {
     pub buffering: Buffering,
     /// Whether the planner can verify its own output.
     pub verification: Verification,
+    /// Whether the planner coordinates columns across a table boundary (it
+    /// produces or references another table's rows). The compiler drives its
+    /// cross-table pre-pass (child-fact injection, external column ownership,
+    /// parent-key fact injection, and family phase building) off this capability
+    /// rather than off any specific planner `kind`. Same-table planners
+    /// (interval/progress/timestamps/soft_delete/lifecycle) set this `false`;
+    /// `commerce.order_family` and the relationship/tenant/polymorphic planners
+    /// set it `true`.
+    pub cross_table: bool,
 }
 
 // --- Compile- and row-time contexts ----------------------------------------
@@ -830,6 +839,18 @@ impl ExtensionRegistry {
             .expect("built-in planner kinds are collision-free");
         registry
             .register_planner(Box::new(super::planners::TemporalLifecycleFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::HierarchyTreeFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::RelationJunctionPairFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::RelationPolymorphicPairFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::RelationTenantFamilyFactory))
             .expect("built-in planner kinds are collision-free");
         registry
     }

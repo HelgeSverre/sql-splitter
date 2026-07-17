@@ -52,6 +52,7 @@ pub static TEMPORAL_INTERVAL_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     determinism: Determinism::Deterministic,
     buffering: Buffering::Streaming,
     verification: Verification::Supported,
+    cross_table: false,
 };
 
 /// Factory for the `temporal.interval` planner.

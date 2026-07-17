@@ -1,8 +1,22 @@
-//! Three common same-table temporal planners: `temporal.timestamps` (a
-//! created/updated pair, plus optional trailing timestamps), `temporal.
-//! soft_delete` (a coherent `deleted_at`/`is_deleted` pair), and `temporal.
-//! lifecycle` (a status column that only ever reaches legal states, each
-//! carrying a correctly-ordered timestamp).
+//! Common same-table temporal planners plus the relationship/hierarchy
+//! planners that build on the same execution pattern.
+//!
+//! Temporal (Task 27): `temporal.timestamps` (a created/updated pair, plus
+//! optional trailing timestamps), `temporal.soft_delete` (a coherent
+//! `deleted_at`/`is_deleted` pair), and `temporal.lifecycle` (a status column
+//! that only ever reaches legal states, each carrying a correctly-ordered
+//! timestamp).
+//!
+//! Relationship + hierarchy (Task 28): `hierarchy.tree` (a self-referential
+//! parent_id tree with configurable-ratio roots and bounded depth/branching)
+//! and the cross-table FK-side planners `relation.junction_pair` (unique
+//! `(left, right)` edges via a deterministic pair-index permutation),
+//! `relation.polymorphic_pair` (an atomic `(type, id)` pair choosing a target
+//! table then a valid key in it), and `relation.tenant_family` (a same-tenant
+//! foreign key drawn from the child's own tenant partition of the parent). The
+//! cross-table planners cannot see the tables they reference, so the compiler
+//! injects the referenced parent counts and dense key recipes as facts under
+//! [`RELATION_FACTS_KEY`], driven off the descriptor's `cross_table` capability.
 //!
 //! # Shared machinery, separate planners
 //!
@@ -406,6 +420,7 @@ pub static TEMPORAL_TIMESTAMPS_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor
     determinism: Determinism::Deterministic,
     buffering: Buffering::Streaming,
     verification: Verification::Supported,
+    cross_table: false,
 };
 
 /// Factory for the `temporal.timestamps` planner.
@@ -680,6 +695,7 @@ pub static TEMPORAL_SOFT_DELETE_DESCRIPTOR: PlannerDescriptor = PlannerDescripto
     determinism: Determinism::Deterministic,
     buffering: Buffering::Streaming,
     verification: Verification::Supported,
+    cross_table: false,
 };
 
 /// Factory for the `temporal.soft_delete` planner.
@@ -915,6 +931,7 @@ pub static TEMPORAL_LIFECYCLE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor 
     determinism: Determinism::Deterministic,
     buffering: Buffering::Streaming,
     verification: Verification::Supported,
+    cross_table: false,
 };
 
 /// Factory for the `temporal.lifecycle` planner.
@@ -1276,4 +1293,1051 @@ fn build_lifecycle_predicates(
     }
 
     predicates
+}
+
+// =============================================================================
+// hierarchy.tree
+// =============================================================================
+
+/// Static description of the `hierarchy.tree` planner.
+///
+/// A same-table planner despite touching a self-referential foreign key: it
+/// owns exactly the `parent` column and references only EARLIER rows of its own
+/// table, so it is `cross_table: false` and needs no cross-table fact injection.
+pub static HIERARCHY_TREE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "hierarchy.tree",
+    aliases: &[],
+    summary: "Builds a self-referential parent_id tree: configurable-ratio roots (null parent) and bounded-depth, bounded-branching descendants that reference an earlier row.",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Supported,
+    cross_table: false,
+};
+
+/// Factory for the `hierarchy.tree` planner.
+pub struct HierarchyTreeFactory;
+
+impl PlannerFactory for HierarchyTreeFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &HIERARCHY_TREE_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &PlannerConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        compile_tree(config, context).map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
+    }
+}
+
+/// The compiled `hierarchy.tree` planner. Rows are generated in index order, so
+/// the planner accumulates the depth and remaining branching capacity of every
+/// row it has already produced and only ever attaches a new non-root to an
+/// earlier, still-eligible row.
+struct HierarchyTreePlanner {
+    writes: Vec<String>,
+    parent_family: SqlTypeFamily,
+    root_ratio: f64,
+    max_depth: u32,
+    /// Maximum children per node; `None` is unbounded.
+    max_branching: Option<u32>,
+    /// The self primary key's dense recipe: row `n`'s key is `key_start + n *
+    /// key_step`. A non-root at row `n` references an earlier row `j`'s key.
+    key_start: i128,
+    key_step: i128,
+    decision_rng: ChaCha8Rng,
+    select_rng: ChaCha8Rng,
+    /// Depth of every row produced so far, indexed by row index.
+    depths: Vec<u32>,
+    /// Remaining children each produced row may still take (only tracked when
+    /// `max_branching` is set).
+    remaining: Vec<u32>,
+    /// Row indices that can still parent a new child (depth < max_depth and, when
+    /// bounded, remaining branching > 0).
+    eligible: Vec<usize>,
+    predicates: Vec<PlannerPredicate>,
+}
+
+impl HierarchyTreePlanner {
+    /// The dense key of the row at `row_index`.
+    fn key_of(&self, row_index: usize) -> i128 {
+        self.key_start + self.key_step * row_index as i128
+    }
+
+    /// Render a parent key value in the representation the parent column expects.
+    fn render_key(&self, key: i128) -> GeneratedValue {
+        match self.parent_family {
+            SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(key),
+            _ => GeneratedValue::Text(key.to_string()),
+        }
+    }
+}
+
+impl CompiledPlanner for HierarchyTreePlanner {
+    fn writes(&self) -> &[String] {
+        &self.writes
+    }
+
+    fn generate_row(
+        &mut self,
+        row_index: u64,
+        output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        // Draw both streams unconditionally and in a fixed order, so a seeded run
+        // reproduces regardless of whether a row lands a root.
+        let decision = self.decision_rng.random::<f64>();
+        let selection = self.select_rng.random::<f64>();
+
+        let n = row_index as usize;
+        // The first row has no earlier row to attach to and is always a root;
+        // otherwise a row is a root by the configured ratio, or forcibly when no
+        // eligible parent remains within the depth/branching bounds.
+        let is_root = n == 0 || decision < self.root_ratio || self.eligible.is_empty();
+
+        let (parent_value, depth) = if is_root {
+            (GeneratedValue::Null, 0)
+        } else {
+            let slot = (selection * self.eligible.len() as f64) as usize;
+            let slot = slot.min(self.eligible.len() - 1);
+            let parent_row = self.eligible[slot];
+            let depth = self.depths[parent_row] + 1;
+            if let Some(limit) = self.max_branching {
+                self.remaining[parent_row] -= 1;
+                if self.remaining[parent_row] == 0 || limit == 0 {
+                    self.eligible.swap_remove(slot);
+                }
+            }
+            (self.render_key(self.key_of(parent_row)), depth)
+        };
+
+        self.depths.push(depth);
+        self.remaining
+            .push(self.max_branching.unwrap_or(u32::MAX).max(1));
+        // A node can parent future children only while it stays under the depth
+        // bound (a child would sit at `depth + 1`).
+        if depth < self.max_depth {
+            self.eligible.push(n);
+        }
+
+        output[0] = parent_value;
+        Ok(())
+    }
+
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        self.predicates.clone()
+    }
+}
+
+fn compile_tree(
+    config: &PlannerConfig,
+    context: &CompileContext<'_>,
+) -> Result<HierarchyTreePlanner, DiagnosticBag> {
+    const COLUMN_CODE: &str = "GEN-TREE-COLUMN-MISSING";
+    const DEPTH_CODE: &str = "GEN-TREE-DEPTH";
+    const ROOT_CODE: &str = "GEN-TREE-ROOT-RATIO";
+    const BRANCH_CODE: &str = "GEN-TREE-BRANCHING";
+    const CYCLE_CODE: &str = "GEN-TREE-REQUIRED-CYCLE";
+    let mut bag = DiagnosticBag::default();
+    let table = context.table();
+    let path = context.path();
+    let columns = config.args.get("columns");
+
+    let parent_col = resolve_required(columns, "parent", table, path, COLUMN_CODE, &mut bag);
+
+    // A non-nullable self-FK cannot hold the null a root needs, so every row
+    // would have to reference another row: a required non-null self cycle with no
+    // constructible seed. (A nullable parent lets roots be null, and every
+    // non-root references an already-generated earlier row, so the FK is
+    // satisfiable without deferral.)
+    if let Some(parent) = parent_col {
+        if !parent.nullable {
+            bag.error(
+                CYCLE_CODE,
+                format!("{path}.columns.parent"),
+                format!(
+                    "hierarchy.tree parent column `{}` is not nullable, so tree roots (which need a null parent) cannot be represented; make it nullable to allow a constructible root seed",
+                    parent.name
+                ),
+            );
+        }
+    }
+
+    let root_ratio = config
+        .args
+        .get("root_ratio")
+        .and_then(as_f64)
+        .unwrap_or(0.1);
+    if !(0.0..=1.0).contains(&root_ratio) {
+        bag.error(
+            ROOT_CODE,
+            format!("{path}.root_ratio"),
+            format!("hierarchy.tree `root_ratio` {root_ratio} must be within [0.0, 1.0]"),
+        );
+    }
+
+    let max_depth = config.args.get("max_depth").and_then(as_i128).unwrap_or(6);
+    if max_depth < 1 {
+        bag.error(
+            DEPTH_CODE,
+            format!("{path}.max_depth"),
+            format!("hierarchy.tree `max_depth` {max_depth} must be at least 1"),
+        );
+    }
+
+    let max_branching = match config.args.get("max_branching").and_then(as_i128) {
+        None => None,
+        Some(branching) if branching >= 1 => Some(branching as u32),
+        Some(branching) => {
+            bag.error(
+                BRANCH_CODE,
+                format!("{path}.max_branching"),
+                format!(
+                    "hierarchy.tree `max_branching` {branching} must be at least 1 (omit it for unbounded branching)"
+                ),
+            );
+            None
+        }
+    };
+
+    let key = config.args.get("key");
+    let key_start = key
+        .and_then(|k| k.get("start"))
+        .and_then(as_i128)
+        .unwrap_or(1);
+    let key_step = key
+        .and_then(|k| k.get("step"))
+        .and_then(as_i128)
+        .unwrap_or(1);
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
+    let parent = parent_col.expect("parent resolved without errors");
+    let writes = vec![parent.name.clone()];
+    let mut predicates = Vec::new();
+    // Every produced key is `key_start + step * index` with non-negative index;
+    // with a non-negative start and step the parent column is never negative
+    // (roots are null, which the verifier does not treat as negative).
+    if key_start >= 0 && key_step >= 0 {
+        predicates.push(PlannerPredicate::NonNegative {
+            columns: vec![parent.name.clone()],
+        });
+    }
+
+    let decision_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        parent.name.clone(),
+        "hierarchy.tree.decision",
+    ));
+    let select_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        parent.name.clone(),
+        "hierarchy.tree.select",
+    ));
+
+    Ok(HierarchyTreePlanner {
+        writes,
+        parent_family: parent.family.clone(),
+        root_ratio,
+        max_depth: max_depth as u32,
+        max_branching,
+        key_start,
+        key_step,
+        decision_rng,
+        select_rng,
+        depths: Vec::new(),
+        remaining: Vec::new(),
+        eligible: Vec::new(),
+        predicates,
+    })
+}
+
+// =============================================================================
+// Cross-table FK-side planners: shared machinery
+// =============================================================================
+
+/// The private config key under which the compiler injects the resolved
+/// parent-key facts an FK-side cross-table planner (`relation.junction_pair`,
+/// `relation.tenant_family`, `relation.polymorphic_pair`) needs to produce valid
+/// keys for tables it references but cannot see on its own. Documented as an
+/// internal contract between [`super::super::compiler`] and these planners.
+pub const RELATION_FACTS_KEY: &str = "__relation_facts";
+
+/// A referenced table's resolved key domain: a dense integer sequence
+/// `start, start + step, …`, `count` rows long. Row `i` (0-based) renders the
+/// key `start + i * step`.
+#[derive(Clone, Copy)]
+struct DenseKey {
+    start: i128,
+    step: i128,
+    count: u64,
+}
+
+impl DenseKey {
+    /// The key of the referenced row at 0-based index `index`.
+    fn key_at(&self, index: u64) -> i128 {
+        self.start + self.step * index as i128
+    }
+}
+
+/// Render an integer key value in the representation the FK column expects.
+fn render_key(key: i128, family: &SqlTypeFamily) -> GeneratedValue {
+    match family {
+        SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(key),
+        _ => GeneratedValue::Text(key.to_string()),
+    }
+}
+
+/// Resolve a relationship's injected fact into a [`DenseKey`], or report why it
+/// cannot serve as a valid integer key domain (unknown relationship, or a
+/// non-dense parent key such as a UUID).
+fn dense_key_from_relationship(
+    facts: Option<&Value>,
+    rel_name: &str,
+    planner: &str,
+    role: &str,
+    codes: [&'static str; 2],
+    path: &str,
+    bag: &mut DiagnosticBag,
+) -> Option<DenseKey> {
+    let [missing_code, key_code] = codes;
+    let fact = facts
+        .and_then(|f| f.get("relationships"))
+        .and_then(|r| r.get(rel_name));
+    let Some(fact) = fact else {
+        bag.error(
+            missing_code,
+            format!("{path}.{role}"),
+            format!(
+                "{planner} `{role}` names relationship `{rel_name}`, which is not declared on this table"
+            ),
+        );
+        return None;
+    };
+    dense_key_from_fact(fact, rel_name, planner, key_code, path, bag)
+}
+
+/// Resolve an already-located fact mapping into a [`DenseKey`].
+fn dense_key_from_fact(
+    fact: &Value,
+    label: &str,
+    planner: &str,
+    key_code: &'static str,
+    path: &str,
+    bag: &mut DiagnosticBag,
+) -> Option<DenseKey> {
+    let dense = fact.get("dense").and_then(Value::as_bool).unwrap_or(false);
+    if !dense {
+        bag.error(
+            key_code,
+            path.to_string(),
+            format!(
+                "{planner} target `{label}` does not have a dense integer key; only bare integer primary keys and `sequence` keys are supported"
+            ),
+        );
+        return None;
+    }
+    let start = fact.get("start").and_then(as_i128).unwrap_or(1);
+    let step = fact.get("step").and_then(as_i128).unwrap_or(1);
+    let count = fact.get("count").and_then(Value::as_u64).unwrap_or(0);
+    Some(DenseKey { start, step, count })
+}
+
+/// The greatest common divisor of two non-negative integers.
+fn gcd(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        (a, b) = (b, a.rem_euclid(b));
+    }
+    a.abs()
+}
+
+// =============================================================================
+// relation.junction_pair
+// =============================================================================
+
+/// Static description of the `relation.junction_pair` planner.
+pub static RELATION_JUNCTION_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "relation.junction_pair",
+    aliases: &[],
+    summary: "Fills a junction row's two foreign keys with a UNIQUE (left, right) pair, using a deterministic pair-index permutation so edges never repeat.",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Supported,
+    cross_table: true,
+};
+
+/// Factory for the `relation.junction_pair` planner.
+pub struct RelationJunctionPairFactory;
+
+impl PlannerFactory for RelationJunctionPairFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &RELATION_JUNCTION_PAIR_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &PlannerConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        compile_junction_pair(config, context)
+            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
+    }
+}
+
+/// The compiled `relation.junction_pair` planner. It maps the junction row index
+/// `n` to a distinct index in `[0, left.count * right.count)` via the bijection
+/// `idx(n) = (offset + n * stride) mod total` (with `gcd(stride, total) == 1`),
+/// then decodes that index into a `(left_row, right_row)` pair. Distinct `n`
+/// therefore always yield distinct pairs — uniqueness is by construction, not by
+/// rejection sampling.
+struct RelationJunctionPairPlanner {
+    writes: Vec<String>,
+    left_family: SqlTypeFamily,
+    right_family: SqlTypeFamily,
+    left: DenseKey,
+    right: DenseKey,
+    total: i128,
+    stride: i128,
+    offset: i128,
+    predicates: Vec<PlannerPredicate>,
+}
+
+impl CompiledPlanner for RelationJunctionPairPlanner {
+    fn writes(&self) -> &[String] {
+        &self.writes
+    }
+
+    fn generate_row(
+        &mut self,
+        row_index: u64,
+        output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        if self.total <= 0 {
+            output[0] = GeneratedValue::Null;
+            output[1] = GeneratedValue::Null;
+            return Ok(());
+        }
+        let idx = (self.offset + (row_index as i128) * self.stride).rem_euclid(self.total);
+        let right_count = self.right.count as i128;
+        let left_row = (idx.div_euclid(right_count)) as u64;
+        let right_row = (idx.rem_euclid(right_count)) as u64;
+        output[0] = render_key(self.left.key_at(left_row), &self.left_family);
+        output[1] = render_key(self.right.key_at(right_row), &self.right_family);
+        Ok(())
+    }
+
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        self.predicates.clone()
+    }
+}
+
+fn compile_junction_pair(
+    config: &PlannerConfig,
+    context: &CompileContext<'_>,
+) -> Result<RelationJunctionPairPlanner, DiagnosticBag> {
+    const COLUMN_CODE: &str = "GEN-JUNCTION-COLUMN-MISSING";
+    const REL_CODE: &str = "GEN-JUNCTION-RELATIONSHIP";
+    const KEY_CODE: &str = "GEN-JUNCTION-KEY-UNSUPPORTED";
+    const EXHAUSTED_CODE: &str = "GEN-JUNCTION-EXHAUSTED";
+    let mut bag = DiagnosticBag::default();
+    let table = context.table();
+    let path = context.path();
+    let columns = config.args.get("columns");
+    let facts = config.args.get(RELATION_FACTS_KEY);
+
+    let left_col = resolve_required(columns, "left", table, path, COLUMN_CODE, &mut bag);
+    let right_col = resolve_required(columns, "right", table, path, COLUMN_CODE, &mut bag);
+
+    let left_rel = config
+        .args
+        .get("left_relationship")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let right_rel = config
+        .args
+        .get("right_relationship")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if left_rel.is_none() {
+        bag.error(
+            REL_CODE,
+            format!("{path}.left_relationship"),
+            "relation.junction_pair requires a `left_relationship` naming the left foreign key"
+                .to_string(),
+        );
+    }
+    if right_rel.is_none() {
+        bag.error(
+            REL_CODE,
+            format!("{path}.right_relationship"),
+            "relation.junction_pair requires a `right_relationship` naming the right foreign key"
+                .to_string(),
+        );
+    }
+
+    let left = left_rel.as_deref().and_then(|name| {
+        dense_key_from_relationship(
+            facts,
+            name,
+            "relation.junction_pair",
+            "left_relationship",
+            [REL_CODE, KEY_CODE],
+            path,
+            &mut bag,
+        )
+    });
+    let right = right_rel.as_deref().and_then(|name| {
+        dense_key_from_relationship(
+            facts,
+            name,
+            "relation.junction_pair",
+            "right_relationship",
+            [REL_CODE, KEY_CODE],
+            path,
+            &mut bag,
+        )
+    });
+
+    // The junction can hold at most `left.count * right.count` distinct edges; a
+    // larger row count could not fill unique pairs.
+    let self_count = facts
+        .and_then(|f| f.get("self_count"))
+        .and_then(Value::as_u64);
+    if let (Some(left), Some(right), Some(rows)) = (left, right, self_count) {
+        let total = i128::from(left.count) * i128::from(right.count);
+        if i128::from(rows) > total {
+            bag.error(
+                EXHAUSTED_CODE,
+                path.to_string(),
+                format!(
+                    "relation.junction_pair needs {rows} unique (left, right) pairs but only {total} exist ({} left x {} right)",
+                    left.count, right.count
+                ),
+            );
+        }
+    }
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
+    let left_col = left_col.expect("left resolved without errors");
+    let right_col = right_col.expect("right resolved without errors");
+    let left = left.expect("left key resolved without errors");
+    let right = right.expect("right key resolved without errors");
+    let total = i128::from(left.count) * i128::from(right.count);
+
+    // A seeded stride coprime with `total` makes `n -> (offset + n*stride) mod
+    // total` a bijection, so distinct rows land on distinct pairs. `stride == 1`
+    // is always coprime, so the search below always terminates on a valid value.
+    let mut rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        format!("{},{}", left_col.name, right_col.name),
+        "relation.junction_pair",
+    ));
+    let (stride, offset) = if total > 1 {
+        let offset = rng.random_range(0..total);
+        let mut stride = 1 + rng.random_range(0..total - 1);
+        let mut tries = 0;
+        while gcd(stride, total) != 1 && tries < 64 {
+            stride = stride % (total - 1) + 1;
+            tries += 1;
+        }
+        if gcd(stride, total) != 1 {
+            stride = 1;
+        }
+        (stride, offset)
+    } else {
+        (1, 0)
+    };
+
+    let writes = vec![left_col.name.clone(), right_col.name.clone()];
+    let mut predicates = Vec::new();
+    if left.start >= 0 && left.step >= 0 && right.start >= 0 && right.step >= 0 {
+        predicates.push(PlannerPredicate::NonNegative {
+            columns: writes.clone(),
+        });
+    }
+
+    Ok(RelationJunctionPairPlanner {
+        writes,
+        left_family: left_col.family.clone(),
+        right_family: right_col.family.clone(),
+        left,
+        right,
+        total,
+        stride,
+        offset,
+        predicates,
+    })
+}
+
+// =============================================================================
+// relation.polymorphic_pair
+// =============================================================================
+
+/// Static description of the `relation.polymorphic_pair` planner.
+pub static RELATION_POLYMORPHIC_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "relation.polymorphic_pair",
+    aliases: &[],
+    summary: "Fills a (type, id) polymorphic pair atomically: a weighted choice picks a target table, then a valid key from that same target's key domain.",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Supported,
+    cross_table: true,
+};
+
+/// Factory for the `relation.polymorphic_pair` planner.
+pub struct RelationPolymorphicPairFactory;
+
+impl PlannerFactory for RelationPolymorphicPairFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &RELATION_POLYMORPHIC_PAIR_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &PlannerConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        compile_polymorphic_pair(config, context)
+            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
+    }
+}
+
+/// One resolved polymorphic target: the discriminator string written into the
+/// type column and the key domain the id is drawn from.
+struct PolyTarget {
+    type_label: String,
+    key: DenseKey,
+}
+
+/// The compiled `relation.polymorphic_pair` planner. Each row draws a target
+/// (weighted) and then a valid key from that same target's domain, in a fixed
+/// stream order, so the type and id are always chosen together and never
+/// independently.
+struct RelationPolymorphicPairPlanner {
+    writes: Vec<String>,
+    id_family: SqlTypeFamily,
+    targets: Vec<PolyTarget>,
+    weights: Vec<f64>,
+    rng: ChaCha8Rng,
+    predicates: Vec<PlannerPredicate>,
+}
+
+impl CompiledPlanner for RelationPolymorphicPairPlanner {
+    fn writes(&self) -> &[String] {
+        &self.writes
+    }
+
+    fn generate_row(
+        &mut self,
+        _row_index: u64,
+        output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        // Draw the target pick, then the id pick, in a fixed order, so the pair
+        // is atomic and a seeded run reproduces exactly.
+        let target_pick = self.rng.random::<f64>();
+        let id_pick = self.rng.random::<f64>();
+        let index = pick_weighted_index(&self.weights, target_pick);
+        let target = &self.targets[index];
+        let row = if target.key.count == 0 {
+            0
+        } else {
+            (id_pick * target.key.count as f64) as u64
+        }
+        .min(target.key.count.saturating_sub(1));
+
+        output[0] = GeneratedValue::Text(target.type_label.clone());
+        output[1] = render_key(target.key.key_at(row), &self.id_family);
+        Ok(())
+    }
+
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        self.predicates.clone()
+    }
+}
+
+fn compile_polymorphic_pair(
+    config: &PlannerConfig,
+    context: &CompileContext<'_>,
+) -> Result<RelationPolymorphicPairPlanner, DiagnosticBag> {
+    const COLUMN_CODE: &str = "GEN-POLYMORPHIC-COLUMN-MISSING";
+    const TARGETS_CODE: &str = "GEN-POLYMORPHIC-TARGETS";
+    const TARGET_UNKNOWN_CODE: &str = "GEN-POLYMORPHIC-TARGET-UNKNOWN";
+    const KEY_CODE: &str = "GEN-POLYMORPHIC-KEY-UNSUPPORTED";
+    let mut bag = DiagnosticBag::default();
+    let table = context.table();
+    let path = context.path();
+    let columns = config.args.get("columns");
+    let facts = config.args.get(RELATION_FACTS_KEY);
+
+    let type_col = resolve_required(columns, "type", table, path, COLUMN_CODE, &mut bag);
+    let id_col = resolve_required(columns, "id", table, path, COLUMN_CODE, &mut bag);
+
+    let target_items = match config.args.get("targets") {
+        Some(Value::Sequence(items)) if !items.is_empty() => items.as_slice(),
+        _ => {
+            bag.error(
+                TARGETS_CODE,
+                format!("{path}.targets"),
+                "relation.polymorphic_pair requires a non-empty `targets` list".to_string(),
+            );
+            &[]
+        }
+    };
+
+    let mut targets = Vec::new();
+    let mut weights = Vec::new();
+    for (index, item) in target_items.iter().enumerate() {
+        let target_path = format!("{path}.targets[{index}]");
+        let Some(table_name) = item.get("table").and_then(Value::as_str) else {
+            bag.error(
+                TARGETS_CODE,
+                target_path,
+                "relation.polymorphic_pair target requires a `table`".to_string(),
+            );
+            continue;
+        };
+        let table_fact = facts
+            .and_then(|f| f.get("tables"))
+            .and_then(|t| t.get(table_name));
+        let Some(table_fact) = table_fact else {
+            bag.error(
+                TARGET_UNKNOWN_CODE,
+                target_path,
+                format!(
+                    "relation.polymorphic_pair target `{table_name}` is not a table in the model"
+                ),
+            );
+            continue;
+        };
+        // The id column: an explicit `id_column`, else the target's primary key.
+        let id_column = item
+            .get("id_column")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                table_fact
+                    .get("primary_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        let Some(id_column) = id_column else {
+            bag.error(
+                TARGET_UNKNOWN_CODE,
+                target_path,
+                format!(
+                    "relation.polymorphic_pair target `{table_name}` has no primary key; specify an `id_column`"
+                ),
+            );
+            continue;
+        };
+        let key_fact = table_fact.get("keys").and_then(|k| k.get(&id_column));
+        let Some(key_fact) = key_fact else {
+            bag.error(
+                KEY_CODE,
+                target_path,
+                format!(
+                    "relation.polymorphic_pair target `{table_name}.{id_column}` does not have a dense integer key; only bare integer primary keys and `sequence` keys are supported"
+                ),
+            );
+            continue;
+        };
+        let Some(key) = dense_key_from_fact(
+            key_fact,
+            &format!("{table_name}.{id_column}"),
+            "relation.polymorphic_pair",
+            KEY_CODE,
+            &target_path,
+            &mut bag,
+        ) else {
+            continue;
+        };
+        if key.count == 0 {
+            // A target with no rows can never supply a valid id; drop it rather
+            // than emit an unsatisfiable (type, id) pair.
+            continue;
+        }
+        let type_label = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or(table_name)
+            .to_string();
+        let weight = item.get("weight").and_then(as_f64).unwrap_or(1.0).max(0.0);
+        targets.push(PolyTarget { type_label, key });
+        weights.push(weight);
+    }
+
+    if targets.is_empty() && !bag.has_errors() {
+        bag.error(
+            TARGETS_CODE,
+            format!("{path}.targets"),
+            "relation.polymorphic_pair has no target with any rows to reference".to_string(),
+        );
+    }
+    if weights.iter().sum::<f64>() <= 0.0 && !targets.is_empty() {
+        // Degenerate weights: fall back to a uniform choice so every row still
+        // resolves a valid (type, id) pair.
+        weights = vec![1.0; targets.len()];
+    }
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
+    let type_col = type_col.expect("type resolved without errors");
+    let id_col = id_col.expect("id resolved without errors");
+    let writes = vec![type_col.name.clone(), id_col.name.clone()];
+
+    let mut predicates = Vec::new();
+    if targets.iter().all(|t| t.key.start >= 0 && t.key.step >= 0) {
+        predicates.push(PlannerPredicate::NonNegative {
+            columns: vec![id_col.name.clone()],
+        });
+    }
+
+    let rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        format!("{},{}", type_col.name, id_col.name),
+        "relation.polymorphic_pair",
+    ));
+
+    Ok(RelationPolymorphicPairPlanner {
+        writes,
+        id_family: id_col.family.clone(),
+        targets,
+        weights,
+        rng,
+        predicates,
+    })
+}
+
+// =============================================================================
+// relation.tenant_family
+// =============================================================================
+
+/// Static description of the `relation.tenant_family` planner.
+pub static RELATION_TENANT_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "relation.tenant_family",
+    aliases: &[],
+    summary: "Selects a same-tenant foreign key: the parent rows are partitioned into tenant blocks, and each child's FK is drawn from the block of the child's own tenant.",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Supported,
+    cross_table: true,
+};
+
+/// Factory for the `relation.tenant_family` planner.
+pub struct RelationTenantFamilyFactory;
+
+impl PlannerFactory for RelationTenantFamilyFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &RELATION_TENANT_FAMILY_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &PlannerConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        compile_tenant_family(config, context)
+            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
+    }
+}
+
+/// The compiled `relation.tenant_family` planner. The parent's `count` rows are
+/// partitioned into `num_tenants` contiguous, balanced tenant blocks by row
+/// index: tenant `t` owns parent rows `[t*count/T, (t+1)*count/T)`, so the
+/// tenant of parent row `p` is `p*T/count`. Each child draws a tenant, sets its
+/// own `tenant` column to that tenant, and draws its foreign key from that
+/// tenant's parent block — so the child and the parent it references always
+/// share a tenant, by construction.
+struct RelationTenantFamilyPlanner {
+    writes: Vec<String>,
+    tenant_family: SqlTypeFamily,
+    parent_family: SqlTypeFamily,
+    parent: DenseKey,
+    num_tenants: u64,
+    tenant_start: i128,
+    tenant_rng: ChaCha8Rng,
+    select_rng: ChaCha8Rng,
+    predicates: Vec<PlannerPredicate>,
+}
+
+impl RelationTenantFamilyPlanner {
+    /// The half-open parent-row range `[start, end)` owned by tenant `t`.
+    fn tenant_block(&self, t: u64) -> (u64, u64) {
+        let count = u128::from(self.parent.count);
+        let tenants = u128::from(self.num_tenants);
+        let start = (u128::from(t) * count / tenants) as u64;
+        let end = (u128::from(t + 1) * count / tenants) as u64;
+        (start, end.max(start + 1).min(self.parent.count))
+    }
+}
+
+impl CompiledPlanner for RelationTenantFamilyPlanner {
+    fn writes(&self) -> &[String] {
+        &self.writes
+    }
+
+    fn generate_row(
+        &mut self,
+        _row_index: u64,
+        output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        // Draw the tenant, then the in-tenant parent, in a fixed order.
+        let tenant_pick = self.tenant_rng.random::<f64>();
+        let parent_pick = self.select_rng.random::<f64>();
+
+        let tenant = ((tenant_pick * self.num_tenants as f64) as u64).min(self.num_tenants - 1);
+        let (start, end) = self.tenant_block(tenant);
+        let size = end - start;
+        let offset = if size == 0 {
+            0
+        } else {
+            ((parent_pick * size as f64) as u64).min(size - 1)
+        };
+        let parent_row = start + offset;
+
+        output[0] = match self.tenant_family {
+            SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => {
+                GeneratedValue::Integer(self.tenant_start + tenant as i128)
+            }
+            _ => GeneratedValue::Text((self.tenant_start + tenant as i128).to_string()),
+        };
+        output[1] = render_key(self.parent.key_at(parent_row), &self.parent_family);
+        Ok(())
+    }
+
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        self.predicates.clone()
+    }
+}
+
+fn compile_tenant_family(
+    config: &PlannerConfig,
+    context: &CompileContext<'_>,
+) -> Result<RelationTenantFamilyPlanner, DiagnosticBag> {
+    const COLUMN_CODE: &str = "GEN-TENANT-COLUMN-MISSING";
+    const REL_CODE: &str = "GEN-TENANT-RELATIONSHIP";
+    const KEY_CODE: &str = "GEN-TENANT-KEY-UNSUPPORTED";
+    const PARTITION_CODE: &str = "GEN-TENANT-PARTITION";
+    let mut bag = DiagnosticBag::default();
+    let table = context.table();
+    let path = context.path();
+    let columns = config.args.get("columns");
+    let facts = config.args.get(RELATION_FACTS_KEY);
+
+    let tenant_col = resolve_required(columns, "tenant", table, path, COLUMN_CODE, &mut bag);
+    let parent_col = resolve_required(columns, "parent", table, path, COLUMN_CODE, &mut bag);
+
+    let rel = config
+        .args
+        .get("relationship")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if rel.is_none() {
+        bag.error(
+            REL_CODE,
+            format!("{path}.relationship"),
+            "relation.tenant_family requires a `relationship` naming the parent foreign key"
+                .to_string(),
+        );
+    }
+    let parent = rel.as_deref().and_then(|name| {
+        dense_key_from_relationship(
+            facts,
+            name,
+            "relation.tenant_family",
+            "relationship",
+            [REL_CODE, KEY_CODE],
+            path,
+            &mut bag,
+        )
+    });
+
+    let num_tenants = config
+        .args
+        .get("num_tenants")
+        .and_then(as_i128)
+        .unwrap_or(4);
+    let tenant_start = config
+        .args
+        .get("tenant_start")
+        .and_then(as_i128)
+        .unwrap_or(0);
+
+    if num_tenants < 1 {
+        bag.error(
+            PARTITION_CODE,
+            format!("{path}.num_tenants"),
+            format!("relation.tenant_family `num_tenants` {num_tenants} must be at least 1"),
+        );
+    }
+    if let Some(parent) = parent {
+        if num_tenants >= 1 && num_tenants as u64 > parent.count {
+            bag.error(
+                PARTITION_CODE,
+                format!("{path}.num_tenants"),
+                format!(
+                    "relation.tenant_family `num_tenants` {num_tenants} exceeds the {} parent rows, so some tenants would have no parent to reference",
+                    parent.count
+                ),
+            );
+        }
+    }
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
+    let tenant_col = tenant_col.expect("tenant resolved without errors");
+    let parent_col = parent_col.expect("parent resolved without errors");
+    let parent = parent.expect("parent key resolved without errors");
+    let writes = vec![tenant_col.name.clone(), parent_col.name.clone()];
+
+    let mut predicates = Vec::new();
+    if parent.start >= 0 && parent.step >= 0 && tenant_start >= 0 {
+        predicates.push(PlannerPredicate::NonNegative {
+            columns: writes.clone(),
+        });
+    }
+
+    let tenant_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        tenant_col.name.clone(),
+        "relation.tenant_family.tenant",
+    ));
+    let select_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        parent_col.name.clone(),
+        "relation.tenant_family.parent",
+    ));
+
+    Ok(RelationTenantFamilyPlanner {
+        writes,
+        tenant_family: tenant_col.family.clone(),
+        parent_family: parent_col.family.clone(),
+        parent,
+        num_tenants: num_tenants as u64,
+        tenant_start,
+        tenant_rng,
+        select_rng,
+        predicates,
+    })
 }
