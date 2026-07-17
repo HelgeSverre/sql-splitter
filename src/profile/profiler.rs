@@ -281,6 +281,9 @@ struct TableProfile {
     fk_candidates: Vec<FkCandidate>,
     fk_child: AHashMap<u16, BoundedHashSet>,
     temporal: Vec<TemporalPair>,
+    /// Whether a `GEN-PROFILE-DECODE-SKIPPED` warning has already been raised for
+    /// this table, so a run of undecodable rows warns once, not per row.
+    decode_warned: bool,
 }
 
 /// Buffered rows for a table whose data arrived before its DDL, retained up to
@@ -320,6 +323,11 @@ struct ProfileRun {
     table_index: AHashMap<String, usize>,
     insert_ctx: Option<InsertCtx>,
     copy_ctx: Option<CopyCtx>,
+    /// The schema-late COPY table whose block is currently open. `CopyRow`
+    /// events carry no table name, so this is the *only* reliable way to route
+    /// pending COPY rows — a predicate scan over `pending` would misroute when
+    /// two tables both have COPY data before either's DDL.
+    pending_copy_key: Option<String>,
     pending: AHashMap<String, PendingTable>,
     warnings: Vec<String>,
     next_seed: u64,
@@ -337,6 +345,7 @@ impl ProfileRun {
             table_index: AHashMap::new(),
             insert_ctx: None,
             copy_ctx: None,
+            pending_copy_key: None,
             pending: AHashMap::new(),
             warnings: Vec::new(),
             next_seed: 0,
@@ -359,6 +368,7 @@ impl ProfileRun {
             ParserEvent::CopyRow(line) => self.on_copy_row(line),
             ParserEvent::CopyEnd => {
                 self.copy_ctx = None;
+                self.pending_copy_key = None;
                 Ok(RowFlow::Continue)
             }
         }
@@ -473,6 +483,7 @@ impl ProfileRun {
             fk_candidates,
             fk_child: AHashMap::new(),
             temporal,
+            decode_warned: false,
         }
     }
 
@@ -488,11 +499,20 @@ impl ProfileRun {
             self.prepare_insert(header);
         }
 
-        // Known table: decode (borrowing the schema) into an owned row, then
-        // observe. Unknown: buffer the raw row for schema-late replay.
-        if let Some((table_idx, parsed)) = self.decode_insert_row(row) {
-            self.observe_insert(table_idx, &parsed);
-        } else if self.insert_ctx.is_none() {
+        // Every delivered `InsertRow` is a real `(...)` tuple, so it counts
+        // toward the exact row total for a known table regardless of whether the
+        // secondary value decode succeeds. Decode success only governs per-column
+        // value/null evidence.
+        if let Some(table_idx) = self.insert_ctx.as_ref().map(|c| c.table_idx) {
+            match self.decode_insert_row(row) {
+                Some((idx, parsed)) => self.observe_insert(idx, &parsed),
+                None => {
+                    self.tables[table_idx].row_count += 1;
+                    self.warn_decode_skipped(table_idx);
+                }
+            }
+        } else {
+            // Schema-late: buffer the raw tuple for replay once the DDL arrives.
             let cap = self.budget.sample_rows;
             if let Some(table) = self.pending_insert_target(header) {
                 table.push_insert(row, cap);
@@ -527,7 +547,10 @@ impl ProfileRun {
                 self.insert_ctx = Some(InsertCtx { table_idx, context });
             }
         } else {
-            // Schema-late: remember the header so the replay can rebuild context.
+            // Schema-late: remember the first header so the replay can rebuild
+            // context (single-layout-per-pending-table assumption — a later
+            // INSERT into the same table with a different column list would
+            // replay under this one).
             self.pending
                 .entry(key)
                 .or_insert_with(PendingTable::new)
@@ -545,6 +568,7 @@ impl ProfileRun {
         }
         let key = Self::key(&name);
         let entry = self.pending.entry(key).or_insert_with(PendingTable::new);
+        // Single-layout-per-pending-table: the first header wins for replay.
         entry.header.get_or_insert_with(|| header.to_vec());
         Some(entry)
     }
@@ -553,6 +577,7 @@ impl ProfileRun {
 
     fn on_copy_start(&mut self, header: &[u8]) -> anyhow::Result<RowFlow> {
         self.copy_ctx = None;
+        self.pending_copy_key = None;
         let header_str = String::from_utf8_lossy(header);
         let (_, name) = Parser::<&[u8]>::parse_statement_with_dialect(header, self.dialect);
         if name.is_empty() {
@@ -563,32 +588,63 @@ impl ProfileRun {
         if let Some(&table_idx) = self.table_index.get(&key) {
             self.copy_ctx = Some(CopyCtx { table_idx, columns });
         } else {
-            let entry = self.pending.entry(key).or_insert_with(PendingTable::new);
+            // Schema-late COPY: record which table this open block belongs to so
+            // its rows route unambiguously, and stash the column layout for
+            // replay (single-layout-per-pending-table assumption).
+            let entry = self
+                .pending
+                .entry(key.clone())
+                .or_insert_with(PendingTable::new);
             entry.copy_columns.get_or_insert(columns);
+            self.pending_copy_key = Some(key);
         }
         Ok(RowFlow::Continue)
     }
 
     fn on_copy_row(&mut self, line: &[u8]) -> anyhow::Result<RowFlow> {
-        if let Some((table_idx, parsed)) = self.decode_copy_row(line) {
-            self.observe_copy(table_idx, &parsed);
-        } else if self.copy_ctx.is_none() {
-            // Schema-late COPY: the header was stashed in pending by on_copy_start.
-            let cap = self.budget.sample_rows;
-            let key = self.pending.iter().find_map(|(k, t)| {
-                if t.copy_columns.is_some() && t.header.is_none() {
-                    Some(k.clone())
-                } else {
-                    None
+        if let Some(table_idx) = self.copy_ctx.as_ref().map(|c| c.table_idx) {
+            // Known table. A blank line inside a COPY block is padding, not a
+            // row, so it must not count; every genuine data line counts toward
+            // the exact total whether or not its values decode.
+            let single_col = self.tables[table_idx].columns.len() == 1;
+            if !copy_line_is_data(line, single_col) {
+                return Ok(RowFlow::Continue);
+            }
+            match self.decode_copy_row(line) {
+                Some((idx, parsed)) => self.observe_copy(idx, &parsed),
+                None => {
+                    self.tables[table_idx].row_count += 1;
+                    self.warn_decode_skipped(table_idx);
                 }
-            });
-            if let Some(key) = key {
+            }
+        } else if let Some(key) = self.pending_copy_key.clone() {
+            // Schema-late COPY: route by the explicitly tracked open-block key,
+            // never a predicate scan (which would misroute with two pending
+            // COPY tables). Buffer genuine data lines only.
+            if copy_line_is_data(line, false) {
+                let cap = self.budget.sample_rows;
                 if let Some(table) = self.pending.get_mut(&key) {
                     table.push_copy(line, cap);
                 }
             }
         }
         Ok(RowFlow::Continue)
+    }
+
+    /// Raise `GEN-PROFILE-DECODE-SKIPPED` once per table when a delivered row
+    /// failed value decoding: it is still counted in the exact row total, but
+    /// contributes no per-column evidence.
+    fn warn_decode_skipped(&mut self, table_idx: usize) {
+        let table = &mut self.tables[table_idx];
+        if table.decode_warned {
+            return;
+        }
+        table.decode_warned = true;
+        self.warnings.push(format!(
+            "GEN-PROFILE-DECODE-SKIPPED: table `{}` had rows that failed value decoding; \
+             they are counted in the exact row total but contributed no per-column evidence",
+            table.name
+        ));
     }
 
     fn decode_copy_row(&self, line: &[u8]) -> Option<(usize, ParsedCopyRow)> {
@@ -850,6 +906,19 @@ impl ProfileRun {
     }
 }
 
+/// True when a raw COPY line is a genuine data row, matching
+/// [`CopyParser::parse_line`]'s own skip rules: the `\.` terminator and (for
+/// multi-column tables) a blank padding line are *not* rows. Lets the exact row
+/// count be decided independently of whether the value decode succeeds.
+fn copy_line_is_data(line: &[u8], empty_is_row: bool) -> bool {
+    let line = if line.last() == Some(&b'\r') {
+        &line[..line.len() - 1]
+    } else {
+        line
+    };
+    !(line == b"\\." || (line.is_empty() && !empty_is_row))
+}
+
 /// Decode one COPY data line into a [`ParsedCopyRow`] with full column identity,
 /// building a fresh (bounded, per-line) parser context bound to the schema.
 fn decode_copy_line(
@@ -982,6 +1051,9 @@ fn finish_column(acc: ColumnAccum) -> ColumnEvidence {
             } else {
                 acc.nulls as f64 / acc.total as f64
             };
+            // Ad-hoc confidence: rises toward 1.0 with the non-null observation
+            // count (mirrors `ColumnSketches::confidence`). A placeholder shared
+            // by both paths; Task 20 may refine the scale.
             let non_null = acc.total.saturating_sub(acc.nulls);
             ColumnEvidence {
                 name: acc.name,

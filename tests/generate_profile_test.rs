@@ -585,3 +585,71 @@ CREATE TABLE widgets (id INT NOT NULL PRIMARY KEY, label VARCHAR(32) NOT NULL);
         profile.warnings
     );
 }
+
+/// Two tables whose COPY data both precede their DDL must route to the CORRECT
+/// table. Pre-fix, `on_copy_row` scanned pending entries by predicate and let
+/// hashmap iteration order silently pick a target, mixing beta's rows into
+/// alpha (or vice versa).
+#[test]
+fn profiler_routes_schema_late_copy_by_table() {
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Basic)
+        .dialect(SqlDialect::Postgres)
+        .build()
+        .profile_path(Path::new(
+            "tests/fixtures/generate/schema_late_two_copy.sql",
+        ))
+        .expect("profile two-table schema-late COPY dump");
+
+    let alpha = table(&profile, "alpha");
+    assert_eq!(alpha.row_count, Some(3), "alpha rows");
+    let beta = table(&profile, "beta");
+    assert_eq!(beta.row_count, Some(2), "beta rows");
+
+    // Each table's values landed in the right table: alpha's labels all start
+    // with "alpha-", beta's notes all start with "beta-".
+    let alpha_label = column(alpha, "label")
+        .string_shape
+        .as_ref()
+        .expect("alpha label shape");
+    assert!(
+        alpha_label.common_prefix.starts_with("alpha-"),
+        "alpha label prefix was {:?}",
+        alpha_label.common_prefix
+    );
+    let beta_note = column(beta, "note")
+        .string_shape
+        .as_ref()
+        .expect("beta note shape");
+    assert!(
+        beta_note.common_prefix.starts_with("beta-"),
+        "beta note prefix was {:?}",
+        beta_note.common_prefix
+    );
+    assert!(profile.warnings.is_empty(), "within budget: no warnings");
+}
+
+/// A delivered row that fails secondary value decoding still counts toward the
+/// exact row total (counts are a complete scan, decoupled from decode success)
+/// and surfaces a single GEN-PROFILE-DECODE-SKIPPED warning.
+#[test]
+fn profiler_counts_rows_even_when_decode_fails() {
+    // `qty` is declared NOT NULL INT but two rows carry an unparenthesized
+    // expression the tuple scanner still delivers as a row; every delivered
+    // InsertRow must count regardless. We assert row_count equals the number of
+    // delivered tuples.
+    let dump = "\
+CREATE TABLE metrics (id INT NOT NULL PRIMARY KEY, qty INT NOT NULL);
+INSERT INTO metrics (id, qty) VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
+";
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Basic)
+        .dialect(SqlDialect::MySql)
+        .build()
+        .profile_reader(dump.as_bytes(), SqlDialect::MySql)
+        .expect("profile metrics dump");
+    let metrics = table(&profile, "metrics");
+    // All five delivered tuples are counted.
+    assert_eq!(metrics.row_count, Some(5));
+    assert_eq!(column(metrics, "qty").total_count, 5);
+}
