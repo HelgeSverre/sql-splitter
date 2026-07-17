@@ -40,18 +40,18 @@ a saved model.
 
 ## Top-level fields
 
-| Field      | `model`            | `overrides`                 | Type               | Default               | Meaning                                                      |
-| ---------- | ------------------ | --------------------------- | ------------------ | --------------------- | ------------------------------------------------------------ |
-| `$schema`  | optional            | optional                    | `String`           | `None`                | Editor-only schema pointer; see below. Ignored by the parser. |
-| `version`  | required           | required                    | `u32`              | —                     | Must equal `1`.                                              |
-| `kind`     | required (`model`) | required (`overrides`)      | tag                | —                     | Explicit document role.                                      |
-| `imports`  | optional           | optional                    | `[String]` (paths) | `[]`                  | Local `kind: overrides` files merged before this document.   |
-| `source`   | optional           | optional                    | object             | `None`                | Provenance and fingerprint policy.                           |
-| `output`   | optional           | optional (see caveat below) | object             | all fields `None`     | Dialect and renderer defaults.                               |
-| `seed`     | optional           | optional                    | `u64` or `null`    | `None` (random)       | Top-level seed; tables inherit unless they opt out.          |
-| `defaults` | optional           | optional                    | object             | `inference: disabled` | Inherited column-inference behavior.                         |
-| `tables`   | required           | optional                    | map                | —                     | Complete tables (`model`) or partial patches (`overrides`).  |
-| `profiles` | optional           | optional                    | map                | `{}`                  | Removable bounded observations/explanations; safe to delete. |
+| Field      | `model`            | `overrides`                 | Type               | Default               | Meaning                                                       |
+| ---------- | ------------------ | --------------------------- | ------------------ | --------------------- | ------------------------------------------------------------- |
+| `$schema`  | optional           | optional                    | `String`           | `None`                | Editor-only schema pointer; see below. Ignored by the parser. |
+| `version`  | required           | required                    | `u32`              | —                     | Must equal `1`.                                               |
+| `kind`     | required (`model`) | required (`overrides`)      | tag                | —                     | Explicit document role.                                       |
+| `imports`  | optional           | optional                    | `[String]` (paths) | `[]`                  | Local `kind: overrides` files merged before this document.    |
+| `source`   | optional           | optional                    | object             | `None`                | Provenance and fingerprint policy.                            |
+| `output`   | optional           | optional (see caveat below) | object             | all fields `None`     | Dialect and renderer defaults.                                |
+| `seed`     | optional           | optional                    | `u64` or `null`    | `None` (random)       | Top-level seed; tables inherit unless they opt out.           |
+| `defaults` | optional           | optional                    | object             | `inference: disabled` | Inherited column-inference behavior.                          |
+| `tables`   | required           | optional                    | map                | —                     | Complete tables (`model`) or partial patches (`overrides`).   |
+| `profiles` | optional           | optional                    | map                | `{}`                  | Removable bounded observations/explanations; safe to delete.  |
 
 > **Caveat:** in the current implementation, `SyntheticOverrides.output` has
 > no `#[serde(default)]`, so an `overrides` document must include an
@@ -349,7 +349,7 @@ compiler automatically:
   yourself is honored as-is and never doubled.
 
 **Composite** (multi-column) primary/unique keys are **not** auto-enforced:
-per-column deduplication cannot guarantee that the *combination* is unique. Make
+per-column deduplication cannot guarantee that the _combination_ is unique. Make
 composite-key components unique by using `sequence`/`uuid` generators for them,
 or run [`--verify`](README.md) to audit uniqueness on the generated output.
 
