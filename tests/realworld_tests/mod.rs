@@ -170,6 +170,7 @@ fn extract_file(cmd: &str, archive: &Path, dest_dir: &Path) -> io::Result<()> {
             .args(["-xf", archive.to_str().unwrap()])
             .current_dir(dest_dir)
             .status()?,
+        #[cfg(feature = "compression")]
         "gunzip" => {
             let output_name = archive.file_stem().unwrap().to_str().unwrap();
             let output_path = dest_dir.join(output_name);
