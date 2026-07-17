@@ -26,7 +26,7 @@ promoted to a failure under `--strict`).
 
 | Code | Meaning |
 | --- | --- |
-| `GEN-SOURCE-FINGERPRINT` | A profiled dump's fingerprint no longer matches the one recorded in the model, under `fingerprint_policy: warn` (the default). `require` promotes this to an error instead. |
+| `GEN-SOURCE-FINGERPRINT` | When merging a `kind: overrides` document onto a base model, the override's `source.fingerprint` differs from the base model's recorded `source.fingerprint`, under an effective `fingerprint_policy: warn`. `require` promotes this to an error; `ignore` suppresses it. This is a YAML-vs-YAML comparison during the overrides merge — **not** a check against a freshly profiled dump (see the note below). |
 | `GEN-CONFIG-COMPLETE-MODEL` | A complete `kind: model` config was supplied alongside a source dump; the model is authoritative and the profiled base is set aside. |
 | `GEN-DETACHED-DEPENDENCY` | A nullable FK to an excluded table is detached; its constraint is omitted from rendered DDL. `--strict` promotes this to a failure. |
 | `GEN-MAX-ROWS-CAPPED` | `--max-rows` actually reduced a table's resolved row count. |
@@ -45,6 +45,13 @@ The `GEN-SOURCE-VALUES` stderr notice (see
 is deliberately **not** a `DiagnosticBag` entry — it is printed unconditionally
 to stderr instead, precisely so `--strict` cannot turn an allowed,
 flagged use into a blocking failure.
+
+`GEN-SOURCE-FINGERPRINT` only ever fires from the overrides-merge comparison
+above. Automatic dump-fingerprint drift detection during *profiling* — computing
+a fingerprint from a `generate <dump>` input and comparing it against a model's
+recorded `source.fingerprint` — is **not yet implemented**: the profiling path
+records no fingerprint, so a dump-input run raises no fingerprint diagnostic. It
+is a planned/deferred feature.
 
 ## Config, import, and merge errors
 
@@ -86,7 +93,7 @@ flagged use into a blocking failure.
 | `GEN-GENERATOR-TYPE` / `GEN-MODIFIER-TYPE` | The rule's descriptor doesn't accept the column's SQL type family. |
 | `GEN-RELATIONSHIP-UNKNOWN` | A planner's `relationship:` argument names a relationship not declared on that table. |
 | `GEN-FOREIGN-KEY-UNRESOLVED` | A relationship-owned FK column has no resolvable value source. |
-| `GEN-KEY-DOMAIN-UNSUPPORTED` | A relationship/planner targets a parent key generator that isn't a dense integer domain (only bare integer PK, `sequence`, and `uuid` are supported). |
+| `GEN-KEY-DOMAIN-UNSUPPORTED` | A relationship/planner targets a parent key generator that isn't a dense integer domain (only bare integer PK, `sequence`, and `uuid` are supported). **Note:** unlike the other codes here, this one is raised at *generation* time as a runtime error string inside `GenerateError::InvalidInput` (the engine builds key domains only when it runs) — it is **not** a compile-time `Diagnostic`, so it does not appear in the `--json` `diagnostics` array. It surfaces as the command's error message and non-zero exit instead. |
 
 ## Generator and modifier argument errors
 

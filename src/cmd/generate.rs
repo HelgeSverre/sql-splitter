@@ -1,15 +1,15 @@
 //! CLI handler for the `generate` command: model-driven synthetic data
 //! generation.
 //!
-//! Phase 1 wires the complete-model path — `--config model.yaml` compiled
+//! The command wires the complete-model path — `--config model.yaml` compiled
 //! and generated, checked, or dry-run — plus JSON/quiet reporting and
-//! clap-level usage validation (see [`GenerateArgs::try_into_request`]).
-//! Dump profiling (`[INPUT]`, `--profile-depth`, `--profile-sample`), config
-//! emission (`--emit-config`), and post-generation verification (`--verify`)
-//! are Phase 2/3 (Tasks 19-21, 26). `--mssql-production-style` and
-//! `--mssql-go` are wired end to end (Task 31 fix); `--compress` still fails
-//! with a clear "not available yet" error rather than silently doing
-//! nothing.
+//! clap-level usage validation (see [`GenerateArgs::try_into_request`]). Dump
+//! profiling (`[INPUT]`, `--profile-depth`, `--profile-sample`), config
+//! emission (`--emit-config`), post-generation verification (`--verify`), and
+//! the `--explain` inference report are all wired end to end, as are
+//! `--mssql-production-style`/`--mssql-go`. The one accepted-but-inert flag is
+//! `--compress`: it fails with a clear "not available yet" error rather than
+//! silently doing nothing.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -103,7 +103,8 @@ pub struct GenerateArgs {
     #[arg(long, help_heading = INPUT_OUTPUT)]
     input_dialect: Option<SqlDialect>,
 
-    /// SQL dialect to render generated output for (default: mysql)
+    /// SQL dialect to render output for (default: the model's output.dialect or
+    /// source dialect; falls back to mysql when neither is known)
     #[arg(long, help_heading = RENDERING)]
     dialect: Option<SqlDialect>,
 
@@ -187,7 +188,8 @@ pub struct GenerateArgs {
     #[arg(long, conflicts_with_all = ["check", "dry_run"], help_heading = PREFLIGHT)]
     verify: bool,
 
-    /// Explain the resolved plan in detail (not yet implemented)
+    /// Explain each column's inference decision (winning rule and rejected
+    /// alternatives); never prints observed values
     #[arg(long, help_heading = PREFLIGHT)]
     explain: bool,
 

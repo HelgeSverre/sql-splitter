@@ -1,0 +1,24 @@
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+# A complete model whose `output:` block pins the render dialect to postgres.
+# With no `--dialect`/`output_dialect` on the run, the render dialect must be
+# resolved from this block (postgres), NOT the MySQL fallback — so the rendered
+# data path uses postgres `COPY ... FROM stdin`.
+output:
+  dialect: postgres
+tables:
+  customers:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: customers
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 12 }

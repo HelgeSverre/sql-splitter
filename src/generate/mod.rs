@@ -118,7 +118,7 @@ use crate::profile::evidence::DumpProfile;
 use crate::profile::{
     Confidence, Decision, DumpProfiler, ModelInference, Precedence, ProfileBudget, ProfileDepth,
 };
-use crate::synthetic::model::InferenceMode;
+use crate::synthetic::model::{InferenceMode, InsertMode, OutputMode};
 use crate::synthetic::{ConfigLoader, ModelMerger, SourceValueUse, SyntheticFile};
 
 // Re-exported so the staged API (registry -> compiler -> engine -> renderer)
@@ -219,11 +219,14 @@ pub struct GenerateRequest {
     /// Dialect and formatting controls passed to [`crate::render::SqlRenderer`].
     pub render: RenderOptions,
     /// The explicitly requested output dialect (`--dialect` /
-    /// [`GenerateBuilder::output_dialect`]), or `None` to render in the model's
-    /// own dialect. When set to a dialect that differs from the model's source,
-    /// the renderer maps every type across dialects and reports lossy
-    /// conversions; when unset, the schema renders verbatim so a model's
-    /// optional `source:` block stays removable metadata.
+    /// [`GenerateBuilder::output_dialect`]), or `None` to resolve the dialect
+    /// from the model. Precedence (see `resolve_render_options`): this explicit
+    /// value > the model's `output.dialect` > the model's captured source/input
+    /// dialect (preserve-source) > [`SqlDialect::MySql`]. When the dialect is
+    /// chosen deliberately (here or via the model's `output` block) and differs
+    /// from the model's source, the renderer maps every type across dialects and
+    /// reports lossy conversions; a preserve-source run renders the schema
+    /// verbatim so a model's optional `source:` block stays removable metadata.
     pub output_dialect: Option<SqlDialect>,
     /// Whether to fully generate, only validate, only report the plan, or only
     /// emit the resolved model.
@@ -354,17 +357,12 @@ impl Generate {
             .map_err(GenerateError::Diagnostics)?;
         diagnostics.diagnostics.extend(plan.diagnostics.clone());
 
-        // Only a *deliberate* cross-dialect request maps types. When the caller
-        // explicitly asked for an output dialect, tell the renderer the schema's
-        // captured (source) dialect so it maps every type across dialects and
-        // reports lossy conversions instead of emitting source types verbatim.
-        // A default run leaves `source_dialect` unset (source == render dialect),
-        // so a model's optional `source:` block stays removable metadata that
-        // cannot change output.
+        // Fold the compiled model `output:` block into the render settings under
+        // any explicit CLI/builder flags (dialect, mode, inserts, batch size).
+        // The precedence and the "deliberate cross-dialect maps types" rule live
+        // in `resolve_render_options`.
         let mut render = render;
-        if output_dialect.is_some() {
-            render.source_dialect = render.source_dialect.or(plan.input_dialect);
-        }
+        resolve_render_options(&mut render, output_dialect, &plan);
 
         // Scan the final resolved model (explicit + inferred rules) for
         // source-derived literals.
@@ -815,6 +813,75 @@ fn run_generate(
     }
 }
 
+/// The batch size the CLI/`RenderOptions::default` land on when a run neither
+/// passes `--batch-size` nor carries a model `output.batch_size`. Used as the
+/// sentinel for "the caller left batch size at its neutral default", so a
+/// model's `output.batch_size` can fill in under it.
+const DEFAULT_RENDER_BATCH_SIZE: usize = 1_000;
+
+/// Fold the compiled model `output:` block into `render` under the caller's
+/// explicit flags, resolving every field with a single precedence: an explicit
+/// CLI/builder flag wins, then the model's `output:` block, then (dialect only)
+/// the model's captured source/input dialect, then the built-in default.
+///
+/// * **dialect** — `--dialect`/[`GenerateBuilder::output_dialect`] > model
+///   `output.dialect` > `plan.input_dialect` (preserve-source) > [`SqlDialect::
+///   MySql`]. When the target dialect was chosen *deliberately* (CLI or model,
+///   not preserve-source/fallback) the captured source dialect is threaded into
+///   `source_dialect` so the renderer maps every type across dialects and
+///   reports lossy conversions; a preserve-source or fallback run leaves
+///   `source_dialect` unset (source == render dialect), so a model's optional
+///   `source:` block stays removable metadata that cannot change output.
+/// * **mode** — only the absence of `--schema-only`/`--data-only` yields
+///   [`OutputMode::SchemaAndData`], so that value is the sentinel under which the
+///   model's `output.mode` fills in; an explicit `--schema-only`/`--data-only`
+///   always wins.
+/// * **inserts** — the CLI has only a `--no-copy` opt-in, so a `false` `no_copy`
+///   falls back to the model: `output.inserts: insert` forces multi-row INSERT,
+///   while `auto`/`copy` keep the COPY default. An explicit `--no-copy` wins.
+/// * **batch_size** — [`DEFAULT_RENDER_BATCH_SIZE`] is the neutral sentinel under
+///   which a positive `output.batch_size` fills in; any other explicit value
+///   wins.
+fn resolve_render_options(
+    render: &mut RenderOptions,
+    output_dialect: Option<SqlDialect>,
+    plan: &GenerationPlan,
+) {
+    let deliberate_dialect = match (output_dialect, plan.output.dialect) {
+        (Some(cli), _) => {
+            render.dialect = cli;
+            true
+        }
+        (None, Some(model_dialect)) => {
+            render.dialect = model_dialect;
+            true
+        }
+        (None, None) => {
+            render.dialect = plan.input_dialect.unwrap_or(SqlDialect::MySql);
+            false
+        }
+    };
+    if deliberate_dialect {
+        render.source_dialect = render.source_dialect.or(plan.input_dialect);
+    }
+
+    if render.mode == OutputMode::SchemaAndData {
+        if let Some(mode) = plan.output.mode {
+            render.mode = mode;
+        }
+    }
+
+    if !render.no_copy {
+        render.no_copy = matches!(plan.output.inserts, Some(InsertMode::Insert));
+    }
+
+    if render.batch_size == DEFAULT_RENDER_BATCH_SIZE {
+        if let Some(batch) = plan.output.batch_size.filter(|&b| b > 0) {
+            render.batch_size = batch as usize;
+        }
+    }
+}
+
 /// Merge renderer [`ConvertWarning`]s into `diagnostics` as `Severity::Warning`
 /// entries with stable `GEN-*` codes, so both the CLI's `write_diagnostics` and
 /// its `--strict` `warnings_are_fatal` gate see a lossy cross-dialect conversion
@@ -924,9 +991,11 @@ impl GenerateBuilder {
         self
     }
 
-    /// The SQL dialect to render for. Choosing a dialect that differs from the
-    /// model's source dialect renders every type across dialects (reporting
-    /// lossy conversions); leaving it unset renders in the model's own dialect.
+    /// The SQL dialect to render for, overriding the model's own `output.dialect`
+    /// and captured source dialect. Choosing a dialect that differs from the
+    /// model's source dialect renders every type across dialects (reporting lossy
+    /// conversions); leaving it unset resolves the dialect from the model
+    /// (`output.dialect`, else the source/input dialect, else MySQL).
     pub fn output_dialect(mut self, dialect: SqlDialect) -> Self {
         self.render.dialect = dialect;
         self.output_dialect = Some(dialect);

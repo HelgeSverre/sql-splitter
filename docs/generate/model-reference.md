@@ -63,12 +63,26 @@ source:
   fingerprint_policy: warn # ignore | warn | require
 ```
 
-`fingerprint_policy` controls what happens when a profiled dump's fingerprint
-no longer matches one recorded in the model: `ignore` does nothing, `warn`
-raises `GEN-SOURCE-FINGERPRINT` as a warning (the default expectation, since
-production dumps change), `require` raises it as a hard error (useful for
-pinning a fixture in CI). In an `overrides` document, `source` replaces the
-base's `source` wholesale when present — it is not merged field by field.
+In an `overrides` document, `source` replaces the base's `source` wholesale
+when present — it is not merged field by field.
+
+`fingerprint`/`fingerprint_policy` are compared in exactly one place today: when
+an `overrides` document is merged onto a base model, the override's
+`source.fingerprint` is checked against the base model's recorded
+`source.fingerprint`. If the two differ, the effective `fingerprint_policy` (the
+override's own if set, else the base's, else `ignore`) decides the outcome:
+`ignore` does nothing, `warn` raises `GEN-SOURCE-FINGERPRINT` as a warning,
+`require` raises it as a hard error (useful for pinning a fixture in CI). The
+replacement still happens either way — the comparison only decides whether you
+are *told* about the mismatch.
+
+> **Not yet implemented:** automatic dump-fingerprint drift detection during
+> *profiling* — computing a fingerprint from a source dump and comparing it
+> against a model's recorded `source.fingerprint` on a `generate <dump>` run —
+> is a planned/deferred feature. The profiling path records no fingerprint
+> (`fingerprint: None`), so no comparison happens on a dump-input run today. The
+> only live check is the overrides-merge (YAML-vs-YAML) comparison described
+> above.
 
 ### `output`
 
@@ -80,9 +94,17 @@ output:
   batch_size: 1000
 ```
 
-Every field defaults to `None`/unset, in which case rendering falls back to
-the source/model dialect and the renderer's own defaults. `--dialect` on the
-CLI overrides `output.dialect`.
+Every field defaults to `None`/unset. When set, the `output:` block is
+**honored** as the render setting, sitting one level *below* the equivalent CLI
+flag: a CLI flag wins when explicitly given, the `output:` block fills in
+otherwise, and only then does the renderer's own default apply. Concretely:
+
+| `output:` field | Falls back under | Effect when honored |
+| --- | --- | --- |
+| `dialect` | `--dialect` | Sets the render dialect. Full precedence: `--dialect` > `output.dialect` > the source/input dialect (preserve-source) > `mysql`. A deliberately chosen target (CLI or `output.dialect`) that differs from the source maps types across dialects and reports lossy conversions; a preserve-source run renders the schema verbatim. |
+| `mode` | `--schema-only` / `--data-only` | `schema_only`/`data_only` restrict the render. Only the *absence* of both flags leaves the neutral `schema_and_data`, under which `output.mode` fills in. |
+| `inserts` | `--no-copy` | `insert` forces multi-row `INSERT` (like `--no-copy`); `auto`/`copy` keep the PostgreSQL `COPY` default. |
+| `batch_size` | `--batch-size` | Rows per `INSERT`/`COPY` batch. Fills in only when `--batch-size` is left at its `1000` default. |
 
 ### `seed`
 

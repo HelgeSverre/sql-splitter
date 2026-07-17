@@ -162,7 +162,7 @@ sql-splitter generate --config model.yaml --check --json
 | `--profile-depth` | Bounded profiling depth (`basic`\|`full`) | `basic` |
 | `--profile-sample` | Row sample size used while profiling `[INPUT]` | depth default |
 | `--input-dialect` | Dialect of `[INPUT]`, if profiling (auto-detected otherwise) | auto-detect |
-| `--dialect` | Output SQL dialect | preserve source/model |
+| `--dialect` | Output SQL dialect | model `output.dialect`, else source/input dialect (preserve-source), else `mysql` |
 | `--scale` | Global multiplicative row-count scale | — |
 | `--rows` | Global absolute root row count | — |
 | `--table-rows` | Per-table absolute row-count override (`table=count`, repeatable) | — |

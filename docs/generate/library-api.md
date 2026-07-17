@@ -43,7 +43,7 @@ Builder methods, matching the CLI flags one for one:
 | `.input_dialect(dialect)` | `--input-dialect` |
 | `.profile_depth(depth)` | `--profile-depth` |
 | `.profile_sample(n)` | `--profile-sample` |
-| `.output_dialect(dialect)` | `--dialect` |
+| `.output_dialect(dialect)` | `--dialect` (default when unset: the model's `output.dialect`, else the source/input dialect (preserve-source), else `mysql`) |
 | `.seed(u64)` | `--seed` |
 | `.mssql_production_style(bool)` | `--mssql-production-style` |
 | `.mssql_go(n)` | `--mssql-go` |
