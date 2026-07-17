@@ -36,13 +36,13 @@ This document consolidates the strategic plan for integrating sql-splitter with 
 
 ### Tier 1 Integrations (Completed Design)
 
-| Integration            | Effort  | Value           | Status              | Version  |
-| ---------------------- | ------- | --------------- | ------------------- | -------- |
-| **DuckDB (query)**     | ~~16h~~ | 🔥 Game-changer | ✅ **Shipped**       | v1.12.0  |
-| **DuckDB (Parquet)**   | 12h     | ⭐ High impact  | 🟡 Designed         | v1.20.0  |
-| **Great Expectations** | 16h     | ⭐ High impact  | 🟡 Designed         | v1.21.0  |
-| **Atlas**              | 20h     | ⭐ High impact  | 🟡 Designed         | v1.22.0  |
-| **dbt**                | 28h     | 🔥 Game-changer | 🟡 Designed         | v1.23.0  |
+| Integration            | Effort  | Value           | Status         | Version |
+| ---------------------- | ------- | --------------- | -------------- | ------- |
+| **DuckDB (query)**     | ~~16h~~ | 🔥 Game-changer | ✅ **Shipped** | v1.12.0 |
+| **DuckDB (Parquet)**   | 12h     | ⭐ High impact  | 🟡 Designed    | v1.20.0 |
+| **Great Expectations** | 16h     | ⭐ High impact  | 🟡 Designed    | v1.21.0 |
+| **Atlas**              | 20h     | ⭐ High impact  | 🟡 Designed    | v1.22.0 |
+| **dbt**                | 28h     | 🔥 Game-changer | 🟡 Designed    | v1.23.0 |
 
 **Total Remaining Effort**: 76 hours (~2 sprints)
 
@@ -457,9 +457,9 @@ psql staging < synthetic.sql
 
 ### Phase 0: Already Done ✅
 
-| Version | Feature              | Effort | Status          |
-| ------- | -------------------- | ------ | --------------- |
-| v1.12.0 | DuckDB query engine  | 16h    | ✅ **Shipped**  |
+| Version | Feature             | Effort | Status         |
+| ------- | ------------------- | ------ | -------------- |
+| v1.12.0 | DuckDB query engine | 16h    | ✅ **Shipped** |
 
 ### Phase 1: Foundation (v1.20.0 - v1.23.0)
 

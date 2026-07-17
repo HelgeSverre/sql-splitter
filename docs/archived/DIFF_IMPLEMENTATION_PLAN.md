@@ -52,13 +52,14 @@ The diff command compares two SQL dumps and reports schema + data differences.
 **Goal:** Show actual PK values for added/removed/modified rows.
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 1.1 Add sample fields to TableDataDiff | 0.5h | `sample_added_pks`, `sample_removed_pks`, `sample_modified_pks` |
-| 1.2 Collect samples in DataDiffer | 0.5h | Store first N PKs during scanning |
-| 1.3 Format samples in text output | 0.5h | Show PKs in verbose mode |
-| 1.4 Format samples in JSON output | 0.25h | Add to JSON structure |
-| 1.5 Tests | 0.25h | Unit + integration tests |
+
+| Task                                   | Effort | Description                                                     |
+| -------------------------------------- | ------ | --------------------------------------------------------------- |
+| 1.1 Add sample fields to TableDataDiff | 0.5h   | `sample_added_pks`, `sample_removed_pks`, `sample_modified_pks` |
+| 1.2 Collect samples in DataDiffer      | 0.5h   | Store first N PKs during scanning                               |
+| 1.3 Format samples in text output      | 0.5h   | Show PKs in verbose mode                                        |
+| 1.4 Format samples in JSON output      | 0.25h  | Add to JSON structure                                           |
+| 1.5 Tests                              | 0.25h  | Unit + integration tests                                        |
 
 **Key Changes:**
 
@@ -88,13 +89,14 @@ pub struct TableDataDiff {
 **Goal:** Allow specifying PK columns for data comparison.
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 2.1 CLI argument parsing | 0.5h | Parse `--primary-key table:col,table2:col1+col2` |
-| 2.2 Add to DiffConfig | 0.25h | `pk_overrides: HashMap<String, Vec<String>>` |
-| 2.3 Apply in DataDiffer | 0.5h | Use override instead of schema PK |
-| 2.4 Validate columns exist | 0.25h | Error if column not in schema |
-| 2.5 Tests | 0.5h | All dialects |
+
+| Task                       | Effort | Description                                      |
+| -------------------------- | ------ | ------------------------------------------------ |
+| 2.1 CLI argument parsing   | 0.5h   | Parse `--primary-key table:col,table2:col1+col2` |
+| 2.2 Add to DiffConfig      | 0.25h  | `pk_overrides: HashMap<String, Vec<String>>`     |
+| 2.3 Apply in DataDiffer    | 0.5h   | Use override instead of schema PK                |
+| 2.4 Validate columns exist | 0.25h  | Error if column not in schema                    |
+| 2.5 Tests                  | 0.5h   | All dialects                                     |
 
 **Parsing Logic:**
 
@@ -118,11 +120,12 @@ fn parse_pk_overrides(s: &str) -> HashMap<String, Vec<String>> {
 **Goal:** Ignore column position when comparing schemas.
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 3.1 Add flag to DiffConfig | 0.1h | `ignore_column_order: bool` |
-| 3.2 Modify schema comparison | 0.5h | Compare as sets, not lists |
-| 3.3 Tests | 0.4h | All dialects |
+
+| Task                         | Effort | Description                 |
+| ---------------------------- | ------ | --------------------------- |
+| 3.1 Add flag to DiffConfig   | 0.1h   | `ignore_column_order: bool` |
+| 3.2 Modify schema comparison | 0.5h   | Compare as sets, not lists  |
+| 3.3 Tests                    | 0.4h   | All dialects                |
 
 **Current vs New Comparison:**
 
@@ -148,14 +151,15 @@ fn compare_tables(old: &TableSchema, new: &TableSchema, ignore_order: bool) {
 **Goal:** Detect added/removed/modified indexes beyond PK.
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 4.1 Add IndexDef to schema | 0.5h | `name, columns, is_unique, index_type` |
-| 4.2 Parse inline indexes | 1h | `INDEX`, `KEY`, `UNIQUE` in CREATE TABLE |
-| 4.3 Parse CREATE INDEX statements | 1h | Standalone statements |
-| 4.4 Compare indexes | 0.5h | Added/removed/modified |
-| 4.5 Format in outputs | 0.5h | Text, JSON, SQL formatters |
-| 4.6 Tests | 0.5h | All dialects |
+
+| Task                              | Effort | Description                              |
+| --------------------------------- | ------ | ---------------------------------------- |
+| 4.1 Add IndexDef to schema        | 0.5h   | `name, columns, is_unique, index_type`   |
+| 4.2 Parse inline indexes          | 1h     | `INDEX`, `KEY`, `UNIQUE` in CREATE TABLE |
+| 4.3 Parse CREATE INDEX statements | 1h     | Standalone statements                    |
+| 4.4 Compare indexes               | 0.5h   | Added/removed/modified                   |
+| 4.5 Format in outputs             | 0.5h   | Text, JSON, SQL formatters               |
+| 4.6 Tests                         | 0.5h   | All dialects                             |
 
 **Schema Types:**
 
@@ -193,14 +197,15 @@ CREATE INDEX idx_name ON table USING gin (col1);
 **Goal:** Exclude columns from comparison using glob patterns.
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 5.1 CLI parsing | 0.25h | Parse comma-separated patterns |
-| 5.2 Glob pattern matching | 0.5h | Match `table.column` against patterns |
-| 5.3 Filter in schema comparison | 0.5h | Skip ignored columns |
-| 5.4 Filter in data comparison | 1h | Skip ignored columns in digest |
-| 5.5 Validate not ignoring PK | 0.25h | Error if pattern matches PK |
-| 5.6 Tests | 0.5h | All dialects |
+
+| Task                            | Effort | Description                           |
+| ------------------------------- | ------ | ------------------------------------- |
+| 5.1 CLI parsing                 | 0.25h  | Parse comma-separated patterns        |
+| 5.2 Glob pattern matching       | 0.5h   | Match `table.column` against patterns |
+| 5.3 Filter in schema comparison | 0.5h   | Skip ignored columns                  |
+| 5.4 Filter in data comparison   | 1h     | Skip ignored columns in digest        |
+| 5.5 Validate not ignoring PK    | 0.25h  | Error if pattern matches PK           |
+| 5.6 Tests                       | 0.5h   | All dialects                          |
 
 **Pattern Matching:**
 
@@ -230,12 +235,13 @@ fn should_ignore_column(table: &str, column: &str, patterns: &[Pattern]) -> bool
 **Goal:** Better handling for tables without primary key.
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 6.1 Add warnings collection | 0.25h | `Vec<Warning>` in DiffResult |
-| 6.2 Emit warning when skipping table | 0.25h | "No PK, skipping data comparison" |
-| 6.3 Add --allow-no-pk flag | 0.25h | Use all columns as PK |
-| 6.4 Tests | 0.25h | All dialects |
+
+| Task                                 | Effort | Description                       |
+| ------------------------------------ | ------ | --------------------------------- |
+| 6.1 Add warnings collection          | 0.25h  | `Vec<Warning>` in DiffResult      |
+| 6.2 Emit warning when skipping table | 0.25h  | "No PK, skipping data comparison" |
+| 6.3 Add --allow-no-pk flag           | 0.25h  | Use all columns as PK             |
+| 6.4 Tests                            | 0.25h  | All dialects                      |
 
 **Warning Structure:**
 

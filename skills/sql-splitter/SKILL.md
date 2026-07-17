@@ -546,12 +546,12 @@ For running SQL queries on dump files without loading into a database:
 
 ## Common Flag Combinations
 
-| Goal                   | Flags                            |
-| ---------------------- | -------------------------------- |
-| CI validation          | `--strict --fail-fast --json`    |
-| Safe exploration       | `--dry-run --progress`           |
-| Reproducible sampling  | `--seed 42 --preserve-relations` |
-| Fast progress feedback | `--progress`                     |
+| Goal                   | Flags                                                                            |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| CI validation          | `--strict --fail-fast --json`                                                    |
+| Safe exploration       | `--dry-run --progress`                                                           |
+| Reproducible sampling  | `--seed 42 --preserve-relations`                                                 |
+| Fast progress feedback | `--progress`                                                                     |
 | Compressed output      | `split --compress gzip\|zstd\|bzip2\|xz`, or archive via `-o dump.tar.gz`/`.zip` |
 
 ---

@@ -239,19 +239,19 @@ See [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) for detailed co
 
 ### Split Options
 
-| Flag             | Description                                         | Default     |
-| ---------------- | --------------------------------------------------- | ----------- |
+| Flag             | Description                                                 | Default     |
+| ---------------- | ----------------------------------------------------------- | ----------- |
 | `-o, --output`   | Output directory, or an archive path (`.tar.gz`, `.zip`, …) | `output`    |
-| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `-t, --tables`   | Only split these tables (comma-separated)           | —           |
-| `--compress`     | Compress each output file: `gzip`, `zstd`, `bzip2`, `xz` | `none`  |
-| `--io-strategy`   | Output device I/O strategy: `auto`, `ssd`, `hdd`, `cheap` | `auto` |
-| `-p, --progress` | Show progress bar                                   | —           |
-| `--dry-run`      | Preview without writing files                       | —           |
-| `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)           | —           |
-| `--data-only`    | Only DML statements (INSERT, COPY)                  | —           |
-| `--fail-fast`    | Stop on first error (for glob patterns)             | —           |
-| `--json`         | Output results as JSON                              | —           |
+| `-d, --dialect`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`         | auto-detect |
+| `-t, --tables`   | Only split these tables (comma-separated)                   | —           |
+| `--compress`     | Compress each output file: `gzip`, `zstd`, `bzip2`, `xz`    | `none`      |
+| `--io-strategy`  | Output device I/O strategy: `auto`, `ssd`, `hdd`, `cheap`   | `auto`      |
+| `-p, --progress` | Show progress bar                                           | —           |
+| `--dry-run`      | Preview without writing files                               | —           |
+| `--schema-only`  | Only DDL statements (CREATE, ALTER, DROP)                   | —           |
+| `--data-only`    | Only DML statements (INSERT, COPY)                          | —           |
+| `--fail-fast`    | Stop on first error (for glob patterns)                     | —           |
+| `--json`         | Output results as JSON                                      | —           |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`),
 plain or compressed (`.gz`/`.bz2`/`.xz`/`.zst`), or a `.zip` archive
@@ -260,7 +260,7 @@ containing exactly one `.sql` member (deflated or stored; junk entries like
 reads a dump, not just `split`.
 
 **Output formats.** By default `split` writes one plain `<table>.sql` per table.
-`--compress <fmt>` instead writes one *compressed* file per table
+`--compress <fmt>` instead writes one _compressed_ file per table
 (`<table>.sql.gz`/`.zst`/`.bz2`/`.xz`) — useful for archival or transfer; each
 file compresses independently and in parallel. Alternatively, give `-o` an
 archive path (`dump.tar.gz`, `.tgz`, `.tar.zst`, `.tar.bz2`, `.tar.xz`, `.tar`,
@@ -280,12 +280,12 @@ The profiles aren't magic — they set three concrete knobs (writer thread
 count, write size, staging memory), and every profile produces byte-identical
 output. Pin one when you already know the target device:
 
-| Profile       | Writers | Write size  | Staging | Built for                                                                 |
-| ------------- | ------- | ----------- | ------- | ------------------------------------------------------------------------- |
-| `ssd`         | up to 4 | 256 KB      | 32 MB   | SSD/NVMe — high-IOPS devices that like many small parallel writes         |
-| `hdd`         | 1       | up to 64 MB | 256 MB  | Spinning disks — one writer avoids competing seeks; big sequential writes amortize head movement |
-| `cheap`       | 1       | up to 64 MB | 512 MB  | Cheap USB flash, network mounts — every write *operation* is expensive regardless of locality, so issue the fewest, largest ones. (Also answers to `potato`.) |
-| `auto`        | adapts  | adapts      | adapts  | Unknown targets — probes the output dir at startup, then switches between the profiles above based on observed backpressure |
+| Profile | Writers | Write size  | Staging | Built for                                                                                                                                                     |
+| ------- | ------- | ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ssd`   | up to 4 | 256 KB      | 32 MB   | SSD/NVMe — high-IOPS devices that like many small parallel writes                                                                                             |
+| `hdd`   | 1       | up to 64 MB | 256 MB  | Spinning disks — one writer avoids competing seeks; big sequential writes amortize head movement                                                              |
+| `cheap` | 1       | up to 64 MB | 512 MB  | Cheap USB flash, network mounts — every write _operation_ is expensive regardless of locality, so issue the fewest, largest ones. (Also answers to `potato`.) |
+| `auto`  | adapts  | adapts      | adapts  | Unknown targets — probes the output dir at startup, then switches between the profiles above based on observed backpressure                                   |
 
 ### Merge Options
 

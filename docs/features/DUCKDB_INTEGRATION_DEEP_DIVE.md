@@ -55,17 +55,17 @@ sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 
 **Shipped features** (see `src/duckdb/` and `src/cmd/query.rs`):
 
-| Feature | Status |
-|---------|--------|
-| In-memory DuckDB import | ✅ Done |
-| Disk-based mode (>2GB dumps) | ✅ Done |
-| MySQL/PostgreSQL/SQLite/MSSQL import | ✅ Done |
-| Output formats: table, json, jsonl, csv, tsv | ✅ Done |
-| Interactive REPL with meta-commands | ✅ Done |
-| Persistent cache (SHA256-keyed, 400x speedup) | ✅ Done |
-| `--tables` filter (import specific tables only) | ✅ Done |
-| `--memory-limit` configuration | ✅ Done |
-| **Parquet export** | ❌ Not yet — see §Parquet Export Integration |
+| Feature                                         | Status                                       |
+| ----------------------------------------------- | -------------------------------------------- |
+| In-memory DuckDB import                         | ✅ Done                                      |
+| Disk-based mode (>2GB dumps)                    | ✅ Done                                      |
+| MySQL/PostgreSQL/SQLite/MSSQL import            | ✅ Done                                      |
+| Output formats: table, json, jsonl, csv, tsv    | ✅ Done                                      |
+| Interactive REPL with meta-commands             | ✅ Done                                      |
+| Persistent cache (SHA256-keyed, 400x speedup)   | ✅ Done                                      |
+| `--tables` filter (import specific tables only) | ✅ Done                                      |
+| `--memory-limit` configuration                  | ✅ Done                                      |
+| **Parquet export**                              | ❌ Not yet — see §Parquet Export Integration |
 
 ---
 

@@ -16,21 +16,21 @@ This work will not parallelize generation, change SQL syntax, add CLI options, o
 
 Measurements were taken on an Apple M2 Max with the release profile. Hyperfine used two warmups and ten measured runs; output was written to `/dev/null` to isolate generation cost.
 
-| Workload | Output size | Mean wall time | Peak RSS from file-output run |
-| --- | ---: | ---: | ---: |
-| Simple MySQL, 10 tables × 125,000 rows | 129,722,365 bytes | 1.039 s ± 0.020 s | 3,152 KB |
-| Simple PostgreSQL, 10 tables × 125,000 rows | 115,076,690 bytes | 0.722 s ± 0.005 s | 2,528 KB |
-| Multi-tenant MySQL, `xlarge` | 134,491,966 bytes | 1.574 s ± 0.014 s | 31,536 KB |
-| Multi-tenant PostgreSQL, `xlarge` | 137,024,950 bytes | 1.276 s ± 0.042 s | 30,656 KB |
+| Workload                                    |       Output size |    Mean wall time | Peak RSS from file-output run |
+| ------------------------------------------- | ----------------: | ----------------: | ----------------------------: |
+| Simple MySQL, 10 tables × 125,000 rows      | 129,722,365 bytes | 1.039 s ± 0.020 s |                      3,152 KB |
+| Simple PostgreSQL, 10 tables × 125,000 rows | 115,076,690 bytes | 0.722 s ± 0.005 s |                      2,528 KB |
+| Multi-tenant MySQL, `xlarge`                | 134,491,966 bytes | 1.574 s ± 0.014 s |                     31,536 KB |
+| Multi-tenant PostgreSQL, `xlarge`           | 137,024,950 bytes | 1.276 s ± 0.042 s |                     30,656 KB |
 
 Stages 1 and 2 must retain these SHA-256 hashes for seed `12345` and the default batch size:
 
-| Workload | SHA-256 |
-| --- | --- |
-| Simple MySQL, 10 tables × 125,000 rows | `4bdaa3e6f0b7d23bd7eb13277a37f31dc5712bbf4f91980eb5b44dd48ed8a032` |
+| Workload                                    | SHA-256                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------ |
+| Simple MySQL, 10 tables × 125,000 rows      | `4bdaa3e6f0b7d23bd7eb13277a37f31dc5712bbf4f91980eb5b44dd48ed8a032` |
 | Simple PostgreSQL, 10 tables × 125,000 rows | `ff5aaf7c3c639a288bec707f660e7d51af7f581865a017ee8856b439f8d15046` |
-| Multi-tenant MySQL, `xlarge` | `5f1dd76233d627169238843faf916b2a79647754a7ff69acbf00448f88772d0e` |
-| Multi-tenant PostgreSQL, `xlarge` | `99b0e8904205ce208f4cdb62162900b5ab36ee3123cb0580cb7df5238513dadb` |
+| Multi-tenant MySQL, `xlarge`                | `5f1dd76233d627169238843faf916b2a79647754a7ff69acbf00448f88772d0e` |
+| Multi-tenant PostgreSQL, `xlarge`           | `99b0e8904205ce208f4cdb62162900b5ab36ee3123cb0580cb7df5238513dadb` |
 
 Increasing `--batch-size` from 100 to 1,000 or 10,000 changed simple-mode time by about 1% and did not improve multi-tenant time. Batch size is not an optimization target.
 
@@ -48,12 +48,12 @@ Introduce a private borrowed value that implements `Display` for a quoted SQL st
 
 The formatter must reproduce the current escaping exactly:
 
-| Dialect | Prefix | Escapes |
-| --- | --- | --- |
-| MySQL | `'` | `\` → `\\`, `'` → `\'`, newline → `\n`, carriage return → `\r`, tab → `\t` |
-| PostgreSQL | `'` | `'` → `''` |
-| SQLite | `'` | `'` → `''` |
-| MSSQL | `N'` | `'` → `''` |
+| Dialect    | Prefix | Escapes                                                                    |
+| ---------- | ------ | -------------------------------------------------------------------------- |
+| MySQL      | `'`    | `\` → `\\`, `'` → `\'`, newline → `\n`, carriage return → `\r`, tab → `\t` |
+| PostgreSQL | `'`    | `'` → `''`                                                                 |
+| SQLite     | `'`    | `'` → `''`                                                                 |
+| MSSQL      | `N'`   | `'` → `''`                                                                 |
 
 Both streaming generators will return this borrowed formatter from `format_string` instead of allocating an escaped `String` and then another quoted `String`. Existing `format!`, `write!`, and `writeln!` call sites can consume the formatter without changing their SQL layout.
 

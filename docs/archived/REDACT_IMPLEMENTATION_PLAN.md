@@ -218,14 +218,15 @@ pub struct RedactArgs {
 ### 1.1 CLI and Config Types (4h)
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 1.1.1 Add Redact command to CLI | 0.5h | `src/cmd/mod.rs`, `src/cmd/redact.rs` |
-| 1.1.2 Define RedactConfig struct | 0.5h | All config fields |
-| 1.1.3 Define YAML config types | 1h | `RedactYamlConfig`, `Rule`, `Defaults` |
-| 1.1.4 Implement config loading | 0.5h | File parsing, validation |
-| 1.1.5 CLI-to-config merging | 1h | Merge inline flags with YAML |
-| 1.1.6 Config validation | 0.5h | Check patterns, strategies, params |
+
+| Task                             | Effort | Description                            |
+| -------------------------------- | ------ | -------------------------------------- |
+| 1.1.1 Add Redact command to CLI  | 0.5h   | `src/cmd/mod.rs`, `src/cmd/redact.rs`  |
+| 1.1.2 Define RedactConfig struct | 0.5h   | All config fields                      |
+| 1.1.3 Define YAML config types   | 1h     | `RedactYamlConfig`, `Rule`, `Defaults` |
+| 1.1.4 Implement config loading   | 0.5h   | File parsing, validation               |
+| 1.1.5 CLI-to-config merging      | 1h     | Merge inline flags with YAML           |
+| 1.1.6 Config validation          | 0.5h   | Check patterns, strategies, params     |
 
 **YAML Config Structure:**
 
@@ -326,23 +327,25 @@ skip_tables:
 ### 1.2 Column Matcher (2h)
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 1.2.1 Define ColumnPattern type | 0.5h | Parsed glob representation |
-| 1.2.2 Implement pattern compilation | 0.5h | Convert "\*.email" to matcher |
-| 1.2.3 Build column→strategy map | 0.5h | Pre-compute for each table/column |
-| 1.2.4 Tests | 0.5h | Pattern matching edge cases |
+
+| Task                                | Effort | Description                       |
+| ----------------------------------- | ------ | --------------------------------- |
+| 1.2.1 Define ColumnPattern type     | 0.5h   | Parsed glob representation        |
+| 1.2.2 Implement pattern compilation | 0.5h   | Convert "\*.email" to matcher     |
+| 1.2.3 Build column→strategy map     | 0.5h   | Pre-compute for each table/column |
+| 1.2.4 Tests                         | 0.5h   | Pattern matching edge cases       |
 
 ### 1.3 Strategy Trait and Types (4h)
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 1.3.1 Define Strategy trait | 0.5h | `apply(&mut self, value: &RedactValue) -> RedactValue` |
-| 1.3.2 Define StrategyKind enum | 1h | All strategy variants with params |
-| 1.3.3 Define RedactValue type | 0.5h | NULL, String, Number, Hex, Other |
-| 1.3.4 Implement strategy factory | 1.5h | Create strategy from config + locale |
-| 1.3.5 Tests | 0.5h | Strategy creation |
+
+| Task                             | Effort | Description                                            |
+| -------------------------------- | ------ | ------------------------------------------------------ |
+| 1.3.1 Define Strategy trait      | 0.5h   | `apply(&mut self, value: &RedactValue) -> RedactValue` |
+| 1.3.2 Define StrategyKind enum   | 1h     | All strategy variants with params                      |
+| 1.3.3 Define RedactValue type    | 0.5h   | NULL, String, Number, Hex, Other                       |
+| 1.3.4 Implement strategy factory | 1.5h   | Create strategy from config + locale                   |
+| 1.3.5 Tests                      | 0.5h   | Strategy creation                                      |
 
 **Key Types:**
 
@@ -727,12 +730,13 @@ impl SchemaLookup {
 ### 3.2 INSERT Rewriting (5h)
 
 **Tasks:**
-| Task | Effort | Description |
-|------|--------|-------------|
-| 3.2.1 Value extraction from INSERT | 2h | Parse multi-row INSERTs |
-| 3.2.2 Value serialization | 1h | RedactValue → SQL bytes |
-| 3.2.3 Statement reassembly | 1h | Header + VALUES + rows |
-| 3.2.4 Tests | 1h | Roundtrip tests |
+
+| Task                               | Effort | Description             |
+| ---------------------------------- | ------ | ----------------------- |
+| 3.2.1 Value extraction from INSERT | 2h     | Parse multi-row INSERTs |
+| 3.2.2 Value serialization          | 1h     | RedactValue → SQL bytes |
+| 3.2.3 Statement reassembly         | 1h     | Header + VALUES + rows  |
+| 3.2.4 Tests                        | 1h     | Roundtrip tests         |
 
 ```rust
 pub fn rewrite_insert(
@@ -1542,10 +1546,10 @@ sql-splitter redact prod.sql.gz -o safe.sql --config redact.yaml --seed 42
 # 5. Quick inline redaction
 
 sql-splitter redact dump.sql -o safe.sql \
- --null "_.ssn,_.tax*id" \
- --hash "*.email" \
- --fake "_.name,_.phone" \
- --mask "\***\*-\*\***-\*\*\*\*-XXXX=\_.credit_card"
+--null "_.ssn,_.tax*id" \
+--hash "*.email" \
+--fake "_.name,_.phone" \
+--mask "\***\*-\*\***-\*\*\*\*-XXXX=\_.credit_card"
 \`\`\`
 
 **Redaction strategies:**
