@@ -602,9 +602,16 @@ impl ModelCompiler {
                     );
                     injected = cloned;
                     &injected
-                } else if is_cross_table && !is_family {
-                    // An FK-side cross-table planner: inject the resolved parent
-                    // key facts it needs to produce valid keys.
+                } else if !is_family
+                    && (is_cross_table || config.args.contains_key("relationship"))
+                {
+                    // A planner that references another table's (or its own
+                    // self-FK) key domain by relationship name: inject the
+                    // resolved parent counts and dense key recipes so it can
+                    // produce valid keys. This covers the FK-side cross-table
+                    // planners (junction/tenant/polymorphic) and the same-table
+                    // `hierarchy.tree`, which derives its emitted parent_id key
+                    // from the referenced primary key's generator.
                     let mut cloned = config.clone();
                     cloned.args.insert(
                         super::planners::structural::RELATION_FACTS_KEY.to_string(),

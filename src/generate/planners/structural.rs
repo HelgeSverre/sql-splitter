@@ -1405,9 +1405,9 @@ impl CompiledPlanner for HierarchyTreePlanner {
             let slot = slot.min(self.eligible.len() - 1);
             let parent_row = self.eligible[slot];
             let depth = self.depths[parent_row] + 1;
-            if let Some(limit) = self.max_branching {
+            if self.max_branching.is_some() {
                 self.remaining[parent_row] -= 1;
-                if self.remaining[parent_row] == 0 || limit == 0 {
+                if self.remaining[parent_row] == 0 {
                     self.eligible.swap_remove(slot);
                 }
             }
@@ -1503,15 +1503,40 @@ fn compile_tree(
         }
     };
 
+    // Derive the emitted parent_id key recipe from the ACTUAL primary key the
+    // self-FK relationship references (a non-default `sequence` start/step must
+    // be honored, or the produced parent_id values would not match any real
+    // id). The compiler injects the referenced key's dense recipe under
+    // `RELATION_FACTS_KEY`; an explicit `key:` block still wins over it, and a
+    // plain default PK falls back to `1, 2, …`.
+    let facts = config.args.get(RELATION_FACTS_KEY);
+    let (derived_start, derived_step) = config
+        .args
+        .get("relationship")
+        .and_then(Value::as_str)
+        .and_then(|name| {
+            facts
+                .and_then(|f| f.get("relationships"))
+                .and_then(|r| r.get(name))
+        })
+        .filter(|fact| fact.get("dense").and_then(Value::as_bool) == Some(true))
+        .map(|fact| {
+            (
+                fact.get("start").and_then(as_i128).unwrap_or(1),
+                fact.get("step").and_then(as_i128).unwrap_or(1),
+            )
+        })
+        .unwrap_or((1, 1));
+
     let key = config.args.get("key");
     let key_start = key
         .and_then(|k| k.get("start"))
         .and_then(as_i128)
-        .unwrap_or(1);
+        .unwrap_or(derived_start);
     let key_step = key
         .and_then(|k| k.get("step"))
         .and_then(as_i128)
-        .unwrap_or(1);
+        .unwrap_or(derived_step);
 
     if bag.has_errors() {
         return Err(bag);

@@ -1926,6 +1926,68 @@ fn tree_seeded_output_repeats_and_differs_by_seed() {
 }
 
 #[test]
+fn tree_derives_parent_id_key_from_non_default_pk_sequence() {
+    // The tree table's own primary key uses a non-default sequence (start 1000),
+    // so the real ids are 1000, 1001, …. The planner must emit parent_id values
+    // drawn from that SAME key domain, not a 1-based default — otherwise every
+    // non-root would be a silently invalid self-FK.
+    let yaml = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 42
+tables:
+  categories:
+    rows: { kind: fixed, count: 2000 }
+    schema:
+      name: categories
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: parent_id, type: bigint, nullable: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1000 } }
+    relationships:
+      - name: category_parent
+        columns: [parent_id]
+        references: { table: categories, columns: [id] }
+    planners:
+      - kind: hierarchy.tree
+        columns:
+          parent: parent_id
+        relationship: category_parent
+        root_ratio: 0.15
+        max_depth: 4
+        max_branching: 5
+"#;
+    let sink = run(yaml);
+    let ids: std::collections::BTreeSet<i128> = sink
+        .column("id")
+        .map(|v| v.as_integer().expect("integer id"))
+        .collect();
+    assert_eq!(ids.len(), 2000);
+    // The dense sequence really did start at 1000.
+    assert_eq!(*ids.iter().next().unwrap(), 1000);
+
+    let mut non_roots = 0;
+    for parent in sink.column("parent_id") {
+        if let GeneratedValue::Null = parent {
+            continue;
+        }
+        let parent = parent.as_integer().expect("integer parent");
+        assert!(
+            parent >= 1000,
+            "parent_id {parent} is not in the real 1000-based id domain"
+        );
+        assert!(
+            ids.contains(&parent),
+            "parent_id {parent} references no real id"
+        );
+        non_roots += 1;
+    }
+    assert!(non_roots > 0, "a bounded tree must have non-root rows");
+}
+
+#[test]
 fn tree_returns_nonnegative_parent_predicate() {
     use sql_splitter::generate::PlannerPredicate;
     let plan =
