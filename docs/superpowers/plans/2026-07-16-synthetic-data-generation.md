@@ -121,6 +121,7 @@ The focused modules above are deliberate. Do not put the model, compiler, regist
 ### Task 7: Build the typed extension registry
 
 **Files:**
+
 - Create: `src/generate/registry.rs`
 - Create: `src/generate/generators/mod.rs`
 - Create: `src/generate/planners/mod.rs`
@@ -128,6 +129,7 @@ The focused modules above are deliberate. Do not put the model, compiler, regist
 - Test: `tests/generate_compiler_test.rs`
 
 **Interfaces:**
+
 - Produces: `ExtensionRegistry::new()`, `ExtensionRegistry::standard()`
 - Produces: `GeneratorFactory`, `ModifierFactory`, `PlannerFactory`
 - Produces: descriptor types and ownership/read declarations
@@ -203,11 +205,13 @@ git commit -m "feat(generate): add typed extension registry"
 ### Task 8: Merge source, model, and overrides into a complete candidate
 
 **Files:**
+
 - Create: `src/synthetic/merge.rs`
 - Modify: `src/synthetic/mod.rs`
 - Test: `tests/generate_config_test.rs`
 
 **Interfaces:**
+
 - Produces: `ModelMerger::merge(base: SyntheticModel, overrides: SyntheticOverrides) -> Result<(SyntheticModel, DiagnosticBag), DiagnosticBag>` — on success returns the merged model plus a warning-only bag (e.g. fingerprint `warn`), so warnings survive a successful merge; on any error-severity diagnostic returns `Err(bag)`. (Design-audit fix: `into_result` discards the bag on success, which would silently drop the fingerprint `warn` diagnostic.)
 - Produces: compatibility diagnostics for tables, columns, and types
 - Consumes: portable schema conversion and partial override types
@@ -287,12 +291,14 @@ git commit -m "feat(generate): merge models and overrides safely"
 ### Task 9: Compile selection and exact row counts
 
 **Files:**
+
 - Create: `src/generate/plan.rs`
 - Create: `src/generate/compiler.rs`
 - Modify: `src/generate/mod.rs`
 - Test: `tests/generate_compiler_test.rs`
 
 **Interfaces:**
+
 - Produces: `CompileOptions`, `TableCountOverride`, `GenerationPlan`, `PlannedTable`
 - Produces: `ModelCompiler::compile(model, options) -> Result<GenerationPlan, DiagnosticBag>`
 - Consumes: `ExtensionRegistry`, `SyntheticModel`, `SchemaGraph`, `SeedRoot`
@@ -394,11 +400,13 @@ git commit -m "feat(generate): compile selection and exact row counts"
 ### Task 10: Compile ownership, types, and dependency graphs
 
 **Files:**
+
 - Modify: `src/generate/compiler.rs`
 - Modify: `src/generate/plan.rs`
 - Test: `tests/generate_compiler_test.rs`
 
 **Interfaces:**
+
 - Produces: `PlannedColumn`, `ColumnOwner`, column/family dependency order
 - Consumes: registry descriptor write/read sets and portable SQL types
 
@@ -460,12 +468,14 @@ git commit -m "feat(generate): compile ownership and dependencies"
 ### Task 11: Implement Phase 1 core generators and modifiers
 
 **Files:**
+
 - Create: `src/generate/generators/core.rs`
 - Modify: `src/generate/generators/mod.rs`
 - Modify: `src/generate/registry.rs`
 - Test: `tests/generate_engine_test.rs`
 
 **Interfaces:**
+
 - Produces factories for `constant`, `null`, `sequence`, `copy`, `template`, `pattern`, `database_default`, `json_value`, typed random, choice, weighted choice
 - Produces modifiers `null_rate`, `unique`, string transforms, `clamp`, `round`, `format`
 - Consumes: `GeneratedValue`, `RowContext`, per-operator RNG streams
@@ -545,6 +555,7 @@ git commit -m "feat(generate): add core generators and modifiers"
 ### Task 12: Implement semantic, credential, and temporal generators
 
 **Files:**
+
 - Create: `src/generate/generators/semantic.rs`
 - Create: `src/fake_data.rs`
 - Modify: `src/generate/generators/mod.rs`
@@ -554,6 +565,7 @@ git commit -m "feat(generate): add core generators and modifiers"
 - Test: `tests/redact_test.rs`
 
 **Interfaces:**
+
 - Produces: the Phase 1 semantic catalog from the spec
 - Produces: credential generators and date/time/duration/before/after generators
 - Reuses: one internal fake-data catalog from both generate and redact
@@ -626,6 +638,7 @@ git commit -m "feat(generate): add semantic and credential generators"
 ### Task 13: Execute tables with simple foreign and composite keys
 
 **Files:**
+
 - Create: `src/generate/generators/relation.rs`
 - Create: `src/generate/engine.rs`
 - Modify: `src/generate/generators/mod.rs`
@@ -634,6 +647,7 @@ git commit -m "feat(generate): add semantic and credential generators"
 - Test: `tests/generate_engine_test.rs`
 
 **Interfaces:**
+
 - Produces: `GenerationEngine::new(plan)`, `GenerationEngine::run(&mut dyn RowSink) -> GenerateReport`
 - Produces: `RowSink`, `GeneratedRow`, `KeyDomain`
 - Produces: `relation.foreign_key`, `relation.composite_key`
@@ -719,6 +733,7 @@ git commit -m "feat(generate): execute relational table plans"
 ### Task 14: Render normalized SQL for all four dialects
 
 **Files:**
+
 - Create: `src/render/ddl.rs`
 - Create: `src/render/sql.rs`
 - Modify: `src/render/mod.rs`
@@ -727,6 +742,7 @@ git commit -m "feat(generate): execute relational table plans"
 - Create: `tests/fixtures/generate/simple.yaml`
 
 **Interfaces:**
+
 - Produces: `SqlRenderer<W: Write>: RowSink`
 - Produces: `RenderOptions`
 - Consumes: `PortableSchema`, `GeneratedValue`, `RowBatch`, existing conversion type mappings
@@ -795,11 +811,13 @@ git commit -m "feat(generate): render model-driven SQL"
 ### Task 15: Expose the public builder and staged library API
 
 **Files:**
+
 - Modify: `src/generate/mod.rs`
 - Modify: `src/lib.rs`
 - Create: `tests/generate_api_test.rs`
 
 **Interfaces:**
+
 - Produces: `Generate`, `GenerateBuilder`, `GenerateReport`
 - Produces: `RunMode::{Generate,Check,DryRun}`
 - Re-exports: `SyntheticModel`, `ExtensionRegistry`, `ModelCompiler`, `GenerationEngine`, renderer types; Task 19 adds `DumpProfiler`
@@ -870,12 +888,14 @@ git commit -m "feat(generate): expose public generation API"
 ### Task 16: Add the Phase 1 CLI, preflight, and report routing
 
 **Files:**
+
 - Create: `src/cmd/generate.rs`
 - Modify: `src/cmd/mod.rs`
 - Create: `tests/generate_cli_test.rs`
 - Modify: `tests/json_output_test.rs`
 
 **Interfaces:**
+
 - Produces: `GenerateArgs`, `cmd::generate::run(args) -> anyhow::Result<ExitCode>`
 - Consumes: `GenerateRequest`, `CompileOptions`, `RenderOptions`, `GenerateReport`
 
@@ -1035,6 +1055,7 @@ git commit -m "feat(generate): add model-driven CLI"
 ### Task 1: Preserve complete portable schema evidence
 
 **Files:**
+
 - Modify: `src/schema/mod.rs`
 - Modify: `src/schema/ddl.rs`
 - Modify: `src/schema/build.rs`
@@ -1045,6 +1066,7 @@ git commit -m "feat(generate): add model-driven CLI"
 - Test: `tests/schema_build_test.rs`
 
 **Interfaces:**
+
 - Produces: `schema::Column.source_type`, `default_sql`, `is_unique`, `is_generated`, `is_identity`
 - Produces: `synthetic::schema::{PortableSchema, PortableTable, PortableColumn}`
 - Produces: `PortableSchema::from_runtime(&Schema, SqlDialect) -> PortableSchema`
@@ -1183,11 +1205,13 @@ git commit -m "feat(generate): preserve portable schema evidence"
 ### Task 2: Add structured diagnostics
 
 **Files:**
+
 - Create: `src/diagnostic.rs`
 - Modify: `src/lib.rs`
 - Create: `tests/generate_compiler_test.rs`
 
 **Interfaces:**
+
 - Produces: `Diagnostic`, `DiagnosticCode`, `Severity`, `SourceLocation`, `DiagnosticBag`
 - Produces: `DiagnosticBag::into_result<T>(value: T) -> Result<T, DiagnosticBag>`
 - Consumed by: config loader, compiler, heuristics, CLI reports, verifier
@@ -1254,18 +1278,21 @@ git commit -m "feat(generate): add structured diagnostics"
 ### Task 3: Define complete model and override types
 
 **Files:**
+
 - Create: `src/synthetic/model.rs`
 - Create: `src/synthetic/overrides.rs`
 - Modify: `src/synthetic/mod.rs`
 - Create: `tests/generate_config_test.rs`
 
 **Interfaces:**
+
 - Produces: `SyntheticFile::{Model(SyntheticModel), Overrides(SyntheticOverrides)}`
 - Produces: `SyntheticFile::parse_str` and role-specific, unknown-field-safe document structs
 - Produces: `TableSeed::{Inherit, Random, Fixed(u64)}` with missing/null/integer YAML semantics
 - Produces: complete and partial row/schema/rule types used by the compiler
 
 **Resolution note (design audit):**
+
 - `PortableColumn` accepts a `type:` input alias for `source_type`; `family` is `#[serde(default)]`-derived from `source_type` when absent; emit is always canonical.
 - `SyntheticModel.output` and `SyntheticModel.defaults` take `#[serde(default)]` (default inference = disabled; default output = preserve source dialect) so a minimal `kind: model` per the spec's optional-field table parses.
 - `SyntheticOverrides` includes `defaults: Option<ModelDefaults>` and `source: Option<SourceModel>` (both spec-optional for overrides).
@@ -1424,11 +1451,13 @@ git commit -m "feat(generate): define model and override documents"
 ### Task 4: Load local imports with deterministic root-wins semantics
 
 **Files:**
+
 - Create: `src/synthetic/config.rs`
 - Modify: `src/synthetic/mod.rs`
 - Test: `tests/generate_config_test.rs`
 
 **Interfaces:**
+
 - Produces: `ConfigLoader::load(path: &Path) -> Result<SyntheticFile, DiagnosticBag>`
 - Produces: `merge_yaml(root, imports) -> Result<serde_yaml_ng::Value, DiagnosticBag>`
 - Consumes: `SyntheticFile` and `SyntheticOverrides`
@@ -1502,6 +1531,7 @@ git commit -m "feat(generate): load deterministic local imports"
 ### Task 5: Add stable seed derivation and typed generated values
 
 **Files:**
+
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 - Create: `src/generate/mod.rs`
@@ -1511,6 +1541,7 @@ git commit -m "feat(generate): load deterministic local imports"
 - Create: `tests/generate_engine_test.rs`
 
 **Interfaces:**
+
 - Produces: `GeneratedValue`
 - Produces: `SeedRoot::new(seed)`, `SeedRoot::stream(StreamId) -> ChaCha8Rng`
 - Produces: `StreamId::{table,column,planner,operator}` constructors
@@ -1592,6 +1623,7 @@ git commit -m "feat(generate): add stable streams and typed values"
 ### Task 6: Restore the measured allocation-lean renderer primitives
 
 **Files:**
+
 - Create: `src/render/mod.rs`
 - Create: `src/render/sql_string.rs`
 - Create: `src/render/row_batch.rs`
@@ -1602,6 +1634,7 @@ git commit -m "feat(generate): add stable streams and typed values"
 - Test: `tests/generate_engine_test.rs`
 
 **Interfaces:**
+
 - Produces: `SqlString<'a>`, `RowBatch`, `RandomBlock`, `DialectRenderer` primitives
 - Consumes: `SqlDialect`, `GeneratedValue`, `ChaCha8Rng`
 - Performance source: `docs/superpowers/specs/2026-07-16-gen-fixtures-performance-design.md`
@@ -1712,6 +1745,7 @@ git commit -m "perf(generate): add allocation-lean renderer primitives"
 ### Task 17: Make row parsing visitor-based and memory-bounded
 
 **Files:**
+
 - Modify: `src/parser/mod.rs`
 - Modify: `src/parser/mysql_insert.rs`
 - Modify: `src/parser/postgres_copy.rs`
@@ -1721,6 +1755,7 @@ git commit -m "perf(generate): add allocation-lean renderer primitives"
 - Create: `tests/shard_integration_test.rs`
 
 **Interfaces:**
+
 - Produces: `Parser::visit_events` and `ParserEvent::{Statement,InsertRow,CopyStart,CopyRow,CopyEnd}`
 - Produces: `visit_insert_rows_with`, `visit_postgres_copy_rows_with`
 - Preserves: `parse_insert_rows_with`, `parse_postgres_copy_rows_with` as collecting adapters
@@ -1774,6 +1809,7 @@ git commit -m "perf(parser): stream parsed data rows to visitors"
 ### Task 18: Implement bounded profiling evidence and sketches
 
 **Files:**
+
 - Create: `src/profile/mod.rs`
 - Create: `src/profile/evidence.rs`
 - Create: `src/profile/sketches.rs`
@@ -1781,6 +1817,7 @@ git commit -m "perf(parser): stream parsed data rows to visitors"
 - Create: `tests/generate_profile_test.rs`
 
 **Interfaces:**
+
 - Produces: `ProfileDepth::{Schema,Basic,Full}` and `ProfileBudget`
 - Produces: `DumpProfile`, `TableEvidence`, `ColumnEvidence`, `RelationshipEvidence`
 - Produces: mergeable `Reservoir`, `SpaceSavingTopK`, `HyperLogLog`, `NumericHistogram`, `StringShapeSketch`
@@ -1842,6 +1879,7 @@ git commit -m "feat(profile): add bounded shape evidence sketches"
 ### Task 19: Stream SQL dumps into a neutral `DumpProfile`
 
 **Files:**
+
 - Create: `src/profile/profiler.rs`
 - Modify: `src/profile/mod.rs`
 - Modify: `src/schema/mod.rs`
@@ -1849,6 +1887,7 @@ git commit -m "feat(profile): add bounded shape evidence sketches"
 - Create: `tests/fixtures/generate/production_shape.sql`
 
 **Interfaces:**
+
 - Produces: `DumpProfiler::builder()`, `DumpProfiler::profile_path`, `DumpProfiler::profile_reader`
 - Consumes: production `Parser`, `SchemaBuilder`, row visitors, `ProfileBudget`
 
@@ -1884,6 +1923,7 @@ git commit -m "feat(profile): stream dumps into neutral evidence"
 ### Task 20: Infer explicit models through registered heuristics
 
 **Files:**
+
 - Create: `src/profile/heuristics/mod.rs`
 - Create: `src/profile/heuristics/schema.rs`
 - Create: `src/profile/heuristics/semantic.rs`
@@ -1896,6 +1936,7 @@ git commit -m "feat(profile): stream dumps into neutral evidence"
 - Test: `tests/generate_profile_test.rs`
 
 **Interfaces:**
+
 - Produces: `ModelInference::infer(profile, registry, options) -> InferenceResult`
 - Produces: `InferenceResult { model, decisions, warnings }`
 - Consumes: neutral `DumpProfile`, heuristic descriptors, confidence thresholds
@@ -1949,6 +1990,7 @@ git commit -m "feat(generate): infer explicit rules from dump profiles"
 ### Task 21: Add dump-to-model and dump-to-SQL workflows
 
 **Files:**
+
 - Modify: `src/generate/mod.rs`
 - Modify: `src/cmd/generate.rs`
 - Modify: `src/synthetic/model.rs`
@@ -1956,6 +1998,7 @@ git commit -m "feat(generate): infer explicit rules from dump profiles"
 - Modify: `tests/generate_profile_test.rs`
 
 **Interfaces:**
+
 - Produces: `RunMode::EmitModel` (extends the Phase 1 `RunMode` with the emit-model mode)
 - Produces: source-literal risk scan and `--explain` report
 - Consumes: `DumpProfiler`, `ModelInference`, merge/compiler/engine pipeline
@@ -2013,6 +2056,7 @@ git commit -m "feat(generate): synthesize data from existing dumps"
 ### Task 22: Add protected family state and atomic outputs
 
 **Files:**
+
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 - Create: `src/generate/output.rs`
@@ -2021,6 +2065,7 @@ git commit -m "feat(generate): synthesize data from existing dumps"
 - Create: `tests/generate_output_test.rs`
 
 **Interfaces:**
+
 - Produces: `ProtectedSpool`, `AtomicOutput`, `PublicationSet`
 - Produces: `FamilyState::{ParentState,ChildSpool,TableSpool}`
 - Consumes: compiled phase/budget estimates and `tempfile`
@@ -2061,11 +2106,13 @@ git commit -m "feat(generate): add protected family spooling and atomic output"
 ### Task 23: Implement `temporal.interval`
 
 **Files:**
+
 - Create: `src/generate/planners/interval.rs`
 - Modify: `src/generate/planners/mod.rs`
 - Create: `tests/generate_planner_test.rs`
 
 **Interfaces:**
+
 - Produces: `TemporalIntervalFactory` and compiled interval planner
 - Consumes: normative `temporal.interval` YAML, timestamp/duration evidence, ownership registry
 
@@ -2099,11 +2146,13 @@ git commit -m "feat(generate): add temporal interval planner"
 ### Task 24: Implement `workflow.progress_counters`
 
 **Files:**
+
 - Create: `src/generate/planners/progress.rs`
 - Modify: `src/generate/planners/mod.rs`
 - Test: `tests/generate_planner_test.rs`
 
 **Interfaces:**
+
 - Produces: `ProgressCountersFactory`
 - Consumes: normative progress YAML and integer/status/timestamp columns
 
@@ -2137,6 +2186,7 @@ git commit -m "feat(generate): add progress counter planner"
 ### Task 25: Implement `commerce.order_family`
 
 **Files:**
+
 - Create: `src/generate/planners/order_family.rs`
 - Modify: `src/generate/planners/mod.rs`
 - Modify: `src/generate/engine.rs`
@@ -2144,6 +2194,7 @@ git commit -m "feat(generate): add progress counter planner"
 - Modify: `tests/fixtures/generate/simple.yaml`
 
 **Interfaces:**
+
 - Produces: `OrderFamilyFactory`
 - Consumes: named child table/relationship, parent/child mappings, required child row distribution
 
@@ -2179,12 +2230,14 @@ git commit -m "feat(generate): add exact order family planner"
 ### Task 26: Verify generated SQL before publication
 
 **Files:**
+
 - Create: `src/generate/verify.rs`
 - Modify: `src/generate/output.rs`
 - Modify: `src/generate/mod.rs`
 - Create: `tests/generate_verify_test.rs`
 
 **Interfaces:**
+
 - Produces: `GenerationVerifier`, `VerificationReport`, `CheckStatus::{Exact,Sampled,NotChecked}`
 - Consumes: compiled constraints/planner predicates, protected temporary SQL, profile tolerances
 
@@ -2222,11 +2275,13 @@ git commit -m "feat(generate): verify output before publication"
 This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part of the initial release rather than following the spec's softer "may ship incrementally" hedge.
 
 **Files:**
+
 - Create: `src/generate/planners/structural.rs`
 - Modify: `src/generate/planners/mod.rs`
 - Test: `tests/generate_planner_test.rs`
 
 **Interfaces:**
+
 - Produces: `temporal.timestamps`, `temporal.soft_delete`, `temporal.lifecycle`
 
 - [ ] Write failing invariant tests for create/update ordering, null/non-null delete timestamps and flags, and legal lifecycle transitions.
@@ -2238,12 +2293,14 @@ This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part o
 ### Task 28: Add common relationship and hierarchy planners
 
 **Files:**
+
 - Modify: `src/generate/planners/structural.rs`
 - Modify: `src/generate/planners/mod.rs`
 - Modify: `src/generate/compiler.rs`
 - Test: `tests/generate_planner_test.rs`
 
 **Interfaces:**
+
 - Produces: `relation.polymorphic_pair`, `relation.junction_pair`, `relation.tenant_family`, `hierarchy.tree`
 
 - [ ] Add failing tests for type/key pairing, unique junction pairs, same-tenant FK selection, bounded-depth trees, root ratios, and cycle handling.
@@ -2255,11 +2312,13 @@ This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part o
 ### Task 29: Add coordinate and file metadata planners
 
 **Files:**
+
 - Modify: `src/generate/planners/structural.rs`
 - Modify: `src/generate/planners/mod.rs`
 - Test: `tests/generate_planner_test.rs`
 
 **Interfaces:**
+
 - Produces: `geo.coordinate_pair`, `file.metadata`
 
 - [ ] Add failing tests for valid latitude/longitude pairs, optional bounding boxes/precision, coherent file name/extension/MIME/size/hash metadata, and seeded stability.
@@ -2294,6 +2353,7 @@ This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part o
 > `simple.yaml` uses `identity: false` to avoid this; real/inferred models will hit it.
 
 **Files:**
+
 - Modify: `src/render/ddl.rs`
 - Modify: `src/render/sql.rs`
 - Modify: `src/generate/compiler.rs`
@@ -2303,6 +2363,7 @@ This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part o
 - Modify: `tests/convert_integration_test.rs`
 
 **Interfaces:**
+
 - Produces: normalized filtered schema and `DeferredConstraintPlan`
 - Consumes: selected tables, relationship optionality, source/output dialect, strictness
 
@@ -2336,6 +2397,7 @@ git commit -m "feat(generate): filter and normalize generated DDL"
 ### Task 31: Replace Rust fixture helpers with the public generation API
 
 **Files:**
+
 - Create: `tests/fixtures/generate/legacy_fixture.yaml`
 - Create: `tests/support/generated_fixture.rs`
 - Create: `tests/support/mod.rs`
@@ -2345,6 +2407,7 @@ git commit -m "feat(generate): filter and normalize generated DDL"
 - Modify: `tests/mssql_integration_test.rs`
 
 **Interfaces:**
+
 - Produces: test-only `generated_fixture(dialect, rows, tables, seed) -> TempPath`
 - Consumes: public `GenerateBuilder`; no imports from private generation modules
 
@@ -2378,6 +2441,7 @@ git commit -m "test: migrate generated fixtures to public API"
 ### Task 32: Migrate fixture scripts and remove `test_data_gen`
 
 **Files:**
+
 - Modify: `scripts/profile-memory.sh`
 - Modify: `scripts/bench-validate-memory.sh`
 - Modify: `scripts/verify-io-strategies.sh`
@@ -2427,6 +2491,7 @@ git commit -m "refactor: replace gen-fixtures with generate"
 ### Task 33: Document the product, model language, and library API
 
 **Files:**
+
 - Create: `docs/generate/README.md`
 - Create: `docs/generate/model-reference.md`
 - Create: `docs/generate/generators.md`
@@ -2475,6 +2540,7 @@ git commit -m "docs: document synthetic data generation"
 ### Task 34: Benchmark, profile, and harden real-world generation
 
 **Files:**
+
 - Modify: `benches/generate_bench.rs`
 - Modify: `scripts/profile-memory.sh`
 - Create: `scripts/benchmark-generate.sh`
@@ -2528,6 +2594,7 @@ git commit -m "perf(generate): benchmark and harden generation"
 ### Task 35: Generate and validate the synthetic-model JSON Schema
 
 **Files:**
+
 - Modify: `src/synthetic/model.rs`
 - Modify: `src/synthetic/overrides.rs`
 - Modify: `src/json_schema.rs`
@@ -2574,6 +2641,7 @@ git commit -m "feat(generate): publish synthetic model schema"
 ### Task 36: Evaluate schema reuse for other YAML-backed commands
 
 **Files:**
+
 - Create: `docs/superpowers/specs/2026-07-16-generate-schema-reuse-assessment.md`
 - Inspect: sample/shard/redact configuration types and schema command support
 
@@ -2655,32 +2723,32 @@ The restored `wip/ORIGINAL-PLAN-DATAGENERATOR.md` was reviewed as historical inp
 
 ## Specification Coverage
 
-| Requirement or decision | Implementation tasks |
-| --- | --- |
-| Complete `model` vs partial `overrides`, imports, unknown fields | 3, 4, 8 |
-| Complete emitted model, frozen counts/rules, disabled inference | 9, 20, 21 |
-| Source/model/override compatibility boundary | 1, 8, 10 |
-| Global/table seed inheritance, `null`, randomize, stable streams | 3, 5, 9, 21 |
-| Count precedence, scale, relationship-child no-double-scale | 9 |
-| Registry-driven generators, modifiers, planners, heuristics | 7, 11, 12, 20, 23–29 |
-| Core/semantic/credential/temporal generator catalog | 11, 12 |
-| Simple/composite relationships and dependency ownership | 10, 13 |
-| Four-dialect SQL and DDL behavior | 14, 30 |
-| CLI modes, conflicts, stdout ownership, exit codes | 16, 21, 26 |
-| Public builder, staged API, custom static registry | 7, 15 |
-| Bounded schema/basic/full profiler and neutral evidence | 17–19 |
-| Explainable precedence/confidence and schema-only inference | 20, 21 |
-| Source-derived warnings and credential safe defaults with explicit override | 12, 20, 21 |
-| Correlated Phase 3A planners | 23–25 |
-| Common Phase 3B planners | 27–29 |
-| Family phases, bounded/protected spools, cycles | 22, 25, 28 |
-| Exact/approximate verification and atomic publication | 22, 26 |
-| Include/exclude precedence and detached DDL/FKs | 9, 30 |
-| Existing fixture/script migration and old crate removal | 31, 32 |
-| Complete documentation surfaces | 33 |
-| Correctness, bounded memory, measured performance target | 6, 17–19, 22, 26, 34 |
-| Existing JSON Schema pipeline reused later | 35, 36 |
-| Deferred catalog retained without YAML expressions/plugins | Deferred Work Packets |
+| Requirement or decision                                                     | Implementation tasks  |
+| --------------------------------------------------------------------------- | --------------------- |
+| Complete `model` vs partial `overrides`, imports, unknown fields            | 3, 4, 8               |
+| Complete emitted model, frozen counts/rules, disabled inference             | 9, 20, 21             |
+| Source/model/override compatibility boundary                                | 1, 8, 10              |
+| Global/table seed inheritance, `null`, randomize, stable streams            | 3, 5, 9, 21           |
+| Count precedence, scale, relationship-child no-double-scale                 | 9                     |
+| Registry-driven generators, modifiers, planners, heuristics                 | 7, 11, 12, 20, 23–29  |
+| Core/semantic/credential/temporal generator catalog                         | 11, 12                |
+| Simple/composite relationships and dependency ownership                     | 10, 13                |
+| Four-dialect SQL and DDL behavior                                           | 14, 30                |
+| CLI modes, conflicts, stdout ownership, exit codes                          | 16, 21, 26            |
+| Public builder, staged API, custom static registry                          | 7, 15                 |
+| Bounded schema/basic/full profiler and neutral evidence                     | 17–19                 |
+| Explainable precedence/confidence and schema-only inference                 | 20, 21                |
+| Source-derived warnings and credential safe defaults with explicit override | 12, 20, 21            |
+| Correlated Phase 3A planners                                                | 23–25                 |
+| Common Phase 3B planners                                                    | 27–29                 |
+| Family phases, bounded/protected spools, cycles                             | 22, 25, 28            |
+| Exact/approximate verification and atomic publication                       | 22, 26                |
+| Include/exclude precedence and detached DDL/FKs                             | 9, 30                 |
+| Existing fixture/script migration and old crate removal                     | 31, 32                |
+| Complete documentation surfaces                                             | 33                    |
+| Correctness, bounded memory, measured performance target                    | 6, 17–19, 22, 26, 34  |
+| Existing JSON Schema pipeline reused later                                  | 35, 36                |
+| Deferred catalog retained without YAML expressions/plugins                  | Deferred Work Packets |
 
 ---
 

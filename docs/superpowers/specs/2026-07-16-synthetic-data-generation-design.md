@@ -130,7 +130,7 @@ Every YAML document declares one role:
 
 ```yaml
 version: 1
-kind: model       # model | overrides
+kind: model # model | overrides
 ```
 
 A `model` is self-contained:
@@ -154,7 +154,7 @@ The explicit role prevents a misspelled or omitted field from silently turning a
 
 ```yaml
 defaults:
-  inference: schema    # schema | disabled
+  inference: schema # schema | disabled
 ```
 
 With `schema`, columns without an owner use type-, constraint-, and name-based heuristics. Missing data profiles do not affect this mode. With `disabled`, every generated column needs an explicit generator or planner owner.
@@ -229,14 +229,14 @@ When a complete model and input are supplied, the model supplies schema and gene
 
 ### Invocation modes
 
-| Input | Config | Result |
-| --- | --- | --- |
-| SQL dump | none | Profile, infer, compile, and generate |
-| SQL dump | `kind: overrides` | Profile, patch, compile, and generate |
-| SQL dump | `kind: model` | Check schema compatibility, optionally refresh observations, and generate |
-| none | `kind: model` | Compile and generate without source access |
-| none | `kind: overrides` | Error: no schema/base source |
-| none | complete model + `--check` | Parse and compile without generation |
+| Input    | Config                     | Result                                                                    |
+| -------- | -------------------------- | ------------------------------------------------------------------------- |
+| SQL dump | none                       | Profile, infer, compile, and generate                                     |
+| SQL dump | `kind: overrides`          | Profile, patch, compile, and generate                                     |
+| SQL dump | `kind: model`              | Check schema compatibility, optionally refresh observations, and generate |
+| none     | `kind: model`              | Compile and generate without source access                                |
+| none     | `kind: overrides`          | Error: no schema/base source                                              |
+| none     | complete model + `--check` | Parse and compile without generation                                      |
 
 `INPUT` may be `-`. Operations needing a second pass spool stdin to a protected temporary file.
 
@@ -244,26 +244,26 @@ Without `--output` or `--emit-config`, generated SQL goes to stdout. With `--emi
 
 ### Input and model options
 
-| Option | Meaning |
-| --- | --- |
-| `[INPUT]` | SQL dump or schema file. Optional with a complete model. |
-| `-c, --config <PATH>` | A complete model or overrides document. Local YAML only. |
-| `--emit-config <PATH>` | Write the resolved complete model. |
-| `--profile-depth <basic|full>` | Select bounded profiling depth. Default: `basic`. |
-| `--profile-sample <N>` | Override the per-table sample budget, subject to safety caps. |
+| Option                      | Meaning                                                       |
+| --------------------------- | ------------------------------------------------------------- |
+| `[INPUT]`                   | SQL dump or schema file. Optional with a complete model.      |
+| `-c, --config <PATH>`       | A complete model or overrides document. Local YAML only.      |
+| `--emit-config <PATH>`      | Write the resolved complete model.                            |
+| `--profile-depth <basic     | full>`                                                        | Select bounded profiling depth. Default: `basic`. |
+| `--profile-sample <N>`      | Override the per-table sample budget, subject to safety caps. |
 | `--input-dialect <DIALECT>` | Set input dialect when detection is unavailable or ambiguous. |
 
 ### Volume options
 
-| Option | Meaning |
-| --- | --- |
-| `--scale <FACTOR>` | Scale independently counted/root tables. Conflicts with `--rows`. |
-| `--rows <N>` | Set the broad count for independently counted/root tables. Conflicts with `--scale`. |
-| `--table-rows <PATTERN=N>` | Set an exact count for matching tables. Repeatable. |
-| `--table-scale <PATTERN=FACTOR>` | Replace the global scale for matching tables. Repeatable. |
-| `--max-rows <N>` | Cap each table after other count rules. |
-| `--tables <PATTERN,...>` | Select the initial table set. |
-| `--exclude <PATTERN,...>` | Remove tables from the selected set. Exclusion wins. |
+| Option                           | Meaning                                                                              |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| `--scale <FACTOR>`               | Scale independently counted/root tables. Conflicts with `--rows`.                    |
+| `--rows <N>`                     | Set the broad count for independently counted/root tables. Conflicts with `--scale`. |
+| `--table-rows <PATTERN=N>`       | Set an exact count for matching tables. Repeatable.                                  |
+| `--table-scale <PATTERN=FACTOR>` | Replace the global scale for matching tables. Repeatable.                            |
+| `--max-rows <N>`                 | Cap each table after other count rules.                                              |
+| `--tables <PATTERN,...>`         | Select the initial table set.                                                        |
+| `--exclude <PATTERN,...>`        | Remove tables from the selected set. Exclusion wins.                                 |
 
 Patterns use the project's case-insensitive glob matcher. Exact table names beat globs for repeated count flags; later equally specific flags win.
 
@@ -293,10 +293,10 @@ Selection resolution is also exact:
 
 ### Randomness options
 
-| Option | Meaning |
-| --- | --- |
-| `--seed <U64>` | Override the top-level model seed. |
-| `--randomize` | Remove the top-level seed for this run. Conflicts with `--seed`. |
+| Option         | Meaning                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `--seed <U64>` | Override the top-level model seed.                               |
+| `--randomize`  | Remove the top-level seed for this run. Conflicts with `--seed`. |
 
 If no seed is present, generation uses fresh entropy. A top-level seed makes inheriting tables deterministic. Each table can inherit, override, or opt out:
 
@@ -325,32 +325,32 @@ Stable streams derive from the root/table seed, normalized table identity, norma
 
 ### Rendering options
 
-| Option | Meaning |
-| --- | --- |
-| `-o, --output <PATH>` | SQL output path; `-` writes stdout. |
-| `--dialect <DIALECT>` | Output dialect. Default: preserve source/model dialect. |
-| `--schema-only` | Render DDL without rows. |
-| `--data-only` | Render rows without DDL. |
-| `--batch-size <N>` | Rows per INSERT/COPY batch where supported. |
-| `--no-copy` | Render PostgreSQL INSERT statements instead of COPY. |
-| `--compress <FORMAT>` | Use supported output compression for file output. |
-| `--mssql-production-style` | Emit production-style MSSQL wrappers/batches. |
-| `--mssql-go <N>` | Emit MSSQL `GO` after the configured batch interval. |
+| Option                     | Meaning                                                 |
+| -------------------------- | ------------------------------------------------------- |
+| `-o, --output <PATH>`      | SQL output path; `-` writes stdout.                     |
+| `--dialect <DIALECT>`      | Output dialect. Default: preserve source/model dialect. |
+| `--schema-only`            | Render DDL without rows.                                |
+| `--data-only`              | Render rows without DDL.                                |
+| `--batch-size <N>`         | Rows per INSERT/COPY batch where supported.             |
+| `--no-copy`                | Render PostgreSQL INSERT statements instead of COPY.    |
+| `--compress <FORMAT>`      | Use supported output compression for file output.       |
+| `--mssql-production-style` | Emit production-style MSSQL wrappers/batches.           |
+| `--mssql-go <N>`           | Emit MSSQL `GO` after the configured batch interval.    |
 
 `--dialect` overrides `output.dialect`; otherwise output inherits the source dialect.
 
 ### Preflight and reporting options
 
-| Option | Meaning |
-| --- | --- |
-| `--check` | Parse and compile a complete model without source or generation. |
-| `--dry-run` | Profile if needed, compile, and report the plan without SQL output. |
-| `--verify` | Generate to protected temporary storage, audit, then publish atomically. |
-| `--explain` | Include inference reason, confidence, and precedence. |
-| `--strict` | Promote selected warnings to failure. |
-| `--progress` | Show profiling/generation progress on stderr. |
-| `--json` | Write a machine-readable command report to stdout. |
-| `--quiet` | Suppress non-error human output except the source-literal safety warning. |
+| Option       | Meaning                                                                   |
+| ------------ | ------------------------------------------------------------------------- |
+| `--check`    | Parse and compile a complete model without source or generation.          |
+| `--dry-run`  | Profile if needed, compile, and report the plan without SQL output.       |
+| `--verify`   | Generate to protected temporary storage, audit, then publish atomically.  |
+| `--explain`  | Include inference reason, confidence, and precedence.                     |
+| `--strict`   | Promote selected warnings to failure.                                     |
+| `--progress` | Show profiling/generation progress on stderr.                             |
+| `--json`     | Write a machine-readable command report to stdout.                        |
+| `--quiet`    | Suppress non-error human output except the source-literal safety warning. |
 
 `--json` owns stdout. It therefore requires SQL and emitted models to use real files. `--json --output -` and `--json --emit-config -` are usage errors. `--check --json` and `--dry-run --json` work because they do not produce SQL.
 
@@ -372,11 +372,11 @@ Stable streams derive from the root/table seed, normalized table identity, norma
 
 Exit behavior follows the existing application and common CLI convention:
 
-| Code | Meaning |
-| ---: | --- |
-| `0` | Successful generation, check, dry run, or verification. |
-| `1` | Model/config invalid, strict warning, runtime/I/O failure, generation failure, or verification failure. |
-| `2` | Invalid CLI arguments or conflicting options. |
+| Code | Meaning                                                                                                 |
+| ---: | ------------------------------------------------------------------------------------------------------- |
+|  `0` | Successful generation, check, dry run, or verification.                                                 |
+|  `1` | Model/config invalid, strict warning, runtime/I/O failure, generation failure, or verification failure. |
+|  `2` | Invalid CLI arguments or conflicting options.                                                           |
 
 Structured diagnostics and JSON report fields distinguish failure categories. A compile error and a promoted warning still exit `1`; all independent diagnostics are reported where possible.
 
@@ -395,18 +395,18 @@ kind: model
 source:
   dialect: mysql
   fingerprint: sha256:0123456789abcdef
-  fingerprint_policy: warn        # ignore | warn | require
+  fingerprint_policy: warn # ignore | warn | require
 
 output:
   dialect: postgres
-  mode: schema_and_data            # schema_and_data | schema_only | data_only
-  inserts: auto                    # auto | insert | copy
+  mode: schema_and_data # schema_and_data | schema_only | data_only
+  inserts: auto # auto | insert | copy
   batch_size: 1000
 
 seed: 840219
 
 defaults:
-  inference: disabled              # schema | disabled
+  inference: disabled # schema | disabled
 
 tables:
   customers:
@@ -433,7 +433,7 @@ tables:
             - { value: closed, weight: 0.05 }
 
   orders:
-    seed: null                      # random even though the model has a seed
+    seed: null # random even though the model has a seed
     rows:
       kind: relation.children
       parent: customers
@@ -496,7 +496,8 @@ tables:
       id:
         generator: { kind: sequence, start: 1 }
       order_id:
-        generator: { kind: relation.foreign_key, relationship: order_items_order }
+        generator:
+          { kind: relation.foreign_key, relationship: order_items_order }
       # quantity, prices, tax, and line_total are owned by commerce.order_family.
 
 profiles:
@@ -531,17 +532,17 @@ An overrides document can omit schema/count details because the input or base mo
 
 ### Top-level fields
 
-| Field | `model` | `overrides` | Meaning |
-| --- | --- | --- | --- |
-| `version` | required | required | Model schema version. |
-| `kind` | `model` | `overrides` | Explicit document role. |
-| `source` | optional | optional | Provenance and fingerprint policy. |
-| `output` | optional | optional | Dialect and renderer defaults. |
-| `seed` | optional | optional | Top-level `u64`; omitted means random. |
-| `defaults` | optional | optional | Inherited table/column behavior. |
-| `imports` | optional | optional | Local partial documents. |
-| `tables` | required | optional | Complete tables or partial patches. |
-| `profiles` | optional | optional | Removable bounded observations/explanations. |
+| Field      | `model`  | `overrides` | Meaning                                      |
+| ---------- | -------- | ----------- | -------------------------------------------- |
+| `version`  | required | required    | Model schema version.                        |
+| `kind`     | `model`  | `overrides` | Explicit document role.                      |
+| `source`   | optional | optional    | Provenance and fingerprint policy.           |
+| `output`   | optional | optional    | Dialect and renderer defaults.               |
+| `seed`     | optional | optional    | Top-level `u64`; omitted means random.       |
+| `defaults` | optional | optional    | Inherited table/column behavior.             |
+| `imports`  | optional | optional    | Local partial documents.                     |
+| `tables`   | required | optional    | Complete tables or partial patches.          |
+| `profiles` | optional | optional    | Removable bounded observations/explanations. |
 
 ### Imports
 
@@ -583,7 +584,7 @@ rows:
   parent: orders
   count: 7600
   distribution:
-    kind: histogram                # observed | fixed | uniform | poisson | histogram
+    kind: histogram # observed | fixed | uniform | poisson | histogram
     mean: 3.8
     min: 1
     max: 25
@@ -688,43 +689,43 @@ their own registry. Runtime CLI/WASM plugins are not planned.
 
 ### Phase 1: hand-authored models
 
-| Family | Required kinds |
-| --- | --- |
-| Core | `constant`, `null`, `sequence`, `copy`, `template`, `pattern`, `database_default`, generic `json_value` |
-| Typed random | `integer`, `decimal`, `boolean`, `string`, `bytes`, `uuid` |
-| Categorical | `choice`, `weighted_choice` |
-| Semantic | Person/name, email/internet, phone, company, address, commerce, text, identifiers, file, and network kinds |
-| Credentials | `credential.password_hash`, `credential.token`, `credential.api_key`, `credential.secret`, `credential.placeholder` |
-| Temporal | `date`, `time`, `datetime`, `duration`, `before`, `after` |
-| Relationships | `relation.foreign_key`, `relation.composite_key` |
-| Modifiers | `null_rate`, `unique`, prefix/suffix/truncate/case, clamp, round, type-specific format |
+| Family        | Required kinds                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Core          | `constant`, `null`, `sequence`, `copy`, `template`, `pattern`, `database_default`, generic `json_value`             |
+| Typed random  | `integer`, `decimal`, `boolean`, `string`, `bytes`, `uuid`                                                          |
+| Categorical   | `choice`, `weighted_choice`                                                                                         |
+| Semantic      | Person/name, email/internet, phone, company, address, commerce, text, identifiers, file, and network kinds          |
+| Credentials   | `credential.password_hash`, `credential.token`, `credential.api_key`, `credential.secret`, `credential.placeholder` |
+| Temporal      | `date`, `time`, `datetime`, `duration`, `before`, `after`                                                           |
+| Relationships | `relation.foreign_key`, `relation.composite_key`                                                                    |
+| Modifiers     | `null_rate`, `unique`, prefix/suffix/truncate/case, clamp, round, type-specific format                              |
 
 `template` joins literal fragments and referenced fields. It does not evaluate conditions or arbitrary expressions.
 
 Initial semantic kinds are explicit and extensible:
 
-| Family | Initial kinds |
-| --- | --- |
-| Person | `person.first_name`, `person.last_name`, `person.full_name`, `person.username`, `person.title` |
-| Internet | `internet.email`, `internet.domain`, `internet.url`, `internet.ipv4`, `internet.ipv6`, `internet.user_agent` |
-| Contact | `phone.number`, `phone.country_code` |
-| Organization | `company.name`, `company.department`, `company.job_title` |
-| Address | `address.line1`, `address.line2`, `address.city`, `address.region`, `address.postcode`, `address.country`, `address.latitude`, `address.longitude` |
-| Commerce | `commerce.product_name`, `commerce.sku`, `commerce.currency`, `commerce.money`, `commerce.quantity` |
-| Text | `text.word`, `text.sentence`, `text.paragraph`, `text.slug` |
-| Identifiers | `identifier.ulid`, `identifier.nanoid`, `identifier.token`, `identifier.hash` |
-| Files/network | `file.name`, `file.extension`, `file.mime_type`, `file.size`, `network.mac`, `network.port` |
+| Family        | Initial kinds                                                                                                                                      |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Person        | `person.first_name`, `person.last_name`, `person.full_name`, `person.username`, `person.title`                                                     |
+| Internet      | `internet.email`, `internet.domain`, `internet.url`, `internet.ipv4`, `internet.ipv6`, `internet.user_agent`                                       |
+| Contact       | `phone.number`, `phone.country_code`                                                                                                               |
+| Organization  | `company.name`, `company.department`, `company.job_title`                                                                                          |
+| Address       | `address.line1`, `address.line2`, `address.city`, `address.region`, `address.postcode`, `address.country`, `address.latitude`, `address.longitude` |
+| Commerce      | `commerce.product_name`, `commerce.sku`, `commerce.currency`, `commerce.money`, `commerce.quantity`                                                |
+| Text          | `text.word`, `text.sentence`, `text.paragraph`, `text.slug`                                                                                        |
+| Identifiers   | `identifier.ulid`, `identifier.nanoid`, `identifier.token`, `identifier.hash`                                                                      |
+| Files/network | `file.name`, `file.extension`, `file.mime_type`, `file.size`, `network.mac`, `network.port`                                                        |
 
 ### Phase 2: production-shape inference
 
-| Family | Required kinds/behavior |
-| --- | --- |
-| Observed | `observed_sample` with bounded weighted values |
-| Statistical | `histogram`, `normal`, `lognormal` |
-| Shape | Observed null rate, string length, categories, ranges, temporal distributions |
-| Sequence | `monotonic` and sequence-gap reproduction |
-| Semantic inference | Select Phase 1 semantic generators from evidence |
-| Relationship inference | Observed FK and composite-key distributions |
+| Family                 | Required kinds/behavior                                                       |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| Observed               | `observed_sample` with bounded weighted values                                |
+| Statistical            | `histogram`, `normal`, `lognormal`                                            |
+| Shape                  | Observed null rate, string length, categories, ranges, temporal distributions |
+| Sequence               | `monotonic` and sequence-gap reproduction                                     |
+| Semantic inference     | Select Phase 1 semantic generators from evidence                              |
+| Relationship inference | Observed FK and composite-key distributions                                   |
 
 ### Phase 3: complex relationships
 
@@ -768,7 +769,7 @@ planners:
       tax: tax_amount
       line_total: line_total
     currency_scale: 2
-    rounding: largest_remainder     # largest_remainder | last_line | bankers
+    rounding: largest_remainder # largest_remainder | last_line | bankers
     tax:
       kind: weighted_choice
       rates: [0.0, 0.08, 0.25]
@@ -797,11 +798,11 @@ planners:
       status: status
       completed_at: completed_at
     progress:
-      kind: mixture                # mixture | complete | in_progress | not_started | observed
+      kind: mixture # mixture | complete | in_progress | not_started | observed
       complete_weight: 0.72
       active_weight: 0.23
       not_started_weight: 0.05
-    partition: exact               # exact | allow_unclassified
+    partition: exact # exact | allow_unclassified
     completed_statuses: [completed, failed]
     active_statuses: [queued, running]
 ```
@@ -819,17 +820,17 @@ planners:
       duration: duration_seconds
       open: is_running
     start:
-      kind: observed_range         # observed_range | range | monotonic
+      kind: observed_range # observed_range | range | monotonic
       min: 2024-01-01T00:00:00Z
       max: 2026-01-01T00:00:00Z
     duration:
-      kind: histogram              # histogram | uniform | normal | fixed | observed
+      kind: histogram # histogram | uniform | normal | fixed | observed
       unit: seconds
       min: 30
       max: 43200
     open_probability: 0.07
     end_inclusive: true
-    timezone: preserve             # preserve | utc | named IANA zone
+    timezone: preserve # preserve | utc | named IANA zone
 ```
 
 Closed rows satisfy the end/start/duration equation. Open rows have a null end and coherent flag/duration behavior. A non-nullable end with non-zero open probability, incompatible timezone, overflow, or negative duration fails compilation.
@@ -871,17 +872,17 @@ Profiling scans the complete dump for exact schema and row counts. Per-column an
 
 ### Depth budgets
 
-| Capability | `basic` | `full` |
-| --- | ---: | ---: |
-| Sampled rows per table | 10,000 | 100,000 |
-| Retained top categorical values | 256 | 256 |
-| Exact distinct hashes before sketch-only mode | 100,000 | 100,000 |
-| Numeric/temporal buckets | 64 | 64 |
-| Candidate column pairs | schema/name candidates | 32 data-ranked pairs |
-| Row counts/null counts | complete scan | complete scan |
-| Declared schema/FKs | complete scan | complete scan |
-| Composite/pair correlations | limited | enabled within pair budget |
-| Planner reconnaissance | obvious groups | schema plus sampled correlations |
+| Capability                                    |                `basic` |                           `full` |
+| --------------------------------------------- | ---------------------: | -------------------------------: |
+| Sampled rows per table                        |                 10,000 |                          100,000 |
+| Retained top categorical values               |                    256 |                              256 |
+| Exact distinct hashes before sketch-only mode |                100,000 |                          100,000 |
+| Numeric/temporal buckets                      |                     64 |                               64 |
+| Candidate column pairs                        | schema/name candidates |             32 data-ranked pairs |
+| Row counts/null counts                        |          complete scan |                    complete scan |
+| Declared schema/FKs                           |          complete scan |                    complete scan |
+| Composite/pair correlations                   |                limited |       enabled within pair budget |
+| Planner reconnaissance                        |         obvious groups | schema plus sampled correlations |
 
 `--profile-sample` overrides only the sample-row budget. Hard safety caps remain.
 
@@ -933,24 +934,24 @@ Relationship precedence:
 
 Every decision records selected rule, confidence, and reasons.
 
-| Confidence | Default behavior |
-| --- | --- |
-| `high` | Apply automatically. |
-| `medium` | Apply with warning and explanation. |
-| `low` | Suggest; use generic fallback. |
+| Confidence | Default behavior                    |
+| ---------- | ----------------------------------- |
+| `high`     | Apply automatically.                |
+| `medium`   | Apply with warning and explanation. |
+| `low`      | Suggest; use generic fallback.      |
 
 `--strict` rejects configured medium-confidence automatic choices. Explicit user choices are not blocked merely because they may contain source values.
 
 ### Heuristic catalog
 
-| Family | Evidence/proposals |
-| --- | --- |
-| Schema | Keys, nullability, checks, enums, defaults, identities, type bounds |
-| Semantic name | Person/contact/address/commerce/money/status/token/file/network/geo/time meanings |
-| Distribution | Constant, sequence, categorical, weighted, histogram, normal/lognormal, sparse, fallback |
-| Relationship | Declared/composite/self-tree/junction/tenant/polymorphic/data-validated names |
+| Family                 | Evidence/proposals                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------- |
+| Schema                 | Keys, nullability, checks, enums, defaults, identities, type bounds                      |
+| Semantic name          | Person/contact/address/commerce/money/status/token/file/network/geo/time meanings        |
+| Distribution           | Constant, sequence, categorical, weighted, histogram, normal/lognormal, sparse, fallback |
+| Relationship           | Declared/composite/self-tree/junction/tenant/polymorphic/data-validated names            |
 | Planner reconnaissance | Timestamps, soft delete, lifecycle, interval, totals/lines, counters, coordinates, files |
-| Compatibility | SQL capacity, decimal precision, length, locale, dialect limits |
+| Compatibility          | SQL capacity, decimal precision, length, locale, dialect limits                          |
 
 Heuristics publish proposals into a ranked set. The resolver applies precedence, rejects incompatible proposals, and records why the winner beat alternatives.
 
@@ -1029,11 +1030,11 @@ Foreign-key order is preferred; constraints may be deferred for cycles.
 
 ### Family state strategies
 
-| Strategy | Use |
-| --- | --- |
-| `ParentState` | Keep compact IDs/totals/distribution state needed by children. |
-| `ChildSpool` | Plan children with the parent, spool rows, render at dependency position. |
-| `TableSpool` | Materialize a protected on-disk phase when a second pass is required. |
+| Strategy      | Use                                                                       |
+| ------------- | ------------------------------------------------------------------------- |
+| `ParentState` | Keep compact IDs/totals/distribution state needed by children.            |
+| `ChildSpool`  | Plan children with the parent, spool rows, render at dependency position. |
+| `TableSpool`  | Materialize a protected on-disk phase when a second pass is required.     |
 
 In-memory family state has explicit budgets and spills rather than growing without bound.
 

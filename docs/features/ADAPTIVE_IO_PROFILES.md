@@ -8,14 +8,14 @@ same-spindle `split` runs at 21–33 MB/s with default settings, but
 (2.52×)** — within ~10% of the drive's theoretical half-duplex ceiling
 (~60 MB/s from a 119/129 MB/s sequential baseline). On a generic USB2 thumb
 drive (5 MB/s writes) the effective rate under mixed I/O drops to 1.7 MB/s
-regardless of byte volume, so it wants fewest write *operations*, not fewest
+regardless of byte volume, so it wants fewest write _operations_, not fewest
 bytes. On NVMe, the current defaults are already right (W=1 costs ~15%).
 One configuration cannot serve all three device classes.
 
 ## Design principle
 
 **Don't identify the device — respond to it.** Static hints (rotational flag,
-fsync probe) only pick the *opening* profile; a feedback loop driven by the
+fsync probe) only pick the _opening_ profile; a feedback loop driven by the
 pipeline's own backpressure owns the truth afterwards. Static detection alone
 is untrustworthy: USB bridges hide rotational flags, network mounts and cheap
 flash report as non-rotational but behave worse than any HDD, SMR drives
@@ -25,11 +25,11 @@ collapse only under sustained writes, and near-full SSDs throttle.
 
 ### Profiles (states)
 
-| State       | Writers          | Flush chunk | Per-file buffer | Stage cap | Intended for            |
-| ----------- | ---------------- | ----------- | --------------- | --------- | ----------------------- |
-| `FAST`      | min(4, cores)    | 256 KB      | 256 KB          | 32 MB     | NVMe/SSD (today's defaults) |
-| `SLOW_SEEK` | 1                | 8 MB        | 64 MB           | 256 MB    | HDDs, same-spindle r+w  |
-| `SLOW_OPS`  | 1                | 32 MB       | 64 MB           | 512 MB    | Cheap flash, network FS |
+| State       | Writers       | Flush chunk | Per-file buffer | Stage cap | Intended for                |
+| ----------- | ------------- | ----------- | --------------- | --------- | --------------------------- |
+| `FAST`      | min(4, cores) | 256 KB      | 256 KB          | 32 MB     | NVMe/SSD (today's defaults) |
+| `SLOW_SEEK` | 1             | 8 MB        | 64 MB           | 256 MB    | HDDs, same-spindle r+w      |
+| `SLOW_OPS`  | 1             | 32 MB       | 64 MB           | 512 MB    | Cheap flash, network FS     |
 
 All numbers become runtime values on a `WriterProfile` struct (today
 `STAGE_FLUSH`/`STAGE_TOTAL_CAP` are hard-coded consts in `src/writer/mod.rs`,
@@ -45,7 +45,7 @@ throughput   = bytes_acked_by_writers / epoch_duration
 send_stall   = time_parser_blocked_on_channel_send / epoch_duration
 ```
 
-`send_stall` near zero + low throughput ⇒ *input* is the bottleneck (different
+`send_stall` near zero + low throughput ⇒ _input_ is the bottleneck (different
 device or slow decompression) ⇒ do **not** touch the write profile.
 High `send_stall` ⇒ output device can't drain ⇒ step down.
 
@@ -75,7 +75,7 @@ Small explicit state machine, evaluated at epoch boundaries:
 - Writer **count**: cannot shrink safely mid-run (each table is owned by one
   thread; that ownership is what keeps output byte-identical). Dodge: **start
   at W=1 and spawn additional writers only after the first epoch proves the
-  device fast.** Spawning assigns *tables not yet seen* to new shards; tables
+  device fast.** Spawning assigns _tables not yet seen_ to new shards; tables
   already written stay with their original owner, preserving per-table
   ordering by construction. Cost of the W=1 start on NVMe: ~15% for one epoch
   (milliseconds-to-seconds); benefit on slow media: never thrashed at all.
@@ -101,13 +101,13 @@ everything (documented as expert knobs).
 
 ## Implementation plan
 
-| Phase | Work | Size |
-| ----- | ---- | ---- |
-| 0 | Instrumentation: bytes-acked + send-stall counters in `ParallelWriters`; hidden `--io-stats` JSON dump for debugging | ~80 lines |
-| 1 | `WriterProfile` struct; replace `STAGE_FLUSH`/`STAGE_TOTAL_CAP` consts with profile values; explicit `--io-strategy ssd\|hdd\|cheap` | ~120 lines |
-| 2 | Controller: `Clock` trait (real + mock), byte-based epochs, state machine, atomic profile swap, deferred writer spawn | ~200 lines |
-| 3 | fsync probe + `auto` default wiring + transition log lines | ~60 lines |
-| 4 | Docs (README, website performance page), benchmark script `scripts/verify-io-strategys.sh` | — |
+| Phase | Work                                                                                                                                 | Size       |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| 0     | Instrumentation: bytes-acked + send-stall counters in `ParallelWriters`; hidden `--io-stats` JSON dump for debugging                 | ~80 lines  |
+| 1     | `WriterProfile` struct; replace `STAGE_FLUSH`/`STAGE_TOTAL_CAP` consts with profile values; explicit `--io-strategy ssd\|hdd\|cheap` | ~120 lines |
+| 2     | Controller: `Clock` trait (real + mock), byte-based epochs, state machine, atomic profile swap, deferred writer spawn                | ~200 lines |
+| 3     | fsync probe + `auto` default wiring + transition log lines                                                                           | ~60 lines  |
+| 4     | Docs (README, website performance page), benchmark script `scripts/verify-io-strategys.sh`                                           | —          |
 
 Order matters: phases 0–1 are independently shippable (explicit profiles alone
 would have captured the 2.5× on the HDD).
@@ -136,10 +136,10 @@ No I/O, no sleeps, no flakiness. This is the bulk of the coverage.
 
 A test-only rate-limited `Write` sink (token bucket, e.g. 10 MB/s) injected
 behind the writer's file handles via a `#[cfg(test)]` (or hidden env) seam,
-driving the *real* pipeline with a fixture sized for ~6 epochs (epoch size
+driving the _real_ pipeline with a fixture sized for ~6 epochs (epoch size
 shrunk via test config). Assert: the transition log shows FAST→SLOW_SEEK, and
 it happens within epochs 2–4. The token bucket makes measured throughput
-reproducible across machines because it's the *limiter*, not the machine.
+reproducible across machines because it's the _limiter_, not the machine.
 
 ### 3. The golden invariant: byte-identical output (the non-negotiable)
 
@@ -172,7 +172,7 @@ hdd` vs `auto` on a 4 GB fixture on the target mount. Acceptance criteria:
 - On NVMe: `auto` within 10% of `fast` (the W=1 opening must stay cheap).
 - RSS stays under the profile's stage cap + fixed overhead.
 
-Numbers vary by drive; the *ratios* are the acceptance gates. Results appended
+Numbers vary by drive; the _ratios_ are the acceptance gates. Results appended
 to BENCHMARKS.md the same way as the 2026-07-15 measurements that motivated
 this feature.
 

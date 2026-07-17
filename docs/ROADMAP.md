@@ -566,14 +566,14 @@ share the same model compiler and generation engine.
 
 **Theme**: Real-world inputs, real-world devices
 
-| Feature            | Effort   | Status  | Notes                                       |
-| ------------------ | -------- | ------- | -------------------------------------------- |
-| Zip input          | ~6–8h    | ✅ Done | No new deps; `zip` crate already present    |
-| Adaptive I/O       | ~2–3 days| ✅ Done | `--io-strategy auto\|ssd\|hdd\|cheap`        |
+| Feature      | Effort    | Status  | Notes                                    |
+| ------------ | --------- | ------- | ---------------------------------------- |
+| Zip input    | ~6–8h     | ✅ Done | No new deps; `zip` crate already present |
+| Adaptive I/O | ~2–3 days | ✅ Done | `--io-strategy auto\|ssd\|hdd\|cheap`    |
 
 **Adaptive I/O strategys** — measured 2026-07-15/16: same-spindle split on a
 USB HDD runs at 21–33 MB/s with defaults but 54.7 MB/s (2.52×) with
-`WRITERS=1` + 64MB buffers; cheap flash wants fewest write *operations*
+`WRITERS=1` + 64MB buffers; cheap flash wants fewest write _operations_
 instead. Design: don't identify the device, respond to it — an fsync probe
 picks the opening profile, then a state machine driven by the pipeline's own
 backpressure counters (bytes-acked throughput + parser send-stall ratio,
@@ -605,7 +605,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
   through these, including the progress-reader variants. Dialect
   auto-detection (`detect_dialect_from_file`) goes through the same helper
   so it works on zipped dumps too.
-- `--compress zip` for per-file *output* stays excluded — archive output
+- `--compress zip` for per-file _output_ stays excluded — archive output
   (`-o dump.zip`) already covers that.
 - Feature-gated under the existing `archive` feature; without it, opening a
   `.zip` produces a clear "requires the archive feature" error.
@@ -786,30 +786,30 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ## Feature Dependency Matrix
 
-| Feature/Module        | Depends On                        | Unlocks                               |
-| --------------------- | --------------------------------- | ------------------------------------- |
-| **Test Data Gen**     | (none)                            | All integration tests                 |
-| **Generate**          | Schema Graph, Row Parsing         | Synthetic fixtures, Infer evidence    |
-| **Merge**             | Split                       | —                                     |
-| **Schema Graph v1**   | (built in Sample)           | Sample, Shard, Validate, Diff         |
-| **Row Parsing v1**    | (built in Sample)           | Sample, Shard, Query, Redact, Convert |
-| **Sample (basic)**    | —                           | —                                     |
-| **Sample --preserve** | Schema Graph v1, Row v1     | Shard                                 |
-| **Shard**             | Schema Graph v1.5, Row v1.5 | —                                     |
-| **Convert**           | Row Parsing v1.5            | MSSQL, Enum Conversion                |
-| **Enum Conversion**   | Convert                     | —                                     |
-| **Validate**          | Schema Graph, Row Parsing   | —                                     |
-| **Diff**              | Schema Graph, Row Parsing   | —                                     |
-| **Query**             | Row Parsing                 | —                                     |
-| **Redact**            | Row Parsing                 | Detect-PII                            |
-| **Detect-PII**        | Redact                      | —                                     |
-| **Graph**             | Schema Graph                | Order, Migrate, DBML                  |
-| **Order**             | Schema Graph                | —                                     |
-| **DBML**              | Graph, Convert              | —                                     |
-| **MSSQL**             | Convert                     | —                                     |
-| **Migrate**           | Diff, Schema Graph          | —                                     |
-| **Parallel**          | (all commands)              | —                                     |
-| **Infer**             | Row Parsing, Generate evidence   | —                                     |
+| Feature/Module        | Depends On                     | Unlocks                               |
+| --------------------- | ------------------------------ | ------------------------------------- |
+| **Test Data Gen**     | (none)                         | All integration tests                 |
+| **Generate**          | Schema Graph, Row Parsing      | Synthetic fixtures, Infer evidence    |
+| **Merge**             | Split                          | —                                     |
+| **Schema Graph v1**   | (built in Sample)              | Sample, Shard, Validate, Diff         |
+| **Row Parsing v1**    | (built in Sample)              | Sample, Shard, Query, Redact, Convert |
+| **Sample (basic)**    | —                              | —                                     |
+| **Sample --preserve** | Schema Graph v1, Row v1        | Shard                                 |
+| **Shard**             | Schema Graph v1.5, Row v1.5    | —                                     |
+| **Convert**           | Row Parsing v1.5               | MSSQL, Enum Conversion                |
+| **Enum Conversion**   | Convert                        | —                                     |
+| **Validate**          | Schema Graph, Row Parsing      | —                                     |
+| **Diff**              | Schema Graph, Row Parsing      | —                                     |
+| **Query**             | Row Parsing                    | —                                     |
+| **Redact**            | Row Parsing                    | Detect-PII                            |
+| **Detect-PII**        | Redact                         | —                                     |
+| **Graph**             | Schema Graph                   | Order, Migrate, DBML                  |
+| **Order**             | Schema Graph                   | —                                     |
+| **DBML**              | Graph, Convert                 | —                                     |
+| **MSSQL**             | Convert                        | —                                     |
+| **Migrate**           | Diff, Schema Graph             | —                                     |
+| **Parallel**          | (all commands)                 | —                                     |
+| **Infer**             | Row Parsing, Generate evidence | —                                     |
 
 ---
 
@@ -844,9 +844,9 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 | v1.13.3 | Release workflow fix (cargo-dist artifact versions)         | ✅ Released |
 | v1.13.4 | `rand` 0.10, `fake` 5, dependabot guard for cargo-dist deps | ✅ Released |
 | v1.13.5 | `duckdb` 1.10502 (CalVer), `sha2` 0.11, dep bumps           | ✅ Released |
-| v1.13.6 | Cargo feature flags for library consumers, Docker images     | ✅ Released |
-| v1.13.7 | MySQL→PG convert fixes (COMMENT/AUTO_INCREMENT/UNIQUE KEY)   | ✅ Released |
-| v1.14.0 | `-o -` stdout, redact compression fix, docs overhaul         | ✅ Released |
+| v1.13.6 | Cargo feature flags for library consumers, Docker images    | ✅ Released |
+| v1.13.7 | MySQL→PG convert fixes (COMMENT/AUTO_INCREMENT/UNIQUE KEY)  | ✅ Released |
+| v1.14.0 | `-o -` stdout, redact compression fix, docs overhaul        | ✅ Released |
 
 ### Upcoming Features (v1.16+)
 
@@ -1022,12 +1022,12 @@ tests/
 
 Strategic integrations beyond core CLI features. See [Integration Roadmap Master](INTEGRATION_ROADMAP_MASTER.md) for full analysis.
 
-| Version | Integration            | Theme                              | Effort |
-| ------- | ---------------------- | ---------------------------------- | ------ |
-| v1.20.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge  | 12h    |
-| v1.21.0 | **Great Expectations** | Auto-generate data quality suites  | 16h    |
-| v1.22.0 | **Atlas**              | SQL dump → HCL schema-as-code      | 20h    |
-| v1.23.0 | **dbt**                | Bootstrap dbt projects from dumps  | 28h    |
+| Version | Integration            | Theme                             | Effort |
+| ------- | ---------------------- | --------------------------------- | ------ |
+| v1.20.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge | 12h    |
+| v1.21.0 | **Great Expectations** | Auto-generate data quality suites | 16h    |
+| v1.22.0 | **Atlas**              | SQL dump → HCL schema-as-code     | 20h    |
+| v1.23.0 | **dbt**                | Bootstrap dbt projects from dumps | 28h    |
 
 These follow the core roadmap (v1.16–v2.1) and require user demand validation before committing.
 

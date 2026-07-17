@@ -72,19 +72,19 @@ sql-splitter sample dump.sql -o sample.sql.zst --compress zstd
 
 ## Priority Matrix
 
-| Feature                | Value  | Complexity | Target |
-| ---------------------- | ------ | ---------- | ------ |
+| Feature                 | Value  | Complexity | Target |
+| ----------------------- | ------ | ---------- | ------ |
 | Detect-PII (standalone) | High   | Low-Medium | Future |
-| Canonicalize           | Medium | Medium     | Future |
-| Key Range Partitioning | Medium | Low        | Future |
-| Streaming Compression  | Medium | Low        | Future |
+| Canonicalize            | Medium | Medium     | Future |
+| Key Range Partitioning  | Medium | Low        | Future |
+| Streaming Compression   | Medium | Low        | Future |
 
 ---
 
 ## Shared Infrastructure (Available)
 
-| Module                       | Built In | Used By                                       |
-| ---------------------------- | -------- | --------------------------------------------- |
+| Module                       | Built In   | Used By                                     |
+| ---------------------------- | ---------- | ------------------------------------------- |
 | Schema Graph (`src/schema/`) | v1.5–v1.11 | sample, shard, validate, diff, graph, order |
 | Row Parsing (`src/parser/`)  | v1.5–v1.10 | sample, shard, convert, redact, query       |
-| PK Tracking                  | v1.5–v1.9  | sample, shard, validate, diff                |
+| PK Tracking                  | v1.5–v1.9  | sample, shard, validate, diff               |

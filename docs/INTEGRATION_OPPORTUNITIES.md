@@ -744,11 +744,11 @@ pub async fn deploy_to_supabase(
    - Extends already-shipped DuckDB query engine
    - Pandas/Spark/DuckDB compatible
 
-3. **GitHub Action** (12h)
+2. **GitHub Action** (12h)
    - Automate validation in CI/CD
    - Massive adoption potential
 
-4. **Great Expectations** (16h)
+3. **Great Expectations** (16h)
    - Bootstrap data quality testing
    - Leverage mature ecosystem
 

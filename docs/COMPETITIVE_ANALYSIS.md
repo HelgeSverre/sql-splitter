@@ -116,7 +116,7 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 | Tool                    | Language | Stars | MySQL | PostgreSQL | SQLite | Streaming | Notes                         |
 | ----------------------- | -------- | ----- | ----- | ---------- | ------ | --------- | ----------------------------- |
-| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.15.0, ~1 GB/s            |
+| **sql-splitter**        | Rust     | —     | ✅    | ✅         | ✅     | ✅        | v1.15.0, ~1 GB/s              |
 | **nxs-data-anonymizer** | Go       | 271   | ✅    | ✅         | ❌     | ✅        | Go templates + Sprig          |
 | **pynonymizer**         | Python   | 109   | ✅    | ✅         | ❌     | ❌        | Faker integration, GDPR focus |
 | **myanon**              | C        | ~30   | ✅    | ❌         | ❌     | ✅        | stdin/stdout streaming        |
@@ -161,11 +161,11 @@ No existing tool offers this combination in a single, streaming, CLI-first, mult
 
 ### Query/Filter Dumps
 
-| Tool             | Language | Stars | Notes                                        |
-| ---------------- | -------- | ----- | -------------------------------------------- |
-| **sql-splitter** | Rust     | —     | ✅ Embedded DuckDB (v1.12.0), full SQL       |
-| **DuckDB**       | C++      | 34.8k | Query SQL/CSV/JSON/Parquet directly          |
-| **sqlglot**      | Python   | 7k+   | Parse/transpile, not filter                  |
+| Tool             | Language | Stars | Notes                                  |
+| ---------------- | -------- | ----- | -------------------------------------- |
+| **sql-splitter** | Rust     | —     | ✅ Embedded DuckDB (v1.12.0), full SQL |
+| **DuckDB**       | C++      | 34.8k | Query SQL/CSV/JSON/Parquet directly    |
+| **sqlglot**      | Python   | 7k+   | Parse/transpile, not filter            |
 
 sql-splitter embeds DuckDB to give full SQL analytics on dumps without an import step (in-memory or disk-backed for >2GB dumps), with persistent caching that delivers a 400× speedup on repeat queries.
 
