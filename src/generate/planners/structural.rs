@@ -496,7 +496,11 @@ fn compile_timestamps(
     // "other" timestamp, keyed by an arbitrary role name — kept as a flat
     // mapping (not a nested `others:` list) so the pre-compile column-ownership
     // scan (which only reads one level of `columns` mapping values) sees every
-    // owned column.
+    // owned column. `other_cols` (and so `writes()`'s trailing columns) end up
+    // in `serde_yaml_ng::Mapping` iteration order, i.e. the order the `others`
+    // keys appear in the model's YAML text. That's deterministic for a given
+    // model file (seeded runs still reproduce exactly), but reordering those
+    // keys in the YAML reorders the produced columns too.
     let mut other_cols: Vec<&PortableColumn> = Vec::new();
     if let Some(Value::Mapping(map)) = columns {
         for (key, value) in map {
@@ -659,6 +663,13 @@ fn resolve_required<'a>(
 // =============================================================================
 
 /// Static description of the `temporal.soft_delete` planner.
+///
+/// Note: the null/non-null coherence between `deleted_at` and `is_deleted` is
+/// only surfaced as a verification predicate when an `is_deleted` flag column
+/// is configured — see [`build_soft_delete_predicates`]. A `deleted_at`-only
+/// model still gets `InRange` coverage on `deleted_at`, but not the
+/// null-iff-not-deleted / non-null-iff-deleted split, since there is no guard
+/// column to state it against.
 pub static TEMPORAL_SOFT_DELETE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     kind: "temporal.soft_delete",
     aliases: &[],

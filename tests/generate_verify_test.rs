@@ -384,6 +384,76 @@ fn corrupt_progress_counter_fails_the_named_check() {
     );
 }
 
+// --- temporal.timestamps ordering (Task 27) --------------------------------
+//
+// `temporal.timestamps` guarantees created_at <= updated_at by construction
+// (see structural.rs), surfaced to the verifier as a `PlannerPredicate::
+// Ordering`. These tests prove the invariant is actually *checked*, not just
+// present in the predicate Vec: a clean dump verifies the ordering check
+// Exact, and a corrupted one (updated_at rewritten to precede created_at)
+// fails the named `planner_ordering:accounts` check.
+
+const TIMESTAMPS: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 3
+tables:
+  accounts:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: accounts
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: created_at, type: timestamp, nullable: false }
+        - { name: updated_at, type: timestamp, nullable: false }
+    planners:
+      - kind: temporal.timestamps
+        columns:
+          created_at: created_at
+          updated_at: updated_at
+        created: { kind: range, min: "2024-01-01T00:00:00Z", max: "2026-01-01T00:00:00Z" }
+        update_delay: { kind: uniform, unit: seconds, min: 0, max: 86400 }
+"#;
+
+#[test]
+fn timestamps_ordering_is_exact_and_passes_for_valid_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(TIMESTAMPS);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "ts.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+    assert_eq!(
+        report.status_of("planner_ordering:accounts"),
+        Some(CheckStatus::Exact),
+        "ordering must be an exact check"
+    );
+    assert!(
+        report.passed(),
+        "{:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn corrupt_timestamps_ordering_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(TIMESTAMPS);
+    // Rewrite the first row's updated_at to a date far before the configured
+    // 2024..2026 created_at range, so it precedes created_at regardless of the
+    // drawn value. The INSERT omits the database-produced `id`, so the tuple
+    // is (created_at, updated_at) — updated_at is index 1.
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        rewrite_first_tuple_value(sql, "INSERT INTO `accounts`", 1, "'2000-01-01 00:00:00'")
+    });
+    assert!(
+        report.failed("planner_ordering:accounts"),
+        "{:?}",
+        report.checks
+    );
+}
+
 // --- commerce.order_family --------------------------------------------------
 
 const ORDER_FAMILY: &str = r#"

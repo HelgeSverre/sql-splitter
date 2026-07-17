@@ -1782,6 +1782,17 @@ fn lifecycle_impossible_range_is_a_compile_error() {
 }
 
 #[test]
+fn lifecycle_impossible_start_range_is_a_compile_error() {
+    // The `start` block's own `max` (distinct from the `step` block's) is
+    // before its `min`, so no legal base instant exists.
+    let yaml = lifecycle_model(1, 10, true).replace(
+        "max: \"2024-06-01T00:00:00Z\"",
+        "max: \"2020-01-01T00:00:00Z\"",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-LIFECYCLE-RANGE".to_string()));
+}
+
+#[test]
 fn lifecycle_missing_owned_column_is_a_compile_error() {
     let yaml = lifecycle_model(1, 10, true).replace("status: status", "status: nonexistent_column");
     assert!(compile_err_code(&yaml).contains(&"GEN-LIFECYCLE-COLUMN-MISSING".to_string()));
