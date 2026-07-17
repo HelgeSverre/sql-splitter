@@ -54,3 +54,6 @@ flamegraph.svg
 /test-output/
 
 linus-ignore-this-file.md
+
+# Code coverage (cargo-llvm-cov)
+lcov.info
