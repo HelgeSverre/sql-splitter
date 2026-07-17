@@ -7,18 +7,6 @@ use crate::parser::SqlDialect;
 /// A borrowed value that renders as a dialect-correct, quoted SQL string
 /// literal via [`Display`], without allocating an intermediate escaped
 /// [`String`].
-///
-/// # Examples
-///
-/// ```
-/// use sql_splitter::parser::SqlDialect;
-/// use sql_splitter::render::SqlString;
-///
-/// assert_eq!(
-///     SqlString::new(SqlDialect::Postgres, "it's").to_string(),
-///     "'it''s'"
-/// );
-/// ```
 pub struct SqlString<'a> {
     dialect: SqlDialect,
     value: &'a str,

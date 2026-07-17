@@ -160,12 +160,22 @@ impl ModelCompiler {
 
         let overrides = self.collect_table_overrides(&options, &mut bag);
         let selected = self.select_tables(&model, &options, &mut bag);
-        let parents = required_parents(&model);
-        self.report_excluded_dependencies(&selected, &parents, &mut bag);
+        // Ordering edges (`All`) include every foreign key so a present parent is
+        // still generated before its child; only *required* edges (non-null FKs,
+        // relation.children parents, polymorphic targets) make an excluded
+        // dependency a hard `GEN-EXCLUDED-DEPENDENCY`. A nullable FK to an
+        // excluded table is detached (with a warning) in `plan_table` instead.
+        let all_parents = parent_edges(&model, EdgeKind::All);
+        let required = parent_edges(&model, EdgeKind::Required);
+        self.report_excluded_dependencies(&selected, &required, &mut bag);
+        // Preserve original DDL byte-for-byte only when the ENTIRE source schema
+        // survives selection; once any table is excluded, every retained table is
+        // rendered from its normalized schema (see `plan_table`).
+        let schema_changed = selected.len() < model.tables.len();
 
         let root_seed = options.seed.or(model.seed);
         let rounding_root = SeedRoot::new(root_seed.unwrap_or(0));
-        let (order, cyclic) = topo_order(&selected, &parents);
+        let (order, cyclic) = topo_order(&selected, &all_parents);
         if !cyclic.is_empty() {
             // Tables left unordered by the Kahn drain form a mutual
             // relation-children dependency cycle: each derives its count from a
@@ -213,6 +223,8 @@ impl ModelCompiler {
                 model.defaults.inference,
                 &family_ctx,
                 &resolved,
+                &selected,
+                !schema_changed,
                 &mut bag,
             ));
         }
@@ -476,6 +488,8 @@ impl ModelCompiler {
         inference: InferenceMode,
         family_ctx: &FamilyContext,
         resolved: &BTreeMap<String, u64>,
+        selected: &BTreeSet<String>,
+        preserve_raw: bool,
         bag: &mut DiagnosticBag,
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
@@ -506,6 +520,29 @@ impl ModelCompiler {
             });
         }
         fold_foreign_key_generators(name, table, &mut relationships, bag);
+
+        // Detach any compiled relationship whose parent table was excluded, so
+        // the output never references an absent table. A required (non-null) FK
+        // to an excluded table already produced a `GEN-EXCLUDED-DEPENDENCY`
+        // error; a nullable one is deliberately detachable, so warn (and let
+        // `--strict` promote it) rather than fail.
+        relationships.retain(|relationship| {
+            if selected.contains(&relationship.parent_table) {
+                return true;
+            }
+            if !fk_columns_all_non_null(table, &relationship.columns) {
+                bag.warning(
+                    "GEN-DETACHED-DEPENDENCY",
+                    format!("tables.{name}"),
+                    format!(
+                        "optional relationship `{}` on table `{name}` references excluded table `{}`; its foreign key is detached and omitted from the rendered DDL",
+                        relationship.name.as_deref().unwrap_or("(unnamed)"),
+                        relationship.parent_table
+                    ),
+                );
+            }
+            false
+        });
 
         let planners =
             self.compile_planners(model, name, table, compile_seed, family_ctx, resolved, bag);
@@ -545,10 +582,36 @@ impl ModelCompiler {
         // bag holds an error and the plan is discarded before it is observed.
         let compiled_planners = planners.into_iter().filter_map(|p| p.compiled).collect();
 
+        // The normalized portable schema the renderer sees: drop every foreign
+        // key to an absent table, and any index that references an object that no
+        // longer exists (columns are never dropped here, so the index guard is a
+        // no-op today but keeps the invariant explicit). Clear the raw
+        // `create_statement` whenever the schema set changed, so a filtered run
+        // renders normalized DDL instead of stale original DDL.
+        let present_columns: BTreeSet<&str> = table
+            .schema
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        let mut schema = table.schema.clone();
+        schema
+            .relationships
+            .retain(|relationship| selected.contains(&relationship.referenced_table));
+        schema.indexes.retain(|index| {
+            index
+                .columns
+                .iter()
+                .all(|c| present_columns.contains(c.as_str()))
+        });
+        if !preserve_raw {
+            schema.create_statement = None;
+        }
+
         PlannedTable {
             name: name.to_string(),
             rows,
-            schema: table.schema.clone(),
+            schema,
             seed,
             columns,
             relationships,
@@ -1019,18 +1082,57 @@ fn has_observed_provenance(model: &SyntheticModel, table: &str) -> bool {
             .any(|(profiled_table, _)| profiled_table == table)
 }
 
-/// Required-parent edges per table: the `relation.children` parent plus every
-/// declared relationship's referenced table.
-fn required_parents(model: &SyntheticModel) -> BTreeMap<String, BTreeSet<String>> {
+/// Which parent edges [`parent_edges`] collects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    /// Every ordering edge: relation.children parents, polymorphic targets, and
+    /// every foreign key regardless of nullability.
+    All,
+    /// Only edges whose absence is fatal: relation.children parents, polymorphic
+    /// targets, and non-null foreign keys. A nullable FK is detachable, so it is
+    /// not required.
+    Required,
+}
+
+/// Whether every column of a foreign key is declared `NOT NULL`; a nullable
+/// component makes the whole relationship optional (detachable). An unknown
+/// column is treated conservatively as required.
+fn fk_columns_all_non_null(table: &TableModel, columns: &[String]) -> bool {
+    columns.iter().all(|column| {
+        table
+            .schema
+            .columns
+            .iter()
+            .find(|candidate| &candidate.name == column)
+            .map(|candidate| !candidate.nullable)
+            .unwrap_or(true)
+    })
+}
+
+/// Parent edges per table for the requested [`EdgeKind`]: the `relation.children`
+/// parent plus every declared relationship's referenced table (generation
+/// relationships and portable-schema foreign keys). Under [`EdgeKind::Required`]
+/// a nullable foreign key is omitted, since it may be detached rather than
+/// forcing its parent to be retained.
+fn parent_edges(model: &SyntheticModel, kind: EdgeKind) -> BTreeMap<String, BTreeSet<String>> {
     model
         .tables
         .iter()
         .map(|(name, table)| {
-            let mut parents: BTreeSet<String> = table
+            let generation = table
                 .relationships
                 .iter()
-                .map(|relationship| relationship.references.table.clone())
-                .collect();
+                .map(|relationship| (relationship.references.table.clone(), &relationship.columns));
+            let schema =
+                table.schema.relationships.iter().map(|relationship| {
+                    (relationship.referenced_table.clone(), &relationship.columns)
+                });
+            let mut parents: BTreeSet<String> = BTreeSet::new();
+            for (parent, columns) in generation.chain(schema) {
+                if kind == EdgeKind::All || fk_columns_all_non_null(table, columns) {
+                    parents.insert(parent);
+                }
+            }
             if let RowsModel::RelationChildren { parent, .. } = &table.rows {
                 parents.insert(parent.clone());
             }

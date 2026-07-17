@@ -75,6 +75,16 @@ struct TableState {
     copy_batch: String,
     /// Rows buffered in `copy_batch` since the last flush.
     copy_rows: usize,
+    /// Whether the classified `insert_columns` carry an explicit value for an
+    /// `IDENTITY`/`GENERATED ALWAYS AS IDENTITY` column — the normal case for a
+    /// primary key referenced by generated foreign keys. Such a value is
+    /// rejected by MSSQL/PostgreSQL unless the load is wrapped
+    /// (`SET IDENTITY_INSERT ... ON`/`OVERRIDING SYSTEM VALUE`). `None` until the
+    /// first row classifies the columns.
+    identity_insert: Option<bool>,
+    /// Whether a `SET IDENTITY_INSERT <t> ON` has been emitted for this table
+    /// (MSSQL) and therefore an `OFF` must close it out in `end_table`.
+    identity_on: bool,
 }
 
 /// Streams generated rows to dialect-correct SQL as a [`RowSink`].
@@ -146,10 +156,28 @@ impl<W: Write> SqlRenderer<W> {
             .insert_columns
             .as_ref()
             .expect("insert_columns is set before the first row is buffered");
+        let identity_insert = state.identity_insert.unwrap_or(false);
         let column_list = quoted_column_list(dialect, table, indices);
+        // MSSQL rejects an explicit value for an IDENTITY column unless
+        // IDENTITY_INSERT is toggled on for the table; open it once, before the
+        // first batch, and close it in `end_table`.
+        if identity_insert && dialect == SqlDialect::Mssql && !state.identity_on {
+            writeln!(self.writer, "SET IDENTITY_INSERT {} ON", state.quoted_table)
+                .map_err(io_err)?;
+            writeln!(self.writer, "GO").map_err(io_err)?;
+            state.identity_on = true;
+        }
+        // PostgreSQL rejects an explicit value for a `GENERATED ALWAYS AS
+        // IDENTITY` column unless the statement declares `OVERRIDING SYSTEM
+        // VALUE`.
+        let overriding = if identity_insert && dialect == SqlDialect::Postgres {
+            " OVERRIDING SYSTEM VALUE"
+        } else {
+            ""
+        };
         writeln!(
             self.writer,
-            "INSERT INTO {} ({column_list}) VALUES",
+            "INSERT INTO {} ({column_list}){overriding} VALUES",
             state.quoted_table
         )
         .map_err(io_err)?;
@@ -230,8 +258,14 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             self.render_ddl(table)?;
         }
         let data_enabled = self.options.mode != OutputMode::SchemaOnly;
-        let use_copy =
-            data_enabled && self.options.dialect == SqlDialect::Postgres && !self.options.no_copy;
+        // A table carrying an identity column that may receive explicit values
+        // must render as multi-row `INSERT` (not `COPY`) on PostgreSQL, so the
+        // load can add `OVERRIDING SYSTEM VALUE`; `COPY` has no such clause.
+        let has_identity = table.columns.iter().any(|column| column.schema.identity);
+        let use_copy = data_enabled
+            && self.options.dialect == SqlDialect::Postgres
+            && !self.options.no_copy
+            && !has_identity;
         let batch_size = self.options.batch_size.max(1);
         self.table = Some(TableState {
             quoted_table: quote_ident(self.options.dialect, &table.name),
@@ -242,6 +276,8 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             row_batch: RowBatch::with_capacity(batch_size, batch_size * 64),
             copy_batch: String::new(),
             copy_rows: 0,
+            identity_insert: None,
+            identity_on: false,
         });
         Ok(())
     }
@@ -261,7 +297,16 @@ impl<W: Write> RowSink for SqlRenderer<W> {
         }
         if needs_classification {
             let insert_columns = Self::classify_columns(table, row, use_copy)?;
-            self.table.as_mut().expect("checked above").insert_columns = Some(insert_columns);
+            // An identity column that survives classification (i.e. carries an
+            // explicit value rather than rendering `DEFAULT`) needs the
+            // engine-specific identity-insert wrapper to load.
+            let identity_insert = matches!(dialect, SqlDialect::Mssql | SqlDialect::Postgres)
+                && insert_columns
+                    .iter()
+                    .any(|&i| table.columns[i].schema.identity);
+            let state = self.table.as_mut().expect("checked above");
+            state.insert_columns = Some(insert_columns);
+            state.identity_insert = Some(identity_insert);
         }
 
         let state = self.table.as_mut().expect("checked above");
@@ -314,6 +359,18 @@ impl<W: Write> RowSink for SqlRenderer<W> {
                 self.flush_copy(table)?;
             } else {
                 self.flush_insert(table)?;
+            }
+        }
+        // Close the MSSQL identity-insert wrapper opened in `flush_insert`.
+        if let Some(state) = &self.table {
+            if state.identity_on {
+                writeln!(
+                    self.writer,
+                    "SET IDENTITY_INSERT {} OFF",
+                    state.quoted_table
+                )
+                .map_err(io_err)?;
+                writeln!(self.writer, "GO").map_err(io_err)?;
             }
         }
         self.table = None;

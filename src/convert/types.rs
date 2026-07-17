@@ -37,7 +37,7 @@ pub(crate) fn map_column_type(
         return source_type.to_string();
     }
     let mapped = TypeMapper::convert(source_type, from, to);
-    if is_narrowed_by_conversion(source_type) {
+    if is_narrowed_by_conversion(source_type, to) {
         warnings.add(ConvertWarning::LossyConversion {
             from_type: source_type.to_string(),
             to_type: mapped.clone(),
@@ -48,12 +48,30 @@ pub(crate) fn map_column_type(
     mapped
 }
 
-/// Whether `source_type` is one of the MySQL types [`TypeMapper::convert`]
-/// always narrows to a plain string type (`ENUM`/`SET` have no equivalent
-/// outside MySQL), regardless of the target dialect.
-fn is_narrowed_by_conversion(source_type: &str) -> bool {
+/// Whether mapping `source_type` to the `to` dialect loses type semantics the
+/// target cannot preserve — a lossy conversion the caller should warn about (and
+/// fail under `--strict`):
+///
+/// * `ENUM`/`SET` have no equivalent outside MySQL and always collapse to a
+///   plain string, for every target dialect.
+/// * `JSON`/`JSONB` become an unvalidated text column on engines without a JSON
+///   type (SQLite, MSSQL).
+/// * `UUID`/`UNIQUEIDENTIFIER` lose their fixed 128-bit domain when stored as
+///   text (MySQL, SQLite).
+fn is_narrowed_by_conversion(source_type: &str, to: SqlDialect) -> bool {
     let lower = source_type.to_lowercase();
-    lower.contains("enum(") || lower.contains("set(")
+    if lower.contains("enum(") || lower.contains("set(") {
+        return true;
+    }
+    if lower.contains("json") && matches!(to, SqlDialect::Sqlite | SqlDialect::Mssql) {
+        return true;
+    }
+    if (lower.contains("uuid") || lower.contains("uniqueidentifier"))
+        && matches!(to, SqlDialect::MySql | SqlDialect::Sqlite)
+    {
+        return true;
+    }
+    false
 }
 
 /// Type mapper for converting between dialects
@@ -809,5 +827,34 @@ mod map_column_type_tests {
             warnings.warnings()[0],
             ConvertWarning::LossyConversion { .. }
         ));
+    }
+
+    #[test]
+    fn json_to_an_engine_without_a_json_type_is_lossy() {
+        let mut warnings = WarningCollector::new();
+        map_column_type("JSON", SqlDialect::MySql, SqlDialect::Sqlite, &mut warnings);
+        assert!(warnings.has_warnings());
+
+        // PostgreSQL keeps a native JSON type, so the same source is not lossy.
+        let mut kept = WarningCollector::new();
+        map_column_type("JSON", SqlDialect::MySql, SqlDialect::Postgres, &mut kept);
+        assert!(!kept.has_warnings());
+    }
+
+    #[test]
+    fn uuid_stored_as_text_is_lossy() {
+        let mut warnings = WarningCollector::new();
+        map_column_type(
+            "UUID",
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert!(warnings.has_warnings());
+
+        // MSSQL has UNIQUEIDENTIFIER, so a UUID keeps its native domain there.
+        let mut kept = WarningCollector::new();
+        map_column_type("UUID", SqlDialect::Postgres, SqlDialect::Mssql, &mut kept);
+        assert!(!kept.has_warnings());
     }
 }

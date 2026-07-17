@@ -988,3 +988,35 @@ CREATE TABLE "users" (
         "Should convert BLOB to VARBINARY"
     );
 }
+
+#[test]
+fn test_convert_uuid_narrows_to_text_on_dialects_without_native_uuid() {
+    // Task 30: UUID stored as text is a lossy narrowing. The convert command's
+    // type mapping (shared with the synthetic renderer) still narrows a
+    // PostgreSQL UUID to VARCHAR(36) on MySQL (regression guard).
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+
+    let postgres_sql = "CREATE TABLE t (id UUID NOT NULL);\n";
+    fs::write(&input_file, postgres_sql).unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "postgres",
+            "--to",
+            "mysql",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Command failed: {:?}", output);
+    let result = fs::read_to_string(&output_file).unwrap();
+    assert!(result.contains("VARCHAR(36)"), "got: {result}");
+    assert!(!result.to_uppercase().contains(" UUID"), "got: {result}");
+}
