@@ -1,0 +1,57 @@
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+tables:
+  customers:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: customers
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: balance, type: "decimal(10,2)", nullable: false }
+        - { name: notes, type: "varchar(255)", nullable: true }
+        - { name: metadata, type: json, nullable: true }
+        - { name: created_at, type: datetime, nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 12 }
+      balance:
+        generator: { kind: decimal, min: 0, max: 1000, scale: 2 }
+      notes:
+        generator: { kind: constant }
+      metadata:
+        generator: { kind: json_value, value: { active: true } }
+      created_at:
+        generator: { kind: datetime }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 15
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+        - { name: total, type: "decimal(10,2)", nullable: false }
+        - { name: status, type: "varchar(20)", nullable: false, default_sql: "'pending'" }
+      indexes:
+        - { name: idx_orders_customer_id, columns: [customer_id] }
+      relationships:
+        - { name: fk_orders_customer, columns: [customer_id], referenced_table: customers, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      total:
+        generator: { kind: decimal, min: 5, max: 500, scale: 2 }
+      status:
+        generator: { kind: database_default }
+    relationships:
+      - { name: fk_orders_customer, columns: [customer_id], references: { table: customers, columns: [id] } }

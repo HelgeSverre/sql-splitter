@@ -1696,3 +1696,336 @@ tables:
         "unexpected error: {err}"
     );
 }
+
+// --- Task 14: render model-driven SQL ---------------------------------------
+
+use sql_splitter::render::{RenderOptions, SqlRenderer};
+use sql_splitter::synthetic::OutputMode;
+use sql_splitter::validate::{ValidateOptions, Validator};
+use std::io::Write as _;
+use tempfile::NamedTempFile;
+
+const SIMPLE_FIXTURE: &str = "tests/fixtures/generate/simple.yaml";
+
+/// Compile `model_yaml`, render it under `configure`d options, and return the
+/// full rendered SQL text.
+fn render_model_with(model_yaml: &str, configure: impl FnOnce(&mut RenderOptions)) -> String {
+    let plan = compile(model_yaml);
+    let mut options = RenderOptions {
+        source_dialect: plan.input_dialect,
+        batch_size: 4,
+        ..RenderOptions::default()
+    };
+    configure(&mut options);
+    let mut renderer = SqlRenderer::new(Vec::new(), options);
+    GenerationEngine::new(plan)
+        .run(&mut renderer)
+        .expect("renders cleanly");
+    let bytes = renderer.finish().expect("finish flushes cleanly");
+    String::from_utf8(bytes).expect("rendered SQL is valid UTF-8")
+}
+
+fn render_model(model_yaml: &str, dialect: SqlDialect) -> String {
+    render_model_with(model_yaml, |options| options.dialect = dialect)
+}
+
+fn render_fixture_with(path: &str, configure: impl FnOnce(&mut RenderOptions)) -> String {
+    let yaml = std::fs::read_to_string(path).expect("fixture readable");
+    render_model_with(&yaml, configure)
+}
+
+fn render_fixture(path: &str, dialect: SqlDialect) -> String {
+    render_fixture_with(path, |options| options.dialect = dialect)
+}
+
+/// Mirrors `render::sql`'s COPY-text escaping, independently, so the test
+/// doesn't just restate the production code's own claim about itself.
+fn copy_escape(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[test]
+fn simple_model_renders_valid_dialect_shapes() {
+    for dialect in [
+        SqlDialect::MySql,
+        SqlDialect::Postgres,
+        SqlDialect::Sqlite,
+        SqlDialect::Mssql,
+    ] {
+        let sql = render_fixture(SIMPLE_FIXTURE, dialect);
+        assert!(sql.contains("CREATE TABLE"), "{dialect:?}: {sql}");
+        match dialect {
+            SqlDialect::Postgres => assert!(sql.contains("COPY "), "{sql}"),
+            SqlDialect::Mssql => assert!(sql.contains("N'"), "{sql}"),
+            _ => assert!(sql.contains("INSERT INTO"), "{sql}"),
+        }
+    }
+}
+
+#[test]
+fn identifiers_are_quoted_per_dialect() {
+    assert!(render_fixture(SIMPLE_FIXTURE, SqlDialect::MySql).contains("`customers`"));
+    assert!(render_fixture(SIMPLE_FIXTURE, SqlDialect::Postgres).contains("\"customers\""));
+    assert!(render_fixture(SIMPLE_FIXTURE, SqlDialect::Sqlite).contains("\"customers\""));
+    assert!(render_fixture(SIMPLE_FIXTURE, SqlDialect::Mssql).contains("[customers]"));
+}
+
+#[test]
+fn foreign_key_and_index_render_after_the_create_table() {
+    let sql = render_fixture(SIMPLE_FIXTURE, SqlDialect::Postgres);
+    assert!(
+        sql.contains(
+            "ALTER TABLE \"orders\" ADD CONSTRAINT \"fk_orders_customer\" FOREIGN KEY (\"customer_id\") REFERENCES \"customers\" (\"id\");"
+        ),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("CREATE INDEX \"idx_orders_customer_id\" ON \"orders\" (\"customer_id\");"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn default_column_is_omitted_from_the_insert_column_list_and_values() {
+    let sql = render_fixture(SIMPLE_FIXTURE, SqlDialect::MySql);
+    // `orders.status` always renders as DEFAULT (a `database_default`
+    // generator); the renderer omits it from the column list and VALUES
+    // entirely rather than repeating the DEFAULT keyword every row.
+    let orders_insert = sql
+        .lines()
+        .find(|line| line.starts_with("INSERT INTO `orders`"))
+        .expect("orders INSERT statement");
+    assert!(!orders_insert.contains("status"), "{orders_insert}");
+}
+
+#[test]
+fn null_default_bytes_decimal_date_json_render_correctly() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 11
+tables:
+  widgets:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: widgets
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: amount, type: "decimal(5,2)", nullable: false }
+        - { name: payload, type: "varbinary(4)", nullable: false }
+        - { name: notes, type: "varchar(50)", nullable: true }
+        - { name: metadata, type: json, nullable: false }
+        - { name: created_at, type: datetime, nullable: false }
+        - { name: status, type: "varchar(20)", nullable: false, default_sql: "'pending'" }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      amount: { generator: { kind: decimal, min: 12.34, max: 12.34, scale: 2 } }
+      payload: { generator: { kind: bytes, min_length: 3, max_length: 3 } }
+      notes: { generator: { kind: constant } }
+      metadata: { generator: { kind: json_value, value: { ok: true } } }
+      created_at: { generator: { kind: datetime } }
+      status: { generator: { kind: database_default } }
+"#;
+    let sql = render_model(model, SqlDialect::MySql);
+    assert!(sql.contains("12.34"), "decimal: {sql}");
+    assert!(sql.contains("X'"), "bytes: {sql}");
+    assert!(sql.contains("NULL"), "null: {sql}");
+    assert!(sql.contains(r#"'{"ok":true}'"#), "json: {sql}");
+    assert!(
+        regex::Regex::new(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+            .unwrap()
+            .is_match(&sql),
+        "date: {sql}"
+    );
+    // `status` always renders DEFAULT: the column still appears in the DDL
+    // (it needs a type), but is dropped from the INSERT column list/VALUES.
+    let insert_line = sql
+        .lines()
+        .find(|line| line.starts_with("INSERT INTO"))
+        .expect("widgets INSERT statement");
+    assert!(!insert_line.contains("status"), "{insert_line}");
+}
+
+#[test]
+fn postgres_copy_escaping_differs_from_insert_string_escaping() {
+    let original = "back\\slash\ttab\nnewline";
+    let yaml_value = serde_yaml_ng::to_string(&original).expect("string always serializes");
+    let model = format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: disabled }}
+seed: 3
+tables:
+  notes:
+    rows: {{ kind: fixed, count: 1 }}
+    schema:
+      name: notes
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: body, type: text, nullable: false }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+      body: {{ generator: {{ kind: constant, value: {} }} }}
+"#,
+        yaml_value.trim()
+    );
+
+    let copy_sql = render_model(&model, SqlDialect::Postgres);
+    assert!(copy_sql.contains("COPY "), "{copy_sql}");
+    assert!(copy_sql.contains(&copy_escape(original)), "{copy_sql}");
+    assert!(!copy_sql.contains(&format!("'{original}'")), "{copy_sql}");
+
+    let insert_sql = render_model_with(&model, |options| {
+        options.dialect = SqlDialect::Postgres;
+        options.no_copy = true;
+    });
+    assert!(insert_sql.contains("INSERT INTO"), "{insert_sql}");
+    // Same value, INSERT-literal escaped: quoted verbatim (Postgres string
+    // literals leave `\t`/`\n`/`\\` untouched; only `'` would be doubled).
+    assert!(
+        insert_sql.contains(&format!("'{original}'")),
+        "{insert_sql}"
+    );
+}
+
+#[test]
+fn mssql_renders_unicode_string_literals_and_go_batch_separators() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 5
+tables:
+  notes:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: notes
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: body, type: text, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      body: { generator: { kind: constant, value: "héllo wörld" } }
+"#;
+    let sql = render_model_with(model, |options| {
+        options.dialect = SqlDialect::Mssql;
+        options.batch_size = 2;
+    });
+    assert!(sql.contains("N'héllo wörld'"), "{sql}");
+    // One GO after the CREATE TABLE, one after each of the two INSERT
+    // batches that 3 rows split into at batch_size 2 (2 rows, then 1).
+    assert_eq!(sql.matches("\nGO\n").count(), 3, "{sql}");
+    assert_eq!(sql.matches("INSERT INTO").count(), 2, "{sql}");
+}
+
+#[test]
+fn batch_size_splits_rows_into_multiple_insert_statements() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 9
+tables:
+  widgets:
+    rows: { kind: fixed, count: 7 }
+    schema:
+      name: widgets
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+"#;
+    let sql = render_model_with(model, |options| {
+        options.dialect = SqlDialect::MySql;
+        options.batch_size = 3;
+    });
+    assert_eq!(sql.matches("INSERT INTO").count(), 3, "{sql}");
+    let ids: Vec<i64> = regex::Regex::new(r"\((\d+)\)")
+        .unwrap()
+        .captures_iter(&sql)
+        .map(|c| c[1].parse().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
+fn schema_only_mode_emits_ddl_without_any_row_data() {
+    let sql = render_fixture_with(SIMPLE_FIXTURE, |options| {
+        options.mode = OutputMode::SchemaOnly
+    });
+    assert!(sql.contains("CREATE TABLE"), "{sql}");
+    assert!(!sql.contains("INSERT INTO"), "{sql}");
+    assert!(!sql.contains("COPY "), "{sql}");
+}
+
+#[test]
+fn data_only_mode_emits_row_data_without_any_ddl() {
+    let sql = render_fixture_with(SIMPLE_FIXTURE, |options| {
+        options.mode = OutputMode::DataOnly
+    });
+    assert!(!sql.contains("CREATE TABLE"), "{sql}");
+    assert!(sql.contains("INSERT INTO"), "{sql}");
+}
+
+#[test]
+fn raw_ddl_is_preserved_only_when_the_target_dialect_matches_the_source() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 1
+source: { dialect: mysql }
+tables:
+  widgets:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: widgets
+      create_statement: "CREATE TABLE `widgets` (\n  `id` bigint NOT NULL\n) ENGINE=InnoDB;"
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+"#;
+    let same_dialect = render_model(model, SqlDialect::MySql);
+    assert!(same_dialect.contains("ENGINE=InnoDB"), "{same_dialect}");
+
+    let cross_dialect = render_model(model, SqlDialect::Postgres);
+    assert!(!cross_dialect.contains("ENGINE=InnoDB"), "{cross_dialect}");
+    assert!(
+        cross_dialect.contains("CREATE TABLE \"widgets\""),
+        "{cross_dialect}"
+    );
+}
+
+#[test]
+fn rendered_mysql_output_passes_the_existing_validator() {
+    let sql = render_fixture(SIMPLE_FIXTURE, SqlDialect::MySql);
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(sql.as_bytes()).expect("write rendered SQL");
+    file.flush().expect("flush temp file");
+
+    let options = ValidateOptions {
+        path: file.path().to_path_buf(),
+        dialect: Some(SqlDialect::MySql),
+        progress: false,
+        strict: false,
+        json: false,
+        max_rows_per_table: 1_000_000,
+        fk_checks_enabled: true,
+        max_pk_fk_keys: None,
+    };
+    let summary = Validator::new(options).validate().expect("validate runs");
+    assert_eq!(summary.summary.errors, 0, "{summary:?}");
+}

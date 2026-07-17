@@ -6,10 +6,13 @@
 //! buffers. See `docs/superpowers/specs/2026-07-16-gen-fixtures-performance-design.md`
 //! for the measurements that motivated this module.
 
+mod ddl;
 mod random;
 mod row_batch;
+mod sql;
 mod sql_string;
 
 pub use random::RandomBlock;
 pub use row_batch::RowBatch;
+pub use sql::{RenderOptions, SqlRenderer};
 pub use sql_string::SqlString;

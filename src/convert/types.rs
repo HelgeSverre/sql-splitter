@@ -12,6 +12,50 @@ use crate::parser::SqlDialect;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use super::warnings::{ConvertWarning, WarningCollector};
+
+/// Map a single column's `source_type` from `from` to `to`, reusing the same
+/// regex-driven rules [`TypeMapper::convert`] applies to a whole statement.
+///
+/// This is the seam the synthetic-data renderer (`render::ddl`) calls
+/// instead of maintaining its own generation-only type mapping: a column's
+/// `source_type` (e.g. `"VARCHAR(255)"`) is itself a valid input to
+/// [`TypeMapper::convert`], since every rule matches on the type token with
+/// word boundaries rather than requiring surrounding `CREATE TABLE` context.
+///
+/// Same-dialect conversions are the identity (returned as-is, no warning).
+/// A conversion that narrows a MySQL `ENUM`/`SET` to a plain string type
+/// records a [`ConvertWarning::LossyConversion`] so callers that surface
+/// warnings (e.g. `--emit-config`) can report it.
+pub(crate) fn map_column_type(
+    source_type: &str,
+    from: SqlDialect,
+    to: SqlDialect,
+    warnings: &mut WarningCollector,
+) -> String {
+    if from == to {
+        return source_type.to_string();
+    }
+    let mapped = TypeMapper::convert(source_type, from, to);
+    if is_narrowed_by_conversion(source_type) {
+        warnings.add(ConvertWarning::LossyConversion {
+            from_type: source_type.to_string(),
+            to_type: mapped.clone(),
+            table: None,
+            column: None,
+        });
+    }
+    mapped
+}
+
+/// Whether `source_type` is one of the MySQL types [`TypeMapper::convert`]
+/// always narrows to a plain string type (`ENUM`/`SET` have no equivalent
+/// outside MySQL), regardless of the target dialect.
+fn is_narrowed_by_conversion(source_type: &str) -> bool {
+    let lower = source_type.to_lowercase();
+    lower.contains("enum(") || lower.contains("set(")
+}
+
 /// Type mapper for converting between dialects
 pub struct TypeMapper;
 
@@ -720,3 +764,50 @@ static RE_ON_PRIMARY: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\s*ON\s*\[\s*PRIMARY\s*\]").unwrap());
 static RE_CLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bCLUSTERED\s+").unwrap());
 static RE_NONCLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNONCLUSTERED\s+").unwrap());
+
+#[cfg(test)]
+mod map_column_type_tests {
+    use super::*;
+
+    #[test]
+    fn same_dialect_is_identity_and_warning_free() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "VARCHAR(255)",
+            SqlDialect::MySql,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "VARCHAR(255)");
+        assert!(!warnings.has_warnings());
+    }
+
+    #[test]
+    fn cross_dialect_reuses_the_statement_level_regex_rules() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "BIGINT(20)",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "BIGINT");
+    }
+
+    #[test]
+    fn narrowing_enum_to_a_plain_string_records_a_lossy_warning() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "ENUM('a','b')",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "VARCHAR(255)");
+        assert!(warnings.has_warnings());
+        assert!(matches!(
+            warnings.warnings()[0],
+            ConvertWarning::LossyConversion { .. }
+        ));
+    }
+}
