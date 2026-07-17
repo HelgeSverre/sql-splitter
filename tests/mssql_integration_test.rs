@@ -1,12 +1,20 @@
 //! Integration tests for MSSQL/T-SQL dialect support.
 
+mod support;
+
 use sql_splitter::parser::{detect_dialect, DialectConfidence, Parser, SqlDialect, StatementType};
 use sql_splitter::splitter::Splitter;
 use sql_splitter::validate::{ValidateOptions, Validator};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use tempfile::{NamedTempFile, TempDir};
+use support::generated_fixture::generated_fixture;
+use tempfile::{NamedTempFile, TempDir, TempPath};
+// The old crate is kept for `test_mssql_generator_production_style` only: its
+// `RenderConfig::mssql_production()` profile (GO batch separators, `[dbo].`
+// schema prefix, named `CONSTRAINT PK_x` clauses, `ON [PRIMARY]` filegroup)
+// has no equivalent in the public renderer — see tests/fixtures/generate/
+// legacy_fixture.yaml and task-31-report.md for why that test stays here.
 use test_data_gen::{Generator, RenderConfig, Renderer, Scale};
 
 fn mssql_simple_fixture() -> PathBuf {
@@ -700,36 +708,29 @@ fn test_mssql_query_with_nvarchar() {
 // Phase 7: Test Data Generator Integration Tests
 // ============================================
 
-fn create_temp_sql(content: &str) -> NamedTempFile {
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(content.as_bytes()).unwrap();
-    file.flush().unwrap();
-    file
-}
-
-/// Generate an MSSQL dump with test_data_gen
-fn generate_mssql_dump(seed: u64, scale: Scale) -> NamedTempFile {
-    let mut gen = Generator::new(seed, scale);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::mssql());
-    let output = renderer.render_to_string(&data).unwrap();
-    create_temp_sql(&output)
+/// Generate an MSSQL dump from the shared `legacy_fixture.yaml` model.
+fn generate_mssql_dump(seed: u64) -> TempPath {
+    generated_fixture(SqlDialect::Mssql, None, None, seed)
 }
 
 #[test]
 fn test_mssql_generator_small_scale() {
-    let file = generate_mssql_dump(42, Scale::Small);
-    let content = fs::read_to_string(file.path()).unwrap();
+    let file = generate_mssql_dump(42);
+    let content = fs::read_to_string(&file).unwrap();
 
-    // Verify MSSQL-specific syntax
-    assert!(
-        content.contains("SET ANSI_NULLS ON;"),
-        "Should have MSSQL header"
-    );
-    assert!(
-        content.contains("SET QUOTED_IDENTIFIER ON;"),
-        "Should have MSSQL header"
-    );
+    // Verify MSSQL-specific syntax. Two properties the old `test_data_gen`
+    // renderer emitted are NOT reproduced here, because the public
+    // `sql_splitter::render::SqlRenderer` has no equivalent option for
+    // either (see tests/fixtures/generate/legacy_fixture.yaml and
+    // task-31-report.md):
+    //   - the `SET ANSI_NULLS ON;` / `SET QUOTED_IDENTIFIER ON;` session
+    //     header the old renderer always prepended;
+    //   - an inline `PRIMARY KEY` clause on the identity column (the public
+    //     renderer always emits a separate `PRIMARY KEY (...)` clause,
+    //     which is the standard-conforming shape and equally valid SQL).
+    // Neither property is inspected by any other test in this suite (they
+    // never execute the dump against a real MSSQL server), so dropping them
+    // does not weaken any assertion this fixture is relied on for.
     assert!(
         content.contains("CREATE TABLE [tenants]"),
         "Should use bracket quoting"
@@ -739,8 +740,8 @@ fn test_mssql_generator_small_scale() {
         "Should use bracket quoting for inserts"
     );
     assert!(
-        content.contains("INT IDENTITY(1,1) NOT NULL PRIMARY KEY"),
-        "Should use IDENTITY"
+        content.contains("IDENTITY(1,1)") && content.contains("PRIMARY KEY ([id])"),
+        "Should use IDENTITY and a PRIMARY KEY clause"
     );
     assert!(content.contains("NVARCHAR"), "Should use NVARCHAR types");
     assert!(content.contains("N'"), "Should use Unicode string literals");
@@ -755,9 +756,9 @@ fn test_mssql_generator_small_scale() {
 fn test_mssql_generator_analyze() {
     use sql_splitter::analyzer::Analyzer;
 
-    let file = generate_mssql_dump(42, Scale::Small);
+    let file = generate_mssql_dump(42);
 
-    let stats = Analyzer::new(file.path().to_path_buf())
+    let stats = Analyzer::new(file.to_path_buf())
         .with_dialect(SqlDialect::Mssql)
         .analyze()
         .unwrap();
@@ -778,11 +779,11 @@ fn test_mssql_generator_analyze() {
 
 #[test]
 fn test_mssql_generator_split() {
-    let file = generate_mssql_dump(42, Scale::Small);
+    let file = generate_mssql_dump(42);
     let temp_dir = TempDir::new().unwrap();
     let output_dir = temp_dir.path().to_path_buf();
 
-    let stats = Splitter::new(file.path().to_path_buf(), output_dir.clone())
+    let stats = Splitter::new(file.to_path_buf(), output_dir.clone())
         .with_dialect(SqlDialect::Mssql)
         .split()
         .unwrap();
@@ -795,10 +796,10 @@ fn test_mssql_generator_split() {
 
 #[test]
 fn test_mssql_generator_validate() {
-    let file = generate_mssql_dump(42, Scale::Small);
+    let file = generate_mssql_dump(42);
 
     let options = ValidateOptions {
-        path: file.path().to_path_buf(),
+        path: file.to_path_buf(),
         dialect: Some(SqlDialect::Mssql),
         progress: false,
         strict: false,
@@ -821,12 +822,12 @@ fn test_mssql_generator_validate() {
 fn test_mssql_generator_split_merge_roundtrip() {
     use sql_splitter::merger::Merger;
 
-    let file = generate_mssql_dump(42, Scale::Small);
+    let file = generate_mssql_dump(42);
     let split_dir = TempDir::new().unwrap();
     let merged_file = NamedTempFile::new().unwrap();
 
     // Split
-    let split_stats = Splitter::new(file.path().to_path_buf(), split_dir.path().to_path_buf())
+    let split_stats = Splitter::new(file.to_path_buf(), split_dir.path().to_path_buf())
         .with_dialect(SqlDialect::Mssql)
         .split()
         .unwrap();
@@ -868,12 +869,12 @@ fn test_mssql_generator_split_merge_roundtrip() {
 fn test_mssql_generator_sample_command() {
     use sql_splitter::sample::{GlobalTableMode, SampleConfig, SampleMode};
 
-    let file = generate_mssql_dump(42, Scale::Small);
+    let file = generate_mssql_dump(42);
     let temp_dir = TempDir::new().unwrap();
     let output_file = temp_dir.path().join("sampled.sql");
 
     let config = SampleConfig {
-        input: file.path().to_path_buf(),
+        input: file.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Mssql,
         mode: SampleMode::Percent(50),
@@ -903,8 +904,8 @@ fn test_mssql_generator_sample_command() {
 
 #[test]
 fn test_mssql_generator_medium_scale() {
-    let file = generate_mssql_dump(42, Scale::Medium);
-    let content = fs::read_to_string(file.path()).unwrap();
+    let file = generated_fixture(SqlDialect::Mssql, Some(20), None, 42);
+    let content = fs::read_to_string(&file).unwrap();
 
     // Medium scale should generate more data
     let insert_count = content.matches("INSERT INTO").count();
@@ -918,11 +919,11 @@ fn test_mssql_generator_medium_scale() {
 #[test]
 fn test_mssql_generator_deterministic() {
     // Two generators with same seed should produce identical output
-    let file1 = generate_mssql_dump(12345, Scale::Small);
-    let file2 = generate_mssql_dump(12345, Scale::Small);
+    let file1 = generate_mssql_dump(12345);
+    let file2 = generate_mssql_dump(12345);
 
-    let content1 = fs::read_to_string(file1.path()).unwrap();
-    let content2 = fs::read_to_string(file2.path()).unwrap();
+    let content1 = fs::read_to_string(&file1).unwrap();
+    let content2 = fs::read_to_string(&file2).unwrap();
 
     assert_eq!(
         content1, content2,
@@ -930,8 +931,8 @@ fn test_mssql_generator_deterministic() {
     );
 
     // Different seed should produce different output
-    let file3 = generate_mssql_dump(99999, Scale::Small);
-    let content3 = fs::read_to_string(file3.path()).unwrap();
+    let file3 = generate_mssql_dump(99999);
+    let content3 = fs::read_to_string(&file3).unwrap();
 
     assert_ne!(
         content1, content3,
@@ -987,13 +988,13 @@ use sql_splitter::redactor::{RedactConfig, Redactor};
 #[test]
 fn test_mssql_redact_null_strategy() {
     // Generate a small MSSQL fixture
-    let input_file = generate_mssql_dump(42, Scale::Small);
+    let input_file = generate_mssql_dump(42);
     let output_dir = TempDir::new().unwrap();
     let output_file = output_dir.path().join("redacted.sql");
 
     // Configure redaction: set email columns to NULL
     let config = RedactConfig::builder()
-        .input(input_file.path().to_path_buf())
+        .input(input_file.to_path_buf())
         .output(Some(output_file.clone()))
         .dialect(SqlDialect::Mssql)
         .null_patterns(vec!["*.email".to_string()])
@@ -1020,12 +1021,12 @@ fn test_mssql_redact_null_strategy() {
 
 #[test]
 fn test_mssql_redact_hash_strategy() {
-    let input_file = generate_mssql_dump(42, Scale::Small);
+    let input_file = generate_mssql_dump(42);
     let output_dir = TempDir::new().unwrap();
     let output_file = output_dir.path().join("redacted.sql");
 
     let config = RedactConfig::builder()
-        .input(input_file.path().to_path_buf())
+        .input(input_file.to_path_buf())
         .output(Some(output_file.clone()))
         .dialect(SqlDialect::Mssql)
         .hash_patterns(vec!["*.email".to_string()])
@@ -1141,12 +1142,12 @@ INSERT INTO [users] ([id], [name], [bio]) VALUES (2, N'中文', N'More unicode: 
 
 #[test]
 fn test_mssql_redact_fake_strategy() {
-    let input_file = generate_mssql_dump(42, Scale::Small);
+    let input_file = generate_mssql_dump(42);
     let output_dir = TempDir::new().unwrap();
     let output_file = output_dir.path().join("redacted.sql");
 
     let config = RedactConfig::builder()
-        .input(input_file.path().to_path_buf())
+        .input(input_file.to_path_buf())
         .output(Some(output_file.clone()))
         .dialect(SqlDialect::Mssql)
         .fake_patterns(vec!["*.name".to_string()])
@@ -1168,10 +1169,10 @@ fn test_mssql_redact_fake_strategy() {
 
 #[test]
 fn test_mssql_redact_dry_run() {
-    let input_file = generate_mssql_dump(42, Scale::Small);
+    let input_file = generate_mssql_dump(42);
 
     let config = RedactConfig::builder()
-        .input(input_file.path().to_path_buf())
+        .input(input_file.to_path_buf())
         .dialect(SqlDialect::Mssql)
         .null_patterns(vec!["*.email".to_string(), "*.password".to_string()])
         .dry_run(true)
@@ -1188,7 +1189,7 @@ fn test_mssql_redact_dry_run() {
 
 #[test]
 fn test_mssql_redact_reproducible_with_seed() {
-    let input_file = generate_mssql_dump(42, Scale::Small);
+    let input_file = generate_mssql_dump(42);
     let output_dir = TempDir::new().unwrap();
     let output_file1 = output_dir.path().join("redacted1.sql");
     let output_file2 = output_dir.path().join("redacted2.sql");
@@ -1196,7 +1197,7 @@ fn test_mssql_redact_reproducible_with_seed() {
     // Run redaction twice with same seed
     for output_file in [&output_file1, &output_file2] {
         let config = RedactConfig::builder()
-            .input(input_file.path().to_path_buf())
+            .input(input_file.to_path_buf())
             .output(Some(output_file.clone()))
             .dialect(SqlDialect::Mssql)
             .hash_patterns(vec!["*.email".to_string()])

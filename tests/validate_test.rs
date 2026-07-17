@@ -7,13 +7,15 @@
 //! - Split→Merge→Validate roundtrip tests
 //! - Test data generator fixtures for realistic multi-table scenarios
 
+mod support;
+
 use sql_splitter::merger::Merger;
 use sql_splitter::parser::SqlDialect;
 use sql_splitter::splitter::Splitter;
 use sql_splitter::validate::{ValidateOptions, ValidationSummary, Validator};
 use std::io::Write;
-use tempfile::{NamedTempFile, TempDir};
-use test_data_gen::{Generator, RenderConfig, Renderer, Scale};
+use support::generated_fixture::generated_fixture;
+use tempfile::{NamedTempFile, TempDir, TempPath};
 
 fn create_temp_sql(content: &str) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
@@ -65,31 +67,19 @@ fn validate_file(
     validator.validate().unwrap()
 }
 
-/// Generate a MySQL dump with test_data_gen
-fn generate_mysql_dump(seed: u64, scale: Scale) -> NamedTempFile {
-    let mut gen = Generator::new(seed, scale);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::mysql());
-    let output = renderer.render_to_string(&data).unwrap();
-    create_temp_sql(&output)
+/// Generate a MySQL dump from the shared `legacy_fixture.yaml` model.
+fn generate_mysql_dump(seed: u64) -> TempPath {
+    generated_fixture(SqlDialect::MySql, None, None, seed)
 }
 
-/// Generate a PostgreSQL dump with test_data_gen
-fn generate_postgres_dump_file(seed: u64, scale: Scale) -> NamedTempFile {
-    let mut gen = Generator::new(seed, scale);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::postgres());
-    let output = renderer.render_to_string(&data).unwrap();
-    create_temp_sql(&output)
+/// Generate a PostgreSQL dump from the shared `legacy_fixture.yaml` model.
+fn generate_postgres_dump_file(seed: u64) -> TempPath {
+    generated_fixture(SqlDialect::Postgres, None, None, seed)
 }
 
-/// Generate a SQLite dump with test_data_gen
-fn generate_sqlite_dump_file(seed: u64, scale: Scale) -> NamedTempFile {
-    let mut gen = Generator::new(seed, scale);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::sqlite());
-    let output = renderer.render_to_string(&data).unwrap();
-    create_temp_sql(&output)
+/// Generate a SQLite dump from the shared `legacy_fixture.yaml` model.
+fn generate_sqlite_dump_file(seed: u64) -> TempPath {
+    generated_fixture(SqlDialect::Sqlite, None, None, seed)
 }
 
 #[test]
@@ -442,8 +432,8 @@ fn test_validate_has_warnings() {
 
 #[test]
 fn test_validate_generated_mysql_dump() {
-    let dump = generate_mysql_dump(42, Scale::Small);
-    let summary = validate_file(dump.path(), SqlDialect::MySql, true);
+    let dump = generate_mysql_dump(42);
+    let summary = validate_file(&dump, SqlDialect::MySql, true);
 
     // Generated data should be valid (no errors)
     assert_eq!(
@@ -462,8 +452,8 @@ fn test_validate_generated_mysql_dump() {
 
 #[test]
 fn test_validate_generated_postgres_dump() {
-    let dump = generate_postgres_dump_file(42, Scale::Small);
-    let summary = validate_file(dump.path(), SqlDialect::Postgres, false);
+    let dump = generate_postgres_dump_file(42);
+    let summary = validate_file(&dump, SqlDialect::Postgres, false);
 
     // PostgreSQL dumps should parse without errors (FK checks skipped)
     assert_eq!(
@@ -478,8 +468,8 @@ fn test_validate_generated_postgres_dump() {
 
 #[test]
 fn test_validate_generated_sqlite_dump() {
-    let dump = generate_sqlite_dump_file(42, Scale::Small);
-    let summary = validate_file(dump.path(), SqlDialect::Sqlite, false);
+    let dump = generate_sqlite_dump_file(42);
+    let summary = validate_file(&dump, SqlDialect::Sqlite, false);
 
     // SQLite dumps should parse without errors
     assert_eq!(
@@ -494,8 +484,8 @@ fn test_validate_generated_sqlite_dump() {
 
 #[test]
 fn test_validate_generated_with_fk_checks() {
-    let dump = generate_mysql_dump(123, Scale::Small);
-    let summary = validate_file(dump.path(), SqlDialect::MySql, true);
+    let dump = generate_mysql_dump(123);
+    let summary = validate_file(&dump, SqlDialect::MySql, true);
 
     // Generated data has FK-consistent data, so no FK violations
     let fk_issues: Vec<_> = summary
@@ -513,8 +503,8 @@ fn test_validate_generated_with_fk_checks() {
 fn test_validate_generated_multiple_seeds() {
     // Validate with different seeds to ensure robustness
     for seed in [1, 42, 100, 999] {
-        let dump = generate_mysql_dump(seed, Scale::Small);
-        let summary = validate_file(dump.path(), SqlDialect::MySql, false);
+        let dump = generate_mysql_dump(seed);
+        let summary = validate_file(&dump, SqlDialect::MySql, false);
         assert_eq!(
             summary.summary.errors, 0,
             "Seed {} should produce valid dump",
@@ -529,12 +519,12 @@ fn test_validate_generated_multiple_seeds() {
 
 #[test]
 fn test_validate_split_merge_roundtrip_mysql() {
-    let dump = generate_mysql_dump(42, Scale::Small);
+    let dump = generate_mysql_dump(42);
     let split_dir = TempDir::new().unwrap();
     let merged_file = NamedTempFile::new().unwrap();
 
     // Split
-    let splitter = Splitter::new(dump.path().to_path_buf(), split_dir.path().to_path_buf())
+    let splitter = Splitter::new(dump.to_path_buf(), split_dir.path().to_path_buf())
         .with_dialect(SqlDialect::MySql);
     let split_stats = splitter.split().unwrap();
     assert!(split_stats.tables_found > 0, "Should have split tables");
@@ -566,12 +556,12 @@ fn test_validate_split_merge_roundtrip_mysql() {
 
 #[test]
 fn test_validate_split_merge_roundtrip_postgres() {
-    let dump = generate_postgres_dump_file(42, Scale::Small);
+    let dump = generate_postgres_dump_file(42);
     let split_dir = TempDir::new().unwrap();
     let merged_file = NamedTempFile::new().unwrap();
 
     // Split
-    let splitter = Splitter::new(dump.path().to_path_buf(), split_dir.path().to_path_buf())
+    let splitter = Splitter::new(dump.to_path_buf(), split_dir.path().to_path_buf())
         .with_dialect(SqlDialect::Postgres);
     let split_stats = splitter.split().unwrap();
     assert!(split_stats.tables_found > 0, "Should have split tables");
@@ -599,12 +589,12 @@ fn test_validate_split_merge_roundtrip_postgres() {
 
 #[test]
 fn test_validate_split_merge_roundtrip_sqlite() {
-    let dump = generate_sqlite_dump_file(42, Scale::Small);
+    let dump = generate_sqlite_dump_file(42);
     let split_dir = TempDir::new().unwrap();
     let merged_file = NamedTempFile::new().unwrap();
 
     // Split
-    let splitter = Splitter::new(dump.path().to_path_buf(), split_dir.path().to_path_buf())
+    let splitter = Splitter::new(dump.to_path_buf(), split_dir.path().to_path_buf())
         .with_dialect(SqlDialect::Sqlite);
     let split_stats = splitter.split().unwrap();
     assert!(split_stats.tables_found > 0, "Should have split tables");
@@ -924,8 +914,8 @@ fn test_validate_postgres_fk_violation() {
 
 #[test]
 fn test_validate_postgres_generated_with_fk_checks() {
-    let dump = generate_postgres_dump_file(42, Scale::Small);
-    let summary = validate_file(dump.path(), SqlDialect::Postgres, true);
+    let dump = generate_postgres_dump_file(42);
+    let summary = validate_file(&dump, SqlDialect::Postgres, true);
 
     // Generated data should be FK-consistent
     assert_eq!(
@@ -991,8 +981,8 @@ fn test_validate_sqlite_fk_violation() {
 
 #[test]
 fn test_validate_sqlite_generated_with_fk_checks() {
-    let dump = generate_sqlite_dump_file(42, Scale::Small);
-    let summary = validate_file(dump.path(), SqlDialect::Sqlite, true);
+    let dump = generate_sqlite_dump_file(42);
+    let summary = validate_file(&dump, SqlDialect::Sqlite, true);
 
     // Generated data should be FK-consistent
     assert_eq!(

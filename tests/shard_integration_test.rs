@@ -2,12 +2,14 @@
 //! row-parsing path (Task 17). These pin the rows selected for a tenant so the
 //! streaming `for_each_data_row` refactor cannot silently change behavior.
 
+mod support;
+
 use sql_splitter::parser::SqlDialect;
 use sql_splitter::shard::{run, GlobalTableMode, ShardConfig};
 use std::fs;
 use std::io::Write;
+use support::generated_fixture::generated_fixture;
 use tempfile::{NamedTempFile, TempDir};
-use test_data_gen::{Generator, RenderConfig, Renderer, Scale};
 
 /// A small multi-tenant MySQL dump (multi-row INSERTs) with a clear tenant key.
 fn multi_tenant_mysql() -> NamedTempFile {
@@ -104,16 +106,8 @@ fn shard_mysql_is_reproducible() {
 
 /// Generate a PostgreSQL dump (COPY blocks) so the COPY streaming path is
 /// exercised end-to-end through shard.
-fn generate_postgres_dump() -> NamedTempFile {
-    let mut gen = Generator::new(7, Scale::Small);
-    let data = gen.generate();
-    let output = Renderer::new(RenderConfig::postgres())
-        .render_to_string(&data)
-        .unwrap();
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(output.as_bytes()).unwrap();
-    file.flush().unwrap();
-    file
+fn generate_postgres_dump() -> tempfile::TempPath {
+    generated_fixture(SqlDialect::Postgres, None, None, 7)
 }
 
 #[test]
@@ -123,7 +117,7 @@ fn shard_postgres_copy_path_runs() {
     let out = out_dir.path().join("shard_pg.sql");
 
     let config = ShardConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(out.clone()),
         dialect: SqlDialect::Postgres,
         tenant_value: "1".to_string(),

@@ -1,0 +1,612 @@
+# Legacy fixture contract (Task 31).
+#
+# Snapshot of the shape the old `test_data_gen` crate (crates/test_data_gen)
+# produced, re-expressed as a `kind: model` document for the public
+# `sql_splitter::generate` API. This is what `tests/support/generated_fixture.rs`
+# loads; `tests/fixture_migration_test.rs` characterizes it against the old
+# crate so Task 32 can delete `crates/test_data_gen` with confidence.
+#
+# Old shape it replaces (see crates/test_data_gen/src/generator.rs):
+#   - 4 global tables: permissions, roles, role_permissions, currencies
+#   - 1 tenant root: tenants
+#   - 11 per-tenant tables: users, user_roles, categories, products,
+#     customers, orders, order_items, projects, tasks, folders, comments
+#   - Scale::Small ~= 3 tenants, ~5 users/tenant, ~10 orders/tenant, etc.
+#     (see Scale::* in the old crate for the exact per-scale formulas)
+#
+# Deliberate simplifications from the old generator (documented, not silent):
+#   - Self-referential columns (categories.parent_id, folders.parent_id,
+#     comments.parent_id) are always NULL here instead of forming a random
+#     tree. None of the three migrated tests inspect hierarchy depth/shape,
+#     only that the dump parses and FK-checks clean, so a flat tree preserves
+#     every property they assert.
+#   - Cross-branch FK columns (e.g. tasks.tenant_id, products.category_id)
+#     reference *some* valid row in the target table rather than one scoped to
+#     the same tenant. The old generator kept those in-tenant; no consuming
+#     test checks tenant-consistency across tables, only FK existence, which
+#     this preserves.
+#   - Junction tables (role_permissions, user_roles) generate independent
+#     pairs rather than the old crate's "no duplicate pair, admin gets every
+#     permission" rules — no consuming test inspects junction semantics.
+#   - The old crate's `RenderConfig::mssql_production()` profile (GO batch
+#     separators, `[dbo].` schema prefix, named `CONSTRAINT PK_x` clauses,
+#     `ON [PRIMARY]` filegroup) has no equivalent in the public renderer; the
+#     one test asserting it (`test_mssql_generator_production_style`) is left
+#     on the old crate directly — see task-31-report.md.
+#
+# `source: { dialect: postgres }` is set (types below are authored in
+# PostgreSQL spelling) purely so an explicit `.output_dialect()` request maps
+# every column type across dialects via the existing convert/types.rs
+# TypeMapper, instead of rendering the PostgreSQL spelling verbatim into every
+# target dialect. This reproduces the old renderer's per-dialect type choices
+# closely: boolean -> TINYINT(1)/INTEGER/BIT, timestamp ->
+# DATETIME/TIMESTAMP/TEXT/DATETIME2, text -> .../NVARCHAR(MAX) for MSSQL.
+
+version: 1
+kind: model
+source: { dialect: postgres }
+seed: 42
+defaults: { inference: disabled }
+
+tables:
+
+  # ---------------------------------------------------------------------
+  # Global tables (no tenant association)
+  # ---------------------------------------------------------------------
+
+  permissions:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: permissions
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: description, type: text, nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: text.word }
+      description:
+        generator: { kind: text.sentence }
+
+  roles:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: roles
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: is_system, type: boolean, nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      tenant_id:
+        generator: { kind: constant }
+      name:
+        generator:
+          kind: weighted_choice
+          choices:
+            - { value: admin, weight: 0.2 }
+            - { value: manager, weight: 0.2 }
+            - { value: member, weight: 0.4 }
+            - { value: viewer, weight: 0.2 }
+      is_system:
+        generator: { kind: boolean, probability: 1.0 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  role_permissions:
+    rows: { kind: fixed, count: 20 }
+    schema:
+      name: role_permissions
+      primary_key: [role_id, permission_id]
+      columns:
+        - { name: role_id, type: bigint, nullable: false, primary_key: true }
+        - { name: permission_id, type: bigint, nullable: false, primary_key: true }
+      relationships:
+        - { name: role_permission_role, columns: [role_id], referenced_table: roles, referenced_columns: [id] }
+        - { name: role_permission_permission, columns: [permission_id], referenced_table: permissions, referenced_columns: [id] }
+    relationships:
+      - { name: role_permission_role, columns: [role_id], references: { table: roles, columns: [id] } }
+      - { name: role_permission_permission, columns: [permission_id], references: { table: permissions, columns: [id] } }
+    planners:
+      - kind: relation.junction_pair
+        columns: { left: role_id, right: permission_id }
+        left_relationship: role_permission_role
+        right_relationship: role_permission_permission
+
+  currencies:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: currencies
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: code, type: "varchar(3)", nullable: false }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: symbol, type: "varchar(10)", nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      code:
+        generator: { kind: text.word }
+      name:
+        generator: { kind: text.word }
+      symbol:
+        generator: { kind: text.word }
+
+  # ---------------------------------------------------------------------
+  # Tenant root
+  # ---------------------------------------------------------------------
+
+  tenants:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: tenants
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: name, type: "varchar(150)", nullable: false }
+        - { name: slug, type: "varchar(160)", nullable: false, unique: true }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: company.name }
+      slug:
+        generator: { kind: text.slug }
+        modifiers:
+          - { kind: unique, attempts: 20, on_exhaustion: error }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  # ---------------------------------------------------------------------
+  # Per-tenant tables
+  # ---------------------------------------------------------------------
+
+  users:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 15
+      distribution: { kind: fixed, mean: 5.0, min: 1.0, max: 100.0 }
+    schema:
+      name: users
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: email, type: "varchar(255)", nullable: false, unique: true }
+        - { name: name, type: "varchar(160)", nullable: false }
+        - { name: role, type: "varchar(30)", nullable: false }
+        - { name: active, type: boolean, nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: deleted_at, type: "timestamp without time zone", nullable: true , family: date_time }
+      relationships:
+        - { name: user_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+    relationships:
+      - { name: user_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      email:
+        generator: { kind: internet.email }
+        modifiers:
+          - { kind: unique, attempts: 20, on_exhaustion: error }
+      name:
+        generator: { kind: person.full_name }
+      role:
+        generator:
+          kind: weighted_choice
+          choices:
+            - { value: admin, weight: 0.1 }
+            - { value: manager, weight: 0.2 }
+            - { value: member, weight: 0.7 }
+      active:
+        generator: { kind: boolean, probability: 0.9 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+      deleted_at:
+        generator: { kind: datetime }
+        modifiers:
+          - { kind: null_rate, rate: 0.95 }
+
+  user_roles:
+    rows: { kind: fixed, count: 20 }
+    schema:
+      name: user_roles
+      primary_key: [user_id, role_id]
+      columns:
+        - { name: user_id, type: bigint, nullable: false, primary_key: true }
+        - { name: role_id, type: bigint, nullable: false, primary_key: true }
+      relationships:
+        - { name: user_role_user, columns: [user_id], referenced_table: users, referenced_columns: [id] }
+        - { name: user_role_role, columns: [role_id], referenced_table: roles, referenced_columns: [id] }
+    relationships:
+      - { name: user_role_user, columns: [user_id], references: { table: users, columns: [id] } }
+      - { name: user_role_role, columns: [role_id], references: { table: roles, columns: [id] } }
+    planners:
+      - kind: relation.junction_pair
+        columns: { left: user_id, right: role_id }
+        left_relationship: user_role_user
+        right_relationship: user_role_role
+
+  categories:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 15
+      distribution: { kind: fixed, mean: 5.0, min: 1.0, max: 100.0 }
+    schema:
+      name: categories
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: parent_id, type: bigint, nullable: true }
+        - { name: name, type: "varchar(120)", nullable: false }
+        - { name: level, type: integer, nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: category_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+    relationships:
+      - { name: category_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      # Self-referential parent_id is always NULL here — see the module
+      # header for why a flat category list preserves every property the
+      # migrated tests actually check.
+      parent_id:
+        generator: { kind: constant }
+      name:
+        generator: { kind: text.word }
+      level:
+        generator: { kind: integer, min: 0, max: 0 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  products:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 30
+      distribution: { kind: fixed, mean: 10.0, min: 1.0, max: 200.0 }
+    schema:
+      name: products
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: category_id, type: bigint, nullable: false }
+        - { name: sku, type: "varchar(40)", nullable: false }
+        - { name: name, type: "varchar(160)", nullable: false }
+        - { name: price, type: "decimal(10,2)", nullable: false }
+        - { name: active, type: boolean, nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: product_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: product_category, columns: [category_id], referenced_table: categories, referenced_columns: [id] }
+    relationships:
+      - { name: product_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+      - { name: product_category, columns: [category_id], references: { table: categories, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      category_id:
+        generator: { kind: relation.foreign_key, relationship: product_category }
+      sku:
+        generator: { kind: commerce.sku }
+      name:
+        generator: { kind: commerce.product_name }
+      price:
+        generator: { kind: decimal, min: 5, max: 500, scale: 2 }
+      active:
+        generator: { kind: boolean, probability: 0.85 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  customers:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 15
+      distribution: { kind: fixed, mean: 5.0, min: 1.0, max: 100.0 }
+    schema:
+      name: customers
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: name, type: "varchar(160)", nullable: false }
+        - { name: email, type: "varchar(255)", nullable: false }
+        - { name: phone, type: "varchar(30)", nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: customer_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+    relationships:
+      - { name: customer_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: person.full_name }
+      email:
+        generator: { kind: internet.email }
+      phone:
+        generator: { kind: phone.number }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  orders:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 30
+      distribution: { kind: fixed, mean: 10.0, min: 1.0, max: 200.0 }
+    schema:
+      name: orders
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: customer_id, type: bigint, nullable: false }
+        - { name: order_number, type: "varchar(40)", nullable: false }
+        - { name: status, type: "varchar(20)", nullable: false }
+        - { name: total, type: "decimal(10,2)", nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: order_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: order_customer, columns: [customer_id], referenced_table: customers, referenced_columns: [id] }
+    relationships:
+      - { name: order_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+      - { name: order_customer, columns: [customer_id], references: { table: customers, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      customer_id:
+        generator: { kind: relation.foreign_key, relationship: order_customer }
+      order_number:
+        generator: { kind: text.word }
+      status:
+        generator:
+          kind: weighted_choice
+          choices:
+            - { value: pending, weight: 0.2 }
+            - { value: paid, weight: 0.5 }
+            - { value: shipped, weight: 0.2 }
+            - { value: cancelled, weight: 0.1 }
+      total:
+        generator: { kind: decimal, min: 20, max: 2000, scale: 2 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 90
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 20.0 }
+    schema:
+      name: order_items
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: product_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(10,2)", nullable: false }
+      relationships:
+        - { name: order_item_order, columns: [order_id], referenced_table: orders, referenced_columns: [id] }
+        - { name: order_item_product, columns: [product_id], referenced_table: products, referenced_columns: [id] }
+    relationships:
+      - { name: order_item_order, columns: [order_id], references: { table: orders, columns: [id] } }
+      - { name: order_item_product, columns: [product_id], references: { table: products, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      order_id:
+        generator: { kind: relation.foreign_key, relationship: order_item_order }
+      product_id:
+        generator: { kind: relation.foreign_key, relationship: order_item_product }
+      quantity:
+        generator: { kind: integer, min: 1, max: 10 }
+      unit_price:
+        generator: { kind: decimal, min: 5, max: 200, scale: 2 }
+
+  projects:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 9
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 50.0 }
+    schema:
+      name: projects
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: owner_id, type: bigint, nullable: false }
+        - { name: name, type: "varchar(160)", nullable: false }
+        - { name: status, type: "varchar(20)", nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: project_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: project_owner, columns: [owner_id], referenced_table: users, referenced_columns: [id] }
+    relationships:
+      - { name: project_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+      - { name: project_owner, columns: [owner_id], references: { table: users, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      owner_id:
+        generator: { kind: relation.foreign_key, relationship: project_owner }
+      name:
+        generator: { kind: text.sentence }
+      status:
+        generator:
+          kind: weighted_choice
+          choices:
+            - { value: planned, weight: 0.2 }
+            - { value: active, weight: 0.6 }
+            - { value: done, weight: 0.2 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  tasks:
+    rows:
+      kind: relation.children
+      parent: projects
+      count: 45
+      distribution: { kind: fixed, mean: 5.0, min: 1.0, max: 50.0 }
+    schema:
+      name: tasks
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: project_id, type: bigint, nullable: false }
+        - { name: assignee_id, type: bigint, nullable: true }
+        - { name: title, type: "varchar(200)", nullable: false }
+        - { name: priority, type: integer, nullable: false }
+        - { name: completed, type: boolean, nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: task_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: task_project, columns: [project_id], referenced_table: projects, referenced_columns: [id] }
+        - { name: task_assignee, columns: [assignee_id], referenced_table: users, referenced_columns: [id] }
+    relationships:
+      - { name: task_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+      - { name: task_project, columns: [project_id], references: { table: projects, columns: [id] } }
+      - { name: task_assignee, columns: [assignee_id], references: { table: users, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      tenant_id:
+        generator: { kind: relation.foreign_key, relationship: task_tenant }
+      assignee_id:
+        generator: { kind: relation.foreign_key, relationship: task_assignee }
+        modifiers:
+          - { kind: null_rate, rate: 0.2 }
+      title:
+        generator: { kind: text.sentence }
+      priority:
+        generator: { kind: integer, min: 0, max: 3 }
+      completed:
+        generator: { kind: boolean, probability: 0.3 }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  folders:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 15
+      distribution: { kind: fixed, mean: 5.0, min: 1.0, max: 100.0 }
+    schema:
+      name: folders
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: parent_id, type: bigint, nullable: true }
+        - { name: name, type: "varchar(120)", nullable: false }
+        - { name: path, type: "varchar(255)", nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+        - { name: updated_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: folder_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+    relationships:
+      - { name: folder_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      # Self-referential parent_id is always NULL — see module header.
+      parent_id:
+        generator: { kind: constant }
+      name:
+        generator: { kind: text.word }
+      path:
+        generator: { kind: text.slug }
+      created_at:
+        generator: { kind: datetime }
+      updated_at:
+        generator: { kind: datetime }
+
+  comments:
+    rows:
+      kind: relation.children
+      parent: tenants
+      count: 30
+      distribution: { kind: fixed, mean: 10.0, min: 1.0, max: 100.0 }
+    schema:
+      name: comments
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: parent_id, type: bigint, nullable: true }
+        - { name: user_id, type: bigint, nullable: false }
+        - { name: commentable_type, type: "varchar(20)", nullable: false }
+        - { name: commentable_id, type: bigint, nullable: false }
+        - { name: body, type: text, nullable: false }
+        - { name: created_at, type: "timestamp without time zone", nullable: false , family: date_time }
+      relationships:
+        - { name: comment_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: comment_user, columns: [user_id], referenced_table: users, referenced_columns: [id] }
+    relationships:
+      - { name: comment_tenant, columns: [tenant_id], references: { table: tenants, columns: [id] } }
+      - { name: comment_user, columns: [user_id], references: { table: users, columns: [id] } }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      # Self-referential parent_id is always NULL — see module header.
+      parent_id:
+        generator: { kind: constant }
+      user_id:
+        generator: { kind: relation.foreign_key, relationship: comment_user }
+      body:
+        generator: { kind: text.paragraph }
+      created_at:
+        generator: { kind: datetime }
+    planners:
+      # Polymorphic: comment attaches to a task or a project, matching the
+      # old generator's commentable_type/commentable_id dispatch.
+      - kind: relation.polymorphic_pair
+        columns: { type: commentable_type, id: commentable_id }
+        targets:
+          - { type: task, table: tasks, weight: 0.7 }
+          - { type: project, table: projects, weight: 0.3 }
