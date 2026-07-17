@@ -33,25 +33,25 @@ println!("{} rows generated", report.rows_written);
 
 Builder methods, matching the CLI flags one for one:
 
-| Method | CLI equivalent |
-| --- | --- |
-| `.input(path)` | `[INPUT]` — profile a dump into a base model |
-| `.config(path)` | `-c, --config` |
-| `.output(path)` | `-o, --output` |
-| `.emit(path)` | `--emit-config` |
-| `.explain(bool)` | `--explain` |
-| `.input_dialect(dialect)` | `--input-dialect` |
-| `.profile_depth(depth)` | `--profile-depth` |
-| `.profile_sample(n)` | `--profile-sample` |
-| `.output_dialect(dialect)` | `--dialect` (default when unset: the model's `output.dialect`, else the source/input dialect (preserve-source), else `mysql`) |
-| `.seed(u64)` | `--seed` |
-| `.mssql_production_style(bool)` | `--mssql-production-style` |
-| `.mssql_go(n)` | `--mssql-go` |
-| `.table_scale(table, factor)` | `--table-scale` (returns `Result<Self, GenerateError>` — a non-finite/negative factor is rejected immediately) |
-| `.compile(CompileOptions)` | `--rows`/`--max-rows`/`--table-rows`/`--tables`/`--exclude` (set as a group via [`CompileOptions`]) |
-| `.verify(bool)` | `--verify` |
-| `.mode(RunMode)` | `--check`/`--dry-run`/(the default `Generate`)/`EmitModel` |
-| `.run()` | executes the request, returning [`GenerateReport`] or a [`GenerateError`] |
+| Method                          | CLI equivalent                                                                                                                |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `.input(path)`                  | `[INPUT]` — profile a dump into a base model                                                                                  |
+| `.config(path)`                 | `-c, --config`                                                                                                                |
+| `.output(path)`                 | `-o, --output`                                                                                                                |
+| `.emit(path)`                   | `--emit-config`                                                                                                               |
+| `.explain(bool)`                | `--explain`                                                                                                                   |
+| `.input_dialect(dialect)`       | `--input-dialect`                                                                                                             |
+| `.profile_depth(depth)`         | `--profile-depth`                                                                                                             |
+| `.profile_sample(n)`            | `--profile-sample`                                                                                                            |
+| `.output_dialect(dialect)`      | `--dialect` (default when unset: the model's `output.dialect`, else the source/input dialect (preserve-source), else `mysql`) |
+| `.seed(u64)`                    | `--seed`                                                                                                                      |
+| `.mssql_production_style(bool)` | `--mssql-production-style`                                                                                                    |
+| `.mssql_go(n)`                  | `--mssql-go`                                                                                                                  |
+| `.table_scale(table, factor)`   | `--table-scale` (returns `Result<Self, GenerateError>` — a non-finite/negative factor is rejected immediately)                |
+| `.compile(CompileOptions)`      | `--rows`/`--max-rows`/`--table-rows`/`--tables`/`--exclude` (set as a group via [`CompileOptions`])                           |
+| `.verify(bool)`                 | `--verify`                                                                                                                    |
+| `.mode(RunMode)`                | `--check`/`--dry-run`/(the default `Generate`)/`EmitModel`                                                                    |
+| `.run()`                        | executes the request, returning [`GenerateReport`] or a [`GenerateError`]                                                     |
 
 `GenerateReport` carries `rows_written`, `effective_seed` (always populated,
 even for an unseeded run — the drawn entropy is recorded so the run can be
@@ -102,7 +102,7 @@ Both examples above are exercised as real, compiled doctests in
    `SyntheticModel` and [`CompileOptions`] (the library form of `--scale`,
    `--rows`, `--max-rows`, `--table-rows`/`--table-scale`, `--tables`,
    `--exclude`, and `--seed`), and returns a `Result<GenerationPlan,
-   DiagnosticBag>`. Compilation never short-circuits on the first error —
+DiagnosticBag>`. Compilation never short-circuits on the first error —
    every independent diagnostic is collected. Warnings survive success in
    `GenerationPlan::diagnostics`.
 

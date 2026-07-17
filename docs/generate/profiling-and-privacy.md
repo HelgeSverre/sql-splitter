@@ -45,7 +45,7 @@ It fires on any column whose rule is `constant`, `weighted_choice`, or
 
 Inference never proposes `constant`/`weighted_choice`/`observed_sample` for
 a credential-shaped column (see [Credentials](#credentials) below) — but if
-you *explicitly* override a credential column to one of those kinds in a
+you _explicitly_ override a credential column to one of those kinds in a
 `kind: overrides` document, the compiler permits it. Nothing in the merge or
 compile pipeline special-cases credential columns to reject this — it
 simply surfaces through `GEN-SOURCE-VALUES` like any other literal-persisting
@@ -64,7 +64,7 @@ inference (`defaults.inference: schema` mode does not yet apply this — see
   every relevant SQL type family (text, bytes, JSON, UUID) and forces a
   synthetic-only `credential.*` generator — never `observed_sample`,
   `weighted_choice`, or a source `DEFAULT`.
-- Token-shaped credentials may preserve the *shape* of the observed value
+- Token-shaped credentials may preserve the _shape_ of the observed value
   (length, character class, prefix) without retaining any of its content.
 - Private-key-like fields render an obviously invalid placeholder
   (`credential.placeholder`'s fixed string,
@@ -96,15 +96,15 @@ To guarantee a model reproduces nothing from its source dump:
 `--profile-depth basic|full` (default `basic`) bounds how much of a source
 dump profiling examines per table before compiling a model:
 
-| Capability | `basic` | `full` |
-| --- | --- | --- |
-| Sampled rows per table | 10,000 | 100,000 |
-| Retained top categorical values | 256 | 256 |
-| Exact distinct-value tracking before switching to sketch-only | 100,000 | 100,000 |
-| Numeric/temporal buckets | 64 | 64 |
-| Candidate column pairs for correlation | schema/name candidates only | 32 data-ranked pairs |
-| Row counts / null counts | complete scan | complete scan |
-| Declared schema / FKs | complete scan | complete scan |
+| Capability                                                    | `basic`                     | `full`               |
+| ------------------------------------------------------------- | --------------------------- | -------------------- |
+| Sampled rows per table                                        | 10,000                      | 100,000              |
+| Retained top categorical values                               | 256                         | 256                  |
+| Exact distinct-value tracking before switching to sketch-only | 100,000                     | 100,000              |
+| Numeric/temporal buckets                                      | 64                          | 64                   |
+| Candidate column pairs for correlation                        | schema/name candidates only | 32 data-ranked pairs |
+| Row counts / null counts                                      | complete scan               | complete scan        |
+| Declared schema / FKs                                         | complete scan               | complete scan        |
 
 Row counts, null counts, and the declared schema are always exact — they
 come from a complete scan regardless of depth. Everything else (categorical
@@ -148,7 +148,7 @@ The generator is hardened against real dumps by a **survey**: it is run
 end-to-end (profile → infer → compile → generate → verify → validate) against
 authorized local dumps and stress fixtures, and every parser/schema/inference
 failure is turned into a **minimal synthetic regression fixture** — one that
-reproduces the structural *shape* that failed using invented table/column names
+reproduces the structural _shape_ that failed using invented table/column names
 and values, never anything copied from a source dump. See
 `tests/fixtures/generate/realworld_shapes.sql` for the pattern.
 

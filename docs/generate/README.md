@@ -44,14 +44,14 @@ sql-splitter generate production.sql \
 
 ## Documentation map
 
-| Page | Covers |
-| --- | --- |
-| [Model reference](model-reference.md) | Every YAML field: top-level, table, schema, row, relationship, column, generator/modifier/planner attachment. |
-| [Generators](generators.md) | The generator and modifier catalog: kinds, fields, defaults, accepted types. |
-| [Planners](planners.md) | Multi-column and cross-table planners, with three fully worked examples. |
-| [Profiling and privacy](profiling-and-privacy.md) | What profiling observes, how inference works, and the honest privacy story. |
-| [Library API](library-api.md) | The Rust convenience builder and the staged registry → compiler → engine → renderer API. |
-| [Diagnostics](diagnostics.md) | Stable `GEN-*` diagnostic codes. |
+| Page                                              | Covers                                                                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| [Model reference](model-reference.md)             | Every YAML field: top-level, table, schema, row, relationship, column, generator/modifier/planner attachment. |
+| [Generators](generators.md)                       | The generator and modifier catalog: kinds, fields, defaults, accepted types.                                  |
+| [Planners](planners.md)                           | Multi-column and cross-table planners, with three fully worked examples.                                      |
+| [Profiling and privacy](profiling-and-privacy.md) | What profiling observes, how inference works, and the honest privacy story.                                   |
+| [Library API](library-api.md)                     | The Rust convenience builder and the staged registry → compiler → engine → renderer API.                      |
+| [Diagnostics](diagnostics.md)                     | Stable `GEN-*` diagnostic codes.                                                                              |
 
 ## How it fits together
 
@@ -78,11 +78,11 @@ precedence rules.
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| `0` | Successful generation, `--check`, `--dry-run`, or `--verify`. |
-| `1` | Invalid model, a `--strict` warning, a runtime/I/O failure, or a `--verify` failure. |
-| `2` | Invalid CLI arguments or conflicting flags. |
+| Code | Meaning                                                                              |
+| ---- | ------------------------------------------------------------------------------------ |
+| `0`  | Successful generation, `--check`, `--dry-run`, or `--verify`.                        |
+| `1`  | Invalid model, a `--strict` warning, a runtime/I/O failure, or a `--verify` failure. |
+| `2`  | Invalid CLI arguments or conflicting flags.                                          |
 
 ## See also
 

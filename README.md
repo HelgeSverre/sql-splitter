@@ -539,37 +539,37 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 `generate` produces **synthetic**, not anonymized, SQL data — from a hand-authored YAML model, a profiled dump, or both. See [`docs/generate/`](docs/generate/README.md) for the full model language, generator/planner catalog, and privacy notes.
 
-| Flag                        | Description                                                        | Default             |
-| ---------------------------- | ------------------------------------------------------------------ | -------------------- |
-| `[INPUT]`                    | SQL dump or schema to profile (optional with a complete model)     | —                     |
-| `-c, --config`               | `kind: model` or `kind: overrides` YAML document                   | —                     |
-| `--emit-config`               | Write the resolved model as YAML instead of generating              | —                     |
-| `-o, --output`                | Output SQL file; `-` for stdout                                    | stdout                |
-| `--profile-depth`             | Profiling depth: `basic`, `full`                                   | `basic`               |
-| `--profile-sample`            | Row sample size while profiling                                    | depth default         |
-| `--input-dialect`             | Dialect of `[INPUT]`, if profiling                                 | auto-detect           |
-| `--dialect`                   | Output SQL dialect                                                  | preserve source/model |
-| `--scale`                     | Global multiplicative row-count scale                               | —                     |
-| `--rows`                      | Global absolute root row count                                      | —                     |
-| `--table-rows`                | Per-table absolute row-count override (`table=count`, repeatable)   | —                     |
-| `--table-scale`               | Per-table row-count scale override (`table=factor`, repeatable)     | —                     |
-| `--max-rows`                  | Cap applied to every table's row count, last                        | —                     |
-| `--tables`                    | Only generate these tables (comma-separated globs)                  | all                   |
-| `--exclude`                   | Exclude these tables (comma-separated globs)                        | none                  |
-| `--seed`                      | Run root seed, overriding the model's own `seed:`                   | —                     |
-| `--randomize`                 | Use a fresh random seed instead of the model's                      | —                     |
-| `--schema-only` / `--data-only` | Render only DDL, or only row data                                 | both                  |
-| `--batch-size`                | Rows per `INSERT`/`COPY` batch                                      | `1000`                |
-| `--no-copy`                   | Force multi-row `INSERT` for PostgreSQL instead of `COPY`            | —                     |
-| `--mssql-production-style`    | `[dbo].` names, named clustered PK, `ON [PRIMARY]`, ANSI header (requires `--dialect mssql`) | — |
-| `--mssql-go`                  | Emit `GO` every N INSERT batches (requires `--dialect mssql`)        | —                     |
-| `--check`                     | Validate the model and exit; writes no SQL                          | —                     |
-| `--dry-run`                   | Compile and report resolved row counts; writes no SQL                | —                     |
-| `--verify`                    | Generate to protected temp storage, audit, then publish atomically   | —                     |
-| `--explain`                   | Include inference reason/confidence/precedence in the report        | —                     |
-| `--strict`                    | Treat model warnings as errors                                      | —                     |
-| `--json`                      | Output the report as JSON (owns stdout)                              | —                     |
-| `--quiet`                     | Suppress the non-JSON summary report                                | —                     |
+| Flag                            | Description                                                                                  | Default               |
+| ------------------------------- | -------------------------------------------------------------------------------------------- | --------------------- |
+| `[INPUT]`                       | SQL dump or schema to profile (optional with a complete model)                               | —                     |
+| `-c, --config`                  | `kind: model` or `kind: overrides` YAML document                                             | —                     |
+| `--emit-config`                 | Write the resolved model as YAML instead of generating                                       | —                     |
+| `-o, --output`                  | Output SQL file; `-` for stdout                                                              | stdout                |
+| `--profile-depth`               | Profiling depth: `basic`, `full`                                                             | `basic`               |
+| `--profile-sample`              | Row sample size while profiling                                                              | depth default         |
+| `--input-dialect`               | Dialect of `[INPUT]`, if profiling                                                           | auto-detect           |
+| `--dialect`                     | Output SQL dialect                                                                           | preserve source/model |
+| `--scale`                       | Global multiplicative row-count scale                                                        | —                     |
+| `--rows`                        | Global absolute root row count                                                               | —                     |
+| `--table-rows`                  | Per-table absolute row-count override (`table=count`, repeatable)                            | —                     |
+| `--table-scale`                 | Per-table row-count scale override (`table=factor`, repeatable)                              | —                     |
+| `--max-rows`                    | Cap applied to every table's row count, last                                                 | —                     |
+| `--tables`                      | Only generate these tables (comma-separated globs)                                           | all                   |
+| `--exclude`                     | Exclude these tables (comma-separated globs)                                                 | none                  |
+| `--seed`                        | Run root seed, overriding the model's own `seed:`                                            | —                     |
+| `--randomize`                   | Use a fresh random seed instead of the model's                                               | —                     |
+| `--schema-only` / `--data-only` | Render only DDL, or only row data                                                            | both                  |
+| `--batch-size`                  | Rows per `INSERT`/`COPY` batch                                                               | `1000`                |
+| `--no-copy`                     | Force multi-row `INSERT` for PostgreSQL instead of `COPY`                                    | —                     |
+| `--mssql-production-style`      | `[dbo].` names, named clustered PK, `ON [PRIMARY]`, ANSI header (requires `--dialect mssql`) | —                     |
+| `--mssql-go`                    | Emit `GO` every N INSERT batches (requires `--dialect mssql`)                                | —                     |
+| `--check`                       | Validate the model and exit; writes no SQL                                                   | —                     |
+| `--dry-run`                     | Compile and report resolved row counts; writes no SQL                                        | —                     |
+| `--verify`                      | Generate to protected temp storage, audit, then publish atomically                           | —                     |
+| `--explain`                     | Include inference reason/confidence/precedence in the report                                 | —                     |
+| `--strict`                      | Treat model warnings as errors                                                               | —                     |
+| `--json`                        | Output the report as JSON (owns stdout)                                                      | —                     |
+| `--quiet`                       | Suppress the non-JSON summary report                                                         | —                     |
 
 ### Query Options
 

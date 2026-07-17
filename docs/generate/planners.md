@@ -12,7 +12,8 @@ tables:
   sessions:
     planners:
       - kind: temporal.interval
-        columns: { start: started_at, end: ended_at, duration: duration_seconds }
+        columns:
+          { start: started_at, end: ended_at, duration: duration_seconds }
         # ...
 ```
 
@@ -47,19 +48,19 @@ planners:
     timezone: preserve # preserve | utc | a named IANA zone
 ```
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `columns.start` | required | Start timestamp column. |
-| `columns.end` | required | End timestamp column (nullable if `open_probability > 0`). |
-| `columns.duration` | required | Duration column, in `duration.unit`. |
-| `columns.open` | optional | A boolean flag column marking an open (not-yet-ended) row. |
-| `start.kind` | `range` | `range`/`observed_range` (uniform between `min`/`max`) or `monotonic` (`step_seconds`, default 1). |
-| `start.min`/`start.max` | required for range kinds | Parseable timestamps (RFC 3339, `%Y-%m-%d %H:%M:%S`/`T`, or a bare date). |
-| `duration.kind` | `uniform` | `fixed` (`value`), `normal` (`mean`, `stddev`, `min`, `max`), `histogram`/`observed` (`min`, `max` — see caveat below), or `uniform` (`min`, `max`). |
-| `duration.unit` | `seconds` | Any of nanosecond/microsecond/millisecond/second/minute/hour/day (and common abbreviations). |
-| `open_probability` | `0.0` | Fraction of rows left open (null `end`). Requires a nullable `end` column if `> 0`. |
-| `end_inclusive` | `false` | If `true`, requires a minimum duration of at least one unit (a zero-length inclusive interval is otherwise impossible). |
-| `timezone` | `preserve` | `preserve`/`utc` renders UTC with no offset; a named IANA zone renders an explicit DST-correct offset. |
+| Field                   | Default                  | Meaning                                                                                                                                              |
+| ----------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `columns.start`         | required                 | Start timestamp column.                                                                                                                              |
+| `columns.end`           | required                 | End timestamp column (nullable if `open_probability > 0`).                                                                                           |
+| `columns.duration`      | required                 | Duration column, in `duration.unit`.                                                                                                                 |
+| `columns.open`          | optional                 | A boolean flag column marking an open (not-yet-ended) row.                                                                                           |
+| `start.kind`            | `range`                  | `range`/`observed_range` (uniform between `min`/`max`) or `monotonic` (`step_seconds`, default 1).                                                   |
+| `start.min`/`start.max` | required for range kinds | Parseable timestamps (RFC 3339, `%Y-%m-%d %H:%M:%S`/`T`, or a bare date).                                                                            |
+| `duration.kind`         | `uniform`                | `fixed` (`value`), `normal` (`mean`, `stddev`, `min`, `max`), `histogram`/`observed` (`min`, `max` — see caveat below), or `uniform` (`min`, `max`). |
+| `duration.unit`         | `seconds`                | Any of nanosecond/microsecond/millisecond/second/minute/hour/day (and common abbreviations).                                                         |
+| `open_probability`      | `0.0`                    | Fraction of rows left open (null `end`). Requires a nullable `end` column if `> 0`.                                                                  |
+| `end_inclusive`         | `false`                  | If `true`, requires a minimum duration of at least one unit (a zero-length inclusive interval is otherwise impossible).                              |
+| `timezone`              | `preserve`               | `preserve`/`utc` renders UTC with no offset; a named IANA zone renders an explicit DST-correct offset.                                               |
 
 Closed rows always satisfy `end = start + duration` (subject to
 `end_inclusive`); open rows have a `null` end and a coherent open flag.
@@ -100,16 +101,16 @@ planners:
     active_statuses: [queued, running]
 ```
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `columns.total` | required | Total-count column. |
-| `columns.processed`/`succeeded`/`failed`/`pending` | optional | Counter columns; only configured ones are written. |
-| `columns.status`/`completed_at` | optional | Status label and completion timestamp. |
-| `total.kind` | `uniform` | `fixed` (`value`) or `uniform` (`min`, `max`, both ≥0). |
-| `progress.kind` | `mixture` | `mixture` (weighted pick of complete/in_progress/not_started), or a fixed state (`complete`/`in_progress`/`not_started`). `observed` is rejected under `partition: exact` (no profile evidence is threaded to planners yet) and falls back to a default 0.7/0.25/0.05 mixture under `allow_unclassified`. |
-| `partition` | `exact` | `exact`: `succeeded + failed = processed` exactly. `allow_unclassified`: adds an `unclassified_ratio` (default 0.1) so `succeeded + failed + unclassified = processed`. |
-| `success_ratio` | `0.9` | Share of `processed` that succeeds (vs. fails), before partition rounding. |
-| `completed_statuses`/`active_statuses` | required if `status` is configured and that state is reachable | Status vocabulary for the completed/active state groups. |
+| Field                                              | Default                                                        | Meaning                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `columns.total`                                    | required                                                       | Total-count column.                                                                                                                                                                                                                                                                                       |
+| `columns.processed`/`succeeded`/`failed`/`pending` | optional                                                       | Counter columns; only configured ones are written.                                                                                                                                                                                                                                                        |
+| `columns.status`/`completed_at`                    | optional                                                       | Status label and completion timestamp.                                                                                                                                                                                                                                                                    |
+| `total.kind`                                       | `uniform`                                                      | `fixed` (`value`) or `uniform` (`min`, `max`, both ≥0).                                                                                                                                                                                                                                                   |
+| `progress.kind`                                    | `mixture`                                                      | `mixture` (weighted pick of complete/in_progress/not_started), or a fixed state (`complete`/`in_progress`/`not_started`). `observed` is rejected under `partition: exact` (no profile evidence is threaded to planners yet) and falls back to a default 0.7/0.25/0.05 mixture under `allow_unclassified`. |
+| `partition`                                        | `exact`                                                        | `exact`: `succeeded + failed = processed` exactly. `allow_unclassified`: adds an `unclassified_ratio` (default 0.1) so `succeeded + failed + unclassified = processed`.                                                                                                                                   |
+| `success_ratio`                                    | `0.9`                                                          | Share of `processed` that succeeds (vs. fails), before partition rounding.                                                                                                                                                                                                                                |
+| `completed_statuses`/`active_statuses`             | required if `status` is configured and that state is reachable | Status vocabulary for the completed/active state groups.                                                                                                                                                                                                                                                  |
 
 Partitioning uses exact largest-remainder integer apportionment — counters
 never drift from their equations due to floating-point rounding. Completed
@@ -148,20 +149,20 @@ planners:
       weights: [0.05, 0.15, 0.80]
 ```
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `children` | required | Name of the child (line-item) table. |
-| `relationship` | required | Name of the FK relationship declared on the child table, referencing this parent. |
-| `columns.subtotal`/`columns.total` | required | Parent money columns. |
-| `columns.discount`/`columns.tax`/`columns.shipping` | optional | Only written if configured. |
-| `child_columns.quantity`/`unit_price`/`line_total` | required | Child columns. |
-| `child_columns.discount`/`child_columns.tax` | optional | Only written if configured. |
-| `currency_scale` | required | Decimal scale for every money column; must match each money column's own declared scale exactly (`GEN-ORDER-FAMILY-SCALE` otherwise). |
-| `rounding` | required | `largest_remainder` (residuals distributed so child sums equal the parent exactly), `last_line`, or `bankers`. |
-| `quantity` | `{ min: 1, max: 1 }` | Per-line quantity range. |
-| `unit_price` | `100`–`10,000` minor units | `{ min_minor, max_minor }` or `{ min, max }` (major units, converted at `currency_scale`). |
-| `tax`/`discount` | zero rate | `{ kind: fixed_rate, rate }` or a weighted `{ rates: [...], weights: [...] }` choice. |
-| `shipping` | `0` | `{ amount_minor }` or `{ amount }`. |
+| Field                                               | Default                    | Meaning                                                                                                                               |
+| --------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `children`                                          | required                   | Name of the child (line-item) table.                                                                                                  |
+| `relationship`                                      | required                   | Name of the FK relationship declared on the child table, referencing this parent.                                                     |
+| `columns.subtotal`/`columns.total`                  | required                   | Parent money columns.                                                                                                                 |
+| `columns.discount`/`columns.tax`/`columns.shipping` | optional                   | Only written if configured.                                                                                                           |
+| `child_columns.quantity`/`unit_price`/`line_total`  | required                   | Child columns.                                                                                                                        |
+| `child_columns.discount`/`child_columns.tax`        | optional                   | Only written if configured.                                                                                                           |
+| `currency_scale`                                    | required                   | Decimal scale for every money column; must match each money column's own declared scale exactly (`GEN-ORDER-FAMILY-SCALE` otherwise). |
+| `rounding`                                          | required                   | `largest_remainder` (residuals distributed so child sums equal the parent exactly), `last_line`, or `bankers`.                        |
+| `quantity`                                          | `{ min: 1, max: 1 }`       | Per-line quantity range.                                                                                                              |
+| `unit_price`                                        | `100`–`10,000` minor units | `{ min_minor, max_minor }` or `{ min, max }` (major units, converted at `currency_scale`).                                            |
+| `tax`/`discount`                                    | zero rate                  | `{ kind: fixed_rate, rate }` or a weighted `{ rates: [...], weights: [...] }` choice.                                                 |
+| `shipping`                                          | `0`                        | `{ amount_minor }` or `{ amount }`.                                                                                                   |
 
 **The line count is not configured on the planner.** It comes entirely from
 the child table's own `rows.distribution` (any `kind`: `fixed`, `uniform`,
@@ -347,7 +348,14 @@ A coherent name/extension/MIME-type/size/hash tuple for a file-metadata row.
 ```yaml
 planners:
   - kind: file.metadata
-    columns: { name: file_name, extension: ext, mime_type: mime, size: size_bytes, hash: checksum }
+    columns:
+      {
+        name: file_name,
+        extension: ext,
+        mime_type: mime,
+        size: size_bytes,
+        hash: checksum,
+      }
     extensions: [pdf, jpg, png, docx]
     size: { min: 1024, max: 5000000 }
     hash_kind: sha256 # md5 | sha1 | sha256 | sha512

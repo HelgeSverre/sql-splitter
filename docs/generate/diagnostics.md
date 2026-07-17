@@ -24,16 +24,16 @@ promoted to a failure under `--strict`).
 
 ## Warnings
 
-| Code | Meaning |
-| --- | --- |
-| `GEN-SOURCE-FINGERPRINT` | When merging a `kind: overrides` document onto a base model, the override's `source.fingerprint` differs from the base model's recorded `source.fingerprint`, under an effective `fingerprint_policy: warn`. `require` promotes this to an error; `ignore` suppresses it. This is a YAML-vs-YAML comparison during the overrides merge — **not** a check against a freshly profiled dump (see the note below). |
-| `GEN-CONFIG-COMPLETE-MODEL` | A complete `kind: model` config was supplied alongside a source dump; the model is authoritative and the profiled base is set aside. |
-| `GEN-DETACHED-DEPENDENCY` | A nullable FK to an excluded table is detached; its constraint is omitted from rendered DDL. `--strict` promotes this to a failure. |
-| `GEN-MAX-ROWS-CAPPED` | `--max-rows` actually reduced a table's resolved row count. |
-| `GEN-PROFILE` / `GEN-INFER` | Fallback codes for a profiler/inference-stage warning that doesn't carry its own more specific code. |
-| `GEN-LOSSY-TYPE` | A cross-dialect type conversion during rendering was lossy. `--strict` can fail the run. |
-| `GEN-RENDER-WARNING` | Any other renderer-stage warning. |
-| `GEN-VERIFY-NOTCHECKED` | `--verify` passed, but one or more capabilities could not be exactly checked (see [Profiling and privacy — Verification](profiling-and-privacy.md#verification)). |
+| Code                        | Meaning                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GEN-SOURCE-FINGERPRINT`    | When merging a `kind: overrides` document onto a base model, the override's `source.fingerprint` differs from the base model's recorded `source.fingerprint`, under an effective `fingerprint_policy: warn`. `require` promotes this to an error; `ignore` suppresses it. This is a YAML-vs-YAML comparison during the overrides merge — **not** a check against a freshly profiled dump (see the note below). |
+| `GEN-CONFIG-COMPLETE-MODEL` | A complete `kind: model` config was supplied alongside a source dump; the model is authoritative and the profiled base is set aside.                                                                                                                                                                                                                                                                           |
+| `GEN-DETACHED-DEPENDENCY`   | A nullable FK to an excluded table is detached; its constraint is omitted from rendered DDL. `--strict` promotes this to a failure.                                                                                                                                                                                                                                                                            |
+| `GEN-MAX-ROWS-CAPPED`       | `--max-rows` actually reduced a table's resolved row count.                                                                                                                                                                                                                                                                                                                                                    |
+| `GEN-PROFILE` / `GEN-INFER` | Fallback codes for a profiler/inference-stage warning that doesn't carry its own more specific code.                                                                                                                                                                                                                                                                                                           |
+| `GEN-LOSSY-TYPE`            | A cross-dialect type conversion during rendering was lossy. `--strict` can fail the run.                                                                                                                                                                                                                                                                                                                       |
+| `GEN-RENDER-WARNING`        | Any other renderer-stage warning.                                                                                                                                                                                                                                                                                                                                                                              |
+| `GEN-VERIFY-NOTCHECKED`     | `--verify` passed, but one or more capabilities could not be exactly checked (see [Profiling and privacy — Verification](profiling-and-privacy.md#verification)).                                                                                                                                                                                                                                              |
 
 `GEN-UNUSED-COLUMN` also appears in `DiagnosticBag`'s own unit tests as a
 warning-severity example code, but nothing in the compiler currently emits
@@ -47,7 +47,7 @@ to stderr instead, precisely so `--strict` cannot turn an allowed,
 flagged use into a blocking failure.
 
 `GEN-SOURCE-FINGERPRINT` only ever fires from the overrides-merge comparison
-above. Automatic dump-fingerprint drift detection during *profiling* — computing
+above. Automatic dump-fingerprint drift detection during _profiling_ — computing
 a fingerprint from a `generate <dump>` input and comparing it against a model's
 recorded `source.fingerprint` — is **not yet implemented**: the profiling path
 records no fingerprint, so a dump-input run raises no fingerprint diagnostic. It
@@ -55,45 +55,45 @@ is a planned/deferred feature.
 
 ## Config, import, and merge errors
 
-| Code | Meaning |
-| --- | --- |
-| `GEN-CONFIG-IO` | Reading the root or an imported YAML file failed. |
-| `GEN-CONFIG-PARSE` | YAML parse failure (including a duplicate mapping key). |
-| `GEN-CONFIG-ROLE` | The merged document fails its role-specific typed parse (wrong `kind`, unknown field). |
-| `GEN-IMPORT-REMOTE` | An import path is absolute or contains `://` — no remote imports. |
-| `GEN-IMPORT-KIND` | An imported file's `kind` isn't `overrides`. |
-| `GEN-IMPORT-NESTED` | An imported file declares its own `imports:` — imports cannot nest. |
-| `GEN-IMPORT-COLLISION` | Two imports define the same configuration path; `related` names both files. |
-| `GEN-MISSING-TABLE` | An `overrides` document names a table absent from the base model. |
-| `GEN-MISSING-COLUMN` | An `overrides` document names a column absent from the table's schema. |
-| `GEN-SCHEMA-MISMATCH` | An `overrides` schema assertion (`name`/`create_statement`) disagrees with the base. |
-| `GEN-INCOMPLETE-ROWS` | An `overrides` `rows:` block switches row-count `kind` but omits a field that kind needs, with no base fallback. |
-| `GEN-OVERRIDES-NO-BASE` | A `kind: overrides` config was given with no source dump or base model to apply it to. |
+| Code                    | Meaning                                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `GEN-CONFIG-IO`         | Reading the root or an imported YAML file failed.                                                                |
+| `GEN-CONFIG-PARSE`      | YAML parse failure (including a duplicate mapping key).                                                          |
+| `GEN-CONFIG-ROLE`       | The merged document fails its role-specific typed parse (wrong `kind`, unknown field).                           |
+| `GEN-IMPORT-REMOTE`     | An import path is absolute or contains `://` — no remote imports.                                                |
+| `GEN-IMPORT-KIND`       | An imported file's `kind` isn't `overrides`.                                                                     |
+| `GEN-IMPORT-NESTED`     | An imported file declares its own `imports:` — imports cannot nest.                                              |
+| `GEN-IMPORT-COLLISION`  | Two imports define the same configuration path; `related` names both files.                                      |
+| `GEN-MISSING-TABLE`     | An `overrides` document names a table absent from the base model.                                                |
+| `GEN-MISSING-COLUMN`    | An `overrides` document names a column absent from the table's schema.                                           |
+| `GEN-SCHEMA-MISMATCH`   | An `overrides` schema assertion (`name`/`create_statement`) disagrees with the base.                             |
+| `GEN-INCOMPLETE-ROWS`   | An `overrides` `rows:` block switches row-count `kind` but omits a field that kind needs, with no base fallback. |
+| `GEN-OVERRIDES-NO-BASE` | A `kind: overrides` config was given with no source dump or base model to apply it to.                           |
 
 ## Selection, counts, and dependencies
 
-| Code | Meaning |
-| --- | --- |
-| `GEN-COUNT-CONTROL-CONFLICT` | Both `--scale` and `--rows` were given (also a clap-level conflict). |
-| `GEN-TABLE-COUNT-CONFLICT` | A table is matched by both `--table-rows` and `--table-scale`. |
-| `GEN-ROWS-CYCLE` | `relation.children` tables form a row-count dependency cycle. |
-| `GEN-ROWS-OBSERVED-MISSING` | `rows.kind: observed` has no source/profile to resolve its count from. |
-| `GEN-CHILD-COUNT-IMPOSSIBLE` | A resolved child count is below `parent_count × distribution.min` — an impossible per-parent minimum. |
-| `GEN-EXCLUDED-DEPENDENCY` | A selected table's required dependency (a non-null FK, a `relation.children` parent, a polymorphic target) was excluded. |
-| `GEN-INVALID-GLOB` | A `--tables`/`--exclude` pattern fails to compile as a glob. |
+| Code                         | Meaning                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `GEN-COUNT-CONTROL-CONFLICT` | Both `--scale` and `--rows` were given (also a clap-level conflict).                                                     |
+| `GEN-TABLE-COUNT-CONFLICT`   | A table is matched by both `--table-rows` and `--table-scale`.                                                           |
+| `GEN-ROWS-CYCLE`             | `relation.children` tables form a row-count dependency cycle.                                                            |
+| `GEN-ROWS-OBSERVED-MISSING`  | `rows.kind: observed` has no source/profile to resolve its count from.                                                   |
+| `GEN-CHILD-COUNT-IMPOSSIBLE` | A resolved child count is below `parent_count × distribution.min` — an impossible per-parent minimum.                    |
+| `GEN-EXCLUDED-DEPENDENCY`    | A selected table's required dependency (a non-null FK, a `relation.children` parent, a polymorphic target) was excluded. |
+| `GEN-INVALID-GLOB`           | A `--tables`/`--exclude` pattern fails to compile as a glob.                                                             |
 
 ## Ownership, types, and cycles
 
-| Code | Meaning |
-| --- | --- |
-| `GEN-COLUMN-OWNER-CONFLICT` | Two generators/planners claim the same column. |
-| `GEN-COLUMN-OWNER-MISSING` | No rule and no structural fact supplies a column's value. |
-| `GEN-COLUMN-CYCLE` | The column/planner read→write dependency graph has a cycle no single planner owns end-to-end. |
-| `GEN-GENERATOR-UNKNOWN` / `GEN-MODIFIER-UNKNOWN` / `GEN-PLANNER-UNKNOWN` | `kind:` names a generator/modifier/planner not registered. |
-| `GEN-GENERATOR-TYPE` / `GEN-MODIFIER-TYPE` | The rule's descriptor doesn't accept the column's SQL type family. |
-| `GEN-RELATIONSHIP-UNKNOWN` | A planner's `relationship:` argument names a relationship not declared on that table. |
-| `GEN-FOREIGN-KEY-UNRESOLVED` | A relationship-owned FK column has no resolvable value source. |
-| `GEN-KEY-DOMAIN-UNSUPPORTED` | A relationship/planner targets a parent key generator that isn't a dense integer domain (only bare integer PK, `sequence`, and `uuid` are supported). **Note:** unlike the other codes here, this one is raised at *generation* time as a runtime error string inside `GenerateError::InvalidInput` (the engine builds key domains only when it runs) — it is **not** a compile-time `Diagnostic`, so it does not appear in the `--json` `diagnostics` array. It surfaces as the command's error message and non-zero exit instead. |
+| Code                                                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GEN-COLUMN-OWNER-CONFLICT`                                              | Two generators/planners claim the same column.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `GEN-COLUMN-OWNER-MISSING`                                               | No rule and no structural fact supplies a column's value.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `GEN-COLUMN-CYCLE`                                                       | The column/planner read→write dependency graph has a cycle no single planner owns end-to-end.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `GEN-GENERATOR-UNKNOWN` / `GEN-MODIFIER-UNKNOWN` / `GEN-PLANNER-UNKNOWN` | `kind:` names a generator/modifier/planner not registered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `GEN-GENERATOR-TYPE` / `GEN-MODIFIER-TYPE`                               | The rule's descriptor doesn't accept the column's SQL type family.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `GEN-RELATIONSHIP-UNKNOWN`                                               | A planner's `relationship:` argument names a relationship not declared on that table.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `GEN-FOREIGN-KEY-UNRESOLVED`                                             | A relationship-owned FK column has no resolvable value source.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `GEN-KEY-DOMAIN-UNSUPPORTED`                                             | A relationship/planner targets a parent key generator that isn't a dense integer domain (only bare integer PK, `sequence`, and `uuid` are supported). **Note:** unlike the other codes here, this one is raised at _generation_ time as a runtime error string inside `GenerateError::InvalidInput` (the engine builds key domains only when it runs) — it is **not** a compile-time `Diagnostic`, so it does not appear in the `--json` `diagnostics` array. It surfaces as the command's error message and non-zero exit instead. |
 
 ## Generator and modifier argument errors
 
@@ -125,11 +125,11 @@ Each planner validates its own argument shape at compile time (see
 
 ## Registry (extension registration)
 
-| Code | Meaning |
-| --- | --- |
-| `GEN-REGISTRY-DUPLICATE` | A generator/modifier/planner kind name is registered twice. |
-| `GEN-REGISTRY-ALIAS-DUPLICATE` | An alias is registered twice. |
-| `GEN-REGISTRY-ALIAS-SHADOWS-KIND` | An alias collides with an existing primary kind name. |
+| Code                              | Meaning                                                     |
+| --------------------------------- | ----------------------------------------------------------- |
+| `GEN-REGISTRY-DUPLICATE`          | A generator/modifier/planner kind name is registered twice. |
+| `GEN-REGISTRY-ALIAS-DUPLICATE`    | An alias is registered twice.                               |
+| `GEN-REGISTRY-ALIAS-SHADOWS-KIND` | An alias collides with an existing primary kind name.       |
 
 ## See also
 

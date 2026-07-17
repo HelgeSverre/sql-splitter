@@ -96,10 +96,10 @@ evidence without freezing profiler internals around an unbuilt consumer.
 **Released**: 2025-12-20  
 **Theme**: Deterministic fixtures + split/merge roundtrip
 
-| Feature                 | Status  | Notes                  |
-| ----------------------- | ------- | ---------------------- |
+| Feature                 | Status              | Notes                                                                                                              |
+| ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | **Test Data Generator** | ✅ Done, superseded | Was `crates/test_data_gen`; removed and replaced by the `generate` command (see "Synthetic Data Generation" below) |
-| **Merge command**       | ✅ Done | `src/merger/`          |
+| **Merge command**       | ✅ Done             | `src/merger/`                                                                                                      |
 
 **Delivered:**
 
@@ -863,15 +863,15 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ### Upcoming Features (v1.16+)
 
-| Version | Features                  | Status   |
-| ------- | ------------------------- | -------- |
-| v1.16.0 | Zip Input + Adaptive I/O  | Released |
+| Version | Features                               | Status      |
+| ------- | -------------------------------------- | ----------- |
+| v1.16.0 | Zip Input + Adaptive I/O               | Released    |
 | vNext   | Synthetic Data Generation (`generate`) | Implemented |
-| v1.17.0 | Enum Conversion           | Planned  |
-| v1.18.0 | Migrate                   | Planned  |
-| v1.19.0 | DBML                      | Planned  |
-| v2.0.0  | Parallel                  | Planned  |
-| v2.1.0  | Infer                     | Planned  |
+| v1.17.0 | Enum Conversion                        | Planned     |
+| v1.18.0 | Migrate                                | Planned     |
+| v1.19.0 | DBML                                   | Planned     |
+| v2.0.0  | Parallel                               | Planned     |
+| v2.1.0  | Infer                                  | Planned     |
 
 ---
 

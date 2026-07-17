@@ -219,9 +219,9 @@ tenant relationships, geo coordinates, file metadata).
 can replay a literal value observed in a source dump — it never prints the
 values themselves.
 
-**Choosing `generate` vs `redact`:** use `generate` to *create* new synthetic
+**Choosing `generate` vs `redact`:** use `generate` to _create_ new synthetic
 data (CI fixtures, load testing, seeding an empty dev database) from a model
-or an inferred dump shape. Use `redact` to *transform existing real data* you
+or an inferred dump shape. Use `redact` to _transform existing real data_ you
 must keep structurally identical while removing/replacing sensitive values.
 `generate` is not a substitute for `redact` when the goal is sharing real
 production data safely.
