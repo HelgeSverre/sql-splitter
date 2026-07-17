@@ -5,11 +5,11 @@
 //! and generated, checked, or dry-run — plus JSON/quiet reporting and
 //! clap-level usage validation (see [`GenerateArgs::try_into_request`]).
 //! Dump profiling (`[INPUT]`, `--profile-depth`, `--profile-sample`), config
-//! emission (`--emit-config`), post-generation verification (`--verify`),
-//! plan explanation (`--explain`), and MSSQL/compression rendering
-//! (`--mssql-production-style`, `--mssql-go`, `--compress`) are Phase 2/3
-//! (Tasks 19-21, 26): their flags parse today, but using them fails with a
-//! clear "not available yet" error rather than silently doing nothing.
+//! emission (`--emit-config`), and post-generation verification (`--verify`)
+//! are Phase 2/3 (Tasks 19-21, 26). `--mssql-production-style` and
+//! `--mssql-go` are wired end to end (Task 31 fix); `--compress` still fails
+//! with a clear "not available yet" error rather than silently doing
+//! nothing.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -163,11 +163,15 @@ pub struct GenerateArgs {
     #[arg(long, value_enum, help_heading = RENDERING)]
     compress: Option<CompressFormat>,
 
-    /// Render MSSQL output in production style (not yet implemented)
+    /// Render MSSQL output in production style: [dbo]. schema-qualified
+    /// names, a named clustered PRIMARY KEY constraint, an ON [PRIMARY]
+    /// filegroup clause, and a SET ANSI_NULLS/QUOTED_IDENTIFIER session
+    /// header. Requires `--dialect mssql`.
     #[arg(long, help_heading = RENDERING)]
     mssql_production_style: bool,
 
-    /// Emit a `GO` batch separator every N statements (not yet implemented)
+    /// Emit a `GO` batch separator every N INSERT batches instead of after
+    /// every batch. Requires `--dialect mssql`.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..), help_heading = RENDERING)]
     mssql_go: Option<u64>,
 
@@ -369,13 +373,13 @@ impl GenerateArgs {
             )));
         }
 
-        if self.mssql_production_style {
-            return Err(RequestError::unavailable(
-                "--mssql-production-style is not available yet",
+        let effective_dialect = self.dialect.unwrap_or_default();
+        if (self.mssql_production_style || self.mssql_go.is_some())
+            && effective_dialect != SqlDialect::Mssql
+        {
+            return Err(RequestError::usage(
+                "--mssql-production-style/--mssql-go require an explicit `--dialect mssql`",
             ));
-        }
-        if self.mssql_go.is_some() {
-            return Err(RequestError::unavailable("--mssql-go is not available yet"));
         }
         if self.compress.is_some() {
             return Err(RequestError::unavailable(
@@ -395,11 +399,13 @@ impl GenerateArgs {
             _ => OutputMode::SchemaAndData,
         };
         let render = RenderOptions {
-            dialect: self.dialect.unwrap_or_default(),
+            dialect: effective_dialect,
             source_dialect: None,
             mode: render_mode,
             no_copy: self.no_copy,
             batch_size: self.batch_size,
+            mssql_production_style: self.mssql_production_style,
+            mssql_go: self.mssql_go,
         };
 
         let compile = CompileOptions {

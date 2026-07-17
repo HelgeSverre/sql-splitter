@@ -10,12 +10,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use support::generated_fixture::generated_fixture;
 use tempfile::{NamedTempFile, TempDir, TempPath};
-// The old crate is kept for `test_mssql_generator_production_style` only: its
-// `RenderConfig::mssql_production()` profile (GO batch separators, `[dbo].`
-// schema prefix, named `CONSTRAINT PK_x` clauses, `ON [PRIMARY]` filegroup)
-// has no equivalent in the public renderer — see tests/fixtures/generate/
-// legacy_fixture.yaml and task-31-report.md for why that test stays here.
-use test_data_gen::{Generator, RenderConfig, Renderer, Scale};
 
 fn mssql_simple_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/static/mssql/simple.sql")
@@ -23,6 +17,21 @@ fn mssql_simple_fixture() -> PathBuf {
 
 fn mssql_edge_cases_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/static/mssql/edge_cases.sql")
+}
+
+/// Slice out `table`'s own `CREATE TABLE [table] ( ... );` block from a
+/// rendered dump, so an assertion can be scoped to that one table's DDL
+/// instead of asking "does this string occur anywhere in the whole file".
+fn create_table_block<'a>(sql: &'a str, table: &str) -> &'a str {
+    let marker = format!("CREATE TABLE [{table}] (");
+    let start = sql
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no `{marker}` found in the rendered dump"));
+    let end = sql[start..]
+        .find(");")
+        .map(|i| start + i + ");".len())
+        .unwrap_or_else(|| panic!("unterminated CREATE TABLE for `{table}`"));
+    &sql[start..end]
 }
 
 #[test]
@@ -718,19 +727,21 @@ fn test_mssql_generator_small_scale() {
     let file = generate_mssql_dump(42);
     let content = fs::read_to_string(&file).unwrap();
 
-    // Verify MSSQL-specific syntax. Two properties the old `test_data_gen`
-    // renderer emitted are NOT reproduced here, because the public
-    // `sql_splitter::render::SqlRenderer` has no equivalent option for
-    // either (see tests/fixtures/generate/legacy_fixture.yaml and
-    // task-31-report.md):
-    //   - the `SET ANSI_NULLS ON;` / `SET QUOTED_IDENTIFIER ON;` session
-    //     header the old renderer always prepended;
-    //   - an inline `PRIMARY KEY` clause on the identity column (the public
-    //     renderer always emits a separate `PRIMARY KEY (...)` clause,
-    //     which is the standard-conforming shape and equally valid SQL).
-    // Neither property is inspected by any other test in this suite (they
-    // never execute the dump against a real MSSQL server), so dropping them
-    // does not weaken any assertion this fixture is relied on for.
+    // Verify MSSQL-specific syntax. This uses the DEFAULT renderer mode
+    // (`--mssql-production-style` off), which differs from the old
+    // `test_data_gen` renderer's always-on output in two ways:
+    //   - no `SET ANSI_NULLS ON;` / `SET QUOTED_IDENTIFIER ON;` session
+    //     header (that header IS available — see
+    //     `test_mssql_generator_production_style` below, which turns it on
+    //     via `--mssql-production-style` / `GenerateBuilder::
+    //     mssql_production_style` — it is simply off by default, matching
+    //     every other dialect's default of "no extra session directives");
+    //   - the primary key renders as a separate `PRIMARY KEY (...)` clause
+    //     rather than the old renderer's inline `... PRIMARY KEY` — the
+    //     standard-conforming shape and equally valid SQL.
+    // Neither default-mode difference is inspected by any other test in
+    // this suite (they never execute the dump against a real MSSQL server),
+    // so it does not weaken any assertion this fixture is relied on for.
     assert!(
         content.contains("CREATE TABLE [tenants]"),
         "Should use bracket quoting"
@@ -739,9 +750,18 @@ fn test_mssql_generator_small_scale() {
         content.contains("INSERT INTO [tenants]"),
         "Should use bracket quoting for inserts"
     );
+    // Scoped to the `tenants` table's own CREATE TABLE block (not a
+    // whole-dump substring check), so this actually pins IDENTITY and the PK
+    // clause to the same column/table rather than merely proving both
+    // strings occur *somewhere* in the file.
+    let tenants_ddl = create_table_block(&content, "tenants");
     assert!(
-        content.contains("IDENTITY(1,1)") && content.contains("PRIMARY KEY ([id])"),
-        "Should use IDENTITY and a PRIMARY KEY clause"
+        tenants_ddl.contains("IDENTITY(1,1)"),
+        "tenants table should use IDENTITY:\n{tenants_ddl}"
+    );
+    assert!(
+        tenants_ddl.contains("PRIMARY KEY ([id])"),
+        "tenants table should have a PRIMARY KEY clause:\n{tenants_ddl}"
     );
     assert!(content.contains("NVARCHAR"), "Should use NVARCHAR types");
     assert!(content.contains("N'"), "Should use Unicode string literals");
@@ -904,6 +924,11 @@ fn test_mssql_generator_sample_command() {
 
 #[test]
 fn test_mssql_generator_medium_scale() {
+    // `Some(20)` tenants approximates the old crate's `Scale::Medium` (~10
+    // tenants) scaled up for headroom; it is not calibrated to match it
+    // exactly — the assertion below only needs "more than one table's worth
+    // of INSERTs", which any tenant count well above `Scale::Small`'s 3
+    // satisfies.
     let file = generated_fixture(SqlDialect::Mssql, Some(20), None, 42);
     let content = fs::read_to_string(&file).unwrap();
 
@@ -942,23 +967,46 @@ fn test_mssql_generator_deterministic() {
 
 #[test]
 fn test_mssql_generator_production_style() {
-    // Test the production-style MSSQL output with GO separators, [dbo]. prefix, and named constraints
-    let mut gen = Generator::new(42, Scale::Small);
-    let data = gen.generate();
+    // Test the production-style MSSQL output — GO separators, [dbo]. prefix,
+    // named constraints, ON [PRIMARY] filegroup, session header — through
+    // the public `generate` API's `--mssql-production-style` equivalent
+    // (`GenerateBuilder::mssql_production_style`), migrated off the old
+    // `test_data_gen` crate (Task 31 fix; see task-31-report.md).
+    use sql_splitter::generate::Generate;
 
-    let renderer = Renderer::new(RenderConfig::mssql_production());
-    let sql = renderer.render_to_string(&data).unwrap();
+    let legacy_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/generate/legacy_fixture.yaml");
+    let output = NamedTempFile::new().unwrap().into_temp_path();
+
+    Generate::builder()
+        .config(legacy_fixture)
+        .output_dialect(SqlDialect::Mssql)
+        .mssql_production_style(true)
+        .seed(42)
+        .output(output.to_path_buf())
+        .run()
+        .expect("generate production-style MSSQL output");
+
+    let sql = fs::read_to_string(&output).unwrap();
 
     // Verify GO batch separators
     assert!(sql.contains("GO\n"), "Should have GO batch separators");
+
+    // Verify the SET ANSI_NULLS/QUOTED_IDENTIFIER session header, emitted
+    // once (not per table) ahead of the first CREATE TABLE.
+    assert_eq!(
+        sql.matches("SET ANSI_NULLS ON;").count(),
+        1,
+        "Session header should appear exactly once"
+    );
     assert!(
-        sql.contains("SET ANSI_NULLS ON\nGO"),
-        "Header should use GO separators"
+        sql.contains("SET ANSI_NULLS ON;\nSET QUOTED_IDENTIFIER ON;\nGO"),
+        "Header should use a GO-terminated SET ANSI_NULLS/QUOTED_IDENTIFIER block"
     );
 
     // Verify [dbo]. schema prefix
     assert!(
-        sql.contains("[dbo].[tenants]"),
+        sql.contains("CREATE TABLE [dbo].[tenants]"),
         "Should have [dbo]. schema prefix on CREATE TABLE"
     );
     assert!(
@@ -976,6 +1024,26 @@ fn test_mssql_generator_production_style() {
     assert!(
         sql.contains(") ON [PRIMARY];"),
         "Should have ON [PRIMARY] filegroup"
+    );
+
+    // The production-style output must still be valid, parseable MSSQL: the
+    // [dbo]. prefix and named constraints must not break the splitter's
+    // reparse.
+    let summary = sql_splitter::validate::Validator::new(sql_splitter::validate::ValidateOptions {
+        path: output.to_path_buf(),
+        dialect: Some(SqlDialect::Mssql),
+        progress: false,
+        strict: false,
+        json: false,
+        max_rows_per_table: 1_000_000,
+        fk_checks_enabled: true,
+        max_pk_fk_keys: None,
+    })
+    .validate()
+    .unwrap();
+    assert_eq!(
+        summary.summary.errors, 0,
+        "production-style output should validate cleanly"
     );
 }
 

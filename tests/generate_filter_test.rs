@@ -57,6 +57,7 @@ fn render(
         mode,
         no_copy: false,
         batch_size: 1000,
+        ..RenderOptions::default()
     };
     let mut renderer = SqlRenderer::new(&mut buffer, options);
     GenerationEngine::new(plan)

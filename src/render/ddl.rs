@@ -31,18 +31,41 @@ pub(crate) fn should_preserve_raw_ddl(
     table.create_statement.is_some() && source_dialect == Some(target_dialect)
 }
 
+/// The table identifier to render: `[dbo].[name]` under MSSQL production
+/// style (see [`crate::render::RenderOptions::mssql_production_style`]),
+/// otherwise the ordinary dialect-quoted identifier. A no-op outside
+/// [`SqlDialect::Mssql`], so a `mssql_production_style` request against a
+/// non-MSSQL render target changes nothing.
+pub(crate) fn qualified_table(
+    dialect: SqlDialect,
+    name: &str,
+    mssql_production_style: bool,
+) -> String {
+    if mssql_production_style && dialect == SqlDialect::Mssql {
+        format!("[dbo].{}", quote_ident(dialect, name))
+    } else {
+        quote_ident(dialect, name)
+    }
+}
+
 /// Render a normalized `CREATE TABLE` (plus a trailing `ALTER TABLE ADD
 /// CONSTRAINT` per foreign key, and one `CREATE INDEX` per index) for
 /// `table`, mapping every column's `source_type` from `from` to `to` via
-/// [`map_column_type`].
+/// [`map_column_type`]. Under `mssql_production_style` (MSSQL only): table
+/// names are `[dbo].`-qualified, the primary key renders as a named
+/// `CONSTRAINT [PK_<table>] PRIMARY KEY CLUSTERED` instead of an inline
+/// `PRIMARY KEY`, and the `CREATE TABLE` closes with an `ON [PRIMARY]`
+/// filegroup clause.
 pub(crate) fn render_create_table(
     table: &PortableTable,
     from: SqlDialect,
     to: SqlDialect,
     warnings: &mut WarningCollector,
+    mssql_production_style: bool,
 ) -> String {
     let mut sql = String::new();
-    let quoted_table = quote_ident(to, &table.name);
+    let quoted_table = qualified_table(to, &table.name, mssql_production_style);
+    let mssql_production_style = mssql_production_style && to == SqlDialect::Mssql;
 
     let mut clauses: Vec<String> = Vec::with_capacity(
         table.columns.len()
@@ -55,7 +78,14 @@ pub(crate) fn render_create_table(
     }
     if !table.primary_key.is_empty() {
         let cols = join_idents(to, &table.primary_key);
-        clauses.push(format!("  PRIMARY KEY ({cols})"));
+        if mssql_production_style {
+            let pk_name = quote_ident(to, &format!("PK_{}", table.name));
+            clauses.push(format!(
+                "  CONSTRAINT {pk_name} PRIMARY KEY CLUSTERED ({cols})"
+            ));
+        } else {
+            clauses.push(format!("  PRIMARY KEY ({cols})"));
+        }
     }
     for unique in &table.unique_constraints {
         let cols = join_idents(to, &unique.columns);
@@ -80,7 +110,11 @@ pub(crate) fn render_create_table(
 
     let _ = writeln!(sql, "CREATE TABLE {quoted_table} (");
     let _ = writeln!(sql, "{}", clauses.join(",\n"));
-    let _ = writeln!(sql, ");");
+    if mssql_production_style {
+        let _ = writeln!(sql, ") ON [PRIMARY];");
+    } else {
+        let _ = writeln!(sql, ");");
+    }
 
     // Foreign keys are added after the CREATE TABLE (rather than inline) so a
     // child table can be created before every referenced parent exists in
@@ -95,7 +129,7 @@ pub(crate) fn render_create_table(
                 None => String::new(),
             },
             join_idents(to, &relationship.columns),
-            quote_ident(to, &relationship.referenced_table),
+            qualified_table(to, &relationship.referenced_table, mssql_production_style),
             join_idents(to, &relationship.referenced_columns),
         );
     }
@@ -232,10 +266,60 @@ mod tests {
             relationships: vec![],
         };
         let mut warnings = WarningCollector::new();
-        let sql = render_create_table(&table, SqlDialect::MySql, SqlDialect::Mssql, &mut warnings);
+        let sql = render_create_table(
+            &table,
+            SqlDialect::MySql,
+            SqlDialect::Mssql,
+            &mut warnings,
+            false,
+        );
         assert!(sql.starts_with("CREATE TABLE [orders] (\n"));
         assert!(sql.contains("[id] BIGINT NOT NULL"));
         assert!(sql.contains("PRIMARY KEY ([id])"));
+    }
+
+    #[test]
+    fn mssql_production_style_qualifies_names_and_uses_a_named_clustered_pk() {
+        let table = PortableTable {
+            name: "orders".into(),
+            columns: vec![column("id", "BIGINT", false)],
+            primary_key: vec!["id".to_string()],
+            unique_constraints: vec![],
+            check_constraints: vec![],
+            indexes: vec![],
+            create_statement: None,
+            relationships: vec![PortableRelationship {
+                name: Some("fk_customer".into()),
+                columns: vec!["id".to_string()],
+                referenced_table: "customers".to_string(),
+                referenced_columns: vec!["id".to_string()],
+            }],
+        };
+        let mut warnings = WarningCollector::new();
+        let sql = render_create_table(
+            &table,
+            SqlDialect::Mssql,
+            SqlDialect::Mssql,
+            &mut warnings,
+            true,
+        );
+        assert!(sql.starts_with("CREATE TABLE [dbo].[orders] (\n"));
+        assert!(sql.contains("CONSTRAINT [PK_orders] PRIMARY KEY CLUSTERED ([id])"));
+        assert!(!sql.contains("  PRIMARY KEY ([id])"));
+        assert!(sql.contains(") ON [PRIMARY];"));
+        assert!(sql.contains("REFERENCES [dbo].[customers] ([id]);"));
+
+        // Not MSSQL: production style has no effect on other dialects.
+        let mut warnings = WarningCollector::new();
+        let sql = render_create_table(
+            &table,
+            SqlDialect::Postgres,
+            SqlDialect::Postgres,
+            &mut warnings,
+            true,
+        );
+        assert!(sql.starts_with("CREATE TABLE \"orders\" (\n"));
+        assert!(sql.contains("  PRIMARY KEY (\"id\")"));
     }
 
     #[test]
@@ -269,6 +353,7 @@ mod tests {
             SqlDialect::Postgres,
             SqlDialect::Postgres,
             &mut warnings,
+            false,
         );
         assert!(sql.contains("CONSTRAINT \"uq_customer\" UNIQUE (\"customer_id\")"));
         assert!(sql.contains(

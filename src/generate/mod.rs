@@ -874,6 +874,22 @@ impl GenerateBuilder {
         self
     }
 
+    /// Render MSSQL output in "production style" — see
+    /// [`RenderOptions::mssql_production_style`]. No effect outside
+    /// [`SqlDialect::Mssql`].
+    pub fn mssql_production_style(mut self, production_style: bool) -> Self {
+        self.render.mssql_production_style = production_style;
+        self
+    }
+
+    /// Emit a `GO` batch separator every `interval` `INSERT` batches instead
+    /// of after every batch — see [`RenderOptions::mssql_go`]. No effect
+    /// outside [`SqlDialect::Mssql`].
+    pub fn mssql_go(mut self, interval: u64) -> Self {
+        self.render.mssql_go = Some(interval);
+        self
+    }
+
     /// A per-table row-count scale factor (`--table-scale`). Rejects a
     /// non-finite or negative factor.
     pub fn table_scale(

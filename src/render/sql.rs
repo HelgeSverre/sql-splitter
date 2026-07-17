@@ -38,6 +38,17 @@ pub struct RenderOptions {
     pub no_copy: bool,
     /// Rows per `INSERT`/`COPY` batch.
     pub batch_size: usize,
+    /// Render MSSQL output in "production style": a `SET ANSI_NULLS ON;` +
+    /// `SET QUOTED_IDENTIFIER ON;` session header, `[dbo].[table]`-qualified
+    /// identifiers, a named `CONSTRAINT [PK_<table>] PRIMARY KEY CLUSTERED`
+    /// instead of an inline `PRIMARY KEY`, and an `ON [PRIMARY]` filegroup
+    /// clause on `CREATE TABLE`. No effect outside [`SqlDialect::Mssql`].
+    pub mssql_production_style: bool,
+    /// Emit a `GO` batch separator every N `INSERT` batches instead of after
+    /// every batch (MSSQL only; `None` keeps today's per-batch `GO`). `CREATE
+    /// TABLE` and `SET IDENTITY_INSERT` batches always get their own `GO`
+    /// regardless of this setting — only `INSERT` batch cadence changes.
+    pub mssql_go: Option<u64>,
 }
 
 impl Default for RenderOptions {
@@ -48,6 +59,8 @@ impl Default for RenderOptions {
             mode: OutputMode::SchemaAndData,
             no_copy: false,
             batch_size: 1000,
+            mssql_production_style: false,
+            mssql_go: None,
         }
     }
 }
@@ -85,6 +98,9 @@ struct TableState {
     /// Whether a `SET IDENTITY_INSERT <t> ON` has been emitted for this table
     /// (MSSQL) and therefore an `OFF` must close it out in `end_table`.
     identity_on: bool,
+    /// `INSERT` batches flushed for this table since the last `GO` (MSSQL,
+    /// only meaningful when [`RenderOptions::mssql_go`] is `Some`).
+    insert_batches_since_go: u64,
 }
 
 /// Streams generated rows to dialect-correct SQL as a [`RowSink`].
@@ -93,6 +109,10 @@ pub struct SqlRenderer<W: Write> {
     options: RenderOptions,
     warnings: WarningCollector,
     table: Option<TableState>,
+    /// Whether the MSSQL production-style session header (`SET ANSI_NULLS
+    /// ON;` / `SET QUOTED_IDENTIFIER ON;`) has already been written; it is
+    /// emitted once, before the first table, not per table.
+    mssql_header_written: bool,
 }
 
 impl<W: Write> SqlRenderer<W> {
@@ -103,6 +123,7 @@ impl<W: Write> SqlRenderer<W> {
             options,
             warnings: WarningCollector::new(),
             table: None,
+            mssql_header_written: false,
         }
     }
 
@@ -120,6 +141,25 @@ impl<W: Write> SqlRenderer<W> {
             .map_err(|err| io_err(err.into_error()))
     }
 
+    /// Write the MSSQL production-style session header
+    /// (`SET ANSI_NULLS ON;` / `SET QUOTED_IDENTIFIER ON;`, `GO`-terminated)
+    /// once, before the first table. A no-op outside
+    /// [`RenderOptions::mssql_production_style`] + [`SqlDialect::Mssql`], and
+    /// idempotent (only ever writes once per renderer).
+    fn maybe_write_mssql_header(&mut self) -> Result<(), GenerateError> {
+        if self.mssql_header_written
+            || !self.options.mssql_production_style
+            || self.options.dialect != SqlDialect::Mssql
+        {
+            return Ok(());
+        }
+        writeln!(self.writer, "SET ANSI_NULLS ON;").map_err(io_err)?;
+        writeln!(self.writer, "SET QUOTED_IDENTIFIER ON;").map_err(io_err)?;
+        writeln!(self.writer, "GO").map_err(io_err)?;
+        self.mssql_header_written = true;
+        Ok(())
+    }
+
     /// Render `table`'s DDL: the raw `create_statement` when the render
     /// target matches the source dialect (see [`ddl::should_preserve_raw_ddl`]),
     /// otherwise a normalized `CREATE TABLE` built from its [`PortableSchema`]
@@ -133,7 +173,13 @@ impl<W: Write> SqlRenderer<W> {
             writeln!(self.writer, "{statement}").map_err(io_err)?;
         } else {
             let from = self.options.source_dialect.unwrap_or(dialect);
-            let sql = ddl::render_create_table(&table.schema, from, dialect, &mut self.warnings);
+            let sql = ddl::render_create_table(
+                &table.schema,
+                from,
+                dialect,
+                &mut self.warnings,
+                self.options.mssql_production_style,
+            );
             write!(self.writer, "{sql}").map_err(io_err)?;
         }
         if dialect == SqlDialect::Mssql {
@@ -145,6 +191,7 @@ impl<W: Write> SqlRenderer<W> {
     /// Flush the buffered `INSERT` batch (a no-op if empty).
     fn flush_insert(&mut self, table: &PlannedTable) -> Result<(), GenerateError> {
         let dialect = self.options.dialect;
+        let mssql_go = self.options.mssql_go;
         let state = self
             .table
             .as_mut()
@@ -183,7 +230,23 @@ impl<W: Write> SqlRenderer<W> {
         .map_err(io_err)?;
         writeln!(self.writer, "{};", state.row_batch.as_str()).map_err(io_err)?;
         if dialect == SqlDialect::Mssql {
-            writeln!(self.writer, "GO").map_err(io_err)?;
+            let should_go = match mssql_go {
+                // Group `n` INSERT batches per GO instead of one-per-batch.
+                Some(n) => {
+                    state.insert_batches_since_go += 1;
+                    if state.insert_batches_since_go >= n.max(1) {
+                        state.insert_batches_since_go = 0;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // Default (and today's only) behavior: a GO after every batch.
+                None => true,
+            };
+            if should_go {
+                writeln!(self.writer, "GO").map_err(io_err)?;
+            }
         }
         state.row_batch.clear();
         Ok(())
@@ -254,6 +317,7 @@ impl<W: Write> SqlRenderer<W> {
 
 impl<W: Write> RowSink for SqlRenderer<W> {
     fn begin_table(&mut self, table: &PlannedTable) -> Result<(), GenerateError> {
+        self.maybe_write_mssql_header()?;
         if self.options.mode != OutputMode::DataOnly {
             self.render_ddl(table)?;
         }
@@ -268,7 +332,11 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             && !has_identity;
         let batch_size = self.options.batch_size.max(1);
         self.table = Some(TableState {
-            quoted_table: quote_ident(self.options.dialect, &table.name),
+            quoted_table: ddl::qualified_table(
+                self.options.dialect,
+                &table.name,
+                self.options.mssql_production_style,
+            ),
             data_enabled,
             use_copy,
             batch_size,
@@ -278,6 +346,7 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             copy_rows: 0,
             identity_insert: None,
             identity_on: false,
+            insert_batches_since_go: 0,
         });
         Ok(())
     }
@@ -359,6 +428,19 @@ impl<W: Write> RowSink for SqlRenderer<W> {
                 self.flush_copy(table)?;
             } else {
                 self.flush_insert(table)?;
+            }
+        }
+        // Under `--mssql-go N`, the last batch flushed above may not have
+        // reached the Nth-batch boundary that triggers a `GO`; close this
+        // table's batch out cleanly (rather than merging into whatever
+        // follows — the next table's DDL, or the IDENTITY_INSERT OFF below)
+        // by emitting the trailing `GO` here.
+        if self.options.dialect == SqlDialect::Mssql && self.options.mssql_go.is_some() {
+            if let Some(state) = &mut self.table {
+                if state.insert_batches_since_go > 0 {
+                    state.insert_batches_since_go = 0;
+                    writeln!(self.writer, "GO").map_err(io_err)?;
+                }
             }
         }
         // Close the MSSQL identity-insert wrapper opened in `flush_insert`.
