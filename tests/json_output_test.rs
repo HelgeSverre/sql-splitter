@@ -460,6 +460,102 @@ INSERT INTO users VALUES (2, 'Bob');
 }
 
 // =============================================================================
+// Generate Command JSON Tests
+// =============================================================================
+
+const GENERATE_SIMPLE_MODEL: &str = "tests/fixtures/generate/simple.yaml";
+
+#[test]
+fn test_generate_json_output() {
+    let dir = TempDir::new().unwrap();
+    let out = dir.path().join("synthetic.sql");
+
+    let output = sql_splitter_bin()
+        .arg("generate")
+        .arg("--config")
+        .arg(GENERATE_SIMPLE_MODEL)
+        .arg("--seed")
+        .arg("42")
+        .arg("--json")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
+
+    assert_eq!(json["mode"], "generate");
+    assert!(json.get("rows_written").is_some());
+    assert!(json["rows_written"].as_u64().unwrap() > 0);
+    assert!(json.get("diagnostics").is_some());
+    assert!(json["diagnostics"].is_array());
+}
+
+#[test]
+fn test_generate_json_check_mode() {
+    let output = sql_splitter_bin()
+        .arg("generate")
+        .arg("--config")
+        .arg(GENERATE_SIMPLE_MODEL)
+        .arg("--check")
+        .arg("--json")
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
+
+    assert_eq!(json["mode"], "check");
+    assert_eq!(json["rows_written"], 0);
+}
+
+#[test]
+fn test_generate_json_dry_run_mode() {
+    let output = sql_splitter_bin()
+        .arg("generate")
+        .arg("--config")
+        .arg(GENERATE_SIMPLE_MODEL)
+        .arg("--dry-run")
+        .arg("--json")
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
+
+    assert_eq!(json["mode"], "dry_run");
+    assert!(json["rows_written"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_generate_json_reports_diagnostics_on_model_failure() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("does-not-exist.yaml");
+
+    let output = sql_splitter_bin()
+        .arg("generate")
+        .arg("--config")
+        .arg(&missing)
+        .arg("--check")
+        .arg("--json")
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|_| panic!("Failed to parse JSON: {}", stdout));
+
+    assert!(json.get("diagnostics").is_some());
+    assert!(json["diagnostics"].is_array());
+    assert!(!json["diagnostics"].as_array().unwrap().is_empty());
+}
+
+// =============================================================================
 // Edge Cases
 // =============================================================================
 

@@ -1,0 +1,634 @@
+//! CLI handler for the `generate` command: model-driven synthetic data
+//! generation.
+//!
+//! Phase 1 wires the complete-model path — `--config model.yaml` compiled
+//! and generated, checked, or dry-run — plus JSON/quiet reporting and
+//! clap-level usage validation (see [`GenerateArgs::try_into_request`]).
+//! Dump profiling (`[INPUT]`, `--profile-depth`, `--profile-sample`), config
+//! emission (`--emit-config`), post-generation verification (`--verify`),
+//! plan explanation (`--explain`), and MSSQL/compression rendering
+//! (`--mssql-production-style`, `--mssql-go`, `--compress`) are Phase 2/3
+//! (Tasks 19-21, 26): their flags parse today, but using them fails with a
+//! clear "not available yet" error rather than silently doing nothing.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::fs::File;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Args, ValueHint};
+use schemars::JsonSchema;
+use serde::Serialize;
+use tempfile::NamedTempFile;
+
+use crate::diagnostic::{DiagnosticBag, Severity};
+use crate::generate::{
+    CompileOptions, Generate, GenerateError, GenerateReport, GenerateRequest, OutputTarget,
+    RenderOptions, RunMode, TableCountOverride,
+};
+use crate::parser::SqlDialect;
+use crate::synthetic::OutputMode;
+
+use super::common::{dash_is_stdout, FILTERING};
+
+const INPUT_OUTPUT: &str = "Input/Model";
+const VOLUME: &str = "Volume";
+const RANDOMNESS: &str = "Randomness";
+const RENDERING: &str = "Rendering";
+const PREFLIGHT: &str = "Preflight/Reporting";
+
+/// Profiling depth for `[INPUT]` (`--profile-depth`; Phase 2, Task 19).
+///
+/// Schema-only profiling remains a library/internal mode — the CLI only
+/// exposes `basic`/`full`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProfileDepthArg {
+    #[default]
+    Basic,
+    Full,
+}
+
+/// Output compression format for `--compress`. Accepted for forward
+/// compatibility; rendering never wraps its output writer in a compressor
+/// yet, so any value here fails with a clear "not available" error.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressFormat {
+    Gzip,
+    Bzip2,
+    Xz,
+    Zstd,
+}
+
+/// CLI surface for `sql-splitter generate`. See module docs and
+/// [`GenerateArgs::try_into_request`] for the Phase 1/Phase 2+ split.
+#[derive(Args)]
+pub struct GenerateArgs {
+    /// Source SQL dump to profile into a base model (Phase 2, Tasks 19-21)
+    #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    input: Option<PathBuf>,
+
+    /// `kind: model` (or `kind: overrides`) YAML document to generate from
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    config: Option<PathBuf>,
+
+    /// Write the resolved model as YAML instead of generating (Phase 3, Task 21)
+    #[arg(long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    emit_config: Option<PathBuf>,
+
+    /// Output file for generated SQL (default: stdout; `-` also means stdout)
+    #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
+    output: Option<PathBuf>,
+
+    /// Depth of profiling to run against `[INPUT]` (Phase 2, Task 19)
+    #[arg(long, value_enum, default_value_t = ProfileDepthArg::Basic, help_heading = INPUT_OUTPUT)]
+    profile_depth: ProfileDepthArg,
+
+    /// Row sample size used while profiling `[INPUT]` (Phase 2, Task 19)
+    #[arg(long, help_heading = INPUT_OUTPUT)]
+    profile_sample: Option<usize>,
+
+    /// Dialect `[INPUT]` is written in, if profiling (auto-detected otherwise)
+    #[arg(long, help_heading = INPUT_OUTPUT)]
+    input_dialect: Option<SqlDialect>,
+
+    /// SQL dialect to render generated output for (default: mysql)
+    #[arg(long, help_heading = RENDERING)]
+    dialect: Option<SqlDialect>,
+
+    /// Global multiplicative row-count scale
+    #[arg(long, conflicts_with = "rows", help_heading = VOLUME)]
+    scale: Option<f64>,
+
+    /// Global absolute root row count
+    #[arg(long, conflicts_with = "scale", help_heading = VOLUME)]
+    rows: Option<u64>,
+
+    /// Per-table absolute row-count override (`table=count`, repeatable)
+    #[arg(long = "table-rows", help_heading = VOLUME)]
+    table_rows: Vec<String>,
+
+    /// Per-table row-count scale override (`table=factor`, repeatable)
+    #[arg(long = "table-scale", help_heading = VOLUME)]
+    table_scale: Vec<String>,
+
+    /// Upper bound applied to every table's row count, last
+    #[arg(long, help_heading = VOLUME)]
+    max_rows: Option<u64>,
+
+    /// Only generate these tables (comma-separated globs)
+    #[arg(long, value_delimiter = ',', help_heading = FILTERING)]
+    tables: Vec<String>,
+
+    /// Exclude these tables (comma-separated globs)
+    #[arg(long, value_delimiter = ',', help_heading = FILTERING)]
+    exclude: Vec<String>,
+
+    /// Run root seed, overriding the model's own `seed:`
+    #[arg(long, conflicts_with = "randomize", help_heading = RANDOMNESS)]
+    seed: Option<u64>,
+
+    /// Use a fresh random seed instead of the model's (or a fixed) seed
+    #[arg(long, conflicts_with = "seed", help_heading = RANDOMNESS)]
+    randomize: bool,
+
+    /// Render only `CREATE TABLE`/DDL, no row data
+    #[arg(long, conflicts_with = "data_only", help_heading = RENDERING)]
+    schema_only: bool,
+
+    /// Render only row data, no DDL
+    #[arg(long, conflicts_with = "schema_only", help_heading = RENDERING)]
+    data_only: bool,
+
+    /// Rows per `INSERT`/`COPY` batch
+    #[arg(long, default_value_t = 1_000, help_heading = RENDERING)]
+    batch_size: usize,
+
+    /// Force multi-row `INSERT` for PostgreSQL instead of `COPY`
+    #[arg(long, help_heading = RENDERING)]
+    no_copy: bool,
+
+    /// Compress rendered output (not yet implemented)
+    #[arg(long, value_enum, help_heading = RENDERING)]
+    compress: Option<CompressFormat>,
+
+    /// Render MSSQL output in production style (not yet implemented)
+    #[arg(long, help_heading = RENDERING)]
+    mssql_production_style: bool,
+
+    /// Emit a `GO` batch separator every N statements (not yet implemented)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..), help_heading = RENDERING)]
+    mssql_go: Option<u64>,
+
+    /// Validate the model and exit; writes no SQL
+    #[arg(long, conflicts_with_all = ["dry_run", "verify"], help_heading = PREFLIGHT)]
+    check: bool,
+
+    /// Compile the model and report resolved row counts; writes no SQL
+    #[arg(long, conflicts_with_all = ["check", "verify"], help_heading = PREFLIGHT)]
+    dry_run: bool,
+
+    /// Verify generated rows against the model's constraints (Phase 3, Task 26)
+    #[arg(long, conflicts_with_all = ["check", "dry_run"], help_heading = PREFLIGHT)]
+    verify: bool,
+
+    /// Explain the resolved plan in detail (not yet implemented)
+    #[arg(long, help_heading = PREFLIGHT)]
+    explain: bool,
+
+    /// Treat model warnings as errors
+    #[arg(long, help_heading = PREFLIGHT)]
+    strict: bool,
+
+    /// Show a progress bar (not yet wired to generation; accepted and ignored)
+    #[arg(long, conflicts_with = "quiet", help_heading = PREFLIGHT)]
+    progress: bool,
+
+    /// Output the report as JSON (owns stdout)
+    #[arg(long, help_heading = PREFLIGHT)]
+    json: bool,
+
+    /// Suppress the non-JSON summary report
+    #[arg(long, conflicts_with = "progress", help_heading = PREFLIGHT)]
+    quiet: bool,
+}
+
+/// A [`GenerateRequest`] plus the CLI-only knobs [`run`] needs once
+/// [`Generate::run`] returns: how to report the outcome, whether warnings
+/// should fail the run, and (when generated SQL has nowhere else to go) the
+/// temporary file it was rendered to so it can be streamed to stdout.
+struct PreparedRequest {
+    request: GenerateRequest,
+    mode: RunMode,
+    json: bool,
+    quiet: bool,
+    strict: bool,
+    /// Present only when SQL renders to stdout: [`GenerateRequest`] has no
+    /// stdout [`OutputTarget`], so this stdout case renders to a temp file
+    /// first and [`run`] streams it to stdout after a successful run.
+    stdout_temp: Option<NamedTempFile>,
+}
+
+/// A problem with the CLI invocation itself, distinct from a model/runtime
+/// failure. [`RequestError::Usage`] is a shape problem clap can't express
+/// (e.g. a value-conditional conflict) — [`run`] maps it to clap's own usage
+/// exit code, `2`. [`RequestError::Unavailable`] is a well-formed request for
+/// a capability Phase 1 doesn't implement yet — [`run`] maps it to the
+/// ordinary failure exit code, `1`, like any other runtime error.
+#[derive(Debug)]
+enum RequestError {
+    Usage(String),
+    Unavailable(String),
+}
+
+impl RequestError {
+    fn usage(message: impl Into<String>) -> Self {
+        RequestError::Usage(message.into())
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        RequestError::Unavailable(message.into())
+    }
+}
+
+impl fmt::Display for RequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequestError::Usage(message) | RequestError::Unavailable(message) => {
+                write!(f, "{message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestError {}
+
+impl GenerateArgs {
+    /// Validate CLI-shape rules clap's declarative `conflicts_with` can't
+    /// express (they depend on argument *values*, e.g. `--output -`, not
+    /// just presence), reject not-yet-implemented flags with a clear error,
+    /// and assemble a [`PreparedRequest`].
+    ///
+    /// Model-level problems (a missing/invalid config, a compile error)
+    /// intentionally are not checked here — those surface from
+    /// [`Generate::run`] itself, as [`GenerateError`].
+    fn try_into_request(self) -> Result<PreparedRequest, RequestError> {
+        if self.check && self.input.is_some() {
+            return Err(RequestError::usage(
+                "--check requires a complete `--config` model; it cannot be combined with an \
+                 input dump (dump profiling is Phase 2, Tasks 19-21)",
+            ));
+        }
+
+        let mode = if self.check {
+            RunMode::Check
+        } else if self.dry_run {
+            RunMode::DryRun
+        } else {
+            RunMode::Generate
+        };
+
+        let output_explicit_dash = is_dash(&self.output);
+        let emit_config_dash = is_dash(&self.emit_config);
+        let sql_wants_stdout = mode == RunMode::Generate
+            && !self.json
+            && (self.output.is_none() || output_explicit_dash);
+
+        if self.json && output_explicit_dash {
+            return Err(RequestError::usage(
+                "--json and `--output -` both claim stdout; choose one",
+            ));
+        }
+        if self.json && emit_config_dash {
+            return Err(RequestError::usage(
+                "--json and `--emit-config -` both claim stdout; choose one",
+            ));
+        }
+        if sql_wants_stdout && emit_config_dash {
+            return Err(RequestError::usage(
+                "generated SQL and `--emit-config -` both claim stdout; choose one",
+            ));
+        }
+
+        if self.verify {
+            let has_file_output = self
+                .output
+                .as_ref()
+                .is_some_and(|path| path.as_os_str() != "-");
+            if !has_file_output {
+                return Err(RequestError::usage(
+                    "--verify requires a real output file (`-o <path>`), not stdout",
+                ));
+            }
+        }
+
+        if self.batch_size == 0 {
+            return Err(RequestError::usage("--batch-size must be at least 1"));
+        }
+
+        if self.compress.is_some() && (self.output.is_none() || output_explicit_dash) {
+            return Err(RequestError::usage(
+                "--compress requires a real output file, not stdout",
+            ));
+        }
+
+        let mut table_rows = Vec::with_capacity(self.table_rows.len());
+        let mut rows_tables = HashSet::new();
+        for raw in &self.table_rows {
+            let (table, value) = split_table_override(raw).ok_or_else(|| {
+                RequestError::usage(format!("--table-rows `{raw}` must be `table=count`"))
+            })?;
+            let count: u64 = value.parse().map_err(|_| {
+                RequestError::usage(format!("--table-rows `{raw}` has a non-numeric count"))
+            })?;
+            rows_tables.insert(table.to_string());
+            table_rows.push(TableCountOverride::rows(table, count));
+        }
+
+        let mut scale_tables = HashSet::new();
+        for raw in &self.table_scale {
+            let (table, value) = split_table_override(raw).ok_or_else(|| {
+                RequestError::usage(format!("--table-scale `{raw}` must be `table=factor`"))
+            })?;
+            let factor: f64 = value.parse().map_err(|_| {
+                RequestError::usage(format!("--table-scale `{raw}` has a non-numeric factor"))
+            })?;
+            if !factor.is_finite() || factor < 0.0 {
+                return Err(RequestError::usage(format!(
+                    "--table-scale `{raw}` must be a finite, non-negative number"
+                )));
+            }
+            scale_tables.insert(table.to_string());
+            table_rows.push(TableCountOverride::scale(table, factor));
+        }
+
+        if let Some(table) = rows_tables.intersection(&scale_tables).next() {
+            return Err(RequestError::usage(format!(
+                "table `{table}` is targeted by both --table-rows and --table-scale"
+            )));
+        }
+
+        if self.emit_config.is_some() {
+            return Err(RequestError::unavailable(
+                "--emit-config is not available until Phase 3 (Task 21)",
+            ));
+        }
+        if self.verify {
+            return Err(RequestError::unavailable(
+                "--verify is not available until Phase 3 (Task 26)",
+            ));
+        }
+        if self.explain {
+            return Err(RequestError::unavailable("--explain is not available yet"));
+        }
+        if self.mssql_production_style {
+            return Err(RequestError::unavailable(
+                "--mssql-production-style is not available yet",
+            ));
+        }
+        if self.mssql_go.is_some() {
+            return Err(RequestError::unavailable("--mssql-go is not available yet"));
+        }
+        if self.compress.is_some() {
+            return Err(RequestError::unavailable(
+                "--compress is not available yet: generated output cannot be compressed",
+            ));
+        }
+
+        let seed = if self.randomize {
+            Some(rand::random::<u64>())
+        } else {
+            self.seed
+        };
+
+        let render_mode = match (self.schema_only, self.data_only) {
+            (true, false) => OutputMode::SchemaOnly,
+            (false, true) => OutputMode::DataOnly,
+            _ => OutputMode::SchemaAndData,
+        };
+        let render = RenderOptions {
+            dialect: self.dialect.unwrap_or_default(),
+            source_dialect: None,
+            mode: render_mode,
+            no_copy: self.no_copy,
+            batch_size: self.batch_size,
+        };
+
+        let compile = CompileOptions {
+            seed,
+            scale: self.scale,
+            rows: self.rows,
+            max_rows: self.max_rows,
+            table_rows,
+            tables: self.tables,
+            exclude: self.exclude,
+        };
+
+        let (output, stdout_temp) = match mode {
+            // `Generate::run` never reads `output` under Check/DryRun (it
+            // reports the plan directly), so any `-o` given alongside them
+            // is inert; discard rather than modeling a meaningless path.
+            RunMode::Check | RunMode::DryRun => (OutputTarget::Discard, None),
+            RunMode::Generate => match dash_is_stdout(self.output) {
+                Some(path) => (OutputTarget::Path(path), None),
+                None if self.json => (OutputTarget::Discard, None),
+                None => {
+                    let temp = NamedTempFile::new().map_err(|error| {
+                        RequestError::unavailable(format!(
+                            "failed to create a temporary file for stdout output: {error}"
+                        ))
+                    })?;
+                    let path = temp.path().to_path_buf();
+                    (OutputTarget::Path(path), Some(temp))
+                }
+            },
+        };
+
+        let request = GenerateRequest {
+            input: self.input,
+            config: self.config,
+            output,
+            compile,
+            render,
+            mode,
+        };
+
+        Ok(PreparedRequest {
+            request,
+            mode,
+            json: self.json,
+            quiet: self.quiet,
+            strict: self.strict,
+            stdout_temp,
+        })
+    }
+}
+
+/// Whether `path` is the literal `-` (the CLI's stdout convention).
+fn is_dash(path: &Option<PathBuf>) -> bool {
+    path.as_deref().is_some_and(|path| path.as_os_str() == "-")
+}
+
+/// Split a `table=value` CLI pattern (`--table-rows`/`--table-scale`) into
+/// its table and value halves. `None` if `raw` has no `=`, or either half is
+/// empty.
+fn split_table_override(raw: &str) -> Option<(&str, &str)> {
+    let (table, value) = raw.split_once('=')?;
+    let table = table.trim();
+    let value = value.trim();
+    if table.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some((table, value))
+}
+
+/// Run the `generate` command: assemble a [`GenerateRequest`] from `args`,
+/// run it, and report the outcome.
+///
+/// Exit codes: `2` for a CLI usage problem (a clap-level conflict, or a
+/// post-clap one [`GenerateArgs::try_into_request`] catches); `1` for a
+/// model/compile failure ([`GenerateError::Diagnostics`]), a `--strict` run
+/// with warnings, or any other runtime error; `0` on success.
+pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
+    let prepared = match args.try_into_request() {
+        Ok(prepared) => prepared,
+        Err(RequestError::Usage(message)) => {
+            eprintln!("error: {message}");
+            return Ok(ExitCode::from(2));
+        }
+        Err(RequestError::Unavailable(message)) => return Err(anyhow::anyhow!(message)),
+    };
+
+    let PreparedRequest {
+        request,
+        mode,
+        json,
+        quiet,
+        strict,
+        stdout_temp,
+    } = prepared;
+
+    match Generate::run(request) {
+        Ok(report) => {
+            if let Some(temp) = &stdout_temp {
+                stream_to_stdout(temp.path())?;
+            }
+
+            let warnings_are_fatal = strict
+                && report
+                    .diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.severity == Severity::Warning);
+
+            if warnings_are_fatal {
+                write_diagnostics(&report.diagnostics, json)?;
+                Ok(ExitCode::FAILURE)
+            } else {
+                write_report(&report, mode, json, quiet, stdout_temp.is_some())?;
+                Ok(ExitCode::SUCCESS)
+            }
+        }
+        Err(GenerateError::Diagnostics(bag)) => {
+            write_diagnostics(&bag, json)?;
+            Ok(ExitCode::FAILURE)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Stream the SQL rendered to a temporary file (the stdout-output case; see
+/// [`PreparedRequest::stdout_temp`]) to the process's stdout.
+fn stream_to_stdout(path: &Path) -> anyhow::Result<()> {
+    let mut file = File::open(path)?;
+    io::copy(&mut file, &mut io::stdout())?;
+    Ok(())
+}
+
+/// The label a report's `mode` field carries, matching the CLI flag that
+/// selected it (`generate` is the default; `check`/`dry_run` opt in).
+fn mode_label(mode: RunMode) -> &'static str {
+    match mode {
+        RunMode::Generate => "generate",
+        RunMode::Check => "check",
+        RunMode::DryRun => "dry_run",
+    }
+}
+
+/// The human-readable one-line summary for a successful run.
+fn summary_line(mode: RunMode, rows_written: u64) -> String {
+    match mode {
+        RunMode::Generate => format!("Generated {rows_written} row(s)."),
+        RunMode::Check => "Check passed: the model compiles.".to_string(),
+        RunMode::DryRun => format!("Dry run: the model would generate {rows_written} row(s)."),
+    }
+}
+
+/// Report a successful [`GenerateReport`], respecting `--json`/`--quiet`.
+///
+/// `sql_on_stdout` is set when generated SQL was just streamed to stdout
+/// ([`stream_to_stdout`]); the non-JSON summary then goes to stderr instead,
+/// so it never lands inside the SQL stream.
+fn write_report(
+    report: &GenerateReport,
+    mode: RunMode,
+    json: bool,
+    quiet: bool,
+    sql_on_stdout: bool,
+) -> anyhow::Result<()> {
+    if json {
+        let payload = GenerateJsonOutput {
+            mode: mode_label(mode).to_string(),
+            rows_written: report.rows_written,
+            diagnostics: diagnostic_entries(&report.diagnostics),
+        };
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if quiet {
+        return Ok(());
+    }
+
+    let line = summary_line(mode, report.rows_written);
+    if sql_on_stdout {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+    for diagnostic in &report.diagnostics.diagnostics {
+        eprintln!("{diagnostic}");
+    }
+    Ok(())
+}
+
+/// Report a failed run's diagnostics ([`GenerateError::Diagnostics`], or a
+/// `--strict` run that only had warnings), respecting `--json`.
+fn write_diagnostics(bag: &DiagnosticBag, json: bool) -> anyhow::Result<()> {
+    if json {
+        let payload = serde_json::json!({ "diagnostics": diagnostic_entries(bag) });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for diagnostic in &bag.diagnostics {
+            eprintln!("{diagnostic}");
+        }
+    }
+    Ok(())
+}
+
+/// JSON report for `generate --json`.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct GenerateJsonOutput {
+    mode: String,
+    rows_written: u64,
+    diagnostics: Vec<DiagnosticEntry>,
+}
+
+/// One [`crate::diagnostic::Diagnostic`], reshaped for JSON reporting
+/// (`DiagnosticBag`/`Diagnostic` themselves don't derive [`JsonSchema`]).
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct DiagnosticEntry {
+    code: String,
+    severity: String,
+    path: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<String>,
+}
+
+fn diagnostic_entries(bag: &DiagnosticBag) -> Vec<DiagnosticEntry> {
+    bag.diagnostics
+        .iter()
+        .map(|diagnostic| DiagnosticEntry {
+            code: diagnostic.code.clone(),
+            severity: match diagnostic.severity {
+                Severity::Warning => "warning".to_string(),
+                Severity::Error => "error".to_string(),
+            },
+            path: diagnostic.path.clone(),
+            message: diagnostic.message.clone(),
+            help: diagnostic.help.clone(),
+        })
+        .collect()
+}

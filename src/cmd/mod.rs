@@ -2,6 +2,7 @@ pub(crate) mod analyze;
 mod common;
 pub(crate) mod convert;
 mod diff;
+pub(crate) mod generate;
 mod glob_util;
 pub(crate) mod graph;
 pub(crate) mod merge;
@@ -139,6 +140,16 @@ pub enum Commands {
   sql-splitter redact dump.sql -o safe.sql --config redact.yaml --seed 42")]
     Redact(redact::RedactArgs),
 
+    /// Generate synthetic SQL data from a model
+    #[command(visible_alias = "gen")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  sql-splitter generate --config model.yaml -o synthetic.sql
+  sql-splitter generate --config model.yaml --check
+  sql-splitter generate --config model.yaml --dry-run
+  sql-splitter generate --config model.yaml --seed 42 -o synthetic.sql
+  sql-splitter generate --config model.yaml --json -o synthetic.sql")]
+    Generate(generate::GenerateArgs),
+
     /// Generate Entity Relationship Diagram (ERD) from SQL dump
     #[command(visible_alias = "gr")]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -230,6 +241,7 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Commands::Validate(args) => validate::run(args),
         Commands::Diff(args) => diff::run(args).map(|()| ExitCode::SUCCESS),
         Commands::Redact(args) => redact::run(args).map(|()| ExitCode::SUCCESS),
+        Commands::Generate(args) => generate::run(args),
         Commands::Graph(args) => graph::run(args).map(|()| ExitCode::SUCCESS),
         Commands::Order(args) => order::run(args),
         #[cfg(feature = "duckdb-query")]
