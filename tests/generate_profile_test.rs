@@ -1106,3 +1106,120 @@ fn boolean_column_uses_schema_boolean() {
     assert_eq!(generator_kind(&result, "t", "flag"), "boolean");
     assert_eq!(result.decision("t.flag").unwrap().reason, "schema_boolean");
 }
+
+// --- Fix: credential guard family bypass (uuid/json) -------------------------
+
+/// A credential-named column typed `uuid` or `json` (a real Postgres shape for
+/// `refresh_token`/`api_key`/`reset_token`) MUST still hit the credential guard
+/// and emit a synthetic `credential.*` rule with NO source literals — never an
+/// observed_sample / weighted_choice that would persist the real secrets.
+#[test]
+fn credential_guard_covers_uuid_and_json_families() {
+    let cases = [
+        ("api_key", "uuid", SqlTypeFamily::Uuid, "credential.api_key"),
+        (
+            "refresh_token",
+            "uuid",
+            SqlTypeFamily::Uuid,
+            "credential.token",
+        ),
+        (
+            "reset_token",
+            "jsonb",
+            SqlTypeFamily::Json,
+            "credential.token",
+        ),
+    ];
+    for (name, source_type, family, expected) in cases {
+        let schema = one_column_schema("t", portable_column(name, source_type, family));
+        let mut evidence = blank_evidence(name, 5);
+        evidence.distinct_estimate = 5.0;
+        // Observed values look categorical/sample-able — the guard must win.
+        evidence.top_k = vec![
+            top("11111111-1111-1111-1111-111111111111", 1),
+            top("22222222-2222-2222-2222-222222222222", 1),
+        ];
+        evidence.sample_values = vec!["11111111-1111-1111-1111-111111111111".to_string()];
+
+        let result = ModelInference::standard()
+            .infer(&schema, &one_column_profile("t", evidence, 5))
+            .unwrap();
+        let key = format!("t.{name}");
+        assert_eq!(
+            generator_kind(&result, "t", name),
+            expected,
+            "column `{name}` ({source_type}) skipped the credential guard"
+        );
+        assert!(
+            result.source_literals(&key).is_empty(),
+            "column `{name}` leaked source literals: {:?}",
+            result.source_literals(&key)
+        );
+        assert_eq!(
+            result.decision(&key).unwrap().reason,
+            "credential_name_guard",
+            "column `{name}` decision reason"
+        );
+    }
+}
+
+// --- Fix: observed / statistical compile-validation rejections --------------
+
+fn observed_compile_error_codes(kind_yaml: &str, col_type: &str) -> Vec<String> {
+    let model = SyntheticFile::parse_str(&format!(
+        "version: 1\nkind: model\ndefaults: {{ inference: disabled }}\nseed: 1\n\
+         tables:\n  t:\n    rows: {{ kind: fixed, count: 5 }}\n    schema:\n      \
+         name: t\n      columns:\n        - {{ name: v, type: {col_type}, nullable: false }}\n    \
+         columns:\n      v:\n        generator: {kind_yaml}\n"
+    ))
+    .expect("parse model")
+    .into_model()
+    .expect("model");
+    match ModelCompiler::standard().compile(model, CompileOptions::default()) {
+        Ok(_) => Vec::new(),
+        Err(bag) => bag.diagnostics.iter().map(|d| d.code.clone()).collect(),
+    }
+}
+
+#[test]
+fn observed_generators_reject_bad_params() {
+    let has = |kind_yaml: &str, col_type: &str, code: &str| {
+        let codes = observed_compile_error_codes(kind_yaml, col_type);
+        assert!(
+            codes.iter().any(|c| c == code),
+            "expected `{code}` for `{kind_yaml}`, got {codes:?}"
+        );
+    };
+
+    // Empty observed_sample values.
+    has(
+        "{ kind: observed_sample, values: [] }",
+        "bigint",
+        "GEN-OBSERVED-SAMPLE-EMPTY",
+    );
+    // Unsorted / overlapping histogram bins.
+    has(
+        "{ kind: histogram, bins: [ { min: 10, max: 20, count: 5 }, \
+         { min: 0, max: 5, count: 5 } ] }",
+        "bigint",
+        "GEN-HISTOGRAM-UNSORTED",
+    );
+    // Non-finite normal std.
+    has(
+        "{ kind: normal, mean: 0, std: .nan }",
+        "bigint",
+        "GEN-GAUSSIAN-NON-FINITE",
+    );
+    // min > max on the ranged normal generator.
+    has(
+        "{ kind: normal, mean: 0, std: 1, min: 10, max: 0 }",
+        "bigint",
+        "GEN-GAUSSIAN-RANGE",
+    );
+    // Negative monotonic step.
+    has(
+        "{ kind: monotonic, start: 0, step: -1 }",
+        "bigint",
+        "GEN-MONOTONIC-STEP",
+    );
+}

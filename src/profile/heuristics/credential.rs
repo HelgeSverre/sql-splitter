@@ -11,16 +11,40 @@ use super::{generator, Candidate, ColumnContext, Confidence, Precedence};
 use crate::synthetic::model::GeneratorConfig;
 use crate::synthetic::schema::SqlTypeFamily;
 
+/// Every family that can hold secret string-ish material and must therefore be
+/// covered by the guard. Numeric families are deliberately excluded — a
+/// `token_count` integer is not a token — but every non-numeric string-shaped
+/// family is included, so a `refresh_token uuid` or an `api_key json` column
+/// cannot slip past the guard into an observed-value replay.
+fn guardable_family(family: &SqlTypeFamily) -> bool {
+    matches!(
+        family,
+        SqlTypeFamily::Text
+            | SqlTypeFamily::Other
+            | SqlTypeFamily::Bytes
+            | SqlTypeFamily::Uuid
+            | SqlTypeFamily::Json
+    )
+}
+
+/// Whether `name` names secret material, regardless of the column's SQL type.
+///
+/// Shared by the guard (which also gates on family) and, as a hard backstop, by
+/// the literal-emitting distribution heuristics (which refuse to persist source
+/// values for such a column even if they are somehow reached). "High
+/// confidence" here means a definite credential-name match — any classified
+/// credential term, not a fuzzy guess.
+pub(super) fn is_high_confidence_credential(name: &str) -> bool {
+    classify(name).is_some()
+}
+
 /// Propose the credential-guard candidate for a column, if its name looks like
 /// secret material.
 pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
     let column = ctx.column();
-    // Only text-shaped columns carry credential material we know how to
+    // Only string-shaped columns carry credential material we know how to
     // synthesize; a numeric "token_count" is not a token.
-    if !matches!(
-        column.family,
-        SqlTypeFamily::Text | SqlTypeFamily::Other | SqlTypeFamily::Bytes
-    ) {
+    if !guardable_family(&column.family) {
         return Vec::new();
     }
 

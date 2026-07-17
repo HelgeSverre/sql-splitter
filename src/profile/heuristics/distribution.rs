@@ -37,8 +37,14 @@ pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
     let column = ctx.column();
     let mut out = Vec::new();
 
+    // Hard backstop: a credential-named column NEVER gets a source-derived rule
+    // here, whatever its SQL type. The credential guard (higher precedence)
+    // already wins for it; this ensures the literal-emitting branches below can
+    // never persist a real secret even if the guard is somehow bypassed.
+    let credential = super::credential::is_high_confidence_credential(&column.name);
+
     // Constant: effectively one distinct non-null value.
-    if distinct <= 1 {
+    if distinct <= 1 && !credential {
         if let Some(literal) = representative_value(evidence) {
             out.push(
                 Candidate::new(
@@ -72,6 +78,7 @@ pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
     if (1..=MAX_CATEGORICAL_DISTINCT).contains(&distinct)
         && !evidence.top_k.is_empty()
         && distinct * 2 <= non_null.max(2)
+        && !credential
     {
         let entries: Vec<(String, u64)> = evidence
             .top_k
@@ -113,6 +120,7 @@ pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
     // Bounded weighted sample: the last resort for high-cardinality text with a
     // retained sample and no stronger match. Embeds source literals.
     if out.is_empty()
+        && !credential
         && matches!(
             column.family,
             SqlTypeFamily::Text | SqlTypeFamily::Other | SqlTypeFamily::Uuid
