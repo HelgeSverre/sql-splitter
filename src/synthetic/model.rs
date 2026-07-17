@@ -466,6 +466,13 @@ impl SyntheticModel {
             let Some(&count) = resolved.get(name) else {
                 continue;
             };
+            // Inferred models are entirely `observed`/`fixed`, so in practice
+            // only those two arms fire today. Overwriting the resolved `count`
+            // on `scale`/`relation.children` is inert for now (the compiler
+            // recomputes their count from `base`*`factor` / the parent), and is
+            // kept only so this stays total over `RowsModel`; a caller that
+            // hand-authors those variants and freezes should revisit whether
+            // the derived count should be pinned.
             match &mut table.rows {
                 RowsModel::Fixed { count: c }
                 | RowsModel::Observed { count: c }

@@ -732,6 +732,12 @@ fn blank_evidence(name: &str, total: u64) -> ColumnEvidence {
 fn one_column_profile(table: &str, evidence: ColumnEvidence, rows: u64) -> DumpProfile {
     DumpProfile {
         depth: ProfileDepth::Full,
+        // These unit tests pass their own `PortableSchema` to `infer`, so the
+        // profile's embedded schema is unused here; an empty snapshot suffices.
+        schema: PortableSchema {
+            dialect: "mysql".to_string(),
+            tables: BTreeMap::new(),
+        },
         tables: vec![TableEvidence {
             table: table.to_string(),
             row_count: Some(rows),

@@ -530,6 +530,8 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
         emit_stdout_temp,
     } = prepared;
 
+    let had_source_dump = request.input.is_some();
+
     match Generate::run(request) {
         Ok(report) => {
             if let Some(temp) = &stdout_temp {
@@ -543,7 +545,7 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
             // stderr — even under `--quiet` — and never carries values. It is
             // deliberately kept out of the diagnostics bag, so `--strict` does
             // not promote this allowed use to a blocking error.
-            print_source_values_notice(&report.source_values);
+            print_source_values_notice(&report.source_values, had_source_dump);
 
             let warnings_are_fatal = strict
                 && report
@@ -569,9 +571,15 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Print the single conservative `GEN-SOURCE-VALUES` safety notice to stderr
-/// when the resolved model replays any source-derived literals. Lists the rule
-/// locations and kinds; never the values themselves.
-fn print_source_values_notice(uses: &[SourceValueUse]) {
+/// when the resolved model replays any literal values. Lists the rule locations
+/// and kinds; never the values themselves.
+///
+/// The phrasing is gated on whether a source dump was actually profiled: a
+/// dump run may replay values *derived from the source dump* (a real
+/// re-identification concern), whereas a `--config`-only run replays only
+/// hand-authored literals, so the notice states the output is synthetic rather
+/// than asserting a source dump that was never read.
+fn print_source_values_notice(uses: &[SourceValueUse], had_source_dump: bool) {
     if uses.is_empty() {
         return;
     }
@@ -580,9 +588,14 @@ fn print_source_values_notice(uses: &[SourceValueUse]) {
         .map(|used| format!("{} ({})", used.path, used.rule_kind))
         .collect::<Vec<_>>()
         .join(", ");
+    let body = if had_source_dump {
+        "replay literal values derived from the source dump; review before sharing the output"
+    } else {
+        "replay hand-authored literal values (e.g. weighted_choice/constant); output is \
+         synthetic, not anonymized source data"
+    };
     eprintln!(
-        "warning[GEN-SOURCE-VALUES] {} rule(s) replay literal values derived from the source \
-         dump; review before sharing the output. Locations: {locations}",
+        "warning[GEN-SOURCE-VALUES] {} rule(s) {body}. Locations: {locations}",
         uses.len()
     );
 }

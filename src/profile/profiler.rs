@@ -39,6 +39,7 @@ use crate::parser::{
     StatementType, SMALL_BUFFER_SIZE,
 };
 use crate::schema::{Column, ColumnType, Schema, SchemaBuilder, TableId, TableSchema};
+use crate::synthetic::schema::PortableSchema;
 
 use super::evidence::{ColumnEvidence, DumpProfile, RelationshipEvidence, TableEvidence};
 use super::{ColumnSketches, ProfileBudget, ProfileDepth, ProfileValue};
@@ -832,8 +833,14 @@ impl ProfileRun {
             })
             .collect();
 
+        // The profiler already built the full DDL schema in this same pass;
+        // capture it as a portable snapshot so downstream inference never has
+        // to re-read the dump to recover it.
+        let portable = PortableSchema::from_runtime(&schema, self.dialect);
+
         DumpProfile {
             depth,
+            schema: portable,
             tables,
             warnings: self.warnings,
         }

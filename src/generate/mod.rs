@@ -100,14 +100,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::DiagnosticBag;
-use crate::parser::{detect_dialect_from_file, SqlDialect};
+use crate::parser::SqlDialect;
 use crate::profile::evidence::DumpProfile;
 use crate::profile::{
     Confidence, Decision, DumpProfiler, ModelInference, Precedence, ProfileBudget, ProfileDepth,
 };
-use crate::schema::Schema;
 use crate::synthetic::model::InferenceMode;
-use crate::synthetic::{ConfigLoader, ModelMerger, PortableSchema, SourceValueUse, SyntheticFile};
+use crate::synthetic::{ConfigLoader, ModelMerger, SourceValueUse, SyntheticFile};
 
 // Re-exported so the staged API (registry -> compiler -> engine -> renderer)
 // is fully usable from `crate::generate` alone, without also reaching into
@@ -393,9 +392,9 @@ fn assemble_model(
             }
         }
         (Some(input_path), config) => {
-            let (schema, profile) = profile_source(input_path, source)?;
+            let profile = profile_source(input_path, source)?;
             let inference = ModelInference::standard()
-                .infer(&schema, &profile)
+                .infer(&profile.schema, &profile)
                 .map_err(|error| {
                     GenerateError::InvalidInput(format!("GEN-INFER-FAILED: {error}"))
                 })?;
@@ -448,25 +447,15 @@ fn assemble_model(
     }
 }
 
-/// Profile `path` into its portable schema and value evidence. Runs two bounded
-/// passes over the dump: one to extract the DDL schema, one to sketch values.
-fn profile_source(
-    path: &Path,
-    source: &SourceOptions,
-) -> Result<(PortableSchema, DumpProfile), GenerateError> {
-    let dialect = match source.dialect {
-        Some(dialect) => dialect,
-        None => {
-            detect_dialect_from_file(path)
-                .map_err(source_error)?
-                .dialect
-        }
-    };
-
-    let runtime = Schema::from_sql_file(path, dialect, None).map_err(source_error)?;
-    let schema = PortableSchema::from_runtime(&runtime, dialect);
-
-    let mut builder = DumpProfiler::builder().dialect(dialect);
+/// Profile `path` into a [`DumpProfile`] carrying both its portable DDL schema
+/// and value evidence. The dump is read exactly once: the profiler builds the
+/// schema and sketches values in the same streaming pass, then exposes the
+/// schema on [`DumpProfile::schema`].
+fn profile_source(path: &Path, source: &SourceOptions) -> Result<DumpProfile, GenerateError> {
+    let mut builder = DumpProfiler::builder();
+    if let Some(dialect) = source.dialect {
+        builder = builder.dialect(dialect);
+    }
     if let Some(depth) = source.depth {
         builder = builder.depth(depth);
     }
@@ -476,9 +465,7 @@ fn profile_source(
             ..ProfileBudget::default()
         });
     }
-    let profile = builder.build().profile_path(path).map_err(source_error)?;
-
-    Ok((schema, profile))
+    builder.build().profile_path(path).map_err(source_error)
 }
 
 /// Wrap an I/O / profiling failure as a `GEN-SOURCE-IO` invalid-input error.

@@ -12,6 +12,7 @@
 //! retained beyond a small, budget-capped sample.
 
 use crate::profile::ProfileDepth;
+use crate::synthetic::schema::PortableSchema;
 use serde::{Deserialize, Serialize};
 
 /// Top-level profile of a whole dump.
@@ -19,6 +20,10 @@ use serde::{Deserialize, Serialize};
 pub struct DumpProfile {
     /// How deep the profiler was asked to look.
     pub depth: ProfileDepth,
+    /// The dump's DDL schema, captured in the same single pass that gathered
+    /// the value evidence. A portable, dialect-neutral snapshot so consumers
+    /// (inference) never have to re-read the dump to recover its schema.
+    pub schema: PortableSchema,
     /// Per-table evidence, in discovery order.
     pub tables: Vec<TableEvidence>,
     /// Stable diagnostic codes raised while profiling (e.g.
