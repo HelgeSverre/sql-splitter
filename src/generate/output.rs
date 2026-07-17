@@ -39,7 +39,7 @@
 //! is no crash-proof cleanup, only owner-only permissions limiting exposure.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once};
@@ -93,7 +93,9 @@ pub fn install_interrupt_handler() {
     INSTALL_HANDLER.call_once(|| {
         #[cfg(unix)]
         // SAFETY: `on_sigint` performs only an async-signal-safe atomic store,
-        // so installing it as a SIGINT handler is sound.
+        // so installing it as a SIGINT handler is sound. The previous handler
+        // returned by `signal` is intentionally discarded: install is
+        // best-effort and this process owns SIGINT for the run's duration.
         unsafe {
             libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
         }
@@ -124,6 +126,11 @@ impl CancellationToken {
     }
 
     /// Whether this token (or the process) has been cancelled.
+    ///
+    /// The flag is a single-writer, single-bit latch (never un-set) used only to
+    /// decide whether to stop, so a `Relaxed` load on the polling path is
+    /// sufficient — no other memory is published through it. `cancel` stores with
+    /// `SeqCst` for an unambiguous happens-before with any later observer.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed) || PROCESS_INTERRUPTED.load(Ordering::Relaxed)
     }
@@ -223,19 +230,29 @@ fn create_protected_in(dir: &Path, prefix: &str) -> io::Result<(File, PathBuf)> 
 /// An owner-only temporary file used to spill buffered rows, removed on drop.
 ///
 /// The backing file is created with [`create_protected_in`] (mode `0600`,
-/// unpredictable name). Write rows with [`writer`](Self::writer), then
+/// unpredictable name). Append rows with [`write_row`](Self::write_row), then
 /// [`rewind`](Self::rewind) to read them back. Dropping the spool removes the
 /// file; see the module docs for the SIGKILL/power-loss caveat.
+///
+/// Writes go through one persistent [`BufWriter`] and reuse a single scratch
+/// buffer for the whole spool lifetime, so spilling a large family costs no
+/// per-row writer allocation and does not flush per row — the buffer is flushed
+/// once on [`rewind`](Self::rewind) (or explicitly via [`flush`](Self::flush)).
 pub struct ProtectedSpool {
-    file: File,
+    file: BufWriter<File>,
     path: PathBuf,
+    scratch: Vec<u8>,
 }
 
 impl ProtectedSpool {
     /// Create a protected spool in `temp`'s directory.
     pub fn create(temp: &TempConfig) -> io::Result<Self> {
         let (file, path) = create_protected_in(&temp.dir(), ".sqlspl-spool-")?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file: BufWriter::new(file),
+            path,
+            scratch: Vec::new(),
+        })
     }
 
     /// The spool's backing path. Callers must not print this at normal
@@ -244,15 +261,25 @@ impl ProtectedSpool {
         &self.path
     }
 
-    /// A writer that appends length-prefixed records to the spool.
-    pub fn writer(&mut self) -> SpoolWriter<&mut File> {
-        SpoolWriter::new(&mut self.file)
+    /// Append one length-prefixed record, reusing the spool's persistent
+    /// buffered writer and scratch buffer (no per-row allocation, no per-row
+    /// flush).
+    pub fn write_row(&mut self, row: &SpooledRow) -> io::Result<()> {
+        write_record(&mut self.file, &mut self.scratch, row)
     }
 
-    /// Seek to the start and return a reader over the spooled records.
+    /// Flush buffered writes to the backing file.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+
+    /// Flush buffered writes, seek to the start, and return a reader over the
+    /// spooled records.
     pub fn rewind(&mut self) -> io::Result<SpoolReader<&mut File>> {
-        self.file.rewind()?;
-        Ok(SpoolReader::new(&mut self.file))
+        self.file.flush()?;
+        let file = self.file.get_mut();
+        file.rewind()?;
+        Ok(SpoolReader::new(file))
     }
 }
 
@@ -438,7 +465,30 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
-/// Writes [`SpooledRow`]s as version-tagged, length-prefixed records.
+/// Encode `row` into `scratch` and write one framed record — a version byte, a
+/// `u32` body length, then the body — to `writer`. `scratch` is reused across
+/// calls so a hot spooling loop never reallocates the encode buffer.
+fn write_record(
+    writer: &mut impl Write,
+    scratch: &mut Vec<u8>,
+    row: &SpooledRow,
+) -> io::Result<()> {
+    scratch.clear();
+    row.encode_body(scratch);
+    let len = u32::try_from(scratch.len())
+        .map_err(|_| invalid_data("spool record exceeds the maximum size"))?;
+    if scratch.len() > MAX_RECORD_BYTES {
+        return Err(invalid_data("spool record exceeds the maximum size"));
+    }
+    writer.write_all(&[SPOOL_VERSION])?;
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(scratch)?;
+    Ok(())
+}
+
+/// Writes [`SpooledRow`]s as version-tagged, length-prefixed records to any
+/// [`Write`]. [`ProtectedSpool`] has its own buffered [`write_row`] for hot
+/// spilling; this stand-alone writer is for one-off or caller-owned sinks.
 pub struct SpoolWriter<W> {
     inner: W,
     scratch: Vec<u8>,
@@ -455,17 +505,7 @@ impl<W: Write> SpoolWriter<W> {
 
     /// Append one record: a version byte, a `u32` body length, then the body.
     pub fn write_row(&mut self, row: &SpooledRow) -> io::Result<()> {
-        self.scratch.clear();
-        row.encode_body(&mut self.scratch);
-        let len = u32::try_from(self.scratch.len())
-            .map_err(|_| invalid_data("spool record exceeds the maximum size"))?;
-        if self.scratch.len() > MAX_RECORD_BYTES {
-            return Err(invalid_data("spool record exceeds the maximum size"));
-        }
-        self.inner.write_all(&[SPOOL_VERSION])?;
-        self.inner.write_all(&len.to_le_bytes())?;
-        self.inner.write_all(&self.scratch)?;
-        Ok(())
+        write_record(&mut self.inner, &mut self.scratch, row)
     }
 
     /// Flush the underlying writer.
@@ -585,18 +625,30 @@ impl AtomicOutput {
     }
 
     /// Flush and fsync the temp file, apply the published mode, then atomically
-    /// rename it over the destination. Only after this returns `Ok` does the
+    /// rename it over the destination and fsync the destination's directory so
+    /// the rename itself is durable. Only after this returns `Ok` does the
     /// destination change.
+    ///
+    /// Atomicity note: `rename(2)` is atomic on Unix (same filesystem, which is
+    /// guaranteed since the temp is a sibling of the destination). On Windows
+    /// `fs::rename` over an existing file is not atomic; this module is
+    /// Unix-first.
     pub fn commit(mut self) -> io::Result<()> {
         let mut file = self
             .file
             .take()
             .ok_or_else(|| invalid_data("AtomicOutput already committed"))?;
         file.flush()?;
+        // Durability of the file contents before the rename that publishes them.
         file.sync_all()?;
         drop(file);
         apply_published_mode(&self.temp_path, self.preserved_mode)?;
         fs::rename(&self.temp_path, &self.destination)?;
+        // Durability of the rename itself: without a directory fsync a commit
+        // that returned `Ok` could still lose the published directory entry on
+        // power loss right after the rename. Best-effort — some filesystems do
+        // not support a directory fsync.
+        sync_parent_dir(&self.destination);
         self.committed = true;
         Ok(())
     }
@@ -633,6 +685,30 @@ fn published_mode(destination: &Path, dir: &Path) -> io::Result<Option<u32>> {
     {
         let _ = (destination, dir);
         Ok(None)
+    }
+}
+
+/// Best-effort fsync of `path`'s parent directory, making a just-completed
+/// `rename` into it durable across power loss.
+///
+/// Opening a directory and calling `fsync` on it is the POSIX way to persist a
+/// directory entry. It is best-effort: some platforms/filesystems refuse a
+/// directory `fsync`, and it is a no-op off Unix. Failures are ignored — the
+/// file contents were already `sync_all`'d before the rename.
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -833,14 +909,15 @@ impl FamilyBuffer {
     }
 
     /// Move any in-memory rows into a fresh protected spool and switch state.
+    ///
+    /// Rows go through the spool's persistent buffered writer; no per-row flush
+    /// — buffered writes are flushed once when the spool is later drained.
     fn spill(&mut self) -> io::Result<()> {
         let mut spool = ProtectedSpool::create(&self.temp)?;
         if let FamilyState::ParentState(rows) = &self.state {
-            let mut writer = spool.writer();
             for row in rows {
-                writer.write_row(row)?;
+                spool.write_row(row)?;
             }
-            writer.flush()?;
         }
         self.state = match self.spill_kind {
             SpillKind::Child => FamilyState::ChildSpool(spool),
@@ -849,14 +926,11 @@ impl FamilyBuffer {
         Ok(())
     }
 
-    /// Append a row directly to the active spool.
+    /// Append a row directly to the active spool's buffered writer (no per-row
+    /// flush; the buffer is flushed once at drain).
     fn write_spilled(&mut self, row: &SpooledRow) -> io::Result<()> {
         match &mut self.state {
-            FamilyState::ChildSpool(spool) | FamilyState::TableSpool(spool) => {
-                let mut writer = spool.writer();
-                writer.write_row(row)?;
-                writer.flush()
-            }
+            FamilyState::ChildSpool(spool) | FamilyState::TableSpool(spool) => spool.write_row(row),
             // `push`/`with_estimate` only reach here after `spill`, so the state
             // is always a spool; treat an in-memory state as a no-op rather than
             // panicking.
@@ -883,7 +957,7 @@ mod tests {
                 GeneratedValue::Bytes(vec![1, 2, 3]),
             ],
         };
-        spool.writer().write_row(&row).unwrap();
+        spool.write_row(&row).unwrap();
         let mut reader = spool.rewind().unwrap();
         assert_eq!(reader.read_row().unwrap(), Some(row));
         assert_eq!(reader.read_row().unwrap(), None);

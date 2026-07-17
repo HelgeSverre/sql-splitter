@@ -10,8 +10,8 @@
 use std::io::Write;
 
 use sql_splitter::generate::output::{
-    AtomicOutput, CancellationToken, FamilyBudget, FamilyBuffer, ProtectedSpool, PublicationSet,
-    SpillKind, SpooledRow, TempConfig,
+    AtomicOutput, CancellationToken, FamilyBudget, FamilyBuffer, FamilyState, ProtectedSpool,
+    PublicationSet, SpillKind, SpoolWriter, SpooledRow, TempConfig,
 };
 use sql_splitter::generate::value::GeneratedValue;
 
@@ -44,11 +44,20 @@ fn mode_of(path: &std::path::Path) -> u32 {
     std::fs::metadata(path).unwrap().mode() & 0o777
 }
 
+/// `umask(2)` is process-global, but integration tests run in parallel threads
+/// of one process — so any test that mutates the umask must hold this lock to
+/// keep a concurrent test from observing the wrong ambient umask.
+#[cfg(unix)]
+static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[cfg(unix)]
 fn protected_spools_are_owner_only_under_a_permissive_umask() {
     // A permissive umask must NOT widen the spool: the mode is set explicitly,
     // so the file is 0600 (owner-only) regardless of the ambient umask.
+    let _guard = UMASK_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let previous = unsafe { libc::umask(0) };
     let spool = ProtectedSpool::create(&TempConfig::default()).unwrap();
     let mode = mode_of(spool.path());
@@ -62,12 +71,8 @@ fn protected_spools_are_owner_only_under_a_permissive_umask() {
 fn protected_spool_round_trips_length_prefixed_rows_in_order() {
     let mut spool = ProtectedSpool::create(&TempConfig::default()).unwrap();
     let written: Vec<SpooledRow> = (0..5).map(every_shape_row).collect();
-    {
-        let mut writer = spool.writer();
-        for row in &written {
-            writer.write_row(row).unwrap();
-        }
-        writer.flush().unwrap();
+    for row in &written {
+        spool.write_row(row).unwrap();
     }
 
     let mut reader = spool.rewind().unwrap();
@@ -178,6 +183,9 @@ fn atomic_output_preserves_an_existing_destination_mode() {
 fn atomic_output_gives_a_new_destination_normal_output_permissions() {
     // A new destination follows normal output-file permissions (umask-adjusted),
     // NOT the owner-only 0600 the temp carried while being written.
+    let _guard = UMASK_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let previous = unsafe { libc::umask(0o022) };
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("fresh.sql");
@@ -273,6 +281,47 @@ fn family_buffer_keeps_small_families_in_memory() {
     }
     assert!(!buffer.is_spilled(), "a tiny family must stay in memory");
     assert_eq!(buffer.drain_rows().unwrap(), rows);
+}
+
+#[test]
+fn family_spill_bytes_match_the_canonical_frame_encoding() {
+    // The spilled byte stream must be exactly the canonical length-prefixed
+    // frames — the buffered, single-writer spill path changes nothing on disk
+    // versus encoding each row through a plain SpoolWriter in push order.
+    let rows: Vec<SpooledRow> = (0..16).map(every_shape_row).collect();
+
+    // Canonical reference: encode every row, in order, with a plain writer.
+    let mut expected = Vec::new();
+    let mut writer = SpoolWriter::new(&mut expected);
+    for row in &rows {
+        writer.write_row(row).unwrap();
+    }
+    writer.flush().unwrap();
+
+    // Spill the same rows through a FamilyBuffer with a tiny budget.
+    let mut buffer = FamilyBuffer::new(
+        FamilyBudget { max_bytes: 8 },
+        3,
+        TempConfig::default(),
+        SpillKind::Child,
+    );
+    for row in &rows {
+        buffer.push(row.clone()).unwrap();
+    }
+    // Draining flushes the spool's buffered writer to its backing file.
+    assert_eq!(buffer.drain_rows().unwrap(), rows);
+
+    let spool_path = match buffer.state() {
+        FamilyState::ChildSpool(spool) => spool.path().to_path_buf(),
+        FamilyState::ParentState(_) | FamilyState::TableSpool(_) => {
+            panic!("expected a child spool after crossing the budget")
+        }
+    };
+    let on_disk = std::fs::read(&spool_path).unwrap();
+    assert_eq!(
+        on_disk, expected,
+        "spilled bytes are not the canonical frames"
+    );
 }
 
 #[test]
