@@ -36,17 +36,18 @@ use rand::RngExt;
 
 use crate::diagnostic::{DiagnosticBag, Severity, SourceLocation};
 use crate::synthetic::model::{
-    ChildDistribution, InferenceMode, PlannerConfig, RelationshipModel, RowsModel, SyntheticModel,
-    TableModel, TableSeed,
+    ChildDistribution, InferenceMode, ModifierConfig, PlannerConfig, RelationshipModel, RowsModel,
+    SyntheticModel, TableModel, TableSeed,
 };
-use crate::synthetic::schema::{PortableColumn, SqlTypeFamily};
+use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
 
 use super::plan::{
     ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, FamilyPhase, GenerationPlan,
     PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
 };
 use super::registry::{
-    ColumnScope, CompileContext, CompiledModifier, CompiledPlanner, ExtensionRegistry,
+    ColumnScope, CompileContext, CompiledGenerator, CompiledModifier, CompiledPlanner,
+    ExtensionRegistry,
 };
 use super::seed::{SeedRoot, StreamId};
 
@@ -975,8 +976,138 @@ impl ModelCompiler {
                 Err(errors) => bag.diagnostics.extend(errors.diagnostics),
             }
         }
+
+        self.enforce_key_uniqueness(
+            table_name,
+            table,
+            column,
+            owner,
+            rule,
+            seed,
+            &mut compiled,
+            bag,
+        );
+
         compiled
     }
+
+    /// Guarantee a single-column primary/unique key is unique BY CONSTRUCTION:
+    /// auto-attach a `unique` modifier (with `on_exhaustion: error`) to a
+    /// generator-owned key column whose generator is not already inherently
+    /// unique. A `sequence`/`Dense` generator is unique by construction and a
+    /// `uuid` collision is astronomically negligible, so both are left alone;
+    /// `monotonic` (a row-indexed sequence with no key recipe) is treated as
+    /// inherently unique too. Everything else (`string`, `pattern`, `choice`,
+    /// semantic text, …) could collide on a key column, so it gets the modifier
+    /// — which either de-duplicates the value or fails loudly, never silently
+    /// emitting a duplicate key. A user-declared `unique` modifier is honored as
+    /// is and never doubled. Composite (multi-column) keys are deliberately not
+    /// enforced here (per-column dedup cannot guarantee composite uniqueness).
+    #[allow(clippy::too_many_arguments)]
+    fn enforce_key_uniqueness(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        column: &PortableColumn,
+        owner: &ColumnOwner,
+        rule: &crate::synthetic::model::ColumnRule,
+        seed: SeedRoot,
+        compiled: &mut Vec<Box<dyn CompiledModifier>>,
+        bag: &mut DiagnosticBag,
+    ) {
+        let ColumnOwner::Generator {
+            kind,
+            compiled: generator,
+            ..
+        } = owner
+        else {
+            return;
+        };
+        if !is_single_column_key(&table.schema, column) {
+            return;
+        }
+        if generator_is_inherently_unique(kind, generator.as_ref()) {
+            return;
+        }
+        // A user-declared `unique` modifier already enforces distinctness (with
+        // whatever `on_exhaustion` they chose); do not add a second one.
+        if rule
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.kind == "unique")
+        {
+            return;
+        }
+        let Some(factory) = self.registry.modifier("unique") else {
+            return;
+        };
+        let path = format!(
+            "tables.{table_name}.columns.{}.modifiers[auto-unique]",
+            column.name
+        );
+        let config = ModifierConfig {
+            kind: "unique".to_string(),
+            args: [(
+                "on_exhaustion".to_string(),
+                serde_yaml_ng::Value::from("error"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let context = CompileContext::for_column(&table.schema, column, seed, &path);
+        match factory.compile(&config, &context) {
+            Ok(operator) => compiled.push(operator),
+            Err(errors) => bag.diagnostics.extend(errors.diagnostics),
+        }
+    }
+}
+
+/// The union of every column that participates in the table's primary key,
+/// from both the table-level `primary_key` list and column-level flags.
+fn primary_key_columns(table: &PortableTable) -> BTreeSet<&str> {
+    let mut columns: BTreeSet<&str> = table.primary_key.iter().map(String::as_str).collect();
+    columns.extend(
+        table
+            .columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.as_str()),
+    );
+    columns
+}
+
+/// Whether `column` is enforced-unique by a SINGLE-COLUMN key: it is the sole
+/// primary-key column, or it carries a one-column UNIQUE constraint (a
+/// column-level `unique` flag, a single-column unique constraint, or a
+/// single-column unique index). Composite keys (2+ columns) are excluded — per
+/// column deduplication cannot guarantee composite uniqueness.
+fn is_single_column_key(table: &PortableTable, column: &PortableColumn) -> bool {
+    let primary = primary_key_columns(table);
+    if primary.len() == 1 && primary.contains(column.name.as_str()) {
+        return true;
+    }
+    if column.unique {
+        return true;
+    }
+    let single = |columns: &[String]| columns.len() == 1 && columns[0] == column.name;
+    table
+        .unique_constraints
+        .iter()
+        .any(|constraint| single(&constraint.columns))
+        || table
+            .indexes
+            .iter()
+            .any(|index| index.unique && single(&index.columns))
+}
+
+/// Whether a key column's owning generator already produces distinct values
+/// (or collides only negligibly), so no `unique` modifier is needed. A
+/// `KeyRecipe::Dense` generator (`sequence`) is unique by construction and
+/// `KeyRecipe::Uuid` collides only with astronomically small probability;
+/// `monotonic` is a row-indexed non-decreasing sequence that exposes no key
+/// recipe but is likewise inherently unique for any positive step.
+fn generator_is_inherently_unique(kind: &str, generator: &dyn CompiledGenerator) -> bool {
+    generator.key_recipe().is_some() || kind == "monotonic"
 }
 
 /// The per-table override view folded from the flat CLI list.

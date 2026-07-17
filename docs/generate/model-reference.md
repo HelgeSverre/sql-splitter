@@ -325,6 +325,28 @@ column). Every generated column needs exactly one owner: a `generator`, a
 planner, a `relation.foreign_key`/`relation.composite_key` marker, or (under
 `defaults.inference: schema`) a structural heuristic.
 
+#### Key uniqueness by construction
+
+A **single-column** primary key, or a column covered by a **single-column**
+`UNIQUE` constraint (a column-level `unique: true`, a one-column
+`unique_constraints` entry, or a one-column unique index), is kept unique by the
+compiler automatically:
+
+- If its generator is inherently unique — `sequence` (and any `Dense`-key
+  generator) or `monotonic` — nothing is added; the values are already distinct.
+- If its generator is `uuid`, nothing is added; a v4 UUID collision is
+  astronomically negligible.
+- Otherwise (`string`, `pattern`, `choice`, semantic text, etc.) the compiler
+  auto-attaches a `unique` modifier with `on_exhaustion: error` to the column's
+  pipeline. The run then either emits distinct values or **fails loudly** — it
+  never silently writes a duplicate key. A `unique` modifier you declare
+  yourself is honored as-is and never doubled.
+
+**Composite** (multi-column) primary/unique keys are **not** auto-enforced:
+per-column deduplication cannot guarantee that the *combination* is unique. Make
+composite-key components unique by using `sequence`/`uuid` generators for them,
+or run [`--verify`](README.md) to audit uniqueness on the generated output.
+
 ### Relationships (`relationships`)
 
 ```yaml

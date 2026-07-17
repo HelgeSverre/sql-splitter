@@ -1039,3 +1039,89 @@ fn mssql_full_verify_lifecycle_publishes_on_pass() {
         .unwrap()
         .contains("INSERT INTO [users]"));
 }
+
+// --- Task 34b: single-column key uniqueness by construction ----------------
+
+// A single-column TEXT primary key backed by a `string` generator drawing from
+// a tiny value space (one alphanumeric character, 62 possibilities) across many
+// rows. Without uniqueness enforcement the birthday paradox all but guarantees a
+// duplicate primary key; with the compiler's auto-attached `unique` modifier the
+// emitted keys are distinct by construction.
+const STRING_PK: &str = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  items:
+    rows: { kind: fixed, count: 40 }
+    schema:
+      name: items
+      primary_key: [code]
+      columns:
+        - { name: code, type: "varchar(16)", nullable: false, primary_key: true }
+    columns:
+      code: { generator: { kind: string, min_length: 1, max_length: 1 } }
+"#;
+
+#[test]
+fn string_primary_key_is_distinct_by_construction() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(STRING_PK);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "string-pk.sql", &sql);
+
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.passed(),
+        "string primary key must be unique by construction; failures: {:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        report.status_of("primary_key:items:code"),
+        Some(CheckStatus::Exact)
+    );
+}
+
+// A single-column UNIQUE (non-primary-key) TEXT column, again over a tiny value
+// space. The compiler auto-attaches uniqueness the same way it does for a
+// primary key, so the emitted values are distinct by construction.
+const UNIQUE_TEXT: &str = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  items:
+    rows: { kind: fixed, count: 40 }
+    schema:
+      name: items
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: slug, type: "varchar(16)", nullable: false, unique: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      slug: { generator: { kind: string, min_length: 1, max_length: 1 } }
+"#;
+
+#[test]
+fn single_column_unique_text_is_distinct_by_construction() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(UNIQUE_TEXT);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "unique-text.sql", &sql);
+
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.passed(),
+        "single-column unique text must be distinct by construction; failures: {:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        report.status_of("unique:items:slug"),
+        Some(CheckStatus::Exact)
+    );
+}

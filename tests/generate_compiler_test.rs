@@ -1115,3 +1115,89 @@ fn ownership_allows_database_default_column() {
         .unwrap();
     assert!(matches!(created.owner, ColumnOwner::DatabaseDefault));
 }
+
+// --- Task 34b: single-column key uniqueness enforced at compile time --------
+
+/// A single-table model whose one non-key `id`-style column `key` is a
+/// single-column primary key produced by `generator_kind`, plus an optional
+/// extra column line and rule. Lets a test observe the compiled modifier
+/// pipeline the compiler attaches to a key column.
+fn single_key_model(key_type: &str, key_rule: &str) -> SyntheticModel {
+    model_from_yaml(&format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: disabled }}
+seed: 7
+tables:
+  t:
+    rows: {{ kind: fixed, count: 10 }}
+    schema:
+      name: t
+      primary_key: [key]
+      columns:
+        - {{ name: key, type: {key_type}, nullable: false, primary_key: true }}
+    columns:
+      key: {{ {key_rule} }}
+"#
+    ))
+}
+
+/// The number of compiled modifiers on table `t`'s `key` column.
+fn key_modifier_count(plan: &GenerationPlan) -> usize {
+    plan.table("t")
+        .unwrap()
+        .columns
+        .iter()
+        .find(|column| column.schema.name == "key")
+        .unwrap()
+        .modifiers
+        .len()
+}
+
+#[test]
+fn string_primary_key_gets_one_auto_unique_modifier() {
+    let model = single_key_model(
+        "\"varchar(16)\"",
+        "generator: { kind: string, min_length: 1, max_length: 1 }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    // The user declared no modifier; the compiler attaches exactly one (unique).
+    assert_eq!(key_modifier_count(&plan), 1);
+}
+
+#[test]
+fn sequence_primary_key_gets_no_auto_unique_modifier() {
+    let model = single_key_model("bigint", "generator: { kind: sequence, start: 1 }");
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    // A sequence is unique by construction (a Dense key recipe): no modifier.
+    assert_eq!(key_modifier_count(&plan), 0);
+}
+
+#[test]
+fn uuid_primary_key_gets_no_auto_unique_modifier() {
+    let model = single_key_model("uuid", "generator: { kind: uuid }");
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    // A uuid collides only negligibly (a Uuid key recipe): no modifier.
+    assert_eq!(key_modifier_count(&plan), 0);
+}
+
+#[test]
+fn user_declared_unique_on_key_is_not_doubled() {
+    let model = single_key_model(
+        "\"varchar(16)\"",
+        "generator: { kind: string, min_length: 1, max_length: 1 }, \
+         modifiers: [ { kind: unique, on_exhaustion: warn } ]",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    // The user's own `unique` modifier is honored; no second one is added.
+    assert_eq!(key_modifier_count(&plan), 1);
+}

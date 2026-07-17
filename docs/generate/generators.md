@@ -134,6 +134,13 @@ Applied in list order, after the generator produces a base value. All are
 There is no `mask` modifier in the `generate` catalog — value masking
 (`****-****-****-XXXX`) is a `redact` concept, not part of this pipeline.
 
+You rarely need to add `unique` by hand for a key: the compiler auto-attaches it
+(with `on_exhaustion: error`) to any single-column primary key or single-column
+`UNIQUE` column whose generator is not already inherently unique, so keys are
+distinct by construction. `sequence`/`monotonic` and `uuid` are left alone, and
+composite keys are not auto-enforced. See
+[Key uniqueness by construction](model-reference.md#key-uniqueness-by-construction).
+
 ## `constant`/`weighted_choice`/`observed_sample` and source literals
 
 `constant`, `weighted_choice`, and `observed_sample` are the generator kinds
