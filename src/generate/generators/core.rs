@@ -229,14 +229,26 @@ const ALL_FAMILIES: &[SqlTypeFamily] = &[
 enum CoreGenerator {
     Null,
     Sequence(SequenceState),
-    Copy { source: String },
+    Copy {
+        source: String,
+    },
     Template(Vec<TemplateFragment>),
-    Pattern { mask: String, rng: ChaCha8Rng },
+    Pattern {
+        mask: String,
+        rng: ChaCha8Rng,
+    },
     DatabaseDefault,
     Json(String),
     Integer(UniformInteger),
     Decimal(UniformDecimal),
-    Boolean { probability: f64, rng: ChaCha8Rng },
+    Boolean {
+        probability: f64,
+        rng: ChaCha8Rng,
+        /// When `true`, the target column is an integer-family column (e.g. a
+        /// MySQL `TINYINT(1)` boolean-by-convention) so the value is emitted as
+        /// `0`/`1` rather than a native boolean.
+        as_integer: bool,
+    },
     String(UniformString),
     Bytes(UniformBytes),
     Uuid(ChaCha8Rng),
@@ -380,8 +392,17 @@ impl CompiledGenerator for CompiledCore {
                     scale: state.scale,
                 };
             }
-            CoreGenerator::Boolean { probability, rng } => {
-                *output = GeneratedValue::Boolean(rng.random_bool(*probability));
+            CoreGenerator::Boolean {
+                probability,
+                rng,
+                as_integer,
+            } => {
+                let flag = rng.random_bool(*probability);
+                *output = if *as_integer {
+                    GeneratedValue::Integer(i128::from(flag))
+                } else {
+                    GeneratedValue::Boolean(flag)
+                };
             }
             CoreGenerator::String(state) => {
                 let len = if state.min_len == state.max_len {
@@ -1023,7 +1044,11 @@ static BOOLEAN_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
         required: false,
         summary: "Probability of `true`, in [0, 1]; defaults to 0.5.",
     }],
-    accepts: &[SqlTypeFamily::Boolean],
+    accepts: &[
+        SqlTypeFamily::Boolean,
+        SqlTypeFamily::Integer,
+        SqlTypeFamily::BigInteger,
+    ],
     writes: ColumnScope::OwnColumn,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -1055,10 +1080,20 @@ impl GeneratorFactory for BooleanFactory {
             );
         }
         let rng = stream(context, "boolean");
-        bag.into_result(
-            Box::new(CompiledCore(CoreGenerator::Boolean { probability, rng }))
-                as Box<dyn CompiledGenerator>,
-        )
+        // A boolean-by-convention integer column (e.g. MySQL `TINYINT(1)`, which
+        // classifies as the Integer family) must receive `0`/`1` integer values,
+        // not a native boolean, so the rendered SQL is valid for the column type.
+        let as_integer = context.column().is_some_and(|column| {
+            matches!(
+                column.family,
+                SqlTypeFamily::Integer | SqlTypeFamily::BigInteger
+            )
+        });
+        bag.into_result(Box::new(CompiledCore(CoreGenerator::Boolean {
+            probability,
+            rng,
+            as_integer,
+        })) as Box<dyn CompiledGenerator>)
     }
 }
 

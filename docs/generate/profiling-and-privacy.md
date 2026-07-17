@@ -116,6 +116,49 @@ Profiling reads the dump in a **single pass** — schema and per-row evidence
 are captured together, so `generate production.sql --emit-config
 model.yaml` never re-reads the file to gather what the compiler needs.
 
+## Performance and memory characteristics
+
+Generation is **streaming**: it holds a batch/family working set, not the whole
+output, so peak memory is bounded by configuration, not by row count or output
+size. On an Apple M2 Max release build, peak RSS stays in the **10–20 MB** band
+across 100 K to **1 000 000** rows and 10 to 100 tables, and a realistic
+core-generator model sustains roughly **1 M rows/s ≈ 94 MB/s** at steady state.
+Profiling a source dump is bounded by the evidence budget (single-digit to
+low-tens of MB regardless of dump size); a 145 MB dump profiles-and-generates in
+about 3 s at ~40 MB RSS.
+
+Measurable overheads inside the configurable path are small: seeded vs unseeded
+is < 1% (the seed draw is negligible), and forcing the family-spill spool path
+(`family_budget_bytes`) costs ~2% while producing byte-for-byte identical
+output. Reproduce all of this with:
+
+```bash
+cargo bench --bench generate_bench      # CPU-only medians (renderer + generate)
+./scripts/benchmark-generate.sh --big   # wall time / throughput / peak RSS matrix
+just profile                            # per-command peak-RSS profile (incl. generate)
+```
+
+A captured baseline snapshot lives in
+[`benchmark-results/generate-baseline.md`](../../benchmark-results/generate-baseline.md)
+— treat it as a regression anchor, re-measured on the same host, not a contract.
+
+## Real-world survey methodology (redaction)
+
+The generator is hardened against real dumps by a **survey**: it is run
+end-to-end (profile → infer → compile → generate → verify → validate) against
+authorized local dumps and stress fixtures, and every parser/schema/inference
+failure is turned into a **minimal synthetic regression fixture** — one that
+reproduces the structural *shape* that failed using invented table/column names
+and values, never anything copied from a source dump. See
+`tests/fixtures/generate/realworld_shapes.sql` for the pattern.
+
+The redaction rule is non-negotiable: benchmark results and survey notes record
+**only aggregate, redacted facts** — dialect, size bucket, schema-feature and
+inferred rule/planner counts, diagnostics, runtime, and memory. Source literals,
+real values, and source table/column names are never committed. When a survey
+finding needs a regression test, reproduce the failing shape synthetically; do
+not check in a dump fragment.
+
 ## Temp-file cleanup after hard termination
 
 `generate` uses protected temporary files in two places: `--verify` stages

@@ -28,6 +28,43 @@ mod mod_tests {
         );
     }
 
+    /// Regression (Task 34 survey): MySQL 8 omits the display width, so real
+    /// dumps write `bigint unsigned` (no parens) and the `unsigned`/`signed`/
+    /// `zerofill` modifiers must not push an integer type into the `Other`
+    /// fallback. Classifying these as `Other` mis-inferred `sequence`/`string`
+    /// generators that the compiler then rejected with `GEN-GENERATOR-TYPE`.
+    #[test]
+    fn test_column_type_parsing_unsigned_modifiers() {
+        assert_eq!(
+            ColumnType::from_mysql_type("bigint unsigned"),
+            ColumnType::BigInt
+        );
+        assert_eq!(ColumnType::from_mysql_type("int unsigned"), ColumnType::Int);
+        assert_eq!(
+            ColumnType::from_mysql_type("tinyint unsigned"),
+            ColumnType::Int
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("int(10) unsigned"),
+            ColumnType::Int
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("BIGINT UNSIGNED ZEROFILL"),
+            ColumnType::BigInt
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("decimal(10,2) unsigned"),
+            ColumnType::Decimal
+        );
+        // The modifier guard must only strip trailing unsigned/signed/zerofill
+        // words: a genuine multi-word type name is never reduced to its first
+        // token (so `double precision` is not silently treated as `double`).
+        assert!(matches!(
+            ColumnType::from_mysql_type("double precision"),
+            ColumnType::Other(_)
+        ));
+    }
+
     #[test]
     fn test_schema_table_lookup() {
         let mut schema = Schema::new();

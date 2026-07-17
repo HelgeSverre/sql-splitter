@@ -64,6 +64,24 @@ impl ColumnType {
         let type_lower = type_str.to_lowercase();
         let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
 
+        // MySQL numeric types can carry `unsigned`/`signed`/`zerofill`
+        // modifiers after the base name. MySQL 8 also omits the display width,
+        // so modern dumps write `bigint unsigned` (no parens). Reduce to the
+        // base name when every trailing word is one of those modifiers, while
+        // preserving genuine multi-word type names like `double precision` and
+        // `timestamp without time zone`.
+        let base_type = match base_type.split_whitespace().next() {
+            Some(first)
+                if base_type
+                    .split_whitespace()
+                    .skip(1)
+                    .all(|word| matches!(word, "unsigned" | "signed" | "zerofill")) =>
+            {
+                first
+            }
+            _ => base_type,
+        };
+
         match base_type {
             // Integer types (all dialects)
             "int" | "integer" | "tinyint" | "smallint" | "mediumint" | "int4" | "int2" => {

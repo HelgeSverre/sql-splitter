@@ -238,3 +238,41 @@ fn generate_mode_without_output_is_a_shape_error() {
     let err = Generate::builder().config(SIMPLE_MODEL).run().unwrap_err();
     assert!(matches!(err, GenerateError::InvalidInput(_)));
 }
+
+/// A synthetic MySQL dump reproducing three everyday shapes (invented names
+/// and values) that real dumps exposed during the Task 34 survey.
+const REALWORLD_SHAPES_DUMP: &str = "tests/fixtures/generate/realworld_shapes.sql";
+
+/// Regression (Task 34 real-world survey): a MySQL dump using the common
+/// Laravel/MySQL 8 shapes must profile, infer, compile, and generate end to
+/// end. Each of these previously aborted the run with a `GEN-GENERATOR-TYPE`
+/// error:
+///   - `bigint/int/tinyint unsigned` columns (MySQL 8 omits the display width)
+///     were classified `Other` and mis-assigned `sequence`/`string` generators;
+///   - a 0/1 `tinyint(1)` boolean-by-convention column got a `boolean`
+///     generator the compiler rejected on the integer-family column;
+///   - a `binary(16)` hash column whose name matched a semantic text rule got a
+///     Text-only generator it could not accept as a UUID-family column.
+#[test]
+fn real_world_mysql_shapes_generate_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .input(REALWORLD_SHAPES_DUMP)
+        .output(&output)
+        .seed(42)
+        .run()
+        .expect("real-world MySQL shapes must generate without a GEN-GENERATOR-TYPE error");
+
+    assert!(!report.diagnostics.has_errors());
+    assert!(report.rows_written > 0);
+
+    let sql = fs::read_to_string(&output).unwrap();
+    assert!(sql.contains("INSERT INTO"), "expected row data, got: {sql}");
+    // The 0/1 `tinyint(1)` column is integer-family, so the boolean-by-
+    // convention rule must render it as `0`/`1`, never a native boolean literal.
+    assert!(
+        !sql.contains("TRUE") && !sql.contains("FALSE"),
+        "integer boolean-by-convention column must render 0/1, got: {sql}"
+    );
+}

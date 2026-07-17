@@ -15,10 +15,12 @@ use crate::synthetic::schema::SqlTypeFamily;
 pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
     let column = ctx.column();
     let name = column.name.to_ascii_lowercase();
-    let text_like = matches!(
-        column.family,
-        SqlTypeFamily::Text | SqlTypeFamily::Other | SqlTypeFamily::Uuid
-    );
+    // Semantic-name generators (email, file.name, address, ...) all render as
+    // text and are declared `accepts: [Text]`. A UUID-family column — including
+    // a MySQL `BINARY(16)` the classifier treats as a UUID — must not be handed
+    // one of these; it belongs to the `uuid` type-fallback instead. Admitting it
+    // here produced models the compiler rejected with `GEN-GENERATOR-TYPE`.
+    let text_like = matches!(column.family, SqlTypeFamily::Text | SqlTypeFamily::Other);
 
     let mut out = Vec::new();
 

@@ -240,6 +240,14 @@ run_profile() {
         split)
             cmd+=("$input_file" "--output" "$output_dir" "--dialect" "$dialect")
             ;;
+        generate)
+            # `generate` synthesizes from a model (it does not read the input
+            # dump), so it profiles the streaming generation path. Reuse the
+            # 10-table chain model at a fixed row count. See
+            # scripts/benchmark-generate.sh for the full throughput matrix.
+            cmd+=("--config" "$MODEL_10" "--dialect" "$dialect" "--rows" "10000" \
+                  "--seed" "$SEED" "--output" "$output_file" "--quiet")
+            ;;
         analyze)
             cmd+=("$input_file" "--dialect" "$dialect")
             ;;
@@ -326,6 +334,7 @@ run_all_profiles() {
     echo "------------------------------------------------------------"
     
     # Core commands
+    run_profile "generate" "$input_file" "$dialect"
     run_profile "analyze" "$input_file" "$dialect"
     run_profile "split" "$input_file" "$dialect"
     run_profile "validate" "$input_file" "$dialect"
