@@ -43,6 +43,7 @@ use smallvec::SmallVec;
 use crate::parser::mysql_insert::{
     hash_pk_tuple, parse_insert_tuple, InsertRowContext, PkTuple, PkValue, RowExtraction,
 };
+use crate::parser::postgres_copy::{parse_copy_columns, CopyParser};
 use crate::parser::{Parser, ParserEvent, RowFlow, SqlDialect};
 use crate::schema::{Schema, SchemaBuilder, TableSchema};
 
@@ -254,9 +255,12 @@ impl GenerationVerifier {
         let reader = open_reader(path)?;
         let mut parser = Parser::with_dialect(reader, 1 << 20, self.dialect);
         let dialect = self.dialect;
-        // The parser borrows the current INSERT context across rows of one
-        // statement; rebuild it whenever a new statement starts.
+        // The parser borrows the current INSERT/COPY context across rows of one
+        // statement; rebuild it whenever a new statement starts. COPY output is
+        // audited through the *same* `observe_row` path as INSERT tuples, so a
+        // Postgres COPY table gets exactly the same exact checks.
         let mut context: Option<InsertState> = None;
+        let mut copy: Option<CopyState<'_>> = None;
         let audit_ref = &mut audit;
         parser
             .visit_events(|event| {
@@ -290,12 +294,28 @@ impl GenerationVerifier {
                             }
                         }
                     }
-                    ParserEvent::CopyStart(_) | ParserEvent::CopyRow(_) => {
-                        // COPY-format output is not audited row-by-row yet; the
-                        // expected-tables/DDL checks still apply and the row-count
-                        // check for such a table is reported NotChecked.
-                        audit_ref.note_copy();
+                    ParserEvent::CopyStart(header) => {
+                        copy = CopyState::from_header(header, schema, dialect);
                     }
+                    ParserEvent::CopyRow(line) => {
+                        if let Some(state) = &copy {
+                            if let Some(parsed) =
+                                state.parser.parse_line(line, state.empty_line_is_row)
+                            {
+                                if parsed.all_values.is_empty() {
+                                    audit_ref.note_undecodable(&state.table_name);
+                                } else {
+                                    audit_ref.observe_row(
+                                        &state.table_name,
+                                        state.table,
+                                        &parsed.all_values,
+                                        &parsed.column_map,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    ParserEvent::CopyEnd => copy = None,
                     _ => {}
                 }
                 Ok(RowFlow::Continue)
@@ -326,6 +346,40 @@ impl InsertState {
             table_name: name,
             table_id_index: table_id,
             context: InsertRowContext::from_header(header, table),
+        })
+    }
+}
+
+/// Per-`COPY`-block parse context: the reparsed table schema plus a prepared
+/// [`CopyParser`] that decodes each `CopyRow` line the same way the profiler
+/// does, so COPY rows feed the identical [`Audit::observe_row`] path as INSERT
+/// tuples.
+struct CopyState<'s> {
+    table_name: String,
+    table: &'s TableSchema,
+    parser: CopyParser<'s>,
+    empty_line_is_row: bool,
+}
+
+impl<'s> CopyState<'s> {
+    fn from_header(header: &[u8], schema: &'s Schema, dialect: SqlDialect) -> Option<Self> {
+        let (_, name) = Parser::<&[u8]>::parse_statement_with_dialect(header, dialect);
+        if name.is_empty() {
+            return None;
+        }
+        let table_id = schema.get_table_id(&name)?;
+        let table = schema.table(table_id)?;
+        let columns = parse_copy_columns(&String::from_utf8_lossy(header));
+        let (parser, empty_line_is_row) = CopyParser::new(&[])
+            .with_schema(table)
+            .with_column_order(columns)
+            .with_extraction(RowExtraction::Full)
+            .prepared();
+        Some(Self {
+            table_name: name,
+            table,
+            parser,
+            empty_line_is_row,
         })
     }
 }
@@ -568,7 +622,6 @@ struct Audit<'a> {
     missing_tables: Vec<String>,
     /// `table.column` pairs the plan declares but the reparsed DDL lacks.
     missing_columns: Vec<String>,
-    copy_seen: bool,
 }
 
 impl<'a> Audit<'a> {
@@ -666,12 +719,7 @@ impl<'a> Audit<'a> {
             families,
             missing_tables,
             missing_columns,
-            copy_seen: false,
         }
-    }
-
-    fn note_copy(&mut self) {
-        self.copy_seen = true;
     }
 
     /// Register the columns each sampled distribution measures so the row pass
@@ -843,7 +891,11 @@ impl<'a> Audit<'a> {
                 .iter()
                 .find(|g| g.columns == rel.parent_columns);
             if let Some(group) = group {
-                let present = group.index.contains(&bytes, hash).unwrap_or(true);
+                // Fail CLOSED: a spool I/O error during collision confirmation
+                // must not be treated as "present" (a silently-satisfied FK
+                // check). An error means the membership could not be confirmed,
+                // so the FK is reported as a failure rather than passed.
+                let present = group.index.contains(&bytes, hash).unwrap_or(false);
                 if !present {
                     failures.push(fk_slug(&planned.name, rel));
                 }
@@ -913,19 +965,10 @@ impl<'a> Audit<'a> {
         for planned in &self.spec.tables {
             let state = &self.tables[&planned.name];
 
-            // Row count (exact). A table rendered as a COPY block whose rows are
-            // not audited row-by-row yet is reported NotChecked rather than
-            // failed, so COPY output is never mislabeled a success or a failure.
+            // Row count (exact). INSERT and COPY output are audited the same way,
+            // so a table that produced zero parseable rows when the plan expected
+            // some is always a genuine failure — never masked as NotChecked.
             let expected = planned.rows;
-            if self.copy_seen && state.rows == 0 && expected > 0 {
-                report.record(
-                    format!("row_count:{}", planned.name),
-                    CheckStatus::NotChecked,
-                    false,
-                    "table rendered as COPY; row-level audit not available".to_string(),
-                );
-                continue;
-            }
             report.record(
                 format!("row_count:{}", planned.name),
                 CheckStatus::Exact,

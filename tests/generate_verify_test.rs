@@ -16,6 +16,7 @@ use sql_splitter::generate::{
     AtomicOutput, CheckStatus, CompileOptions, DistributionExpectation, Generate, GenerationEngine,
     GenerationPlan, GenerationVerifier, ModelCompiler, RenderOptions,
 };
+use sql_splitter::parser::SqlDialect;
 use sql_splitter::render::SqlRenderer;
 use sql_splitter::synthetic::SyntheticFile;
 
@@ -541,4 +542,314 @@ fn sampled_distribution_is_labeled_sampled_not_exact() {
         Some(CheckStatus::Sampled),
         "a distribution comparison must be labeled Sampled, never Exact"
     );
+}
+
+// ===========================================================================
+// Postgres COPY output is audited through the SAME exact checks as INSERT.
+// ===========================================================================
+
+/// Render a plan to Postgres COPY output (default `inserts: auto`, no --no-copy).
+fn render_pg_copy(plan: GenerationPlan) -> String {
+    let options = RenderOptions {
+        dialect: SqlDialect::Postgres,
+        ..RenderOptions::default()
+    };
+    let mut buffer = Vec::new();
+    let mut renderer = SqlRenderer::new(&mut buffer, options);
+    GenerationEngine::new(plan).run(&mut renderer).unwrap();
+    renderer.finish().unwrap();
+    String::from_utf8(buffer).unwrap()
+}
+
+/// Verify a Postgres COPY dump, optionally mutating it first.
+fn verify_pg_copy(
+    plan: GenerationPlan,
+    dir: &Path,
+    mutate: impl FnOnce(String) -> String,
+) -> sql_splitter::generate::VerificationReport {
+    let verifier = GenerationVerifier::new(&plan).dialect(SqlDialect::Postgres);
+    let sql = mutate(render_pg_copy(plan));
+    let path = write(dir, "copy.sql", &sql);
+    verifier.verify_path(&path).unwrap()
+}
+
+/// Rewrite the `index`-th tab-separated value of the first COPY data row after
+/// the `COPY "<table>"` header.
+fn rewrite_first_copy_value(sql: String, table: &str, index: usize, new_value: &str) -> String {
+    let marker = format!("COPY \"{table}\"");
+    let start = sql
+        .find(&marker)
+        .unwrap_or_else(|| panic!("`{marker}` present"));
+    let header_end = sql[start..].find('\n').expect("COPY header newline") + start;
+    let line_start = header_end + 1;
+    let line_end = sql[line_start..].find('\n').expect("first COPY row") + line_start;
+    let mut parts: Vec<String> = sql[line_start..line_end]
+        .split('\t')
+        .map(String::from)
+        .collect();
+    assert!(
+        index < parts.len(),
+        "COPY row has no value at index {index}"
+    );
+    parts[index] = new_value.to_string();
+    format!(
+        "{}{}{}",
+        &sql[..line_start],
+        parts.join("\t"),
+        &sql[line_end..]
+    )
+}
+
+#[test]
+fn clean_postgres_copy_output_verifies_exactly_not_notchecked() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let report = verify_pg_copy(plan, dir.path(), |sql| sql);
+    assert!(
+        report.passed(),
+        "{:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+    // COPY tables are audited exactly, never left NotChecked.
+    assert_eq!(
+        report.status_of("row_count:users"),
+        Some(CheckStatus::Exact)
+    );
+    assert_eq!(
+        report.status_of("row_count:orders"),
+        Some(CheckStatus::Exact)
+    );
+    assert_eq!(
+        report.status_of("foreign_key:orders"),
+        Some(CheckStatus::Exact)
+    );
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|c| c.status == CheckStatus::NotChecked),
+        "no COPY check should be NotChecked: {:?}",
+        report.checks
+    );
+}
+
+#[test]
+fn corrupt_copy_non_null_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    // COPY NULL marker is \N; blank the first user's code.
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "users", 1, "\\N")
+    });
+    assert!(report.failed("non_null:users"), "{:?}", report.checks);
+}
+
+#[test]
+fn corrupt_copy_primary_key_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    // Second user's id (row 2) collides with the first (id 1).
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        // Rewrite the SECOND data row's id: replace the "2\t101" line prefix.
+        replace_once(sql, "\n2\t101\t", "\n1\t101\t")
+    });
+    assert!(report.failed("primary_key:users"), "{:?}", report.checks);
+}
+
+#[test]
+fn corrupt_copy_unique_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        replace_once(sql, "\n2\t101\t", "\n2\t100\t")
+    });
+    assert!(report.failed("unique:users"), "{:?}", report.checks);
+}
+
+#[test]
+fn corrupt_copy_arity_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    // Drop the name value from the first user COPY row.
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "users", 2, "extra\tsplit")
+    });
+    assert!(report.failed("arity:users"), "{:?}", report.checks);
+}
+
+#[test]
+fn corrupt_copy_foreign_key_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    // Point the first order's user_id (index 1) at a non-existent parent.
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "orders", 1, "999")
+    });
+    assert!(report.failed("foreign_key:orders"), "{:?}", report.checks);
+}
+
+// Postgres COPY cannot emit `DEFAULT`, so a table whose PK renders as DEFAULT
+// (a bare integer PK) can only render via multi-row INSERT. These COPY variants
+// give every such key an explicit `sequence` generator so the family/planner
+// tables render as COPY and get audited row-by-row.
+
+const COMPOSITE_COPY: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  cells:
+    rows: { kind: fixed, count: 6 }
+    schema:
+      name: cells
+      columns:
+        - { name: x, type: bigint, nullable: false, primary_key: true }
+        - { name: y, type: bigint, nullable: false, primary_key: true }
+    columns:
+      x: { generator: { kind: sequence, start: 1 } }
+      y: { generator: { kind: sequence, start: 1 } }
+  readings:
+    rows:
+      kind: relation.children
+      parent: cells
+      count: 18
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: readings
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: cell_x, type: bigint, nullable: false }
+        - { name: cell_y, type: bigint, nullable: false }
+    relationships:
+      - { columns: [cell_x, cell_y], references: { table: cells, columns: [x, y] } }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+"#;
+
+#[test]
+fn corrupt_copy_composite_foreign_key_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(COMPOSITE_COPY);
+    // readings COPY is (id, cell_x, cell_y); break cell_x (index 1).
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "readings", 1, "999999")
+    });
+    assert!(
+        report.failed("composite_foreign_key:readings"),
+        "{:?}",
+        report.checks
+    );
+}
+
+const INTERVAL_COPY: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 5
+tables:
+  jobs:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: jobs
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: started_at, type: timestamp, nullable: false }
+        - { name: ended_at, type: timestamp, nullable: true }
+        - { name: duration_seconds, type: bigint, nullable: true }
+        - { name: is_running, type: boolean, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: temporal.interval
+        columns:
+          start: started_at
+          end: ended_at
+          duration: duration_seconds
+          open: is_running
+        start: { kind: range, min: "2024-01-01T00:00:00Z", max: "2026-01-01T00:00:00Z" }
+        duration: { kind: uniform, unit: seconds, min: 30, max: 43200 }
+        end_inclusive: false
+        timezone: utc
+"#;
+
+#[test]
+fn corrupt_copy_interval_equation_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(INTERVAL_COPY);
+    // jobs COPY keeps the explicit `id`: (id, started_at, ended_at, ...) —
+    // ended_at is index 2.
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "jobs", 2, "2099-12-31 00:00:00")
+    });
+    assert!(
+        report.failed("planner_equation:jobs"),
+        "{:?}",
+        report.checks
+    );
+}
+
+const PROGRESS_COPY: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 9
+tables:
+  jobs:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: jobs
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: total_rows, type: bigint, nullable: false }
+        - { name: processed_rows, type: bigint, nullable: false }
+        - { name: imported_rows, type: bigint, nullable: false }
+        - { name: failed_rows, type: bigint, nullable: false }
+        - { name: pending_rows, type: bigint, nullable: false }
+        - { name: status, type: text, nullable: false }
+        - { name: completed_at, type: timestamp, nullable: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: workflow.progress_counters
+        columns:
+          total: total_rows
+          processed: processed_rows
+          succeeded: imported_rows
+          failed: failed_rows
+          pending: pending_rows
+          status: status
+          completed_at: completed_at
+        total: { kind: uniform, min: 10, max: 1000 }
+        progress: { kind: mixture, complete_weight: 0.5, active_weight: 0.3, not_started_weight: 0.2 }
+        partition: exact
+        completed_statuses: [completed, failed]
+        active_statuses: [queued, running]
+"#;
+
+#[test]
+fn corrupt_copy_progress_counter_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(PROGRESS_COPY);
+    // jobs COPY keeps `id`: (id, total, processed, imported, failed, pending,
+    // status, completed_at) — pending_rows is index 5.
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "jobs", 5, "424242")
+    });
+    assert!(
+        report.failed("planner_counter_sum:jobs"),
+        "{:?}",
+        report.checks
+    );
+}
+
+#[test]
+fn corrupt_copy_order_family_sum_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(ORDER_FAMILY);
+    // order_items keeps its explicit `id`; tax_amount is index 4.
+    let report = verify_pg_copy(plan, dir.path(), |sql| {
+        rewrite_first_copy_value(sql, "order_items", 4, "999.99")
+    });
+    assert!(report.failed("family_sum:orders"), "{:?}", report.checks);
 }

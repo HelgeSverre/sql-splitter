@@ -364,11 +364,30 @@ impl Generate {
         };
 
         if verify {
-            let rows = run_verified(&model, plan, explicit_seed, output, emit, render)?;
-            return Ok(GenerateReport {
-                rows_written: rows,
+            let VerifiedRun {
+                rows_written,
+                not_checked,
+            } = run_verified(&model, plan, explicit_seed, output, emit, render)?;
+            let mut out = GenerateReport {
+                rows_written,
                 ..report
-            });
+            };
+            // An honest coverage gap must never be silent on a green exit: if the
+            // audit passed but could not evaluate some capabilities, surface them
+            // as a warning so the user sees exactly what was NOT checked.
+            if !not_checked.is_empty() {
+                out.diagnostics.warning(
+                    "GEN-VERIFY-NOTCHECKED",
+                    String::new(),
+                    format!(
+                        "verification passed but {} capability/capabilities could not be \
+                         checked exactly: {}",
+                        not_checked.len(),
+                        not_checked.join(", ")
+                    ),
+                );
+            }
+            return Ok(out);
         }
 
         match mode {
@@ -388,6 +407,13 @@ impl Generate {
     }
 }
 
+/// The outcome of a successful `--verify` publish: the rows written plus any
+/// capabilities the audit could not evaluate exactly (surfaced as a warning).
+struct VerifiedRun {
+    rows_written: u64,
+    not_checked: Vec<String>,
+}
+
 /// Render SQL to a protected temp beside the destination, verify it against the
 /// compiled plan, and publish atomically only if the full audit passes. A failed
 /// audit leaves every prior destination untouched and returns
@@ -402,7 +428,7 @@ fn run_verified(
     output: OutputTarget,
     emit: Option<OutputTarget>,
     render: RenderOptions,
-) -> Result<u64, GenerateError> {
+) -> Result<VerifiedRun, GenerateError> {
     let destination =
         match output {
             OutputTarget::Path(path) => path,
@@ -449,6 +475,12 @@ fn run_verified(
         // Dropping `sql_output` removes the temp; the destination is untouched.
         return Err(GenerateError::VerificationFailed(failures));
     }
+    let not_checked: Vec<String> = report
+        .checks
+        .iter()
+        .filter(|check| check.status == verify::CheckStatus::NotChecked)
+        .map(|check| check.name.clone())
+        .collect();
 
     // Verification passed: publish the SQL, then the model (if any).
     let mut outputs = vec![sql_output];
@@ -471,7 +503,10 @@ fn run_verified(
         GenerateError::InvalidInput(format!("GEN-VERIFY-PARTIAL-PUBLISH: {partial}"))
     })?;
 
-    Ok(rows_written)
+    Ok(VerifiedRun {
+        rows_written,
+        not_checked,
+    })
 }
 
 /// A resolved base model plus the diagnostics and inference decisions gathered
