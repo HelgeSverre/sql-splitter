@@ -33,6 +33,7 @@ use std::fmt;
 use rand::{Rng, RngExt};
 use rand_chacha::ChaCha8Rng;
 
+use super::output::{FamilyBudget, FamilyBuffer, SpillKind, SpooledRow, TempConfig};
 use super::plan::{
     ColumnOwner, CompiledRelationship, GenerationPlan, PlannedTable, RelationshipDistribution,
     ResolvedTableSeed,
@@ -289,12 +290,42 @@ impl GenerationEngine {
     /// Generate every table's rows in dependency order, writing each to `sink`.
     pub fn run(mut self, sink: &mut dyn RowSink) -> Result<EngineReport, GenerateError> {
         let key_domains = build_key_domains(&self.plan)?;
+        let family_budget = FamilyBudget {
+            max_bytes: self.plan.family_budget_bytes,
+        };
+        // A family child table is generated from its parent's spooled family
+        // rows (drained at this position) rather than the ordinary row loop.
+        let table_index_by_name: BTreeMap<String, usize> = self
+            .plan
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(index, table)| (table.name.clone(), index))
+            .collect();
+        let family_children = collect_family_children(&self.plan.tables);
+
         // Take ownership of the tables so per-column compiled generators can be
         // advanced mutably while the rest of the plan stays borrowable.
         let tables = std::mem::take(&mut self.plan.tables);
         let mut rows_written = 0u64;
+        // Buffered family child rows, keyed by child table name, accumulated as
+        // each parent is generated and drained when the child is reached.
+        let mut family_buffers: BTreeMap<String, FamilyBuffer> = BTreeMap::new();
 
         for (table_index, mut table) in tables.into_iter().enumerate() {
+            // A family child: render the spooled rows produced by its parent.
+            if let Some(link) = family_children.get(&table.name) {
+                rows_written += render_family_child(
+                    table_index,
+                    &mut table,
+                    link,
+                    &mut family_buffers,
+                    &key_domains,
+                    sink,
+                )?;
+                continue;
+            }
+
             sink.begin_table(&table)?;
             let exec = TableExec::build(&table, &key_domains);
             let names: Vec<String> = table
@@ -327,6 +358,33 @@ impl GenerationEngine {
                     planner.generate_row(row_index, &mut exec.scratch)?;
                     for (slot, value) in exec.members.iter().zip(exec.scratch.iter_mut()) {
                         buffer[*slot] = std::mem::replace(value, GeneratedValue::Null);
+                    }
+                    // A family planner also produced this order's child lines:
+                    // spool them (bounded — spills past the family budget) so
+                    // they can be drained when the child table is reached.
+                    if let Some(child_name) = planner.family_child_table().map(str::to_string) {
+                        let child_rows = planner.take_family_children();
+                        if !child_rows.is_empty() {
+                            let child_index =
+                                table_index_by_name.get(&child_name).copied().unwrap_or(0);
+                            let buffer = family_buffers.entry(child_name).or_insert_with(|| {
+                                FamilyBuffer::new(
+                                    family_budget,
+                                    child_index as u32,
+                                    TempConfig::default(),
+                                    SpillKind::Child,
+                                )
+                            });
+                            for values in child_rows {
+                                buffer
+                                    .push(SpooledRow {
+                                        table_id: child_index as u32,
+                                        row_index,
+                                        values,
+                                    })
+                                    .map_err(family_spool_error)?;
+                            }
+                        }
                     }
                 }
                 // Column generators last: they may read siblings produced above.
@@ -372,6 +430,159 @@ impl GenerationEngine {
 
         Ok(EngineReport { rows_written })
     }
+}
+
+/// A family child table's link to the parent family: the child columns the
+/// planner produces (in spooled-value order) and the child relationship carrying
+/// the foreign key back to the parent.
+struct FamilyChildLink {
+    child_writes: Vec<String>,
+    relationship: String,
+}
+
+/// Discover every family child table declared by a planner on any parent table.
+fn collect_family_children(tables: &[PlannedTable]) -> BTreeMap<String, FamilyChildLink> {
+    let mut links = BTreeMap::new();
+    for table in tables {
+        for planner in &table.planners {
+            if let (Some(child), Some(relationship)) =
+                (planner.family_child_table(), planner.family_relationship())
+            {
+                links.insert(
+                    child.to_string(),
+                    FamilyChildLink {
+                        child_writes: planner.child_writes().to_vec(),
+                        relationship: relationship.to_string(),
+                    },
+                );
+            }
+        }
+    }
+    links
+}
+
+/// Render a family child table from the rows its parent spooled: each drained
+/// row carries its parent row index (so the foreign key binds to the exact
+/// parent that produced it) and the planner-owned child column values; the
+/// remaining columns (the child primary key, other generators) run their own
+/// owners. Returns the number of child rows written.
+fn render_family_child(
+    table_index: usize,
+    table: &mut PlannedTable,
+    link: &FamilyChildLink,
+    family_buffers: &mut BTreeMap<String, FamilyBuffer>,
+    key_domains: &BTreeMap<(String, String), ParentKey>,
+    sink: &mut dyn RowSink,
+) -> Result<u64, GenerateError> {
+    sink.begin_table(table)?;
+    let exec = TableExec::build(table, key_domains);
+    let names: Vec<String> = table
+        .columns
+        .iter()
+        .map(|column| column.schema.name.clone())
+        .collect();
+    let ncols = table.columns.len();
+
+    let slot_of = |name: &str| names.iter().position(|candidate| candidate == name);
+    let child_slots: Vec<Option<usize>> =
+        link.child_writes.iter().map(|name| slot_of(name)).collect();
+
+    // The relationship (on this child) whose FK is set from the owning parent.
+    let fk: Vec<(usize, (String, String))> = table
+        .relationships
+        .iter()
+        .find(|relationship| relationship.name.as_deref() == Some(link.relationship.as_str()))
+        .map(|relationship| {
+            relationship
+                .columns
+                .iter()
+                .zip(&relationship.parent_columns)
+                .filter_map(|(child_col, parent_col)| {
+                    slot_of(child_col).map(|slot| {
+                        (
+                            slot,
+                            (relationship.parent_table.clone(), parent_col.clone()),
+                        )
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let drained = match family_buffers.remove(&table.name) {
+        Some(mut buffer) => buffer.drain_rows().map_err(family_spool_error)?,
+        None => Vec::new(),
+    };
+
+    let mut rows_written = 0u64;
+    let mut buffer = vec![GeneratedValue::Null; ncols];
+    for (child_index, spooled) in drained.into_iter().enumerate() {
+        let child_index = child_index as u64;
+        let parent_index = spooled.row_index;
+        for value in buffer.iter_mut() {
+            *value = GeneratedValue::Null;
+        }
+        for &i in &exec.defaults {
+            buffer[i] = GeneratedValue::Default;
+        }
+        for (i, key) in &exec.dense {
+            buffer[*i] = key_domains[key].key_at(child_index);
+        }
+        // Planner-owned child columns from the spooled values.
+        for (slot, value) in child_slots.iter().zip(spooled.values) {
+            if let Some(slot) = slot {
+                buffer[*slot] = value;
+            }
+        }
+        // Foreign key(s) bound to the exact parent that produced this line.
+        for (slot, key) in &fk {
+            buffer[*slot] = key_domains
+                .get(key)
+                .map_or(GeneratedValue::Null, |parent| parent.key_at(parent_index));
+        }
+        // Remaining generator-owned columns (e.g. the child primary key).
+        for i in 0..ncols {
+            if exec.dense_indices.contains(&i) {
+                continue;
+            }
+            let column = &mut table.columns[i];
+            let ColumnOwner::Generator { kind, compiled } = &mut column.owner else {
+                continue;
+            };
+            if is_fk_kind(kind) {
+                continue;
+            }
+            let (left, right) = buffer.split_at_mut(i);
+            let view = PartialRow {
+                names: &names[..i],
+                values: left,
+            };
+            let context = RowContext::new(child_index, &view);
+            compiled.generate(&context, &mut right[0])?;
+            for modifier in column.modifiers.iter_mut() {
+                modifier.apply(&context, &mut right[0])?;
+            }
+        }
+
+        let generated = GeneratedRow {
+            table_index,
+            row_index: child_index,
+            values: std::mem::take(&mut buffer),
+        };
+        sink.write_row(table, &generated)?;
+        buffer = generated.values;
+        rows_written += 1;
+    }
+
+    sink.end_table(table)?;
+    Ok(rows_written)
+}
+
+/// Wrap a family spool I/O failure as a generation error.
+fn family_spool_error(error: std::io::Error) -> GenerateError {
+    GenerateError::InvalidInput(format!(
+        "GEN-FAMILY-SPOOL: buffering family child rows failed: {error}"
+    ))
 }
 
 /// Whether a generator kind is a foreign-key marker driven by the engine rather

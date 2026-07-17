@@ -12,7 +12,9 @@
 //! planner that coordinates a job's lifecycle counters.
 
 pub mod interval;
+pub mod order_family;
 pub mod progress;
 
 pub use interval::TemporalIntervalFactory;
+pub use order_family::OrderFamilyFactory;
 pub use progress::ProgressCountersFactory;

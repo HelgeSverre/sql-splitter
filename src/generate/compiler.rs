@@ -42,7 +42,7 @@ use crate::synthetic::model::{
 use crate::synthetic::schema::{PortableColumn, SqlTypeFamily};
 
 use super::plan::{
-    ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
+    ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, FamilyPhase, GenerationPlan,
     PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
 };
 use super::registry::{
@@ -106,7 +106,15 @@ pub struct CompileOptions {
     pub tables: Vec<String>,
     /// Table-exclusion globs (`--exclude`).
     pub exclude: Vec<String>,
+    /// The exact in-memory byte budget for each correlated family's buffered
+    /// child rows (`--family-budget`). `None` uses a large default; a small
+    /// value forces the family spill path. Byte-for-byte output is independent
+    /// of this budget — only where child rows are held changes.
+    pub family_budget_bytes: Option<u64>,
 }
+
+/// The default per-family in-memory budget when none is pinned.
+const DEFAULT_FAMILY_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Compiles a [`SyntheticModel`] into a [`GenerationPlan`].
 ///
@@ -175,9 +183,13 @@ impl ModelCompiler {
             );
         }
 
+        let family_ctx = collect_family_facts(&model, &mut bag);
+        let family_budget_bytes = options
+            .family_budget_bytes
+            .unwrap_or(DEFAULT_FAMILY_BUDGET_BYTES);
+
         let mut resolved: BTreeMap<String, u64> = BTreeMap::new();
         let mut tables: Vec<PlannedTable> = Vec::with_capacity(order.len());
-        let mut phases: Vec<ExecutionPhase> = Vec::with_capacity(order.len());
 
         for name in &order {
             let table = &model.tables[name];
@@ -198,10 +210,12 @@ impl ModelCompiler {
                 count,
                 root_seed,
                 model.defaults.inference,
+                &family_ctx,
                 &mut bag,
             ));
-            phases.push(ExecutionPhase::Table(name.clone()));
         }
+
+        let phases = build_phases(&order, &family_ctx, family_budget_bytes);
 
         let estimates = PlanEstimates {
             total_rows: resolved.values().sum(),
@@ -231,6 +245,7 @@ impl ModelCompiler {
             phases,
             diagnostics,
             estimates,
+            family_budget_bytes,
         })
     }
 
@@ -448,6 +463,7 @@ impl ModelCompiler {
     /// declared planner, assign exactly one owner to each column, type-check
     /// generators/modifiers, and report read/write dependency cycles. All
     /// diagnostics are appended to `bag`.
+    #[allow(clippy::too_many_arguments)]
     fn plan_table(
         &self,
         name: &str,
@@ -455,6 +471,7 @@ impl ModelCompiler {
         rows: u64,
         root_seed: Option<u64>,
         inference: InferenceMode,
+        family_ctx: &FamilyContext,
         bag: &mut DiagnosticBag,
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
@@ -486,7 +503,7 @@ impl ModelCompiler {
         }
         fold_foreign_key_generators(name, table, &mut relationships, bag);
 
-        let planners = self.compile_planners(name, table, compile_seed, bag);
+        let planners = self.compile_planners(name, table, compile_seed, family_ctx, bag);
         let claims = collect_claims(table, &planners);
 
         let columns: Vec<PlannedColumn> = table
@@ -500,6 +517,7 @@ impl ModelCompiler {
                     column,
                     claims.get(&column.name).map(Vec::as_slice).unwrap_or(&[]),
                     &planners,
+                    family_ctx,
                     compile_seed,
                     inference,
                     bag,
@@ -540,6 +558,7 @@ impl ModelCompiler {
         table_name: &str,
         table: &TableModel,
         seed: SeedRoot,
+        family_ctx: &FamilyContext,
         bag: &mut DiagnosticBag,
     ) -> Vec<PlannerInfo> {
         let relationship_names = relationship_names(table);
@@ -549,6 +568,23 @@ impl ModelCompiler {
             .enumerate()
             .map(|(index, config)| {
                 let path = format!("tables.{table_name}.planners[{index}]");
+                // A cross-table family planner (`children:`) carries its
+                // relationship on the *child* table; the compiler injected the
+                // child facts to validate it there, so skip the same-table
+                // relationship check that would otherwise falsely reject it.
+                let is_family = config.args.contains_key("children");
+                let injected;
+                let config = match family_ctx.facts.get(&(table_name.to_string(), index)) {
+                    Some(facts) => {
+                        let mut cloned = config.clone();
+                        cloned
+                            .args
+                            .insert(super::planners::order_family::FAMILY_FACTS_KEY.to_string(), facts.clone());
+                        injected = cloned;
+                        &injected
+                    }
+                    None => config,
+                };
                 let Some(factory) = self.registry.planner(&config.kind) else {
                     bag.error(
                         "GEN-PLANNER-UNKNOWN",
@@ -568,16 +604,18 @@ impl ModelCompiler {
                     _ => Vec::new(),
                 };
 
-                if let Some(referenced) = string_arg(config, "relationship") {
-                    if !relationship_names.iter().any(|n| n == referenced) {
-                        bag.error(
-                            "GEN-RELATIONSHIP-UNKNOWN",
-                            format!("{path}.relationship"),
-                            format!(
-                                "planner `{}` references relationship `{referenced}`, which is not declared on table `{table_name}`",
-                                config.kind
-                            ),
-                        );
+                if !is_family {
+                    if let Some(referenced) = string_arg(config, "relationship") {
+                        if !relationship_names.iter().any(|n| n == referenced) {
+                            bag.error(
+                                "GEN-RELATIONSHIP-UNKNOWN",
+                                format!("{path}.relationship"),
+                                format!(
+                                    "planner `{}` references relationship `{referenced}`, which is not declared on table `{table_name}`",
+                                    config.kind
+                                ),
+                            );
+                        }
                     }
                 }
 
@@ -609,6 +647,7 @@ impl ModelCompiler {
         column: &PortableColumn,
         claimants: &[Claim],
         planners: &[PlannerInfo],
+        family_ctx: &FamilyContext,
         seed: SeedRoot,
         inference: InferenceMode,
         bag: &mut DiagnosticBag,
@@ -645,6 +684,17 @@ impl ModelCompiler {
                     kind: planners[*index].kind.clone(),
                     planner_index: *index,
                 },
+            };
+        }
+
+        // A cross-table family planner (declared on another table) may own this
+        // column; that ownership was recorded when its parent table was planned.
+        if let Some(external) = family_ctx
+            .external_owners
+            .get(&(table_name.to_string(), column.name.clone()))
+        {
+            return ColumnOwner::FamilyChild {
+                planner_kind: external.planner_kind.clone(),
             };
         }
 
@@ -1357,6 +1407,177 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
         }
     }
     state.components
+}
+
+// --- Cross-table family (commerce.order_family) -----------------------------
+
+/// The child-facts a parent-scoped family planner cannot see on its own,
+/// gathered by the compiler (which has the whole model) and injected into the
+/// planner config, plus the child-column ownership the family planner asserts
+/// across the table boundary.
+#[derive(Default)]
+struct FamilyContext {
+    /// `(parent_table, planner_index)` → injected child facts.
+    facts: BTreeMap<(String, usize), serde_yaml_ng::Value>,
+    /// `(child_table, child_column)` → the family planner that owns it.
+    external_owners: BTreeMap<(String, String), ExternalChildOwner>,
+    /// Every discovered parent→child family membership.
+    families: Vec<FamilyMembership>,
+}
+
+/// A child column owned by a family planner declared on another table.
+struct ExternalChildOwner {
+    planner_kind: String,
+}
+
+/// One discovered parent/child family, used to emit the [`ExecutionPhase::Family`].
+struct FamilyMembership {
+    parent: String,
+    child: String,
+}
+
+/// Scan the model for `commerce.order_family` planners, validate the child-side
+/// facts each one cannot see (child existence and ownership conflicts on the
+/// child columns it claims), and gather the facts to inject plus the child
+/// column ownership the planner asserts. The parent-side and remaining
+/// child-side validation runs in the planner's own `compile`.
+fn collect_family_facts(model: &SyntheticModel, bag: &mut DiagnosticBag) -> FamilyContext {
+    let mut ctx = FamilyContext::default();
+    for (parent_name, table) in &model.tables {
+        for (index, config) in table.planners.iter().enumerate() {
+            if config.kind != "commerce.order_family" {
+                continue;
+            }
+            let child_name = config.args.get("children").and_then(|v| v.as_str());
+            let child = child_name.and_then(|name| model.tables.get(name).map(|t| (name, t)));
+
+            let mut facts = serde_yaml_ng::Mapping::new();
+            facts.insert("child_found".into(), (child.is_some()).into());
+
+            if let Some((child_name, child_model)) = child {
+                let mut columns = serde_yaml_ng::Mapping::new();
+                for column in &child_model.schema.columns {
+                    columns.insert(
+                        column.name.clone().into(),
+                        column.source_type.clone().into(),
+                    );
+                }
+                facts.insert(
+                    "child_columns".into(),
+                    serde_yaml_ng::Value::Mapping(columns),
+                );
+
+                if let RowsModel::RelationChildren { distribution, .. } = &child_model.rows {
+                    let (mean, min, max) = distribution_bounds(distribution);
+                    facts.insert("dist_mean".into(), mean.into());
+                    facts.insert("dist_min".into(), min.into());
+                    facts.insert("dist_max".into(), max.into());
+                }
+
+                let rel_name = config.args.get("relationship").and_then(|v| v.as_str());
+                let rel_on_child = rel_name.is_some_and(|name| {
+                    child_relationship_references(child_model, name, parent_name)
+                });
+                facts.insert("rel_on_child".into(), rel_on_child.into());
+
+                // Record ownership of every child column the planner maps, and
+                // report a conflict with any competing generator on the child.
+                if let Some(serde_yaml_ng::Value::Mapping(mapping)) =
+                    config.args.get("child_columns")
+                {
+                    for column_name in mapping.values().filter_map(|v| v.as_str()) {
+                        let exists = child_model
+                            .schema
+                            .columns
+                            .iter()
+                            .any(|column| column.name == column_name);
+                        if !exists {
+                            continue;
+                        }
+                        let has_generator = child_model
+                            .columns
+                            .get(column_name)
+                            .is_some_and(|rule| rule.generator.is_some());
+                        if has_generator {
+                            bag.error(
+                                "GEN-COLUMN-OWNER-CONFLICT",
+                                format!("tables.{child_name}.columns.{column_name}"),
+                                format!(
+                                    "column `{column_name}` on table `{child_name}` is produced by both its own generator and the `commerce.order_family` planner on table `{parent_name}`"
+                                ),
+                            );
+                        }
+                        ctx.external_owners.insert(
+                            (child_name.to_string(), column_name.to_string()),
+                            ExternalChildOwner {
+                                planner_kind: config.kind.clone(),
+                            },
+                        );
+                    }
+                }
+
+                ctx.families.push(FamilyMembership {
+                    parent: parent_name.clone(),
+                    child: child_name.to_string(),
+                });
+            }
+
+            ctx.facts.insert(
+                (parent_name.clone(), index),
+                serde_yaml_ng::Value::Mapping(facts),
+            );
+        }
+    }
+    ctx
+}
+
+/// Whether `child` declares a relationship named `name` that references
+/// `parent`, via either a generation relationship or a portable-schema foreign
+/// key. A name that resolves to a relationship referencing a *different* table
+/// (or is absent) does not count — the family FK must bind the child to its
+/// parent.
+fn child_relationship_references(child: &TableModel, name: &str, parent: &str) -> bool {
+    let generation = child.relationships.iter().any(|relationship| {
+        relationship.name.as_deref() == Some(name) && relationship.references.table == parent
+    });
+    let schema = child.schema.relationships.iter().any(|relationship| {
+        relationship.name.as_deref() == Some(name) && relationship.referenced_table == parent
+    });
+    generation || schema
+}
+
+/// Build the execution phases: a family parent and its child collapse into one
+/// [`ExecutionPhase::Family`] (the child's own `Table` phase is omitted, since it
+/// is generated inside the family), and every other table stays a `Table` phase.
+fn build_phases(
+    order: &[String],
+    family_ctx: &FamilyContext,
+    budget_bytes: u64,
+) -> Vec<ExecutionPhase> {
+    let child_tables: BTreeSet<&str> = family_ctx
+        .families
+        .iter()
+        .map(|family| family.child.as_str())
+        .collect();
+    let mut phases = Vec::with_capacity(order.len());
+    for name in order {
+        if child_tables.contains(name.as_str()) {
+            continue;
+        }
+        match family_ctx
+            .families
+            .iter()
+            .find(|family| &family.parent == name)
+        {
+            Some(family) => phases.push(ExecutionPhase::Family(FamilyPhase {
+                name: name.clone(),
+                tables: vec![name.clone(), family.child.clone()],
+                budget_bytes,
+            })),
+            None => phases.push(ExecutionPhase::Table(name.clone())),
+        }
+    }
+    phases
 }
 
 /// Capture a declared relationship's referential shape and value-assignment

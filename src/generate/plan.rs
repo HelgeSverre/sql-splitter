@@ -48,6 +48,12 @@ pub struct GenerationPlan {
     /// Cost/size estimates. Temp-storage and verification fields are filled by
     /// Tasks 22/26; Task 9 only fills `total_rows`.
     pub estimates: PlanEstimates,
+    /// The exact in-memory byte budget for each correlated family's buffered
+    /// child rows before it spills to a protected spool. The engine's
+    /// `commerce.order_family` execution keys its [`FamilyBuffer`] off this. A
+    /// large default keeps ordinary families in memory; a run may pin a small
+    /// budget (`--family-budget`) to exercise the spill path.
+    pub family_budget_bytes: u64,
 }
 
 impl GenerationPlan {
@@ -220,6 +226,14 @@ pub enum ColumnOwner {
         /// The owning planner's index in [`PlannedTable::planners`].
         planner_index: usize,
     },
+    /// A cross-table family planner declared on *another* table owns this
+    /// column's value (a `commerce.order_family` child column). The engine
+    /// fills it from the spooled family child rows rather than a same-table
+    /// generator, so it needs no local owner and never renders `DEFAULT`.
+    FamilyChild {
+        /// The owning planner's kind, for diagnostics.
+        planner_kind: String,
+    },
     /// A declared relationship supplies this foreign-key column's value. The
     /// per-row parent assignment is completed by Task 13.
     Relationship {
@@ -250,6 +264,10 @@ impl fmt::Debug for ColumnOwner {
                 .debug_struct("Planner")
                 .field("kind", kind)
                 .field("planner_index", planner_index)
+                .finish(),
+            ColumnOwner::FamilyChild { planner_kind } => f
+                .debug_struct("FamilyChild")
+                .field("planner_kind", planner_kind)
                 .finish(),
             ColumnOwner::Relationship { relationship } => f
                 .debug_struct("Relationship")

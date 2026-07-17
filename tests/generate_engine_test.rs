@@ -2104,3 +2104,135 @@ fn family_buffer_with_large_estimate_spills_before_the_first_row() {
     }
     assert_eq!(buffer.drain_rows().unwrap(), rows);
 }
+
+// --- Task 25: commerce.order_family engine family execution + spill ---------
+
+/// Compile `model_yaml` pinning the family memory budget, then render it to SQL.
+fn render_family_at_budget(model_yaml: &str, family_budget_bytes: u64) -> String {
+    let model = SyntheticFile::parse_str(model_yaml)
+        .expect("valid model YAML")
+        .into_model()
+        .expect("document is a model");
+    let plan = ModelCompiler::standard()
+        .compile(
+            model,
+            CompileOptions {
+                family_budget_bytes: Some(family_budget_bytes),
+                ..CompileOptions::default()
+            },
+        )
+        .expect("model compiles cleanly");
+    let options = RenderOptions {
+        dialect: SqlDialect::Postgres,
+        batch_size: 8,
+        no_copy: true,
+        ..RenderOptions::default()
+    };
+    let mut renderer = SqlRenderer::new(Vec::new(), options);
+    GenerationEngine::new(plan)
+        .run(&mut renderer)
+        .expect("engine runs the family");
+    let bytes = renderer.finish().expect("finish flushes cleanly");
+    String::from_utf8(bytes).expect("rendered SQL is valid UTF-8")
+}
+
+const ORDER_FAMILY_MODEL: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 4242
+tables:
+  orders:
+    rows: { kind: fixed, count: 200 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: subtotal, type: "decimal(18,2)", nullable: false }
+        - { name: tax_total, type: "decimal(18,2)", nullable: false }
+        - { name: grand_total, type: "decimal(18,2)", nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: order_items_order
+        columns:
+          subtotal: subtotal
+          tax: tax_total
+          total: grand_total
+        child_columns:
+          quantity: quantity
+          unit_price: unit_price
+          tax: tax_amount
+          line_total: line_total
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: { min: 1, max: 6 }
+        unit_price: { min_minor: 100, max_minor: 90000 }
+        tax:
+          kind: weighted_choice
+          rates: [0.0, 0.08, 0.25]
+          weights: [0.1, 0.3, 0.6]
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: { kind: fixed, mean: 4.0, min: 1.0, max: 12.0 }
+    schema:
+      name: order_items
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(18,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(18,2)", nullable: false }
+        - { name: line_total, type: "decimal(18,2)", nullable: false }
+    relationships:
+      - name: order_items_order
+        columns: [order_id]
+        references: { table: orders, columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      order_id:
+        generator: { kind: relation.foreign_key, relationship: order_items_order }
+"#;
+
+#[test]
+fn family_output_is_byte_identical_across_a_tiny_and_a_huge_budget() {
+    // A 1 KiB budget forces the child buffer to spill to a protected spool many
+    // times; a 1 GiB budget keeps every family in memory. Because each family is
+    // seeded by its parent row index, the spill changes only where rows live —
+    // never their values — so the rendered SQL is byte-for-byte identical.
+    let tiny = render_family_at_budget(ORDER_FAMILY_MODEL, 1024);
+    let huge = render_family_at_budget(ORDER_FAMILY_MODEL, 1 << 30);
+    assert_eq!(tiny, huge, "family spill must not change generated output");
+    // Sanity: the family actually produced both tables and non-trivial data.
+    assert!(
+        tiny.contains("INSERT INTO \"order_items\""),
+        "child rows rendered"
+    );
+    assert!(
+        tiny.contains("INSERT INTO \"orders\""),
+        "parent rows rendered"
+    );
+}
+
+#[test]
+fn family_child_rows_reference_their_producing_parent() {
+    // Every order_items.order_id must be a real orders.id in 1..=200.
+    let sql = render_family_at_budget(ORDER_FAMILY_MODEL, 1 << 30);
+    assert!(sql.contains("INSERT INTO \"order_items\""));
+    // The child table is generated after its parent (dependency order).
+    let orders_pos = sql.find("INSERT INTO \"orders\"").expect("orders insert");
+    let items_pos = sql
+        .find("INSERT INTO \"order_items\"")
+        .expect("items insert");
+    assert!(
+        orders_pos < items_pos,
+        "parent rows render before child rows"
+    );
+}

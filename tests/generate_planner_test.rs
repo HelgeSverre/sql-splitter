@@ -867,3 +867,431 @@ fn progress_counters_ownership_collision_is_a_compile_error() {
     );
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
+
+// === commerce.order_family (Task 25) ========================================
+//
+// The order-family planner coordinates an `orders` parent and an `order_items`
+// child as one family, computing exact minor-unit money. These tests pin the
+// exact-sum invariants across tax rates, discounts, shipping, currency scales,
+// mixed quantities, large values, and all three rounding modes, plus the
+// compile-time diagnostics.
+
+use std::collections::BTreeMap;
+
+/// A [`RowSink`] that records every table's rows separately (unlike
+/// [`CollectingSink`], which flattens them), so a cross-table family can be
+/// checked parent-against-child.
+#[derive(Default)]
+struct MultiSink {
+    tables: BTreeMap<String, (Vec<String>, Vec<Vec<GeneratedValue>>)>,
+}
+
+impl RowSink for MultiSink {
+    fn begin_table(
+        &mut self,
+        table: &PlannedTable,
+    ) -> Result<(), sql_splitter::generate::GenerateError> {
+        let columns = table
+            .columns
+            .iter()
+            .map(|column| column.schema.name.clone())
+            .collect();
+        self.tables
+            .insert(table.name.clone(), (columns, Vec::new()));
+        Ok(())
+    }
+
+    fn write_row(
+        &mut self,
+        table: &PlannedTable,
+        row: &GeneratedRow,
+    ) -> Result<(), sql_splitter::generate::GenerateError> {
+        self.tables
+            .get_mut(&table.name)
+            .expect("table began")
+            .1
+            .push(row.values.clone());
+        Ok(())
+    }
+
+    fn end_table(
+        &mut self,
+        _table: &PlannedTable,
+    ) -> Result<(), sql_splitter::generate::GenerateError> {
+        Ok(())
+    }
+}
+
+impl MultiSink {
+    fn index(&self, table: &str, column: &str) -> usize {
+        self.tables[table]
+            .0
+            .iter()
+            .position(|name| name == column)
+            .unwrap_or_else(|| panic!("no column `{column}` on `{table}`"))
+    }
+
+    fn rows(&self, table: &str) -> &[Vec<GeneratedValue>] {
+        &self.tables[table].1
+    }
+}
+
+fn run_multi(model_yaml: &str) -> MultiSink {
+    let plan = compile_result(model_yaml).expect("model compiles cleanly");
+    let mut sink = MultiSink::default();
+    GenerationEngine::new(plan)
+        .run(&mut sink)
+        .expect("engine runs");
+    sink
+}
+
+/// The minor-unit integer behind a money value (decimal) or a plain integer.
+fn minor(value: &GeneratedValue) -> i128 {
+    match value {
+        GeneratedValue::Decimal { minor, .. } => *minor,
+        GeneratedValue::Integer(i) => *i,
+        other => panic!("expected a money/integer value, found {other:?}"),
+    }
+}
+
+fn int_of(value: &GeneratedValue) -> i128 {
+    value.as_integer().expect("integer value")
+}
+
+/// Build an orders/order_items family model. `scale` sets the currency scale and
+/// the declared money-column scale; `dist` is the child line-count distribution;
+/// `extra` are extra planner keys (quantity/unit_price/tax/discount/shipping).
+fn order_family_model(
+    seed: u64,
+    orders: u64,
+    scale: u32,
+    rounding: &str,
+    dist: &str,
+    extra: &str,
+) -> String {
+    let money = format!("decimal(18,{scale})");
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  orders:
+    rows: {{ kind: fixed, count: {orders} }}
+    schema:
+      name: orders
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: subtotal, type: "{money}", nullable: false }}
+        - {{ name: discount_total, type: "{money}", nullable: false }}
+        - {{ name: tax_total, type: "{money}", nullable: false }}
+        - {{ name: shipping_total, type: "{money}", nullable: false }}
+        - {{ name: grand_total, type: "{money}", nullable: false }}
+    columns:
+      id:
+        generator: {{ kind: sequence, start: 1 }}
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: order_items_order
+        columns:
+          subtotal: subtotal
+          discount: discount_total
+          tax: tax_total
+          shipping: shipping_total
+          total: grand_total
+        child_columns:
+          quantity: quantity
+          unit_price: unit_price
+          discount: discount_amount
+          tax: tax_amount
+          line_total: line_total
+        currency_scale: {scale}
+        rounding: {rounding}
+{extra}
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: {dist}
+    schema:
+      name: order_items
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: order_id, type: bigint, nullable: false }}
+        - {{ name: quantity, type: integer, nullable: false }}
+        - {{ name: unit_price, type: "{money}", nullable: false }}
+        - {{ name: discount_amount, type: "{money}", nullable: false }}
+        - {{ name: tax_amount, type: "{money}", nullable: false }}
+        - {{ name: line_total, type: "{money}", nullable: false }}
+    relationships:
+      - name: order_items_order
+        columns: [order_id]
+        references: {{ table: orders, columns: [id] }}
+    columns:
+      id:
+        generator: {{ kind: sequence, start: 1 }}
+      order_id:
+        generator: {{ kind: relation.foreign_key, relationship: order_items_order }}
+"#
+    )
+}
+
+/// Assert every exact minor-unit family invariant across every order.
+fn assert_family_exact(sink: &MultiSink, has_shipping: bool) {
+    let (o_sub, o_disc, o_tax, o_ship, o_total, o_id) = (
+        sink.index("orders", "subtotal"),
+        sink.index("orders", "discount_total"),
+        sink.index("orders", "tax_total"),
+        sink.index("orders", "shipping_total"),
+        sink.index("orders", "grand_total"),
+        sink.index("orders", "id"),
+    );
+    let (c_order, c_qty, c_price, c_disc, c_tax, c_total) = (
+        sink.index("order_items", "order_id"),
+        sink.index("order_items", "quantity"),
+        sink.index("order_items", "unit_price"),
+        sink.index("order_items", "discount_amount"),
+        sink.index("order_items", "tax_amount"),
+        sink.index("order_items", "line_total"),
+    );
+
+    let mut checked_lines = 0usize;
+    for order in sink.rows("orders") {
+        let id = int_of(&order[o_id]);
+        let subtotal = minor(&order[o_sub]);
+        let discount = minor(&order[o_disc]);
+        let tax = minor(&order[o_tax]);
+        let shipping = minor(&order[o_ship]);
+        let grand = minor(&order[o_total]);
+
+        let lines: Vec<&Vec<GeneratedValue>> = sink
+            .rows("order_items")
+            .iter()
+            .filter(|line| int_of(&line[c_order]) == id)
+            .collect();
+
+        let mut sum_sub = 0i128;
+        let mut sum_disc = 0i128;
+        let mut sum_tax = 0i128;
+        let mut sum_total = 0i128;
+        for line in &lines {
+            let qty = int_of(&line[c_qty]);
+            let price = minor(&line[c_price]);
+            let d = minor(&line[c_disc]);
+            let t = minor(&line[c_tax]);
+            let lt = minor(&line[c_total]);
+            assert!(
+                qty >= 0 && price >= 0 && d >= 0 && t >= 0,
+                "order {id}: negative line value"
+            );
+            assert_eq!(
+                lt,
+                qty * price - d + t,
+                "order {id}: line_total != qty*price - disc + tax"
+            );
+            sum_sub += qty * price;
+            sum_disc += d;
+            sum_tax += t;
+            sum_total += lt;
+            checked_lines += 1;
+        }
+
+        assert_eq!(sum_sub, subtotal, "order {id}: line subtotals != subtotal");
+        assert_eq!(
+            sum_disc, discount,
+            "order {id}: line discounts != discount_total"
+        );
+        assert_eq!(sum_tax, tax, "order {id}: line taxes != tax_total");
+        assert_eq!(
+            sum_total,
+            subtotal - discount + tax,
+            "order {id}: line totals != net"
+        );
+        assert_eq!(
+            grand,
+            subtotal - discount + tax + shipping,
+            "order {id}: grand_total equation"
+        );
+        if has_shipping {
+            assert!(shipping > 0, "order {id}: expected positive shipping");
+        }
+    }
+    assert!(checked_lines > 0, "no child lines were generated");
+}
+
+#[test]
+fn order_family_is_exact_across_taxes_discounts_shipping_scales_and_rounding() {
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let taxes = [
+        "        tax: { kind: fixed, rate: 0.0 }",
+        "        tax: { kind: fixed, rate: 0.08 }",
+        "        tax: { kind: fixed, rate: 0.25 }",
+    ];
+    for rounding in ["largest_remainder", "last_line", "bankers"] {
+        for scale in [0u32, 2, 3] {
+            for tax in taxes {
+                let extra = format!(
+                    "        quantity: {{ min: 1, max: 7 }}\n        unit_price: {{ min_minor: 1, max_minor: 250000 }}\n{tax}\n        discount: {{ kind: fixed_rate, rate: 0.1 }}\n        shipping: {{ kind: fixed, amount_minor: 500 }}"
+                );
+                let sink = run_multi(&order_family_model(99, 40, scale, rounding, dist, &extra));
+                assert_family_exact(&sink, true);
+            }
+        }
+    }
+}
+
+#[test]
+fn order_family_handles_large_values_without_overflow() {
+    let dist = "{ kind: fixed, mean: 5.0, min: 3.0, max: 8.0 }";
+    let extra = "        quantity: { min: 100, max: 1000 }\n        unit_price: { min_minor: 1000000, max_minor: 9000000 }\n        tax: { kind: fixed, rate: 0.25 }\n        discount: { kind: fixed_rate, rate: 0.15 }";
+    let sink = run_multi(&order_family_model(
+        7,
+        25,
+        2,
+        "largest_remainder",
+        dist,
+        extra,
+    ));
+    assert_family_exact(&sink, false);
+}
+
+#[test]
+fn order_family_weighted_tax_still_sums_exactly() {
+    let dist = "{ kind: fixed, mean: 4.0, min: 1.0, max: 10.0 }";
+    let extra = "        quantity: { min: 1, max: 5 }\n        unit_price: { min_minor: 100, max_minor: 20000 }\n        tax:\n          kind: weighted_choice\n          rates: [0.0, 0.08, 0.25]\n          weights: [0.05, 0.15, 0.80]";
+    let sink = run_multi(&order_family_model(3, 60, 2, "bankers", dist, extra));
+    assert_family_exact(&sink, false);
+    // The weighted tax should land on more than one rate across 60 orders, so at
+    // least some orders carry a non-zero tax and some a different non-zero tax.
+    let o_tax = sink.index("orders", "tax_total");
+    let distinct: std::collections::BTreeSet<i128> = sink
+        .rows("orders")
+        .iter()
+        .map(|order| minor(&order[o_tax]))
+        .collect();
+    assert!(
+        distinct.len() >= 2,
+        "weighted tax should vary across orders"
+    );
+}
+
+#[test]
+fn order_family_seeded_output_repeats_and_differs_by_seed() {
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let extra = "        quantity: { min: 1, max: 5 }\n        unit_price: { min_minor: 100, max_minor: 50000 }\n        tax: { kind: fixed, rate: 0.08 }";
+    let first = run_multi(&order_family_model(
+        11,
+        30,
+        2,
+        "largest_remainder",
+        dist,
+        extra,
+    ));
+    let again = run_multi(&order_family_model(
+        11,
+        30,
+        2,
+        "largest_remainder",
+        dist,
+        extra,
+    ));
+    let other = run_multi(&order_family_model(
+        12,
+        30,
+        2,
+        "largest_remainder",
+        dist,
+        extra,
+    ));
+    assert_eq!(
+        first.rows("order_items"),
+        again.rows("order_items"),
+        "same seed reproduces"
+    );
+    assert_ne!(
+        first.rows("order_items"),
+        other.rows("order_items"),
+        "different seed diverges"
+    );
+}
+
+// --- Compile diagnostics ----------------------------------------------------
+
+/// A minimal valid extra block for compile-error models.
+const OF_EXTRA: &str =
+    "        quantity: { min: 1, max: 3 }\n        unit_price: { min_minor: 100, max_minor: 1000 }";
+
+#[test]
+fn order_family_undefined_child_is_a_compile_error() {
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA)
+        .replace("children: order_items", "children: nope_items");
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-CHILD-UNKNOWN".to_string()));
+}
+
+#[test]
+fn order_family_relationship_on_another_table_is_a_compile_error() {
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA).replace(
+        "relationship: order_items_order\n        columns:",
+        "relationship: not_a_real_rel\n        columns:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-RELATIONSHIP".to_string()));
+}
+
+#[test]
+fn order_family_zero_lines_with_nonzero_minimum_is_a_compile_error() {
+    // A distribution whose max floors to zero lines while its minimum is 2.
+    let dist = "{ kind: fixed, mean: 1.0, min: 2.0, max: 0.4 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA);
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-ZERO-LINES".to_string()));
+}
+
+#[test]
+fn order_family_ambiguous_currency_scale_is_a_compile_error() {
+    // Money columns are declared decimal(18,2) but currency_scale is 3.
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA)
+        .replace("currency_scale: 2", "currency_scale: 3");
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-SCALE".to_string()));
+}
+
+#[test]
+fn order_family_decimal_overflow_is_a_compile_error() {
+    // Tiny precision decimal(4,2) cannot hold large line values.
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let extra = "        quantity: { min: 10, max: 100 }\n        unit_price: { min_minor: 100000, max_minor: 900000 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, extra)
+        .replace("decimal(18,2)", "decimal(4,2)");
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-OVERFLOW".to_string()));
+}
+
+#[test]
+fn order_family_missing_mapped_column_is_a_compile_error() {
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA)
+        .replace("subtotal: subtotal", "subtotal: does_not_exist");
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn order_family_child_ownership_conflict_is_a_compile_error() {
+    // A generator on order_items.quantity collides with the planner's ownership.
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA).replace(
+        "      order_id:\n        generator: { kind: relation.foreign_key, relationship: order_items_order }",
+        "      order_id:\n        generator: { kind: relation.foreign_key, relationship: order_items_order }\n      quantity:\n        generator: { kind: constant, value: 1 }",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
+
+#[test]
+fn order_family_old_flat_form_is_an_unknown_field_error() {
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let extra = format!("{OF_EXTRA}\n        line_total: line_total");
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, &extra);
+    assert!(compile_err_code(&yaml).contains(&"GEN-ORDER-FAMILY-UNKNOWN-FIELD".to_string()));
+}

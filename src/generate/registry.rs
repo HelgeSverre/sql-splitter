@@ -451,6 +451,41 @@ pub trait CompiledPlanner: Send {
     fn verification_predicates(&self) -> Vec<PlannerPredicate> {
         Vec::new()
     }
+
+    /// The name of the child table this planner coordinates as a cross-table
+    /// family, if any. A same-table planner returns `None`; a family planner
+    /// (e.g. `commerce.order_family`) names the child table whose rows it
+    /// produces alongside its parent columns. The engine spools those child
+    /// rows and renders them at the child table's dependency position.
+    fn family_child_table(&self) -> Option<&str> {
+        None
+    }
+
+    /// The child-table relationship (declared on the child) that carries the
+    /// foreign key back to this planner's parent, so the engine sets each
+    /// spooled child row's FK to the exact parent that produced it. Only
+    /// meaningful when [`family_child_table`](Self::family_child_table) is
+    /// `Some`.
+    fn family_relationship(&self) -> Option<&str> {
+        None
+    }
+
+    /// The child columns this planner produces, in the positional order of the
+    /// per-child value vectors returned by
+    /// [`take_family_children`](Self::take_family_children). Only meaningful for
+    /// a family planner. Default: none.
+    fn child_writes(&self) -> &[String] {
+        &[]
+    }
+
+    /// Take the child rows produced by the most recent
+    /// [`generate_row`](Self::generate_row) call — one value vector per child
+    /// line, aligned with [`child_writes`](Self::child_writes). The engine calls
+    /// this once per parent row for a family planner and spools the rows.
+    /// Default: none.
+    fn take_family_children(&mut self) -> Vec<Vec<GeneratedValue>> {
+        Vec::new()
+    }
 }
 
 /// A machine-checkable invariant a planner guarantees over the columns it owns.
@@ -739,6 +774,9 @@ impl ExtensionRegistry {
             .expect("built-in planner kinds are collision-free");
         registry
             .register_planner(Box::new(super::planners::ProgressCountersFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::OrderFamilyFactory))
             .expect("built-in planner kinds are collision-free");
         registry
     }
