@@ -923,3 +923,119 @@ fn corrupt_copy_order_family_sum_fails_the_named_check() {
     });
     assert!(report.failed("family_sum:orders"), "{:?}", report.checks);
 }
+
+// ===========================================================================
+// MSSQL output (bracket identifiers, `GO` batch separators, `N'...'` literals)
+// is delivered as whole INSERT statements, not streamed row-by-row; the
+// verifier audits those rows through the same exact-check path as every dialect.
+// ===========================================================================
+
+/// Render a plan to MSSQL (`INSERT INTO [table] ... VALUES ...; GO`).
+fn render_mssql(plan: GenerationPlan) -> String {
+    let options = RenderOptions {
+        dialect: SqlDialect::Mssql,
+        ..RenderOptions::default()
+    };
+    let mut buffer = Vec::new();
+    let mut renderer = SqlRenderer::new(&mut buffer, options);
+    GenerationEngine::new(plan).run(&mut renderer).unwrap();
+    renderer.finish().unwrap();
+    String::from_utf8(buffer).unwrap()
+}
+
+fn verify_mssql(
+    plan: GenerationPlan,
+    dir: &Path,
+    mutate: impl FnOnce(String) -> String,
+) -> sql_splitter::generate::VerificationReport {
+    let verifier = GenerationVerifier::new(&plan).dialect(SqlDialect::Mssql);
+    let sql = mutate(render_mssql(plan));
+    let path = write(dir, "mssql.sql", &sql);
+    verifier.verify_path(&path).unwrap()
+}
+
+#[test]
+fn mssql_output_is_audited_with_exact_row_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let report = verify_mssql(plan, dir.path(), |sql| sql);
+    assert!(
+        report.passed(),
+        "{:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+    // Rows are actually audited: exact counts per table, never 0 or NotChecked.
+    assert_eq!(
+        report.status_of("row_count:users"),
+        Some(CheckStatus::Exact)
+    );
+    assert_eq!(
+        report.status_of("row_count:orders"),
+        Some(CheckStatus::Exact)
+    );
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.name == "row_count:users" && c.passed && c.detail.contains("observed 4")),
+        "users row count must observe 4 (not 0): {:?}",
+        report.checks
+    );
+    assert_eq!(
+        report.status_of("foreign_key:orders"),
+        Some(CheckStatus::Exact)
+    );
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|c| c.status == CheckStatus::NotChecked),
+        "no MSSQL check should be NotChecked: {:?}",
+        report.checks
+    );
+}
+
+#[test]
+fn corrupt_mssql_primary_key_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    // Second user's id collides with the first.
+    let report = verify_mssql(plan, dir.path(), |sql| {
+        replace_once(sql, "(2, 101,", "(1, 101,")
+    });
+    assert!(report.failed("primary_key:users"), "{:?}", report.checks);
+}
+
+#[test]
+fn corrupt_mssql_foreign_key_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    // Point the first order at a non-existent user id.
+    let report = verify_mssql(plan, dir.path(), |sql| {
+        let idx = sql.find("INSERT INTO [orders]").expect("orders insert");
+        let (head, tail) = sql.split_at(idx);
+        let open = tail.find("(1, ").expect("first order tuple");
+        let close = tail[open..].find(')').unwrap() + open;
+        format!("{head}{}(1, 999){}", &tail[..open], &tail[close + 1..])
+    });
+    assert!(report.failed("foreign_key:orders"), "{:?}", report.checks);
+}
+
+#[test]
+fn mssql_full_verify_lifecycle_publishes_on_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write(dir.path(), "model.yaml", CORE);
+    let out = dir.path().join("out-mssql.sql");
+    let report = Generate::builder()
+        .config(&config)
+        .output(&out)
+        .output_dialect(SqlDialect::Mssql)
+        .verify(true)
+        .run()
+        .expect("MSSQL verify + publish should succeed");
+    assert!(report.rows_written > 0);
+    assert!(out.exists(), "verified MSSQL output should be published");
+    assert!(fs::read_to_string(&out)
+        .unwrap()
+        .contains("INSERT INTO [users]"));
+}

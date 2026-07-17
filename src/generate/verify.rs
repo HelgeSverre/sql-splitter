@@ -41,10 +41,11 @@ use std::path::Path;
 use smallvec::SmallVec;
 
 use crate::parser::mysql_insert::{
-    hash_pk_tuple, parse_insert_tuple, InsertRowContext, PkTuple, PkValue, RowExtraction,
+    hash_pk_tuple, parse_insert_tuple, visit_insert_rows_with, InsertRowContext, PkTuple, PkValue,
+    RowExtraction,
 };
 use crate::parser::postgres_copy::{parse_copy_columns, CopyParser};
-use crate::parser::{Parser, ParserEvent, RowFlow, SqlDialect};
+use crate::parser::{Parser, ParserEvent, RowFlow, SqlDialect, StatementType};
 use crate::schema::{Schema, SchemaBuilder, TableSchema};
 
 use super::output::{ProtectedSpool, SpoolReader, SpooledRow, TempConfig};
@@ -294,6 +295,40 @@ impl GenerationVerifier {
                             }
                         }
                     }
+                    ParserEvent::Statement(bytes) => {
+                        // Some dialects (notably MSSQL, whose INSERTs are
+                        // separated by `GO` batch markers) are delivered as a
+                        // whole INSERT statement rather than streamed one tuple
+                        // at a time. Audit those rows through the SAME path by
+                        // parsing the statement's tuples here.
+                        let (stmt_type, name) =
+                            Parser::<&[u8]>::parse_statement_with_dialect(bytes, dialect);
+                        if stmt_type == StatementType::Insert && !name.is_empty() {
+                            if let Some(table_id) = schema.get_table_id(&name) {
+                                if let Some(table) = schema.table(table_id) {
+                                    let _ = visit_insert_rows_with(
+                                        bytes,
+                                        table,
+                                        dialect,
+                                        RowExtraction::Full,
+                                        |parsed| {
+                                            if parsed.all_values.is_empty() {
+                                                audit_ref.note_undecodable(&name);
+                                            } else {
+                                                audit_ref.observe_row(
+                                                    &name,
+                                                    table,
+                                                    &parsed.all_values,
+                                                    &parsed.column_map,
+                                                );
+                                            }
+                                            Ok(RowFlow::Continue)
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
                     ParserEvent::CopyStart(header) => {
                         copy = CopyState::from_header(header, schema, dialect);
                     }
@@ -316,7 +351,6 @@ impl GenerationVerifier {
                         }
                     }
                     ParserEvent::CopyEnd => copy = None,
-                    _ => {}
                 }
                 Ok(RowFlow::Continue)
             })
