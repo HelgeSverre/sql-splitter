@@ -1,0 +1,2205 @@
+{
+  "$id": "https://sql-splitter.dev/schemas/generate-config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sql-splitter generate config",
+  "description": "Schema for the `sql-splitter generate` command's `kind: model` and `kind: overrides` YAML documents. Add `# yaml-language-server: $schema=https://sql-splitter.dev/schemas/generate-config.schema.json` as the first line of a config file for editor validation and completion.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/SyntheticModel"
+    },
+    {
+      "$ref": "#/$defs/SyntheticOverrides"
+    }
+  ],
+  "$defs": {
+    "ChildDistribution": {
+      "description": "The fan-out distribution used to allocate a relationship child's rows\nacross its parents.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "observed"
+            },
+            "max": {
+              "type": "number"
+            },
+            "mean": {
+              "type": "number"
+            },
+            "min": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "mean", "min", "max"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fixed"
+            },
+            "max": {
+              "type": "number"
+            },
+            "mean": {
+              "type": "number"
+            },
+            "min": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "mean", "min", "max"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "uniform"
+            },
+            "max": {
+              "type": "number"
+            },
+            "mean": {
+              "type": "number"
+            },
+            "min": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "mean", "min", "max"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "poisson"
+            },
+            "max": {
+              "type": "number"
+            },
+            "mean": {
+              "type": "number"
+            },
+            "min": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "mean", "min", "max"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "histogram"
+            },
+            "max": {
+              "type": "number"
+            },
+            "mean": {
+              "type": "number"
+            },
+            "min": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "mean", "min", "max"]
+        }
+      ]
+    },
+    "ColumnRule": {
+      "description": "A single column's generation rule: an optional semantic annotation, an\noptional generator owner, and an ordered modifier pipeline.",
+      "type": "object",
+      "properties": {
+        "generator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeneratorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modifiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModifierConfig"
+          }
+        },
+        "semantic": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColumnRuleOverride": {
+      "description": "A partial patch for one column's generation rule.",
+      "type": "object",
+      "properties": {
+        "generator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeneratorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modifiers": {
+          "type": ["array", "null"],
+          "items": {
+            "$ref": "#/$defs/ModifierConfig"
+          }
+        },
+        "semantic": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FingerprintPolicy": {
+      "description": "How strictly a model requires the source fingerprint to match.",
+      "type": "string",
+      "enum": ["ignore", "warn", "require"]
+    },
+    "GeneratorConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.city"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.country"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.latitude"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.line1"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.line2"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.longitude"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.postcode"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["address.region"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["after"]
+            },
+            "max_seconds": {
+              "description": "Maximum offset after the source, in seconds; defaults to 86400."
+            },
+            "min_seconds": {
+              "description": "Minimum offset after the source, in seconds; defaults to 1."
+            },
+            "source": {
+              "description": "The sibling column to generate relative to."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "source"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["before"]
+            },
+            "max_seconds": {
+              "description": "Maximum offset before the source, in seconds; defaults to 86400."
+            },
+            "min_seconds": {
+              "description": "Minimum offset before the source, in seconds; defaults to 1."
+            },
+            "source": {
+              "description": "The sibling column to generate relative to."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "source"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["boolean"]
+            },
+            "probability": {
+              "description": "Probability of `true`, in [0, 1]; defaults to 0.5."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["bytes"]
+            },
+            "max_length": {
+              "description": "Maximum length; defaults to `min_length`."
+            },
+            "min_length": {
+              "description": "Minimum length; defaults to 16."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["choice"]
+            },
+            "values": {
+              "description": "The non-empty list of values to pick from."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "values"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["commerce.currency"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["commerce.money"]
+            },
+            "max": {
+              "description": "Inclusive upper bound; defaults to 1000."
+            },
+            "min": {
+              "description": "Inclusive lower bound; defaults to 0."
+            },
+            "scale": {
+              "description": "Decimal places; defaults to 2."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["commerce.product_name"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["commerce.quantity"]
+            },
+            "max": {
+              "description": "Inclusive upper bound; defaults to 100."
+            },
+            "min": {
+              "description": "Inclusive lower bound; defaults to 1."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["commerce.sku"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["company.department"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["company.job_title"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["company.name"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["constant", "const"]
+            },
+            "value": {
+              "description": "The constant value to emit; SQL NULL when omitted."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["copy"]
+            },
+            "source": {
+              "description": "The sibling column to copy the value from."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "source"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "alphabet": {
+              "description": "`alphanumeric` | `hex` | `numeric` | `alpha` | `url_safe`; defaults to `alphanumeric`."
+            },
+            "kind": {
+              "enum": ["credential.api_key"]
+            },
+            "length": {
+              "description": "Number of characters drawn after the prefix; defaults to 32."
+            },
+            "prefix": {
+              "description": "Literal text prepended before the random characters; defaults to `sk_`."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["credential.password_hash"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["credential.placeholder"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "alphabet": {
+              "description": "`alphanumeric` | `hex` | `numeric` | `alpha` | `url_safe`; defaults to `alphanumeric`."
+            },
+            "kind": {
+              "enum": ["credential.secret"]
+            },
+            "length": {
+              "description": "Number of characters drawn; defaults to 48."
+            },
+            "prefix": {
+              "description": "Literal text prepended before the random characters."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "alphabet": {
+              "description": "`alphanumeric` | `hex` | `numeric` | `alpha` | `url_safe`; defaults to `alphanumeric`."
+            },
+            "kind": {
+              "enum": ["credential.token"]
+            },
+            "length": {
+              "description": "Number of characters drawn; defaults to 32."
+            },
+            "prefix": {
+              "description": "Literal text prepended before the random characters."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["database_default"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["date"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["datetime"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["decimal"]
+            },
+            "max": {
+              "description": "Inclusive upper bound; defaults to 1000."
+            },
+            "min": {
+              "description": "Inclusive lower bound; defaults to 0."
+            },
+            "scale": {
+              "description": "Decimal places; defaults to 2."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["duration"]
+            },
+            "max": {
+              "description": "Inclusive upper bound in seconds; defaults to 86400 (one day)."
+            },
+            "min": {
+              "description": "Inclusive lower bound in seconds; defaults to 0."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["file.extension"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["file.mime_type"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["file.name"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["file.size"]
+            },
+            "max": {
+              "description": "Inclusive upper bound; defaults to 10,000,000."
+            },
+            "min": {
+              "description": "Inclusive lower bound; defaults to 1."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bins": {
+              "description": "Sorted, non-overlapping `{ min, max, count }` bins."
+            },
+            "kind": {
+              "enum": ["histogram"]
+            },
+            "scale": {
+              "description": "Decimal places for decimal columns; defaults to 0."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "bins"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["identifier.hash"]
+            },
+            "length": {
+              "description": "Number of hex characters; defaults to 64 (SHA-256-shaped)."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "alphabet": {
+              "description": "`alphanumeric` | `hex` | `numeric` | `alpha` | `url_safe`; defaults to `url_safe`."
+            },
+            "kind": {
+              "enum": ["identifier.nanoid"]
+            },
+            "length": {
+              "description": "Number of characters drawn; defaults to 21."
+            },
+            "prefix": {
+              "description": "Literal text prepended before the random characters."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "alphabet": {
+              "description": "`alphanumeric` | `hex` | `numeric` | `alpha` | `url_safe`; defaults to `alphanumeric`."
+            },
+            "kind": {
+              "enum": ["identifier.token"]
+            },
+            "length": {
+              "description": "Number of characters drawn; defaults to 32."
+            },
+            "prefix": {
+              "description": "Literal text prepended before the random characters."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["identifier.ulid"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["integer"]
+            },
+            "max": {
+              "description": "Inclusive upper bound; defaults to 1000."
+            },
+            "min": {
+              "description": "Inclusive lower bound; defaults to 0."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["internet.domain"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["internet.email"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["internet.ipv4"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["internet.ipv6"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["internet.url"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["internet.user_agent"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["json_value"]
+            },
+            "value": {
+              "description": "The document to emit; defaults to `{}`."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["lognormal"]
+            },
+            "max": {
+              "description": "Inclusive upper clamp."
+            },
+            "min": {
+              "description": "Inclusive lower clamp."
+            },
+            "mu": {
+              "description": "Mean of the underlying normal (log space)."
+            },
+            "scale": {
+              "description": "Decimal places for decimal columns; defaults to 0."
+            },
+            "sigma": {
+              "description": "Std-dev of the underlying normal (finite, non-negative)."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "mu", "sigma"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["monotonic"]
+            },
+            "start": {
+              "description": "The value at row 0; defaults to 0."
+            },
+            "step": {
+              "description": "The per-row increment; defaults to 1."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["network.mac"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["network.port"]
+            },
+            "max": {
+              "description": "Inclusive upper bound; defaults to 65535."
+            },
+            "min": {
+              "description": "Inclusive lower bound; defaults to 1."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["normal"]
+            },
+            "max": {
+              "description": "Inclusive upper clamp."
+            },
+            "mean": {
+              "description": "Distribution mean."
+            },
+            "min": {
+              "description": "Inclusive lower clamp."
+            },
+            "scale": {
+              "description": "Decimal places for decimal columns; defaults to 0."
+            },
+            "std": {
+              "description": "Standard deviation (finite, non-negative)."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "mean", "std"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["null"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["observed_sample"]
+            },
+            "values": {
+              "description": "The non-empty list of `{ value, weight }` entries (or bare values)."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "values"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["pattern"]
+            },
+            "mask": {
+              "description": "The mask to fill, e.g. `\"###-??\"`."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "mask"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["person.first_name"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["person.full_name"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["person.last_name"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["person.title"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["person.username"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["phone.country_code"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["phone.number"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "distribution": {
+              "description": "Parent-assignment distribution: uniform, sequential, weighted, or observed."
+            },
+            "kind": {
+              "enum": ["relation.composite_key", "composite_key"]
+            },
+            "null_rate": {
+              "description": "Fraction (0.0..=1.0) of children whose key is NULL (nullable columns only)."
+            },
+            "relationship": {
+              "description": "Name of the declared relationship this key follows."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "distribution": {
+              "description": "Parent-assignment distribution: uniform, sequential, weighted, or observed."
+            },
+            "kind": {
+              "enum": ["relation.foreign_key", "foreign_key"]
+            },
+            "null_rate": {
+              "description": "Fraction (0.0..=1.0) of children whose key is NULL (nullable columns only)."
+            },
+            "relationship": {
+              "description": "Name of the declared relationship this key follows."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["sequence"]
+            },
+            "start": {
+              "description": "The first value emitted; defaults to 0."
+            },
+            "step": {
+              "description": "The increment applied after each row; defaults to 1."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["string"]
+            },
+            "max_length": {
+              "description": "Maximum length; defaults to `min_length`."
+            },
+            "min_length": {
+              "description": "Minimum length; defaults to 8."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["template"]
+            },
+            "parts": {
+              "description": "A list of literal strings and `{ field: <name> }` references."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "parts"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["text.paragraph"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["text.sentence"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["text.slug"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["text.word"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["time"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["uuid"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "choices": {
+              "description": "The non-empty list of `{ value, weight }` entries."
+            },
+            "kind": {
+              "enum": ["weighted_choice"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "choices"]
+        }
+      ]
+    },
+    "InferenceMode": {
+      "description": "Whether columns without an explicit owner may fall back to schema-based\nheuristics, or must always be explicit.",
+      "type": "string",
+      "enum": ["schema", "disabled"]
+    },
+    "InsertMode": {
+      "description": "How PostgreSQL row output is rendered.",
+      "type": "string",
+      "enum": ["auto", "insert", "copy"]
+    },
+    "ModelDefaults": {
+      "description": "Inherited table/column behavior defaults.\n\nBoth `output` and `defaults` are spec-optional on a `kind: model`\ndocument (see the \"Top-level fields\" table); a model that omits\n`defaults` gets [`InferenceMode::Disabled`], matching what\n`--emit-config` always writes explicitly.",
+      "type": "object",
+      "properties": {
+        "inference": {
+          "$ref": "#/$defs/InferenceMode",
+          "default": "disabled"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModelKind": {
+      "description": "Marker type accepting only the literal `kind: model` tag.",
+      "type": "string",
+      "enum": ["model"]
+    },
+    "ModifierConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["case"]
+            },
+            "mode": {
+              "description": "`upper` | `lower` | `title`."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "mode"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["clamp"]
+            },
+            "max": {
+              "description": "Inclusive upper bound."
+            },
+            "min": {
+              "description": "Inclusive lower bound."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "min", "max"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["format"]
+            },
+            "template": {
+              "description": "A string containing the literal `{value}` placeholder."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "template"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["null_rate"]
+            },
+            "rate": {
+              "description": "Probability of NULL, in [0, 1]."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "rate"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["prefix"]
+            },
+            "max_length": {
+              "description": "Truncate to this many Unicode scalars afterward, if set."
+            },
+            "value": {
+              "description": "The text to prepend."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "value"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["round"]
+            },
+            "scale": {
+              "description": "Target number of decimal places."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "scale"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["suffix"]
+            },
+            "max_length": {
+              "description": "Truncate to this many Unicode scalars afterward, if set."
+            },
+            "value": {
+              "description": "The text to append."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "value"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["truncate"]
+            },
+            "max_length": {
+              "description": "The number of Unicode scalars to keep."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind", "max_length"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["unique"]
+            },
+            "max_attempts": {
+              "description": "Retries allowed before resolving via on_exhaustion; defaults to 10."
+            },
+            "max_tracked": {
+              "description": "Maximum number of distinct values remembered; defaults to 1,000,000. Reaching this budget resolves via on_exhaustion, the same as a collision."
+            },
+            "on_exhaustion": {
+              "description": "`error` | `warn` | `widen`; defaults to `error`."
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        }
+      ]
+    },
+    "OutputMode": {
+      "description": "Whether rendering emits DDL, rows, or both.",
+      "type": "string",
+      "enum": ["schema_and_data", "schema_only", "data_only"]
+    },
+    "OutputModel": {
+      "description": "Dialect and renderer defaults (`output:` in the complete model example).\n\nA model that omits `output` entirely preserves the source/base dialect\n(`dialect: None`); see [`ModelDefaults`] for why this field is\n`#[serde(default)]` on [`SyntheticModel`].",
+      "type": "object",
+      "properties": {
+        "batch_size": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "dialect": {
+          "type": ["string", "null"]
+        },
+        "inserts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InsertMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputOverride": {
+      "description": "A partial patch for `output:`; present fields replace the base value.",
+      "type": "object",
+      "properties": {
+        "batch_size": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "dialect": {
+          "type": ["string", "null"]
+        },
+        "inserts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InsertMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "OverridesKind": {
+      "description": "Marker type accepting only the literal `kind: overrides` tag.",
+      "type": "string",
+      "enum": ["overrides"]
+    },
+    "PlannerConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["commerce.order_family"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["file.metadata"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["geo.coordinate_pair"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["hierarchy.tree"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["relation.junction_pair"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["relation.polymorphic_pair"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["relation.tenant_family"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["temporal.interval"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["temporal.lifecycle"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["temporal.soft_delete"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["temporal.timestamps"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": ["workflow.progress_counters"]
+            }
+          },
+          "additionalProperties": true,
+          "required": ["kind"]
+        }
+      ]
+    },
+    "PortableCheckConstraint": {
+      "description": "A CHECK constraint, with its raw SQL expression preserved verbatim.",
+      "type": "object",
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "name": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["expression"]
+    },
+    "PortableColumn": {
+      "type": "object",
+      "properties": {
+        "collation": {
+          "type": ["string", "null"]
+        },
+        "default_sql": {
+          "type": ["string", "null"]
+        },
+        "family": {
+          "$ref": "#/$defs/SqlTypeFamily"
+        },
+        "generated": {
+          "type": "boolean"
+        },
+        "identity": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "primary_key": {
+          "type": "boolean"
+        },
+        "source_type": {
+          "type": "string"
+        },
+        "type": {
+          "description": "Shorthand alias for `source_type`; `family` is derived automatically when omitted.",
+          "type": "string"
+        },
+        "unique": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": ["source_type"]
+        },
+        {
+          "required": ["type"]
+        }
+      ],
+      "required": ["name", "nullable"]
+    },
+    "PortableIndex": {
+      "description": "An index definition (not necessarily unique; see\n[`PortableUniqueConstraint`] for UNIQUE constraints).",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "index_type": {
+          "type": ["string", "null"]
+        },
+        "name": {
+          "type": "string"
+        },
+        "unique": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": ["name", "columns"]
+    },
+    "PortableRelationship": {
+      "description": "A declared foreign-key relationship to another table, by name (not\nresolved to an ID, since a `PortableSchema` stands alone from the\n`Schema` it was built from).",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": ["string", "null"]
+        },
+        "referenced_columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "referenced_table": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["columns", "referenced_table", "referenced_columns"]
+    },
+    "PortableTable": {
+      "description": "Portable table: ordered columns and constraints, plus the raw same-dialect\nDDL for reference. Column and constraint order is preserved in `Vec`s;\nonly table name lookup uses a `BTreeMap` (see [`PortableSchema::tables`]).",
+      "type": "object",
+      "properties": {
+        "check_constraints": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortableCheckConstraint"
+          }
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortableColumn"
+          }
+        },
+        "create_statement": {
+          "type": ["string", "null"]
+        },
+        "indexes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortableIndex"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "primary_key": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortableRelationship"
+          }
+        },
+        "unique_constraints": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortableUniqueConstraint"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": ["name", "columns"]
+    },
+    "PortableTableOverride": {
+      "description": "A partial patch for `schema:`. Overrides cannot redefine DDL structure\n(see the design's \"source, model, and overrides merge predictably\"\nsection), so this only covers non-structural annotations.",
+      "type": "object",
+      "properties": {
+        "create_statement": {
+          "type": ["string", "null"]
+        },
+        "name": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PortableUniqueConstraint": {
+      "description": "A table-level UNIQUE constraint, covering one or more columns.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["columns"]
+    },
+    "ProfileInference": {
+      "description": "The inference explanation attached to a [`ProfileMetadata`] entry.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "type": "string"
+        },
+        "reasons": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "selected": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["selected", "confidence"]
+    },
+    "ProfileMetadata": {
+      "description": "Removable evidence recorded for one profiled column\n(`profiles.\"table.column\"` in the complete model example). Deleting a\nmodel's `profiles` map cannot change generation.",
+      "type": "object",
+      "properties": {
+        "distinct_estimate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileInference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "null_fraction": {
+          "type": "number"
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": ["rows", "null_fraction", "distinct_estimate"]
+    },
+    "RelationshipModel": {
+      "description": "A declared generation relationship to another table.\n\nThis covers the common named foreign-key shape used throughout the\ncomplete model example. Self-referential, polymorphic, and shaped\n(tree/junction) relationships are a documented follow-up; see the\ntask report for why they are out of scope here.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "distribution": {
+          "type": ["string", "null"]
+        },
+        "name": {
+          "type": ["string", "null"]
+        },
+        "references": {
+          "$ref": "#/$defs/RelationshipReference"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["columns", "references"]
+    },
+    "RelationshipReference": {
+      "description": "The `references:` half of a [`RelationshipModel`].",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "table": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["table", "columns"]
+    },
+    "RowsKind": {
+      "description": "The tag for [`RowsOverride::kind`]; standalone since an override may\ncarry only a subset of the fields a complete [`super::model::RowsModel`]\nrequires (for example, `{ kind: observed, scale: 0.01 }`).",
+      "type": "string",
+      "enum": ["fixed", "observed", "scale", "relation.children"]
+    },
+    "RowsModel": {
+      "description": "How many rows a table produces, and how those rows are derived.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "fixed"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "count"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "observed"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "count"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "base": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "factor": {
+              "type": "number"
+            },
+            "kind": {
+              "type": "string",
+              "const": "scale"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "base", "factor", "count"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "distribution": {
+              "$ref": "#/$defs/ChildDistribution"
+            },
+            "kind": {
+              "type": "string",
+              "const": "relation.children"
+            },
+            "parent": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "parent", "count", "distribution"]
+        }
+      ]
+    },
+    "RowsOverride": {
+      "description": "A partial patch for `rows:`. Unlike [`super::model::RowsModel`], a count\nor distribution may be omitted when the source/base model supplies it.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "distribution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChildDistribution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "factor": {
+          "type": ["number", "null"]
+        },
+        "kind": {
+          "$ref": "#/$defs/RowsKind"
+        },
+        "parent": {
+          "type": ["string", "null"]
+        },
+        "scale": {
+          "type": ["number", "null"]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["kind"]
+    },
+    "SourceModel": {
+      "description": "Provenance and fingerprint policy for the source dump a model was\nderived from (`source:` in the complete model example).",
+      "type": "object",
+      "properties": {
+        "dialect": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": ["string", "null"]
+        },
+        "fingerprint_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FingerprintPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["dialect"]
+    },
+    "SqlTypeFamily": {
+      "description": "Coarse-grained classification of a SQL column type, independent of the\nsource dialect's exact type name. Generation strategies key off this\ninstead of re-deriving it from `source_type`.",
+      "type": "string",
+      "enum": [
+        "integer",
+        "big_integer",
+        "decimal",
+        "boolean",
+        "text",
+        "bytes",
+        "uuid",
+        "date_time",
+        "json",
+        "other"
+      ]
+    },
+    "SyntheticModel": {
+      "description": "A complete, self-contained synthetic data model.",
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "description": "Editor-only schema pointer (e.g. `# yaml-language-server: $schema=...`\npromoted into the document body, or a literal `$schema:` key). Purely\ndocumentation metadata: recognized so an editor-annotated document\ndoesn't trip `deny_unknown_fields`, never read by the parser.",
+          "type": ["string", "null"]
+        },
+        "defaults": {
+          "$ref": "#/$defs/ModelDefaults",
+          "default": {
+            "inference": "disabled"
+          }
+        },
+        "imports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/ModelKind"
+        },
+        "output": {
+          "$ref": "#/$defs/OutputModel",
+          "default": {}
+        },
+        "profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProfileMetadata"
+          },
+          "default": {}
+        },
+        "seed": {
+          "type": ["integer", "null"],
+          "default": null,
+          "minimum": 0
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tables": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TableModel"
+          }
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": ["version", "kind", "tables"]
+    },
+    "SyntheticOverrides": {
+      "description": "A partial patch document applied on top of a source dump or base model.",
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "description": "Editor-only schema pointer; see [`super::model::SyntheticModel::schema_ref`].",
+          "type": ["string", "null"]
+        },
+        "defaults": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelDefaults"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "imports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/OverridesKind"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tables": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TableOverride"
+          },
+          "default": {}
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": ["version", "kind"]
+    },
+    "TableModel": {
+      "description": "A single table's complete generation rules.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ColumnRule"
+          },
+          "default": {}
+        },
+        "planners": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlannerConfig"
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RelationshipModel"
+          }
+        },
+        "rows": {
+          "$ref": "#/$defs/RowsModel"
+        },
+        "schema": {
+          "$ref": "#/$defs/PortableTable"
+        },
+        "seed": {
+          "description": "Tri-state seed: omitted inherits the model seed, `null` opts out of\ndeterminism, and an integer pins an independent seed. Schema'd as\n`Option<u64>` (the same shape [`deserialize_table_seed`] reads)\nsince [`TableSeed`] itself has no direct YAML representation.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": ["rows", "schema"]
+    },
+    "TableOverride": {
+      "description": "A partial patch for one table.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ColumnRuleOverride"
+          },
+          "default": {}
+        },
+        "planners": {
+          "type": ["array", "null"],
+          "items": {
+            "$ref": "#/$defs/PlannerConfig"
+          }
+        },
+        "relationships": {
+          "type": ["array", "null"],
+          "items": {
+            "$ref": "#/$defs/RelationshipModel"
+          }
+        },
+        "rows": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RowsOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PortableTableOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

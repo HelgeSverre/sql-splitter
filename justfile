@@ -164,7 +164,10 @@ man:
     @echo ""
     @echo "Man pages generated in man/ directory"
 
-# Generate JSON schemas from Rust types, validate, and copy to website
+# Generate JSON schemas from Rust types (--json output schemas, plus
+# generate-config.schema.json for the `generate` command's YAML model/
+# overrides language), validate, and copy to website. Safe to run repeatedly:
+# regenerating twice in a row produces no diff.
 [group('docs')]
 schemas: release
     @echo "Generating JSON schemas from Rust types..."
@@ -173,7 +176,7 @@ schemas: release
     @echo "Formatting schemas with prettier..."
     bunx prettier --write "schemas/*.schema.json" --log-level warn
     @echo ""
-    @echo "Validating schemas against actual CLI output..."
+    @echo "Validating schemas against actual CLI output and generate fixtures..."
     cargo nextest run --test json_schema_tests
     @echo ""
     @echo "Copying schemas to website..."

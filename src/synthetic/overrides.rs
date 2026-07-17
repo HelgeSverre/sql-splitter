@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::model::{
@@ -16,16 +17,19 @@ use super::model::{
 };
 
 /// Marker type accepting only the literal `kind: overrides` tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OverridesKind {
     Overrides,
 }
 
 /// A partial patch document applied on top of a source dump or base model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SyntheticOverrides {
+    /// Editor-only schema pointer; see [`super::model::SyntheticModel::schema_ref`].
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    pub schema_ref: Option<String>,
     pub version: u32,
     pub kind: OverridesKind,
     #[serde(default)]
@@ -40,6 +44,7 @@ pub struct SyntheticOverrides {
         serialize_with = "serialize_root_seed_override",
         skip_serializing_if = "RootSeedOverride::is_inherit"
     )]
+    #[schemars(with = "Option<u64>")]
     pub seed: RootSeedOverride,
     pub output: Option<OutputOverride>,
     #[serde(default)]
@@ -92,7 +97,7 @@ where
 }
 
 /// A partial patch for `output:`; present fields replace the base value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,7 +111,7 @@ pub struct OutputOverride {
 }
 
 /// A partial patch for one table.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TableOverride {
     #[serde(
@@ -115,6 +120,7 @@ pub struct TableOverride {
         serialize_with = "serialize_table_seed_override",
         skip_serializing_if = "TableSeedOverride::is_inherit"
     )]
+    #[schemars(with = "Option<u64>")]
     pub seed: TableSeedOverride,
     pub rows: Option<RowsOverride>,
     pub schema: Option<PortableTableOverride>,
@@ -167,7 +173,7 @@ where
 /// The tag for [`RowsOverride::kind`]; standalone since an override may
 /// carry only a subset of the fields a complete [`super::model::RowsModel`]
 /// requires (for example, `{ kind: observed, scale: 0.01 }`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RowsKind {
     Fixed,
@@ -179,7 +185,7 @@ pub enum RowsKind {
 
 /// A partial patch for `rows:`. Unlike [`super::model::RowsModel`], a count
 /// or distribution may be omitted when the source/base model supplies it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RowsOverride {
     pub kind: RowsKind,
@@ -200,7 +206,7 @@ pub struct RowsOverride {
 /// A partial patch for `schema:`. Overrides cannot redefine DDL structure
 /// (see the design's "source, model, and overrides merge predictably"
 /// section), so this only covers non-structural annotations.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableTableOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,7 +216,7 @@ pub struct PortableTableOverride {
 }
 
 /// A partial patch for one column's generation rule.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnRuleOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]

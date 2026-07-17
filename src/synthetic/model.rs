@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::de::Error as SerdeDeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -101,16 +102,22 @@ impl SyntheticFile {
 }
 
 /// Marker type accepting only the literal `kind: model` tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelKind {
     Model,
 }
 
 /// A complete, self-contained synthetic data model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SyntheticModel {
+    /// Editor-only schema pointer (e.g. `# yaml-language-server: $schema=...`
+    /// promoted into the document body, or a literal `$schema:` key). Purely
+    /// documentation metadata: recognized so an editor-annotated document
+    /// doesn't trip `deny_unknown_fields`, never read by the parser.
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    pub schema_ref: Option<String>,
     pub version: u32,
     pub kind: ModelKind,
     #[serde(default)]
@@ -130,7 +137,7 @@ pub struct SyntheticModel {
 
 /// Provenance and fingerprint policy for the source dump a model was
 /// derived from (`source:` in the complete model example).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceModel {
     pub dialect: String,
@@ -141,7 +148,7 @@ pub struct SourceModel {
 }
 
 /// How strictly a model requires the source fingerprint to match.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FingerprintPolicy {
     Ignore,
@@ -155,7 +162,7 @@ pub enum FingerprintPolicy {
 /// document (see the "Top-level fields" table); a model that omits
 /// `defaults` gets [`InferenceMode::Disabled`], matching what
 /// `--emit-config` always writes explicitly.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelDefaults {
     #[serde(default)]
@@ -164,7 +171,7 @@ pub struct ModelDefaults {
 
 /// Whether columns without an explicit owner may fall back to schema-based
 /// heuristics, or must always be explicit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InferenceMode {
     Schema,
@@ -177,7 +184,7 @@ pub enum InferenceMode {
 /// A model that omits `output` entirely preserves the source/base dialect
 /// (`dialect: None`); see [`ModelDefaults`] for why this field is
 /// `#[serde(default)]` on [`SyntheticModel`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,7 +198,7 @@ pub struct OutputModel {
 }
 
 /// Whether rendering emits DDL, rows, or both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     SchemaAndData,
@@ -200,7 +207,7 @@ pub enum OutputMode {
 }
 
 /// How PostgreSQL row output is rendered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InsertMode {
     Auto,
@@ -209,15 +216,20 @@ pub enum InsertMode {
 }
 
 /// A single table's complete generation rules.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TableModel {
+    /// Tri-state seed: omitted inherits the model seed, `null` opts out of
+    /// determinism, and an integer pins an independent seed. Schema'd as
+    /// `Option<u64>` (the same shape [`deserialize_table_seed`] reads)
+    /// since [`TableSeed`] itself has no direct YAML representation.
     #[serde(
         default,
         deserialize_with = "deserialize_table_seed",
         serialize_with = "serialize_table_seed",
         skip_serializing_if = "TableSeed::is_inherit"
     )]
+    #[schemars(with = "Option<u64>")]
     pub seed: TableSeed,
     pub rows: RowsModel,
     pub schema: PortableTable,
@@ -274,7 +286,7 @@ where
 }
 
 /// How many rows a table produces, and how those rows are derived.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RowsModel {
     Fixed {
@@ -298,7 +310,7 @@ pub enum RowsModel {
 
 /// The fan-out distribution used to allocate a relationship child's rows
 /// across its parents.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChildDistribution {
     Observed { mean: f64, min: f64, max: f64 },
@@ -310,7 +322,7 @@ pub enum ChildDistribution {
 
 /// A single column's generation rule: an optional semantic annotation, an
 /// optional generator owner, and an ordered modifier pipeline.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,26 +336,44 @@ pub struct ColumnRule {
 /// A registry-resolved generator invocation. `kind` selects the registered
 /// generator; the remaining fields are its typed arguments, opaque to the
 /// document model and resolved later by `ExtensionRegistry`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GeneratorConfig {
     pub kind: String,
+    /// Registry-owned arguments, opaque to the document model.
+    /// Schema'd permissively as an arbitrary JSON object here;
+    /// `json_schema::generate_config_schema` replaces this
+    /// definition with a `oneOf` composed from the standard
+    /// registry's descriptors (see that function's doc comment).
     #[serde(flatten)]
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
     pub args: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
 /// A registry-resolved modifier invocation; see [`GeneratorConfig`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModifierConfig {
     pub kind: String,
+    /// Registry-owned arguments, opaque to the document model.
+    /// Schema'd permissively as an arbitrary JSON object here;
+    /// `json_schema::generate_config_schema` replaces this
+    /// definition with a `oneOf` composed from the standard
+    /// registry's descriptors (see that function's doc comment).
     #[serde(flatten)]
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
     pub args: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
 /// A registry-resolved planner invocation; see [`GeneratorConfig`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PlannerConfig {
     pub kind: String,
+    /// Registry-owned arguments, opaque to the document model.
+    /// Schema'd permissively as an arbitrary JSON object here;
+    /// `json_schema::generate_config_schema` replaces this
+    /// definition with a `oneOf` composed from the standard
+    /// registry's descriptors (see that function's doc comment).
     #[serde(flatten)]
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
     pub args: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
@@ -353,7 +383,7 @@ pub struct PlannerConfig {
 /// complete model example. Self-referential, polymorphic, and shaped
 /// (tree/junction) relationships are a documented follow-up; see the
 /// task report for why they are out of scope here.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelationshipModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -365,7 +395,7 @@ pub struct RelationshipModel {
 }
 
 /// The `references:` half of a [`RelationshipModel`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelationshipReference {
     pub table: String,
@@ -375,7 +405,7 @@ pub struct RelationshipReference {
 /// Removable evidence recorded for one profiled column
 /// (`profiles."table.column"` in the complete model example). Deleting a
 /// model's `profiles` map cannot change generation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileMetadata {
     pub rows: u64,
@@ -386,7 +416,7 @@ pub struct ProfileMetadata {
 }
 
 /// The inference explanation attached to a [`ProfileMetadata`] entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileInference {
     pub selected: String,

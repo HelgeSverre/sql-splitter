@@ -367,6 +367,7 @@ impl ModelInference {
         }
 
         let model = SyntheticModel {
+            schema_ref: None,
             version: 1,
             kind: ModelKind::Model,
             imports: Vec::new(),

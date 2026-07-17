@@ -238,6 +238,25 @@ tables:
           - { kind: unique }
 ```
 
+### Editor validation
+
+Add a `yaml-language-server` modeline as the first line of a config file to
+get inline validation and completion in editors that support it (VS Code with
+the YAML extension, Neovim's `yamlls`, and others):
+
+```yaml
+# yaml-language-server: $schema=https://sql-splitter.dev/schemas/generate-config.schema.json
+version: 1
+kind: model
+```
+
+The schema is generated straight from the same Rust types this reference
+documents, including a `oneOf` composed from the standard
+generator/modifier/planner registry, so it always matches the shipped
+binary. See [the full schema](/schemas/generate-config.schema.json) and the
+[model reference's editor validation section](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/model-reference.md#editor-validation-json-schema)
+for exactly what it does and doesn't enforce.
+
 The full model language — every field, generator, modifier, and planner —
 is documented in the repository:
 

@@ -2,13 +2,14 @@
 
 use crate::parser::SqlDialect;
 use crate::schema::{Column, Schema, TableSchema};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Coarse-grained classification of a SQL column type, independent of the
 /// source dialect's exact type name. Generation strategies key off this
 /// instead of re-deriving it from `source_type`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SqlTypeFamily {
     Integer,
@@ -104,6 +105,47 @@ pub struct PortableColumn {
     pub collation: Option<String>,
 }
 
+/// Manual schema: `#[serde(try_from = "PortableColumnInput")]` means the
+/// derive macro would describe `PortableColumn`'s own fields (which always
+/// require `source_type` + `family`), not what YAML actually accepts. This
+/// impl instead mirrors [`PortableColumnInput`]: `family` is optional, and
+/// either `source_type` or its `type` shorthand alias may supply the type
+/// name (see D1 in the module tests below).
+impl JsonSchema for PortableColumn {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PortableColumn".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let family_schema = generator.subschema_for::<SqlTypeFamily>();
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "source_type": { "type": "string" },
+                "type": {
+                    "type": "string",
+                    "description": "Shorthand alias for `source_type`; `family` is derived automatically when omitted."
+                },
+                "family": family_schema,
+                "nullable": { "type": "boolean" },
+                "primary_key": { "type": "boolean" },
+                "unique": { "type": "boolean" },
+                "default_sql": { "type": ["string", "null"] },
+                "generated": { "type": "boolean" },
+                "identity": { "type": "boolean" },
+                "collation": { "type": ["string", "null"] }
+            },
+            "required": ["name", "nullable"],
+            "anyOf": [
+                { "required": ["source_type"] },
+                { "required": ["type"] }
+            ],
+            "additionalProperties": false
+        })
+    }
+}
+
 impl PortableColumn {
     fn from_runtime(column: &Column) -> Self {
         Self {
@@ -170,7 +212,7 @@ impl From<PortableColumnInput> for PortableColumn {
 }
 
 /// A table-level UNIQUE constraint, covering one or more columns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableUniqueConstraint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,7 +221,7 @@ pub struct PortableUniqueConstraint {
 }
 
 /// A CHECK constraint, with its raw SQL expression preserved verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableCheckConstraint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,7 +231,7 @@ pub struct PortableCheckConstraint {
 
 /// An index definition (not necessarily unique; see
 /// [`PortableUniqueConstraint`] for UNIQUE constraints).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableIndex {
     pub name: String,
@@ -203,7 +245,7 @@ pub struct PortableIndex {
 /// A declared foreign-key relationship to another table, by name (not
 /// resolved to an ID, since a `PortableSchema` stands alone from the
 /// `Schema` it was built from).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableRelationship {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,7 +258,7 @@ pub struct PortableRelationship {
 /// Portable table: ordered columns and constraints, plus the raw same-dialect
 /// DDL for reference. Column and constraint order is preserved in `Vec`s;
 /// only table name lookup uses a `BTreeMap` (see [`PortableSchema::tables`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableTable {
     pub name: String,
@@ -306,7 +348,7 @@ impl PortableTable {
 /// Dialect-agnostic snapshot of a full database schema, suitable for
 /// serialization and for driving synthetic data generation without
 /// depending on the DDL parser internals.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortableSchema {
     /// The dialect the source DDL was parsed with (e.g. `"mysql"`).
