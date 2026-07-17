@@ -117,7 +117,7 @@ tables:
           unit: seconds
           min: 30
           max: 43200
-        end_inclusive: true
+        end_inclusive: false
 {overrides}
 "#
     )
@@ -305,6 +305,123 @@ fn compiled_planner_returns_exact_verification_predicates() {
     assert!(predicates
         .iter()
         .any(|p| matches!(p, PlannerPredicate::InRange { column, .. } if column == "started_at")));
+}
+
+/// A monotonic-start (second-aligned), fixed-duration model whose only variable
+/// is `end_inclusive`, so the inclusive/exclusive `end` values are directly
+/// comparable at second precision.
+fn inclusive_model(end_inclusive: bool, duration_value: i64) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: 11
+tables:
+  jobs:
+    rows: {{ kind: fixed, count: 200 }}
+    schema:
+      name: jobs
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: started_at, type: timestamp, nullable: false }}
+        - {{ name: ended_at, type: timestamp, nullable: true }}
+        - {{ name: duration_seconds, type: bigint, nullable: true }}
+    planners:
+      - kind: temporal.interval
+        columns:
+          start: started_at
+          end: ended_at
+          duration: duration_seconds
+        start:
+          kind: monotonic
+          min: "2024-01-01T00:00:00Z"
+          step_seconds: 3600
+        duration:
+          kind: fixed
+          unit: seconds
+          value: {duration_value}
+        end_inclusive: {end_inclusive}
+        timezone: utc
+"#
+    )
+}
+
+#[test]
+fn end_inclusive_shifts_the_generated_end_by_one_unit() {
+    use sql_splitter::generate::PlannerPredicate;
+
+    // Second-aligned starts + a whole-second duration make the internal 1 ns
+    // shift observable at second precision: inclusive `end` is the last covered
+    // second, exactly one second before the half-open exclusive boundary.
+    let inclusive = run(&inclusive_model(true, 120));
+    let exclusive = run(&inclusive_model(false, 120));
+
+    let inclusive_ends: Vec<i128> = inclusive
+        .column("ended_at")
+        .map(|v| instant_ns(datetime_text(v)))
+        .collect();
+    let exclusive_ends: Vec<i128> = exclusive
+        .column("ended_at")
+        .map(|v| instant_ns(datetime_text(v)))
+        .collect();
+    assert_eq!(inclusive_ends.len(), 200);
+
+    for (i, (incl, excl)) in inclusive_ends.iter().zip(&exclusive_ends).enumerate() {
+        assert_ne!(
+            incl, excl,
+            "row {i}: end_inclusive must change the end value"
+        );
+        assert_eq!(
+            excl - incl,
+            1_000_000_000,
+            "row {i}: inclusive end is one second (unit) before the exclusive boundary"
+        );
+    }
+
+    // Each plan's Equation predicate encodes its own mode.
+    let inclusive_flag = equation_end_inclusive(&inclusive_model(true, 120));
+    let exclusive_flag = equation_end_inclusive(&inclusive_model(false, 120));
+    assert!(
+        inclusive_flag,
+        "inclusive plan predicate must carry end_inclusive = true"
+    );
+    assert!(
+        !exclusive_flag,
+        "exclusive plan predicate must carry end_inclusive = false"
+    );
+    // Sanity: the predicate variant is the interval Equation with second units.
+    assert!(matches!(
+        first_equation(&inclusive_model(true, 120)),
+        PlannerPredicate::Equation { duration_unit_nanos, .. } if duration_unit_nanos == 1_000_000_000
+    ));
+}
+
+/// The `end_inclusive` flag of the first Equation predicate a model compiles to.
+fn equation_end_inclusive(model_yaml: &str) -> bool {
+    match first_equation(model_yaml) {
+        sql_splitter::generate::PlannerPredicate::Equation { end_inclusive, .. } => end_inclusive,
+        other => panic!("expected an Equation predicate, found {other:?}"),
+    }
+}
+
+fn first_equation(model_yaml: &str) -> sql_splitter::generate::PlannerPredicate {
+    let plan = compile_result(model_yaml).expect("model compiles cleanly");
+    plan.table("jobs").expect("jobs table").planners[0]
+        .verification_predicates()
+        .into_iter()
+        .find(|p| matches!(p, sql_splitter::generate::PlannerPredicate::Equation { .. }))
+        .expect("an Equation predicate")
+}
+
+#[test]
+fn zero_length_inclusive_interval_is_a_compile_error() {
+    // A fixed zero-length duration cannot form an inclusive (closed) interval.
+    assert!(
+        compile_err_code(&inclusive_model(true, 0)).contains(&"GEN-INTERVAL-DURATION".to_string())
+    );
+    // The same duration is fine for a half-open interval.
+    assert!(compile_result(&inclusive_model(false, 0)).is_ok());
 }
 
 // --- Compile diagnostics ----------------------------------------------------

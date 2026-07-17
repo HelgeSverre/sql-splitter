@@ -463,10 +463,17 @@ pub trait CompiledPlanner: Send {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerPredicate {
     /// On every row the `guard` selects (or every row when `guard` is `None`),
-    /// the `end` timestamp equals the `start` timestamp plus `duration` units:
-    /// `end_ns == start_ns + duration * duration_unit_nanos`. `end_inclusive`
-    /// records whether `end` is the last covered instant (metadata; it does not
-    /// change the equation).
+    /// the `end` timestamp is a checked-integer function of `start` and
+    /// `duration`. The exact relation depends on `end_inclusive`:
+    ///
+    /// * `end_inclusive == false` (half-open `[start, end)`):
+    ///   `end_ns == start_ns + duration * duration_unit_nanos`.
+    /// * `end_inclusive == true` (closed `[start, end]`, `end` the last covered
+    ///   instant): `end_ns == start_ns + duration * duration_unit_nanos - 1`
+    ///   (one nanosecond, the smallest internal unit).
+    ///
+    /// The two modes are therefore *not* the same predicate: a verifier must
+    /// branch on `end_inclusive` and check the exact produced value.
     Equation {
         /// The start timestamp column.
         start: String,

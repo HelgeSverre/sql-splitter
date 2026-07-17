@@ -154,6 +154,7 @@ struct TemporalIntervalPlanner {
     start_kind: StartKind,
     duration_draw: DurationDraw,
     open_probability: f64,
+    end_inclusive: bool,
     zone: RenderZone,
     start_rng: ChaCha8Rng,
     open_rng: ChaCha8Rng,
@@ -179,21 +180,29 @@ impl CompiledPlanner for TemporalIntervalPlanner {
             self.open_probability > 0.0 && self.open_rng.random::<f64>() < self.open_probability;
         let duration_units = self.draw_duration();
 
-        output[0] = render_instant(start_ns, &self.zone, &self.start.family);
+        output[0] = render_instant(start_ns, &self.zone, &self.start.family)?;
 
         if is_open {
             output[1] = GeneratedValue::Null;
             output[2] = self.open_duration();
         } else {
-            let duration_ns = duration_units
+            let span_ns = duration_units
                 .checked_mul(self.duration.unit_nanos)
-                .and_then(|ns| start_ns.checked_add(ns))
-                .ok_or_else(|| {
-                    GenerateError::Overflow(
-                        "temporal.interval: start + duration overflows the representable instant range".to_string(),
-                    )
-                })?;
-            output[1] = render_instant(duration_ns, &self.zone, &self.end.family);
+                .ok_or_else(interval_overflow)?;
+            // Inclusive `[start, end]` renders `end` as the last covered instant
+            // — one nanosecond (the smallest internal unit) before the half-open
+            // boundary. Exclusive `[start, end)` renders the boundary itself.
+            // A positive duration is guaranteed at compile time for the
+            // inclusive case, so the subtraction never goes below `start`.
+            let delta_ns = if self.end_inclusive {
+                span_ns - 1
+            } else {
+                span_ns
+            };
+            let end_ns = start_ns
+                .checked_add(delta_ns)
+                .ok_or_else(interval_overflow)?;
+            output[1] = render_instant(end_ns, &self.zone, &self.end.family)?;
             output[2] = render_duration(duration_units, &self.duration.family);
         }
 
@@ -283,20 +292,27 @@ impl TemporalIntervalPlanner {
 
 /// Render an epoch-nanosecond instant to a wall-clock literal in `zone`, in the
 /// representation `family` expects.
-fn render_instant(instant_ns: i128, zone: &RenderZone, family: &SqlTypeFamily) -> GeneratedValue {
-    let text = format_instant(instant_ns, zone);
-    match family {
+fn render_instant(
+    instant_ns: i128,
+    zone: &RenderZone,
+    family: &SqlTypeFamily,
+) -> Result<GeneratedValue, GenerateError> {
+    let text = format_instant(instant_ns, zone)?;
+    Ok(match family {
         SqlTypeFamily::DateTime => GeneratedValue::DateTime(text),
         _ => GeneratedValue::Text(text),
-    }
+    })
 }
 
-/// Format an epoch-nanosecond instant as wall-clock text in `zone`.
-fn format_instant(instant_ns: i128, zone: &RenderZone) -> String {
+/// Format an epoch-nanosecond instant as wall-clock text in `zone`. An instant
+/// outside chrono's representable timestamp range is an error rather than a
+/// silent fallback to the 1970 epoch (which would break the interval equation).
+fn format_instant(instant_ns: i128, zone: &RenderZone) -> Result<String, GenerateError> {
     let secs = instant_ns.div_euclid(NANOS_PER_SECOND);
     let nanos = instant_ns.rem_euclid(NANOS_PER_SECOND) as u32;
-    let utc = DateTime::<Utc>::from_timestamp(secs as i64, nanos).unwrap_or_default();
-    match zone {
+    let secs = i64::try_from(secs).map_err(|_| instant_overflow())?;
+    let utc = DateTime::<Utc>::from_timestamp(secs, nanos).ok_or_else(instant_overflow)?;
+    Ok(match zone {
         RenderZone::Utc => utc.format("%Y-%m-%d %H:%M:%S").to_string(),
         // Include the offset for a named zone so the absolute instant round-
         // trips even across a DST transition (the offset disambiguates the
@@ -305,7 +321,22 @@ fn format_instant(instant_ns: i128, zone: &RenderZone) -> String {
             .with_timezone(tz)
             .format("%Y-%m-%d %H:%M:%S%:z")
             .to_string(),
-    }
+    })
+}
+
+/// The error for an interval arithmetic step that overflows the representable
+/// instant range.
+fn interval_overflow() -> GenerateError {
+    GenerateError::Overflow(
+        "temporal.interval: start + duration overflows the representable instant range".to_string(),
+    )
+}
+
+/// The error for an instant that falls outside chrono's representable range.
+fn instant_overflow() -> GenerateError {
+    GenerateError::Overflow(
+        "temporal.interval: instant is outside the representable timestamp range".to_string(),
+    )
 }
 
 /// Render a duration (in whole units) in the representation `family` expects.
@@ -389,6 +420,21 @@ fn compile_interval(
     let (duration_draw, unit_nanos) = compile_duration(config.args.get("duration"), path, &mut bag);
     let zone = compile_zone(config.args.get("timezone"), path, &mut bag);
 
+    // An inclusive interval renders `end = start + duration - 1ns`, so a
+    // zero-length interval (minimum duration of 0) is impossible: `end` would
+    // fall before `start`. Require a strictly positive minimum duration.
+    if end_inclusive {
+        if let Some(draw) = &duration_draw {
+            if min_duration_units(draw) < 1 {
+                bag.error(
+                    "GEN-INTERVAL-DURATION",
+                    format!("{path}.duration"),
+                    "temporal.interval `end_inclusive: true` requires a minimum duration of at least 1 unit; a zero-length closed interval is impossible".to_string(),
+                );
+            }
+        }
+    }
+
     // Bail before touching the (possibly unresolved) column roles.
     if bag.has_errors() {
         return Err(bag);
@@ -451,6 +497,7 @@ fn compile_interval(
         start_kind,
         duration_draw,
         open_probability,
+        end_inclusive,
         zone,
         start_rng,
         open_rng,
@@ -616,6 +663,17 @@ fn compile_duration(
     };
 
     (Some(draw), Some(unit_nanos))
+}
+
+/// The smallest duration (in whole units) a draw can ever yield. Used to reject
+/// a zero-length inclusive interval at compile time.
+fn min_duration_units(draw: &DurationDraw) -> i128 {
+    match draw {
+        DurationDraw::Fixed(value) => *value,
+        DurationDraw::Uniform { min, .. }
+        | DurationDraw::Skewed { min, .. }
+        | DurationDraw::Normal { min, .. } => *min,
+    }
 }
 
 /// Report a negative duration bound or one whose nanosecond span overflows.
