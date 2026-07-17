@@ -462,6 +462,7 @@ impl GenerateArgs {
             emit,
             compile,
             render,
+            output_dialect: self.dialect,
             mode,
             explain: self.explain,
             verify: self.verify,

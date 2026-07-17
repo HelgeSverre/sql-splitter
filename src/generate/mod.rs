@@ -9,26 +9,9 @@
 //!
 //! [`Generate`] is the one-call facade: it loads a `kind: model` document,
 //! compiles it, runs the generation engine, and renders SQL to a file — the
-//! complete pipeline behind a single [`GenerateBuilder`].
-//!
-//! ```
-//! use sql_splitter::generate::Generate;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let dir = tempfile::tempdir()?;
-//! let output = dir.path().join("synthetic.sql");
-//!
-//! let report = Generate::builder()
-//!     .config("tests/fixtures/generate/simple.yaml")
-//!     .output(&output)
-//!     .seed(42)
-//!     .run()?;
-//!
-//! assert!(report.rows_written > 0);
-//! assert!(std::fs::read_to_string(output)?.contains("INSERT INTO"));
-//! # Ok(())
-//! # }
-//! ```
+//! complete pipeline behind a single [`GenerateBuilder`]. See
+//! `builder_generates_from_a_complete_model` in `tests/generate_api_test.rs`
+//! for a worked example.
 //!
 //! # The staged API
 //!
@@ -45,46 +28,8 @@
 //! [`GenerateBuilder::input`] to profile a dump into a base model, optionally
 //! merging a `kind: overrides` `.config()` on top.)
 //!
-//! ```
-//! use sql_splitter::generate::{CompileOptions, ExtensionRegistry, GenerationEngine, ModelCompiler};
-//! use sql_splitter::render::{RenderOptions, SqlRenderer};
-//! use sql_splitter::synthetic::SyntheticFile;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let model = SyntheticFile::parse_str(r#"
-//! version: 1
-//! kind: model
-//! defaults: { inference: disabled }
-//! seed: 1
-//! tables:
-//!   users:
-//!     rows: { kind: fixed, count: 3 }
-//!     schema:
-//!       name: users
-//!       primary_key: [id]
-//!       columns:
-//!         - { name: id, type: bigint, nullable: false, primary_key: true }
-//!         - { name: name, type: "varchar(50)", nullable: false }
-//!     columns:
-//!       id:
-//!         generator: { kind: sequence, start: 1 }
-//!       name:
-//!         generator: { kind: string, min_length: 3, max_length: 8 }
-//! "#)?
-//! .into_model()?;
-//!
-//! let registry = ExtensionRegistry::standard();
-//! let plan = ModelCompiler::new(registry).compile(model, CompileOptions::default())?;
-//!
-//! let mut output = Vec::new();
-//! let mut renderer = SqlRenderer::new(&mut output, RenderOptions::default());
-//! GenerationEngine::new(plan).run(&mut renderer)?;
-//! renderer.finish()?;
-//!
-//! assert!(String::from_utf8(output)?.contains("INSERT INTO"));
-//! # Ok(())
-//! # }
-//! ```
+//! See `staged_api_renders_inserts` in `tests/generate_engine_test.rs` for a
+//! worked example of assembling the stages by hand.
 
 pub mod compiler;
 pub mod engine;
@@ -101,6 +46,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::convert::ConvertWarning;
 use crate::diagnostic::DiagnosticBag;
 use crate::parser::SqlDialect;
 use crate::profile::evidence::DumpProfile;
@@ -207,6 +153,13 @@ pub struct GenerateRequest {
     pub compile: CompileOptions,
     /// Dialect and formatting controls passed to [`crate::render::SqlRenderer`].
     pub render: RenderOptions,
+    /// The explicitly requested output dialect (`--dialect` /
+    /// [`GenerateBuilder::output_dialect`]), or `None` to render in the model's
+    /// own dialect. When set to a dialect that differs from the model's source,
+    /// the renderer maps every type across dialects and reports lossy
+    /// conversions; when unset, the schema renders verbatim so a model's
+    /// optional `source:` block stays removable metadata.
+    pub output_dialect: Option<SqlDialect>,
     /// Whether to fully generate, only validate, only report the plan, or only
     /// emit the resolved model.
     pub mode: RunMode,
@@ -309,6 +262,7 @@ impl Generate {
             emit,
             mut compile,
             render,
+            output_dialect,
             mode,
             explain,
             verify,
@@ -334,6 +288,18 @@ impl Generate {
             .compile(model.clone(), compile)
             .map_err(GenerateError::Diagnostics)?;
         diagnostics.diagnostics.extend(plan.diagnostics.clone());
+
+        // Only a *deliberate* cross-dialect request maps types. When the caller
+        // explicitly asked for an output dialect, tell the renderer the schema's
+        // captured (source) dialect so it maps every type across dialects and
+        // reports lossy conversions instead of emitting source types verbatim.
+        // A default run leaves `source_dialect` unset (source == render dialect),
+        // so a model's optional `source:` block stays removable metadata that
+        // cannot change output.
+        let mut render = render;
+        if output_dialect.is_some() {
+            render.source_dialect = render.source_dialect.or(plan.input_dialect);
+        }
 
         // Scan the final resolved model (explicit + inferred rules) for
         // source-derived literals.
@@ -367,11 +333,13 @@ impl Generate {
             let VerifiedRun {
                 rows_written,
                 not_checked,
+                render_warnings,
             } = run_verified(&model, plan, explicit_seed, output, emit, render)?;
             let mut out = GenerateReport {
                 rows_written,
                 ..report
             };
+            merge_render_warnings(&mut out.diagnostics, &render_warnings);
             // An honest coverage gap must never be silent on a green exit: if the
             // audit passed but could not evaluate some capabilities, surface them
             // as a warning so the user sees exactly what was NOT checked.
@@ -397,11 +365,14 @@ impl Generate {
                 ..report
             }),
             RunMode::Generate => {
-                let engine_report = run_generate(GenerationEngine::new(plan), output, render)?;
-                Ok(GenerateReport {
+                let (engine_report, render_warnings) =
+                    run_generate(GenerationEngine::new(plan), output, render)?;
+                let mut out = GenerateReport {
                     rows_written: engine_report.rows_written,
                     ..report
-                })
+                };
+                merge_render_warnings(&mut out.diagnostics, &render_warnings);
+                Ok(out)
             }
         }
     }
@@ -412,6 +383,7 @@ impl Generate {
 struct VerifiedRun {
     rows_written: u64,
     not_checked: Vec<String>,
+    render_warnings: Vec<ConvertWarning>,
 }
 
 /// Render SQL to a protected temp beside the destination, verify it against the
@@ -458,11 +430,12 @@ fn run_verified(
         ))
     })?;
     let temp_path = sql_output.temp_path().to_path_buf();
-    let rows_written = {
+    let (rows_written, render_warnings) = {
         let mut renderer = SqlRenderer::new(sql_output.writer(), render);
         let engine_report = GenerationEngine::new(plan).run(&mut renderer)?;
+        let warnings = renderer.warnings().to_vec();
         renderer.finish()?;
-        engine_report.rows_written
+        (engine_report.rows_written, warnings)
     };
 
     // Audit the freshly rendered temp file.
@@ -506,6 +479,7 @@ fn run_verified(
     Ok(VerifiedRun {
         rows_written,
         not_checked,
+        render_warnings,
     })
 }
 
@@ -745,12 +719,15 @@ fn precedence_label(precedence: Precedence) -> &'static str {
     }
 }
 
-/// Run the engine under [`RunMode::Generate`], rendering to `output`.
+/// Run the engine under [`RunMode::Generate`], rendering to `output`. Returns
+/// the engine report plus any warnings the renderer collected (e.g. lossy
+/// cross-dialect type conversions), which the caller merges into the report
+/// diagnostics so they are visible and `--strict`-promotable.
 fn run_generate(
     engine: GenerationEngine,
     output: OutputTarget,
     render: RenderOptions,
-) -> Result<EngineReport, GenerateError> {
+) -> Result<(EngineReport, Vec<ConvertWarning>), GenerateError> {
     match output {
         OutputTarget::Path(path) => {
             let file = fs::File::create(&path).map_err(|err| {
@@ -761,13 +738,29 @@ fn run_generate(
             })?;
             let mut renderer = SqlRenderer::new(file, render);
             let report = engine.run(&mut renderer)?;
+            // Drain the renderer's warnings before `finish` consumes it.
+            let warnings = renderer.warnings().to_vec();
             renderer.finish()?;
-            Ok(report)
+            Ok((report, warnings))
         }
         OutputTarget::Discard => {
             let mut sink = DiscardSink;
-            engine.run(&mut sink)
+            Ok((engine.run(&mut sink)?, Vec::new()))
         }
+    }
+}
+
+/// Merge renderer [`ConvertWarning`]s into `diagnostics` as `Severity::Warning`
+/// entries with stable `GEN-*` codes, so both the CLI's `write_diagnostics` and
+/// its `--strict` `warnings_are_fatal` gate see a lossy cross-dialect conversion
+/// (which would otherwise be silently dropped on the render pass).
+fn merge_render_warnings(diagnostics: &mut DiagnosticBag, warnings: &[ConvertWarning]) {
+    for warning in warnings {
+        let code = match warning {
+            ConvertWarning::LossyConversion { .. } => "GEN-LOSSY-TYPE",
+            _ => "GEN-RENDER-WARNING",
+        };
+        diagnostics.warning(code, "output", warning.to_string());
     }
 }
 
@@ -809,6 +802,7 @@ pub struct GenerateBuilder {
     emit: Option<PathBuf>,
     compile: CompileOptions,
     render: RenderOptions,
+    output_dialect: Option<SqlDialect>,
     mode: RunMode,
     explain: bool,
     verify: bool,
@@ -865,9 +859,12 @@ impl GenerateBuilder {
         self
     }
 
-    /// The SQL dialect to render for.
+    /// The SQL dialect to render for. Choosing a dialect that differs from the
+    /// model's source dialect renders every type across dialects (reporting
+    /// lossy conversions); leaving it unset renders in the model's own dialect.
     pub fn output_dialect(mut self, dialect: SqlDialect) -> Self {
         self.render.dialect = dialect;
+        self.output_dialect = Some(dialect);
         self
     }
 
@@ -960,6 +957,7 @@ impl GenerateBuilder {
             emit: self.emit.map(OutputTarget::Path),
             compile: self.compile,
             render: self.render,
+            output_dialect: self.output_dialect,
             mode: self.mode,
             explain: self.explain,
             verify: self.verify,

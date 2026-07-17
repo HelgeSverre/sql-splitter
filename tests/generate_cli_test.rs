@@ -730,3 +730,103 @@ fn an_invalid_model_exits_with_failure_code_not_usage_code() {
 
     assert_eq!(output.status.code(), Some(1));
 }
+
+// ===========================================================================
+// Task 30: lossy cross-dialect warnings are surfaced and strict-promoted
+// ===========================================================================
+
+/// A model whose MySQL `ENUM` column narrows to a plain string on any other
+/// dialect — a genuinely lossy cross-dialect conversion.
+const LOSSY_ENUM_MODEL: &str = r#"
+version: 1
+kind: model
+source: { dialect: mysql }
+defaults: { inference: disabled }
+seed: 7
+tables:
+  widgets:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: widgets
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: kind, type: "enum('a','b')", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      kind: { generator: { kind: choice, values: [a, b] } }
+"#;
+
+#[test]
+fn lossy_cross_dialect_conversion_warns_on_a_normal_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model.yaml");
+    let out = dir.path().join("out.sql");
+    fs::write(&model, LOSSY_ENUM_MODEL).unwrap();
+
+    // Render the MySQL-source model to PostgreSQL: ENUM -> VARCHAR(255) is lossy.
+    let run = sql_splitter_bin()
+        .args(["generate", "--config"])
+        .arg(&model)
+        .args(["--dialect", "postgres", "-o"])
+        .arg(&out)
+        .output()
+        .expect("failed to run sql-splitter");
+
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(0), "stderr: {stderr}");
+    // The lossy conversion is no longer silent: it reaches the report diagnostics
+    // and is printed (previously `renderer.warnings()` was dropped entirely).
+    assert!(
+        stderr.contains("GEN-LOSSY-TYPE"),
+        "lossy warning not surfaced; stderr: {stderr}"
+    );
+    // The narrowed type is what actually landed in the DDL.
+    assert!(fs::read_to_string(&out).unwrap().contains("VARCHAR(255)"));
+}
+
+#[test]
+fn lossy_cross_dialect_conversion_fails_under_strict() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model.yaml");
+    let out = dir.path().join("out.sql");
+    fs::write(&model, LOSSY_ENUM_MODEL).unwrap();
+
+    // The SAME run under --strict promotes the lossy warning to a failure.
+    let run = sql_splitter_bin()
+        .args(["generate", "--config"])
+        .arg(&model)
+        .args(["--dialect", "postgres", "--strict", "-o"])
+        .arg(&out)
+        .output()
+        .expect("failed to run sql-splitter");
+
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "expected strict failure; stderr: {stderr}"
+    );
+    assert!(stderr.contains("GEN-LOSSY-TYPE"), "stderr: {stderr}");
+}
+
+#[test]
+fn same_dialect_run_has_no_lossy_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model.yaml");
+    let out = dir.path().join("out.sql");
+    fs::write(&model, LOSSY_ENUM_MODEL).unwrap();
+
+    // Rendering to the model's own dialect maps nothing, so --strict still passes.
+    let run = sql_splitter_bin()
+        .args(["generate", "--config"])
+        .arg(&model)
+        .args(["--dialect", "mysql", "--strict", "-o"])
+        .arg(&out)
+        .output()
+        .expect("failed to run sql-splitter");
+
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(0), "stderr: {stderr}");
+    assert!(!stderr.contains("GEN-LOSSY-TYPE"), "stderr: {stderr}");
+}
