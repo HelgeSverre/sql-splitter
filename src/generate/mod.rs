@@ -9,9 +9,30 @@
 //!
 //! [`Generate`] is the one-call facade: it loads a `kind: model` document,
 //! compiles it, runs the generation engine, and renders SQL to a file — the
-//! complete pipeline behind a single [`GenerateBuilder`]. See
-//! `builder_generates_from_a_complete_model` in `tests/generate_api_test.rs`
-//! for a worked example.
+//! complete pipeline behind a single [`GenerateBuilder`].
+//!
+//! ```
+//! use sql_splitter::generate::Generate;
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let dir = tempfile::tempdir()?;
+//! let output = dir.path().join("synthetic.sql");
+//!
+//! let report = Generate::builder()
+//!     .config("tests/fixtures/generate/simple.yaml")
+//!     .output(&output)
+//!     .seed(42)
+//!     .run()?;
+//!
+//! assert!(report.rows_written > 0);
+//! assert!(std::fs::read_to_string(&output)?.contains("INSERT INTO"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See `builder_generates_from_a_complete_model` in `tests/generate_api_test.rs`
+//! for more builder-driven workflows (dump profiling, `--check`, `--dry-run`,
+//! `--verify`, table/seed overrides).
 //!
 //! # The staged API
 //!
@@ -23,13 +44,57 @@
 //! [`GenerationEngine`] drives against any [`RowSink`], most commonly a
 //! [`crate::render::SqlRenderer`].
 //!
+//! ```
+//! use sql_splitter::generate::{CompileOptions, ExtensionRegistry, GenerationEngine, ModelCompiler};
+//! use sql_splitter::render::{RenderOptions, SqlRenderer};
+//! use sql_splitter::synthetic::SyntheticFile;
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let model = SyntheticFile::parse_str(
+//!     r#"
+//! version: 1
+//! kind: model
+//! defaults: { inference: disabled }
+//! seed: 1
+//! tables:
+//!   users:
+//!     rows: { kind: fixed, count: 3 }
+//!     schema:
+//!       name: users
+//!       primary_key: [id]
+//!       columns:
+//!         - { name: id, type: bigint, nullable: false, primary_key: true }
+//!         - { name: name, type: "varchar(50)", nullable: false }
+//!     columns:
+//!       id:
+//!         generator: { kind: sequence, start: 1 }
+//!       name:
+//!         generator: { kind: string, min_length: 3, max_length: 8 }
+//! "#,
+//! )?
+//! .into_model()
+//! .expect("is a complete model");
+//!
+//! let registry = ExtensionRegistry::standard();
+//! let plan = ModelCompiler::new(registry).compile(model, CompileOptions::default())?;
+//!
+//! let mut renderer = SqlRenderer::new(Vec::new(), RenderOptions::default());
+//! GenerationEngine::new(plan).run(&mut renderer)?;
+//! let bytes = renderer.finish()?;
+//!
+//! assert!(String::from_utf8(bytes)?.contains("INSERT INTO"));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! (Profiling a model from a dump — a `DumpProfiler`/`ModelInference` stage
 //! ahead of the compiler — is wired into [`Generate::run`] itself: pass
 //! [`GenerateBuilder::input`] to profile a dump into a base model, optionally
 //! merging a `kind: overrides` `.config()` on top.)
 //!
 //! See `staged_api_renders_inserts` in `tests/generate_engine_test.rs` for a
-//! worked example of assembling the stages by hand.
+//! worked example of assembling the stages by hand, including a custom
+//! [`ExtensionRegistry`].
 
 pub mod compiler;
 pub mod engine;

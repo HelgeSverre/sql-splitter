@@ -12,7 +12,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **High Priority (v1.x):**
 
-1. ✅ Test Data Generator — Enables CI testing for all features (v1.4.0)
+1. ✅ Test Data Generator — Enables CI testing for all features (v1.4.0) — **superseded by `generate` (below); the `test_data_gen` crate has been removed**
 2. ✅ Merge — Completes split/merge roundtrip (v1.4.0)
 3. ✅ Sample — FK-aware data sampling (builds shared infra) (v1.5.0)
 4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
@@ -42,7 +42,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Next:**
 
-- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models
+- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models (implemented; documented in `docs/generate/`)
 - v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.18.0: Migrate — Schema migration generation
 - v1.19.0: DBML — Import/export DBML schema definitions
@@ -98,7 +98,7 @@ evidence without freezing profiler internals around an unbuilt consumer.
 
 | Feature                 | Status  | Notes                  |
 | ----------------------- | ------- | ---------------------- |
-| **Test Data Generator** | ✅ Done | `crates/test_data_gen` |
+| **Test Data Generator** | ✅ Done, superseded | Was `crates/test_data_gen`; removed and replaced by the `generate` command (see "Synthetic Data Generation" below) |
 | **Merge command**       | ✅ Done | `src/merger/`          |
 
 **Delivered:**
@@ -541,13 +541,15 @@ evidence without freezing profiler internals around an unbuilt consumer.
 
 ---
 
-### vNext — Synthetic Data Generation
+### `generate` — Synthetic Data Generation (implemented)
 
 **Theme**: Generate production-shaped synthetic SQL from files
 
 `generate` profiles a SQL dump or schema into a complete, editable YAML model,
 then streams relationally consistent synthetic data. The CLI and public library
-share the same model compiler and generation engine.
+share the same model compiler and generation engine. This supersedes the old
+`test_data_gen` fixture crate (v1.4.0) as the product feature for synthetic
+data — that crate has been removed.
 
 **Deliverables:**
 
@@ -555,10 +557,21 @@ share the same model compiler and generation engine.
 - `sql-splitter generate production.sql --emit-config synthetic.yaml`
 - `sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql`
 - Bounded basic/full profiling and exact emitted row counts
-- Registered typed generators and planners without a YAML expression language
+- Registered typed generators, modifiers, and planners without a YAML expression language
 - Stable top-level, table, column, and operator seed streams
 
 **Design:** [Synthetic data generation](superpowers/specs/2026-07-16-synthetic-data-generation-design.md)
+(describes the original design — for the shipped/actual behavior, see the
+docs below, which win where they differ).
+
+**Documentation:** [`docs/generate/`](generate/README.md) — model
+reference, generator/planner catalog, profiling and privacy, library API,
+and diagnostics.
+
+**Future `infer` reuse:** the bounded `DumpProfiler`/evidence model `generate`
+introduced is public specifically so a future `infer` command (schema
+inference from data, tracked separately below under v2.1.0) can reuse or
+extend it — profiler internals are not frozen around that unbuilt consumer.
 
 ---
 
@@ -853,7 +866,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 | Version | Features                  | Status   |
 | ------- | ------------------------- | -------- |
 | v1.16.0 | Zip Input + Adaptive I/O  | Released |
-| vNext   | Synthetic Data Generation | Designed |
+| vNext   | Synthetic Data Generation (`generate`) | Implemented |
 | v1.17.0 | Enum Conversion           | Planned  |
 | v1.18.0 | Migrate                   | Planned  |
 | v1.19.0 | DBML                      | Planned  |

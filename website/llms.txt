@@ -56,6 +56,7 @@ sql-splitter --version
 | `shard`    | Extract tenant-specific data              | Multi-tenant isolation, tenant exports            |
 | `diff`     | Compare two SQL dumps for changes         | Schema migrations, change detection, auditing     |
 | `redact`   | Anonymize PII in SQL dumps                | GDPR compliance, dev data, safe sharing           |
+| `generate` | Generate synthetic SQL from a model or dump | CI fixtures, load testing, dev seeding (synthetic, NOT anonymized) |
 | `graph`    | Generate ERD diagrams (HTML, DOT, Mermaid)| Schema visualization, documentation, onboarding   |
 | `order`    | Reorder dump in topological FK order      | Safe imports, cycle detection, DROP order         |
 | `query`    | Run SQL analytics on dumps with DuckDB    | Ad-hoc queries, data exploration, export results  |
@@ -87,6 +88,7 @@ All commands support:
 | Validate all dumps in CI pipeline        | `validate "*.sql" --json` | Parse JSON output with `jq` for automation                  |
 | Compare two dumps for changes            | `diff`                    | Schema + data comparison; outputs text, json, or sql        |
 | Anonymize sensitive data for dev/sharing | `redact`                  | Replace PII with fake/hashed values; YAML config or CLI     |
+| Generate synthetic test/CI fixture data  | `generate`                | Model-driven; profile+infer from a dump or hand-author YAML; output is synthetic, NOT anonymized |
 | Visualize schema as ERD diagram          | `graph`                   | HTML, DOT, Mermaid, JSON; focus on table or detect cycles   |
 | Reorder dump for safe FK imports         | `order`                   | Topological sort; `--check` to detect cycles                |
 | Run ad-hoc SQL queries on dump           | `query`                   | Uses embedded DuckDB; outputs table, JSON, CSV              |
@@ -667,6 +669,45 @@ sql-splitter query --clear-cache
 
 ---
 
+## Workflow 11: Synthetic Data Generation
+
+**Goal:** Generate synthetic SQL data for CI fixtures, load testing, or dev seeding — from a dump, a hand-authored model, or both. **Output is synthetic, NOT anonymized** — use `redact` instead if you need irreversible anonymization of real data.
+
+```bash
+# Generate straight from a dump: profile, infer a model, generate
+sql-splitter generate production.sql -o synthetic.sql
+
+# Emit an editable resolved model instead of SQL, then generate from it
+sql-splitter generate production.sql --emit-config synthetic.yaml
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+
+# Generate from a model only, no source dump at all
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+
+# Apply overrides, freeze the resolved model, and scale row counts
+sql-splitter generate production.sql --config overrides.yaml \
+  --emit-config resolved.yaml --scale 0.1 -o synthetic.sql
+
+# Validate a model without generating, or preview resolved row counts
+sql-splitter generate --config synthetic.yaml --check
+sql-splitter generate --config synthetic.yaml --dry-run --explain
+
+# Generate, audit constraints, and publish atomically
+sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql
+
+# Reproducible output with a seed; per-table/per-column row overrides
+sql-splitter generate --config synthetic.yaml -o out.sql --seed 42 \
+  --table-rows users=5000 --table-scale "audit_*=0.01"
+```
+
+**Model language:** a YAML `kind: model` (self-contained: complete schema, exact row counts, explicit generator/planner ownership per column) or `kind: overrides` (a partial patch requiring a source dump or base model). Generators cover core types, semantic data (person/internet/commerce/address/etc.), credentials (safe synthetic-only formats), and observed/statistical shapes; planners coordinate multiple columns or a parent/child family together (temporal intervals, workflow progress counters, commerce order totals, hierarchies, polymorphic/junction/tenant relationships, geo coordinates, file metadata).
+
+**Privacy:** a `warning[GEN-SOURCE-VALUES]` on stderr (never suppressed by `--quiet`, never promotable to failure by `--strict`) flags any rule that can replay a literal value observed in a source dump — it never prints the values themselves.
+
+**Full documentation:** `docs/generate/` in the repository (model reference, generator/planner catalog, profiling and privacy, library API, diagnostics).
+
+---
+
 ## JSON Schema Generation
 
 **Goal:** Generate JSON schemas for `--json` output formats (useful for API integration, validation, tooling).
@@ -742,6 +783,10 @@ If commands fail with syntax errors or unknown keywords:
 - [src/shard/](https://github.com/helgesverre/sql-splitter/tree/main/src/shard): Tenant extraction
 - [src/differ/](https://github.com/helgesverre/sql-splitter/tree/main/src/differ): Schema + data diffing
 - [src/redactor/](https://github.com/helgesverre/sql-splitter/tree/main/src/redactor): Data anonymization
+- [src/generate/](https://github.com/helgesverre/sql-splitter/tree/main/src/generate): Synthetic data generation engine (compiler, generators, planners, engine)
+- [src/synthetic/](https://github.com/helgesverre/sql-splitter/tree/main/src/synthetic): Synthetic data model YAML language (parsing, merge, overrides)
+- [src/profile/](https://github.com/helgesverre/sql-splitter/tree/main/src/profile): Bounded dump profiling and model inference
+- [docs/generate/](https://github.com/helgesverre/sql-splitter/tree/main/docs/generate): `generate` documentation (model reference, generators, planners, library API, diagnostics)
 - [src/graph/](https://github.com/helgesverre/sql-splitter/tree/main/src/graph): ERD generation and graph analysis
 - [src/duckdb/](https://github.com/helgesverre/sql-splitter/tree/main/src/duckdb): DuckDB query engine integration
 - [schemas/](https://github.com/helgesverre/sql-splitter/tree/main/schemas): Generated JSON schemas for --json outputs

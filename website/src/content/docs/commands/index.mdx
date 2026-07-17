@@ -16,6 +16,7 @@ description: All sql-splitter commands at a glance
 | [`shard`](/commands/shard)             | Extract tenant-specific data                    | Multi-tenant isolation, tenant exports            |
 | [`diff`](/commands/diff)               | Compare two SQL dumps for changes               | Schema migrations, change detection, auditing     |
 | [`redact`](/commands/redact)           | Anonymize PII in SQL dumps                      | GDPR compliance, dev data, safe sharing           |
+| [`generate`](/commands/generate)       | Generate synthetic SQL from a model or a dump   | CI fixtures, load testing, dev seeding            |
 | [`graph`](/commands/graph)             | Generate ERD diagrams (HTML, DOT, Mermaid)      | Schema visualization, documentation               |
 | [`order`](/commands/order)             | Reorder dump in topological FK order            | Safe imports, cycle detection, DROP order         |
 | [`query`](/commands/query)             | Run SQL analytics on dumps with DuckDB          | Ad-hoc queries, data exploration                  |
@@ -39,13 +40,13 @@ For faster typing, all commands have short aliases:
 
 | Command    | Alias | Command  | Alias |
 | ---------- | ----- | -------- | ----- |
-| `split`    | `sp`  | `diff`   | `df`  |
-| `analyze`  | `an`  | `redact` | `rd`  |
-| `merge`    | `mg`  | `graph`  | `gr`  |
-| `sample`   | `sa`  | `order`  | `ord` |
-| `shard`    | `sh`  | `query`  | `qy`  |
-| `convert`  | `cv`  |          |       |
-| `validate` | `val` |          |       |
+| `split`    | `sp`  | `diff`     | `df`  |
+| `analyze`  | `an`  | `redact`   | `rd`  |
+| `merge`    | `mg`  | `generate` | `gen` |
+| `sample`   | `sa`  | `graph`    | `gr`  |
+| `shard`    | `sh`  | `order`    | `ord` |
+| `convert`  | `cv`  | `query`    | `qy`  |
+| `validate` | `val` |            |       |
 
 ## Decision Guide
 
@@ -60,6 +61,7 @@ For faster typing, all commands have short aliases:
 | Validate in CI             | `validate "*.sql" --json`     |
 | Compare two dumps          | `diff old.sql new.sql`        |
 | Anonymize PII              | `redact`                      |
+| Generate synthetic test data | `generate`                  |
 | Visualize schema           | `graph`                       |
 | Safe import order          | `order`                       |
 | Query without restore      | `query`                       |

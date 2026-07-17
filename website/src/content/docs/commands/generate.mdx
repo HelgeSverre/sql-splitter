@@ -1,0 +1,307 @@
+---
+title: generate
+description: Generate synthetic SQL data from a model, a dump, or both
+---
+
+Produce synthetic SQL data — from a hand-authored YAML model, by profiling
+a real SQL dump and inferring one, or both combined.
+
+**Alias:** `gen` (e.g., `sql-splitter gen --config model.yaml -o synthetic.sql`)
+
+**Output is synthetic, not anonymized.** `generate` can legitimately
+reproduce values it observed in a source dump (a `weighted_choice`'s
+choices, an `observed_sample`'s literal values, a schema `DEFAULT`). If you
+need irreversibly anonymized output, use [`redact`](/commands/redact)
+instead. See the [profiling and privacy guide](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/profiling-and-privacy.md)
+for the full story, including the `GEN-SOURCE-VALUES` warning.
+
+## When to Use This
+
+- **CI/CD test fixtures** - Realistic, relationally consistent data without touching production
+- **Load/scale testing** - Generate millions of rows at a chosen scale from a small model
+- **Local development seeding** - Generate a database that looks like production, without any of its data
+- **Schema prototyping** - Hand-author a model before you have any real data at all
+
+## The four primary workflows
+
+### 1. Dump straight to SQL
+
+Profile a dump, infer a model, generate synthetic SQL — no YAML to write:
+
+```bash
+sql-splitter generate production.sql -o synthetic.sql
+```
+
+### 2. Emit an editable model
+
+Profile a dump, write the resolved model instead of SQL, edit it, then
+generate from the edited model later:
+
+```bash
+sql-splitter generate production.sql --emit-config synthetic.yaml
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+```
+
+### 3. Generate from a model only
+
+No source dump at all — the model is fully self-contained:
+
+```bash
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+```
+
+### 4. Apply overrides, freeze the result, and scale it
+
+Profile a dump, patch it with a `kind: overrides` document, save the fully
+resolved model, and scale row counts — all in one run:
+
+```bash
+sql-splitter generate production.sql \
+  --config overrides.yaml \
+  --emit-config resolved.yaml \
+  --scale 0.1 \
+  -o synthetic.sql
+```
+
+## How It Works
+
+1. **Profile** (if `[INPUT]` is given) - Streams the dump once, computing exact row/null counts and bounded statistical sketches (`--profile-depth basic|full`).
+2. **Infer or load** - Without `--config`, infers a complete model from the profile. With `--config`, loads a `kind: model` (self-contained) or `kind: overrides` (a patch requiring a dump or base model) document.
+3. **Merge** - `source facts < inferred defaults < YAML overrides < broad CLI overrides < per-table CLI overrides`.
+4. **Compile** - Resolves names, types, seeds, ownership, dependencies, and exact row counts into an immutable plan. Independent diagnostics are all collected, not just the first one.
+5. **Generate** - Executes the plan in dependency order, streaming rows to the dialect renderer (or auditing them first, under `--verify`).
+
+## Exit Codes
+
+- `0` - Successful generation, `--check`, `--dry-run`, or `--verify`
+- `1` - Invalid model/config, a `--strict` warning, a runtime/I/O failure, or a `--verify` failure
+- `2` - Invalid CLI arguments or conflicting flags
+
+## Usage
+
+```bash
+sql-splitter generate [INPUT] [OPTIONS]
+```
+
+## Examples
+
+### Scaling and Filtering
+
+```bash
+# Scale every table to 10% of its observed/model size
+sql-splitter generate production.sql -o synthetic.sql --scale 0.1
+
+# Set an absolute row count for one table, cap every table at 1M rows
+sql-splitter generate --config model.yaml -o out.sql \
+  --table-rows users=5000 --max-rows 1000000
+
+# Only generate two tables and their dependencies
+sql-splitter generate --config model.yaml -o out.sql --tables users,orders
+
+# Generate everything except audit tables
+sql-splitter generate --config model.yaml -o out.sql --exclude "audit_*,*_log"
+```
+
+### Reproducible and Random Runs
+
+```bash
+# Same seed = identical output across runs
+sql-splitter generate --config model.yaml -o out.sql --seed 42
+
+# Fresh entropy every run, ignoring any seed the model declares
+sql-splitter generate --config model.yaml -o out.sql --randomize
+```
+
+### Preflight Checks
+
+```bash
+# Validate a model compiles, without generating or reading a source
+sql-splitter generate --config model.yaml --check
+
+# Compile and report resolved row counts, without writing SQL
+sql-splitter generate --config model.yaml --dry-run
+
+# Show inference reasoning and confidence alongside the report
+sql-splitter generate production.sql --config overrides.yaml --dry-run --explain
+```
+
+### Verified, Atomic Generation
+
+```bash
+# Generate to protected temp storage, audit, then publish atomically
+sql-splitter generate --config model.yaml --verify -o synthetic.sql
+```
+
+### Cross-Dialect and MSSQL Output
+
+```bash
+# Generate MySQL-shaped data, render as PostgreSQL
+sql-splitter generate --config model.yaml -o out.sql --dialect postgres
+
+# Production-style MSSQL: [dbo]. schema-qualified names, named clustered
+# PRIMARY KEY, ON [PRIMARY] filegroup, SET ANSI_NULLS/QUOTED_IDENTIFIER
+sql-splitter generate --config model.yaml -o out.sql \
+  --dialect mssql --mssql-production-style --mssql-go 1000
+```
+
+### JSON Reporting
+
+```bash
+sql-splitter generate --config model.yaml -o out.sql --json
+sql-splitter generate --config model.yaml --check --json
+```
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `[INPUT]` | SQL dump or schema file to profile. Optional with a complete model. | — |
+| `-c, --config` | `kind: model` or `kind: overrides` YAML document | — |
+| `--emit-config` | Write the resolved model as YAML instead of generating | — |
+| `-o, --output` | Output SQL file; `-` writes stdout | stdout |
+| `--profile-depth` | Bounded profiling depth (`basic`\|`full`) | `basic` |
+| `--profile-sample` | Row sample size used while profiling `[INPUT]` | depth default |
+| `--input-dialect` | Dialect of `[INPUT]`, if profiling (auto-detected otherwise) | auto-detect |
+| `--dialect` | Output SQL dialect | preserve source/model |
+| `--scale` | Global multiplicative row-count scale | — |
+| `--rows` | Global absolute root row count | — |
+| `--table-rows` | Per-table absolute row-count override (`table=count`, repeatable) | — |
+| `--table-scale` | Per-table row-count scale override (`table=factor`, repeatable) | — |
+| `--max-rows` | Upper bound applied to every table's row count, last | — |
+| `--tables` | Only generate these tables (comma-separated globs) | all |
+| `--exclude` | Exclude these tables (comma-separated globs) | none |
+| `--seed` | Run root seed, overriding the model's own `seed:` | — |
+| `--randomize` | Use a fresh random seed instead of the model's (or a fixed) seed | false |
+| `--schema-only` | Render only `CREATE TABLE`/DDL, no row data | false |
+| `--data-only` | Render only row data, no DDL | false |
+| `--batch-size` | Rows per `INSERT`/`COPY` batch | `1000` |
+| `--no-copy` | Force multi-row `INSERT` for PostgreSQL instead of `COPY` | false |
+| `--mssql-production-style` | `[dbo].` schema-qualified names, named clustered PK, `ON [PRIMARY]`, ANSI session header. Requires `--dialect mssql`. | false |
+| `--mssql-go` | Emit `GO` every N INSERT batches. Requires `--dialect mssql`. | — |
+| `--check` | Validate the model and exit; writes no SQL | false |
+| `--dry-run` | Compile the model and report resolved row counts; writes no SQL | false |
+| `--verify` | Generate to protected temp storage, audit, then publish atomically | false |
+| `--explain` | Include inference reason, confidence, and precedence in the report | false |
+| `--strict` | Treat model warnings as errors | false |
+| `--json` | Output the report as JSON (owns stdout) | false |
+| `--quiet` | Suppress the non-JSON summary report | false |
+| `--progress` | Accepted for forward compatibility; not yet wired to generation | false |
+| `--compress` | Accepted for forward compatibility; always fails with "not available yet" | — |
+
+## Conflicts
+
+- `--check`, `--dry-run`, and `--verify` are mutually exclusive.
+- `--schema-only` and `--data-only` are mutually exclusive.
+- `--randomize` and `--seed` are mutually exclusive.
+- `--scale` and `--rows` are mutually exclusive.
+- `--quiet` and `--progress` are mutually exclusive.
+- `--json`, `--output -`, and `--emit-config -` all claim stdout — only one may be used per run.
+- `--check` requires a complete `--config` model and conflicts with `[INPUT]` (dump profiling only combines with the default/`--dry-run`/`--verify` modes).
+- `--verify` requires a real output file (`-o <path>`, not stdout) and cannot combine with `--compress`.
+- A table matched by both `--table-rows` and `--table-scale` is an error.
+- `--mssql-production-style`/`--mssql-go` require an explicit `--dialect mssql`.
+
+## Stdout Ownership
+
+Without `--output` or `--emit-config`, generated SQL goes to stdout. With
+`--emit-config` and no `--output`, only the resolved model is written. With
+both, both are written. `--json` owns stdout entirely, so it cannot combine
+with `--output -` or `--emit-config -` — write both to real files instead.
+
+## The YAML Model Language
+
+`generate` reads two document kinds: a self-contained `kind: model` (every
+table has a complete schema, exact row count, and every generated column has
+an explicit owner) or a partial `kind: overrides` patch (requires a source
+dump or base model). A minimal complete model:
+
+```yaml
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+
+tables:
+  customers:
+    rows: { kind: fixed, count: 5000 }
+    schema:
+      name: customers
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: email, type: "varchar(255)", nullable: false, unique: true }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      email:
+        generator: { kind: internet.email }
+        modifiers:
+          - { kind: unique }
+```
+
+The full model language — every field, generator, modifier, and planner —
+is documented in the repository:
+
+- [Model reference](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/model-reference.md)
+- [Generators](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/generators.md)
+- [Planners](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/planners.md)
+- [Profiling and privacy](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/profiling-and-privacy.md)
+- [Library API](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/library-api.md)
+- [Diagnostics](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/diagnostics.md)
+
+## Troubleshooting
+
+### "GEN-COLUMN-OWNER-MISSING" or a similar compile error
+
+**Symptom:** `--check`/`--dry-run`/generation fails with a `GEN-*` diagnostic.
+
+**Cause:** A generated column has no owner (no generator, planner, or
+structural inference rule), or two rules claim the same column.
+
+**Solutions:**
+
+1. Add an explicit `generator:` for the column, or opt into
+   `defaults: { inference: schema }` for structural columns (primary/foreign keys).
+2. Run `--check` first — it validates the model without touching a source
+   dump or writing SQL.
+3. See [Diagnostics](https://github.com/helgesverre/sql-splitter/blob/main/docs/generate/diagnostics.md)
+   for the full code catalog.
+
+### Output looks suspiciously like real production data
+
+**Symptom:** Emails, names, or statuses in the output match values you
+recognize from the source dump.
+
+**Cause:** The model (hand-authored or inferred) uses `constant`,
+`weighted_choice`, or `observed_sample` somewhere — these can legitimately
+replay source-derived literals. `generate` is synthetic, not anonymized.
+
+**Solutions:**
+
+1. Watch for the `warning[GEN-SOURCE-VALUES]` line on stderr — it never
+   suppresses under `--quiet` and always names the affected rules (never the
+   values).
+2. Run with `--explain` to see which generator each column resolved to.
+3. Replace source-literal generators with semantic ones (`internet.email`,
+   `person.full_name`, and so on) or use [`redact`](/commands/redact) instead.
+
+### `--verify` fails after a successful `--dry-run`
+
+**Symptom:** `--dry-run` reports a plan, but `--verify -o out.sql` fails.
+
+**Cause:** `--dry-run` never generates rows, so it can't catch a runtime
+generation failure (e.g. a `unique` modifier exhausting its attempt budget).
+`--verify` actually generates, then audits the result before publishing.
+
+**Solutions:**
+
+1. Run a full (non-`--verify`) generation first to see the runtime error directly.
+2. Loosen a `unique` modifier's `max_attempts`/`max_tracked`, or reduce the
+   row count relative to the value space.
+
+## See Also
+
+- [`redact`](/commands/redact) - Anonymize real data instead of generating synthetic data
+- [`convert`](/commands/convert) - Convert generated output to a different dialect
+- [`validate`](/commands/validate) - Verify generated output integrity
+- [JSON Output Schema](/reference/json-output/) - Schema for `--json` output
+- [Full `generate` documentation](https://github.com/helgesverre/sql-splitter/tree/main/docs/generate) - Model reference, generator/planner catalog, library API, diagnostics

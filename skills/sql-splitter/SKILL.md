@@ -3,10 +3,12 @@ name: sql-splitter
 description: >
   High-performance CLI for working with SQL dump files: split/merge by table,
   analyze contents, validate integrity, convert between MySQL/PostgreSQL/SQLite/MSSQL,
-  create FK-safe samples, shard multi-tenant dumps, generate ERD diagrams,
-  reorder for safe imports, and run SQL analytics with embedded DuckDB.
+  create FK-safe samples, shard multi-tenant dumps, generate synthetic SQL data
+  from a model or dump, generate ERD diagrams, reorder for safe imports, and
+  run SQL analytics with embedded DuckDB.
   Use when working with .sql dump files for migrations, dev seeding, CI validation,
-  schema visualization, data extraction, or ad-hoc analytics.
+  synthetic test data generation, schema visualization, data extraction, or
+  ad-hoc analytics.
 license: MIT
 compatibility: Requires sql-splitter binary installed (cargo install sql-splitter)
 ---
@@ -24,6 +26,7 @@ Use `sql-splitter` when:
 - The user needs to validate, analyze, split, merge, convert, sample, shard, or **query** dumps
 - Working with **MySQL, PostgreSQL, SQLite, or MSSQL** dump formats
 - The user wants to run **SQL analytics** on a dump file without loading it into a database
+- The user needs **synthetic test/CI fixture data** — from a model, an inferred dump shape, or both (not the same as anonymizing real data — see `redact` for that)
 
 ## When NOT to Use This Skill
 
@@ -167,6 +170,64 @@ sql-splitter redact dump.sql --output safe.sql --fake "*.name" --locale de_de
 - `--constant "column=value"`: Fixed value replacement
 
 **Fake generators:** email, name, first_name, last_name, phone, address, city, zip, company, ip, uuid, date, credit_card, ssn, lorem, and more.
+
+### generate
+
+Generate **synthetic** SQL data — model-driven, from a dump, a hand-authored
+YAML model, or both. **Not anonymization** — see [`redact`](#redact) for
+that; `generate` can legitimately reproduce values it observed in a source
+dump unless the model avoids source-literal generators.
+
+```bash
+# Generate straight from a dump: profile, infer a model, generate
+sql-splitter generate production.sql --output synthetic.sql
+
+# Emit an editable resolved model instead of SQL, then generate from it
+sql-splitter generate production.sql --emit-config synthetic.yaml
+sql-splitter generate --config synthetic.yaml --output synthetic.sql
+
+# Generate from a model only, no source dump at all
+sql-splitter generate --config synthetic.yaml --output synthetic.sql
+
+# Apply overrides, freeze the resolved model, and scale row counts
+sql-splitter generate production.sql --config overrides.yaml \
+  --emit-config resolved.yaml --scale 0.1 --output synthetic.sql
+
+# Validate a model without generating, or preview resolved row counts
+sql-splitter generate --config synthetic.yaml --check
+sql-splitter generate --config synthetic.yaml --dry-run --explain
+
+# Generate, audit constraints, and publish atomically
+sql-splitter generate --config synthetic.yaml --verify --output synthetic.sql
+
+# Reproducible output with a seed; per-table row overrides
+sql-splitter generate --config synthetic.yaml --output out.sql --seed 42 \
+  --table-rows users=5000 --table-scale "audit_*=0.01"
+```
+
+**Model language:** `kind: model` (self-contained: complete schema, exact
+row counts, explicit generator/planner ownership) or `kind: overrides` (a
+partial patch requiring a source dump or base model). Generators cover core
+types, semantic data (person/internet/commerce/address/etc.), synthetic-only
+credentials, and observed/statistical shapes; planners coordinate multiple
+columns or a parent/child family together (temporal intervals, workflow
+progress counters, commerce order totals, hierarchies, polymorphic/junction/
+tenant relationships, geo coordinates, file metadata).
+
+**Privacy:** a `warning[GEN-SOURCE-VALUES]` on stderr (never suppressed by
+`--quiet`, never promotable to a failure by `--strict`) flags any rule that
+can replay a literal value observed in a source dump — it never prints the
+values themselves.
+
+**Choosing `generate` vs `redact`:** use `generate` to *create* new synthetic
+data (CI fixtures, load testing, seeding an empty dev database) from a model
+or an inferred dump shape. Use `redact` to *transform existing real data* you
+must keep structurally identical while removing/replacing sensitive values.
+`generate` is not a substitute for `redact` when the goal is sharing real
+production data safely.
+
+**Full documentation:** `docs/generate/` in the repository (model reference,
+generator/planner catalog, profiling and privacy, library API, diagnostics).
 
 ### graph
 
