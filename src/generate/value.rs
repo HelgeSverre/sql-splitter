@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::schema::SqlTypeFamily;
 
 /// A single value produced by a generator, independent of any target SQL
@@ -168,6 +169,12 @@ pub enum GenerateError {
     /// A generator could not make sense of a value it depends on at row
     /// time (e.g. `before`/`after` reading an unparsable source column).
     InvalidInput(String),
+    /// Structured diagnostics from loading, merging, or compiling a model,
+    /// surfaced through the public [`crate::generate::Generate`] API (e.g.
+    /// `ModelCompiler::compile` errors, or `ModelMerger::merge` errors).
+    /// Carries the full bag, including any warnings, so a caller can report
+    /// every problem rather than just the first.
+    Diagnostics(DiagnosticBag),
 }
 
 impl GenerateError {
@@ -188,6 +195,7 @@ impl fmt::Display for GenerateError {
             GenerateError::Overflow(message) => write!(f, "{message}"),
             GenerateError::Exhausted(message) => write!(f, "{message}"),
             GenerateError::InvalidInput(message) => write!(f, "{message}"),
+            GenerateError::Diagnostics(bag) => write!(f, "{bag}"),
         }
     }
 }

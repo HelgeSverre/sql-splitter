@@ -56,9 +56,13 @@ pub struct GeneratedRow {
     pub values: Vec<GeneratedValue>,
 }
 
-/// A summary of a completed generation run.
+/// A summary of a completed engine run: rows written across every table.
+///
+/// This is the low-level engine-only report; the public
+/// [`crate::generate::Generate`] API wraps it in a richer
+/// [`crate::generate::GenerateReport`] that also carries diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct GenerateReport {
+pub struct EngineReport {
     /// Total rows written across every table.
     pub rows_written: u64,
 }
@@ -283,7 +287,7 @@ impl GenerationEngine {
     }
 
     /// Generate every table's rows in dependency order, writing each to `sink`.
-    pub fn run(mut self, sink: &mut dyn RowSink) -> Result<GenerateReport, GenerateError> {
+    pub fn run(mut self, sink: &mut dyn RowSink) -> Result<EngineReport, GenerateError> {
         let key_domains = build_key_domains(&self.plan)?;
         // Take ownership of the tables so per-column compiled generators can be
         // advanced mutably while the rest of the plan stays borrowable.
@@ -355,7 +359,7 @@ impl GenerationEngine {
             sink.end_table(&table)?;
         }
 
-        Ok(GenerateReport { rows_written })
+        Ok(EngineReport { rows_written })
     }
 }
 

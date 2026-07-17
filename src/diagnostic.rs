@@ -81,7 +81,7 @@ impl fmt::Display for Diagnostic {
 }
 
 /// Collects independent diagnostics from a single compilation pass.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticBag {
     pub diagnostics: Vec<Diagnostic>,
 }

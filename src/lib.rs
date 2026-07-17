@@ -1,3 +1,10 @@
+//! Synthetic data generation, plus the SQL dump splitting/transform tools
+//! this crate started as.
+//!
+//! For generating synthetic SQL data from a model, start at
+//! [`generate::Generate`] (a one-call builder) or the staged
+//! registry/compiler/engine/renderer API documented on [`generate`].
+
 pub mod analyzer;
 #[cfg(feature = "archive")]
 pub mod archive;
