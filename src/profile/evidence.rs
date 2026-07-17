@@ -21,6 +21,11 @@ pub struct DumpProfile {
     pub depth: ProfileDepth,
     /// Per-table evidence, in discovery order.
     pub tables: Vec<TableEvidence>,
+    /// Stable diagnostic codes raised while profiling (e.g.
+    /// `GEN-PROFILE-SCHEMA-LATE` when data preceded its table's DDL by more than
+    /// the retained sample). Empty on a clean, schema-before-data dump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Evidence gathered for a single table.

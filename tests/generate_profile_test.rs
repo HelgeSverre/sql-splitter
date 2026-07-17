@@ -308,3 +308,280 @@ fn reservoir_is_seed_deterministic() {
     // Different seed -> (almost surely) different sample.
     assert_ne!(build(1234), build(9999));
 }
+
+// ---------------------------------------------------------------------------
+// Task 19: streaming DumpProfiler over real dumps
+// ---------------------------------------------------------------------------
+
+use sql_splitter::parser::SqlDialect;
+use sql_splitter::profile::{
+    ColumnEvidence, DumpProfile, DumpProfiler, ProfileDepth, TableEvidence,
+};
+use std::path::Path;
+
+fn table<'a>(profile: &'a DumpProfile, name: &str) -> &'a TableEvidence {
+    profile
+        .tables
+        .iter()
+        .find(|t| t.table == name)
+        .unwrap_or_else(|| panic!("table `{name}` not in profile"))
+}
+
+fn column<'a>(t: &'a TableEvidence, name: &str) -> &'a ColumnEvidence {
+    t.columns
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("column `{name}` not in table `{}`", t.table))
+}
+
+fn table_names(profile: &DumpProfile) -> Vec<String> {
+    profile.tables.iter().map(|t| t.table.clone()).collect()
+}
+
+const MYSQL_FIXTURE: &str = "tests/fixtures/generate/production_shape.sql";
+
+fn profile_mysql(depth: ProfileDepth) -> DumpProfile {
+    DumpProfiler::builder()
+        .depth(depth)
+        .budget(ProfileBudget {
+            sample_rows: 256,
+            top_k: 16,
+            histogram_bins: 16,
+        })
+        .seed(7)
+        .dialect(SqlDialect::MySql)
+        .build()
+        .profile_path(Path::new(MYSQL_FIXTURE))
+        .expect("profile mysql fixture")
+}
+
+/// The brief's headline test: schema depth reads no values, basic fills the
+/// cheap metrics, full adds correlations — and *every* depth returns the same
+/// portable schema and the same exact row/null counts.
+#[test]
+fn profile_depths_respect_their_budgets() {
+    let schema = profile_mysql(ProfileDepth::Schema);
+    let basic = profile_mysql(ProfileDepth::Basic);
+    let full = profile_mysql(ProfileDepth::Full);
+
+    // Same portable schema at every depth.
+    let names = vec![
+        "users".to_string(),
+        "orders".to_string(),
+        "order_items".to_string(),
+    ];
+    assert_eq!(table_names(&schema), names);
+    assert_eq!(table_names(&basic), names);
+    assert_eq!(table_names(&full), names);
+
+    // Same exact row counts at every depth.
+    for p in [&schema, &basic, &full] {
+        assert_eq!(table(p, "users").row_count, Some(6));
+        assert_eq!(table(p, "orders").row_count, Some(5));
+        assert_eq!(table(p, "order_items").row_count, Some(4));
+    }
+
+    // Exact null/total counts at every depth (api_key is NULL in 2 of 6 rows).
+    for p in [&schema, &basic, &full] {
+        let api_key = column(table(p, "users"), "api_key");
+        assert_eq!(api_key.total_count, 6);
+        assert_eq!(api_key.null_count, 2);
+    }
+
+    // Schema depth reads NO values: no value-derived evidence anywhere.
+    for t in &schema.tables {
+        for c in &t.columns {
+            assert_eq!(c.distinct_estimate, 0.0, "{}.{}", t.table, c.name);
+            assert!(c.sample_values.is_empty());
+            assert!(c.numeric.is_none());
+            assert!(c.string_shape.is_none());
+            assert!(c.top_k.is_empty());
+            assert!(c.timestamp_range.is_none());
+        }
+        assert!(t.relationships.is_empty());
+    }
+
+    // Basic depth fills the cheap per-column metrics but adds no correlations.
+    let users = table(&basic, "users");
+    assert!(column(users, "balance").numeric.is_some());
+    assert!(column(users, "email").string_shape.is_some());
+    assert!(column(users, "email").distinct_estimate > 0.0);
+    let status = column(table(&basic, "orders"), "status");
+    assert!(!status.top_k.is_empty());
+    assert_eq!(status.top_k[0].value, "paid");
+    for t in &basic.tables {
+        assert!(t.relationships.is_empty(), "basic must add no correlations");
+    }
+
+    // Full depth adds pairwise correlations for declared FKs.
+    let orders = table(&full, "orders");
+    assert!(
+        orders.relationships.iter().any(|r| r.to_table == "users"),
+        "full depth must surface the orders -> users foreign key"
+    );
+    let items = table(&full, "order_items");
+    assert!(items.relationships.iter().any(|r| r.to_table == "orders"));
+}
+
+/// Every dialect input path (MySQL INSERT, PostgreSQL COPY, SQLite INSERT,
+/// MSSQL bracket/GO INSERT) profiles into the same neutral evidence with exact
+/// row counts.
+#[test]
+fn profiler_reads_all_dialects() {
+    let cases = [
+        (MYSQL_FIXTURE, SqlDialect::MySql),
+        (
+            "tests/fixtures/generate/production_shape_postgres.sql",
+            SqlDialect::Postgres,
+        ),
+        (
+            "tests/fixtures/generate/production_shape_sqlite.sql",
+            SqlDialect::Sqlite,
+        ),
+        (
+            "tests/fixtures/generate/production_shape_mssql.sql",
+            SqlDialect::Mssql,
+        ),
+    ];
+
+    for (path, dialect) in cases {
+        let profile = DumpProfiler::builder()
+            .depth(ProfileDepth::Full)
+            .dialect(dialect)
+            .build()
+            .profile_path(Path::new(path))
+            .unwrap_or_else(|e| panic!("profiling {path}: {e}"));
+
+        let users = table(&profile, "users");
+        assert_eq!(users.row_count, Some(6), "{path} users rows");
+        assert_eq!(
+            column(users, "api_key").null_count,
+            2,
+            "{path} api_key nulls"
+        );
+        assert!(
+            column(users, "email").string_shape.is_some(),
+            "{path} email"
+        );
+
+        let orders = table(&profile, "orders");
+        assert_eq!(orders.row_count, Some(5), "{path} orders rows");
+        // The declared orders -> users FK is fully covered in every fixture.
+        assert!(
+            orders.relationships.iter().any(|r| r.to_table == "users"),
+            "{path} orders -> users FK"
+        );
+    }
+}
+
+/// Resident retained evidence is bounded by the budget, not by the row count:
+/// a high-cardinality column over many rows still retains at most `sample_rows`
+/// samples and `top_k` heavy hitters, while recovering the distinct count.
+#[test]
+fn profiler_retained_evidence_is_budget_bound() {
+    const ROWS: usize = 20_000;
+    let mut dump = String::from(
+        "CREATE TABLE events (id INT NOT NULL PRIMARY KEY, tag VARCHAR(64) NOT NULL);\n",
+    );
+    dump.push_str("INSERT INTO events (id, tag) VALUES\n");
+    for i in 0..ROWS {
+        // Unique tag per row -> high cardinality; skewed hot value every 4th row.
+        if i % 4 == 0 {
+            dump.push_str("(0,'hot')");
+        } else {
+            dump.push_str(&format!("({i},'tag_{i:08}')"));
+        }
+        dump.push_str(if i + 1 == ROWS { ";\n" } else { ",\n" });
+    }
+
+    let budget = ProfileBudget {
+        sample_rows: 128,
+        top_k: 8,
+        histogram_bins: 16,
+    };
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Full)
+        .budget(budget)
+        .seed(1)
+        .dialect(SqlDialect::MySql)
+        .build()
+        .profile_reader(dump.as_bytes(), SqlDialect::MySql)
+        .expect("profile in-memory dump");
+
+    let events = table(&profile, "events");
+    assert_eq!(events.row_count, Some(ROWS as u64));
+
+    let tag = column(events, "tag");
+    // Retention is budget-bound, not row-count-bound.
+    assert!(
+        tag.sample_values.len() <= budget.sample_rows,
+        "samples {} exceed budget {}",
+        tag.sample_values.len(),
+        budget.sample_rows
+    );
+    assert!(tag.top_k.len() <= budget.top_k);
+    // The skewed hot value still surfaces as the top heavy hitter.
+    assert_eq!(tag.top_k[0].value, "hot");
+    // ~15k distinct tags recovered within HLL tolerance despite 128 samples.
+    let expected_distinct = (ROWS - ROWS / 4) as f64 + 1.0;
+    let rel = (tag.distinct_estimate - expected_distinct).abs() / expected_distinct;
+    assert!(
+        rel <= 0.10,
+        "distinct estimate {} off",
+        tag.distinct_estimate
+    );
+}
+
+/// Schema-late handling: when a table's data precedes its DDL, the profiler
+/// buffers a bounded sample, replays it once the CREATE TABLE arrives, keeps
+/// the row count exact, and emits GEN-PROFILE-SCHEMA-LATE only when the bounded
+/// replay could not cover every early row.
+#[test]
+fn profiler_handles_schema_late_data() {
+    // Common case within budget: replay covers all early rows, no warning.
+    let dump = "\
+INSERT INTO widgets (id, label) VALUES (1,'a'),(2,'b'),(3,'c');
+CREATE TABLE widgets (id INT NOT NULL PRIMARY KEY, label VARCHAR(32) NOT NULL);
+";
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Basic)
+        .dialect(SqlDialect::MySql)
+        .build()
+        .profile_reader(dump.as_bytes(), SqlDialect::MySql)
+        .expect("profile schema-late dump");
+    let widgets = table(&profile, "widgets");
+    assert_eq!(widgets.row_count, Some(3));
+    assert_eq!(column(widgets, "label").total_count, 3);
+    assert!(column(widgets, "label").string_shape.is_some());
+    assert!(profile.warnings.is_empty(), "within budget: no warning");
+
+    // Overflow case: more early rows than the retained sample -> exact row count
+    // is preserved and a GEN-PROFILE-SCHEMA-LATE warning is raised.
+    let mut big = String::from("INSERT INTO gadgets (id) VALUES\n");
+    for i in 0..50 {
+        big.push_str(&format!("({i})"));
+        big.push_str(if i == 49 { ";\n" } else { ",\n" });
+    }
+    big.push_str("CREATE TABLE gadgets (id INT NOT NULL PRIMARY KEY);\n");
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Basic)
+        .budget(ProfileBudget {
+            sample_rows: 10,
+            top_k: 4,
+            histogram_bins: 4,
+        })
+        .dialect(SqlDialect::MySql)
+        .build()
+        .profile_reader(big.as_bytes(), SqlDialect::MySql)
+        .expect("profile overflowing schema-late dump");
+    let gadgets = table(&profile, "gadgets");
+    assert_eq!(gadgets.row_count, Some(50), "row count stays exact");
+    assert!(
+        profile
+            .warnings
+            .iter()
+            .any(|w| w.contains("GEN-PROFILE-SCHEMA-LATE")),
+        "overflow must raise GEN-PROFILE-SCHEMA-LATE, got {:?}",
+        profile.warnings
+    );
+}

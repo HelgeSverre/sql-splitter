@@ -18,12 +18,14 @@
 //! * **Seeded** — the same seed yields the same reservoir sample.
 
 pub mod evidence;
+mod profiler;
 mod sketches;
 
 pub use evidence::{
     BooleanEvidence, CharClasses, ColumnEvidence, DumpProfile, NumericEvidence,
     RelationshipEvidence, StringShapeEvidence, TableEvidence, TimestampRangeEvidence, TopKEntry,
 };
+pub use profiler::{DumpProfiler, DumpProfilerBuilder};
 pub use sketches::ColumnSketches;
 
 use serde::{Deserialize, Serialize};
