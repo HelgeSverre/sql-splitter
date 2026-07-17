@@ -505,6 +505,35 @@ pub enum PlannerPredicate {
         /// Inclusive upper bound, epoch nanoseconds.
         max_nanos: i128,
     },
+    /// On every row the `guard` selects (or every row when `guard` is `None`),
+    /// the integer values of `addends` sum exactly to the integer value of
+    /// `sum`. Counter planners state their partition equations this way, e.g.
+    /// `succeeded + failed == processed` and `processed + pending == total`. A
+    /// single-element `addends` therefore asserts a plain equality between two
+    /// counter columns (e.g. `processed == total` on completed rows).
+    CounterSum {
+        /// The integer columns summed on the left-hand side.
+        addends: Vec<String>,
+        /// The integer column the addends must sum to.
+        sum: String,
+        /// The rows the equation applies to; `None` means every row.
+        guard: Option<PredicateGuard>,
+    },
+    /// Every listed integer `columns` value is `>= 0` on every row. Counter
+    /// planners assert their counters never go negative.
+    NonNegative {
+        /// The integer columns constrained to be non-negative.
+        columns: Vec<String>,
+    },
+    /// On every row the `guard` selects, `column` is non-`NULL` (the dual of
+    /// [`NullWhen`](Self::NullWhen)). Counter planners assert a completed row
+    /// carries a completion timestamp.
+    NotNullWhen {
+        /// The column asserted to be non-`NULL`.
+        column: String,
+        /// The rows the assertion applies to.
+        guard: PredicateGuard,
+    },
 }
 
 /// A row-level condition selecting which rows a [`PlannerPredicate`] applies to.
@@ -523,6 +552,15 @@ pub enum PredicateGuard {
         column: String,
         /// Whether the guard selects null (`true`) or non-null (`false`) rows.
         is_null: bool,
+    },
+    /// Rows where the text `column` equals `value`. Counter planners guard
+    /// state constraints on the workflow status column (e.g. rows whose
+    /// `status` is a particular completed status).
+    Equals {
+        /// The text column tested.
+        column: String,
+        /// The value the column must equal.
+        value: String,
     },
 }
 
@@ -698,6 +736,9 @@ impl ExtensionRegistry {
             .expect("built-in generator kinds are collision-free");
         registry
             .register_planner(Box::new(super::planners::TemporalIntervalFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::ProgressCountersFactory))
             .expect("built-in planner kinds are collision-free");
         registry
     }

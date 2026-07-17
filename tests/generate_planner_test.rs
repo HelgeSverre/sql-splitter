@@ -483,3 +483,387 @@ fn ownership_collision_with_a_generator_is_a_compile_error() {
     );
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
+
+// === workflow.progress_counters (Task 24) ===================================
+//
+// The progress-counter planner chooses a TOTAL and a lifecycle STATE per row,
+// then partitions exact integer counter amounts. These tests pin the state
+// machine invariants (with `partition: exact`), the exact integer partition,
+// the compile-time diagnostics, and seeded reproducibility.
+
+/// A one-table `jobs` model carrying a `workflow.progress_counters` planner.
+/// `progress` is the indented body of the `progress:` block (choosing the
+/// lifecycle mixture); `extra` appends planner-level keys.
+fn progress_model(seed: u64, rows: u64, progress: &str, extra: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  jobs:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: jobs
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: total_rows, type: bigint, nullable: false }}
+        - {{ name: processed_rows, type: bigint, nullable: false }}
+        - {{ name: imported_rows, type: bigint, nullable: false }}
+        - {{ name: failed_rows, type: bigint, nullable: false }}
+        - {{ name: pending_rows, type: bigint, nullable: false }}
+        - {{ name: status, type: text, nullable: false }}
+        - {{ name: completed_at, type: timestamp, nullable: true }}
+    planners:
+      - kind: workflow.progress_counters
+        columns:
+          total: total_rows
+          processed: processed_rows
+          succeeded: imported_rows
+          failed: failed_rows
+          pending: pending_rows
+          status: status
+          completed_at: completed_at
+        total: {{ kind: uniform, min: 10, max: 1000 }}
+        progress:
+{progress}
+        partition: exact
+        completed_statuses: [completed, failed]
+        active_statuses: [queued, running]
+{extra}
+"#
+    )
+}
+
+/// The integer value of a counter cell.
+fn counter(value: &GeneratedValue) -> i128 {
+    value.as_integer().expect("integer counter")
+}
+
+/// The text of a status cell.
+fn status_text(value: &GeneratedValue) -> &str {
+    value.as_text().expect("text status")
+}
+
+/// Assert the exact partition invariants shared by every produced row.
+fn assert_row_invariants(
+    i: usize,
+    total: i128,
+    processed: i128,
+    succeeded: i128,
+    failed: i128,
+    pending: i128,
+) {
+    // All counters non-negative.
+    for (name, value) in [
+        ("total", total),
+        ("processed", processed),
+        ("succeeded", succeeded),
+        ("failed", failed),
+        ("pending", pending),
+    ] {
+        assert!(value >= 0, "row {i}: {name} counter {value} is negative");
+    }
+    // Exact partition equations.
+    assert_eq!(
+        succeeded + failed,
+        processed,
+        "row {i}: succeeded + failed != processed"
+    );
+    assert_eq!(
+        pending,
+        total - processed,
+        "row {i}: pending != total - processed"
+    );
+    // Ordered: succeeded, failed <= processed <= total.
+    assert!(succeeded <= processed, "row {i}: succeeded > processed");
+    assert!(failed <= processed, "row {i}: failed > processed");
+    assert!(processed <= total, "row {i}: processed > total");
+}
+
+#[test]
+fn progress_counters_complete_mixture_holds_exact_invariants() {
+    let sink = run(&progress_model(4, 500, "          kind: complete", ""));
+    for i in 0..sink.rows.len() {
+        let total = counter(sink.rows[i].get(sink.index("total_rows")).unwrap());
+        let processed = counter(sink.rows[i].get(sink.index("processed_rows")).unwrap());
+        let succeeded = counter(sink.rows[i].get(sink.index("imported_rows")).unwrap());
+        let failed = counter(sink.rows[i].get(sink.index("failed_rows")).unwrap());
+        let pending = counter(sink.rows[i].get(sink.index("pending_rows")).unwrap());
+        assert_row_invariants(i, total, processed, succeeded, failed, pending);
+
+        // Completed rows: fully processed, nothing pending, non-null completion.
+        assert_eq!(
+            processed, total,
+            "row {i}: completed must have processed=total"
+        );
+        assert_eq!(pending, 0, "row {i}: completed must have pending=0");
+        let completed_at = sink.rows[i].get(sink.index("completed_at")).unwrap();
+        assert!(
+            !completed_at.is_null(),
+            "row {i}: completed needs a timestamp"
+        );
+        let status = status_text(sink.rows[i].get(sink.index("status")).unwrap());
+        assert!(
+            ["completed", "failed"].contains(&status),
+            "row {i}: status `{status}` not a completed status"
+        );
+    }
+}
+
+#[test]
+fn progress_counters_active_mixture_is_incomplete() {
+    let sink = run(&progress_model(5, 500, "          kind: in_progress", ""));
+    for i in 0..sink.rows.len() {
+        let total = counter(sink.rows[i].get(sink.index("total_rows")).unwrap());
+        let processed = counter(sink.rows[i].get(sink.index("processed_rows")).unwrap());
+        let succeeded = counter(sink.rows[i].get(sink.index("imported_rows")).unwrap());
+        let failed = counter(sink.rows[i].get(sink.index("failed_rows")).unwrap());
+        let pending = counter(sink.rows[i].get(sink.index("pending_rows")).unwrap());
+        assert_row_invariants(i, total, processed, succeeded, failed, pending);
+
+        // Active rows: incomplete (pending > 0), null completion.
+        assert!(processed < total, "row {i}: active must be incomplete");
+        assert!(pending > 0, "row {i}: active must have pending > 0");
+        let completed_at = sink.rows[i].get(sink.index("completed_at")).unwrap();
+        assert!(
+            completed_at.is_null(),
+            "row {i}: active must have null completion"
+        );
+        let status = status_text(sink.rows[i].get(sink.index("status")).unwrap());
+        assert!(
+            ["queued", "running"].contains(&status),
+            "row {i}: status `{status}` not an active status"
+        );
+    }
+}
+
+#[test]
+fn progress_counters_not_started_mixture_is_zeroed() {
+    let sink = run(&progress_model(6, 300, "          kind: not_started", ""));
+    for i in 0..sink.rows.len() {
+        let total = counter(sink.rows[i].get(sink.index("total_rows")).unwrap());
+        let processed = counter(sink.rows[i].get(sink.index("processed_rows")).unwrap());
+        let succeeded = counter(sink.rows[i].get(sink.index("imported_rows")).unwrap());
+        let failed = counter(sink.rows[i].get(sink.index("failed_rows")).unwrap());
+        let pending = counter(sink.rows[i].get(sink.index("pending_rows")).unwrap());
+        assert_row_invariants(i, total, processed, succeeded, failed, pending);
+
+        assert_eq!(processed, 0, "row {i}: not_started must have processed=0");
+        assert_eq!(succeeded, 0, "row {i}: not_started must have succeeded=0");
+        assert_eq!(failed, 0, "row {i}: not_started must have failed=0");
+        assert_eq!(
+            pending, total,
+            "row {i}: not_started must have pending=total"
+        );
+        let completed_at = sink.rows[i].get(sink.index("completed_at")).unwrap();
+        assert!(
+            completed_at.is_null(),
+            "row {i}: not_started null completion"
+        );
+    }
+}
+
+#[test]
+fn progress_counters_mixture_covers_all_states_with_invariants() {
+    let progress = "          kind: mixture\n          complete_weight: 0.5\n          active_weight: 0.35\n          not_started_weight: 0.15";
+    let sink = run(&progress_model(9, 4000, progress, ""));
+    let (mut complete, mut active, mut not_started) = (0, 0, 0);
+    for i in 0..sink.rows.len() {
+        let total = counter(sink.rows[i].get(sink.index("total_rows")).unwrap());
+        let processed = counter(sink.rows[i].get(sink.index("processed_rows")).unwrap());
+        let succeeded = counter(sink.rows[i].get(sink.index("imported_rows")).unwrap());
+        let failed = counter(sink.rows[i].get(sink.index("failed_rows")).unwrap());
+        let pending = counter(sink.rows[i].get(sink.index("pending_rows")).unwrap());
+        assert_row_invariants(i, total, processed, succeeded, failed, pending);
+
+        let completed_at = sink.rows[i].get(sink.index("completed_at")).unwrap();
+        if !completed_at.is_null() {
+            // Completed: processed=total, non-null completion.
+            assert_eq!(processed, total, "row {i}: completed processed=total");
+            complete += 1;
+        } else if processed == 0 {
+            assert_eq!(pending, total, "row {i}: not_started pending=total");
+            not_started += 1;
+        } else {
+            assert!(processed < total, "row {i}: active incomplete");
+            active += 1;
+        }
+    }
+    // Every configured state should appear across 4000 rows (broad bands).
+    assert!(
+        complete > 500,
+        "expected many completed rows, saw {complete}"
+    );
+    assert!(active > 300, "expected many active rows, saw {active}");
+    assert!(
+        not_started > 50,
+        "expected some not-started rows, saw {not_started}"
+    );
+}
+
+#[test]
+fn progress_counters_allow_unclassified_relaxes_the_split() {
+    let yaml = progress_model(10, 400, "          kind: complete", "").replace(
+        "partition: exact",
+        "partition: allow_unclassified\n        unclassified_ratio: 0.2",
+    );
+    let sink = run(&yaml);
+    let mut saw_unclassified = false;
+    for i in 0..sink.rows.len() {
+        let total = counter(sink.rows[i].get(sink.index("total_rows")).unwrap());
+        let processed = counter(sink.rows[i].get(sink.index("processed_rows")).unwrap());
+        let succeeded = counter(sink.rows[i].get(sink.index("imported_rows")).unwrap());
+        let failed = counter(sink.rows[i].get(sink.index("failed_rows")).unwrap());
+        let pending = counter(sink.rows[i].get(sink.index("pending_rows")).unwrap());
+        // succeeded + failed may leave an unclassified remainder <= processed.
+        assert!(
+            succeeded + failed <= processed,
+            "row {i}: classified exceeds processed"
+        );
+        assert_eq!(pending, total - processed, "row {i}: pending equation");
+        assert!(succeeded >= 0 && failed >= 0, "row {i}: nonneg");
+        if succeeded + failed < processed {
+            saw_unclassified = true;
+        }
+    }
+    assert!(
+        saw_unclassified,
+        "allow_unclassified should leave a remainder"
+    );
+}
+
+#[test]
+fn progress_counters_seeded_output_repeats_and_differs_by_seed() {
+    let progress = "          kind: mixture\n          complete_weight: 0.5\n          active_weight: 0.4\n          not_started_weight: 0.1";
+    let first = run(&progress_model(21, 1500, progress, ""));
+    let again = run(&progress_model(21, 1500, progress, ""));
+    let other = run(&progress_model(22, 1500, progress, ""));
+    assert_eq!(first.rows, again.rows, "same seed must reproduce rows");
+    assert_ne!(first.rows, other.rows, "a different seed must diverge");
+}
+
+#[test]
+fn progress_counters_returns_exact_verification_predicates() {
+    use sql_splitter::generate::{PlannerPredicate, PredicateGuard};
+
+    let plan = compile_result(&progress_model(5, 10, "          kind: mixture\n          complete_weight: 0.6\n          active_weight: 0.3\n          not_started_weight: 0.1", ""))
+        .expect("model compiles cleanly");
+    let planner = &plan.table("jobs").expect("jobs table").planners[0];
+    let predicates = planner.verification_predicates();
+
+    // succeeded + failed == processed (exact partition).
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::CounterSum { addends, sum, guard: None }
+            if addends.len() == 2
+                && addends.contains(&"imported_rows".to_string())
+                && addends.contains(&"failed_rows".to_string())
+                && sum == "processed_rows"
+    )));
+    // processed + pending == total.
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::CounterSum { addends, sum, guard: None }
+            if addends.contains(&"processed_rows".to_string())
+                && addends.contains(&"pending_rows".to_string())
+                && sum == "total_rows"
+    )));
+    // All counters non-negative.
+    assert!(predicates
+        .iter()
+        .any(|p| matches!(p, PlannerPredicate::NonNegative { columns } if columns.contains(&"total_rows".to_string()))));
+    // Completed rows carry a non-null completion timestamp.
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NotNullWhen { column, guard: PredicateGuard::Equals { column: guard_col, .. } }
+            if column == "completed_at" && guard_col == "status"
+    )));
+}
+
+// --- Compile diagnostics ----------------------------------------------------
+
+#[test]
+fn progress_counters_overflow_is_a_compile_error() {
+    // int counters cap at i32::MAX; a fixed total beyond that overflows.
+    let yaml = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  jobs:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: jobs
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: total_rows, type: int, nullable: false }
+        - { name: processed_rows, type: int, nullable: false }
+    planners:
+      - kind: workflow.progress_counters
+        columns:
+          total: total_rows
+          processed: processed_rows
+        total: { kind: fixed, value: 3000000000 }
+        progress:
+          kind: complete
+        partition: exact
+"#;
+    assert!(compile_err_code(yaml).contains(&"GEN-PROGRESS-OVERFLOW".to_string()));
+}
+
+#[test]
+fn progress_counters_absent_status_vocabulary_is_a_compile_error() {
+    // A configured status column with an empty completed vocabulary, while the
+    // mixture produces completed rows, cannot label those rows.
+    let yaml = progress_model(1, 10, "          kind: complete", "").replace(
+        "completed_statuses: [completed, failed]",
+        "completed_statuses: []",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-PROGRESS-STATUS-VOCABULARY".to_string()));
+}
+
+#[test]
+fn progress_counters_impossible_non_null_completion_is_a_compile_error() {
+    // A non-nullable completion column cannot hold the null an active row needs.
+    let progress = "          kind: mixture\n          complete_weight: 0.5\n          active_weight: 0.5\n          not_started_weight: 0.0";
+    let yaml = progress_model(1, 10, progress, "").replace(
+        "{ name: completed_at, type: timestamp, nullable: true }",
+        "{ name: completed_at, type: timestamp, nullable: false }",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-PROGRESS-COMPLETION".to_string()));
+}
+
+#[test]
+fn progress_counters_missing_column_is_a_compile_error() {
+    let yaml = progress_model(1, 10, "          kind: complete", "")
+        .replace("total: total_rows", "total: does_not_exist");
+    assert!(compile_err_code(&yaml).contains(&"GEN-PROGRESS-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn progress_counters_exact_partition_with_absent_observed_evidence_is_a_compile_error() {
+    // `observed` progress under `partition: exact` needs observed evidence; with
+    // none available it cannot form an exact integer partition.
+    let yaml = progress_model(1, 10, "          kind: observed", "");
+    assert!(compile_err_code(&yaml).contains(&"GEN-PROGRESS-OBSERVED".to_string()));
+}
+
+#[test]
+fn progress_counters_zero_total_weights_is_a_compile_error() {
+    let progress = "          kind: mixture\n          complete_weight: 0.0\n          active_weight: 0.0\n          not_started_weight: 0.0";
+    let yaml = progress_model(1, 10, progress, "");
+    assert!(compile_err_code(&yaml).contains(&"GEN-PROGRESS-WEIGHTS".to_string()));
+}
+
+#[test]
+fn progress_counters_ownership_collision_is_a_compile_error() {
+    // A generator on total_rows collides with the planner's ownership of it.
+    let yaml = progress_model(1, 10, "          kind: complete", "").replace(
+        "    planners:",
+        "    columns:\n      total_rows:\n        generator: { kind: constant, value: 1 }\n    planners:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
