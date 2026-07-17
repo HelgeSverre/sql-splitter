@@ -134,7 +134,7 @@ pub use registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,
     CompiledPlanner, Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory,
     KeyRecipe, ModifierDescriptor, ModifierFactory, PlanContext, PlannerDescriptor, PlannerFactory,
-    RowContext, RowView, Verification,
+    PlannerPredicate, PredicateGuard, RowContext, RowView, Verification,
 };
 pub use seed::{derive_seed, SeedRoot, StreamId};
 pub use value::{GenerateError, GeneratedValue};

@@ -305,6 +305,7 @@ impl GenerationEngine {
             let ncols = table.columns.len();
             let mut buffer = vec![GeneratedValue::Null; ncols];
             let mut selectors = exec.selectors;
+            let mut planners = exec.planners;
 
             for row_index in 0..table.rows {
                 // Non-reading owners first: defaults, materialized parent keys,
@@ -317,6 +318,16 @@ impl GenerationEngine {
                 }
                 for selector in selectors.iter_mut() {
                     selector.assign(row_index, &mut buffer);
+                }
+                // Table planners produce their owned columns together, before
+                // the per-column generator pass (a planner-owned column takes
+                // its value from the planner, not a generator).
+                for exec in planners.iter_mut() {
+                    let planner = &mut table.planners[exec.index];
+                    planner.generate_row(row_index, &mut exec.scratch)?;
+                    for (slot, value) in exec.members.iter().zip(exec.scratch.iter_mut()) {
+                        buffer[*slot] = std::mem::replace(value, GeneratedValue::Null);
+                    }
                 }
                 // Column generators last: they may read siblings produced above.
                 // A materialized referenced key (in `dense`) is rendered from its
@@ -468,6 +479,8 @@ struct TableExec {
     dense_indices: BTreeSet<usize>,
     /// Foreign-key selectors, one per active relationship.
     selectors: Vec<FkSelector>,
+    /// Table planners that produce owned columns, one per active planner.
+    planners: Vec<PlannerExec>,
 }
 
 impl TableExec {
@@ -492,16 +505,48 @@ impl TableExec {
             }
         }
 
+        // Map each planner's owned columns (by name) to row-buffer slots so the
+        // engine can scatter the planner's per-row output into place. Slots a
+        // planner owns are excluded from the DEFAULT pass below.
+        let mut planners: Vec<PlannerExec> = Vec::new();
+        let mut planner_indices: BTreeSet<usize> = BTreeSet::new();
+        for (index, planner) in table.planners.iter().enumerate() {
+            let members: Option<Vec<usize>> = planner
+                .writes()
+                .iter()
+                .map(|name| {
+                    table
+                        .columns
+                        .iter()
+                        .position(|column| &column.schema.name == name)
+                })
+                .collect();
+            let Some(members) = members else {
+                continue;
+            };
+            planner_indices.extend(members.iter().copied());
+            let scratch = vec![GeneratedValue::Null; members.len()];
+            planners.push(PlannerExec {
+                index,
+                members,
+                scratch,
+            });
+        }
+
         let mut defaults: Vec<usize> = Vec::new();
         for i in 0..table.columns.len() {
-            if dense_indices.contains(&i) || member_indices.contains(&i) {
+            if dense_indices.contains(&i)
+                || member_indices.contains(&i)
+                || planner_indices.contains(&i)
+            {
                 continue;
             }
             match &table.columns[i].owner {
                 // A live column generator is executed in the generator pass.
                 ColumnOwner::Generator { kind, .. } if !is_fk_kind(kind) => {}
-                // Everything else (database-filled, defaults, planners, or an FK
-                // that never resolved a selector) renders as DEFAULT.
+                // Everything else (database-filled, defaults, a planner that
+                // never mapped, or an FK that never resolved a selector) renders
+                // as DEFAULT.
                 _ => defaults.push(i),
             }
         }
@@ -511,8 +556,21 @@ impl TableExec {
             dense,
             dense_indices,
             selectors,
+            planners,
         }
     }
+}
+
+/// A per-planner execution binding: which compiled planner to invoke and the
+/// row-buffer slots its produced columns scatter into.
+struct PlannerExec {
+    /// Index into [`PlannedTable::planners`].
+    index: usize,
+    /// Row-buffer slots for the planner's written columns, in `writes()` order.
+    members: Vec<usize>,
+    /// Reusable scratch aligned with `members`: the planner writes here each
+    /// row, then the engine moves each value into its buffer slot.
+    scratch: Vec<GeneratedValue>,
 }
 
 /// A per-relationship foreign-key selector: picks a parent row per child row and

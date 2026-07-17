@@ -407,13 +407,116 @@ pub trait PlannerFactory: Send + Sync {
     ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag>;
 }
 
-/// A compiled planner: contributes table-level structural decisions.
+/// A compiled planner: coordinates several columns of a table together.
 ///
-/// The concrete planning behavior is defined by Task 22; this method is the
-/// stable extension point compiled planners hang that behavior off.
+/// Planners split their work across two phases. [`plan`](Self::plan) runs once
+/// per table before any row (the table-scope extension point Task 22 hangs
+/// spooling off). [`generate_row`](Self::generate_row) runs once per row in the
+/// engine's row pipeline and *produces* the values of the columns the planner
+/// owns — a planner writes several correlated columns together (e.g. an
+/// interval's `start`/`end`/`duration`/`open`) rather than one column at a
+/// time. The engine maps [`writes`](Self::writes) to row-buffer slots once per
+/// table, then scatters each produced value into place; a planner-owned column
+/// therefore takes its value from the planner, not from a generator.
 pub trait CompiledPlanner: Send {
-    /// Contribute this planner's decisions for the table in `context`.
-    fn plan(&mut self, context: &PlanContext<'_>) -> Result<(), GenerateError>;
+    /// Contribute this planner's table-level decisions for `context`. Runs once
+    /// per table before any row is generated. Default: nothing to do.
+    fn plan(&mut self, _context: &PlanContext<'_>) -> Result<(), GenerateError> {
+        Ok(())
+    }
+
+    /// The columns this planner produces, in the positional order
+    /// [`generate_row`](Self::generate_row) writes them. The engine resolves
+    /// each name to a row-buffer slot once per table. Default: none (a planner
+    /// that contributes only structural decisions, not column values).
+    fn writes(&self) -> &[String] {
+        &[]
+    }
+
+    /// Produce this planner's owned column values for the row at `row_index`,
+    /// writing them into `output` positionally aligned with
+    /// [`writes`](Self::writes). Runs once per row, before column modifiers and
+    /// the sink. Default: no-op (nothing owned).
+    fn generate_row(
+        &mut self,
+        _row_index: u64,
+        _output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        Ok(())
+    }
+
+    /// Machine-checkable invariants this planner guarantees over its owned
+    /// columns, surfaced so the verification stage (Task 26) can assert them
+    /// without knowing the planner's internals. Default: none.
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        Vec::new()
+    }
+}
+
+/// A machine-checkable invariant a planner guarantees over the columns it owns.
+///
+/// Predicates are stated over column *names* and integer units so a verifier
+/// (Task 26) can evaluate them directly against generated rows, without
+/// re-deriving the planner's logic. Timestamp columns are compared as
+/// nanoseconds since the Unix epoch; a duration column is an integer count of
+/// `duration_unit_nanos`-sized units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannerPredicate {
+    /// On every row the `guard` selects (or every row when `guard` is `None`),
+    /// the `end` timestamp equals the `start` timestamp plus `duration` units:
+    /// `end_ns == start_ns + duration * duration_unit_nanos`. `end_inclusive`
+    /// records whether `end` is the last covered instant (metadata; it does not
+    /// change the equation).
+    Equation {
+        /// The start timestamp column.
+        start: String,
+        /// The end timestamp column.
+        end: String,
+        /// The duration column, an integer count of `duration_unit_nanos` units.
+        duration: String,
+        /// Nanoseconds per duration unit (e.g. `1_000_000_000` for seconds).
+        duration_unit_nanos: i128,
+        /// Whether `end` denotes the inclusive last instant of the interval.
+        end_inclusive: bool,
+        /// The rows the equation applies to; `None` means every row.
+        guard: Option<PredicateGuard>,
+    },
+    /// On every row the `guard` selects, `column` is SQL `NULL`.
+    NullWhen {
+        /// The column asserted to be `NULL`.
+        column: String,
+        /// The rows the assertion applies to.
+        guard: PredicateGuard,
+    },
+    /// `column`, compared as epoch nanoseconds, lies within the inclusive
+    /// bounds `[min_nanos, max_nanos]` on every non-null row.
+    InRange {
+        /// The timestamp column bounded.
+        column: String,
+        /// Inclusive lower bound, epoch nanoseconds.
+        min_nanos: i128,
+        /// Inclusive upper bound, epoch nanoseconds.
+        max_nanos: i128,
+    },
+}
+
+/// A row-level condition selecting which rows a [`PlannerPredicate`] applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PredicateGuard {
+    /// Rows where the boolean `column` equals `value`.
+    Flag {
+        /// The boolean flag column tested.
+        column: String,
+        /// The value the flag must equal.
+        value: bool,
+    },
+    /// Rows where `column` is `NULL` (`is_null`) or non-`NULL` (`!is_null`).
+    Null {
+        /// The column tested for nullness.
+        column: String,
+        /// Whether the guard selects null (`true`) or non-null (`false`) rows.
+        is_null: bool,
+    },
 }
 
 // --- Catalog ----------------------------------------------------------------
@@ -586,6 +689,9 @@ impl ExtensionRegistry {
         registry
             .register_generator(Box::new(super::generators::relation::CompositeKeyFactory))
             .expect("built-in generator kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::TemporalIntervalFactory))
+            .expect("built-in planner kinds are collision-free");
         registry
     }
 
