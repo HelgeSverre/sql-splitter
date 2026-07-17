@@ -1336,3 +1336,462 @@ fn order_family_line_count_tracks_the_child_distribution_mean() {
     // Money invariants must be unchanged for any line count.
     assert_family_exact(&sink, false);
 }
+
+// === temporal.timestamps / temporal.soft_delete / temporal.lifecycle (Task 27) ==
+//
+// Three small same-table planners sharing the interval/progress execution
+// pattern: `temporal.timestamps` (created <= updated, plus optional trailing
+// timestamps), `temporal.soft_delete` (a coherent deleted_at/is_deleted pair),
+// and `temporal.lifecycle` (a status column that only ever reaches legal
+// states, each carrying a correctly-ordered timestamp).
+
+fn timestamps_model(seed: u64, rows: u64, overrides: &str, extra_columns: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  accounts:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: accounts
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: created_at, type: timestamp, nullable: false }}
+        - {{ name: updated_at, type: timestamp, nullable: false }}
+{extra_columns}
+    planners:
+      - kind: temporal.timestamps
+        columns:
+          created_at: created_at
+          updated_at: updated_at
+{overrides}
+        created:
+          kind: range
+          min: "2024-01-01T00:00:00Z"
+          max: "2026-01-01T00:00:00Z"
+        update_delay:
+          kind: uniform
+          unit: seconds
+          min: 0
+          max: 86400
+"#
+    )
+}
+
+#[test]
+fn timestamps_created_is_never_after_updated_for_many_rows() {
+    let sink = run(&timestamps_model(1, 20_000, "", ""));
+    let created: Vec<i128> = sink
+        .column("created_at")
+        .map(|v| instant_ns(datetime_text(v)))
+        .collect();
+    let updated: Vec<i128> = sink
+        .column("updated_at")
+        .map(|v| instant_ns(datetime_text(v)))
+        .collect();
+    assert_eq!(created.len(), 20_000);
+    for (i, (c, u)) in created.iter().zip(&updated).enumerate() {
+        assert!(c <= u, "row {i}: created_at {c} > updated_at {u}");
+    }
+    // The delay isn't degenerate: at least some rows show a real gap.
+    assert!(
+        created.iter().zip(&updated).any(|(c, u)| u > c),
+        "expected at least one row with updated_at strictly after created_at"
+    );
+}
+
+#[test]
+fn timestamps_other_columns_are_never_before_created() {
+    let overrides = "          last_login_at: last_login_at\n";
+    let extra_columns = "        - { name: last_login_at, type: timestamp, nullable: false }";
+    let sink = run(&timestamps_model(2, 5_000, overrides, extra_columns));
+    let created: Vec<i128> = sink
+        .column("created_at")
+        .map(|v| instant_ns(datetime_text(v)))
+        .collect();
+    let logins: Vec<i128> = sink
+        .column("last_login_at")
+        .map(|v| instant_ns(datetime_text(v)))
+        .collect();
+    for (i, (c, l)) in created.iter().zip(&logins).enumerate() {
+        assert!(c <= l, "row {i}: created_at {c} > last_login_at {l}");
+    }
+}
+
+#[test]
+fn timestamps_seeded_output_repeats_and_differs_by_seed() {
+    let first = run(&timestamps_model(9, 1_000, "", ""));
+    let again = run(&timestamps_model(9, 1_000, "", ""));
+    let other = run(&timestamps_model(10, 1_000, "", ""));
+    assert_eq!(first.rows, again.rows, "same seed must reproduce rows");
+    assert_ne!(first.rows, other.rows, "a different seed must diverge");
+}
+
+#[test]
+fn timestamps_returns_exact_verification_predicates() {
+    use sql_splitter::generate::PlannerPredicate;
+
+    let plan = compile_result(&timestamps_model(1, 10, "", "")).expect("model compiles cleanly");
+    let predicates =
+        plan.table("accounts").expect("accounts table").planners[0].verification_predicates();
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::Ordering { earlier, later, guard: None }
+            if earlier == "created_at" && later == "updated_at"
+    )));
+}
+
+#[test]
+fn timestamps_missing_owned_column_is_a_compile_error() {
+    let yaml = timestamps_model(1, 10, "", "")
+        .replace("updated_at: updated_at", "updated_at: nonexistent_column");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TIMESTAMPS-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn timestamps_impossible_range_is_a_compile_error() {
+    let yaml = timestamps_model(1, 10, "", "").replace(
+        "max: \"2026-01-01T00:00:00Z\"",
+        "max: \"2020-01-01T00:00:00Z\"",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-TIMESTAMPS-RANGE".to_string()));
+}
+
+#[test]
+fn timestamps_ownership_collision_is_a_compile_error() {
+    let yaml = timestamps_model(1, 10, "", "").replace(
+        "    planners:",
+        "    columns:\n      created_at:\n        generator: { kind: datetime }\n    planners:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
+
+// --- temporal.soft_delete ----------------------------------------------------
+
+fn soft_delete_model(seed: u64, rows: u64, deleted_at_nullable: bool, probability: f64) -> String {
+    let nullable = if deleted_at_nullable { "true" } else { "false" };
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  widgets:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: widgets
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: deleted_at, type: timestamp, nullable: {nullable} }}
+        - {{ name: is_deleted, type: boolean, nullable: false }}
+    planners:
+      - kind: temporal.soft_delete
+        columns:
+          deleted_at: deleted_at
+          is_deleted: is_deleted
+        deletion_probability: {probability}
+        deleted_range:
+          kind: range
+          min: "2024-01-01T00:00:00Z"
+          max: "2026-01-01T00:00:00Z"
+"#
+    )
+}
+
+#[test]
+fn soft_delete_null_and_flag_are_coherent_for_many_rows() {
+    let sink = run(&soft_delete_model(1, 20_000, true, 0.3));
+    let mut deleted_rows = 0;
+    for (i, (deleted_at, is_deleted)) in sink
+        .column("deleted_at")
+        .zip(sink.column("is_deleted"))
+        .enumerate()
+    {
+        let flag = is_deleted.as_boolean().expect("boolean flag");
+        if flag {
+            deleted_rows += 1;
+            assert!(
+                !deleted_at.is_null(),
+                "row {i}: is_deleted=true must carry a non-null deleted_at"
+            );
+        } else {
+            assert!(
+                deleted_at.is_null(),
+                "row {i}: is_deleted=false must carry a null deleted_at"
+            );
+        }
+    }
+    // ~30% of 20k rows should be deleted — assert a broad band.
+    assert!(
+        (4_000..8_000).contains(&deleted_rows),
+        "expected ~30% deleted rows, saw {deleted_rows}"
+    );
+}
+
+#[test]
+fn soft_delete_all_rows_deleted_when_probability_is_one() {
+    let sink = run(&soft_delete_model(2, 500, true, 1.0));
+    for deleted_at in sink.column("deleted_at") {
+        assert!(!deleted_at.is_null());
+    }
+    for is_deleted in sink.column("is_deleted") {
+        assert!(is_deleted.as_boolean().expect("boolean"));
+    }
+}
+
+#[test]
+fn soft_delete_no_rows_deleted_when_probability_is_zero() {
+    let sink = run(&soft_delete_model(3, 500, true, 0.0));
+    for deleted_at in sink.column("deleted_at") {
+        assert!(deleted_at.is_null());
+    }
+    for is_deleted in sink.column("is_deleted") {
+        assert!(!is_deleted.as_boolean().expect("boolean"));
+    }
+}
+
+#[test]
+fn soft_delete_seeded_output_repeats_and_differs_by_seed() {
+    let first = run(&soft_delete_model(4, 1_000, true, 0.4));
+    let again = run(&soft_delete_model(4, 1_000, true, 0.4));
+    let other = run(&soft_delete_model(5, 1_000, true, 0.4));
+    assert_eq!(first.rows, again.rows, "same seed must reproduce rows");
+    assert_ne!(first.rows, other.rows, "a different seed must diverge");
+}
+
+#[test]
+fn soft_delete_returns_exact_verification_predicates() {
+    use sql_splitter::generate::{PlannerPredicate, PredicateGuard};
+
+    let plan =
+        compile_result(&soft_delete_model(1, 10, true, 0.3)).expect("model compiles cleanly");
+    let predicates =
+        plan.table("widgets").expect("widgets table").planners[0].verification_predicates();
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NotNullWhen { column, guard: PredicateGuard::Flag { column: flag, value: true } }
+            if column == "deleted_at" && flag == "is_deleted"
+    )));
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NullWhen { column, guard: PredicateGuard::Flag { column: flag, value: false } }
+            if column == "deleted_at" && flag == "is_deleted"
+    )));
+}
+
+#[test]
+fn soft_delete_non_nullable_deleted_at_with_partial_probability_is_a_compile_error() {
+    let yaml = soft_delete_model(1, 10, false, 0.3);
+    assert!(compile_err_code(&yaml).contains(&"GEN-SOFT-DELETE-NULLABILITY".to_string()));
+    // A probability of 1.0 never needs a null deleted_at, so it's fine.
+    assert!(compile_result(&soft_delete_model(1, 10, false, 1.0)).is_ok());
+}
+
+#[test]
+fn soft_delete_missing_owned_column_is_a_compile_error() {
+    let yaml = soft_delete_model(1, 10, true, 0.3)
+        .replace("deleted_at: deleted_at", "deleted_at: nonexistent_column");
+    assert!(compile_err_code(&yaml).contains(&"GEN-SOFT-DELETE-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn soft_delete_impossible_range_is_a_compile_error() {
+    let yaml = soft_delete_model(1, 10, true, 0.3).replace(
+        "max: \"2026-01-01T00:00:00Z\"",
+        "max: \"2020-01-01T00:00:00Z\"",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-SOFT-DELETE-RANGE".to_string()));
+}
+
+#[test]
+fn soft_delete_ownership_collision_is_a_compile_error() {
+    let yaml = soft_delete_model(1, 10, true, 0.3).replace(
+        "    planners:",
+        "    columns:\n      deleted_at:\n        generator: { kind: datetime }\n    planners:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
+
+// --- temporal.lifecycle ------------------------------------------------------
+
+fn lifecycle_model(seed: u64, rows: u64, archived_nullable: bool) -> String {
+    let nullable = if archived_nullable { "true" } else { "false" };
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  orders:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: orders
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: status, type: text, nullable: false }}
+        - {{ name: created_at, type: timestamp, nullable: false }}
+        - {{ name: activated_at, type: timestamp, nullable: true }}
+        - {{ name: archived_at, type: timestamp, nullable: {nullable} }}
+    planners:
+      - kind: temporal.lifecycle
+        columns:
+          status: status
+          draft: created_at
+          active: activated_at
+          archived: archived_at
+        states: [draft, active, archived]
+        weights: [0.2, 0.5, 0.3]
+        start:
+          kind: range
+          min: "2024-01-01T00:00:00Z"
+          max: "2024-06-01T00:00:00Z"
+        step:
+          kind: uniform
+          unit: seconds
+          min: 60
+          max: 86400
+"#
+    )
+}
+
+#[test]
+fn lifecycle_only_reaches_legal_states_with_ordered_timestamps() {
+    let sink = run(&lifecycle_model(1, 20_000, true));
+    let statuses: Vec<&str> = sink.column("status").map(status_text).collect();
+    let legal = ["draft", "active", "archived"];
+    for (i, status) in statuses.iter().enumerate() {
+        assert!(legal.contains(status), "row {i}: illegal status {status}");
+    }
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (i, ((status, created), (activated, archived))) in statuses
+        .iter()
+        .zip(sink.column("created_at"))
+        .zip(sink.column("activated_at").zip(sink.column("archived_at")))
+        .enumerate()
+    {
+        seen.insert(status);
+        assert!(!created.is_null(), "row {i}: created_at must be set");
+        let created_ns = instant_ns(datetime_text(created));
+        match *status {
+            "draft" => {
+                assert!(activated.is_null(), "row {i}: draft must not be activated");
+                assert!(archived.is_null(), "row {i}: draft must not be archived");
+            }
+            "active" => {
+                assert!(!activated.is_null(), "row {i}: active must be activated");
+                assert!(archived.is_null(), "row {i}: active must not be archived");
+                let activated_ns = instant_ns(datetime_text(activated));
+                assert!(
+                    created_ns <= activated_ns,
+                    "row {i}: created after activated"
+                );
+            }
+            "archived" => {
+                assert!(
+                    !activated.is_null(),
+                    "row {i}: archived must have been activated"
+                );
+                assert!(
+                    !archived.is_null(),
+                    "row {i}: archived must carry archived_at"
+                );
+                let activated_ns = instant_ns(datetime_text(activated));
+                let archived_ns = instant_ns(datetime_text(archived));
+                assert!(
+                    created_ns <= activated_ns,
+                    "row {i}: created after activated"
+                );
+                assert!(
+                    activated_ns <= archived_ns,
+                    "row {i}: activated after archived"
+                );
+            }
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    // With positive weights on all three states, a large sample reaches all of them.
+    assert_eq!(
+        seen.len(),
+        3,
+        "expected all three states to occur, saw {seen:?}"
+    );
+}
+
+#[test]
+fn lifecycle_seeded_output_repeats_and_differs_by_seed() {
+    let first = run(&lifecycle_model(7, 1_000, true));
+    let again = run(&lifecycle_model(7, 1_000, true));
+    let other = run(&lifecycle_model(8, 1_000, true));
+    assert_eq!(first.rows, again.rows, "same seed must reproduce rows");
+    assert_ne!(first.rows, other.rows, "a different seed must diverge");
+}
+
+#[test]
+fn lifecycle_returns_exact_verification_predicates() {
+    use sql_splitter::generate::{PlannerPredicate, PredicateGuard};
+
+    let plan = compile_result(&lifecycle_model(1, 10, true)).expect("model compiles cleanly");
+    let predicates =
+        plan.table("orders").expect("orders table").planners[0].verification_predicates();
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NotNullWhen { column, guard: PredicateGuard::Equals { column: status, value } }
+            if column == "activated_at" && status == "status" && value == "active"
+    )));
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NullWhen { column, guard: PredicateGuard::Equals { column: status, value } }
+            if column == "activated_at" && status == "status" && value == "draft"
+    )));
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::Ordering { earlier, later, .. }
+            if earlier == "created_at" && later == "activated_at"
+    )));
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::Ordering { earlier, later, .. }
+            if earlier == "activated_at" && later == "archived_at"
+    )));
+}
+
+#[test]
+fn lifecycle_unknown_status_vocabulary_is_a_compile_error() {
+    let yaml =
+        lifecycle_model(1, 10, true).replace("archived: archived_at", "canceled: archived_at");
+    assert!(compile_err_code(&yaml).contains(&"GEN-LIFECYCLE-STATUS-VOCABULARY".to_string()));
+}
+
+#[test]
+fn lifecycle_impossible_nullability_is_a_compile_error() {
+    // archived_at is non-nullable, but draft/active rows (weight > 0) leave it null.
+    let yaml = lifecycle_model(1, 10, false);
+    assert!(compile_err_code(&yaml).contains(&"GEN-LIFECYCLE-NULLABILITY".to_string()));
+}
+
+#[test]
+fn lifecycle_impossible_range_is_a_compile_error() {
+    let yaml =
+        lifecycle_model(1, 10, true).replace("min: 60", "min: \"100000000000000000000000000\"");
+    assert!(compile_err_code(&yaml).contains(&"GEN-LIFECYCLE-STEP".to_string()));
+}
+
+#[test]
+fn lifecycle_missing_owned_column_is_a_compile_error() {
+    let yaml = lifecycle_model(1, 10, true).replace("status: status", "status: nonexistent_column");
+    assert!(compile_err_code(&yaml).contains(&"GEN-LIFECYCLE-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn lifecycle_ownership_collision_is_a_compile_error() {
+    let yaml = lifecycle_model(1, 10, true).replace(
+        "    planners:",
+        "    columns:\n      status:\n        generator: { kind: constant, value: draft }\n    planners:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}

@@ -599,6 +599,20 @@ pub enum PlannerPredicate {
         /// The rows the assertion applies to.
         guard: PredicateGuard,
     },
+    /// On every row the `guard` selects (or every row when `guard` is `None`)
+    /// where both endpoints are non-`NULL`, `earlier` (compared as epoch
+    /// nanoseconds) is at most `later`. A `NULL` endpoint never violates the
+    /// predicate — Task 27's `temporal.lifecycle` planner uses `NULL` to mean
+    /// "state not yet reached", so an unreached column's absence does not
+    /// participate in the ordering.
+    Ordering {
+        /// The timestamp column expected to occur first.
+        earlier: String,
+        /// The timestamp column expected to occur at or after `earlier`.
+        later: String,
+        /// The rows the ordering applies to; `None` means every row.
+        guard: Option<PredicateGuard>,
+    },
 }
 
 /// A row-level condition selecting which rows a [`PlannerPredicate`] applies to.
@@ -807,6 +821,15 @@ impl ExtensionRegistry {
             .expect("built-in planner kinds are collision-free");
         registry
             .register_planner(Box::new(super::planners::OrderFamilyFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::TemporalTimestampsFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::TemporalSoftDeleteFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::TemporalLifecycleFactory))
             .expect("built-in planner kinds are collision-free");
         registry
     }

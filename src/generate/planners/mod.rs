@@ -14,7 +14,11 @@
 pub mod interval;
 pub mod order_family;
 pub mod progress;
+pub mod structural;
 
 pub use interval::TemporalIntervalFactory;
 pub use order_family::OrderFamilyFactory;
 pub use progress::ProgressCountersFactory;
+pub use structural::{
+    TemporalLifecycleFactory, TemporalSoftDeleteFactory, TemporalTimestampsFactory,
+};

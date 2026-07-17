@@ -1231,6 +1231,25 @@ fn evaluate_predicate<'v>(
         PlannerPredicate::NonNegative { columns } => columns
             .iter()
             .any(|col| matches!(value_of(col).and_then(int_of), Some(v) if v < 0)),
+        PlannerPredicate::Ordering {
+            earlier,
+            later,
+            guard,
+        } => {
+            if !guard_selects(guard.as_ref(), value_of) {
+                false
+            } else {
+                match (
+                    value_of(earlier).and_then(epoch_nanos),
+                    value_of(later).and_then(epoch_nanos),
+                ) {
+                    (Some(earlier_ns), Some(later_ns)) => {
+                        floor_sec(earlier_ns) > floor_sec(later_ns)
+                    }
+                    _ => false,
+                }
+            }
+        }
     };
     violated.then_some(slug)
 }
@@ -1244,6 +1263,7 @@ fn predicate_slug(predicate: &PlannerPredicate, table: &str) -> String {
         PlannerPredicate::InRange { .. } => "in_range",
         PlannerPredicate::CounterSum { .. } => "counter_sum",
         PlannerPredicate::NonNegative { .. } => "non_negative",
+        PlannerPredicate::Ordering { .. } => "ordering",
     };
     format!("planner_{kind}:{table}")
 }
