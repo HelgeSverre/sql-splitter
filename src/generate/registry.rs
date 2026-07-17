@@ -486,6 +486,36 @@ pub trait CompiledPlanner: Send {
     fn take_family_children(&mut self) -> Vec<Vec<GeneratedValue>> {
         Vec::new()
     }
+
+    /// Cross-table sum invariants this family planner guarantees between a
+    /// parent aggregate column and the child rows that reference each parent
+    /// row. Same-table planners (whose invariants are stated as
+    /// [`verification_predicates`](Self::verification_predicates)) return none;
+    /// a family planner (e.g. `commerce.order_family`) surfaces the equalities
+    /// the verification stage (Task 26) checks by grouping child rows on the
+    /// declared [`family_relationship`](Self::family_relationship) foreign key.
+    /// Default: none.
+    fn family_sum_checks(&self) -> Vec<FamilySumCheck> {
+        Vec::new()
+    }
+}
+
+/// A cross-table sum invariant: over the child rows of the
+/// [`CompiledPlanner::family_child_table`] that reference a given parent row,
+/// the integer value of `child_column` sums exactly to the integer value of the
+/// parent's `parent_column`. Money columns are compared in currency minor units,
+/// so a verifier normalizes decimal/text renderings to the same fixed scale
+/// before summing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilySumCheck {
+    /// The named relationship (declared on the child table) whose foreign key
+    /// groups child rows under their parent — the same name
+    /// [`CompiledPlanner::family_relationship`] returns.
+    pub relationship: String,
+    /// The parent aggregate column the child values must sum to.
+    pub parent_column: String,
+    /// The child column summed across every child of a parent row.
+    pub child_column: String,
 }
 
 /// A machine-checkable invariant a planner guarantees over the columns it owns.

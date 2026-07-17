@@ -766,6 +766,62 @@ impl PublicationSet {
     }
 }
 
+/// The outcome of publishing several destinations that are *not* one atomic
+/// cross-file transaction. Each destination's own no-truncation-before-success
+/// guarantee still holds, but a failure partway through can leave earlier
+/// destinations already published; [`PartialPublication`] reports exactly which
+/// destinations landed and which one failed, so a caller never has to pretend
+/// the set was pairwise atomic across filesystems.
+#[derive(Debug)]
+pub struct PartialPublication {
+    /// Destinations that were published before the failure, in publish order.
+    pub published: Vec<PathBuf>,
+    /// The destination whose rename failed.
+    pub failed: PathBuf,
+    /// The underlying I/O error.
+    pub source: io::Error,
+}
+
+impl std::fmt::Display for PartialPublication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "partial publication: failed to publish `{}` ({}); already published: [{}]",
+            self.failed.display(),
+            self.source,
+            self.published
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl std::error::Error for PartialPublication {}
+
+/// Publish a sequence of already-written [`AtomicOutput`]s in order, renaming
+/// each finished temp file over its destination. Returns [`PartialPublication`]
+/// if a rename fails after one or more destinations were already published —
+/// honestly reporting that the set is not atomic across files/filesystems.
+pub fn publish_in_order(outputs: Vec<AtomicOutput>) -> Result<(), PartialPublication> {
+    let mut published = Vec::new();
+    for output in outputs {
+        let destination = output.destination().to_path_buf();
+        match output.commit() {
+            Ok(()) => published.push(destination),
+            Err(source) => {
+                return Err(PartialPublication {
+                    published,
+                    failed: destination,
+                    source,
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
 // --- Family state + budget ---------------------------------------------------
 
 /// An exact memory budget (in bytes) for a correlated table family's buffered

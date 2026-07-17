@@ -581,9 +581,58 @@ impl CompiledPlanner for OrderFamilyPlanner {
     fn take_family_children(&mut self) -> Vec<Vec<GeneratedValue>> {
         std::mem::take(&mut self.pending_children)
     }
+
+    fn family_sum_checks(&self) -> Vec<crate::generate::registry::FamilySumCheck> {
+        use crate::generate::registry::FamilySumCheck;
+
+        // Only the roles that are a pure sum of the matching child column are
+        // stated as sum checks: a per-line `discount`/`tax` sums exactly to its
+        // parent aggregate by construction (largest-remainder apportionment).
+        // `subtotal`/`total`/`shipping` involve a product or the shipping offset,
+        // so they are not a single-column sum and are intentionally omitted here
+        // (the structural + apportionment invariants still hold internally).
+        let pure_sum_roles = [ParentRole::Discount, ParentRole::Tax];
+        let child_role_of = |parent: ParentRole| match parent {
+            ParentRole::Discount => Some(ChildRole::Discount),
+            ParentRole::Tax => Some(ChildRole::Tax),
+            _ => None,
+        };
+
+        pure_sum_roles
+            .into_iter()
+            .filter_map(|parent_role| {
+                let child_role = child_role_of(parent_role)?;
+                let parent_column = self.column_for_parent_role(parent_role)?;
+                let child_column = self.column_for_child_role(child_role)?;
+                Some(FamilySumCheck {
+                    relationship: self.relationship.clone(),
+                    parent_column,
+                    child_column,
+                })
+            })
+            .collect()
+    }
 }
 
 impl OrderFamilyPlanner {
+    /// The schema column name the planner writes for a parent role, if that role
+    /// is configured for this family.
+    fn column_for_parent_role(&self, role: ParentRole) -> Option<String> {
+        self.parent_roles
+            .iter()
+            .position(|candidate| *candidate == role)
+            .map(|index| self.parent_writes[index].clone())
+    }
+
+    /// The schema column name the planner writes for a child role, if that role
+    /// is configured for this family.
+    fn column_for_child_role(&self, role: ChildRole) -> Option<String> {
+        self.child_roles
+            .iter()
+            .position(|candidate| *candidate == role)
+            .map(|index| self.child_writes[index].clone())
+    }
+
     fn parent_family_for(&self, role: ParentRole) -> &SqlTypeFamily {
         let index = self
             .parent_roles

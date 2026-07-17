@@ -175,6 +175,10 @@ pub enum GenerateError {
     /// Carries the full bag, including any warnings, so a caller can report
     /// every problem rather than just the first.
     Diagnostics(DiagnosticBag),
+    /// `--verify` audited the generated SQL and one or more exact checks
+    /// failed; the prior destination is left untouched. Carries a value-free
+    /// summary of each failed check.
+    VerificationFailed(Vec<String>),
 }
 
 impl GenerateError {
@@ -196,6 +200,13 @@ impl fmt::Display for GenerateError {
             GenerateError::Exhausted(message) => write!(f, "{message}"),
             GenerateError::InvalidInput(message) => write!(f, "{message}"),
             GenerateError::Diagnostics(bag) => write!(f, "{bag}"),
+            GenerateError::VerificationFailed(failures) => write!(
+                f,
+                "GEN-VERIFY-FAILED: generated output failed verification and was not published; \
+                 {} check(s) failed: {}",
+                failures.len(),
+                failures.join("; ")
+            ),
         }
     }
 }

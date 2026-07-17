@@ -285,11 +285,11 @@ fn compress_with_stdout_output_exits_with_usage_code() {
 }
 
 // ===========================================================================
-// End-to-end: not-yet-implemented flags fail clearly (exit code 1)
+// End-to-end: --verify generates, audits, and atomically publishes
 // ===========================================================================
 
 #[test]
-fn verify_is_not_yet_available() {
+fn verify_generates_audits_and_publishes_to_a_real_file() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("synthetic.sql");
     let output = sql_splitter_bin()
@@ -298,9 +298,15 @@ fn verify_is_not_yet_available() {
         .output()
         .expect("failed to run sql-splitter");
 
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not available"), "stderr: {stderr}");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out.exists(), "verified output should be published");
+    let published = std::fs::read_to_string(&out).unwrap();
+    assert!(published.contains("INSERT INTO"), "{published}");
 }
 
 // ===========================================================================

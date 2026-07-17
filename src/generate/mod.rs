@@ -95,6 +95,7 @@ pub mod planners;
 pub mod registry;
 pub mod seed;
 pub mod value;
+pub mod verify;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -121,9 +122,9 @@ pub use engine::{
 };
 pub use generators::ConstantFactory;
 pub use output::{
-    install_interrupt_handler, AtomicOutput, CancellationToken, FamilyBudget, FamilyBuffer,
-    FamilyState, ProtectedSpool, PublicationSet, SpillKind, SpoolReader, SpoolWriter, SpooledRow,
-    TempConfig,
+    install_interrupt_handler, publish_in_order, AtomicOutput, CancellationToken, FamilyBudget,
+    FamilyBuffer, FamilyState, PartialPublication, ProtectedSpool, PublicationSet, SpillKind,
+    SpoolReader, SpoolWriter, SpooledRow, TempConfig,
 };
 pub use plan::{
     ColumnOwner, CompiledOutput, CompiledRelationship, DeferredConstraints, ExecutionPhase,
@@ -132,12 +133,16 @@ pub use plan::{
 };
 pub use registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,
-    CompiledPlanner, Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory,
-    KeyRecipe, ModifierDescriptor, ModifierFactory, PlanContext, PlannerDescriptor, PlannerFactory,
-    PlannerPredicate, PredicateGuard, RowContext, RowView, Verification,
+    CompiledPlanner, Determinism, ExtensionRegistry, FamilySumCheck, GeneratorDescriptor,
+    GeneratorFactory, KeyRecipe, ModifierDescriptor, ModifierFactory, PlanContext,
+    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, RowContext, RowView,
+    Verification,
 };
 pub use seed::{derive_seed, SeedRoot, StreamId};
 pub use value::{GenerateError, GeneratedValue};
+pub use verify::{
+    CheckOutcome, CheckStatus, DistributionExpectation, GenerationVerifier, VerificationReport,
+};
 
 /// How a [`Generate::run`] call should treat the compiled model.
 ///
@@ -207,6 +212,10 @@ pub struct GenerateRequest {
     pub mode: RunMode,
     /// Whether to build the `--explain` inference report.
     pub explain: bool,
+    /// Whether to verify the generated SQL against the compiled plan and publish
+    /// atomically only if the audit passes (`--verify`). Requires a filesystem
+    /// SQL destination under [`RunMode::Generate`].
+    pub verify: bool,
     /// How to profile `input`, if given.
     pub source: SourceOptions,
 }
@@ -302,6 +311,7 @@ impl Generate {
             render,
             mode,
             explain,
+            verify,
             source,
         } = request;
 
@@ -326,10 +336,17 @@ impl Generate {
         diagnostics.diagnostics.extend(plan.diagnostics.clone());
 
         // Scan the final resolved model (explicit + inferred rules) for
-        // source-derived literals, and emit the self-contained model if asked.
+        // source-derived literals.
         let source_values = model.source_value_uses();
-        if let Some(target) = &emit {
-            emit_model(&model, &plan, explicit_seed, target)?;
+
+        // Under `--verify` the SQL is rendered to a protected temp, audited, and
+        // published atomically *only if* the audit passes; an emitted model is
+        // published alongside it (never before verification succeeds). So the
+        // ordinary direct emit is skipped for the verify path.
+        if !verify {
+            if let Some(target) = &emit {
+                emit_model(&model, &plan, explicit_seed, target)?;
+            }
         }
 
         let explain = if explain {
@@ -346,6 +363,14 @@ impl Generate {
             explain,
         };
 
+        if verify {
+            let rows = run_verified(&model, plan, explicit_seed, output, emit, render)?;
+            return Ok(GenerateReport {
+                rows_written: rows,
+                ..report
+            });
+        }
+
         match mode {
             RunMode::Check | RunMode::EmitModel => Ok(report),
             RunMode::DryRun => Ok(GenerateReport {
@@ -361,6 +386,92 @@ impl Generate {
             }
         }
     }
+}
+
+/// Render SQL to a protected temp beside the destination, verify it against the
+/// compiled plan, and publish atomically only if the full audit passes. A failed
+/// audit leaves every prior destination untouched and returns
+/// [`GenerateError::VerificationFailed`]. When a resolved model is also requested
+/// it is published *after* SQL verification succeeds; a failure publishing the
+/// second file is reported as a precise partial publication rather than as a
+/// pretended pairwise-atomic write.
+fn run_verified(
+    model: &SyntheticModel,
+    plan: GenerationPlan,
+    explicit_seed: Option<u64>,
+    output: OutputTarget,
+    emit: Option<OutputTarget>,
+    render: RenderOptions,
+) -> Result<u64, GenerateError> {
+    let destination =
+        match output {
+            OutputTarget::Path(path) => path,
+            OutputTarget::Discard => return Err(GenerateError::InvalidInput(
+                "GEN-VERIFY-NO-FILE: --verify requires a filesystem SQL destination, not stdout"
+                    .into(),
+            )),
+        };
+
+    // Stage the resolved model YAML up front so a serialization error fails
+    // before anything is rendered.
+    let emit_plan = match &emit {
+        Some(OutputTarget::Path(path)) => Some((
+            path.clone(),
+            resolved_model_yaml(model, &plan, explicit_seed)?,
+        )),
+        _ => None,
+    };
+
+    let verifier = verify::GenerationVerifier::new(&plan).dialect(render.dialect);
+
+    // Render SQL into a protected temp file beside the destination.
+    let mut sql_output = AtomicOutput::create(&destination).map_err(|error| {
+        GenerateError::InvalidInput(format!(
+            "GEN-VERIFY-STAGE: cannot stage output beside `{}`: {error}",
+            destination.display()
+        ))
+    })?;
+    let temp_path = sql_output.temp_path().to_path_buf();
+    let rows_written = {
+        let mut renderer = SqlRenderer::new(sql_output.writer(), render);
+        let engine_report = GenerationEngine::new(plan).run(&mut renderer)?;
+        renderer.finish()?;
+        engine_report.rows_written
+    };
+
+    // Audit the freshly rendered temp file.
+    let report = verifier.verify_path(&temp_path)?;
+    if !report.passed() {
+        let failures: Vec<String> = report
+            .failures()
+            .map(|check| format!("{} ({})", check.name, check.detail))
+            .collect();
+        // Dropping `sql_output` removes the temp; the destination is untouched.
+        return Err(GenerateError::VerificationFailed(failures));
+    }
+
+    // Verification passed: publish the SQL, then the model (if any).
+    let mut outputs = vec![sql_output];
+    if let Some((path, yaml)) = emit_plan {
+        let mut model_output = AtomicOutput::create(&path).map_err(|error| {
+            GenerateError::InvalidInput(format!(
+                "GEN-VERIFY-STAGE: cannot stage model beside `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        use std::io::Write;
+        model_output
+            .writer()
+            .write_all(yaml.as_bytes())
+            .map_err(|error| GenerateError::InvalidInput(format!("GEN-EMIT-IO: {error}")))?;
+        outputs.push(model_output);
+    }
+
+    publish_in_order(outputs).map_err(|partial| {
+        GenerateError::InvalidInput(format!("GEN-VERIFY-PARTIAL-PUBLISH: {partial}"))
+    })?;
+
+    Ok(rows_written)
 }
 
 /// A resolved base model plus the diagnostics and inference decisions gathered
@@ -505,12 +616,16 @@ fn push_coded_warnings(bag: &mut DiagnosticBag, default_code: &str, messages: &[
 /// was explicitly seeded — an unseeded run emits no seed so reloading it is
 /// intentionally fresh. Inference already omits raw samples, so the emitted
 /// model carries only bounded, non-literal `profiles` metadata.
-fn emit_model(
+/// Build the resolved, self-contained `--emit-config` YAML for `model`/`plan`.
+///
+/// Freezes each table's resolved row count, pins `inference: disabled`, and
+/// records the seed only for an explicitly-seeded run. Shared by the direct
+/// [`emit_model`] write and the `--verify` atomic-emit path.
+fn resolved_model_yaml(
     model: &SyntheticModel,
     plan: &GenerationPlan,
     explicit_seed: Option<u64>,
-    target: &OutputTarget,
-) -> Result<(), GenerateError> {
+) -> Result<String, GenerateError> {
     let mut emit = model.clone();
 
     let resolved: BTreeMap<String, u64> = plan
@@ -522,8 +637,17 @@ fn emit_model(
     emit.defaults.inference = InferenceMode::Disabled;
     emit.seed = explicit_seed;
 
-    let yaml = serde_yaml_ng::to_string(&emit)
-        .map_err(|error| GenerateError::InvalidInput(format!("GEN-EMIT-SERIALIZE: {error}")))?;
+    serde_yaml_ng::to_string(&emit)
+        .map_err(|error| GenerateError::InvalidInput(format!("GEN-EMIT-SERIALIZE: {error}")))
+}
+
+fn emit_model(
+    model: &SyntheticModel,
+    plan: &GenerationPlan,
+    explicit_seed: Option<u64>,
+    target: &OutputTarget,
+) -> Result<(), GenerateError> {
+    let yaml = resolved_model_yaml(model, plan, explicit_seed)?;
 
     match target {
         OutputTarget::Path(path) => fs::write(path, yaml).map_err(|error| {
@@ -652,6 +776,7 @@ pub struct GenerateBuilder {
     render: RenderOptions,
     mode: RunMode,
     explain: bool,
+    verify: bool,
     source: SourceOptions,
 }
 
@@ -742,10 +867,11 @@ impl GenerateBuilder {
         self
     }
 
-    /// Whether to verify generated rows against the source's constraints
-    /// after generation. Accepted for forward compatibility; verification
-    /// itself lands in Task 26, so this is a no-op until then.
-    pub fn verify(self, _verify: bool) -> Self {
+    /// Whether to verify the generated SQL against the compiled plan and
+    /// publish atomically only if the audit passes. Requires a filesystem SQL
+    /// destination (`.output()`); a stdout destination is a usage error.
+    pub fn verify(mut self, verify: bool) -> Self {
+        self.verify = verify;
         self
     }
 
@@ -766,6 +892,13 @@ impl GenerateBuilder {
     /// `RunMode::Generate` needs `.output()`). Model-level problems surface
     /// later, from [`Generate::run`].
     fn build(self) -> Result<GenerateRequest, GenerateError> {
+        if self.verify && self.mode != RunMode::Generate {
+            return Err(GenerateError::InvalidInput(
+                "GEN-VERIFY-MODE: --verify generates and publishes; it cannot be combined with \
+                 check/dry-run/emit-only modes"
+                    .into(),
+            ));
+        }
         let output = match (self.mode, self.output) {
             (RunMode::Generate, Some(path)) => OutputTarget::Path(path),
             (RunMode::Generate, None) => {
@@ -779,6 +912,12 @@ impl GenerateBuilder {
             (RunMode::Check | RunMode::DryRun | RunMode::EmitModel, None) => OutputTarget::Discard,
         };
 
+        if self.verify && !matches!(output, OutputTarget::Path(_)) {
+            return Err(GenerateError::InvalidInput(
+                "GEN-VERIFY-NO-FILE: --verify requires a filesystem SQL destination".into(),
+            ));
+        }
+
         Ok(GenerateRequest {
             input: self.input,
             config: self.config,
@@ -788,6 +927,7 @@ impl GenerateBuilder {
             render: self.render,
             mode: self.mode,
             explain: self.explain,
+            verify: self.verify,
             source: self.source,
         })
     }

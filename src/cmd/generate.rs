@@ -369,11 +369,6 @@ impl GenerateArgs {
             )));
         }
 
-        if self.verify {
-            return Err(RequestError::unavailable(
-                "--verify is not available until Phase 3 (Task 26)",
-            ));
-        }
         if self.mssql_production_style {
             return Err(RequestError::unavailable(
                 "--mssql-production-style is not available yet",
@@ -469,6 +464,7 @@ impl GenerateArgs {
             render,
             mode,
             explain: self.explain,
+            verify: self.verify,
             source,
         };
 
