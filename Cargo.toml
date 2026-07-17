@@ -67,11 +67,22 @@ dirs = "6"
 rustyline = "17"
 schemars = "1"
 
+# Unix-only: a real, best-effort process-level Ctrl-C (SIGINT) handler and
+# explicit file-mode control for protected temporary files. `libc` is already
+# present transitively; declaring it directly keeps the dependency honest.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 test_data_gen = { path = "crates/test_data_gen" }
 jsonschema = "0.46"
+
+# Unix-only test support: set the umask and inspect file modes to prove the
+# protected-output permission guarantees.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [dev-dependencies.clap_mangen]
 version = "0.3"

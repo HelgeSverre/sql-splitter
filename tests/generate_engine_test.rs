@@ -2029,3 +2029,78 @@ fn rendered_mysql_output_passes_the_existing_validator() {
     let summary = Validator::new(options).validate().expect("validate runs");
     assert_eq!(summary.summary.errors, 0, "{summary:?}");
 }
+
+// --- Task 22: protected family spooling budget/spill ------------------------
+
+use sql_splitter::generate::output::{
+    FamilyBudget, FamilyBuffer, FamilyState, SpillKind, SpooledRow, TempConfig,
+};
+
+/// A family child row of roughly known size, so a budget can be sized to force
+/// (or avoid) a spill deterministically.
+fn family_child_row(row_index: u64) -> SpooledRow {
+    SpooledRow {
+        table_id: 2,
+        row_index,
+        values: vec![
+            GeneratedValue::Integer(row_index as i128),
+            GeneratedValue::Text(format!("child-{row_index}")),
+        ],
+    }
+}
+
+#[test]
+fn family_buffer_within_budget_stays_in_parent_state() {
+    let mut buffer = FamilyBuffer::new(
+        FamilyBudget { max_bytes: 1 << 20 },
+        2,
+        TempConfig::default(),
+        SpillKind::Child,
+    );
+    let rows: Vec<SpooledRow> = (0..8).map(family_child_row).collect();
+    for row in &rows {
+        buffer.push(row.clone()).unwrap();
+    }
+    assert!(matches!(buffer.state(), FamilyState::ParentState(_)));
+    assert_eq!(buffer.drain_rows().unwrap(), rows);
+}
+
+#[test]
+fn family_buffer_crossing_budget_spills_every_child_row_in_order() {
+    // A budget below a single row's footprint forces a spill; no child row may
+    // be dropped and none may be retained in an unbounded in-memory Vec.
+    let mut buffer = FamilyBuffer::new(
+        FamilyBudget { max_bytes: 8 },
+        2,
+        TempConfig::default(),
+        SpillKind::Child,
+    );
+    let rows: Vec<SpooledRow> = (0..64).map(family_child_row).collect();
+    for row in &rows {
+        buffer.push(row.clone()).unwrap();
+    }
+    assert!(buffer.is_spilled());
+    assert!(matches!(buffer.state(), FamilyState::ChildSpool(_)));
+    assert_eq!(buffer.drain_rows().unwrap(), rows);
+}
+
+#[test]
+fn family_buffer_with_large_estimate_spills_before_the_first_row() {
+    // A family known up front to exceed its budget spills before generation,
+    // choosing a protected spool rather than a transient in-memory spike.
+    let mut buffer = FamilyBuffer::with_estimate(
+        FamilyBudget { max_bytes: 1024 },
+        5,
+        TempConfig::default(),
+        SpillKind::Table,
+        1_000_000,
+    )
+    .unwrap();
+    assert!(buffer.is_spilled());
+    assert!(matches!(buffer.state(), FamilyState::TableSpool(_)));
+    let rows: Vec<SpooledRow> = (0..10).map(family_child_row).collect();
+    for row in &rows {
+        buffer.push(row.clone()).unwrap();
+    }
+    assert_eq!(buffer.drain_rows().unwrap(), rows);
+}

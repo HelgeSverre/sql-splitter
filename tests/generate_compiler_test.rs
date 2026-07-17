@@ -782,8 +782,9 @@ fn phases_and_columns_are_ordered_and_initially_unowned() {
     let phases: Vec<&str> = plan
         .phases
         .iter()
-        .map(|phase| match phase {
-            ExecutionPhase::Table(name) => name.as_str(),
+        .filter_map(|phase| match phase {
+            ExecutionPhase::Table(name) => Some(name.as_str()),
+            ExecutionPhase::Family(_) | ExecutionPhase::DeferredConstraints(_) => None,
         })
         .collect();
     assert_eq!(phases, vec!["customers", "orders"]);

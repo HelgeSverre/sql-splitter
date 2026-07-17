@@ -73,12 +73,51 @@ pub struct CompiledOutput {
 
 /// One unit of generation work, in execution order.
 ///
-/// Task 9 only distinguishes tables; `Family` (correlated multi-table groups)
-/// and `DeferredConstraints` arrive with Task 22's family planning.
+/// A [`Table`](Self::Table) phase generates one table on its own. A
+/// [`Family`](Self::Family) phase generates a correlated group of tables
+/// together under a shared memory budget (so cross-table correlations are
+/// coherent), and a [`DeferredConstraints`](Self::DeferredConstraints) phase
+/// records constraints (e.g. self-referential foreign keys, circular
+/// references) that are applied only after the referenced rows exist. The
+/// compiler emits `Family`/`DeferredConstraints` once the family planners of
+/// Tasks 23-25 drive them; the variants and their budget/spill machinery
+/// (see [`crate::generate::output::FamilyBuffer`]) land here in Task 22.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionPhase {
     /// Generate a single table's rows, identified by name.
     Table(String),
+    /// Generate a correlated family of tables together under one budget.
+    Family(FamilyPhase),
+    /// Apply constraints that could only be satisfied after their referents
+    /// were generated.
+    DeferredConstraints(DeferredConstraints),
+}
+
+/// A correlated family of tables generated together under a shared, exact
+/// memory budget.
+///
+/// The budget is fixed at compile time; at run time a
+/// [`crate::generate::output::FamilyBuffer`] keeps the family's buffered rows in
+/// memory only while under `budget_bytes` and spills to a protected spool the
+/// moment a push would cross it, so a family never retains every child row in an
+/// unbounded `Vec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyPhase {
+    /// A stable name for the family (typically its root parent table).
+    pub name: String,
+    /// The member tables, in dependency order (parents before children).
+    pub tables: Vec<String>,
+    /// The exact in-memory byte budget for the family's buffered rows.
+    pub budget_bytes: u64,
+}
+
+/// Constraints deferred until after the rows they reference are generated —
+/// self-referential or circular foreign keys the ordinary parent-before-child
+/// ordering cannot satisfy in one pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeferredConstraints {
+    /// The tables whose constraints are applied in this phase.
+    pub tables: Vec<String>,
 }
 
 /// A single selected table with its resolved row count and generation surface.

@@ -89,6 +89,7 @@
 pub mod compiler;
 pub mod engine;
 pub mod generators;
+pub mod output;
 pub mod plan;
 pub mod planners;
 pub mod registry;
@@ -119,9 +120,15 @@ pub use engine::{
     RandomAccessKeyGenerator, RowSink,
 };
 pub use generators::ConstantFactory;
+pub use output::{
+    install_interrupt_handler, AtomicOutput, CancellationToken, FamilyBudget, FamilyBuffer,
+    FamilyState, ProtectedSpool, PublicationSet, SpillKind, SpoolReader, SpoolWriter, SpooledRow,
+    TempConfig,
+};
 pub use plan::{
-    ColumnOwner, CompiledOutput, CompiledRelationship, ExecutionPhase, GenerationPlan,
-    PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
+    ColumnOwner, CompiledOutput, CompiledRelationship, DeferredConstraints, ExecutionPhase,
+    FamilyPhase, GenerationPlan, PlanEstimates, PlannedColumn, PlannedTable,
+    RelationshipDistribution, ResolvedTableSeed,
 };
 pub use registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,

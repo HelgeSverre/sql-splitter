@@ -3070,6 +3070,7 @@ dependencies = [
  "hex",
  "indicatif",
  "jsonschema",
+ "libc",
  "memchr",
  "once_cell",
  "rand 0.10.2",
