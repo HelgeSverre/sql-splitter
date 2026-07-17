@@ -20,7 +20,7 @@ pub use interval::TemporalIntervalFactory;
 pub use order_family::OrderFamilyFactory;
 pub use progress::ProgressCountersFactory;
 pub use structural::{
-    HierarchyTreeFactory, RelationJunctionPairFactory, RelationPolymorphicPairFactory,
-    RelationTenantFamilyFactory, TemporalLifecycleFactory, TemporalSoftDeleteFactory,
-    TemporalTimestampsFactory,
+    FileMetadataFactory, GeoCoordinatePairFactory, HierarchyTreeFactory,
+    RelationJunctionPairFactory, RelationPolymorphicPairFactory, RelationTenantFamilyFactory,
+    TemporalLifecycleFactory, TemporalSoftDeleteFactory, TemporalTimestampsFactory,
 };

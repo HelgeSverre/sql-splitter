@@ -2366,3 +2366,741 @@ fn compile_tenant_family(
         predicates,
     })
 }
+
+// =============================================================================
+// geo.coordinate_pair
+// =============================================================================
+
+/// Global inclusive latitude range, in whole degrees.
+const LAT_MIN_DEGREES: f64 = -90.0;
+const LAT_MAX_DEGREES: f64 = 90.0;
+/// Global inclusive longitude range, in whole degrees.
+const LON_MIN_DEGREES: f64 = -180.0;
+const LON_MAX_DEGREES: f64 = 180.0;
+
+/// Static description of the `geo.coordinate_pair` planner.
+///
+/// Note: no [`PlannerPredicate`] variant expresses a decimal-valued bounded
+/// range — [`PlannerPredicate::InRange`] is timestamp-only (it compares
+/// epoch nanoseconds; see Task 26/27). Range and bounding-box correctness are
+/// therefore guaranteed by construction (every draw is a `random_range` over
+/// the compiled bound) and covered by this module's tests, not by a runtime
+/// predicate.
+pub static GEO_COORDINATE_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "geo.coordinate_pair",
+    aliases: &[],
+    summary: "Draws a coherent (latitude, longitude) pair within [-90, 90] x [-180, 180] (or a configured bounding box), at a configurable decimal precision.",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Unsupported,
+    cross_table: false,
+};
+
+/// Factory for the `geo.coordinate_pair` planner.
+pub struct GeoCoordinatePairFactory;
+
+impl PlannerFactory for GeoCoordinatePairFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &GEO_COORDINATE_PAIR_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &PlannerConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        compile_coordinate_pair(config, context)
+            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
+    }
+}
+
+struct GeoCoordinatePairPlanner {
+    writes: Vec<String>,
+    lat_family: SqlTypeFamily,
+    lon_family: SqlTypeFamily,
+    lat_min_minor: i128,
+    lat_max_minor: i128,
+    lon_min_minor: i128,
+    lon_max_minor: i128,
+    scale: u32,
+    lat_rng: ChaCha8Rng,
+    lon_rng: ChaCha8Rng,
+}
+
+impl CompiledPlanner for GeoCoordinatePairPlanner {
+    fn writes(&self) -> &[String] {
+        &self.writes
+    }
+
+    fn generate_row(
+        &mut self,
+        _row_index: u64,
+        output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        // Both columns are drawn from independent streams, in a fixed order,
+        // every row — the pair is coherent (always present together) simply
+        // because a single planner call produces both.
+        let lat_minor = self
+            .lat_rng
+            .random_range(self.lat_min_minor..=self.lat_max_minor);
+        let lon_minor = self
+            .lon_rng
+            .random_range(self.lon_min_minor..=self.lon_max_minor);
+        output[0] = render_decimal(&self.lat_family, lat_minor, self.scale);
+        output[1] = render_decimal(&self.lon_family, lon_minor, self.scale);
+        Ok(())
+    }
+
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        Vec::new()
+    }
+}
+
+/// Render a fixed-point value in whichever representation `family` expects
+/// (mirrors `semantic.rs`'s private `decimal_value`; kept local since that
+/// helper is module-private and duplicating it here is cheaper than exposing
+/// it across modules for one shared use).
+fn render_decimal(family: &SqlTypeFamily, minor: i128, scale: u32) -> GeneratedValue {
+    match family {
+        SqlTypeFamily::Decimal => GeneratedValue::Decimal { minor, scale },
+        _ => GeneratedValue::Text(format_fixed_point(minor, scale)),
+    }
+}
+
+/// Render `minor` units at `scale` decimal places as a fixed-point string.
+fn format_fixed_point(minor: i128, scale: u32) -> String {
+    if scale == 0 {
+        return minor.to_string();
+    }
+    let negative = minor < 0;
+    let magnitude = minor.unsigned_abs();
+    let factor = 10u128.pow(scale);
+    let whole = magnitude / factor;
+    let frac = magnitude % factor;
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{whole}.{frac:0width$}", width = scale as usize)
+}
+
+fn compile_coordinate_pair(
+    config: &PlannerConfig,
+    context: &CompileContext<'_>,
+) -> Result<GeoCoordinatePairPlanner, DiagnosticBag> {
+    const COLUMN_CODE: &str = "GEN-COORDINATE-COLUMN-MISSING";
+    const BOUNDS_CODE: &str = "GEN-COORDINATE-BOUNDS";
+    const PRECISION_CODE: &str = "GEN-COORDINATE-PRECISION";
+    let mut bag = DiagnosticBag::default();
+    let table = context.table();
+    let path = context.path();
+    let columns = config.args.get("columns");
+
+    let lat_col = resolve_required(columns, "latitude", table, path, COLUMN_CODE, &mut bag);
+    let lon_col = resolve_required(columns, "longitude", table, path, COLUMN_CODE, &mut bag);
+
+    let precision = config.args.get("precision").and_then(as_i128).unwrap_or(6);
+    if !(0..=9).contains(&precision) {
+        bag.error(
+            PRECISION_CODE,
+            format!("{path}.precision"),
+            format!("geo.coordinate_pair `precision` {precision} must be within [0, 9]"),
+        );
+    }
+
+    let bounds = config.args.get("bounds");
+    let min_lat = bounds
+        .and_then(|b| b.get("min_lat"))
+        .and_then(as_f64)
+        .unwrap_or(LAT_MIN_DEGREES);
+    let max_lat = bounds
+        .and_then(|b| b.get("max_lat"))
+        .and_then(as_f64)
+        .unwrap_or(LAT_MAX_DEGREES);
+    let min_lon = bounds
+        .and_then(|b| b.get("min_lon"))
+        .and_then(as_f64)
+        .unwrap_or(LON_MIN_DEGREES);
+    let max_lon = bounds
+        .and_then(|b| b.get("max_lon"))
+        .and_then(as_f64)
+        .unwrap_or(LON_MAX_DEGREES);
+
+    if !(LAT_MIN_DEGREES..=LAT_MAX_DEGREES).contains(&min_lat)
+        || !(LAT_MIN_DEGREES..=LAT_MAX_DEGREES).contains(&max_lat)
+        || min_lat > max_lat
+    {
+        bag.error(
+            BOUNDS_CODE,
+            format!("{path}.bounds"),
+            format!(
+                "geo.coordinate_pair latitude bounds [{min_lat}, {max_lat}] must lie within [-90, 90] with min <= max"
+            ),
+        );
+    }
+    if !(LON_MIN_DEGREES..=LON_MAX_DEGREES).contains(&min_lon)
+        || !(LON_MIN_DEGREES..=LON_MAX_DEGREES).contains(&max_lon)
+        || min_lon > max_lon
+    {
+        bag.error(
+            BOUNDS_CODE,
+            format!("{path}.bounds"),
+            format!(
+                "geo.coordinate_pair longitude bounds [{min_lon}, {max_lon}] must lie within [-180, 180] with min <= max"
+            ),
+        );
+    }
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
+    let lat = lat_col.expect("latitude resolved without errors");
+    let lon = lon_col.expect("longitude resolved without errors");
+    let scale = precision as u32;
+    let factor = 10f64.powi(scale as i32);
+    let lat_min_minor = (min_lat * factor).round() as i128;
+    let lat_max_minor = (max_lat * factor).round() as i128;
+    let lon_min_minor = (min_lon * factor).round() as i128;
+    let lon_max_minor = (max_lon * factor).round() as i128;
+
+    let writes = vec![lat.name.clone(), lon.name.clone()];
+    let lat_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        lat.name.clone(),
+        "geo.coordinate_pair.latitude",
+    ));
+    let lon_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        lon.name.clone(),
+        "geo.coordinate_pair.longitude",
+    ));
+
+    Ok(GeoCoordinatePairPlanner {
+        writes,
+        lat_family: lat.family.clone(),
+        lon_family: lon.family.clone(),
+        lat_min_minor,
+        lat_max_minor,
+        lon_min_minor,
+        lon_max_minor,
+        scale,
+        lat_rng,
+        lon_rng,
+    })
+}
+
+// =============================================================================
+// file.metadata
+// =============================================================================
+
+/// One recognized `(extension, mime_type)` pairing `file.metadata` can draw.
+/// Extensions are matched case-insensitively but stored (and rendered)
+/// lowercase.
+struct FileTypeEntry {
+    extension: &'static str,
+    mime_type: &'static str,
+}
+
+/// The built-in extension/MIME catalog. Intentionally a plain, well-known
+/// mapping (not tied to any locale or external crate) so `mime_type` is
+/// always consistent with `extension` by construction.
+const FILE_TYPE_CATALOG: &[FileTypeEntry] = &[
+    FileTypeEntry {
+        extension: "txt",
+        mime_type: "text/plain",
+    },
+    FileTypeEntry {
+        extension: "csv",
+        mime_type: "text/csv",
+    },
+    FileTypeEntry {
+        extension: "json",
+        mime_type: "application/json",
+    },
+    FileTypeEntry {
+        extension: "xml",
+        mime_type: "application/xml",
+    },
+    FileTypeEntry {
+        extension: "html",
+        mime_type: "text/html",
+    },
+    FileTypeEntry {
+        extension: "css",
+        mime_type: "text/css",
+    },
+    FileTypeEntry {
+        extension: "js",
+        mime_type: "text/javascript",
+    },
+    FileTypeEntry {
+        extension: "md",
+        mime_type: "text/markdown",
+    },
+    FileTypeEntry {
+        extension: "jpg",
+        mime_type: "image/jpeg",
+    },
+    FileTypeEntry {
+        extension: "jpeg",
+        mime_type: "image/jpeg",
+    },
+    FileTypeEntry {
+        extension: "png",
+        mime_type: "image/png",
+    },
+    FileTypeEntry {
+        extension: "gif",
+        mime_type: "image/gif",
+    },
+    FileTypeEntry {
+        extension: "webp",
+        mime_type: "image/webp",
+    },
+    FileTypeEntry {
+        extension: "svg",
+        mime_type: "image/svg+xml",
+    },
+    FileTypeEntry {
+        extension: "bmp",
+        mime_type: "image/bmp",
+    },
+    FileTypeEntry {
+        extension: "pdf",
+        mime_type: "application/pdf",
+    },
+    FileTypeEntry {
+        extension: "zip",
+        mime_type: "application/zip",
+    },
+    FileTypeEntry {
+        extension: "gz",
+        mime_type: "application/gzip",
+    },
+    FileTypeEntry {
+        extension: "tar",
+        mime_type: "application/x-tar",
+    },
+    FileTypeEntry {
+        extension: "mp3",
+        mime_type: "audio/mpeg",
+    },
+    FileTypeEntry {
+        extension: "wav",
+        mime_type: "audio/wav",
+    },
+    FileTypeEntry {
+        extension: "mp4",
+        mime_type: "video/mp4",
+    },
+    FileTypeEntry {
+        extension: "mov",
+        mime_type: "video/quicktime",
+    },
+    FileTypeEntry {
+        extension: "avi",
+        mime_type: "video/x-msvideo",
+    },
+    FileTypeEntry {
+        extension: "doc",
+        mime_type: "application/msword",
+    },
+    FileTypeEntry {
+        extension: "docx",
+        mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    FileTypeEntry {
+        extension: "xls",
+        mime_type: "application/vnd.ms-excel",
+    },
+    FileTypeEntry {
+        extension: "xlsx",
+        mime_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+    FileTypeEntry {
+        extension: "ppt",
+        mime_type: "application/vnd.ms-powerpoint",
+    },
+    FileTypeEntry {
+        extension: "pptx",
+        mime_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    },
+    FileTypeEntry {
+        extension: "bin",
+        mime_type: "application/octet-stream",
+    },
+];
+
+fn find_file_type(extension: &str) -> Option<&'static FileTypeEntry> {
+    FILE_TYPE_CATALOG
+        .iter()
+        .find(|entry| entry.extension.eq_ignore_ascii_case(extension))
+}
+
+/// Plain, unremarkable words a synthetic file name is built from — no
+/// locale/crate dependency, just enough variety to look plausible.
+const FILE_NAME_WORDS: &[&str] = &[
+    "report",
+    "invoice",
+    "photo",
+    "backup",
+    "export",
+    "summary",
+    "dataset",
+    "image",
+    "archive",
+    "document",
+    "manifest",
+    "snapshot",
+    "profile",
+    "transcript",
+    "spreadsheet",
+    "presentation",
+    "recording",
+    "scan",
+    "thumbnail",
+    "upload",
+];
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// A supported `hash_kind`: fixes the hex digest length `file.metadata`
+/// draws. The digest is a uniformly random hex string of the correct
+/// length/charset for the kind — digest-shaped, but never a hash of any real
+/// content, so it is unmistakably synthetic (the same posture as
+/// `identifier.hash`).
+#[derive(Clone, Copy)]
+enum HashKind {
+    Md5,
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+impl HashKind {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "md5" => Some(Self::Md5),
+            "sha1" => Some(Self::Sha1),
+            "sha256" => Some(Self::Sha256),
+            "sha512" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+
+    fn hex_len(self) -> usize {
+        match self {
+            Self::Md5 => 32,
+            Self::Sha1 => 40,
+            Self::Sha256 => 64,
+            Self::Sha512 => 128,
+        }
+    }
+}
+
+/// Static description of the `file.metadata` planner.
+///
+/// Note: only `size`'s nonnegativity has an equivalent in the existing
+/// [`PlannerPredicate`] vocabulary ([`PlannerPredicate::NonNegative`]). There
+/// is no "column ends with column" or cross-column text-equality predicate,
+/// so the name/extension/mime_type textual coherence invariants are
+/// guaranteed by construction (every row draws one target extension and
+/// derives the name suffix and MIME type from it) and covered by this
+/// module's tests rather than a runtime predicate.
+pub static FILE_METADATA_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
+    kind: "file.metadata",
+    aliases: &[],
+    summary: "Coordinates a coherent file name/extension/mime_type/size/hash: the extension matches the name's suffix, mime_type matches the extension, size is a plausible byte count, and hash is a clearly-synthetic digest-shaped string.",
+    arguments: &[],
+    writes: ColumnScope::Configured,
+    reads: ColumnScope::None,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Supported,
+    cross_table: false,
+};
+
+/// Factory for the `file.metadata` planner.
+pub struct FileMetadataFactory;
+
+impl PlannerFactory for FileMetadataFactory {
+    fn descriptor(&self) -> &'static PlannerDescriptor {
+        &FILE_METADATA_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &PlannerConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
+        compile_file_metadata(config, context)
+            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
+    }
+}
+
+struct FileMetadataPlanner {
+    writes: Vec<String>,
+    entries: Vec<&'static FileTypeEntry>,
+    has_extension: bool,
+    has_mime_type: bool,
+    size_family: Option<SqlTypeFamily>,
+    size_min: i128,
+    size_max: i128,
+    hash_len: Option<usize>,
+    ext_rng: ChaCha8Rng,
+    name_rng: ChaCha8Rng,
+    size_rng: ChaCha8Rng,
+    hash_rng: ChaCha8Rng,
+    predicates: Vec<PlannerPredicate>,
+}
+
+impl CompiledPlanner for FileMetadataPlanner {
+    fn writes(&self) -> &[String] {
+        &self.writes
+    }
+
+    fn generate_row(
+        &mut self,
+        row_index: u64,
+        output: &mut [GeneratedValue],
+    ) -> Result<(), GenerateError> {
+        // Every stream is drawn unconditionally, in a fixed order, so a
+        // seeded run reproduces exactly regardless of which optional columns
+        // this instance was configured to own.
+        let ext_pick = self.ext_rng.random::<f64>();
+        let word1_pick = self.name_rng.random::<f64>();
+        let word2_pick = self.name_rng.random::<f64>();
+        let size_pick = self.size_rng.random::<f64>();
+
+        let entry = &self.entries[pick_index(ext_pick, self.entries.len())];
+        let word1 = FILE_NAME_WORDS[pick_index(word1_pick, FILE_NAME_WORDS.len())];
+        let word2 = FILE_NAME_WORDS[pick_index(word2_pick, FILE_NAME_WORDS.len())];
+        let name = format!("{word1}_{word2}_{row_index}.{}", entry.extension);
+
+        let mut slot = 0usize;
+        output[slot] = GeneratedValue::Text(name);
+        slot += 1;
+        if self.has_extension {
+            output[slot] = GeneratedValue::Text(entry.extension.to_string());
+            slot += 1;
+        }
+        if self.has_mime_type {
+            output[slot] = GeneratedValue::Text(entry.mime_type.to_string());
+            slot += 1;
+        }
+        if let Some(family) = &self.size_family {
+            let span = self
+                .size_max
+                .saturating_sub(self.size_min)
+                .saturating_add(1);
+            let offset = ((size_pick * span as f64) as i128).clamp(0, span - 1);
+            output[slot] = render_key(self.size_min.saturating_add(offset), family);
+            slot += 1;
+        }
+        if let Some(hash_len) = self.hash_len {
+            let digest: String = (0..hash_len)
+                .map(|_| HEX_DIGITS[self.hash_rng.random_range(0..HEX_DIGITS.len())] as char)
+                .collect();
+            output[slot] = GeneratedValue::Text(digest);
+            slot += 1;
+        }
+        debug_assert_eq!(slot, output.len());
+        Ok(())
+    }
+
+    fn verification_predicates(&self) -> Vec<PlannerPredicate> {
+        self.predicates.clone()
+    }
+}
+
+/// Map a uniform `[0, 1)` draw to an index in `[0, len)`.
+fn pick_index(pick: f64, len: usize) -> usize {
+    ((pick * len as f64) as usize).min(len.saturating_sub(1))
+}
+
+fn compile_file_metadata(
+    config: &PlannerConfig,
+    context: &CompileContext<'_>,
+) -> Result<FileMetadataPlanner, DiagnosticBag> {
+    const COLUMN_CODE: &str = "GEN-FILE-COLUMN-MISSING";
+    const SIZE_CODE: &str = "GEN-FILE-SIZE-RANGE";
+    const HASH_CODE: &str = "GEN-FILE-HASH-KIND";
+    const EXTENSIONS_CODE: &str = "GEN-FILE-EXTENSIONS";
+    let mut bag = DiagnosticBag::default();
+    let table = context.table();
+    let path = context.path();
+    let columns = config.args.get("columns");
+
+    let name_col = resolve_required(columns, "name", table, path, COLUMN_CODE, &mut bag);
+    let extension_col = resolve_optional(columns, "extension", table, path, COLUMN_CODE, &mut bag);
+    let mime_col = resolve_optional(columns, "mime_type", table, path, COLUMN_CODE, &mut bag);
+    let size_col = resolve_optional(columns, "size", table, path, COLUMN_CODE, &mut bag);
+    let hash_col = resolve_optional(columns, "hash", table, path, COLUMN_CODE, &mut bag);
+
+    let requested_extensions = string_list(config.args.get("extensions"));
+    let mut entries: Vec<&'static FileTypeEntry> = Vec::new();
+    if requested_extensions.is_empty() {
+        entries.extend(FILE_TYPE_CATALOG.iter());
+    } else {
+        for extension in &requested_extensions {
+            match find_file_type(extension) {
+                Some(entry) => entries.push(entry),
+                None => {
+                    bag.error(
+                        EXTENSIONS_CODE,
+                        format!("{path}.extensions"),
+                        format!(
+                            "file.metadata `extensions` names `{extension}`, which is not a recognized file extension"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if entries.is_empty() && !bag.has_errors() {
+        bag.error(
+            EXTENSIONS_CODE,
+            format!("{path}.extensions"),
+            "file.metadata `extensions` must resolve to at least one recognized extension"
+                .to_string(),
+        );
+    }
+
+    let size_block = config.args.get("size");
+    let size_min = size_block
+        .and_then(|s| s.get("min"))
+        .and_then(as_i128)
+        .unwrap_or(0);
+    let size_max = size_block
+        .and_then(|s| s.get("max"))
+        .and_then(as_i128)
+        .unwrap_or(10_000_000);
+    if size_col.is_some() {
+        if size_min < 0 {
+            bag.error(
+                SIZE_CODE,
+                format!("{path}.size.min"),
+                format!("file.metadata `size.min` {size_min} must be >= 0"),
+            );
+        }
+        if size_max < size_min {
+            bag.error(
+                SIZE_CODE,
+                format!("{path}.size.max"),
+                format!("file.metadata `size.max` {size_max} is below `size.min` {size_min}"),
+            );
+        }
+    }
+
+    let hash_kind_name = config
+        .args
+        .get("hash_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("sha256");
+    let hash_kind = HashKind::parse(hash_kind_name);
+    if hash_col.is_some() && hash_kind.is_none() {
+        bag.error(
+            HASH_CODE,
+            format!("{path}.hash_kind"),
+            format!(
+                "file.metadata `hash_kind` `{hash_kind_name}` is not a recognized hash kind (expected one of md5, sha1, sha256, sha512)"
+            ),
+        );
+    }
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
+    let name = name_col.expect("name resolved without errors");
+    let mut writes = vec![name.name.clone()];
+    let has_extension = extension_col.is_some();
+    if let Some(column) = extension_col {
+        writes.push(column.name.clone());
+    }
+    let has_mime_type = mime_col.is_some();
+    if let Some(column) = mime_col {
+        writes.push(column.name.clone());
+    }
+    let size_family = size_col.map(|column| {
+        writes.push(column.name.clone());
+        column.family.clone()
+    });
+    let hash_len = hash_col.map(|column| {
+        writes.push(column.name.clone());
+        hash_kind.unwrap_or(HashKind::Sha256).hex_len()
+    });
+
+    let mut predicates = Vec::new();
+    if let Some(size) = size_col {
+        if size_min >= 0 {
+            predicates.push(PlannerPredicate::NonNegative {
+                columns: vec![size.name.clone()],
+            });
+        }
+    }
+
+    let ext_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        name.name.clone(),
+        "file.metadata.extension",
+    ));
+    let name_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        name.name.clone(),
+        "file.metadata.name",
+    ));
+    let size_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        name.name.clone(),
+        "file.metadata.size",
+    ));
+    let hash_rng = context.rng(StreamId::operator(
+        table.name.as_str(),
+        name.name.clone(),
+        "file.metadata.hash",
+    ));
+
+    Ok(FileMetadataPlanner {
+        writes,
+        entries,
+        has_extension,
+        has_mime_type,
+        size_family,
+        size_min,
+        size_max,
+        hash_len,
+        ext_rng,
+        name_rng,
+        size_rng,
+        hash_rng,
+        predicates,
+    })
+}
+
+/// Resolve an optional column role: `None` when the role is absent from
+/// `columns`, `Some` when present and valid, or a compile error when present
+/// but naming a column that does not exist on the table.
+fn resolve_optional<'a>(
+    columns: Option<&Value>,
+    role: &str,
+    table: &'a PortableTable,
+    path: &str,
+    code: &'static str,
+    bag: &mut DiagnosticBag,
+) -> Option<&'a PortableColumn> {
+    let name = role_name(columns, role)?;
+    let column = find_column(table, name);
+    if column.is_none() {
+        bag.error(
+            code,
+            format!("{path}.columns.{role}"),
+            format!(
+                "file.metadata `{role}` column `{name}` does not exist on table `{}`",
+                table.name
+            ),
+        );
+    }
+    column
+}

@@ -853,6 +853,12 @@ impl ExtensionRegistry {
             .register_planner(Box::new(super::planners::RelationTenantFamilyFactory))
             .expect("built-in planner kinds are collision-free");
         registry
+            .register_planner(Box::new(super::planners::GeoCoordinatePairFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
+            .register_planner(Box::new(super::planners::FileMetadataFactory))
+            .expect("built-in planner kinds are collision-free");
+        registry
     }
 
     /// Register a generator factory.

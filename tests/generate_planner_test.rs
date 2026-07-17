@@ -2419,3 +2419,356 @@ fn tenant_family_non_dense_key_is_a_compile_error() {
     );
     assert!(compile_err_code(&yaml).contains(&"GEN-TENANT-KEY-UNSUPPORTED".to_string()));
 }
+
+// === geo.coordinate_pair (Task 29) ==========================================
+//
+// A coherent (latitude, longitude) pair: both columns are drawn together, each
+// within its global range (and an optional bounding box), at a configurable
+// decimal precision.
+
+fn decimal_f64(value: &GeneratedValue) -> f64 {
+    let (minor, scale) = value.as_decimal().expect("decimal-shaped value");
+    minor as f64 / 10f64.powi(scale as i32)
+}
+
+/// A `places` table carrying a `geo.coordinate_pair` planner. `overrides` is
+/// spliced into the planner block so tests can add `bounds`/`precision`.
+fn coordinate_model(seed: u64, rows: u64, overrides: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  places:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: places
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: latitude, type: decimal, nullable: false }}
+        - {{ name: longitude, type: decimal, nullable: false }}
+    planners:
+      - kind: geo.coordinate_pair
+        columns:
+          latitude: latitude
+          longitude: longitude
+{overrides}
+"#
+    )
+}
+
+#[test]
+fn coordinate_pair_stays_within_global_ranges_for_many_rows() {
+    let sink = run(&coordinate_model(1, 20_000, ""));
+    for (lat, lon) in sink.column("latitude").zip(sink.column("longitude")) {
+        let lat = decimal_f64(lat);
+        let lon = decimal_f64(lon);
+        assert!((-90.0..=90.0).contains(&lat), "latitude {lat} out of range");
+        assert!(
+            (-180.0..=180.0).contains(&lon),
+            "longitude {lon} out of range"
+        );
+    }
+}
+
+#[test]
+fn coordinate_pair_honors_a_configured_bounding_box() {
+    let overrides = "        bounds:\n          min_lat: 10\n          max_lat: 20\n          min_lon: -5\n          max_lon: 5\n";
+    let sink = run(&coordinate_model(2, 5_000, overrides));
+    for (lat, lon) in sink.column("latitude").zip(sink.column("longitude")) {
+        let lat = decimal_f64(lat);
+        let lon = decimal_f64(lon);
+        assert!((10.0..=20.0).contains(&lat), "latitude {lat} outside bbox");
+        assert!((-5.0..=5.0).contains(&lon), "longitude {lon} outside bbox");
+    }
+}
+
+#[test]
+fn coordinate_pair_honors_configured_precision() {
+    let overrides = "        precision: 2\n";
+    let sink = run(&coordinate_model(3, 2_000, overrides));
+    for lat in sink.column("latitude") {
+        let (_, scale) = lat.as_decimal().expect("decimal-shaped value");
+        assert_eq!(scale, 2, "expected 2 decimal places");
+    }
+}
+
+#[test]
+fn coordinate_pair_seeded_output_repeats_and_differs_by_seed() {
+    let first = run(&coordinate_model(9, 1_000, ""));
+    let again = run(&coordinate_model(9, 1_000, ""));
+    let other = run(&coordinate_model(10, 1_000, ""));
+    assert_eq!(first.rows, again.rows, "same seed must reproduce rows");
+    assert_ne!(first.rows, other.rows, "a different seed must diverge");
+}
+
+#[test]
+fn coordinate_pair_missing_owned_column_is_a_compile_error() {
+    let yaml =
+        coordinate_model(1, 10, "").replace("longitude: longitude", "longitude: nonexistent");
+    assert!(compile_err_code(&yaml).contains(&"GEN-COORDINATE-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn coordinate_pair_impossible_bounds_is_a_compile_error() {
+    let overrides = "        bounds:\n          min_lat: 40\n          max_lat: 10\n";
+    let yaml = coordinate_model(1, 10, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-COORDINATE-BOUNDS".to_string()));
+}
+
+#[test]
+fn coordinate_pair_out_of_range_bounds_is_a_compile_error() {
+    let overrides = "        bounds:\n          max_lat: 200\n";
+    let yaml = coordinate_model(1, 10, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-COORDINATE-BOUNDS".to_string()));
+}
+
+#[test]
+fn coordinate_pair_impossible_precision_is_a_compile_error() {
+    let overrides = "        precision: -1\n";
+    let yaml = coordinate_model(1, 10, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-COORDINATE-PRECISION".to_string()));
+}
+
+#[test]
+fn coordinate_pair_ownership_collision_is_a_compile_error() {
+    let yaml = coordinate_model(1, 10, "").replace(
+        "    planners:",
+        "    columns:\n      latitude:\n        generator: { kind: decimal }\n    planners:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
+
+// === file.metadata (Task 29) =================================================
+//
+// A coherent file name/extension/mime_type/size/hash: the extension matches
+// the name's suffix, mime_type is consistent with that extension, size is a
+// plausible nonnegative byte count, and hash is a clearly-synthetic
+// digest-shaped string.
+
+/// An `attachments` table carrying a `file.metadata` planner. `overrides` is
+/// spliced into the planner block; `extra_columns` adds schema columns for
+/// roles a test wants to exercise beyond `name`.
+fn file_metadata_model(seed: u64, rows: u64, columns_block: &str, overrides: &str) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  attachments:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: attachments
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: file_name, type: text, nullable: false }}
+        - {{ name: file_extension, type: text, nullable: false }}
+        - {{ name: file_mime_type, type: text, nullable: false }}
+        - {{ name: file_size, type: bigint, nullable: false }}
+        - {{ name: file_hash, type: text, nullable: false }}
+    planners:
+      - kind: file.metadata
+        columns:
+{columns_block}
+{overrides}
+"#
+    )
+}
+
+const FULL_FILE_COLUMNS: &str = "          name: file_name\n          extension: file_extension\n          mime_type: file_mime_type\n          size: file_size\n          hash: file_hash\n";
+
+/// A minimal `attachments` table carrying only a `name` column — used to
+/// check that `file.metadata` still produces a coherent name suffix when no
+/// optional role column is configured.
+fn file_metadata_name_only_model(seed: u64, rows: u64) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  attachments:
+    rows: {{ kind: fixed, count: {rows} }}
+    schema:
+      name: attachments
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: file_name, type: text, nullable: false }}
+    planners:
+      - kind: file.metadata
+        columns:
+          name: file_name
+"#
+    )
+}
+
+fn known_mime_for_extension(extension: &str) -> Option<&'static str> {
+    let table = [
+        ("txt", "text/plain"),
+        ("csv", "text/csv"),
+        ("json", "application/json"),
+        ("xml", "application/xml"),
+        ("html", "text/html"),
+        ("css", "text/css"),
+        ("js", "text/javascript"),
+        ("md", "text/markdown"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("png", "image/png"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+        ("svg", "image/svg+xml"),
+        ("bmp", "image/bmp"),
+        ("pdf", "application/pdf"),
+        ("zip", "application/zip"),
+        ("gz", "application/gzip"),
+        ("tar", "application/x-tar"),
+        ("mp3", "audio/mpeg"),
+        ("wav", "audio/wav"),
+        ("mp4", "video/mp4"),
+        ("mov", "video/quicktime"),
+        ("avi", "video/x-msvideo"),
+        ("doc", "application/msword"),
+        (
+            "docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        ("xls", "application/vnd.ms-excel"),
+        (
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("ppt", "application/vnd.ms-powerpoint"),
+        (
+            "pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+        ("bin", "application/octet-stream"),
+    ];
+    table
+        .iter()
+        .find(|(ext, _)| *ext == extension)
+        .map(|(_, mime)| *mime)
+}
+
+#[test]
+fn file_metadata_name_extension_and_mime_are_coherent_for_many_rows() {
+    let sink = run(&file_metadata_model(1, 5_000, FULL_FILE_COLUMNS, ""));
+    for (i, ((name, extension), mime)) in sink
+        .column("file_name")
+        .zip(sink.column("file_extension"))
+        .zip(sink.column("file_mime_type"))
+        .enumerate()
+    {
+        let name = name.as_text().expect("text name");
+        let extension = extension.as_text().expect("text extension");
+        let mime = mime.as_text().expect("text mime");
+        assert!(
+            name.ends_with(&format!(".{extension}")),
+            "row {i}: name `{name}` does not end with `.{extension}`"
+        );
+        let expected_mime = known_mime_for_extension(extension)
+            .unwrap_or_else(|| panic!("unknown extension {extension}"));
+        assert_eq!(
+            mime, expected_mime,
+            "row {i}: mime `{mime}` inconsistent with extension `{extension}`"
+        );
+    }
+}
+
+#[test]
+fn file_metadata_size_is_nonnegative_for_many_rows() {
+    let sink = run(&file_metadata_model(2, 5_000, FULL_FILE_COLUMNS, ""));
+    for size in sink.column("file_size") {
+        assert!(int_of(size) >= 0, "size {:?} is negative", size);
+    }
+}
+
+#[test]
+fn file_metadata_hash_is_correct_shape_and_synthetic() {
+    let sink = run(&file_metadata_model(3, 5_000, FULL_FILE_COLUMNS, ""));
+    for hash in sink.column("file_hash") {
+        let hash = hash.as_text().expect("text hash");
+        assert_eq!(hash.len(), 64, "expected 64 hex chars for sha256");
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hash `{hash}` is not lowercase hex"
+        );
+    }
+}
+
+#[test]
+fn file_metadata_seeded_output_repeats_and_differs_by_seed() {
+    let first = run(&file_metadata_model(9, 1_000, FULL_FILE_COLUMNS, ""));
+    let again = run(&file_metadata_model(9, 1_000, FULL_FILE_COLUMNS, ""));
+    let other = run(&file_metadata_model(10, 1_000, FULL_FILE_COLUMNS, ""));
+    assert_eq!(first.rows, again.rows, "same seed must reproduce rows");
+    assert_ne!(first.rows, other.rows, "a different seed must diverge");
+}
+
+#[test]
+fn file_metadata_returns_exact_verification_predicates() {
+    use sql_splitter::generate::PlannerPredicate;
+
+    let plan = compile_result(&file_metadata_model(1, 10, FULL_FILE_COLUMNS, ""))
+        .expect("model compiles cleanly");
+    let predicates = plan
+        .table("attachments")
+        .expect("attachments table")
+        .planners[0]
+        .verification_predicates();
+    assert!(predicates.iter().any(|p| matches!(
+        p,
+        PlannerPredicate::NonNegative { columns } if columns == &vec!["file_size".to_string()]
+    )));
+}
+
+#[test]
+fn file_metadata_missing_owned_column_is_a_compile_error() {
+    let yaml = file_metadata_model(1, 10, FULL_FILE_COLUMNS, "").replace(
+        "          name: file_name",
+        "          name: nonexistent_column",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-FILE-COLUMN-MISSING".to_string()));
+}
+
+#[test]
+fn file_metadata_impossible_size_range_is_a_compile_error() {
+    let overrides = "        size:\n          min: 100\n          max: 10\n";
+    let yaml = file_metadata_model(1, 10, FULL_FILE_COLUMNS, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-FILE-SIZE-RANGE".to_string()));
+}
+
+#[test]
+fn file_metadata_unknown_hash_kind_is_a_compile_error() {
+    let overrides = "        hash_kind: rot13\n";
+    let yaml = file_metadata_model(1, 10, FULL_FILE_COLUMNS, overrides);
+    assert!(compile_err_code(&yaml).contains(&"GEN-FILE-HASH-KIND".to_string()));
+}
+
+#[test]
+fn file_metadata_only_name_column_still_produces_a_coherent_suffix() {
+    let sink = run(&file_metadata_name_only_model(1, 500));
+    for name in sink.column("file_name") {
+        let name = name.as_text().expect("text name");
+        assert!(
+            name.rsplit_once('.').is_some(),
+            "name `{name}` has no extension suffix"
+        );
+    }
+}
+
+#[test]
+fn file_metadata_ownership_collision_is_a_compile_error() {
+    let yaml = file_metadata_model(1, 10, FULL_FILE_COLUMNS, "").replace(
+        "    planners:",
+        "    columns:\n      file_name:\n        generator: { kind: constant, value: x }\n    planners:",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
