@@ -19,6 +19,8 @@ mod fake_data;
 pub mod generate;
 pub mod graph;
 pub mod json_schema;
+#[cfg(feature = "man-pages")]
+pub mod man;
 pub mod merger;
 pub mod parser;
 pub mod pk;

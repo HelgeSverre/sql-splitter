@@ -25,6 +25,8 @@ mod fake_data;
 mod generate;
 mod graph;
 mod json_schema;
+#[cfg(feature = "man-pages")]
+mod man;
 mod merger;
 mod parser;
 mod pk;

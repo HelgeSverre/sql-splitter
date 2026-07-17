@@ -202,6 +202,15 @@ pub enum Commands {
         list: bool,
     },
 
+    /// Generate man pages (developer tool)
+    #[cfg(feature = "man-pages")]
+    #[command(hide = true)]
+    Man {
+        /// Output directory for man pages
+        #[arg(short, long, default_value = "man", value_hint = ValueHint::DirPath)]
+        output: PathBuf,
+    },
+
     /// Generate shell completion scripts
     #[command(after_help = "\x1b[1mInstallation:\x1b[0m
   Bash:
@@ -252,6 +261,8 @@ pub fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             stdout,
             list,
         } => run_schema(output, command, stdout, list).map(|()| ExitCode::SUCCESS),
+        #[cfg(feature = "man-pages")]
+        Commands::Man { output } => crate::man::generate(&output).map(|()| ExitCode::SUCCESS),
         Commands::Completions { shell } => {
             generate(
                 shell,
