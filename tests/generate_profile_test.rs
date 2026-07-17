@@ -1109,25 +1109,26 @@ fn boolean_column_uses_schema_boolean() {
 
 // --- Fix: credential guard family bypass (uuid/json) -------------------------
 
-/// A credential-named column typed `uuid` or `json` (a real Postgres shape for
+/// A credential-named column typed `uuid`/`json` (a real Postgres shape for
 /// `refresh_token`/`api_key`/`reset_token`) MUST still hit the credential guard
-/// and emit a synthetic `credential.*` rule with NO source literals — never an
-/// observed_sample / weighted_choice that would persist the real secrets.
+/// and emit a *family-valid synthetic* rule with NO source literals — never an
+/// observed_sample / weighted_choice that would persist the real secrets, and
+/// never a `credential.*` (Text-only) rule that would fail the compiler's
+/// type-check for the uuid/json column. The inferred model must COMPILE.
 #[test]
 fn credential_guard_covers_uuid_and_json_families() {
     let cases = [
-        ("api_key", "uuid", SqlTypeFamily::Uuid, "credential.api_key"),
+        // uuid credential columns -> synthetic random uuid (Uuid-valid)
+        ("api_key", "uuid", SqlTypeFamily::Uuid, "uuid"),
+        ("refresh_token", "uuid", SqlTypeFamily::Uuid, "uuid"),
+        // json credential column -> synthetic json document (Json-valid)
+        ("reset_token", "jsonb", SqlTypeFamily::Json, "json_value"),
+        // text credential column -> the specific credential kind
         (
-            "refresh_token",
-            "uuid",
-            SqlTypeFamily::Uuid,
-            "credential.token",
-        ),
-        (
-            "reset_token",
-            "jsonb",
-            SqlTypeFamily::Json,
-            "credential.token",
+            "password",
+            "varchar(255)",
+            SqlTypeFamily::Text,
+            "credential.password_hash",
         ),
     ];
     for (name, source_type, family, expected) in cases {
@@ -1148,7 +1149,7 @@ fn credential_guard_covers_uuid_and_json_families() {
         assert_eq!(
             generator_kind(&result, "t", name),
             expected,
-            "column `{name}` ({source_type}) skipped the credential guard"
+            "column `{name}` ({source_type}) got the wrong guard generator"
         );
         assert!(
             result.source_literals(&key).is_empty(),
@@ -1159,6 +1160,19 @@ fn credential_guard_covers_uuid_and_json_families() {
             result.decision(&key).unwrap().reason,
             "credential_name_guard",
             "column `{name}` decision reason"
+        );
+
+        // The self-contained inferred model COMPILES: no type-check failure for
+        // the guarded column against its family.
+        let codes = match ModelCompiler::standard()
+            .compile(result.model.clone(), CompileOptions::default())
+        {
+            Ok(_) => Vec::new(),
+            Err(bag) => bag.diagnostics.iter().map(|d| d.code.clone()).collect(),
+        };
+        assert!(
+            !codes.iter().any(|c| c == "GEN-GENERATOR-TYPE"),
+            "column `{name}` ({source_type}) produced a type-incompatible rule: {codes:?}"
         );
     }
 }

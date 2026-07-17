@@ -40,6 +40,14 @@ pub(super) fn is_high_confidence_credential(name: &str) -> bool {
 
 /// Propose the credential-guard candidate for a column, if its name looks like
 /// secret material.
+///
+/// The generator is always synthetic (never source-derived), and is chosen so
+/// the emitted rule *type-checks against the column's family*: a `Text`/`Other`
+/// credential column gets the specific `credential.*` kind, but a `uuid`/`json`/
+/// `bytea` credential column gets the family-native synthetic generator
+/// (`uuid`/`json_value`/`bytes`) — because a `credential.token` value is a
+/// random string, not a valid UUID/JSON/blob, and would fail the compiler's
+/// type-check (or render invalid data) for those columns.
 pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
     let column = ctx.column();
     // Only string-shaped columns carry credential material we know how to
@@ -52,11 +60,24 @@ pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
         return Vec::new();
     };
 
+    let generator = match column.family {
+        // Text/Other: the specific credential generator (accepts Text).
+        SqlTypeFamily::Text | SqlTypeFamily::Other => credential_generator(kind),
+        // Uuid: a fresh random synthetic UUID — format-valid, not source-derived.
+        SqlTypeFamily::Uuid => generator("uuid"),
+        // Json: a synthetic JSON document (accepts Json).
+        SqlTypeFamily::Json => generator("json_value"),
+        // Bytes: a random synthetic byte string (accepts Bytes).
+        SqlTypeFamily::Bytes => generator("bytes"),
+        // `guardable_family` admits nothing else.
+        _ => return Vec::new(),
+    };
+
     vec![Candidate::new(
         Precedence::CredentialGuard,
         confidence,
         "credential_name_guard",
-        credential_generator(kind),
+        generator,
     )]
 }
 
