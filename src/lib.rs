@@ -22,6 +22,7 @@ pub mod json_schema;
 pub mod merger;
 pub mod parser;
 pub mod pk;
+pub mod profile;
 pub mod progress;
 pub mod redactor;
 pub mod render;
