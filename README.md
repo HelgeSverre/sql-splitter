@@ -553,7 +553,7 @@ See [BENCHMARKS.md](BENCHMARKS.md) for detailed comparisons.
 
 ```bash
 # Unit tests
-cargo test
+cargo nextest run
 
 # Verify against real-world SQL dumps (MySQL, PostgreSQL, WordPress, etc.)
 make verify-realworld

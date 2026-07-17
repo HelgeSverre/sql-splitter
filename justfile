@@ -19,7 +19,19 @@ native:
 
 # Run all tests
 test:
-    cargo test
+    cargo nextest run
+
+# Code coverage — HTML report (cargo-llvm-cov + nextest; install: cargo install cargo-llvm-cov)
+coverage:
+    cargo llvm-cov nextest --html --open
+
+# Code coverage — summary printed to the terminal
+coverage-summary:
+    cargo llvm-cov nextest --summary-only
+
+# Code coverage — lcov report for CI / Codecov (writes ./lcov.info)
+coverage-lcov:
+    cargo llvm-cov nextest --lcov --output-path lcov.info
 
 # Run criterion benchmarks
 bench:
@@ -116,7 +128,7 @@ install-man: man
 
 # Verify against real-world SQL dumps from public sources
 verify-realworld:
-    cargo test --test realworld -- --ignored
+    cargo nextest run --test realworld --run-ignored only
 
 # Generate man pages
 man:
@@ -133,7 +145,7 @@ schemas: release
     npx prettier --write "schemas/*.schema.json" --log-level warn
     @echo ""
     @echo "Validating schemas against actual CLI output..."
-    cargo test --test json_schema_tests -- --quiet
+    cargo nextest run --test json_schema_tests
     @echo ""
     @echo "Copying schemas to website..."
     cp schemas/*.schema.json website/public/schemas/

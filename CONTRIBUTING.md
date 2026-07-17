@@ -21,7 +21,7 @@ Thanks for your interest in contributing! This document covers everything you ne
 3. **Build and test**
    ```bash
    cargo build --release
-   cargo test
+   cargo nextest run
    ```
 
 ## Code Style
@@ -68,8 +68,8 @@ This prevents scope creep and keeps AI contributions focused.
 
 ## Testing
 
-- Run all tests: `cargo test`
-- Run with output: `cargo test -- --nocapture`
+- Run all tests: `cargo nextest run`
+- Run with output: `cargo nextest run --no-capture`
 - Run benchmarks: `cargo bench`
 
 All PRs must pass tests. Add tests for new functionality.
@@ -96,7 +96,7 @@ cargo flamegraph --bench parser
    ```bash
    cargo fmt
    cargo clippy
-   cargo test
+   cargo nextest run
    ```
 5. Commit with a clear message
 6. Push and open a PR

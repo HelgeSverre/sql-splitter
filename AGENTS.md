@@ -49,7 +49,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 # or: make native
 
 # Run tests
-cargo test
+cargo nextest run
 # or: make test
 
 # Run benchmarks
@@ -159,13 +159,13 @@ Key functions:
 
 ```bash
 # All tests
-cargo test
+cargo nextest run
 
 # Specific module
-cargo test parser::tests
+cargo nextest run parser::tests
 
 # With output
-cargo test -- --nocapture
+cargo nextest run --no-capture
 ```
 
 ## Benchmarking
@@ -397,7 +397,7 @@ Follow [Semantic Versioning](https://semver.org/):
 ### Quick Release Checklist
 
 ```
-[ ] cargo test passes
+[ ] cargo nextest run passes
 [ ] cargo clippy clean
 [ ] Version bumped in Cargo.toml
 [ ] CHANGELOG.md updated
@@ -572,9 +572,9 @@ For this codebase, both runners perform similarly:
 | `cargo test`        | ~20s       | 342%      | Default, in-process parallelism                |
 | `cargo nextest run` | ~19s       | 755%      | Per-test process isolation, better parallelism |
 
-**Recommendation:** Use `cargo test` for development (simpler). Consider `cargo nextest` when:
+**Recommendation:** This project standardizes on `cargo nextest run` and does not use doctests. nextest gives:
 
-- You need better test failure diagnostics (clearer output)
-- You need test retries (`--retries`)
-- You want maximum parallelization on many-core machines
-- Tests have resource conflicts requiring process isolation
+- Better test failure diagnostics (clearer output)
+- Test retries (`--retries`)
+- Maximum parallelization on many-core machines
+- Per-test process isolation for tests with resource conflicts
