@@ -138,6 +138,40 @@ fn json_and_explicit_stdout_output_exit_with_usage_code() {
 }
 
 #[test]
+fn json_and_explicit_emit_config_stdout_exit_with_usage_code() {
+    // `--json` (the report) and `--emit-config -` both claim stdout; this
+    // usage rejection must fire before `--emit-config`'s "not available
+    // yet" error (exit `1`), so the exit code here is `2`, not `1`.
+    let output = sql_splitter_bin()
+        .args([
+            "generate",
+            "--config",
+            SIMPLE_MODEL,
+            "--json",
+            "--emit-config",
+            "-",
+        ])
+        .output()
+        .expect("failed to run sql-splitter");
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn default_stdout_sql_and_emit_config_stdout_exit_with_usage_code() {
+    // No `--json`, no `-o`: generated SQL defaults to stdout. `--emit-config
+    // -` also claims stdout, so this is a collision too — again, this usage
+    // rejection must fire before `--emit-config`'s "not available yet"
+    // error, so the exit code is `2`, not `1`.
+    let output = sql_splitter_bin()
+        .args(["generate", "--config", SIMPLE_MODEL, "--emit-config", "-"])
+        .output()
+        .expect("failed to run sql-splitter");
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn check_with_an_input_dump_exits_with_usage_code() {
     let output = sql_splitter_bin()
         .args(["generate", "dump.sql", "--check"])
