@@ -6,7 +6,7 @@
  * Astro serves from public/. Generating straight into public/ keeps the
  * committed image and its HTML source from drifting apart.
  *
- * Usage: bun run og   (or: npx tsx scripts/generate-og-image.ts)
+ * Usage: bun run og   (or: bun scripts/generate-og-image.ts)
  */
 
 import { resolve, dirname } from "node:path";

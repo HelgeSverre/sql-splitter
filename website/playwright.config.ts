@@ -12,7 +12,7 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: "npm run preview -- --port 4399",
+    command: "bun run preview -- --port 4399",
     url: "http://localhost:4399",
     reuseExistingServer: !process.env.CI,
     timeout: 30000,
