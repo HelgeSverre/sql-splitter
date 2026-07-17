@@ -183,7 +183,7 @@
               "enum": ["address.city"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -193,7 +193,7 @@
               "enum": ["address.country"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -203,7 +203,7 @@
               "enum": ["address.latitude"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -213,7 +213,7 @@
               "enum": ["address.line1"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -223,7 +223,7 @@
               "enum": ["address.line2"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -233,7 +233,7 @@
               "enum": ["address.longitude"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -243,7 +243,7 @@
               "enum": ["address.postcode"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -253,7 +253,7 @@
               "enum": ["address.region"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -272,7 +272,7 @@
               "description": "The sibling column to generate relative to."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "source"]
         },
         {
@@ -291,7 +291,7 @@
               "description": "The sibling column to generate relative to."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "source"]
         },
         {
@@ -304,7 +304,7 @@
               "description": "Probability of `true`, in [0, 1]; defaults to 0.5."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -320,7 +320,7 @@
               "description": "Minimum length; defaults to 16."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -333,7 +333,7 @@
               "description": "The non-empty list of values to pick from."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "values"]
         },
         {
@@ -343,7 +343,7 @@
               "enum": ["commerce.currency"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -362,7 +362,7 @@
               "description": "Decimal places; defaults to 2."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -372,7 +372,7 @@
               "enum": ["commerce.product_name"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -388,7 +388,7 @@
               "description": "Inclusive lower bound; defaults to 1."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -398,7 +398,7 @@
               "enum": ["commerce.sku"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -408,7 +408,7 @@
               "enum": ["company.department"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -418,7 +418,7 @@
               "enum": ["company.job_title"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -428,7 +428,7 @@
               "enum": ["company.name"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -441,7 +441,7 @@
               "description": "The constant value to emit; SQL NULL when omitted."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -454,7 +454,7 @@
               "description": "The sibling column to copy the value from."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "source"]
         },
         {
@@ -473,7 +473,7 @@
               "description": "Literal text prepended before the random characters; defaults to `sk_`."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -483,7 +483,7 @@
               "enum": ["credential.password_hash"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -493,7 +493,7 @@
               "enum": ["credential.placeholder"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -512,7 +512,7 @@
               "description": "Literal text prepended before the random characters."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -531,7 +531,7 @@
               "description": "Literal text prepended before the random characters."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -541,7 +541,7 @@
               "enum": ["database_default"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -551,7 +551,7 @@
               "enum": ["date"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -561,7 +561,7 @@
               "enum": ["datetime"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -580,7 +580,7 @@
               "description": "Decimal places; defaults to 2."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -596,7 +596,7 @@
               "description": "Inclusive lower bound in seconds; defaults to 0."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -606,7 +606,7 @@
               "enum": ["file.extension"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -616,7 +616,7 @@
               "enum": ["file.mime_type"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -626,7 +626,7 @@
               "enum": ["file.name"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -642,7 +642,7 @@
               "description": "Inclusive lower bound; defaults to 1."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -658,7 +658,7 @@
               "description": "Decimal places for decimal columns; defaults to 0."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "bins"]
         },
         {
@@ -671,7 +671,7 @@
               "description": "Number of hex characters; defaults to 64 (SHA-256-shaped)."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -690,7 +690,7 @@
               "description": "Literal text prepended before the random characters."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -709,7 +709,7 @@
               "description": "Literal text prepended before the random characters."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -719,7 +719,7 @@
               "enum": ["identifier.ulid"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -735,7 +735,7 @@
               "description": "Inclusive lower bound; defaults to 0."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -745,7 +745,7 @@
               "enum": ["internet.domain"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -755,7 +755,7 @@
               "enum": ["internet.email"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -765,7 +765,7 @@
               "enum": ["internet.ipv4"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -775,7 +775,7 @@
               "enum": ["internet.ipv6"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -785,7 +785,7 @@
               "enum": ["internet.url"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -795,7 +795,7 @@
               "enum": ["internet.user_agent"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -808,7 +808,7 @@
               "description": "The document to emit; defaults to `{}`."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -833,7 +833,7 @@
               "description": "Std-dev of the underlying normal (finite, non-negative)."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "mu", "sigma"]
         },
         {
@@ -849,7 +849,7 @@
               "description": "The per-row increment; defaults to 1."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -859,7 +859,7 @@
               "enum": ["network.mac"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -875,7 +875,7 @@
               "description": "Inclusive lower bound; defaults to 1."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -900,7 +900,7 @@
               "description": "Standard deviation (finite, non-negative)."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "mean", "std"]
         },
         {
@@ -910,7 +910,7 @@
               "enum": ["null"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -923,7 +923,7 @@
               "description": "The non-empty list of `{ value, weight }` entries (or bare values)."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "values"]
         },
         {
@@ -936,7 +936,7 @@
               "description": "The mask to fill, e.g. `\"###-??\"`."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "mask"]
         },
         {
@@ -946,7 +946,7 @@
               "enum": ["person.first_name"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -956,7 +956,7 @@
               "enum": ["person.full_name"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -966,7 +966,7 @@
               "enum": ["person.last_name"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -976,7 +976,7 @@
               "enum": ["person.title"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -986,7 +986,7 @@
               "enum": ["person.username"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -996,7 +996,7 @@
               "enum": ["phone.country_code"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1006,7 +1006,7 @@
               "enum": ["phone.number"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1025,7 +1025,7 @@
               "description": "Name of the declared relationship this key follows."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1044,7 +1044,7 @@
               "description": "Name of the declared relationship this key follows."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1060,7 +1060,7 @@
               "description": "The increment applied after each row; defaults to 1."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1076,7 +1076,7 @@
               "description": "Minimum length; defaults to 8."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1089,7 +1089,7 @@
               "description": "A list of literal strings and `{ field: <name> }` references."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "parts"]
         },
         {
@@ -1099,7 +1099,7 @@
               "enum": ["text.paragraph"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1109,7 +1109,7 @@
               "enum": ["text.sentence"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1119,7 +1119,7 @@
               "enum": ["text.slug"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1129,7 +1129,7 @@
               "enum": ["text.word"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1139,7 +1139,7 @@
               "enum": ["time"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1149,7 +1149,7 @@
               "enum": ["uuid"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind"]
         },
         {
@@ -1162,7 +1162,7 @@
               "enum": ["weighted_choice"]
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "choices"]
         }
       ]
@@ -1205,7 +1205,7 @@
               "description": "`upper` | `lower` | `title`."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "mode"]
         },
         {
@@ -1221,7 +1221,7 @@
               "description": "Inclusive lower bound."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "min", "max"]
         },
         {
@@ -1234,7 +1234,7 @@
               "description": "A string containing the literal `{value}` placeholder."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "template"]
         },
         {
@@ -1247,7 +1247,7 @@
               "description": "Probability of NULL, in [0, 1]."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "rate"]
         },
         {
@@ -1263,7 +1263,7 @@
               "description": "The text to prepend."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "value"]
         },
         {
@@ -1276,7 +1276,7 @@
               "description": "Target number of decimal places."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "scale"]
         },
         {
@@ -1292,7 +1292,7 @@
               "description": "The text to append."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "value"]
         },
         {
@@ -1305,7 +1305,7 @@
               "description": "The number of Unicode scalars to keep."
             }
           },
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["kind", "max_length"]
         },
         {

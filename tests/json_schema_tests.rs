@@ -932,3 +932,68 @@ fn generate_config_schema_rejects_structurally_invalid_relationship() {
         "a relationship missing `references` must be rejected"
     );
 }
+
+#[test]
+fn generate_config_schema_rejects_generator_with_unknown_argument_name() {
+    let schema = load_schema("generate-config");
+    // `sequence` is a plain GeneratorConfig branch (not `unique`, not a
+    // planner), so it is closed: a typo'd/unknown argument name must be
+    // rejected by `additionalProperties: false`.
+    let yaml = valid_model_yaml().replace(
+        "generator: { kind: sequence, start: 1 }",
+        "generator: { kind: sequence, strt: 1 }",
+    );
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "an unrecognized generator argument name must be rejected on a closed branch"
+    );
+}
+
+// =============================================================================
+// generate-config: `kind: overrides` root rejection coverage
+// =============================================================================
+//
+// The tests above all mutate a `kind: model` document. `kind: overrides`
+// uses its own distinct types (RowsOverride/TableOverride/
+// ColumnRuleOverride/RootSeedOverride+TableSeedOverride), so a wrong
+// `required` list or a missing `additionalProperties: false` there would go
+// undetected without dedicated coverage.
+
+#[test]
+fn generate_config_schema_accepts_minimal_overrides_document() {
+    let schema = load_schema("generate-config");
+    assert!(
+        schema.is_valid(&yaml_to_json(valid_overrides_yaml())),
+        "minimal overrides document should validate"
+    );
+}
+
+#[test]
+fn generate_config_schema_rejects_unknown_top_level_field_in_overrides() {
+    let schema = load_schema("generate-config");
+    let yaml = format!("{}\nbogus_top_level_field: true\n", valid_overrides_yaml());
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "an unknown top-level field on an overrides document must be rejected"
+    );
+}
+
+#[test]
+fn generate_config_schema_rejects_invalid_document_kind_in_overrides() {
+    let schema = load_schema("generate-config");
+    let yaml = valid_overrides_yaml().replace("kind: overrides", "kind: bogus_role");
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "an unknown document `kind` on an overrides-shaped document must be rejected"
+    );
+}
+
+#[test]
+fn generate_config_schema_rejects_invalid_seed_type_in_overrides() {
+    let schema = load_schema("generate-config");
+    let yaml = format!("{}\nseed: not_a_number\n", valid_overrides_yaml());
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "a non-integer, non-null seed on an overrides document must be rejected"
+    );
+}
