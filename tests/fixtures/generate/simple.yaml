@@ -44,6 +44,10 @@ tables:
         - { name: status, type: "varchar(20)", nullable: false, default_sql: "'pending'" }
       indexes:
         - { name: idx_orders_customer_id, columns: [customer_id] }
+      # schema-level FK: authoritative structural constraint that drives the
+      # rendered CREATE TABLE FOREIGN KEY. Distinct from the generation-level
+      # `relationships:` below (which drives FK VALUE selection). Both are
+      # intentional — do not delete one; they are different layers.
       relationships:
         - { name: fk_orders_customer, columns: [customer_id], referenced_table: customers, referenced_columns: [id] }
     columns:

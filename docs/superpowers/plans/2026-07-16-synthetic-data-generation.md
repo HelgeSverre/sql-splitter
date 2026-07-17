@@ -2283,6 +2283,16 @@ This plan deliberately schedules the Phase 3B planners (Tasks 27–29) as part o
 
 ### Task 30: Harden DDL filtering and cross-dialect output
 
+> **Carried forward from Task 14 review (IDENTITY + explicit values):** When a
+> column is rendered as `IDENTITY(1,1)` (MSSQL) / `GENERATED ALWAYS AS IDENTITY`
+> (Postgres) but the generator emits explicit values for it (the normal case for
+> a PK referenced by generated FKs), the INSERT/COPY is rejected by those engines.
+> Handle this in the renderer: either omit identity columns from the value list
+> and let the DB assign them (only safe when no generated FK references those
+> values), or wrap the data with `SET IDENTITY_INSERT <t> ON/OFF` (MSSQL) and use
+> `OVERRIDING SYSTEM VALUE` (Postgres) so explicit generated keys load. Task 14's
+> `simple.yaml` uses `identity: false` to avoid this; real/inferred models will hit it.
+
 **Files:**
 - Modify: `src/render/ddl.rs`
 - Modify: `src/render/sql.rs`
