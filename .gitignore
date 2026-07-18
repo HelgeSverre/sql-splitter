@@ -5,6 +5,7 @@
 *.prof
 *.svg
 flamegraph.svg
+!website/public/favicon.svg
 
 # Output directories
 /output/
