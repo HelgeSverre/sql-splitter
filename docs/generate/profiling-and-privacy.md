@@ -97,7 +97,7 @@ To guarantee a model reproduces nothing from its source dump:
 dump profiling examines per table before compiling a model:
 
 | Capability                                                    | `basic`                     | `full`               |
-| ------------------------------------------------------------- | --------------------------- | -------------------- |
+|---------------------------------------------------------------|-----------------------------|----------------------|
 | Sampled rows per table                                        | 10,000                      | 100,000              |
 | Retained top categorical values                               | 256                         | 256                  |
 | Exact distinct-value tracking before switching to sketch-only | 100,000                     | 100,000              |

@@ -14,7 +14,7 @@ the family list); attaching one to an incompatible column is a compile error
 ## Core generators
 
 | Kind               | Fields (default)                                                  | Accepts              | Notes                                                                                         |
-| ------------------ | ----------------------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------- |
+|--------------------|-------------------------------------------------------------------|----------------------|-----------------------------------------------------------------------------------------------|
 | `constant`         | `value` (optional, default `NULL`)                                | any                  | Minimal YAML→value coercion.                                                                  |
 | `null`             | none                                                              | any                  | Errors `GEN-NULL-ON-NON-NULLABLE` if the column isn't nullable.                               |
 | `sequence`         | `start` (0), `step` (1)                                           | integer, big_integer | `GEN-SEQUENCE-ZERO-STEP` if `step: 0`. Usable as a dense FK/PK key domain.                    |
@@ -49,7 +49,7 @@ Fixed-shape, no-argument text generators drawn from a fake-data catalog
 Configurable semantic generators:
 
 | Kind                    | Fields (default)                                              | Accepts              | Notes                                                              |
-| ----------------------- | ------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------ |
+|-------------------------|---------------------------------------------------------------|----------------------|--------------------------------------------------------------------|
 | `address.latitude`      | none                                                          | decimal, text        | Uniform `[-90, 90]` at scale 6.                                    |
 | `address.longitude`     | none                                                          | decimal, text        | Uniform `[-180, 180]` at scale 6.                                  |
 | `commerce.product_name` | none                                                          | text                 | Two capitalized random words.                                      |
@@ -78,7 +78,7 @@ inference-side guarantee. These are the synthetic-only generators inference
 picks, and are also available for explicit use:
 
 | Kind                       | Fields (default)                                               | Accepts | Output shape                                                                                             |
-| -------------------------- | -------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------- |
+|----------------------------|----------------------------------------------------------------|---------|----------------------------------------------------------------------------------------------------------|
 | `credential.token`         | `length` (32), `alphabet` (`alphanumeric`), `prefix` (`""`)    | text    | Random string.                                                                                           |
 | `credential.api_key`       | `length` (32), `alphabet` (`alphanumeric`), `prefix` (`"sk_"`) | text    | `sk_<32 chars>`.                                                                                         |
 | `credential.secret`        | `length` (48), `alphabet` (`alphanumeric`), `prefix` (`""`)    | text    | Random string.                                                                                           |
@@ -92,7 +92,7 @@ exact original values (except `observed_sample`, which does replay the
 sampled literal values themselves — see the privacy notes linked above).
 
 | Kind              | Fields                                                                             | Accepts                       | Notes                                                                            |
-| ----------------- | ---------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------- |
+|-------------------|------------------------------------------------------------------------------------|-------------------------------|----------------------------------------------------------------------------------|
 | `observed_sample` | `values` (required, non-empty; `{ value, weight }` or bare values)                 | any                           | Weighted replay of literal source values. Always flagged by `GEN-SOURCE-VALUES`. |
 | `histogram`       | `bins` (required, sorted, non-overlapping `{ min, max, count }`), `scale` (0)      | integer, big_integer, decimal | Samples a bin by frequency, then uniformly within the bin.                       |
 | `normal`          | `mean` (required), `std` (required, ≥0), `min`/`max` (optional clamp), `scale` (0) | integer, big_integer, decimal | Box–Muller Gaussian draw.                                                        |
@@ -102,7 +102,7 @@ sampled literal values themselves — see the privacy notes linked above).
 ## Relationship generators
 
 | Kind                     | Fields                                                                                                                                     | Accepts                                 | Notes                                                                                                                        |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+|--------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
 | `relation.foreign_key`   | `relationship` (optional), `distribution` (optional: `uniform \| sequential \| weighted \| observed`), `null_rate` (optional, `0.0`–`1.0`) | integer, big_integer, text, uuid, other | A compiled marker, not an executable generator on its own — the engine assigns the value from the parent table's key domain. |
 | `relation.composite_key` | same fields                                                                                                                                | same                                    | Multi-column reference, same mechanism.                                                                                      |
 
@@ -120,7 +120,7 @@ Applied in list order, after the generator produces a base value. All are
 `ColumnScope::OwnColumn` (no cross-column reads).
 
 | Kind        | Fields (default)                                                                                            | Accepts                       | Behavior                                                                                                                                                                                                                                                                                                                                                            |
-| ----------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|-------------|-------------------------------------------------------------------------------------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `null_rate` | `rate` (required, `0`–`1`)                                                                                  | any                           | Replaces the value with `NULL` at probability `rate`. Errors on a non-nullable column.                                                                                                                                                                                                                                                                              |
 | `unique`    | `max_attempts` (10), `on_exhaustion` (`error \| warn \| widen`, default `error`), `max_tracked` (1,000,000) | any                           | Tracks seen values up to `max_tracked`; on collision, mutates the candidate (append a suffix for text, add an offset for numeric types, and so on). `widen` retries with a 10× attempt budget before falling back to `warn`'s behavior (accept the duplicate); families without a defined mutation (e.g. `boolean`) can't `widen` (`GEN-UNIQUE-WIDEN-UNSUPPORTED`). |
 | `prefix`    | `value` (required), `max_length` (optional, truncates after prepending)                                     | text                          |                                                                                                                                                                                                                                                                                                                                                                     |

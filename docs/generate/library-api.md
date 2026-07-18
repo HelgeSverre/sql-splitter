@@ -18,14 +18,14 @@ merging, compiling, and rendering — in one call.
 ```rust
 use sql_splitter::generate::Generate;
 
-let dir = tempfile::tempdir()?;
+let dir = tempfile::tempdir() ?;
 let output = dir.path().join("synthetic.sql");
 
 let report = Generate::builder()
-    .config("model.yaml")
-    .output(&output)
-    .seed(42)
-    .run()?;
+.config("model.yaml")
+.output( & output)
+.seed(42)
+.run() ?;
 
 println!("{} rows generated", report.rows_written);
 # Ok::<(), anyhow::Error>(())
@@ -34,7 +34,7 @@ println!("{} rows generated", report.rows_written);
 Builder methods, matching the CLI flags one for one:
 
 | Method                          | CLI equivalent                                                                                                                |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+|---------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
 | `.input(path)`                  | `[INPUT]` — profile a dump into a base model                                                                                  |
 | `.config(path)`                 | `-c, --config`                                                                                                                |
 | `.output(path)`                 | `-o, --output`                                                                                                                |
@@ -71,16 +71,16 @@ use sql_splitter::generate::{CompileOptions, ExtensionRegistry, GenerationEngine
 use sql_splitter::render::{RenderOptions, SqlRenderer};
 use sql_splitter::synthetic::SyntheticFile;
 
-let model = SyntheticFile::parse_str(model_yaml)?
-    .into_model()
-    .expect("is a complete model");
+let model = SyntheticFile::parse_str(model_yaml) ?
+.into_model()
+.expect("is a complete model");
 
 let registry = ExtensionRegistry::standard(); // or ::new() + register_generator/_modifier/_planner
-let plan = ModelCompiler::new(registry).compile(model, CompileOptions::default())?;
+let plan = ModelCompiler::new(registry).compile(model, CompileOptions::default ()) ?;
 
-let mut renderer = SqlRenderer::new(Vec::new(), RenderOptions::default());
-GenerationEngine::new(plan).run(&mut renderer)?;
-let sql_bytes = renderer.finish()?;
+let mut renderer = SqlRenderer::new(Vec::new(), RenderOptions::default ());
+GenerationEngine::new(plan).run( & mut renderer) ?;
+let sql_bytes = renderer.finish() ?;
 # Ok::<(), anyhow::Error>(())
 ```
 
@@ -127,16 +127,16 @@ use sql_splitter::synthetic::merge::ModelMerger;
 
 let registry = ExtensionRegistry::standard();
 let profile = DumpProfiler::builder()
-    .depth(ProfileDepth::Basic)
-    .build()
-    .profile_path(dump_path)?;
+.depth(ProfileDepth::Basic)
+.build()
+.profile_path(dump_path) ?;
 
 let inference = sql_splitter::profile::ModelInference::standard()
-    .infer(&profile.schema, &profile)?;
+.infer( & profile.schema, & profile) ?;
 let model = inference.model;
 
 // If a `kind: overrides` document is present, merge it before compiling:
-let (model, _merge_warnings) = ModelMerger::merge(model, overrides)?;
+let (model, _merge_warnings) = ModelMerger::merge(model, overrides) ?;
 # Ok::<(), anyhow::Error>(())
 ```
 

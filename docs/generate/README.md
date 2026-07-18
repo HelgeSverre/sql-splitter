@@ -45,7 +45,7 @@ sql-splitter generate production.sql \
 ## Documentation map
 
 | Page                                              | Covers                                                                                                        |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+|---------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | [Model reference](model-reference.md)             | Every YAML field: top-level, table, schema, row, relationship, column, generator/modifier/planner attachment. |
 | [Generators](generators.md)                       | The generator and modifier catalog: kinds, fields, defaults, accepted types.                                  |
 | [Planners](planners.md)                           | Multi-column and cross-table planners, with three fully worked examples.                                      |
@@ -58,14 +58,14 @@ sql-splitter generate production.sql \
 ```text
 SQL dump ──> schema extraction ──┐
                                   ├─> model ─> compiler + registry ─> plan
-SQL rows ──> bounded profiler ───┘                                    │
+SQL rows ──> bounded profiler ───┘                                     │
 YAML model/overrides ──────────────────────────────────────────────────┘
-                                                                        │
-                                                                        v
-                                                          streaming generation
-                                                                        │
-                                                                        v
-                                                            dialect renderer
+                                                                       │
+                                                                       v
+                                                         streaming generation
+                                                                       │
+                                                                       v
+                                                           dialect renderer
 ```
 
 A model is either self-contained (`kind: model`) or a partial patch
@@ -79,7 +79,7 @@ precedence rules.
 ## Exit codes
 
 | Code | Meaning                                                                              |
-| ---- | ------------------------------------------------------------------------------------ |
+|------|--------------------------------------------------------------------------------------|
 | `0`  | Successful generation, `--check`, `--dry-run`, or `--verify`.                        |
 | `1`  | Invalid model, a `--strict` warning, a runtime/I/O failure, or a `--verify` failure. |
 | `2`  | Invalid CLI arguments or conflicting flags.                                          |
@@ -87,4 +87,5 @@ precedence rules.
 ## See also
 
 - [`generate` command reference](/commands/generate) on the website — full flag table and stdout ownership rules.
-- [Synthetic data generation design](../superpowers/specs/2026-07-16-synthetic-data-generation-design.md) — the original design spec (the pages here describe the shipped behavior; where they differ, this documentation wins).
+- [Synthetic data generation design](../superpowers/specs/2026-07-16-synthetic-data-generation-design.md) — the original
+  design spec (the pages here describe the shipped behavior; where they differ, this documentation wins).

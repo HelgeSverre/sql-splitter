@@ -18,7 +18,7 @@ kind: model # model | overrides
 ```
 
 | Kind        | Meaning                                                                                                                                                                                                            |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `model`     | Self-contained: every table has a complete schema, an exact final `rows` count, and every generated column has an explicit owner (unless `defaults.inference: schema` opts into heuristics). Needs no source dump. |
 | `overrides` | A partial patch. Tables, schemas, columns, relationships, rules, and defaults may be omitted — missing fields mean "leave the source/base value unchanged." Requires a source dump or a base model to apply to.    |
 
@@ -41,7 +41,7 @@ a saved model.
 ## Top-level fields
 
 | Field      | `model`            | `overrides`                 | Type               | Default               | Meaning                                                       |
-| ---------- | ------------------ | --------------------------- | ------------------ | --------------------- | ------------------------------------------------------------- |
+|------------|--------------------|-----------------------------|--------------------|-----------------------|---------------------------------------------------------------|
 | `$schema`  | optional           | optional                    | `String`           | `None`                | Editor-only schema pointer; see below. Ignored by the parser. |
 | `version`  | required           | required                    | `u32`              | —                     | Must equal `1`.                                               |
 | `kind`     | required (`model`) | required (`overrides`)      | tag                | —                     | Explicit document role.                                       |
@@ -106,7 +106,7 @@ flag: a CLI flag wins when explicitly given, the `output:` block fills in
 otherwise, and only then does the renderer's own default apply. Concretely:
 
 | `output:` field | Falls back under                | Effect when honored                                                                                                                                                                                                                                                                                                               |
-| --------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|-----------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `dialect`       | `--dialect`                     | Sets the render dialect. Full precedence: `--dialect` > `output.dialect` > the source/input dialect (preserve-source) > `mysql`. A deliberately chosen target (CLI or `output.dialect`) that differs from the source maps types across dialects and reports lossy conversions; a preserve-source run renders the schema verbatim. |
 | `mode`          | `--schema-only` / `--data-only` | `schema_only`/`data_only` restrict the render. Only the _absence_ of both flags leaves the neutral `schema_and_data`, under which `output.mode` fills in.                                                                                                                                                                         |
 | `inserts`       | `--no-copy`                     | `insert` forces multi-row `INSERT` (like `--no-copy`); `auto`/`copy` keep the PostgreSQL `COPY` default.                                                                                                                                                                                                                          |
@@ -142,7 +142,7 @@ defaults:
 ```
 
 | Value                                           | Meaning                                                                                                                                                                                       |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|-------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `disabled` (default when `defaults` is omitted) | Every generated column needs an explicit generator or planner owner.                                                                                                                          |
 | `schema`                                        | Columns without an owner fall back to structural, type-based heuristics (for example, a bare integer primary key gets a `sequence` generator). Missing data profiles do not affect this mode. |
 
@@ -199,7 +199,7 @@ tables:
 ```
 
 | Field           | Type                                 | Default             | Meaning                                                         |
-| --------------- | ------------------------------------ | ------------------- | --------------------------------------------------------------- |
+|-----------------|--------------------------------------|---------------------|-----------------------------------------------------------------|
 | `seed`          | tri-state (omit / `null` / integer)  | inherit             | See [`seed`](#seed) above.                                      |
 | `rows`          | tagged object, `kind:` discriminator | required in `model` | Row-count rule; see below.                                      |
 | `schema`        | object                               | required in `model` | Normalized table schema; see below.                             |
@@ -221,7 +221,7 @@ rows:
 ```
 
 | `kind`              | Fields                                         | Meaning                                                                                                                                |
-| ------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+|---------------------|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
 | `fixed`             | `count: u64`                                   | An exact, hand-chosen count.                                                                                                           |
 | `observed`          | `count: u64`                                   | The count observed in a profiled source dump. Unresolved without a source/base count is a compile error (`GEN-ROWS-OBSERVED-MISSING`). |
 | `scale`             | `base: u64`, `factor: f64`, `count: u64`       | `count` scales `base` by `factor` (stochastically rounded when non-integral).                                                          |
@@ -268,7 +268,7 @@ schema:
 ```
 
 | Field                | Default  | Meaning                                                                                                                                                                                                                                                            |
-| -------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|----------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`               | required | Table name.                                                                                                                                                                                                                                                        |
 | `columns`            | required | Ordered list of columns (order is preserved into rendered DDL).                                                                                                                                                                                                    |
 | `primary_key`        | `[]`     | Column names forming the primary key.                                                                                                                                                                                                                              |
@@ -292,7 +292,7 @@ schema:
 ```
 
 | Field         | Default                               | Meaning                                                                                                                                                                                                                        |
-| ------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|---------------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`        | required                              | Column name.                                                                                                                                                                                                                   |
 | `source_type` | required (or via `type:` shorthand)   | Original SQL type text, e.g. `"varchar(255)"`.                                                                                                                                                                                 |
 | `type`        | —                                     | **Shorthand alias** for `source_type`, accepted on input only. Hand-authored models may write `type: bigint`; `--emit-config` always emits the canonical `source_type` + `family` pair, never `type:`.                         |
@@ -319,7 +319,7 @@ columns:
 ```
 
 | Field       | Default | Meaning                                                                                                            |
-| ----------- | ------- | ------------------------------------------------------------------------------------------------------------------ |
+|-------------|---------|--------------------------------------------------------------------------------------------------------------------|
 | `semantic`  | `None`  | Optional semantic annotation (informational; does not itself select a generator).                                  |
 | `generator` | `None`  | `{ kind: String, ...args }` — see [Generators](generators.md) for every kind and its arguments.                    |
 | `modifiers` | `[]`    | Ordered pipeline of `{ kind: String, ...args }` — applied in list order after the generator produces a base value. |
@@ -370,7 +370,7 @@ relationships:
 ```
 
 | Field          | Default  | Meaning                                                                                                                                                                           |
-| -------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|----------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`         | `None`   | Required if any generator or planner refers to this relationship by name; must be unique within the table. Anonymous relationships are allowed only when nothing references them. |
 | `columns`      | required | Local column(s) forming the foreign key.                                                                                                                                          |
 | `references`   | required | `{ table: String, columns: [String] }` — the parent table/columns.                                                                                                                |
@@ -407,7 +407,7 @@ tables:
 ```
 
 | Field      | Default                            | Merge rule                                                                                    |
-| ---------- | ---------------------------------- | --------------------------------------------------------------------------------------------- |
+|------------|------------------------------------|-----------------------------------------------------------------------------------------------|
 | `source`   | `None`                             | If present, replaces the base's `source` wholesale.                                           |
 | `defaults` | `None`                             | If present, replaces the base's `defaults` wholesale.                                         |
 | `seed`     | inherit (tri-state)                | `Inherit` = no change; `null` clears the base seed; an integer sets it.                       |
@@ -417,7 +417,7 @@ tables:
 Per-table override fields (`TableOverride`):
 
 | Field           | Default             | Merge rule                                                                                                                                                                                                                                                          |
-| --------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|-----------------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `seed`          | inherit (tri-state) | Same tri-state semantics as the model's table `seed`.                                                                                                                                                                                                               |
 | `rows`          | `None`              | If the override's `kind` matches the base's current row-count kind, only the supplied fields change; switching to a different `kind` requires every field that kind needs (`GEN-INCOMPLETE-ROWS` otherwise — no partial fallback across kinds).                     |
 | `schema`        | `None`              | **Structural assertion only** — `{ name: Option<String>, create_statement: Option<String> }`. A mismatching value is `GEN-SCHEMA-MISMATCH`; a matching value is a silent no-op. Column types, nullability, keys, and existence can never be changed by an override. |
