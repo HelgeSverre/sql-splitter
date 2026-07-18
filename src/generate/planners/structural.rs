@@ -1,13 +1,13 @@
 //! Common same-table temporal planners plus the relationship/hierarchy
 //! planners that build on the same execution pattern.
 //!
-//! Temporal (Task 27): `temporal.timestamps` (a created/updated pair, plus
+//! Temporal planners include `temporal.timestamps` (a created/updated pair, plus
 //! optional trailing timestamps), `temporal.soft_delete` (a coherent
 //! `deleted_at`/`is_deleted` pair), and `temporal.lifecycle` (a status column
 //! that only ever reaches legal states, each carrying a correctly-ordered
 //! timestamp).
 //!
-//! Relationship + hierarchy (Task 28): `hierarchy.tree` (a self-referential
+//! Relationship and hierarchy planners include `hierarchy.tree` (a self-referential
 //! parent_id tree with configurable-ratio roots and bounded depth/branching)
 //! and the cross-table FK-side planners `relation.junction_pair` (unique
 //! `(left, right)` edges via a deterministic pair-index permutation),
@@ -27,8 +27,7 @@
 //! non-negative whole-unit offset added to a base instant. Every timestamp is
 //! reduced to a single internal UTC instant measured in nanoseconds since the
 //! Unix epoch (an `i128`), so every "B happens no earlier than A" invariant is
-//! pure checked integer arithmetic, matching Task 23's `temporal.interval`
-//! approach.
+//! pure checked integer arithmetic, matching the `temporal.interval` approach.
 //!
 //! # Owned columns and streams
 //!
@@ -2382,7 +2381,7 @@ const LON_MAX_DEGREES: f64 = 180.0;
 ///
 /// Note: no [`PlannerPredicate`] variant expresses a decimal-valued bounded
 /// range — [`PlannerPredicate::InRange`] is timestamp-only (it compares
-/// epoch nanoseconds; see Task 26/27). Range and bounding-box correctness are
+/// epoch nanoseconds). Range and bounding-box correctness are
 /// therefore guaranteed by construction (every draw is a `random_range` over
 /// the compiled bound) and covered by this module's tests, not by a runtime
 /// predicate.

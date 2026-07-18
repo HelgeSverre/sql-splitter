@@ -1,4 +1,4 @@
-//! Phase 1 core generator and modifier catalog.
+//! Core generator and modifier catalog.
 //!
 //! Every generator here compiles its YAML config exactly once into
 //! [`CoreGenerator`], a closed enum of built-in operators. `CompiledCore`'s
@@ -6,9 +6,9 @@
 //! the per-row hot path, only a `match` on a plain discriminant.
 //!
 //! `constant` is deliberately not reimplemented here: [`super::ConstantFactory`]
-//! is Task 7's worked exemplar and already satisfies this module's
-//! factory/compiled split, so duplicating it into [`CoreGenerator`] would only
-//! add a second, redundant implementation of the same behavior.
+//! already satisfies this module's factory/compiled split, so duplicating it
+//! into [`CoreGenerator`] would only add a second, redundant implementation of
+//! the same behavior.
 
 use std::collections::HashSet;
 
@@ -30,9 +30,9 @@ use crate::generate::value::{GenerateError, GeneratedValue};
 // --- Shared helpers ----------------------------------------------------------
 
 /// The column an operator is compiled against. Every generator and modifier
-/// in this module is column-scoped, so the compiler (Task 10) always builds
-/// its `CompileContext` with [`CompileContext::for_column`]; a missing column
-/// would be a caller bug, not a data problem, hence the `expect`.
+/// in this module is column-scoped, so the compiler always builds its
+/// `CompileContext` with [`CompileContext::for_column`]; a missing column would
+/// be a caller bug, not a data problem, hence the `expect`.
 fn column<'a>(context: &CompileContext<'a>) -> &'a PortableColumn {
     context
         .column()
@@ -223,8 +223,8 @@ const ALL_FAMILIES: &[SqlTypeFamily] = &[
 
 // --- The compiled-enum built-in ----------------------------------------------
 
-/// Every Phase 1 built-in generator, compiled once from its config. `generate`
-/// is a single `match` over this enum — the hot path never re-parses YAML or
+/// Every core built-in generator, compiled once from its config. `generate` is
+/// a single `match` over this enum — the hot path never re-parses YAML or
 /// dispatches on a kind string.
 enum CoreGenerator {
     Null,
@@ -319,7 +319,7 @@ fn random_alphabet_char(rng: &mut ChaCha8Rng, alphabet: &[u8]) -> char {
 }
 
 /// The compiled form of every [`CoreGenerator`] variant. One type, one
-/// `match`, shared by every Phase 1 factory below.
+/// `match`, shared by every core factory below.
 struct CompiledCore(CoreGenerator);
 
 impl CompiledGenerator for CompiledCore {
@@ -2326,7 +2326,7 @@ impl ModifierFactory for FormatFactory {
     }
 }
 
-/// Register every Phase 1 generator and modifier factory into `registry`.
+/// Register every core generator and modifier factory into `registry`.
 pub(crate) fn register_all(registry: &mut ExtensionRegistry) {
     registry
         .register_generator(Box::new(NullFactory))

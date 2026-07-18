@@ -1,13 +1,13 @@
 //! Built-in generator factories.
 //!
-//! This module is the home of the generator catalog. Task 7 seeded it with a
-//! single exemplar, [`ConstantFactory`]. [`core`] adds the rest of the Phase 1
-//! catalog: the other literal/structural generators (`null`, `sequence`,
+//! This module is the home of the generator catalog. [`ConstantFactory`]
+//! provides the minimal factory/compiled exemplar. [`core`] provides the
+//! literal and structural generators (`null`, `sequence`,
 //! `copy`, `template`, `pattern`, `database_default`, `json_value`), the
 //! typed random generators (`integer`, `decimal`, `boolean`, `string`,
-//! `bytes`, `uuid`), `choice`/`weighted_choice`, and the Phase 1 modifiers.
-//! Semantic/temporal/credential generators are Task 12; `relation.foreign_key`
-//! is Task 13.
+//! `bytes`, `uuid`), `choice`/`weighted_choice`, and the built-in modifiers.
+//! [`semantic`] provides semantic, temporal, and credential generators;
+//! [`relation`] provides relationship-aware generators.
 
 mod core;
 pub(crate) mod observed;
@@ -98,8 +98,8 @@ impl CompiledGenerator for CompiledConstant {
 /// Minimal YAML → [`GeneratedValue`] mapping for the constant exemplar.
 ///
 /// Only the scalar shapes a hand-authored `value:` is likely to use are
-/// mapped; the full, family-aware coercion (decimals with scale, byte
-/// literals, typed date/time) is a Task 11 concern.
+/// mapped. Family-aware coercion for decimals with scale, byte literals, and
+/// typed date/time values is outside this constant-specific helper.
 fn yaml_to_value(value: &serde_yaml_ng::Value) -> GeneratedValue {
     match value {
         serde_yaml_ng::Value::Null => GeneratedValue::Null,

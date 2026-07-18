@@ -1,5 +1,5 @@
 //! Integration tests characterizing `shard` output through the visitor-based
-//! row-parsing path (Task 17). These pin the rows selected for a tenant so the
+//! row-parsing path. These pin the rows selected for a tenant so the
 //! streaming `for_each_data_row` refactor cannot silently change behavior.
 
 mod support;

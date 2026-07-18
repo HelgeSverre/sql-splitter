@@ -206,6 +206,10 @@ fn check_with_an_input_dump_exits_with_usage_code() {
         .expect("failed to run sql-splitter");
 
     assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("stderr is valid UTF-8");
+    let normalized = stderr.to_ascii_lowercase();
+    assert!(!normalized.contains("phase"), "stderr: {stderr}");
+    assert!(!normalized.contains("task"), "stderr: {stderr}");
 }
 
 #[test]
@@ -310,7 +314,7 @@ fn verify_generates_audits_and_publishes_to_a_real_file() {
 }
 
 // ===========================================================================
-// Task 21: dump-to-model and dump-to-SQL workflows
+// Dump-to-model and dump-to-SQL workflows
 // ===========================================================================
 
 const PRODUCTION_DUMP: &str = "tests/fixtures/generate/production_shape.sql";
@@ -569,7 +573,7 @@ fn dump_workflow_unseeded_run_records_effective_seed() {
 }
 
 // ===========================================================================
-// End-to-end: complete-model generate/check/dry-run (Phase 1 happy paths)
+// End-to-end: complete-model generate/check/dry-run happy paths
 // ===========================================================================
 
 #[test]
@@ -732,7 +736,7 @@ fn an_invalid_model_exits_with_failure_code_not_usage_code() {
 }
 
 // ===========================================================================
-// Task 30: lossy cross-dialect warnings are surfaced and strict-promoted
+// Lossy cross-dialect warnings are surfaced and strict-promoted
 // ===========================================================================
 
 /// A model whose MySQL `ENUM` column narrows to a plain string on any other

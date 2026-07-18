@@ -285,16 +285,15 @@ use sql_splitter::synthetic::{
     ColumnRule, GeneratorConfig as GenConfig, PlannerConfig, SyntheticFile, SyntheticModel,
 };
 
-// --- Task 10 test operators -------------------------------------------------
+// --- Test-only ownership operators -----------------------------------------
 //
 // The standard registry ships the family-agnostic `constant` generator plus
-// the full Phase 1 core catalog (Task 11), so ownership/type/cycle validation
-// needs a few narrow test operators under kinds the core catalog doesn't
-// claim: a generator that accepts only integer families (to trigger
-// `GEN-GENERATOR-TYPE` against a text column), a generator that reads a
-// sibling column (to build read/write cycles), and a planner that owns and
-// reads columns named in its config (to trigger conflicts and planner-owned
-// cycles).
+// the full core catalog, so ownership/type/cycle validation needs a few narrow
+// test operators under kinds the core catalog doesn't claim: a generator that
+// accepts only integer families (to trigger `GEN-GENERATOR-TYPE` against a text
+// column), a generator that reads a sibling column (to build read/write
+// cycles), and a planner that owns and reads columns named in its config (to
+// trigger conflicts and planner-owned cycles).
 
 /// A generator that only accepts integer families.
 struct IntegerOnlyFactory;
@@ -395,8 +394,8 @@ impl PlannerFactory for TestFamilyFactory {
     }
 }
 
-/// A compiler backed by the standard registry plus the Task 10 test operators.
-/// The extra operators are inert for the Task 9 count/selection tests.
+/// A compiler backed by the standard registry plus the test-only operators.
+/// The extra operators are inert for the count and selection tests.
 fn compiler() -> ModelCompiler {
     let mut registry = ExtensionRegistry::standard();
     registry
@@ -883,14 +882,14 @@ fn root_table_scale_replaces_the_global_scale() {
     assert_eq!(plan.table("users").unwrap().rows, 1_000);
 }
 
-/// Type stubs forward-referenced by the plan (`GenerationPlan`) must exist and
-/// be constructible so downstream tasks (10, 13, 22) can extend them.
+/// Types referenced by the plan (`GenerationPlan`) must remain constructible
+/// and debuggable for downstream generation stages.
 #[allow(dead_code)]
 fn plan_type_is_debuggable(plan: &GenerationPlan) -> String {
     format!("{plan:?}")
 }
 
-// --- Task 10: ownership, types, and dependency graphs -----------------------
+// --- Ownership, types, and dependency graphs -------------------------------
 
 #[test]
 fn compiler_reports_all_independent_ownership_and_type_errors() {
@@ -1116,7 +1115,7 @@ fn ownership_allows_database_default_column() {
     assert!(matches!(created.owner, ColumnOwner::DatabaseDefault));
 }
 
-// --- Task 34b: single-column key uniqueness enforced at compile time --------
+// --- Single-column key uniqueness enforced at compile time -----------------
 
 /// A single-table model whose one non-key `id`-style column `key` is a
 /// single-column primary key produced by `generator_kind`, plus an optional

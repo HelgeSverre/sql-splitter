@@ -1,4 +1,4 @@
-//! Task 12: the semantic, credential, and temporal generator catalog.
+//! The semantic, credential, and temporal generator catalog.
 //!
 //! Most of this catalog (`person.*`, `internet.*` minus a few numeric-ish
 //! fields, `phone.*`, `company.*`, most of `address.*`, `commerce.currency`,
@@ -1727,8 +1727,7 @@ impl CompiledGenerator for CompiledRelative {
 
 // --- Registration --------------------------------------------------------------
 
-/// Register the complete Task 12 semantic/credential/temporal catalog into
-/// `registry`.
+/// Register the complete semantic, credential, and temporal catalog.
 pub(crate) fn register_all(registry: &mut ExtensionRegistry) {
     for spec in FAKE_TEXT_SPECS {
         registry

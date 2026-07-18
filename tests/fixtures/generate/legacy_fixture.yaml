@@ -1,12 +1,11 @@
-# Legacy fixture contract (Task 31).
+# Legacy fixture contract.
 #
-# Snapshot of the shape the old `test_data_gen` crate (crates/test_data_gen)
-# produced, re-expressed as a `kind: model` document for the public
+# Snapshot of the shape formerly produced by the private `test_data_gen`
+# crate, re-expressed as a `kind: model` document for the public
 # `sql_splitter::generate` API. This is what `tests/support/generated_fixture.rs`
-# loads; `tests/fixture_migration_test.rs` characterizes it against the old
-# crate so Task 32 can delete `crates/test_data_gen` with confidence.
+# loads for shared integration-test dumps.
 #
-# Old shape it replaces (see crates/test_data_gen/src/generator.rs):
+# Shape represented by this fixture:
 #   - 4 global tables: permissions, roles, role_permissions, currencies
 #   - 1 tenant root: tenants
 #   - 11 per-tenant tables: users, user_roles, categories, products,
@@ -28,11 +27,10 @@
 #   - Junction tables (role_permissions, user_roles) generate independent
 #     pairs rather than the old crate's "no duplicate pair, admin gets every
 #     permission" rules — no consuming test inspects junction semantics.
-#   - The old crate's `RenderConfig::mssql_production()` profile (GO batch
-#     separators, `[dbo].` schema prefix, named `CONSTRAINT PK_x` clauses,
-#     `ON [PRIMARY]` filegroup) has no equivalent in the public renderer; the
-#     one test asserting it (`test_mssql_generator_production_style`) is left
-#     on the old crate directly — see task-31-report.md.
+# The public renderer's MSSQL production profile (GO batch separators,
+# `[dbo].` schema prefix, named `CONSTRAINT PK_x` clauses, and the
+# `ON [PRIMARY]` filegroup) is exercised from this model by
+# `test_mssql_generator_production_style`.
 #
 # `source: { dialect: postgres }` is set (types below are authored in
 # PostgreSQL spelling) purely so an explicit `.output_dialect()` request maps

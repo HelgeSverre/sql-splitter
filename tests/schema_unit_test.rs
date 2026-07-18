@@ -28,11 +28,11 @@ mod mod_tests {
         );
     }
 
-    /// Regression (Task 34 survey): MySQL 8 omits the display width, so real
-    /// dumps write `bigint unsigned` (no parens) and the `unsigned`/`signed`/
-    /// `zerofill` modifiers must not push an integer type into the `Other`
-    /// fallback. Classifying these as `Other` mis-inferred `sequence`/`string`
-    /// generators that the compiler then rejected with `GEN-GENERATOR-TYPE`.
+    /// Regression for MySQL 8 integer modifiers: real dumps write `bigint
+    /// unsigned` without a display width, and the `unsigned`/`signed`/`zerofill`
+    /// modifiers must not push an integer type into the `Other` fallback.
+    /// Classifying these as `Other` mis-inferred `sequence`/`string` generators
+    /// that the compiler then rejected with `GEN-GENERATOR-TYPE`.
     #[test]
     fn test_column_type_parsing_unsigned_modifiers() {
         assert_eq!(

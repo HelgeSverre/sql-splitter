@@ -966,9 +966,9 @@ fn test_mysql_sized_int_auto_increment_to_sqlite() {
 
 #[test]
 fn test_enum_narrows_to_varchar_cross_dialect() {
-    // Task 30: the synthetic renderer flags ENUM/SET narrowing as lossy; the
-    // convert command's type mapping is the shared rule and must still narrow
-    // ENUM to a plain VARCHAR (regression guard, behavior unchanged).
+    // The synthetic renderer flags ENUM/SET narrowing as lossy; the convert
+    // command's type mapping is the shared rule and must still narrow ENUM to
+    // a plain VARCHAR (regression guard, behavior unchanged).
     let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
     let input = b"CREATE TABLE t (kind ENUM('a','b') NOT NULL);";
     let output = converter.convert_statement(input).unwrap();

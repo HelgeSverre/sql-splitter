@@ -240,10 +240,10 @@ fn generate_mode_without_output_is_a_shape_error() {
 }
 
 /// A synthetic MySQL dump reproducing three everyday shapes (invented names
-/// and values) that real dumps exposed during the Task 34 survey.
+/// and values) found in real dumps.
 const REALWORLD_SHAPES_DUMP: &str = "tests/fixtures/generate/realworld_shapes.sql";
 
-/// Regression (Task 34 real-world survey): a MySQL dump using the common
+/// Regression for common real-world shapes: a MySQL dump using the
 /// Laravel/MySQL 8 shapes must profile, infer, compile, and generate end to
 /// end. Each of these previously aborted the run with a `GEN-GENERATOR-TYPE`
 /// error:

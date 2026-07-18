@@ -8,8 +8,8 @@
 //! when the render target is the same dialect the DDL was captured in *and*
 //! the table itself carries a `create_statement` to preserve. Excluded-object
 //! DDL rewriting (a table selection that changes which columns/FKs a
-//! same-dialect `create_statement` may still reference) is Task 26/30's
-//! responsibility, not this one.
+//! same-dialect `create_statement` may still reference) belongs to the table
+//! selection pipeline, not this normalized renderer.
 
 use std::fmt::Write as _;
 

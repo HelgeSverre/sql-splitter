@@ -1,4 +1,4 @@
-//! Task 30: hardened DDL filtering and cross-dialect output.
+//! Integration coverage for DDL filtering and cross-dialect output.
 //!
 //! Covers the selection/exclusion filter matrix, the required-vs-optional
 //! dependency split (`GEN-EXCLUDED-DEPENDENCY` vs the detachable
@@ -190,7 +190,7 @@ fn exact_names_and_globs_coexist_with_exclude_winning() {
 #[test]
 fn retained_required_fk_to_excluded_table_is_an_error() {
     // A NOT NULL FK cannot be detached: excluding its parent is fatal, with the
-    // same stable code Task 9 uses for the selection-time condition.
+    // same stable code used for the selection-time condition.
     let error = compile(&customers_orders(false), &[], &["customers"])
         .expect_err("required FK to an excluded table must fail");
     assert!(error.contains("GEN-EXCLUDED-DEPENDENCY"), "{error}");

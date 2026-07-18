@@ -37,8 +37,8 @@
 # for all ~2,000 columns. Explicit generators are given only for primary keys and
 # foreign keys.
 #
-# PROVISIONAL: Phase-3B planner argument shapes follow the documented style; only
-# the three Phase-3A planners have normative YAML in the spec today.
+# Planner argument payloads follow the documented configuration shapes for all
+# planner kinds used below.
 
 version: 1
 kind: model
@@ -9687,4 +9687,3 @@ tables:
       partner_id: { generator: { kind: relation.foreign_key, relationship: partner_id_ref, nullable: true, null_rate: 0.15 } }
       create_uid: { generator: { kind: relation.foreign_key, relationship: create_uid_ref, nullable: true, null_rate: 0.15 } }
       write_uid: { generator: { kind: relation.foreign_key, relationship: write_uid_ref, nullable: true, null_rate: 0.15 } }
-

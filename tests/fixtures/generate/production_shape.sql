@@ -1,8 +1,8 @@
 -- MySQL mysqldump-style dump exercising the shapes the profiler must observe:
 -- multiple tables, multi-row INSERTs, NULLs, value skew, duplicates, declared
 -- foreign keys, a composite primary key, timestamps, JSON, and credential-like
--- column names password, api_key, token. Reused by Task 20 inference and the
--- Phase 2 checkpoint, so keep it representative and dialect-clean with no inline
+-- column names password, api_key, token. Shared by inference regression and
+-- profiling checks, so keep it representative and dialect-clean with no inline
 -- comments between value tuples.
 
 CREATE TABLE `users` (

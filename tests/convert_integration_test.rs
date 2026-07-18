@@ -991,9 +991,9 @@ CREATE TABLE "users" (
 
 #[test]
 fn test_convert_uuid_narrows_to_text_on_dialects_without_native_uuid() {
-    // Task 30: UUID stored as text is a lossy narrowing. The convert command's
-    // type mapping (shared with the synthetic renderer) still narrows a
-    // PostgreSQL UUID to VARCHAR(36) on MySQL (regression guard).
+    // UUID stored as text is a lossy narrowing. The convert command's type
+    // mapping (shared with the synthetic renderer) still narrows a PostgreSQL
+    // UUID to VARCHAR(36) on MySQL (regression guard).
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("input.sql");
     let output_file = temp_dir.path().join("output.sql");

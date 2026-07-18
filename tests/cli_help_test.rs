@@ -41,6 +41,25 @@ fn top_level_help_lists_the_generate_subcommand() {
 }
 
 #[test]
+fn generate_help_omits_release_planning_labels() {
+    let help = run_help(&["generate", "--help"]);
+    let normalized = help.to_ascii_lowercase();
+
+    for label in [
+        concat!("phase ", "1"),
+        concat!("phase ", "2"),
+        concat!("phase ", "3"),
+        concat!("task ", "19"),
+        concat!("tasks ", "19"),
+    ] {
+        assert!(
+            !normalized.contains(label),
+            "generate --help exposes release-planning label `{label}`:\n{help}"
+        );
+    }
+}
+
+#[test]
 fn generate_help_documents_every_cli_contract_flag() {
     let help = run_help(&["generate", "--help"]);
 
@@ -48,7 +67,7 @@ fn generate_help_documents_every_cli_contract_flag() {
     // (docs/superpowers/specs/2026-07-16-synthetic-data-generation-design.md,
     // "CLI contract"), cross-checked against `GenerateArgs`
     // (src/cmd/generate.rs) — including `--mssql-production-style`/
-    // `--mssql-go`, which Task 31 wired end to end after the spec was written.
+    // `--mssql-go`, which were added after the spec was written.
     let expected_flags = [
         // Input and model options
         "--config",

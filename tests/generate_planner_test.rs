@@ -1,4 +1,4 @@
-//! Tests for the `temporal.interval` planner (Task 23): its interval-equation
+//! Tests for the `temporal.interval` planner: its interval-equation
 //! and open-row invariants under many rows across DST boundaries, seeded
 //! reproducibility, and its compile-time diagnostics.
 
@@ -484,7 +484,7 @@ fn ownership_collision_with_a_generator_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
 
-// === workflow.progress_counters (Task 24) ===================================
+// === workflow.progress_counters =============================================
 //
 // The progress-counter planner chooses a TOTAL and a lifecycle STATE per row,
 // then partitions exact integer counter amounts. These tests pin the state
@@ -868,7 +868,7 @@ fn progress_counters_ownership_collision_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
 
-// === commerce.order_family (Task 25) ========================================
+// === commerce.order_family ==================================================
 //
 // The order-family planner coordinates an `orders` parent and an `order_items`
 // child as one family, computing exact minor-unit money. These tests pin the
@@ -1337,7 +1337,7 @@ fn order_family_line_count_tracks_the_child_distribution_mean() {
     assert_family_exact(&sink, false);
 }
 
-// === temporal.timestamps / temporal.soft_delete / temporal.lifecycle (Task 27) ==
+// === temporal.timestamps / temporal.soft_delete / temporal.lifecycle ========
 //
 // Three small same-table planners sharing the interval/progress execution
 // pattern: `temporal.timestamps` (created <= updated, plus optional trailing
@@ -1807,7 +1807,7 @@ fn lifecycle_ownership_collision_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
 
-// === hierarchy.tree (Task 28) ===============================================
+// === hierarchy.tree =========================================================
 //
 // A self-referential parent_id tree: roots (configurable ratio) carry a null
 // parent, and every non-root references an EARLIER row (parent-before-child by
@@ -2036,7 +2036,7 @@ fn tree_unknown_relationship_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-RELATIONSHIP-UNKNOWN".to_string()));
 }
 
-// === relation.junction_pair (Task 28) =======================================
+// === relation.junction_pair =================================================
 //
 // A junction row references two parents with UNIQUE (left, right) pairs. A
 // deterministic pair-index permutation makes uniqueness hold by construction.
@@ -2169,7 +2169,7 @@ fn junction_non_dense_key_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-JUNCTION-KEY-UNSUPPORTED".to_string()));
 }
 
-// === relation.polymorphic_pair (Task 28) ====================================
+// === relation.polymorphic_pair ==============================================
 //
 // A (type, id) pair where the type selects one of several target tables
 // (weighted) and the id is a VALID key in that target. Type and id are chosen
@@ -2297,7 +2297,7 @@ fn polymorphic_non_dense_target_key_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-POLYMORPHIC-KEY-UNSUPPORTED".to_string()));
 }
 
-// === relation.tenant_family (Task 28) =======================================
+// === relation.tenant_family =================================================
 //
 // A child references a parent that shares the child's tenant: the parent rows
 // are partitioned into contiguous tenant blocks, and each child's FK is drawn
@@ -2420,7 +2420,7 @@ fn tenant_family_non_dense_key_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-TENANT-KEY-UNSUPPORTED".to_string()));
 }
 
-// === geo.coordinate_pair (Task 29) ==========================================
+// === geo.coordinate_pair ====================================================
 //
 // A coherent (latitude, longitude) pair: both columns are drawn together, each
 // within its global range (and an optional bounding box), at a configurable
@@ -2541,7 +2541,7 @@ fn coordinate_pair_ownership_collision_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
 
-// === file.metadata (Task 29) =================================================
+// === file.metadata ===========================================================
 //
 // A coherent file name/extension/mime_type/size/hash: the extension matches
 // the name's suffix, mime_type is consistent with that extension, size is a

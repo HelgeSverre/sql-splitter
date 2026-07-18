@@ -82,7 +82,7 @@ pub enum Buffering {
     /// Emits each row as it is produced; safe to stream to the writer.
     Streaming,
     /// Requires buffering rows before emitting (e.g. shuffles, global sorts).
-    /// The spooling stage (Task 22) keys off this.
+    /// The spooling stage keys off this value.
     Buffered,
 }
 
@@ -269,7 +269,7 @@ pub trait RowView {
 /// [`CompileContext`] at compile time and advanced sequentially per row), so
 /// `RowContext` deliberately carries no RNG: it exposes the row index and
 /// read-only access to sibling column values, which is all the row-time
-/// dependencies a value operator has today. Task 22's spooling can extend it.
+/// dependencies a value operator needs. Spooling is coordinated at table scope.
 pub struct RowContext<'a> {
     row_index: u64,
     columns: &'a dyn RowView,
@@ -296,9 +296,8 @@ impl<'a> RowContext<'a> {
 /// Context handed to a compiled planner. Planners run once per table before
 /// any row is generated, so they see the whole table and the run seed.
 ///
-/// The planner *runtime surface* (row-count resolution, parent/child
-/// fan-out, spooling hooks) is owned by Task 22; this type is the stable
-/// extension point that work hangs off.
+/// This type is the stable extension point for planner setup; row-count
+/// resolution, parent/child fan-out, and spooling are coordinated around it.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanContext<'a> {
     table: &'a PortableTable,
@@ -419,8 +418,8 @@ pub trait PlannerFactory: Send + Sync {
 /// A compiled planner: coordinates several columns of a table together.
 ///
 /// Planners split their work across two phases. [`plan`](Self::plan) runs once
-/// per table before any row (the table-scope extension point Task 22 hangs
-/// spooling off). [`generate_row`](Self::generate_row) runs once per row in the
+/// per table before any row and provides the table-scope extension point for
+/// spooling. [`generate_row`](Self::generate_row) runs once per row in the
 /// engine's row pipeline and *produces* the values of the columns the planner
 /// owns — a planner writes several correlated columns together (e.g. an
 /// interval's `start`/`end`/`duration`/`open`) rather than one column at a
@@ -455,8 +454,8 @@ pub trait CompiledPlanner: Send {
     }
 
     /// Machine-checkable invariants this planner guarantees over its owned
-    /// columns, surfaced so the verification stage (Task 26) can assert them
-    /// without knowing the planner's internals. Default: none.
+    /// columns, surfaced so the verifier can assert them without knowing the
+    /// planner's internals. Default: none.
     fn verification_predicates(&self) -> Vec<PlannerPredicate> {
         Vec::new()
     }
@@ -501,7 +500,7 @@ pub trait CompiledPlanner: Send {
     /// row. Same-table planners (whose invariants are stated as
     /// [`verification_predicates`](Self::verification_predicates)) return none;
     /// a family planner (e.g. `commerce.order_family`) surfaces the equalities
-    /// the verification stage (Task 26) checks by grouping child rows on the
+    /// the verifier checks by grouping child rows on the
     /// declared [`family_relationship`](Self::family_relationship) foreign key.
     /// Default: none.
     fn family_sum_checks(&self) -> Vec<FamilySumCheck> {
@@ -529,9 +528,9 @@ pub struct FamilySumCheck {
 
 /// A machine-checkable invariant a planner guarantees over the columns it owns.
 ///
-/// Predicates are stated over column *names* and integer units so a verifier
-/// (Task 26) can evaluate them directly against generated rows, without
-/// re-deriving the planner's logic. Timestamp columns are compared as
+/// Predicates are stated over column *names* and integer units so the verifier
+/// can evaluate them directly against generated rows without re-deriving the
+/// planner's logic. Timestamp columns are compared as
 /// nanoseconds since the Unix epoch; a duration column is an integer count of
 /// `duration_unit_nanos`-sized units.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,8 +610,8 @@ pub enum PlannerPredicate {
     /// On every row the `guard` selects (or every row when `guard` is `None`)
     /// where both endpoints are non-`NULL`, `earlier` (compared as epoch
     /// nanoseconds) is at most `later`. A `NULL` endpoint never violates the
-    /// predicate — Task 27's `temporal.lifecycle` planner uses `NULL` to mean
-    /// "state not yet reached", so an unreached column's absence does not
+    /// predicate — the `temporal.lifecycle` planner uses `NULL` to mean "state
+    /// not yet reached", so an unreached column's absence does not
     /// participate in the ordering.
     Ordering {
         /// The timestamp column expected to occur first.
@@ -805,9 +804,8 @@ impl ExtensionRegistry {
         }
     }
 
-    /// A registry preloaded with every factory implemented so far: Task 7's
-    /// `constant` exemplar plus the full Phase 1 core catalog (Task 11). Later
-    /// phases (Tasks 12/22) register their own catalogs here in turn.
+    /// A registry preloaded with every built-in generator, modifier, and
+    /// planner factory.
     pub fn standard() -> Self {
         let mut registry = Self::new();
         registry

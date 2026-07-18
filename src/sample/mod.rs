@@ -155,12 +155,12 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     let mut rng = StdRng::seed_from_u64(config.seed);
     let mut stats = SampleStats::default();
 
-    // Phase 0: Split into temp per-table files
+    // Split input into per-table files
     let split_phase = split_to_temp_tables(&config.input, config.dialect, config.progress)?;
     let temp_dir = split_phase.temp_dir;
     let tables_dir = split_phase.tables_dir;
 
-    // Phase 1: Build schema graph
+    // Build the schema graph
     if config.progress {
         eprintln!("Building schema graph...");
     }
@@ -221,7 +221,7 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
     let selected_dir = temp_dir.path().join("selected");
     fs::create_dir_all(&selected_dir)?;
 
-    // Phase 2: Process tables in dependency order
+    // Process tables in dependency order
     if config.progress {
         eprintln!(
             "Sampling {} tables in dependency order...",
@@ -352,7 +352,7 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
         eprintln!("Sampling complete");
     }
 
-    // Phase 3: Output synthesis
+    // Synthesize the output
     if config.dry_run {
         return Ok(stats);
     }
