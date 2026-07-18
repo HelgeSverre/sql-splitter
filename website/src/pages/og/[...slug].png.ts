@@ -1,13 +1,19 @@
+import type { APIRoute } from "astro";
 import { getCollection } from "astro:content";
+import { getOgImageSlug } from "../../ogPath";
 import { generateOgSvg, svgToPng } from "./satori-lib.mjs";
+
+interface OgImageProps {
+  title: string;
+  description: string;
+  slug: string;
+}
 
 export async function getStaticPaths() {
   const docs = await getCollection("docs");
 
   return docs.map((doc) => {
-    // Remove .mdx extension and /index suffix to match routeData.ts URL generation
-    const slug =
-      doc.id.replace(/\.mdx$/, "").replace(/\/index$/, "") || "index";
+    const slug = getOgImageSlug(doc.id);
 
     return {
       params: { slug },
@@ -20,7 +26,7 @@ export async function getStaticPaths() {
   });
 }
 
-export async function GET({ props }) {
+export const GET: APIRoute<OgImageProps> = async ({ props }) => {
   const { title, description, slug } = props;
 
   const svg = await generateOgSvg({ title, description, slug });
@@ -32,4 +38,4 @@ export async function GET({ props }) {
       "Cache-Control": "public, max-age=31536000, immutable",
     },
   });
-}
+};

@@ -21,6 +21,8 @@
 
 <script>
   class StarlightThemeToggle extends HTMLElement {
+    private button: HTMLButtonElement | null;
+
     constructor() {
       super();
       this.button = this.querySelector('button');

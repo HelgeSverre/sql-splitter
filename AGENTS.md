@@ -18,8 +18,8 @@ Use these sources in descending order of authority:
 2. `sql-splitter <command> --help` for the current CLI.
 3. `just --list` and `justfile` for development commands.
 4. `website/src/content/docs/` for maintained user and contributor docs.
-5. `README.md`, `website/llms.txt`, and `skills/sql-splitter/SKILL.md` for
-   secondary user- and agent-facing summaries.
+5. `README.md` and `skills/sql-splitter/SKILL.md` for secondary user- and
+   agent-facing summaries.
 
 When behavior changes, update every affected user-facing source in the same
 change. Do not preserve stale prose merely because it appears in this file.
@@ -29,8 +29,7 @@ change. Do not preserve stale prose merely because it appears in this file.
 - Run `git status --short` and preserve unrelated worktree changes.
 - Read the implementation and nearby tests before changing behavior.
 - Search for the same option, command, or concept across `README.md`,
-  `website/llms.txt`, `website/src/content/docs/`, and
-  `skills/sql-splitter/SKILL.md`.
+  `website/src/content/docs/`, and `skills/sql-splitter/SKILL.md`.
 - Use `cargo run -- <command> --help` when validating CLI examples or flags.
 
 ## Development commands
@@ -201,24 +200,22 @@ than mirror private implementation details.
 Do not hand-edit generated artifacts when a repository command owns them.
 
 - `just schemas` regenerates `schemas/*.schema.json`, validates them against CLI
-  output and generate fixtures, and copies them to `website/public/schemas/`.
+  output and generate fixtures, clears stale vendored schemas, copies them to
+  `website/public/schemas/`, and verifies both directories match.
 - `just man` regenerates `man/` from Clap definitions.
+- `bun run build` generates `llms.txt`, `llms-full.txt`, and `llms-small.txt`
+  through `starlight-llms-txt`; do not edit or commit those build outputs.
 
 When changing a command, option, output format, dialect, compression/archive
 support, or common workflow, review:
 
 - `README.md`
 - the matching page under `website/src/content/docs/commands/` or `reference/`
-- `website/llms.txt`
 - `skills/sql-splitter/SKILL.md`
 - generated man pages and JSON schemas, when applicable
 
 When changing synthetic model semantics, also update the relevant page under
 `docs/generate/` and `website/src/content/docs/commands/generate.mdx`.
-
-`website/llms.txt` is the editable source; `website/public/llms.txt` is the
-published copy and must stay synchronized with it. Keep the llms.txt structure
-compatible with llmstxt.org and keep examples aligned with current Clap help.
 
 Update `skills/sql-splitter/SKILL.md` when a change affects command selection,
 common agent workflows, or important flags. Keep it focused on when and how to

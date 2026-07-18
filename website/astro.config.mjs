@@ -1,39 +1,25 @@
-import { defineConfig } from "astro/config";
+import { defineConfig, envField } from "astro/config";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
-import react from "@astrojs/react";
 import indexnow from "astro-indexnow";
 import tailwindcss from "@tailwindcss/vite";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightGitHubAlerts from "starlight-github-alerts";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
-// Read the package version from Cargo.toml at config time.
-function getVersion() {
-  const cargoPath = resolve(import.meta.dirname, "../Cargo.toml");
-  let cargoContent;
-
-  try {
-    cargoContent = readFileSync(cargoPath, "utf-8");
-  } catch (cause) {
-    throw new Error(`Could not read version source at ${cargoPath}`, { cause });
-  }
-
-  const versionMatch = cargoContent.match(/^version\s*=\s*"([^"]+)"/m);
-  if (!versionMatch) {
-    throw new Error(`Could not find package version in ${cargoPath}`);
-  }
-
-  return versionMatch[1];
-}
-
-const SQL_SPLITTER_VERSION = getVersion();
+import starlightLlmsTxt from "starlight-llms-txt";
+import packageJson from "./package.json" with { type: "json" };
 
 export default defineConfig({
   site: "https://sql-splitter.dev",
+  env: {
+    schema: {
+      SQL_SPLITTER_VERSION: envField.string({
+        context: "server",
+        access: "public",
+        default: packageJson.version,
+      }),
+    },
+  },
   integrations: [
-    react(),
     starlight({
       title: "sql-splitter",
       lastUpdated: true,
@@ -41,6 +27,12 @@ export default defineConfig({
       pagination: true,
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
       plugins: [
+        starlightLlmsTxt({
+          projectName: "sql-splitter",
+          description:
+            "A fast Rust CLI and library for inspecting and transforming SQL dumps.",
+          promote: ["index*", "getting-started/**", "commands/index"],
+        }),
         starlightLinksValidator({
           exclude: ["/schemas/", "/schemas/**"],
         }),
@@ -132,8 +124,5 @@ export default defineConfig({
   ],
   vite: {
     plugins: [tailwindcss()],
-    define: {
-      __SQL_SPLITTER_VERSION__: JSON.stringify(SQL_SPLITTER_VERSION),
-    },
   },
 });

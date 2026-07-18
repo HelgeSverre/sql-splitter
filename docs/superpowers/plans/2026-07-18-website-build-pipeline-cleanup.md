@@ -21,12 +21,14 @@
 ### Task 1: Share OG route normalization
 
 **Files:**
+
 - Create: `website/src/ogPath.test.ts`
 - Create: `website/src/ogPath.ts`
 - Modify: `website/src/routeData.ts`
 - Modify: `website/src/pages/og/[...slug].png.ts`
 
 **Interfaces:**
+
 - Produces: `getOgImageSlug(contentId: string): string`
 - Consumes: Starlight's normalized content entry and route IDs
 
@@ -74,6 +76,7 @@ Expected: 3 PASS, 0 FAIL.
 ### Task 2: Delegate derived outputs to Astro and Starlight
 
 **Files:**
+
 - Create: `website/src/buildOutput.test.ts`
 - Modify: `website/package.json`
 - Modify: `website/astro.config.mjs`
@@ -86,6 +89,7 @@ Expected: 3 PASS, 0 FAIL.
 - Delete: `website/public/llms.txt`
 
 **Interfaces:**
+
 - Produces: `SQL_SPLITTER_VERSION` from `astro:env/server`
 - Produces: `dist/llms.txt`, `dist/llms-full.txt`, `dist/llms-small.txt`, `dist/sitemap-index.xml`
 
@@ -109,7 +113,10 @@ test("framework integrations own llms and sitemap outputs", () => {
 });
 
 test("the Starlight header shows the package version", () => {
-  const html = readFileSync(join(dist, "getting-started", "index.html"), "utf8");
+  const html = readFileSync(
+    join(dist, "getting-started", "index.html"),
+    "utf8",
+  );
   expect(html).toContain("v1.15.0");
 });
 ```
@@ -129,7 +136,7 @@ cd website
 bun remove @astrojs/react @resvg/resvg-js @types/react @types/react-dom react react-dom tsx
 bun add starlight-llms-txt
 bun add --dev @astrojs/check typescript
-bun pm pkg set version=1.15.0 scripts.og="bun scripts/generate-og-image.ts" scripts.test:unit="bun test src/*.test.ts"
+bun pm pkg set version=1.15.0 scripts.og="bun scripts/generate-og-image.ts" scripts.test:unit="bun test src/ogPath.test.ts" scripts.test:build="bun run build && bun test src/buildOutput.test.ts"
 ```
 
 Remove `prebuild` from `package.json`.
@@ -159,6 +166,7 @@ Expected: build succeeds and both tests pass.
 ### Task 3: Remove dead website files and stale documentation
 
 **Files:**
+
 - Modify: `website/src/pages/schemas/index.astro`
 - Modify: `website/src/content/docs/contributing/website-og-images.mdx`
 - Delete: `website/index.html`
@@ -169,6 +177,7 @@ Expected: build succeeds and both tests pass.
 - Delete: `website/src/styles/global.css`
 
 **Interfaces:**
+
 - Consumes: Astro's `public/` directory as the only static asset source
 
 - [ ] **Step 1: Remove files with no active importer or build consumer**
@@ -193,11 +202,13 @@ Expected: no matches.
 ### Task 4: Make schema vendoring and release version sync explicit
 
 **Files:**
+
 - Modify: `justfile`
 - Modify: `AGENTS.md`
 - Modify: `website/src/buildOutput.test.ts`
 
 **Interfaces:**
+
 - Consumes: authoritative `schemas/*.schema.json`
 - Produces: byte-identical `website/public/schemas/*.schema.json`
 
@@ -233,11 +244,12 @@ Expected: no schema differences and successful recipe listing.
 ### Task 5: Full verification and review
 
 **Files:**
+
 - Verify all modified website and repository tooling files
 
 - [ ] **Step 1: Run unit and generated-artifact tests**
 
-Run: `cd website && bun run test:unit`
+Run: `cd website && bun run test:unit && bun run test:build`
 
 Expected: all tests pass.
 

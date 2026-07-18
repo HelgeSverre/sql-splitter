@@ -617,7 +617,7 @@ just verify-realworld
 
 sql-splitter includes documentation optimized for AI agents:
 
-- **[llms.txt](website/llms.txt)** - LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification
+- **[llms.txt](https://sql-splitter.dev/llms.txt)** - Generated LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification
 - **[Agent Skill](skills/sql-splitter/SKILL.md)** - Claude Code / Amp skill for automatic tool discovery
 
 Install the skill in Claude Code / Amp:

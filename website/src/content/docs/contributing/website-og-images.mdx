@@ -30,7 +30,7 @@ The website generates an OpenGraph image (1200x630px) for every documentation pa
 
 ## Implementation
 
-OG images are generated using **Satori** (Vercel's JSX-to-SVG library) and converted to PNG with **@resvg/resvg-js**.
+OG images are generated using **Satori** and converted from SVG to PNG with **Sharp**.
 
 ### Key Files
 
@@ -44,7 +44,7 @@ OG images are generated using **Satori** (Vercel's JSX-to-SVG library) and conve
 1. At build time, Astro fetches all docs from the `docs` content collection
 2. For each doc, `getStaticPaths()` creates a route at `/og/{slug}.png`
 3. The `GET` handler renders the Satori template to SVG
-4. Resvg converts SVG to PNG
+4. Sharp converts SVG to PNG
 5. Images are saved to `dist/og/` with `.png` extension
 
 ### Example Output

@@ -185,9 +185,11 @@ schemas: release
     cargo nextest run --test json_schema_tests
     @echo ""
     @echo "Copying schemas to website..."
+    rm -f website/public/schemas/*.schema.json
     cp schemas/*.schema.json website/public/schemas/
+    diff -qr schemas website/public/schemas
     @echo ""
-    @echo "✓ Schemas generated, formatted, validated, and copied to website/public/schemas/"
+    @echo "✓ Schemas generated, validated, and synchronized with website/public/schemas/"
 
 # Install website deps and start the dev server
 [group('website')]
@@ -298,6 +300,7 @@ version:
 bump new_version:
     @echo "Bumping version to {{ new_version }}..."
     awk -v new="{{ new_version }}" '!done && /^version = "/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 } { print }' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+    cd website && bun pm pkg set version={{ new_version }}
     cargo check
     @echo "✓ Version bumped to {{ new_version }}"
     @echo ""
