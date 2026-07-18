@@ -22,6 +22,7 @@ Use [`validate`](/commands/validate) if you only need to check a single dump's i
 The diff command loads both dumps, extracts schema metadata (tables, columns, indexes, foreign keys), and compares them structurally. For data comparison, it uses primary keys to match rows efficiently - this means tables without primary keys require special handling (`--allow-no-pk`).
 
 **Exit codes:**
+
 - `0` - Comparison completed (whether or not differences were found)
 - `1` - Error during comparison (missing file, parse error)
 - `2` - Invalid CLI arguments
@@ -162,7 +163,12 @@ Summary:
       {
         "table_name": "users",
         "columns_added": [
-          { "name": "phone", "col_type": "TEXT", "is_nullable": true, "is_primary_key": false }
+          {
+            "name": "phone",
+            "col_type": "TEXT",
+            "is_nullable": true,
+            "is_primary_key": false
+          }
         ],
         "columns_removed": [],
         "columns_modified": [],

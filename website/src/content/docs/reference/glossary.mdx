@@ -18,6 +18,7 @@ A constraint that requires values in one table's column(s) to match existing val
 ### Constraint
 
 A rule the database enforces on table data or structure. Common constraints include:
+
 - **PRIMARY KEY** - Unique row identifier
 - **FOREIGN KEY** - Reference to another table
 - **UNIQUE** - No duplicate values allowed
@@ -50,19 +51,21 @@ The organized definition of database objects—tables, columns, types, constrain
 ### DDL (Data Definition Language)
 
 SQL statements that define or change database structure:
+
 - `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`
 - `CREATE INDEX`, `DROP INDEX`
 - `CREATE VIEW`
 
-DDL describes *what the database looks like*.
+DDL describes _what the database looks like_.
 
 ### DML (Data Manipulation Language)
 
 SQL statements that work with data:
+
 - `INSERT`, `UPDATE`, `DELETE`
 - `COPY ... FROM stdin` (PostgreSQL bulk load)
 
-DML describes *what data is in the database*.
+DML describes _what data is in the database_.
 
 ## Dialect-Specific Syntax
 
@@ -70,12 +73,12 @@ DML describes *what data is in the database*.
 
 The specific flavor of SQL supported by a database engine. sql-splitter supports four dialects:
 
-| Dialect | Key Features |
-|---------|--------------|
-| MySQL | Backtick quoting, `AUTO_INCREMENT`, `ENGINE=InnoDB` |
+| Dialect    | Key Features                                          |
+| ---------- | ----------------------------------------------------- |
+| MySQL      | Backtick quoting, `AUTO_INCREMENT`, `ENGINE=InnoDB`   |
 | PostgreSQL | Double-quote identifiers, `SERIAL`, `COPY FROM stdin` |
-| SQLite | `INTEGER PRIMARY KEY` for auto-increment |
-| MSSQL | `IDENTITY`, `GO` batch separators, `NVARCHAR` |
+| SQLite     | `INTEGER PRIMARY KEY` for auto-increment              |
+| MSSQL      | `IDENTITY`, `GO` batch separators, `NVARCHAR`         |
 
 ### AUTO_INCREMENT (MySQL)
 
@@ -160,9 +163,11 @@ The referencing table in a foreign key relationship—it contains the foreign ke
 Processing a dump file incrementally as it's read, rather than loading the entire file into memory.
 
 **Commands that stream (bounded memory, independent of file size):**
+
 - `split`, `merge`, `convert`, `analyze`, `redact`
 
 **Commands that require more memory:**
+
 - `query` - Loads data into DuckDB (use `--disk` for large files)
 - `diff` - Tracks PK hashes for comparison (use `--schema-only` to reduce)
 - `validate` - Tracks PKs/FKs when checking integrity (use `--no-fk-checks` to skip)
@@ -243,12 +248,12 @@ See [`diff`](/commands/diff) for detecting schema differences between dumps.
 
 A simple pattern syntax for matching file paths:
 
-| Pattern | Matches |
-|---------|---------|
-| `*.sql` | All SQL files in current directory |
-| `**/*.sql` | All SQL files recursively |
-| `dump_*.sql.gz` | Files starting with `dump_` ending in `.sql.gz` |
-| `backups/202[3-4]*.sql` | Backups from 2023-2024 |
+| Pattern                 | Matches                                         |
+| ----------------------- | ----------------------------------------------- |
+| `*.sql`                 | All SQL files in current directory              |
+| `**/*.sql`              | All SQL files recursively                       |
+| `dump_*.sql.gz`         | Files starting with `dump_` ending in `.sql.gz` |
+| `backups/202[3-4]*.sql` | Backups from 2023-2024                          |
 
 Most sql-splitter commands accept glob patterns:
 

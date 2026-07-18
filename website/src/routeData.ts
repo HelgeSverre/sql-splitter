@@ -1,10 +1,9 @@
-import { defineRouteMiddleware } from "@astrojs/starlight/route-data";
 import type { StarlightRouteData } from "@astrojs/starlight/route-data";
+import { defineRouteMiddleware } from "@astrojs/starlight/route-data";
 
 export const onRequest = defineRouteMiddleware((context, next) => {
   const routeData = context.locals.starlightRoute as
-    | StarlightRouteData
-    | undefined;
+    StarlightRouteData | undefined;
   if (!routeData) return next();
 
   // Get the slug from the entry id (e.g., "getting-started/index.mdx" -> "getting-started")

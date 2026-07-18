@@ -588,7 +588,10 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
               <tr>
                 <td><code>--output</code></td>
                 <td><code>-o</code></td>
-                <td>Output directory, or an archive path (<code>.tar.gz</code>, <code>.zip</code>, …)</td>
+                <td>
+                  Output directory, or an archive path (<code>.tar.gz</code>,
+                  <code>.zip</code>, …)
+                </td>
                 <td>output</td>
               </tr>
               <tr>
@@ -647,8 +650,8 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
           </p>
           <p class="note">
             <strong>Output formats.</strong> Default is one plain
-            <code>&lt;table&gt;.sql</code> per table. <code>--compress</code>
-            writes one compressed file per table
+            <code>&lt;table&gt;.sql</code> per table.
+            <code>--compress</code> writes one compressed file per table
             (<code>&lt;table&gt;.sql.zst</code>, …), each compressed
             independently and in parallel. Or point <code>-o</code> at an
             archive (<code>.tar.gz</code>, <code>.tgz</code>,
@@ -1492,7 +1495,9 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
           <p class="note">
             Compressed input auto-detected: .gz, .bz2, .xz, .zst. Compressed
             output for <code>split</code> too — per-file
-            (<code>--compress</code>) or a single <code>.tar.*</code>/<code>.zip</code>
+            (<code>--compress</code>) or a single <code>.tar.*</code>/<code
+              >.zip</code
+            >
             archive.
           </p>
         </article>
@@ -1696,7 +1701,9 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
               </tr>
               <tr>
                 <td>Compressed Files</td>
-                <td>in &amp; out: gzip, bz2, xz, zstd · archives: tar.*, zip</td>
+                <td>
+                  in &amp; out: gzip, bz2, xz, zstd · archives: tar.*, zip
+                </td>
               </tr>
             </tbody>
           </table>
@@ -1927,8 +1934,8 @@ sudo cp target/release/sql-splitter /usr/local/bin/"
             <div class="details-content">
               <p>
                 Zero-cost abstractions, no garbage collection, and memory safety
-                enable ~1 GB/s throughput with constant memory usage
-                regardless of file size.
+                enable ~1 GB/s throughput with constant memory usage regardless
+                of file size.
               </p>
             </div>
           </details>

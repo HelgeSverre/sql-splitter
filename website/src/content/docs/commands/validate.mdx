@@ -28,6 +28,7 @@ Validation runs in two passes:
 **Memory considerations:** For a table with 10 million rows, expect ~80MB memory for PK tracking. Use `--no-fk-checks` for large dumps to skip the data integrity pass entirely, or `--max-rows-per-table` to limit tracking per table.
 
 **Exit codes:**
+
 - `0` - Valid (no errors; warnings may exist)
 - `1` - Invalid (errors found, or warnings with `--strict`), or runtime error (file not found, parse failure)
 - `2` - Invalid CLI arguments
@@ -94,13 +95,13 @@ sql-splitter validate dump.sql --no-limit
 
 ## Validation Checks
 
-| Check | What It Detects | Memory Impact |
-|-------|-----------------|---------------|
-| **SQL syntax** | Malformed statements, unclosed strings, invalid keywords | None (streaming) |
-| **Encoding** | Invalid UTF-8 byte sequences, mixed encodings | None (streaming) |
-| **[DDL](/reference/glossary#ddl-data-definition-language)/[DML](/reference/glossary#dml-data-manipulation-language) consistency** | INSERT/COPY into non-existent tables, column count mismatches | Minimal (table registry) |
-| **Duplicate [PK](/reference/glossary#primary-key-pk)** | Multiple rows with the same primary key value | ~8 bytes per row |
-| **[FK](/reference/glossary#foreign-key-fk) referential integrity** | Foreign key values referencing non-existent parent rows | ~8 bytes per FK reference |
+| Check                                                                                                                             | What It Detects                                               | Memory Impact             |
+| --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------- |
+| **SQL syntax**                                                                                                                    | Malformed statements, unclosed strings, invalid keywords      | None (streaming)          |
+| **Encoding**                                                                                                                      | Invalid UTF-8 byte sequences, mixed encodings                 | None (streaming)          |
+| **[DDL](/reference/glossary#ddl-data-definition-language)/[DML](/reference/glossary#dml-data-manipulation-language) consistency** | INSERT/COPY into non-existent tables, column count mismatches | Minimal (table registry)  |
+| **Duplicate [PK](/reference/glossary#primary-key-pk)**                                                                            | Multiple rows with the same primary key value                 | ~8 bytes per row          |
+| **[FK](/reference/glossary#foreign-key-fk) referential integrity**                                                                | Foreign key values referencing non-existent parent rows       | ~8 bytes per FK reference |
 
 The first three checks run during the schema pass. PK/FK checks require the data integrity pass and can be disabled with `--no-fk-checks`.
 
@@ -215,6 +216,7 @@ fi
 **Cause:** PK/FK integrity checks track hashes of all primary key values, which grows with row count.
 
 **Solutions:**
+
 1. Skip integrity checks entirely: `--no-fk-checks`
 2. Limit rows checked per table: `--max-rows-per-table 500000`
 3. Validate tables individually after splitting: `sql-splitter split` then validate each file
@@ -226,6 +228,7 @@ fi
 **Cause:** The dump may define foreign keys before the referenced parent rows appear (common with [deferred constraints](/reference/glossary#deferred-constraints) or out-of-order dumps).
 
 **Solutions:**
+
 1. Reorder the dump first: [`sql-splitter order dump.sql -o ordered.sql`](/commands/order)
 2. Skip FK checks: `--no-fk-checks`
 3. If using PostgreSQL with deferred FKs, this is expected behavior—the database handles it at commit time
@@ -237,6 +240,7 @@ fi
 **Cause:** The file may use Latin-1, Windows-1252, or mixed encodings.
 
 **Solutions:**
+
 1. Convert to UTF-8: `iconv -f WINDOWS-1252 -t UTF-8 dump.sql > dump-utf8.sql`
 2. Check the original `mysqldump` charset: ensure `--default-character-set=utf8mb4`
 
@@ -247,6 +251,7 @@ fi
 **Cause:** sql-splitter validates common SQL patterns but may not catch all dialect-specific edge cases.
 
 **Solutions:**
+
 1. Ensure correct dialect: `--dialect=postgres` for pg_dump files
 2. Check for dialect-specific syntax not yet supported
 3. Report the issue with a minimal reproduction
@@ -258,6 +263,7 @@ fi
 **Cause:** PK duplicate detection requires knowing the primary key. Tables without PKs can only have basic syntax/encoding checks.
 
 **Solutions:**
+
 1. This is informational—data integrity for these tables is skipped
 2. Use `--strict` only if you want to enforce PKs on all tables
 3. Consider adding PKs to these tables in your schema

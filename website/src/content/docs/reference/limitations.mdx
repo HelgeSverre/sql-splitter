@@ -3,7 +3,7 @@ title: Known Limitations
 description: What sql-splitter does not parse, per dialect — stored procedures, binary formats, detection edge cases, and lossy conversions
 ---
 
-sql-splitter is a streaming statement splitter, not a full SQL parser. It recognizes six statement types — `CREATE TABLE`, `INSERT`, `CREATE INDEX`, `ALTER TABLE`, `DROP TABLE`, and PostgreSQL `COPY` — and attributes each to a table. Everything else (views, triggers, procedures, grants, session commands) passes through as *unknown* and is **skipped by `split`**, since it cannot be attributed to a table.
+sql-splitter is a streaming statement splitter, not a full SQL parser. It recognizes six statement types — `CREATE TABLE`, `INSERT`, `CREATE INDEX`, `ALTER TABLE`, `DROP TABLE`, and PostgreSQL `COPY` — and attributes each to a table. Everything else (views, triggers, procedures, grants, session commands) passes through as _unknown_ and is **skipped by `split`**, since it cannot be attributed to a table.
 
 This page lists what does not work, so you can check your dump against it before relying on the output.
 
@@ -11,7 +11,7 @@ This page lists what does not work, so you can check your dump against it before
 
 - **Statements without a table are dropped by `split`.** `CREATE VIEW`, `CREATE TRIGGER`, `CREATE PROCEDURE`/`FUNCTION`, `GRANT`/`REVOKE`, `TRUNCATE`, `SET`, and `USE` are not written to any output file. Run `validate` or compare statement counts if your dump relies on them.
 - **Schema qualifiers are discarded.** Table attribution keys on the bare table name: `sales.orders` and `hr.orders` both land in `orders.sql`. Multi-schema dumps merge colliding names into one file.
-- **A `;` inside a backtick-quoted identifier or inside a `/* */` block comment splits the statement early.** Quoted *strings* are handled correctly; backtick identifiers and mid-statement block comments are not.
+- **A `;` inside a backtick-quoted identifier or inside a `/* */` block comment splits the statement early.** Quoted _strings_ are handled correctly; backtick identifiers and mid-statement block comments are not.
 - **A leading UTF-8 BOM** can make the first statement unrecognized. Strip it first (`sed -i '1s/^\xEF\xBB\xBF//' dump.sql`).
 - **No character-set transcoding.** Input bytes pass through verbatim; latin1 dumps are not converted to UTF-8. `validate` emits an `ENCODING` warning for statements containing invalid UTF-8.
 - **Compressed input** (`.gz`, `.bz2`, `.xz`, `.zst`) requires the `compression` Cargo feature (on by default in released binaries).
@@ -37,7 +37,7 @@ This page lists what does not work, so you can check your dump against it before
 ## MSSQL
 
 - **`GO` must be alone on its own line** (optionally `GO <count>`). An inline `GO` or one followed by a comment does not separate batches.
-- Both `GO` *and* `;` terminate statements, so multi-statement batches (procedure bodies, `BEGIN ... END` blocks with internal semicolons) are split apart.
+- Both `GO` _and_ `;` terminate statements, so multi-statement batches (procedure bodies, `BEGIN ... END` blocks with internal semicolons) are split apart.
 - `CREATE PROCEDURE`/`FUNCTION`/`TRIGGER`/`VIEW`, `MERGE`, and `EXEC` are dropped by `split`.
 
 ## Dialect auto-detection
@@ -59,7 +59,7 @@ Conversion is string-based rewriting, not AST transformation. It is deliberately
 - **Skipped**: session commands (`SET NAMES`, `SET ANSI_NULLS`, `LOCK TABLES`, `PRAGMA`, ...), and PostgreSQL-only DDL (`CREATE FUNCTION`/`TYPE`/`DOMAIN`/`SEQUENCE`/`EXTENSION`/`TRIGGER`, `COMMENT ON`, `GRANT`) — each with a warning.
 - **Rewritten lossily**: MySQL `ENUM(...)` and `SET(...)` become `VARCHAR(255)`/`TEXT` (constraint semantics lost); `UNSIGNED` and `ZEROFILL` are removed; inline `COMMENT` clauses are stripped for PostgreSQL targets.
 - **Warned but left as-is**: PostgreSQL array types (`integer[]`) and `INHERITS` — no equivalent is generated.
-- **Not detectable**: SQLite auto-increment (`INTEGER PRIMARY KEY`) passes through unchanged when converting *from* SQLite; MSSQL `TIMESTAMP` (rowversion) is only converted when written as `[TIMESTAMP]`.
+- **Not detectable**: SQLite auto-increment (`INTEGER PRIMARY KEY`) passes through unchanged when converting _from_ SQLite; MSSQL `TIMESTAMP` (rowversion) is only converted when written as `[TIMESTAMP]`.
 - `COPY` blocks are converted to multi-row `INSERT`s (1000 rows per statement) for non-PostgreSQL targets.
 
 Use `--strict` to fail on the first unsupported construct instead of collecting warnings. See [Type Mappings](/reference/type-mappings/) for the full type conversion matrix.

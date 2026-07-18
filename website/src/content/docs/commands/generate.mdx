@@ -153,40 +153,40 @@ sql-splitter generate --config model.yaml --check --json
 
 ## Options
 
-| Flag | Description | Default |
-| --- | --- | --- |
-| `[INPUT]` | SQL dump or schema file to profile. Optional with a complete model. | — |
-| `-c, --config` | `kind: model` or `kind: overrides` YAML document | — |
-| `--emit-config` | Write the resolved model as YAML instead of generating | — |
-| `-o, --output` | Output SQL file; `-` writes stdout | stdout |
-| `--profile-depth` | Bounded profiling depth (`basic`\|`full`) | `basic` |
-| `--profile-sample` | Row sample size used while profiling `[INPUT]` | depth default |
-| `--input-dialect` | Dialect of `[INPUT]`, if profiling (auto-detected otherwise) | auto-detect |
-| `--dialect` | Output SQL dialect | model `output.dialect`, else source/input dialect (preserve-source), else `mysql` |
-| `--scale` | Global multiplicative row-count scale | — |
-| `--rows` | Global absolute root row count | — |
-| `--table-rows` | Per-table absolute row-count override (`table=count`, repeatable) | — |
-| `--table-scale` | Per-table row-count scale override (`table=factor`, repeatable) | — |
-| `--max-rows` | Upper bound applied to every table's row count, last | — |
-| `--tables` | Only generate these tables (comma-separated globs) | all |
-| `--exclude` | Exclude these tables (comma-separated globs) | none |
-| `--seed` | Run root seed, overriding the model's own `seed:` | — |
-| `--randomize` | Use a fresh random seed instead of the model's (or a fixed) seed | false |
-| `--schema-only` | Render only `CREATE TABLE`/DDL, no row data | false |
-| `--data-only` | Render only row data, no DDL | false |
-| `--batch-size` | Rows per `INSERT`/`COPY` batch | `1000` |
-| `--no-copy` | Force multi-row `INSERT` for PostgreSQL instead of `COPY` | false |
-| `--mssql-production-style` | `[dbo].` schema-qualified names, named clustered PK, `ON [PRIMARY]`, ANSI session header. Requires `--dialect mssql`. | false |
-| `--mssql-go` | Emit `GO` every N INSERT batches. Requires `--dialect mssql`. | — |
-| `--check` | Validate the model and exit; writes no SQL | false |
-| `--dry-run` | Compile the model and report resolved row counts; writes no SQL | false |
-| `--verify` | Generate to protected temp storage, audit, then publish atomically | false |
-| `--explain` | Include inference reason, confidence, and precedence in the report | false |
-| `--strict` | Treat model warnings as errors | false |
-| `--json` | Output the report as JSON (owns stdout) | false |
-| `--quiet` | Suppress the non-JSON summary report | false |
-| `--progress` | Accepted for forward compatibility; not yet wired to generation | false |
-| `--compress` | Accepted for forward compatibility; always fails with "not available yet" | — |
+| Flag                       | Description                                                                                                           | Default                                                                           |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `[INPUT]`                  | SQL dump or schema file to profile. Optional with a complete model.                                                   | —                                                                                 |
+| `-c, --config`             | `kind: model` or `kind: overrides` YAML document                                                                      | —                                                                                 |
+| `--emit-config`            | Write the resolved model as YAML instead of generating                                                                | —                                                                                 |
+| `-o, --output`             | Output SQL file; `-` writes stdout                                                                                    | stdout                                                                            |
+| `--profile-depth`          | Bounded profiling depth (`basic`\|`full`)                                                                             | `basic`                                                                           |
+| `--profile-sample`         | Row sample size used while profiling `[INPUT]`                                                                        | depth default                                                                     |
+| `--input-dialect`          | Dialect of `[INPUT]`, if profiling (auto-detected otherwise)                                                          | auto-detect                                                                       |
+| `--dialect`                | Output SQL dialect                                                                                                    | model `output.dialect`, else source/input dialect (preserve-source), else `mysql` |
+| `--scale`                  | Global multiplicative row-count scale                                                                                 | —                                                                                 |
+| `--rows`                   | Global absolute root row count                                                                                        | —                                                                                 |
+| `--table-rows`             | Per-table absolute row-count override (`table=count`, repeatable)                                                     | —                                                                                 |
+| `--table-scale`            | Per-table row-count scale override (`table=factor`, repeatable)                                                       | —                                                                                 |
+| `--max-rows`               | Upper bound applied to every table's row count, last                                                                  | —                                                                                 |
+| `--tables`                 | Only generate these tables (comma-separated globs)                                                                    | all                                                                               |
+| `--exclude`                | Exclude these tables (comma-separated globs)                                                                          | none                                                                              |
+| `--seed`                   | Run root seed, overriding the model's own `seed:`                                                                     | —                                                                                 |
+| `--randomize`              | Use a fresh random seed instead of the model's (or a fixed) seed                                                      | false                                                                             |
+| `--schema-only`            | Render only `CREATE TABLE`/DDL, no row data                                                                           | false                                                                             |
+| `--data-only`              | Render only row data, no DDL                                                                                          | false                                                                             |
+| `--batch-size`             | Rows per `INSERT`/`COPY` batch                                                                                        | `1000`                                                                            |
+| `--no-copy`                | Force multi-row `INSERT` for PostgreSQL instead of `COPY`                                                             | false                                                                             |
+| `--mssql-production-style` | `[dbo].` schema-qualified names, named clustered PK, `ON [PRIMARY]`, ANSI session header. Requires `--dialect mssql`. | false                                                                             |
+| `--mssql-go`               | Emit `GO` every N INSERT batches. Requires `--dialect mssql`.                                                         | —                                                                                 |
+| `--check`                  | Validate the model and exit; writes no SQL                                                                            | false                                                                             |
+| `--dry-run`                | Compile the model and report resolved row counts; writes no SQL                                                       | false                                                                             |
+| `--verify`                 | Generate to protected temp storage, audit, then publish atomically                                                    | false                                                                             |
+| `--explain`                | Include inference reason, confidence, and precedence in the report                                                    | false                                                                             |
+| `--strict`                 | Treat model warnings as errors                                                                                        | false                                                                             |
+| `--json`                   | Output the report as JSON (owns stdout)                                                                               | false                                                                             |
+| `--quiet`                  | Suppress the non-JSON summary report                                                                                  | false                                                                             |
+| `--progress`               | Accepted for forward compatibility; not yet wired to generation                                                       | false                                                                             |
+| `--compress`               | Accepted for forward compatibility; always fails with "not available yet"                                             | —                                                                                 |
 
 ## Conflicts
 

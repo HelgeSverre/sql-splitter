@@ -210,6 +210,7 @@ sql-splitter graph dump.sql --json | jq '.tables | map(select(.foreign_keys | le
 Foreign keys must be explicitly defined in CREATE TABLE statements. Implicit FKs (application-level only) won't appear.
 
 Check if FKs are defined:
+
 ```bash
 sql-splitter graph dump.sql --json | jq '.relationships'
 ```

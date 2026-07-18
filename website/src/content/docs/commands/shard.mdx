@@ -57,6 +57,7 @@ sql-splitter shard dump.sql --tenant-values "1,2,3" -o shards/
 ```
 
 This creates:
+
 ```
 shards/
 ├── tenant_1.sql
@@ -168,6 +169,7 @@ sql-splitter shard dump.sql --tenant-column customer_id --tenant-value 123 -o te
 ### Missing related data in output
 
 Foreign key relationships might not be detected if:
+
 - They're not defined in the schema (implicit FKs)
 - The FK references a table that's excluded
 

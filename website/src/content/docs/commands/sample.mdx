@@ -124,6 +124,7 @@ sql-splitter sample dump.sql -o dev.sql --config sample.yaml
 [Root tables](/reference/glossary#root-table) are tables with no outgoing foreign keys—they don't reference other tables. The sample command auto-detects these as starting points for FK-preserving sampling.
 
 Override auto-detection when:
+
 - Your FKs are implicit (not declared in the schema)
 - You want to start sampling from specific tables
 - Auto-detection picks the wrong tables
@@ -137,15 +138,16 @@ sql-splitter sample dump.sql -o dev.sql --percent 10 --preserve-relations --root
 
 The `--include-global` option controls how lookup/reference tables are handled:
 
-| Value | Behavior |
-|-------|----------|
-| `none` | Skip global/lookup tables entirely |
+| Value     | Behavior                                      |
+| --------- | --------------------------------------------- |
+| `none`    | Skip global/lookup tables entirely            |
 | `lookups` | Include small lookup tables in full (default) |
-| `all` | Include all global tables in full |
+| `all`     | Include all global tables in full             |
 
 **What counts as a lookup table?**
 
 Tables are auto-classified as lookups if they match common patterns:
+
 - `countries`, `states`, `provinces`, `cities`
 - `currencies`, `languages`, `timezones`
 - `permissions`, `roles`, `settings`
@@ -183,13 +185,13 @@ classification:
 
 tables:
   users:
-    rows: 500      # Fixed row count for this table
+    rows: 500 # Fixed row count for this table
   posts:
-    percent: 5     # Different percentage for this table
+    percent: 5 # Different percentage for this table
   sessions:
-    skip: true     # Skip entirely
+    skip: true # Skip entirely
   audit_logs:
-    classification: system  # Override classification
+    classification: system # Override classification
 ```
 
 Then run:
@@ -239,6 +241,7 @@ sql-splitter query sample.sql "SELECT COUNT(*) FROM users"
 **Cause**: FK preservation pulls in all related rows. If you sample 10% of orders, you get 100% of the users who placed those orders.
 
 **Solutions**:
+
 - Use `--max-total-rows` to cap the total: `--max-total-rows 100000`
 - Sample from tables higher in the dependency chain (use `--root-tables`)
 - Use `--dry-run` to preview sizes before sampling
@@ -253,6 +256,7 @@ sql-splitter sample dump.sql --percent 10 --preserve-relations --dry-run --json 
 **Cause**: Foreign keys weren't detected in the schema (implicit FKs, or defined in application code).
 
 **Solutions**:
+
 - Specify root tables explicitly: `--root-tables users,organizations`
 - Add FK constraints to your schema dump
 - Use `--strict-fk` to fail early when FK issues are detected
@@ -262,6 +266,7 @@ sql-splitter sample dump.sql --percent 10 --preserve-relations --dry-run --json 
 **Cause**: `--preserve-relations` tracks all sampled PK values in memory (8 bytes per row).
 
 **Solutions**:
+
 - Reduce sample size: `--percent 1` instead of `--percent 10`
 - Use `--max-total-rows 500000` to cap memory usage
 - Disable FK preservation for very large dumps (accept potential broken FKs)
@@ -282,17 +287,18 @@ sql-splitter sample dump.sql --percent 10 --seed 42 -o dev.sql
 **Cause**: The `--max-total-rows` guard stopped sampling to prevent runaway growth.
 
 **Solutions**:
+
 - Increase the limit if you have sufficient memory
 - Reduce `--percent` to sample fewer rows initially
 - Review which tables are pulling in the most related rows with `--dry-run --json`
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Error (I/O, parse error, FK integrity failure with `--strict-fk`) |
-| `2` | Invalid arguments |
+| Code | Meaning                                                           |
+| ---- | ----------------------------------------------------------------- |
+| `0`  | Success                                                           |
+| `1`  | Error (I/O, parse error, FK integrity failure with `--strict-fk`) |
+| `2`  | Invalid arguments                                                 |
 
 See [Exit Codes](/reference/exit-codes) for usage in scripts.
 

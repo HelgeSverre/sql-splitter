@@ -46,11 +46,13 @@ If you installed sql-splitter via Homebrew or a package manager, completions may
 Bash supports two installation methods:
 
 **System-wide** (all users, requires sudo):
+
 ```bash
 sudo sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
 ```
 
 **User-only** (recommended):
+
 ```bash
 # Create completions directory if needed
 mkdir -p ~/.bash_completion.d
@@ -74,6 +76,7 @@ echo $fpath | tr ' ' '\n'
 ```
 
 **Standard installation:**
+
 ```bash
 # Use the first writable fpath directory (usually ~/.zsh/completions or similar)
 sql-splitter completions zsh > "${fpath[1]}/_sql-splitter"
@@ -84,6 +87,7 @@ source ~/.zshrc
 ```
 
 **Oh-My-Zsh:**
+
 ```bash
 # Oh-My-Zsh includes ~/.oh-my-zsh/completions in fpath
 mkdir -p ~/.oh-my-zsh/completions
@@ -94,6 +98,7 @@ source ~/.zshrc
 ```
 
 **If you don't have a user fpath directory:**
+
 ```bash
 # Create one and add to fpath in .zshrc
 mkdir -p ~/.zsh/completions
@@ -127,6 +132,7 @@ echo $PROFILE
 ```
 
 **Install completions:**
+
 ```powershell
 # Create profile if it doesn't exist
 if (!(Test-Path -Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force }
@@ -177,6 +183,7 @@ sql-splitter <TAB>
 ### Completions not working
 
 **Shell needs reload:** After installing completions, you must reload your shell configuration or open a new terminal:
+
 ```bash
 # Bash
 source ~/.bashrc
@@ -192,6 +199,7 @@ source ~/.config/fish/config.fish
 ```
 
 **Zsh fpath issues:** Ensure the completion file is in a directory listed in `$fpath` and the filename starts with `_`:
+
 ```bash
 # Check if the file is in fpath
 echo $fpath | tr ' ' '\n' | xargs -I {} ls {}_sql-splitter 2>/dev/null
@@ -213,6 +221,7 @@ source ~/.zshrc
 ### Permission denied
 
 For system-wide installation, use `sudo`:
+
 ```bash
 sudo sql-splitter completions bash > /etc/bash_completion.d/sql-splitter
 ```
@@ -222,6 +231,7 @@ Or use user-only installation (recommended) which doesn't require elevated permi
 ### PowerShell profile doesn't exist
 
 Create the profile file before appending:
+
 ```powershell
 if (!(Test-Path -Path $PROFILE)) {
     New-Item -ItemType File -Path $PROFILE -Force

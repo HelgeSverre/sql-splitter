@@ -27,16 +27,19 @@ The merge process:
 4. **Stream** - Writes each file's contents sequentially with separator comments
 
 **What gets included:**
+
 - All `.sql` files in the directory (non-recursive)
 - Each file is prefixed with a separator comment: `-- Table: tablename`
 - Files are streamed line-by-line (memory-efficient for large dumps)
 
 **What does NOT happen:**
+
 - `_global.sql` is treated like any other table file (sorted alphabetically with `_` at the start)
 - No FK dependency ordering—files are merged alphabetically. Use [`order`](/commands/order) on the output if you need topological order.
 - No deduplication—if a table appears in multiple files, both are included
 
 **Dialect-specific behavior:**
+
 - MySQL: Adds `SET FOREIGN_KEY_CHECKS = 0;` header, `SET FOREIGN_KEY_CHECKS = 1;` footer
 - PostgreSQL: Adds `SET client_encoding = 'UTF8';` header
 - SQLite: Adds `PRAGMA foreign_keys = OFF;` header, `PRAGMA foreign_keys = ON;` footer
@@ -307,9 +310,9 @@ sql-splitter merge tables/ | mysql -u user database
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0`  | Success |
+| Code | Meaning                                                |
+| ---- | ------------------------------------------------------ |
+| `0`  | Success                                                |
 | `1`  | Error (no files found, write error, invalid directory) |
 
 ## See Also

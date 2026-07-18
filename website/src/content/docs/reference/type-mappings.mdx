@@ -42,12 +42,12 @@ sql-splitter handles 50+ data type mappings during conversion.
 
 ## Date/Time Types
 
-| MySQL       | PostgreSQL  | SQLite    | MSSQL       |
-| ----------- | ----------- | --------- | ----------- |
-| `DATE`      | `DATE`      | `TEXT`    | `DATE`      |
-| `TIME`      | `TIME`      | `TEXT`    | `TIME`      |
-| `DATETIME`  | `TIMESTAMP` | `TEXT`    | `DATETIME2` |
-| `TIMESTAMP` | `TIMESTAMP` | `TEXT`    | `TIMESTAMP` |
+| MySQL       | PostgreSQL  | SQLite | MSSQL       |
+| ----------- | ----------- | ------ | ----------- |
+| `DATE`      | `DATE`      | `TEXT` | `DATE`      |
+| `TIME`      | `TIME`      | `TEXT` | `TIME`      |
+| `DATETIME`  | `TIMESTAMP` | `TEXT` | `DATETIME2` |
+| `TIMESTAMP` | `TIMESTAMP` | `TEXT` | `TIMESTAMP` |
 
 MySQL `YEAR` and `TIMESTAMP` (for MSSQL targets) are not rewritten and pass through unchanged.
 

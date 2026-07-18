@@ -38,8 +38,8 @@ Most commands support these flags (availability varies):
 
 For faster typing, all commands have short aliases:
 
-| Command    | Alias | Command  | Alias |
-| ---------- | ----- | -------- | ----- |
+| Command    | Alias | Command    | Alias |
+| ---------- | ----- | ---------- | ----- |
 | `split`    | `sp`  | `diff`     | `df`  |
 | `analyze`  | `an`  | `redact`   | `rd`  |
 | `merge`    | `mg`  | `generate` | `gen` |
@@ -50,18 +50,18 @@ For faster typing, all commands have short aliases:
 
 ## Decision Guide
 
-| Goal                       | Command(s)                    |
-| -------------------------- | ----------------------------- |
-| Check if dump is valid     | `validate --strict`           |
-| Understand dump contents   | `analyze`                     |
-| Edit specific tables       | `split` → edit → `merge`      |
-| Create dev dataset         | `sample --preserve-relations` |
-| Export tenant data         | `shard --tenant-value`        |
-| Convert MySQL → PostgreSQL | `convert --to postgres`       |
-| Validate in CI             | `validate "*.sql" --json`     |
-| Compare two dumps          | `diff old.sql new.sql`        |
-| Anonymize PII              | `redact`                      |
-| Generate synthetic test data | `generate`                  |
-| Visualize schema           | `graph`                       |
-| Safe import order          | `order`                       |
-| Query without restore      | `query`                       |
+| Goal                         | Command(s)                    |
+| ---------------------------- | ----------------------------- |
+| Check if dump is valid       | `validate --strict`           |
+| Understand dump contents     | `analyze`                     |
+| Edit specific tables         | `split` → edit → `merge`      |
+| Create dev dataset           | `sample --preserve-relations` |
+| Export tenant data           | `shard --tenant-value`        |
+| Convert MySQL → PostgreSQL   | `convert --to postgres`       |
+| Validate in CI               | `validate "*.sql" --json`     |
+| Compare two dumps            | `diff old.sql new.sql`        |
+| Anonymize PII                | `redact`                      |
+| Generate synthetic test data | `generate`                    |
+| Visualize schema             | `graph`                       |
+| Safe import order            | `order`                       |
+| Query without restore        | `query`                       |

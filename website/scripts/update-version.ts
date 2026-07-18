@@ -18,7 +18,9 @@ const cargoPath = resolve(__dirname, "../../Cargo.toml");
 
 // On Vercel/CI, Cargo.toml won't exist - skip gracefully
 if (!existsSync(cargoPath)) {
-  console.log("Cargo.toml not found (CI/Vercel deploy) - skipping version update");
+  console.log(
+    "Cargo.toml not found (CI/Vercel deploy) - skipping version update",
+  );
   console.log("Version should already be updated in committed files.");
   process.exit(0);
 }
@@ -38,7 +40,7 @@ const llmsPath = resolve(__dirname, "../llms.txt");
 let llmsContent = readFileSync(llmsPath, "utf-8");
 llmsContent = llmsContent.replace(
   /# sql-splitter \d+\.\d+\.\d+/,
-  `# sql-splitter ${version}`
+  `# sql-splitter ${version}`,
 );
 writeFileSync(llmsPath, llmsContent);
 console.log(`  ✓ Updated llms.txt`);
