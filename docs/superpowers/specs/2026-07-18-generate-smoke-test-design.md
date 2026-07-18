@@ -6,7 +6,7 @@ Add a repeatable developer harness that runs `sql-splitter generate` against eve
 
 Expose the harness as:
 
-```console
+```shell
 just generate-smoke
 ```
 
