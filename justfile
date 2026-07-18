@@ -49,6 +49,11 @@ coverage-lcov:
 verify-realworld:
     cargo nextest run --test realworld --run-ignored only
 
+# Smoke-test generate against every top-level SQL fixture
+[group('test')]
+generate-smoke: build
+    ./scripts/smoke-test-generate.sh
+
 # Format code (Rust + Markdown)
 [group('lint')]
 fmt:
