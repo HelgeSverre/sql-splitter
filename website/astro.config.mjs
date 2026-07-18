@@ -6,26 +6,26 @@ import indexnow from "astro-indexnow";
 import tailwindcss from "@tailwindcss/vite";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightGitHubAlerts from "starlight-github-alerts";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-// Read version from Cargo.toml or llms.txt at config time
+// Read the package version from Cargo.toml at config time.
 function getVersion() {
   const cargoPath = resolve(import.meta.dirname, "../Cargo.toml");
-  if (existsSync(cargoPath)) {
-    const content = readFileSync(cargoPath, "utf-8");
-    const match = content.match(/^version\s*=\s*"([^"]+)"/m);
-    if (match) return match[1];
+  let cargoContent;
+
+  try {
+    cargoContent = readFileSync(cargoPath, "utf-8");
+  } catch (cause) {
+    throw new Error(`Could not read version source at ${cargoPath}`, { cause });
   }
 
-  const llmsPath = resolve(import.meta.dirname, "llms.txt");
-  if (existsSync(llmsPath)) {
-    const content = readFileSync(llmsPath, "utf-8");
-    const match = content.match(/# sql-splitter (\d+\.\d+\.\d+)/);
-    if (match) return match[1];
+  const versionMatch = cargoContent.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!versionMatch) {
+    throw new Error(`Could not find package version in ${cargoPath}`);
   }
 
-  return "0.0.0";
+  return versionMatch[1];
 }
 
 const SQL_SPLITTER_VERSION = getVersion();

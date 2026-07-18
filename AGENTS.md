@@ -203,8 +203,6 @@ Do not hand-edit generated artifacts when a repository command owns them.
 - `just schemas` regenerates `schemas/*.schema.json`, validates them against CLI
   output and generate fixtures, and copies them to `website/public/schemas/`.
 - `just man` regenerates `man/` from Clap definitions.
-- `just website-update-version` refreshes the version header in
-  `website/llms.txt`.
 
 When changing a command, option, output format, dialect, compression/archive
 support, or common workflow, review:

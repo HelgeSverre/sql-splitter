@@ -288,11 +288,6 @@ website-open:
 website-maintain: website-clean website-install website-audit website-build website-check
     @echo "✓ Website maintenance complete"
 
-# Update version in website files from Cargo.toml
-[group('website')]
-website-update-version:
-    cd website && bunx tsx scripts/update-version.ts
-
 # Show current version from Cargo.toml
 [group('release')]
 version:
@@ -310,9 +305,9 @@ bump new_version:
     @echo "  1. Update CHANGELOG.md"
     @echo "  2. Run: just release-prepare"
 
-# Prepare release (builds, tests, updates website version)
+# Prepare release (builds, tests, and updates generated schemas)
 [group('release')]
-release-prepare: release test schemas website-update-version
+release-prepare: release test schemas
     @echo ""
     @echo "✓ Release preparation complete"
     @echo ""
