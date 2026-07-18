@@ -59,7 +59,7 @@ pub enum ColumnType {
 
 impl ColumnType {
     /// Parse a SQL type string into a ColumnType
-    /// Supports MySQL, PostgreSQL, and SQLite types
+    /// Supports MySQL, PostgreSQL, SQLite, and MSSQL types.
     pub fn from_sql_type(type_str: &str) -> Self {
         let type_lower = type_str.to_lowercase();
         let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
@@ -92,7 +92,7 @@ impl ColumnType {
             "bigint" | "int8" | "bigserial" => ColumnType::BigInt,
             // Text types (all dialects)
             "char" | "varchar" | "text" | "tinytext" | "mediumtext" | "longtext" | "enum"
-            | "set" | "character" => ColumnType::Text,
+            | "set" | "character" | "nchar" | "nvarchar" | "ntext" => ColumnType::Text,
             // Decimal types (all dialects)
             "decimal" | "numeric" | "float" | "double" | "real" | "float4" | "float8" | "money" => {
                 ColumnType::Decimal
@@ -100,8 +100,10 @@ impl ColumnType {
             // Date/time types (all dialects)
             "date" | "datetime" | "timestamp" | "time" | "year" | "timestamptz" | "timetz"
             | "interval" => ColumnType::DateTime,
-            // Boolean (all dialects)
+            // Boolean types. A bare BIT is MSSQL's boolean type; retain
+            // parameterized bit strings such as MySQL BIT(8) as unknown.
             "bool" | "boolean" => ColumnType::Bool,
+            "bit" if type_lower.trim() == "bit" => ColumnType::Bool,
             // Binary types
             "binary" | "varbinary" | "blob" | "bytea" => {
                 // Could be UUID if binary(16)

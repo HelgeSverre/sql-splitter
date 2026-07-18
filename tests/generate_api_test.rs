@@ -242,6 +242,7 @@ fn generate_mode_without_output_is_a_shape_error() {
 /// A synthetic MySQL dump reproducing three everyday shapes (invented names
 /// and values) found in real dumps.
 const REALWORLD_SHAPES_DUMP: &str = "tests/fixtures/generate/realworld_shapes.sql";
+const MSSQL_PRODUCTION_SHAPE_DUMP: &str = "tests/fixtures/generate/production_shape_mssql.sql";
 
 /// Regression for common real-world shapes: a MySQL dump using the
 /// Laravel/MySQL 8 shapes must profile, infer, compile, and generate end to
@@ -274,5 +275,26 @@ fn real_world_mysql_shapes_generate_end_to_end() {
     assert!(
         !sql.contains("TRUE") && !sql.contains("FALSE"),
         "integer boolean-by-convention column must render 0/1, got: {sql}"
+    );
+}
+
+/// Regression: MSSQL Unicode text and bit columns must retain usable portable
+/// type families so semantic inference can compile the profiled model.
+#[test]
+fn mssql_dump_generates_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .input(MSSQL_PRODUCTION_SHAPE_DUMP)
+        .output(&output)
+        .seed(42)
+        .run()
+        .expect("MSSQL NVARCHAR and BIT columns must compile with inferred generators");
+
+    assert!(!report.diagnostics.has_errors());
+    assert_eq!(report.rows_written, 11);
+    assert!(
+        fs::read_to_string(output).unwrap().contains("INSERT INTO"),
+        "expected generated MSSQL row data"
     );
 }

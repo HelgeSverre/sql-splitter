@@ -28,6 +28,16 @@ mod mod_tests {
         );
     }
 
+    #[test]
+    fn test_column_type_parsing_mssql() {
+        assert_eq!(ColumnType::from_sql_type("NVARCHAR(255)"), ColumnType::Text);
+        assert_eq!(ColumnType::from_sql_type("BIT"), ColumnType::Bool);
+        assert_eq!(
+            ColumnType::from_sql_type("BIT(8)"),
+            ColumnType::Other("BIT(8)".to_string())
+        );
+    }
+
     /// Regression for MySQL 8 integer modifiers: real dumps write `bigint
     /// unsigned` without a display width, and the `unsigned`/`signed`/`zerofill`
     /// modifiers must not push an integer type into the `Other` fallback.
