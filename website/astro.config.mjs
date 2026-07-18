@@ -6,7 +6,28 @@ import tailwindcss from "@tailwindcss/vite";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightGitHubAlerts from "starlight-github-alerts";
 import starlightLlmsTxt from "starlight-llms-txt";
-import packageJson from "./package.json" with { type: "json" };
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+function getVersion() {
+  const cargoPath = resolve(import.meta.dirname, "../Cargo.toml");
+  let cargoContent;
+
+  try {
+    cargoContent = readFileSync(cargoPath, "utf8");
+  } catch (cause) {
+    throw new Error(`Could not read version source at ${cargoPath}`, { cause });
+  }
+
+  const versionMatch = cargoContent.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!versionMatch) {
+    throw new Error(`Could not find package version in ${cargoPath}`);
+  }
+
+  return versionMatch[1];
+}
+
+const SQL_SPLITTER_VERSION = getVersion();
 
 export default defineConfig({
   site: "https://sql-splitter.dev",
@@ -15,7 +36,7 @@ export default defineConfig({
       SQL_SPLITTER_VERSION: envField.string({
         context: "server",
         access: "public",
-        default: packageJson.version,
+        default: SQL_SPLITTER_VERSION,
       }),
     },
   },

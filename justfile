@@ -300,7 +300,6 @@ version:
 bump new_version:
     @echo "Bumping version to {{ new_version }}..."
     awk -v new="{{ new_version }}" '!done && /^version = "/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 } { print }' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
-    cd website && bun pm pkg set version={{ new_version }}
     cargo check
     @echo "✓ Version bumped to {{ new_version }}"
     @echo ""
