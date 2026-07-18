@@ -119,8 +119,8 @@ const DEFAULT_FAMILY_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Compiles a [`SyntheticModel`] into a [`GenerationPlan`].
 ///
-/// Holds the [`ExtensionRegistry`] that later stages (column generators,
-/// planners) resolve against; Task 9 itself only reads structure and counts.
+/// Holds the [`ExtensionRegistry`] used to resolve column generators and
+/// planners while compiling structure, counts, ownership, and dependencies.
 pub struct ModelCompiler {
     registry: ExtensionRegistry,
 }
@@ -181,9 +181,9 @@ impl ModelCompiler {
             // Tables left unordered by the Kahn drain form a mutual
             // relation-children dependency cycle: each derives its count from a
             // parent that in turn derives from it. Resolving them would silently
-            // yield zero rows, so this is a Task-9 count error. (Distinct from
-            // the column-generation cycle Task 10 owns and the FK deferral
-            // Task 22 owns.)
+            // yield zero rows. This row-count dependency error is distinct from
+            // column-generation cycles and foreign-key cycles handled through
+            // deferred constraints.
             bag.error(
                 "GEN-ROWS-CYCLE",
                 "tables",
@@ -884,11 +884,10 @@ impl ModelCompiler {
         // `disabled` every generated column needs an explicit owner, so a bare
         // PK falls through to `GEN-COLUMN-OWNER-MISSING`.
         //
-        // PLACEHOLDER: `GeneratedByDatabase` here means "the DB fills it", but a
-        // plain integer PK has no sequence to fill from. Once the `sequence`
-        // generator is registered (Task 11) and real inference lands (Task 20),
-        // a schema-mode bare PK should receive a sequence generator that renders
-        // an actual value. Closing that gap is not this task's job.
+        // `GeneratedByDatabase` here means "the DB fills it", but a plain integer
+        // PK has no sequence to fill from. Schema inference currently classifies
+        // it this way without attaching the registered `sequence` generator, so
+        // rendered output relies on database behavior for the value.
         if matches!(inference, InferenceMode::Schema)
             && column.primary_key
             && matches!(
@@ -899,9 +898,9 @@ impl ModelCompiler {
             return ColumnOwner::GeneratedByDatabase;
         }
 
-        // Nothing structural applies. Richer name/constraint heuristics under
-        // `schema` inference arrive in Task 20; for now the column is reported
-        // as unowned so a run never invents values silently.
+        // Nothing structural applies. `schema` inference reports the column as
+        // unowned when its current name and constraint heuristics find no rule,
+        // so a run never invents values silently.
         let note = match inference {
             InferenceMode::Schema => {
                 " (schema inference has no rule for it yet; richer heuristics arrive later)"
@@ -2063,8 +2062,7 @@ fn build_phases(
 }
 
 /// Capture a declared relationship's referential shape and value-assignment
-/// distribution. The per-row parent assignment itself is executed by Task 13's
-/// engine.
+/// distribution. The generation engine executes the per-row parent assignment.
 fn compile_relationship(relationship: &RelationshipModel) -> CompiledRelationship {
     CompiledRelationship {
         name: relationship.name.clone(),

@@ -1,4 +1,4 @@
-//! Task 26: verify generated SQL before publication.
+//! Verify generated SQL before publication.
 //!
 //! These tests reparse generated SQL with the production parser and assert that
 //! each declared constraint is audited exactly: a single corrupted row for
@@ -384,7 +384,7 @@ fn corrupt_progress_counter_fails_the_named_check() {
     );
 }
 
-// --- temporal.timestamps ordering (Task 27) --------------------------------
+// --- temporal.timestamps ordering ------------------------------------------
 //
 // `temporal.timestamps` guarantees created_at <= updated_at by construction
 // (see structural.rs), surfaced to the verifier as a `PlannerPredicate::

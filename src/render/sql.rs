@@ -461,7 +461,7 @@ impl<W: Write> RowSink for SqlRenderer<W> {
 }
 
 /// Map an [`io::Error`] into the closed [`GenerateError`] set: the
-/// [`RowSink`] contract (fixed by Task 13) has no I/O variant, so a write
+/// [`RowSink`] contract has no I/O variant, so a write
 /// failure surfaces as `InvalidInput` with a distinguishing `GEN-RENDER-IO`
 /// prefix rather than silently panicking or being swallowed.
 fn io_err(err: io::Error) -> GenerateError {

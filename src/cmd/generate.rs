@@ -40,7 +40,7 @@ const RANDOMNESS: &str = "Randomness";
 const RENDERING: &str = "Rendering";
 const PREFLIGHT: &str = "Preflight/Reporting";
 
-/// Profiling depth for `[INPUT]` (`--profile-depth`; Phase 2, Task 19).
+/// Profiling depth for `[INPUT]` (`--profile-depth`).
 ///
 /// Schema-only profiling remains a library/internal mode — the CLI only
 /// exposes `basic`/`full`.
@@ -71,11 +71,11 @@ pub enum CompressFormat {
     Zstd,
 }
 
-/// CLI surface for `sql-splitter generate`. See module docs and
-/// [`GenerateArgs::try_into_request`] for the Phase 1/Phase 2+ split.
+/// CLI surface for `sql-splitter generate`. See the module docs for supported
+/// workflows and [`GenerateArgs::try_into_request`] for request validation.
 #[derive(Args)]
 pub struct GenerateArgs {
-    /// Source SQL dump to profile into a base model (Phase 2, Tasks 19-21)
+    /// Source SQL dump to profile into a base model
     #[arg(value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     input: Option<PathBuf>,
 
@@ -83,7 +83,7 @@ pub struct GenerateArgs {
     #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     config: Option<PathBuf>,
 
-    /// Write the resolved model as YAML instead of generating (Phase 3, Task 21)
+    /// Write the resolved model as YAML instead of generating
     #[arg(long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     emit_config: Option<PathBuf>,
 
@@ -91,11 +91,11 @@ pub struct GenerateArgs {
     #[arg(short, long, value_hint = ValueHint::FilePath, help_heading = INPUT_OUTPUT)]
     output: Option<PathBuf>,
 
-    /// Depth of profiling to run against `[INPUT]` (Phase 2, Task 19)
+    /// Depth of profiling to run against `[INPUT]`
     #[arg(long, value_enum, default_value_t = ProfileDepthArg::Basic, help_heading = INPUT_OUTPUT)]
     profile_depth: ProfileDepthArg,
 
-    /// Row sample size used while profiling `[INPUT]` (Phase 2, Task 19)
+    /// Row sample size used while profiling `[INPUT]`
     #[arg(long, help_heading = INPUT_OUTPUT)]
     profile_sample: Option<usize>,
 
@@ -184,7 +184,7 @@ pub struct GenerateArgs {
     #[arg(long, conflicts_with_all = ["check", "verify"], help_heading = PREFLIGHT)]
     dry_run: bool,
 
-    /// Verify generated rows against the model's constraints (Phase 3, Task 26)
+    /// Verify generated rows against the model's constraints
     #[arg(long, conflicts_with_all = ["check", "dry_run"], help_heading = PREFLIGHT)]
     verify: bool,
 
@@ -235,8 +235,8 @@ struct PreparedRequest {
 /// failure. [`RequestError::Usage`] is a shape problem clap can't express
 /// (e.g. a value-conditional conflict) — [`run`] maps it to clap's own usage
 /// exit code, `2`. [`RequestError::Unavailable`] is a well-formed request for
-/// a capability Phase 1 doesn't implement yet — [`run`] maps it to the
-/// ordinary failure exit code, `1`, like any other runtime error.
+/// an accepted request for a capability that is not implemented — [`run`] maps
+/// it to the ordinary failure exit code, `1`, like any other runtime error.
 #[derive(Debug)]
 enum RequestError {
     Usage(String),
@@ -277,8 +277,8 @@ impl GenerateArgs {
     fn try_into_request(self) -> Result<PreparedRequest, RequestError> {
         if self.check && self.input.is_some() {
             return Err(RequestError::usage(
-                "--check requires a complete `--config` model; it cannot be combined with an \
-                 input dump (dump profiling is Phase 2, Tasks 19-21)",
+                "--check requires a complete `--config` model and cannot profile an input dump; \
+                 omit `[INPUT]`",
             ));
         }
 

@@ -1,8 +1,6 @@
-//! Public-API replacement for the old `test_data_gen` fixture helpers
-//! (Task 31). Generates a small, FK-consistent, multi-table SQL dump from
-//! `tests/fixtures/generate/legacy_fixture.yaml` using
-//! `sql_splitter::generate::Generate`, instead of the private
-//! `test_data_gen::{Generator, Renderer}` pair.
+//! Public-API fixture helpers for generating a small, FK-consistent, multi-table
+//! SQL dump from `tests/fixtures/generate/legacy_fixture.yaml` with
+//! [`sql_splitter::generate::Generate`].
 
 use sql_splitter::generate::{CompileOptions, Generate, TableCountOverride};
 use sql_splitter::parser::SqlDialect;

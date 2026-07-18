@@ -17,8 +17,8 @@
 //!   sample.
 //! * [`ProfileDepth::Full`] additionally computes pairwise evidence for the
 //!   *bounded* candidate set: declared foreign-key pairs (child→parent coverage)
-//!   and same-table temporal orderings. Planner-nominated pairs (Task 20) plug
-//!   in through the same [`RelationshipEvidence`] surface.
+//!   and same-table temporal orderings. Planner-nominated pairs plug in through
+//!   the same [`RelationshipEvidence`] surface.
 //!
 //! Every depth returns the *same* portable schema and the *same* exact row and
 //! null counts; the depths differ only in how much value-derived evidence they
@@ -1059,8 +1059,8 @@ fn finish_column(acc: ColumnAccum) -> ColumnEvidence {
                 acc.nulls as f64 / acc.total as f64
             };
             // Ad-hoc confidence: rises toward 1.0 with the non-null observation
-            // count (mirrors `ColumnSketches::confidence`). A placeholder shared
-            // by both paths; Task 20 may refine the scale.
+            // count (mirrors `ColumnSketches::confidence`). Both paths share
+            // this intentionally heuristic scale.
             let non_null = acc.total.saturating_sub(acc.nulls);
             ColumnEvidence {
                 name: acc.name,

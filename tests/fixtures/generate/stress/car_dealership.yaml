@@ -23,7 +23,7 @@
 # generated/default columns, pattern (VIN / stock no / plate), lognormal money.
 #
 # Output targets MySQL. defaults.inference: disabled -> every generated column has
-# an explicit owner. PROVISIONAL: Phase-3B planner arg shapes follow documented style.
+# an explicit owner. Planner argument shapes follow the documented style.
 
 version: 1
 kind: model

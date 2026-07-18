@@ -310,7 +310,7 @@ fn reservoir_is_seed_deterministic() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 19: streaming DumpProfiler over real dumps
+// Streaming DumpProfiler over real dumps
 // ---------------------------------------------------------------------------
 
 use sql_splitter::parser::SqlDialect;
@@ -655,7 +655,7 @@ INSERT INTO metrics (id, qty) VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
 }
 
 // ---------------------------------------------------------------------------
-// Task 20: infer explicit models from a dump profile
+// Infer explicit models from a dump profile
 // ---------------------------------------------------------------------------
 
 use sql_splitter::generate::{
@@ -1245,7 +1245,7 @@ fn observed_generators_reject_bad_params() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 21: dump-to-model and dump-to-SQL workflows via the public Generate API
+// Dump-to-model and dump-to-SQL workflows via the public Generate API
 // ---------------------------------------------------------------------------
 
 use sql_splitter::generate::{Generate, RunMode};

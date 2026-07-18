@@ -1,10 +1,9 @@
-//! Planner reconnaissance: nominate the Phase-3A table planners when — and
-//! only when — every column and relationship they require is present.
+//! Planner reconnaissance: nominate table planners when — and only when —
+//! every column and relationship they require is present.
 //!
-//! The planner implementations land in Tasks 23-25, so this pass never writes a
-//! `PlannerConfig` into the model (that would emit an uncompilable rule).
-//! Instead it records a nomination as a warning, so `--explain` and the report
-//! can show which planners the table is a candidate for.
+//! This pass records nominations as warnings instead of writing `PlannerConfig`
+//! entries into the model, so `--explain` and the report can show which planners
+//! the table is a candidate for without changing generation behavior.
 
 use crate::profile::evidence::TableEvidence;
 use crate::synthetic::schema::{PortableTable, SqlTypeFamily};
@@ -18,7 +17,7 @@ pub(super) fn nominations(table: &PortableTable, _evidence: Option<&TableEvidenc
     for fk in &table.relationships {
         out.push(format!(
             "GEN-INFER-PLANNER-NOMINATE: table `{}` is a candidate for the `relation.children` \
-             planner via its foreign key to `{}` (planner impl: Task 23)",
+             planner via its foreign key to `{}`",
             table.name, fk.referenced_table
         ));
     }
@@ -29,7 +28,7 @@ pub(super) fn nominations(table: &PortableTable, _evidence: Option<&TableEvidenc
     {
         out.push(format!(
             "GEN-INFER-PLANNER-NOMINATE: table `{}` is a candidate for the temporal-ordering \
-             planner (created_at <= updated_at) (planner impl: Task 24)",
+             planner (created_at <= updated_at)",
             table.name
         ));
     }
@@ -40,7 +39,7 @@ pub(super) fn nominations(table: &PortableTable, _evidence: Option<&TableEvidenc
     {
         out.push(format!(
             "GEN-INFER-PLANNER-NOMINATE: table `{}` is a candidate for the geo-coordinate \
-             planner (latitude/longitude) (planner impl: Task 25)",
+             planner (latitude/longitude)",
             table.name
         ));
     }

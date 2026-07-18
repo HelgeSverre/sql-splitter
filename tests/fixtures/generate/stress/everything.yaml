@@ -1,23 +1,21 @@
 # Stress fixture 6 of 6 — THE EVERYTHING FIXTURE (capstone / ultimate stress test).
 #
-# A single self-contained `kind: model` that exercises the entire planned surface
+# A single self-contained `kind: model` that exercises the supported surface
 # in one file: every generator family, every modifier, every row-count rule and
 # child distribution kind, composite primary keys, an FK cycle resolved via
 # deferred constraints, per-table seed overrides, and all twelve planners:
 #
-#   Phase 3A: commerce.order_family, workflow.progress_counters, temporal.interval
-#   Phase 3B: temporal.timestamps, temporal.soft_delete, temporal.lifecycle,
-#             relation.polymorphic_pair, relation.junction_pair,
-#             relation.tenant_family, hierarchy.tree, geo.coordinate_pair,
-#             file.metadata
+#   commerce.order_family, workflow.progress_counters, temporal.interval,
+#   temporal.timestamps, temporal.soft_delete, temporal.lifecycle,
+#   relation.polymorphic_pair, relation.junction_pair, relation.tenant_family,
+#   hierarchy.tree, geo.coordinate_pair, file.metadata
 #
 # Fictional "OmniPlatform": a multi-tenant SaaS that combines commerce, project
 # workflow, payments, and content. Output targets MSSQL (hardest dialect: N''
 # prefixing, IDENTITY, GO batching via --mssql-go at the CLI).
 #
-# PROVISIONAL: Phase-3B planner argument payloads follow the documented planner
-# style; only the three Phase-3A planners have normative YAML in the spec today.
-# This fixture is intended to DRIVE the eventual 3B planner shape decisions.
+# Planner argument payloads follow the documented configuration shapes. This
+# fixture exercises all twelve planners together with the other model features.
 
 version: 1
 kind: model

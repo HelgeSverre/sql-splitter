@@ -1,4 +1,4 @@
-//! Phase 2 observed / statistical generators.
+//! Observed and statistical generators.
 //!
 //! These generators replay a source dump's *shape* rather than a hand-authored
 //! rule: a bounded set of observed values (`observed_sample`), a numeric
@@ -742,7 +742,7 @@ impl CompiledGenerator for CompiledMonotonic {
 
 // --- Registration ------------------------------------------------------------
 
-/// Register the Phase 2 observed / statistical catalog into `registry`.
+/// Register the observed and statistical catalog into `registry`.
 pub(crate) fn register_all(registry: &mut ExtensionRegistry) {
     registry
         .register_generator(Box::new(ObservedSampleFactory))

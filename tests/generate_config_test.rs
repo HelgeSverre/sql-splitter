@@ -185,9 +185,9 @@ fn complete_model_example_parses() {
     // YAML — the comma inside the unquoted scalar is a flow-mapping
     // separator, so every conformant YAML parser (confirmed against both
     // serde_yaml_ng and Python's PyYAML) splits `decimal(12,2)` into a
-    // `type: decimal(12` pair and a stray `2)` key. This is a pre-existing
-    // quoting gap in the design doc's example, unrelated to fix #2; it is
-    // flagged in task-3-report.md rather than silently worked around.
+    // `type: decimal(12` pair and a stray `2)` key. This test quotes the value
+    // explicitly to preserve the intended scalar without hiding the design
+    // example's pre-existing quoting gap.
     let yaml = r#"
 version: 1
 kind: model
@@ -347,10 +347,9 @@ profiles:
         sql_splitter::synthetic::SqlTypeFamily::BigInteger
     );
 
-    // Round-trip: re-serialize and re-parse without loss of the values we
-    // depend on downstream (the compiler task). Re-serialization always
-    // emits the canonical source_type/family form, never the `type:`
-    // shorthand this test parsed.
+    // Round-trip: re-serialize and re-parse without loss of the values the
+    // compiler depends on. Re-serialization always emits the canonical
+    // source_type/family form, never the `type:` shorthand this test parsed.
     let rendered = serde_yaml_ng::to_string(&model).unwrap();
     assert!(rendered.contains("source_type: bigint"));
     let reparsed: sql_splitter::synthetic::SyntheticModel =

@@ -47,8 +47,8 @@ pub(crate) struct EpochDriver {
     epoch_start: Duration,
     epoch_acked: u64,
     epoch_stall: Duration,
-    /// Hidden debugging aid: dump per-epoch measurements to stderr (the
-    /// phase-0 "io stats" seam from the design doc).
+    /// Hidden debugging aid: dump per-epoch measurements to stderr through the
+    /// runtime I/O statistics seam.
     io_debug: bool,
 }
 

@@ -135,7 +135,7 @@ fn random_block_samples_stay_in_alphabet_and_are_seed_reproducible() {
     assert_eq!(bytes_a, bytes_b);
 }
 
-// --- Task 11: Phase 1 core generators and modifiers -------------------------
+// --- Core generators and modifiers ------------------------------------------
 
 fn yaml(source: &str) -> GeneratorConfig {
     serde_yaml_ng::from_str(source).expect("valid generator config yaml")
@@ -715,10 +715,10 @@ fn same_seed_reproduces_the_same_generator_sequence() {
     assert_eq!(run(), run());
 }
 
-// --- Task 12: semantic, credential, and temporal generators -----------------
+// --- Semantic, credential, and temporal generators --------------------------
 
 /// Compile `kind` with `config` against a single `Text`-family column and
-/// generate `count` rows, returning each row's text. Every Task 12 catalog
+/// generate `count` rows, returning each row's text. Every semantic catalog
 /// generator emits `Text` when its column's family is `Text` (numeric- and
 /// timestamp-shaped generators fall back to a formatted string), so this one
 /// helper covers the whole catalog for shape assertions.
@@ -779,7 +779,7 @@ type CatalogShapeCase = (&'static str, fn(&str) -> bool);
 
 #[test]
 fn every_catalog_family_has_a_shape_valid_representative() {
-    // One assertion per Phase 1 catalog family from the task brief, proving
+    // One assertion per semantic generator catalog family, proving
     // every family is registered and produces a plausible shape.
     let cases: &[CatalogShapeCase] = &[
         ("person.full_name", |v| v.contains(' ')),
@@ -969,7 +969,7 @@ fn descriptors_declare_the_families_they_accept() {
     assert!(port.accepts.contains(&SqlTypeFamily::Integer));
 }
 
-/// Every catalog kind the Task 12 brief lists must be registered — a
+/// Every semantic catalog kind must be registered — a
 /// regression here means a kind silently dropped out of `register_all`.
 #[test]
 fn every_brief_catalog_kind_is_registered() {
@@ -1033,7 +1033,7 @@ fn every_brief_catalog_kind_is_registered() {
     for kind in EXPECTED {
         assert!(
             registry.generator(kind).is_some(),
-            "`{kind}` from the Task 12 catalog is not registered"
+            "`{kind}` from the semantic generator catalog is not registered"
         );
     }
     assert_eq!(
@@ -1043,7 +1043,7 @@ fn every_brief_catalog_kind_is_registered() {
     );
 }
 
-// --- Task 13: relational execution engine -----------------------------------
+// --- Relational execution ---------------------------------------------------
 
 use sql_splitter::generate::{
     CompileOptions, GeneratedRow, GenerationEngine, GenerationPlan, ModelCompiler, PlannedTable,
@@ -1342,7 +1342,7 @@ fn same_seed_reproduces_and_different_seed_diverges() {
     );
 }
 
-// --- Task 13 fix: column modifiers execute end-to-end ------------------------
+// --- Column modifiers execute end-to-end ------------------------------------
 
 /// A single `metrics` table whose `score` column carries `generator` +
 /// `modifiers`, so the engine's owner→modifier→sink pipeline is observable.
@@ -1433,7 +1433,7 @@ fn modifier_pipeline_applies_in_declared_order_through_the_engine() {
         .all(|v| v.as_text().unwrap() == "abcdeXYZ"));
 }
 
-// --- Task 13 fix: random-access (uuid) parent key domains --------------------
+// --- Random-access (UUID) parent key domains --------------------------------
 
 #[test]
 fn uuid_parent_key_children_reference_real_generated_ids() {
@@ -1663,7 +1663,7 @@ tables:
         .all(|id| order_ids.contains(id)));
 }
 
-// --- Task 13 fix: unresolved FK generator is a compile error -----------------
+// --- Unresolved FK generator is a compile error -----------------------------
 
 #[test]
 fn foreign_key_generator_without_a_relationship_is_a_compile_error() {
@@ -1697,7 +1697,7 @@ tables:
     );
 }
 
-// --- Task 14: render model-driven SQL ---------------------------------------
+// --- Render model-driven SQL ------------------------------------------------
 
 use sql_splitter::render::{RenderOptions, SqlRenderer};
 use sql_splitter::synthetic::OutputMode;
@@ -2030,7 +2030,7 @@ fn rendered_mysql_output_passes_the_existing_validator() {
     assert_eq!(summary.summary.errors, 0, "{summary:?}");
 }
 
-// --- Task 22: protected family spooling budget/spill ------------------------
+// --- Protected family spooling budget and spill -----------------------------
 
 use sql_splitter::generate::output::{
     FamilyBudget, FamilyBuffer, FamilyState, SpillKind, SpooledRow, TempConfig,
@@ -2105,7 +2105,7 @@ fn family_buffer_with_large_estimate_spills_before_the_first_row() {
     assert_eq!(buffer.drain_rows().unwrap(), rows);
 }
 
-// --- Task 25: commerce.order_family engine family execution + spill ---------
+// --- Commerce order-family execution and spill ------------------------------
 
 /// Compile `model_yaml` pinning the family memory budget, then render it to SQL.
 fn render_family_at_budget(model_yaml: &str, family_budget_bytes: u64) -> String {

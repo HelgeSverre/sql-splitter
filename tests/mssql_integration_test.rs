@@ -284,7 +284,7 @@ fn test_mssql_schema_qualified_names() {
     }
 }
 
-// Phase 4 Tests: Schema Commands
+// Schema command tests
 
 #[test]
 fn test_mssql_schema_pk_parsing_clustered() {
@@ -419,7 +419,7 @@ fn test_mssql_schema_index_parsing() {
     assert_eq!(idx2.columns, vec!["name"]);
 }
 
-// Phase 5 Tests: Data Commands
+// Data parsing tests
 
 #[test]
 fn test_mssql_insert_row_parsing() {
@@ -513,7 +513,7 @@ fn test_mssql_insert_column_mapping() {
     );
 }
 
-// Phase 5 Data Command Tests
+// Data command integration tests
 
 fn mssql_multi_tenant_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/static/mssql/multi_tenant.sql")
@@ -659,7 +659,7 @@ fn test_mssql_shard_tenant_column_detection() {
     );
 }
 
-// Phase 6: Query Command Tests
+// Query command tests
 
 #[cfg(feature = "duckdb-query")]
 #[test]
@@ -714,7 +714,7 @@ fn test_mssql_query_with_nvarchar() {
 }
 
 // ============================================
-// Phase 7: Test Data Generator Integration Tests
+// Synthetic data generator integration tests
 // ============================================
 
 /// Generate an MSSQL dump from the shared `legacy_fixture.yaml` model.
@@ -970,8 +970,7 @@ fn test_mssql_generator_production_style() {
     // Test the production-style MSSQL output — GO separators, [dbo]. prefix,
     // named constraints, ON [PRIMARY] filegroup, session header — through
     // the public `generate` API's `--mssql-production-style` equivalent
-    // (`GenerateBuilder::mssql_production_style`), migrated off the old
-    // `test_data_gen` crate (Task 31 fix; see task-31-report.md).
+    // (`GenerateBuilder::mssql_production_style`).
     use sql_splitter::generate::Generate;
 
     let legacy_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

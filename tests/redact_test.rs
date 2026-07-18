@@ -611,7 +611,7 @@ fn test_redact_gzip_input_is_decompressed() {
 // ============================================================================
 
 /// Golden output captured by building the redactor at commit `cbda248`
-/// (the commit immediately before Task 12's `fake_data` extraction — the
+/// (the commit immediately before the `fake_data` extraction — the
 /// last commit where `FakeStrategy::generate` drew its RNG block
 /// unconditionally at the top of the function, before the alias `match`)
 /// and running it against the fixture below with `--seed 42`:
@@ -657,7 +657,7 @@ rules:
     generator: email
 "#;
 
-/// Golden captured from the pre-Task-12 build (commit `cbda248`) as
+/// Golden captured from the redactor baseline build (commit `cbda248`) as
 /// documented on [`RNG_LOCKSTEP_INPUT`]. Byte-for-byte, including the
 /// `CREATE TABLE`/`INSERT` formatting this build's writer already produces.
 const RNG_LOCKSTEP_GOLDEN: &str = "\nCREATE TABLE `users` (\n    `id` INT PRIMARY KEY,\n    `country` VARCHAR(100),\n    `name` VARCHAR(100),\n    `email` VARCHAR(255)\n);INSERT INTO `users` VALUES\n(1, 'United States', 'Ray Maggio', 'walter@example.org');\nINSERT INTO `users` VALUES\n(2, 'United States', 'Antone Romaguera', 'telly@example.com');\nINSERT INTO `users` VALUES\n(3, 'United States', 'Alexandre Reilly', 'genesis@example.com');\n\n";
@@ -691,7 +691,7 @@ fn fake_strategy_stays_in_rng_lockstep_with_the_pre_task_12_baseline() {
     let output = fs::read_to_string(&output_file).unwrap();
     assert_eq!(
         output, RNG_LOCKSTEP_GOLDEN,
-        "current output diverged from the pre-Task-12 baseline — a redactor \
+        "current output diverged from the golden redactor baseline — a redactor \
          alias branch is consuming a different amount of entropy than it did \
          before the fake_data extraction, shifting every fake value drawn \
          after it in the shared RNG stream"

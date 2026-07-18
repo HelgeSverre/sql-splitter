@@ -697,9 +697,9 @@ fn compile_state(
         "in_progress" => Some(StateMix::Fixed(LifecycleState::Active)),
         "not_started" => Some(StateMix::Fixed(LifecycleState::NotStarted)),
         "observed" => {
-            // Observed progress needs distribution evidence from a profile
-            // (Task 20). None is threaded here yet, so an exact partition over
-            // absent observed evidence cannot be formed: reject it clearly.
+            // Observed progress needs distribution evidence from a profile.
+            // None is threaded here yet, so an exact partition over absent
+            // observed evidence cannot be formed: reject it clearly.
             // A relaxed partition falls back to a documented default mixture.
             if let Partition::Exact = partition {
                 bag.error(

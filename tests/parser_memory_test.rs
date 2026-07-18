@@ -1,4 +1,4 @@
-//! Tests for the visitor-based, memory-bounded row parsing (Task 17).
+//! Tests for the visitor-based, memory-bounded row parsing.
 //!
 //! Covers: streaming visitor output equals the collecting parser; callbacks can
 //! stop early; a live-row counter never exceeds two rows; and `visit_events`

@@ -15,11 +15,9 @@
 #   - per-table `seed: null` randomization inside a seeded model
 #   - imports: (root-wins override merge across two partial documents)
 #
-# NOTE: Phase-3B planner argument payloads (tenant_family, junction_pair,
-# polymorphic_pair, hierarchy.tree, temporal.*) are PROVISIONAL — the spec only
-# fixes normative YAML for the three Phase-3A planners. These shapes are designed
-# to be consistent with the documented planner style and to drive the eventual
-# 3B planner design.
+# Planner argument payloads (tenant_family, junction_pair, polymorphic_pair,
+# hierarchy.tree, temporal.*) follow the documented planner style and exercise
+# their supported interactions in a single model.
 
 version: 1
 kind: model

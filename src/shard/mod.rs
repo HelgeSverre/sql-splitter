@@ -142,12 +142,12 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
 
     let mut stats = ShardStats::default();
 
-    // Phase 0: Split into temp per-table files
+    // Split input into per-table files
     let split_phase = split_to_temp_tables(&config.input, config.dialect, config.progress)?;
     let temp_dir = split_phase.temp_dir;
     let tables_dir = split_phase.tables_dir;
 
-    // Phase 1: Build schema graph
+    // Build the schema graph
     if config.progress {
         eprintln!("Building schema graph...");
     }
@@ -165,7 +165,7 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     // Parse tenant value
     let tenant_pk_value = parse_tenant_value(&config.tenant_value);
 
-    // Phase 2: Classify tables and build runtimes
+    // Classify tables and build runtimes
     let (topo_order, cyclic_tables) = graph.processing_order();
 
     if !cyclic_tables.is_empty() {
@@ -228,7 +228,7 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     let selected_dir = temp_dir.path().join("selected");
     fs::create_dir_all(&selected_dir)?;
 
-    // Phase 3: Process tables in dependency order
+    // Process tables in dependency order
     if config.progress {
         eprintln!(
             "Processing {} tables for tenant {}...",
@@ -393,7 +393,7 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
         eprintln!("Processing complete");
     }
 
-    // Phase 4: Output synthesis
+    // Synthesize the output
     if config.dry_run {
         return Ok(stats);
     }

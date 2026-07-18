@@ -13,11 +13,9 @@
 //! [`std::fmt::Debug`] that keeps the plan observable without pretending the
 //! compiled planners are printable.
 //!
-//! Several types are deliberately minimal stubs that later tasks fill in:
-//! [`PlannedColumn`]/[`ColumnOwner`] gain real owners in Task 10,
-//! [`CompiledRelationship`] gains fan-out assignment in Task 13, and
-//! [`ExecutionPhase`] gains `Family`/`DeferredConstraints` plus the
-//! temp-storage/verification [`PlanEstimates`] in Tasks 22/26.
+//! The plan also fixes column ownership, relationship assignment strategies,
+//! execution phases for individual tables and correlated families, and cost
+//! estimates used by reporting and execution.
 
 use std::fmt;
 
@@ -39,14 +37,13 @@ pub struct GenerationPlan {
     pub output: CompiledOutput,
     /// The selected tables, in dependency order (parents before children).
     pub tables: Vec<PlannedTable>,
-    /// Generation phases, in execution order. Task 9 emits one
-    /// [`ExecutionPhase::Table`] per selected table; Task 22 adds richer phases.
+    /// Generation phases, in execution order, for individual tables or
+    /// correlated table families.
     pub phases: Vec<ExecutionPhase>,
     /// Non-error diagnostics that survive a successful compile: drained merge
     /// warnings plus compile-stage warnings (e.g. a `--max-rows` cap).
     pub diagnostics: Vec<Diagnostic>,
-    /// Cost/size estimates. Temp-storage and verification fields are filled by
-    /// Tasks 22/26; Task 9 only fills `total_rows`.
+    /// Cost and size estimates for reporting and resource planning.
     pub estimates: PlanEstimates,
     /// The exact in-memory byte budget for each correlated family's buffered
     /// child rows before it spills to a protected spool. The engine's
@@ -85,9 +82,8 @@ pub struct CompiledOutput {
 /// coherent), and a [`DeferredConstraints`](Self::DeferredConstraints) phase
 /// records constraints (e.g. self-referential foreign keys, circular
 /// references) that are applied only after the referenced rows exist. The
-/// compiler emits `Family`/`DeferredConstraints` once the family planners of
-/// Tasks 23-25 drive them; the variants and their budget/spill machinery
-/// (see [`crate::generate::output::FamilyBuffer`]) land here in Task 22.
+/// compiler emits `Family` for correlated parent/child generation; its bounded
+/// buffering uses [`crate::generate::output::FamilyBuffer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionPhase {
     /// Generate a single table's rows, identified by name.
@@ -141,13 +137,12 @@ pub struct PlannedTable {
     pub seed: ResolvedTableSeed,
     /// Every schema column, paired with the owner that produces its values.
     pub columns: Vec<PlannedColumn>,
-    /// Compiled relationships to parent tables. Task 9 records the shape;
-    /// Task 13 completes fan-out assignment.
+    /// Compiled relationships to parent tables, including fan-out assignment.
     pub relationships: Vec<CompiledRelationship>,
     /// Compiled table-level planners, in declaration order. A
     /// [`ColumnOwner::Planner`]'s `planner_index` indexes into this vector.
-    /// The planner *runtime* behavior is filled by Task 22; Task 10 compiles
-    /// the declared planners so ownership can reference them.
+    /// Declared planners are compiled here so ownership can reference and the
+    /// runtime can execute them without resolving the registry again.
     pub planners: Vec<Box<dyn CompiledPlanner>>,
 }
 
@@ -206,9 +201,9 @@ impl fmt::Debug for PlannedColumn {
 /// What produces a column's values.
 ///
 /// Exactly one owner is assigned to every non-omitted column during
-/// compilation (Task 10). Two generators or planners claiming the same column
-/// is a `GEN-COLUMN-OWNER-CONFLICT`; a column that no rule and no structural
-/// schema fact can supply is a `GEN-COLUMN-OWNER-MISSING`.
+/// compilation. Two generators or planners claiming the same column is a
+/// `GEN-COLUMN-OWNER-CONFLICT`; a column that no rule and no structural schema
+/// fact can supply is a `GEN-COLUMN-OWNER-MISSING`.
 pub enum ColumnOwner {
     /// An explicit column generator produces the value. Holds the compiled
     /// generator so the row hot path never re-resolves the registry.
@@ -234,8 +229,7 @@ pub enum ColumnOwner {
         /// The owning planner's kind, for diagnostics.
         planner_kind: String,
     },
-    /// A declared relationship supplies this foreign-key column's value. The
-    /// per-row parent assignment is completed by Task 13.
+    /// A declared relationship supplies this foreign-key column's value.
     Relationship {
         /// The owning relationship's declared name, if any.
         relationship: Option<String>,
@@ -301,7 +295,7 @@ pub enum RelationshipDistribution {
 }
 
 /// A compiled relationship from a child table to a parent table, including the
-/// per-row parent assignment strategy the engine (Task 13) executes.
+/// per-row parent assignment strategy executed by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledRelationship {
     /// The relationship's declared name, if any.
@@ -333,15 +327,14 @@ pub enum ResolvedTableSeed {
 
 /// Cost and size estimates for a plan.
 ///
-/// `total_rows` is filled by Task 9. `temp_storage_bytes` (family spool state)
-/// is filled by Task 22 and `verification_cost` by Task 26; both stay zero
-/// here.
+/// Compilation records `total_rows`; estimates not calculated for the current
+/// plan remain zero.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlanEstimates {
     /// Sum of every selected table's resolved row count.
     pub total_rows: u64,
-    /// Peak temporary storage for buffered/family state. Filled by Task 22.
+    /// Peak temporary storage for buffered or family state, when estimated.
     pub temp_storage_bytes: u64,
-    /// Estimated verification cost. Filled by Task 26.
+    /// Estimated verification cost, when calculated.
     pub verification_cost: u64,
 }

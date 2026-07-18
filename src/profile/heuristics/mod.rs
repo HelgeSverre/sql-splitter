@@ -466,8 +466,8 @@ impl ModelInference {
             columns.insert(column.name.clone(), rule);
         }
 
-        // Planner reconnaissance runs at table scope; nominations are recorded
-        // as warnings only (the Phase-3A planners land in Tasks 23-25).
+        // Planner reconnaissance runs at table scope. Nominations remain
+        // warnings so inference does not insert planner configuration.
         warnings.extend(planner::nominations(portable, evidence));
 
         TableModel {

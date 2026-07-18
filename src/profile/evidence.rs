@@ -3,9 +3,9 @@
 //! These types record *what was observed* in a dump — counts, bounded
 //! summaries, and sketched estimates — with no opinion about how to regenerate
 //! it. Nothing here names a generator kind (no "email", no "faker"); mapping
-//! evidence to generation strategies is a later, separate concern
-//! (Task 20's heuristics consume these structs without depending on the
-//! accumulator internals that produced them).
+//! evidence to generation strategies is a separate concern. Inference
+//! heuristics consume these structs without depending on the accumulator
+//! internals that produced them.
 //!
 //! Every summary is bounded: a column that scans a billion rows produces the
 //! same size evidence as one that scans a thousand. Raw values are never
@@ -150,9 +150,9 @@ pub struct TimestampRangeEvidence {
 
 /// Evidence about an observed relationship between two columns.
 ///
-/// No data-driven relationship inference is wired yet (Task 19); this type
-/// exists so the neutral evidence surface is complete and stable for
-/// downstream consumers.
+/// The profiler does not infer relationships from observed values; this type
+/// keeps the neutral evidence surface complete and stable for downstream
+/// consumers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelationshipEvidence {
     pub from_column: String,

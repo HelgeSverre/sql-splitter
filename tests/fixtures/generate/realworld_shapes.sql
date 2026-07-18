@@ -1,4 +1,4 @@
--- Synthetic regression fixture for the Task 34 real-world survey.
+-- Synthetic regression fixture for real-world MySQL inference shapes.
 --
 -- Every name and value here is invented; nothing is copied from any source
 -- dump. It reproduces three inference/compile shapes that real MySQL dumps
