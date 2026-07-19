@@ -784,6 +784,29 @@ fn resolved_model_yaml(
         .iter()
         .map(|t| (t.name.clone(), t.rows))
         .collect();
+    // The resolved model represents this compiled plan, not the pre-selection
+    // source model. Drop excluded tables and their optional profile metadata,
+    // and carry the compiler's normalized schema (including detached FKs).
+    emit.imports.clear();
+    emit.tables.retain(|name, _| resolved.contains_key(name));
+    emit.profiles.retain(|path, _| {
+        path.split_once('.')
+            .is_some_and(|(table, _)| resolved.contains_key(table))
+    });
+    for planned in &plan.tables {
+        let Some(table) = emit.tables.get_mut(&planned.name) else {
+            continue;
+        };
+        table.schema = planned.schema.clone();
+        table.relationships.retain(|relationship| {
+            planned.relationships.iter().any(|active| {
+                active.name == relationship.name
+                    && active.columns == relationship.columns
+                    && active.parent_table == relationship.references.table
+                    && active.parent_columns == relationship.references.columns
+            })
+        });
+    }
     emit.freeze_row_counts(&resolved);
     emit.defaults.inference = InferenceMode::Disabled;
     emit.seed = explicit_seed;

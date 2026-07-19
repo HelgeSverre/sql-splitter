@@ -5,8 +5,11 @@
 use std::fs;
 
 use sql_splitter::diagnostic::{codes, Severity};
-use sql_splitter::generate::{CompileOptions, Generate, GenerateError, RunMode};
+use sql_splitter::generate::{
+    CompileOptions, Generate, GenerateError, RunMode, TableCountOverride,
+};
 use sql_splitter::parser::SqlDialect;
+use sql_splitter::synthetic::{RowsModel, SyntheticFile};
 
 const SIMPLE_MODEL: &str = "tests/fixtures/generate/simple.yaml";
 /// A complete model whose `output:` block pins the render dialect to postgres.
@@ -143,6 +146,97 @@ fn same_seed_reproduces_identical_output() {
     assert_eq!(
         fs::read_to_string(first_path).unwrap(),
         fs::read_to_string(second_path).unwrap()
+    );
+}
+
+#[test]
+fn filtered_child_override_emit_reloads_to_identical_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("model.yaml");
+    let resolved = dir.path().join("resolved.yaml");
+    let first = dir.path().join("first.sql");
+    let second = dir.path().join("second.sql");
+    fs::write(
+        &config,
+        r#"version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+tables:
+  parents:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: parents
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+  children:
+    rows:
+      kind: relation.children
+      parent: parents
+      count: 4
+      distribution: { kind: fixed, mean: 2.0, min: 0.0, max: 100.0 }
+    schema:
+      name: children
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: children_parent, columns: [parent_id], referenced_table: parents, referenced_columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      parent_id: { generator: { kind: relation.foreign_key, relationship: children_parent } }
+    relationships:
+      - { name: children_parent, columns: [parent_id], references: { table: parents, columns: [id] } }
+  audit:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: audit
+      columns:
+        - { name: id, type: bigint, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+"#,
+    )
+    .unwrap();
+
+    Generate::builder()
+        .config(&config)
+        .output(&first)
+        .emit(&resolved)
+        .compile(CompileOptions {
+            table_rows: vec![TableCountOverride::rows("children", 7)],
+            exclude: vec!["audit".into()],
+            ..Default::default()
+        })
+        .run()
+        .unwrap();
+    Generate::builder()
+        .config(&resolved)
+        .output(&second)
+        .run()
+        .unwrap();
+
+    let emitted = fs::read_to_string(&resolved).unwrap();
+    assert!(
+        !emitted.contains("  audit:"),
+        "excluded table leaked: {emitted}"
+    );
+    let emitted_model = SyntheticFile::parse_str(&emitted)
+        .unwrap()
+        .into_model()
+        .unwrap();
+    assert!(matches!(
+        emitted_model.tables["children"].rows,
+        RowsModel::Fixed { count: 7 }
+    ));
+    assert_eq!(
+        fs::read_to_string(first).unwrap(),
+        fs::read_to_string(second).unwrap(),
+        "the emitted child override must be authoritative on reload"
     );
 }
 

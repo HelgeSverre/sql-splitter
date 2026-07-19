@@ -485,7 +485,9 @@ impl SyntheticModel {
     }
 
     /// Rewrite each table's `rows` count to the resolved value from a compiled
-    /// plan, keeping the original `kind`.
+    /// plan. Already-authoritative `fixed`/`observed` counts keep their kind;
+    /// derived `scale`/`relation.children` policies become `fixed` so a reload
+    /// cannot derive a different count.
     ///
     /// An `observed` table stays `kind: observed` with a frozen integer count,
     /// which is what `--emit-config` needs for a self-contained model that
@@ -496,18 +498,13 @@ impl SyntheticModel {
             let Some(&count) = resolved.get(name) else {
                 continue;
             };
-            // Inferred models are entirely `observed`/`fixed`, so in practice
-            // only those two arms fire today. Overwriting the resolved `count`
-            // on `scale`/`relation.children` is inert for now (the compiler
-            // recomputes their count from `base`*`factor` / the parent), and is
-            // kept only so this stays total over `RowsModel`; a caller that
-            // hand-authors those variants and freezes should revisit whether
-            // the derived count should be pinned.
             match &mut table.rows {
-                RowsModel::Fixed { count: c }
-                | RowsModel::Observed { count: c }
-                | RowsModel::Scale { count: c, .. }
-                | RowsModel::RelationChildren { count: c, .. } => *c = count,
+                RowsModel::Fixed { count: current } | RowsModel::Observed { count: current } => {
+                    *current = count;
+                }
+                RowsModel::Scale { .. } | RowsModel::RelationChildren { .. } => {
+                    table.rows = RowsModel::Fixed { count };
+                }
             }
         }
     }
