@@ -225,6 +225,76 @@ fn corrupt_foreign_key_fails_the_named_check() {
     assert!(report.failed("foreign_key:orders"), "{:?}", report.checks);
 }
 
+const DUPLICATE_RELATIONSHIP_SLUGS: &str = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  users:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: users
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+  accounts:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: accounts
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+  orders:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: orders
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: user_id, type: bigint, nullable: false }
+        - { name: account_id, type: bigint, nullable: false }
+    relationships:
+      - { name: shared_parent, columns: [user_id], references: { table: users, columns: [id] } }
+      - { name: shared_parent, columns: [account_id], references: { table: accounts, columns: [id] } }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      user_id: { generator: { kind: relation.foreign_key } }
+      account_id: { generator: { kind: relation.foreign_key } }
+"#;
+
+#[test]
+fn duplicate_relationship_slugs_do_not_overwrite_an_earlier_fk_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(DUPLICATE_RELATIONSHIP_SLUGS);
+    let orders = plan.table("orders").expect("orders table");
+    assert_eq!(orders.relationships.len(), 2);
+    assert!(orders
+        .relationships
+        .iter()
+        .all(|relationship| relationship.name.as_deref() == Some("shared_parent")));
+
+    // Only the earlier users relationship is invalid. The later accounts
+    // relationship remains valid and must not overwrite the earlier failure.
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        rewrite_first_tuple_value(sql, "INSERT INTO `orders`", 1, "999")
+    });
+    let shared_checks: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.name == "foreign_key:orders:shared_parent")
+        .collect();
+
+    assert_eq!(shared_checks.len(), 2, "{:?}", report.checks);
+    assert!(!shared_checks[0].passed, "{:?}", report.checks);
+    assert!(shared_checks[1].passed, "{:?}", report.checks);
+    assert!(!report.passed(), "{:?}", report.checks);
+}
+
 /// Repoint the first `orders` row's `user_id` to a non-existent parent by
 /// rewriting the orders INSERT's first tuple to `(1,999)`.
 fn corrupt_first_order_fk(sql: String) -> String {

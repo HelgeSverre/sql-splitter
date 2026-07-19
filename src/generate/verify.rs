@@ -1446,7 +1446,7 @@ impl<'a> Audit<'a> {
 
     /// Finalize every append-only key index, then evaluate child FK indexes
     /// against their parent membership indexes by sorted merge join.
-    fn finalize_indexes(&mut self) -> Result<HashMap<(String, String), u64>, GenerateError> {
+    fn finalize_indexes(&mut self) -> Result<Vec<Vec<u64>>, GenerateError> {
         for state in self.tables.values_mut() {
             for group in &mut state.unique_groups {
                 group.duplicate |= group.index.finalize().map_err(membership_index_error)?;
@@ -1459,29 +1459,30 @@ impl<'a> Audit<'a> {
             }
         }
 
-        let mut failures = HashMap::new();
+        let mut failures = Vec::with_capacity(self.spec.tables.len());
         for planned in &self.spec.tables {
             let child = &self.tables[&planned.name];
+            let mut relationship_failures = Vec::with_capacity(planned.relationships.len());
             for (relationship, child_keys) in planned.relationships.iter().zip(&child.foreign_keys)
             {
-                let Some(parent) = self.tables.get(&relationship.parent_table) else {
-                    continue;
+                let parent_keys = self
+                    .tables
+                    .get(&relationship.parent_table)
+                    .and_then(|parent| {
+                        parent
+                            .member_groups
+                            .iter()
+                            .find(|group| group.columns == relationship.parent_columns)
+                    });
+                let missing = match parent_keys {
+                    Some(parent_keys) => child_keys
+                        .missing_from(&parent_keys.index)
+                        .map_err(membership_index_error)?,
+                    None => 0,
                 };
-                let Some(parent_keys) = parent
-                    .member_groups
-                    .iter()
-                    .find(|group| group.columns == relationship.parent_columns)
-                else {
-                    continue;
-                };
-                let missing = child_keys
-                    .missing_from(&parent_keys.index)
-                    .map_err(membership_index_error)?;
-                failures.insert(
-                    (planned.name.clone(), fk_slug(&planned.name, relationship)),
-                    missing,
-                );
+                relationship_failures.push(missing);
             }
+            failures.push(relationship_failures);
         }
         Ok(failures)
     }
@@ -1493,7 +1494,7 @@ impl<'a> Audit<'a> {
         distributions: &[DistributionExpectation],
     ) -> Result<(), GenerateError> {
         let foreign_key_failures = self.finalize_indexes()?;
-        for planned in &self.spec.tables {
+        for (plan_index, planned) in self.spec.tables.iter().enumerate() {
             let state = &self.tables[&planned.name];
 
             // Row count (exact). INSERT and COPY output are audited the same way,
@@ -1564,10 +1565,11 @@ impl<'a> Audit<'a> {
             }
 
             // Foreign keys / composite keys.
-            for rel in &planned.relationships {
+            for (relationship_index, rel) in planned.relationships.iter().enumerate() {
                 let slug = fk_slug(&planned.name, rel);
                 let failed = foreign_key_failures
-                    .get(&(planned.name.clone(), slug.clone()))
+                    .get(plan_index)
+                    .and_then(|failures| failures.get(relationship_index))
                     .copied()
                     .unwrap_or(0);
                 report.record(
