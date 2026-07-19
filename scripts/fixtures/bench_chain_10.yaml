@@ -286,4 +286,3 @@ tables:
         generator: { kind: relation.foreign_key, relationship: fk_table_009_parent }
     relationships:
       - { name: fk_table_009_parent, columns: [parent_id], references: { table: table_008, columns: [id] } }
-
