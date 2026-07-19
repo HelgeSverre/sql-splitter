@@ -5,9 +5,9 @@ use sql_splitter::diagnostic::{
     codes, Diagnostic, DiagnosticBag, DiagnosticCategory, Severity, SourceLocation, TypicalSeverity,
 };
 use sql_splitter::generate::{
-    Buffering, ColumnScope, CompileContext, CompiledGenerator, ConstantFactory, Determinism,
-    ExtensionRegistry, GeneratedValue, GeneratorDescriptor, GeneratorFactory, RowContext,
-    Verification,
+    ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, ConstantFactory,
+    Determinism, ExtensionRegistry, GeneratedValue, GeneratorDescriptor, GeneratorFactory,
+    RowContext, Verification,
 };
 use sql_splitter::synthetic::{GeneratorConfig, SqlTypeFamily};
 
@@ -552,6 +552,56 @@ fn standard_planner_descriptors_publish_their_complete_top_level_arguments() {
     }
 }
 
+#[test]
+fn unknown_operator_arguments_are_rejected_at_every_layer() {
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  events:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: events
+      columns:
+        - { name: code, type: "varchar(16)", nullable: false }
+        - { name: created_at, type: timestamp, nullable: false }
+        - { name: updated_at, type: timestamp, nullable: false }
+    columns:
+      code:
+        generator: { kind: string, min_length: 3, max_length: 3, min_lenght: 9 }
+        modifiers:
+          - { kind: unique, max_trakced: 5 }
+    planners:
+      - kind: temporal.timestamps
+        columns: { created_at: created_at, updated_at: updated_at }
+        created:
+          kind: range
+          min: "2024-01-01T00:00:00Z"
+          max: "2025-01-01T00:00:00Z"
+        update_delai: { kind: fixed, unit: seconds, value: 1 }
+"#,
+    );
+
+    let error = compiler()
+        .compile(model, CompileOptions::default())
+        .expect_err("unknown operator arguments must not be ignored");
+    let unknown: Vec<_> = error
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "GEN-OPERATOR-UNKNOWN-ARGUMENT")
+        .collect();
+
+    assert_eq!(unknown.len(), 3, "diagnostics: {:?}", error.diagnostics);
+    for typo in ["min_lenght", "max_trakced", "update_delai"] {
+        assert!(unknown
+            .iter()
+            .any(|diagnostic| diagnostic.path.ends_with(typo)));
+    }
+}
+
 // --- Model compiler: selection and exact row counts -------------------------
 
 use sql_splitter::generate::{
@@ -608,7 +658,11 @@ static COPY_OF_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
     kind: "copy_of",
     aliases: &[],
     summary: "test cross-column generator",
-    arguments: &[],
+    arguments: &[ArgumentSpec {
+        name: "reads",
+        required: true,
+        summary: "test sibling columns",
+    }],
     accepts: &[
         SqlTypeFamily::Integer,
         SqlTypeFamily::BigInteger,
@@ -641,7 +695,28 @@ static TEST_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     kind: "test.family",
     aliases: &[],
     summary: "test column-owning planner",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: false,
+            summary: "test owned columns",
+        },
+        ArgumentSpec {
+            name: "writes",
+            required: false,
+            summary: "test explicit writes",
+        },
+        ArgumentSpec {
+            name: "reads",
+            required: false,
+            summary: "test read columns",
+        },
+        ArgumentSpec {
+            name: "relationship",
+            required: false,
+            summary: "test relationship",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::Configured,
     determinism: Determinism::Deterministic,

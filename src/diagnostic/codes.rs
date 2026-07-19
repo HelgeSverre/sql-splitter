@@ -135,6 +135,7 @@ define_diagnostics! {
     ORDER_FAMILY_UNKNOWN_FIELD, "GEN-ORDER-FAMILY-UNKNOWN-FIELD", "Order-family field is unknown", Planner, Error, "An order-family planner uses a removed flat field instead of the parent or child column maps.";
     ORDER_FAMILY_ZERO_LINES, "GEN-ORDER-FAMILY-ZERO-LINES", "Order-family line count is impossible", Planner, Error, "A configured line distribution can yield zero lines where the planner requires at least one.";
     OUTPUT_IO, "GEN-OUTPUT-IO", "Generated output could not be written", Runtime, Error, "Opening, writing, flushing, or publishing the generated SQL output failed.";
+    OPERATOR_UNKNOWN_ARGUMENT, "GEN-OPERATOR-UNKNOWN-ARGUMENT", "Operator argument is unknown", Config, Error, "A generator, modifier, or planner configuration contains a key absent from that operator's descriptor.";
     OVERRIDES_NO_BASE, "GEN-OVERRIDES-NO-BASE", "Overrides document has no base model", Config, Error, "An overrides document was supplied without a source dump or other base model.";
     PATTERN_MISSING_MASK, "GEN-PATTERN-MISSING-MASK", "Pattern mask is missing", Generator, Error, "A pattern generator omits the mask that describes its output.";
     PLANNER_UNKNOWN, "GEN-PLANNER-UNKNOWN", "Planner kind is unknown", Planner, Error, "The model names a planner kind that is not registered.";

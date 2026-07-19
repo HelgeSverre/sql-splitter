@@ -498,6 +498,7 @@ impl ModelCompiler {
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
         let compile_seed = seed_root_of(&seed);
+        self.validate_column_operator_arguments(name, table, bag);
         let mut relationships: Vec<CompiledRelationship> = table
             .relationships
             .iter()
@@ -651,15 +652,29 @@ impl ModelCompiler {
             .enumerate()
             .map(|(index, config)| {
                 let path = format!("tables.{table_name}.planners[{index}]");
+                let Some(factory) = self.registry.planner(&config.kind) else {
+                    bag.error(
+                        crate::diagnostic::codes::PLANNER_UNKNOWN.code,
+                        path,
+                        format!("no planner registered for kind `{}`", config.kind),
+                    );
+                    return PlannerInfo::unresolved(&config.kind);
+                };
+                let descriptor = factory.descriptor();
+                validate_operator_arguments(
+                    &config.args,
+                    descriptor.arguments,
+                    &path,
+                    "planner",
+                    &config.kind,
+                    bag,
+                );
                 // A cross-table family planner (`children:`) carries its
                 // relationship on the *child* table; the compiler injected the
                 // child facts to validate it there, so skip the same-table
                 // relationship check that would otherwise falsely reject it.
                 let is_family = config.args.contains_key("children");
-                let is_cross_table = self
-                    .registry
-                    .planner(&config.kind)
-                    .is_some_and(|factory| factory.descriptor().cross_table);
+                let is_cross_table = descriptor.cross_table;
                 let injected;
                 let config = if let Some(facts) = family_ctx.facts.get(&(table_name.to_string(), index)) {
                     let mut cloned = config.clone();
@@ -689,16 +704,6 @@ impl ModelCompiler {
                 } else {
                     config
                 };
-                let Some(factory) = self.registry.planner(&config.kind) else {
-                    bag.error(
-                        crate::diagnostic::codes::PLANNER_UNKNOWN.code,
-                        path,
-                        format!("no planner registered for kind `{}`", config.kind),
-                    );
-                    return PlannerInfo::unresolved(&config.kind);
-                };
-                let descriptor = factory.descriptor();
-
                 let writes = match descriptor.writes {
                     ColumnScope::Configured => configured_columns(config, &["columns", "writes"]),
                     _ => Vec::new(),
@@ -740,6 +745,43 @@ impl ModelCompiler {
                 }
             })
             .collect()
+    }
+
+    /// Validate descriptor-owned generator/modifier keys before ownership
+    /// resolution. This includes relationship marker generators that the
+    /// engine consumes structurally instead of compiling as value operators.
+    fn validate_column_operator_arguments(
+        &self,
+        table_name: &str,
+        table: &TableModel,
+        bag: &mut DiagnosticBag,
+    ) {
+        for (column_name, rule) in &table.columns {
+            if let Some(config) = &rule.generator {
+                if let Some(factory) = self.registry.generator(&config.kind) {
+                    validate_operator_arguments(
+                        &config.args,
+                        factory.descriptor().arguments,
+                        &format!("tables.{table_name}.columns.{column_name}.generator"),
+                        "generator",
+                        &config.kind,
+                        bag,
+                    );
+                }
+            }
+            for (index, config) in rule.modifiers.iter().enumerate() {
+                if let Some(factory) = self.registry.modifier(&config.kind) {
+                    validate_operator_arguments(
+                        &config.args,
+                        factory.descriptor().arguments,
+                        &format!("tables.{table_name}.columns.{column_name}.modifiers[{index}]"),
+                        "modifier",
+                        &config.kind,
+                        bag,
+                    );
+                }
+            }
+        }
     }
 
     /// Assign the single owner for `column`, given its recorded claimants.
@@ -1060,6 +1102,39 @@ impl ModelCompiler {
         match factory.compile(&config, &context) {
             Ok(operator) => compiled.push(operator),
             Err(errors) => bag.diagnostics.extend(errors.diagnostics),
+        }
+    }
+}
+
+/// Reject keys the registered descriptor does not publish. Factories remain
+/// responsible for required arguments and value semantics; this common pass
+/// only closes the permissive flattened-map gap shared by every operator kind.
+fn validate_operator_arguments(
+    args: &BTreeMap<String, serde_yaml_ng::Value>,
+    expected: &[super::registry::ArgumentSpec],
+    path: &str,
+    operator_type: &str,
+    kind: &str,
+    bag: &mut DiagnosticBag,
+) {
+    for argument in args.keys() {
+        if expected.iter().any(|spec| spec.name == argument) {
+            continue;
+        }
+        let diagnostic = bag.error(
+            crate::diagnostic::codes::OPERATOR_UNKNOWN_ARGUMENT.code,
+            format!("{path}.{argument}"),
+            format!("{operator_type} `{kind}` does not accept argument `{argument}`"),
+        );
+        if !expected.is_empty() {
+            diagnostic.help = Some(format!(
+                "supported arguments: {}",
+                expected
+                    .iter()
+                    .map(|spec| spec.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
 }
