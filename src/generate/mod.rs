@@ -343,6 +343,22 @@ impl Generate {
             source,
         } = request;
 
+        let conflicting_output = match (&output, &emit) {
+            (OutputTarget::Path(sql), Some(OutputTarget::Path(model)))
+                if mode == RunMode::Generate && sql == model =>
+            {
+                Some(sql)
+            }
+            _ => None,
+        };
+        if let Some(path) = conflicting_output {
+            return Err(GenerateError::diagnostic(
+                &codes::REQUEST_OUTPUT,
+                path.display().to_string(),
+                "generated SQL and the resolved model require different destinations",
+            ));
+        }
+
         let had_source_dump = input.is_some();
 
         let ResolvedModel {

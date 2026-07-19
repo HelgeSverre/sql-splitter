@@ -289,6 +289,23 @@ fn output_staging_failure_preserves_an_existing_emitted_model() {
 }
 
 #[test]
+fn sql_and_model_outputs_cannot_publish_to_the_same_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("synthetic.out");
+    fs::write(&destination, "previous bytes\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&destination)
+        .emit(&destination)
+        .run()
+        .expect_err("SQL and model outputs must not overwrite each other");
+
+    assert!(matches!(error, GenerateError::Diagnostic(_)));
+    assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");
+}
+
+#[test]
 fn runtime_failure_preserves_existing_sql_and_emitted_model() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("overflow.yaml");
