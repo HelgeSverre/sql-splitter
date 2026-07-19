@@ -590,6 +590,23 @@ fn membership_indexes_spill_and_still_verify_exactly() {
 }
 
 #[test]
+fn membership_index_io_errors_abort_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_temp = dir.path().join("missing-temp-directory");
+    let plan = compile(CORE);
+    let verifier = GenerationVerifier::new(&plan)
+        .membership_budget_bytes(0)
+        .temp_directory(&missing_temp);
+    let sql = render(plan);
+    let path = write(dir.path(), "membership-io.sql", &sql);
+
+    let error = verifier
+        .verify_path(&path)
+        .expect_err("membership spool creation must be propagated");
+    assert!(error.to_string().contains("membership index"), "{error}");
+}
+
+#[test]
 fn failed_verification_leaves_a_prior_destination_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("dest.sql");

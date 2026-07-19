@@ -36,7 +36,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 
@@ -206,6 +206,13 @@ impl GenerationVerifier {
         self
     }
 
+    /// Store protected verification spools in `dir` instead of the OS temp
+    /// directory. The directory must already exist.
+    pub fn temp_directory(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.temp = TempConfig::in_dir(dir);
+        self
+    }
+
     /// Add an approximate distribution expectation, checked as
     /// [`CheckStatus::Sampled`].
     pub fn expect_distribution(mut self, expectation: DistributionExpectation) -> Self {
@@ -288,7 +295,7 @@ impl GenerationVerifier {
                                         table,
                                         &parsed.all_values,
                                         &parsed.column_map,
-                                    );
+                                    )?;
                                 } else {
                                     audit_ref.note_undecodable(&state.table_name);
                                 }
@@ -306,7 +313,7 @@ impl GenerationVerifier {
                         if stmt_type == StatementType::Insert && !name.is_empty() {
                             if let Some(table_id) = schema.get_table_id(&name) {
                                 if let Some(table) = schema.table(table_id) {
-                                    let _ = visit_insert_rows_with(
+                                    visit_insert_rows_with(
                                         bytes,
                                         table,
                                         dialect,
@@ -320,11 +327,11 @@ impl GenerationVerifier {
                                                     table,
                                                     &parsed.all_values,
                                                     &parsed.column_map,
-                                                );
+                                                )?;
                                             }
                                             Ok(RowFlow::Continue)
                                         },
-                                    );
+                                    )?;
                                 }
                             }
                         }
@@ -345,7 +352,7 @@ impl GenerationVerifier {
                                         state.table,
                                         &parsed.all_values,
                                         &parsed.column_map,
-                                    );
+                                    )?;
                                 }
                             }
                         }
@@ -809,10 +816,10 @@ impl<'a> Audit<'a> {
         schema: &TableSchema,
         all_values: &[PkValue],
         column_map: &[Option<usize>],
-    ) {
+    ) -> Result<(), GenerateError> {
         let plan_index = match self.tables.get(table_name) {
             Some(state) => state.plan_index,
-            None => return,
+            None => return Ok(()),
         };
         // Borrow the owned spec (tied to the spec's lifetime, not to `self`), so
         // the row-check reads below do not conflict with the mutable `self`
@@ -873,7 +880,7 @@ impl<'a> Audit<'a> {
         };
 
         // FK membership: check each relationship's child key against the parent.
-        let fk_failures = self.check_foreign_keys(planned, &value_of);
+        let fk_failures = self.check_foreign_keys(planned, &value_of)?;
 
         // Family accumulation.
         self.accumulate_families(table_name, &value_of);
@@ -902,14 +909,21 @@ impl<'a> Audit<'a> {
         }
         for (group, key) in state.unique_groups.iter_mut().zip(unique_keys) {
             if let Some((bytes, hash)) = key {
-                if let Ok(false) = group.index.insert(&bytes, hash) {
+                if !group
+                    .index
+                    .insert(&bytes, hash)
+                    .map_err(membership_index_error)?
+                {
                     group.duplicate = true;
                 }
             }
         }
         for (group, key) in state.member_groups.iter_mut().zip(member_keys) {
             if let Some((bytes, hash)) = key {
-                let _ = group.index.insert(&bytes, hash);
+                group
+                    .index
+                    .insert(&bytes, hash)
+                    .map_err(membership_index_error)?;
             }
         }
         for slug in fk_failures {
@@ -923,6 +937,7 @@ impl<'a> Audit<'a> {
                 .entry(value)
                 .or_insert(0) += 1;
         }
+        Ok(())
     }
 
     /// Check every foreign key of `planned` against the parent's exposed
@@ -931,7 +946,7 @@ impl<'a> Audit<'a> {
         &self,
         planned: &TableSpec,
         value_of: &impl Fn(&str) -> Option<&'v PkValue>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, GenerateError> {
         let mut failures = Vec::new();
         for rel in &planned.relationships {
             let Some((bytes, hash)) = encode_group(&rel.columns, value_of) else {
@@ -949,17 +964,16 @@ impl<'a> Audit<'a> {
                 .iter()
                 .find(|g| g.columns == rel.parent_columns);
             if let Some(group) = group {
-                // Fail CLOSED: a spool I/O error during collision confirmation
-                // must not be treated as "present" (a silently-satisfied FK
-                // check). An error means the membership could not be confirmed,
-                // so the FK is reported as a failure rather than passed.
-                let present = group.index.contains(&bytes, hash).unwrap_or(false);
+                let present = group
+                    .index
+                    .contains(&bytes, hash)
+                    .map_err(membership_index_error)?;
                 if !present {
                     failures.push(fk_slug(&planned.name, rel));
                 }
             }
         }
-        failures
+        Ok(failures)
     }
 
     /// Accumulate parent totals and child sums for every family this row
@@ -1535,10 +1549,21 @@ fn open_reader(path: &Path) -> Result<std::fs::File, GenerateError> {
 }
 
 fn parse_error(error: anyhow::Error) -> GenerateError {
+    match error.downcast::<GenerateError>() {
+        Ok(error) => error,
+        Err(error) => GenerateError::diagnostic(
+            &crate::diagnostic::codes::VERIFY_PARSE,
+            "verification",
+            error.to_string(),
+        ),
+    }
+}
+
+fn membership_index_error(error: io::Error) -> GenerateError {
     GenerateError::diagnostic(
-        &crate::diagnostic::codes::VERIFY_PARSE,
-        "verification",
-        error.to_string(),
+        &crate::diagnostic::codes::VERIFY_IO,
+        "verification.membership",
+        format!("membership index I/O failed: {error}"),
     )
 }
 
