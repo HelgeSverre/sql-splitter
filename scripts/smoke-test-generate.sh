@@ -36,10 +36,9 @@ if isinstance(rows, bool) or not isinstance(rows, int) or rows < 0:
 warnings = {
     diagnostic["code"]
     for diagnostic in report.get("diagnostics", [])
-    if diagnostic.get("severity") == "warning" and diagnostic.get("code")
+    if diagnostic.get("severity") in {"warning", "advisory"}
+    and diagnostic.get("code")
 }
-if report.get("source_values"):
-    warnings.add("GEN-SOURCE-VALUES")
 
 print(rows)
 print(",".join(sorted(warnings)) or "-")

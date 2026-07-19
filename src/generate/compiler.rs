@@ -153,7 +153,7 @@ impl ModelCompiler {
 
         if options.scale.is_some() && options.rows.is_some() {
             bag.error(
-                "GEN-COUNT-CONTROL-CONFLICT",
+                crate::diagnostic::codes::COUNT_CONTROL_CONFLICT.code,
                 "options",
                 "`--scale` and `--rows` are mutually exclusive global row controls",
             );
@@ -185,7 +185,7 @@ impl ModelCompiler {
             // column-generation cycles and foreign-key cycles handled through
             // deferred constraints.
             bag.error(
-                "GEN-ROWS-CYCLE",
+                crate::diagnostic::codes::ROWS_CYCLE.code,
                 "tables",
                 format!(
                     "relation-children row counts form a dependency cycle among tables: {}; each table's count derives from a parent that ultimately derives from it",
@@ -283,7 +283,7 @@ impl ModelCompiler {
         for (table, over) in &map {
             if over.rows.is_some() && over.scale.is_some() {
                 bag.error(
-                    "GEN-TABLE-COUNT-CONFLICT",
+                    crate::diagnostic::codes::TABLE_COUNT_CONFLICT.code,
                     format!("tables.{table}"),
                     format!(
                         "table `{table}` has both `--table-rows` and `--table-scale`; they are mutually exclusive"
@@ -343,7 +343,7 @@ impl ModelCompiler {
                         }
                     } else if reported.insert(parent.clone()) {
                         bag.error(
-                            "GEN-EXCLUDED-DEPENDENCY",
+                            crate::diagnostic::codes::EXCLUDED_DEPENDENCY.code,
                             format!("tables.{start}"),
                             format!(
                                 "table `{start}` requires excluded table `{parent}` via dependency path {}",
@@ -401,7 +401,7 @@ impl ModelCompiler {
     ) -> u64 {
         if matches!(rows, RowsModel::Observed { .. }) && !has_observed_provenance(model, name) {
             bag.error(
-                "GEN-ROWS-OBSERVED-MISSING",
+                crate::diagnostic::codes::ROWS_OBSERVED_MISSING.code,
                 format!("tables.{name}.rows"),
                 format!(
                     "table `{name}` uses `rows.kind: observed` but the model has no attached source or profile to resolve the observed count from"
@@ -464,7 +464,7 @@ impl ModelCompiler {
         let minimum = (parent_count as f64 * min).ceil() as u64;
         if count < minimum {
             bag.error(
-                "GEN-CHILD-COUNT-IMPOSSIBLE",
+                crate::diagnostic::codes::CHILD_COUNT_IMPOSSIBLE.code,
                 format!("tables.{name}.rows"),
                 format!(
                     "table `{name}` resolves to {count} rows, but its {parent_count} parents in `{parent}` each require at least {min} child(ren) ({minimum} total)"
@@ -533,7 +533,7 @@ impl ModelCompiler {
             }
             if !fk_columns_all_non_null(table, &relationship.columns) {
                 bag.warning(
-                    "GEN-DETACHED-DEPENDENCY",
+                    crate::diagnostic::codes::DETACHED_DEPENDENCY.code,
                     format!("tables.{name}"),
                     format!(
                         "optional relationship `{}` on table `{name}` references excluded table `{}`; its foreign key is detached and omitted from the rendered DDL",
@@ -688,7 +688,7 @@ impl ModelCompiler {
                 };
                 let Some(factory) = self.registry.planner(&config.kind) else {
                     bag.error(
-                        "GEN-PLANNER-UNKNOWN",
+                        crate::diagnostic::codes::PLANNER_UNKNOWN.code,
                         path,
                         format!("no planner registered for kind `{}`", config.kind),
                     );
@@ -709,7 +709,7 @@ impl ModelCompiler {
                     if let Some(referenced) = string_arg(config, "relationship") {
                         if !relationship_names.iter().any(|n| n == referenced) {
                             bag.error(
-                                "GEN-RELATIONSHIP-UNKNOWN",
+                                crate::diagnostic::codes::RELATIONSHIP_UNKNOWN.code,
                                 format!("{path}.relationship"),
                                 format!(
                                     "planner `{}` references relationship `{referenced}`, which is not declared on table `{table_name}`",
@@ -755,7 +755,7 @@ impl ModelCompiler {
     ) -> ColumnOwner {
         if claimants.len() > 1 {
             let diagnostic = bag.error(
-                "GEN-COLUMN-OWNER-CONFLICT",
+                crate::diagnostic::codes::COLUMN_OWNER_CONFLICT.code,
                 format!("tables.{table_name}.columns.{}", column.name),
                 format!(
                     "tables.{table_name}.columns.{} is produced by more than one owner",
@@ -819,7 +819,7 @@ impl ModelCompiler {
 
         let Some(factory) = self.registry.generator(&config.kind) else {
             bag.error(
-                "GEN-GENERATOR-UNKNOWN",
+                crate::diagnostic::codes::GENERATOR_UNKNOWN.code,
                 path,
                 format!("no generator registered for kind `{}`", config.kind),
             );
@@ -829,7 +829,7 @@ impl ModelCompiler {
 
         if !descriptor.accepts.contains(&column.family) {
             bag.error(
-                "GEN-GENERATOR-TYPE",
+                crate::diagnostic::codes::GENERATOR_TYPE.code,
                 path,
                 format!(
                     "generator `{}` cannot produce column `{}` of type family {:?}",
@@ -908,7 +908,7 @@ impl ModelCompiler {
             InferenceMode::Disabled => "",
         };
         bag.error(
-            "GEN-COLUMN-OWNER-MISSING",
+            crate::diagnostic::codes::COLUMN_OWNER_MISSING.code,
             format!("tables.{table_name}.columns.{}", column.name),
             format!(
                 "column `{}` on table `{table_name}` has no generator, planner, relationship, or database default to produce its value{note}",
@@ -949,7 +949,7 @@ impl ModelCompiler {
             );
             let Some(factory) = self.registry.modifier(&modifier.kind) else {
                 bag.error(
-                    "GEN-MODIFIER-UNKNOWN",
+                    crate::diagnostic::codes::MODIFIER_UNKNOWN.code,
                     path,
                     format!("no modifier registered for kind `{}`", modifier.kind),
                 );
@@ -957,7 +957,7 @@ impl ModelCompiler {
             };
             if !factory.descriptor().accepts.contains(&column.family) {
                 bag.error(
-                    "GEN-MODIFIER-TYPE",
+                    crate::diagnostic::codes::MODIFIER_TYPE.code,
                     path,
                     format!(
                         "modifier `{}` cannot transform column `{}` of type family {:?}",
@@ -1140,7 +1140,7 @@ fn apply_max_rows(count: u64, max_rows: Option<u64>, name: &str, bag: &mut Diagn
     match max_rows {
         Some(max) if count > max => {
             bag.warning(
-                "GEN-MAX-ROWS-CAPPED",
+                crate::diagnostic::codes::MAX_ROWS_CAPPED.code,
                 format!("tables.{name}.rows"),
                 format!("table `{name}` row count capped from {count} to {max} by `--max-rows`"),
             );
@@ -1590,7 +1590,7 @@ fn report_dependency_cycles(
             continue;
         }
         bag.error(
-            "GEN-COLUMN-CYCLE",
+            crate::diagnostic::codes::COLUMN_CYCLE.code,
             format!("tables.{table_name}.columns"),
             format!(
                 "columns on table `{table_name}` form a read/write dependency cycle: {}",
@@ -1829,7 +1829,7 @@ fn collect_family_facts(
                             .is_some_and(|rule| rule.generator.is_some());
                         if has_generator {
                             bag.error(
-                                "GEN-COLUMN-OWNER-CONFLICT",
+                                crate::diagnostic::codes::COLUMN_OWNER_CONFLICT.code,
                                 format!("tables.{child_name}.columns.{column_name}"),
                                 format!(
                                     "column `{column_name}` on table `{child_name}` is produced by both its own generator and the `commerce.order_family` planner on table `{parent_name}`"
@@ -2111,7 +2111,7 @@ fn fold_foreign_key_generators(
             .find(|relationship| relationship.columns.iter().any(|c| c == column))
         else {
             bag.error(
-                "GEN-FOREIGN-KEY-UNRESOLVED",
+                crate::diagnostic::codes::FOREIGN_KEY_UNRESOLVED.code,
                 format!("tables.{table_name}.columns.{column}.generator"),
                 format!(
                     "column `{column}` on table `{table_name}` uses generator `{}` but no relationship declares it as a foreign key; declare a `relationships:` entry covering it",
@@ -2160,7 +2160,7 @@ fn compile_globs(patterns: &[String], bag: &mut DiagnosticBag) -> Vec<Pattern> {
             Ok(compiled) => Some(compiled),
             Err(error) => {
                 bag.error(
-                    "GEN-INVALID-GLOB",
+                    crate::diagnostic::codes::INVALID_GLOB.code,
                     "options",
                     format!("invalid table glob `{pattern}`: {error}"),
                 );

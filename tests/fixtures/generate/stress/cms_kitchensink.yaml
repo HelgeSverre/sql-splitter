@@ -72,12 +72,12 @@ tables:
       nanoid: { generator: { kind: identifier.nanoid } }
       email:
         generator: { kind: internet.email }
-        modifiers: [{ kind: unique, attempts: 64, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
       username:
         generator: { kind: person.username }
         modifiers:
           - { kind: lowercase }
-          - { kind: unique, attempts: 64, on_exhaustion: widen }
+          - { kind: unique, max_attempts: 64, on_exhaustion: widen }
       display_name: { generator: { kind: person.full_name } }
       title:
         generator: { kind: person.title }
@@ -160,7 +160,7 @@ tables:
       name: { generator: { kind: text.word } }
       slug:
         generator: { kind: text.slug }
-        modifiers: [{ kind: unique, attempts: 16, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 16, on_exhaustion: error }]
     planners:
       - kind: hierarchy.tree
         relationship: category_parent
@@ -287,10 +287,10 @@ tables:
     columns:
       name:
         generator: { kind: text.word }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: widen }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: widen }]
       slug:
         generator: { kind: text.slug }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
 
   taggables:
     # Polymorphic + junction: a tag attached to a post OR a comment.

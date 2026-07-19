@@ -1,0 +1,210 @@
+---
+title: Rust library API
+description: Drive generation through the convenience builder or staged extension API
+sidebar:
+  order: 8
+---
+
+The Rust crate exposes the same pipeline as the CLI. Use `Generate::builder()`
+for ordinary file workflows and the staged registry/compiler/engine API for
+custom operators, plan inspection, or a custom row sink.
+
+## Convenience builder
+
+```rust
+use sql_splitter::generate::Generate;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let report = Generate::builder()
+        .config("model.yaml")
+        .output("synthetic.sql")
+        .seed(42)
+        .run()?;
+
+    println!("generated {} rows", report.rows_written);
+    println!("effective seed: {:?}", report.effective_seed);
+    Ok(())
+}
+```
+
+| Builder method                  | Purpose                                          |
+| ------------------------------- | ------------------------------------------------ |
+| `.input(path)`                  | Profile a source dump                            |
+| `.config(path)`                 | Load a model or overrides document               |
+| `.output(path)`                 | Select generated SQL destination                 |
+| `.emit(path)`                   | Write the resolved complete model                |
+| `.input_dialect(dialect)`       | Override source dialect detection                |
+| `.profile_depth(depth)`         | Select schema/basic/full library profiling depth |
+| `.profile_sample(n)`            | Set retained sample capacity                     |
+| `.output_dialect(dialect)`      | Select render dialect                            |
+| `.seed(u64)`                    | Override root seed                               |
+| `.table_scale(table, factor)`   | Add one validated table-scale override           |
+| `.compile(options)`             | Replace grouped count/selection compile options  |
+| `.explain(bool)`                | Include inference decisions                      |
+| `.verify(bool)`                 | Enable verified atomic publication               |
+| `.mode(mode)`                   | Generate, check, dry-run, or emit model          |
+| `.mssql_production_style(bool)` | Enable MSSQL production-style DDL                |
+| `.mssql_go(n)`                  | Set MSSQL GO interval                            |
+| `.run()`                        | Build the request and execute it                 |
+
+`GenerateReport` contains:
+
+- `rows_written`;
+- `effective_seed`, including entropy drawn for an unseeded run;
+- `diagnostics`, including info/advisory/warning entries on success;
+- `source_values`, containing path and rule kind but never literal values;
+- `explain`, when requested.
+
+Always inspect diagnostics even when generation succeeds.
+
+## Compile options
+
+`CompileOptions` is the library form of seed, count, include/exclude, and
+per-table overrides. `TableCountOverride::absolute` and
+`TableCountOverride::scale` build repeatable per-table rules.
+
+```rust
+use sql_splitter::generate::{CompileOptions, Generate, TableCountOverride};
+
+let report = Generate::builder()
+    .config("model.yaml")
+    .output("synthetic.sql")
+    .compile(CompileOptions {
+        scale: Some(0.1),
+        max_rows: Some(100_000),
+        table_rows: vec![TableCountOverride::absolute("audit_events", 500)],
+        ..CompileOptions::default()
+    })
+    .run()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+## Staged API
+
+```rust
+use sql_splitter::generate::{
+    CompileOptions, ExtensionRegistry, GenerationEngine, ModelCompiler,
+    RenderOptions, SqlRenderer,
+};
+use sql_splitter::synthetic::SyntheticFile;
+
+let yaml = std::fs::read_to_string("model.yaml")?;
+let model = SyntheticFile::parse_str(&yaml)?
+    .into_model()
+    .expect("a complete model");
+
+let registry = ExtensionRegistry::standard();
+let plan = ModelCompiler::new(registry)
+    .compile(model, CompileOptions::default())?;
+
+let mut renderer = SqlRenderer::new(Vec::new(), RenderOptions::default());
+let engine_report = GenerationEngine::new(plan).run(&mut renderer)?;
+let sql = renderer.finish()?;
+
+assert_eq!(engine_report.rows_written, 100);
+std::fs::write("synthetic.sql", sql)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### `ExtensionRegistry`
+
+`ExtensionRegistry::standard()` contains every built-in generator, modifier,
+and planner. `ExtensionRegistry::new()` starts empty. Register custom statically
+linked factories with `register_generator`, `register_modifier`, and
+`register_planner`.
+
+Each factory publishes a descriptor:
+
+- canonical kind and aliases;
+- argument names, requiredness, and summaries;
+- accepted SQL families for column operators;
+- read/write scope;
+- determinism, buffering, and verification capabilities;
+- cross-table capability for planners.
+
+Registration rejects duplicate kinds, duplicate aliases, and aliases that
+shadow canonical names. Custom operator kinds are runtime/compiler validated;
+the standard public JSON Schema cannot describe them.
+
+### `ModelCompiler`
+
+`ModelCompiler::compile` validates and resolves a `SyntheticModel` into an
+immutable `GenerationPlan`. It collects independent problems instead of
+stopping at the first one. Errors return `DiagnosticBag`; successful plans keep
+warning and informational diagnostics in `GenerationPlan::diagnostics`.
+
+The compiler resolves final counts, table dependency order, ownership,
+cross-column dependencies, planner phases, seeds, selection, and verification
+predicates. A plan should be treated as the authority for execution.
+
+### `GenerationEngine` and `RowSink`
+
+`GenerationEngine::run` drives the compiled plan against any `RowSink`:
+
+```rust
+pub trait RowSink {
+    fn begin_table(&mut self, table: &PlannedTable) -> Result<(), GenerateError>;
+    fn write_row(
+        &mut self,
+        table: &PlannedTable,
+        row: &GeneratedRow,
+    ) -> Result<(), GenerateError>;
+    fn end_table(&mut self, table: &PlannedTable) -> Result<(), GenerateError>;
+}
+```
+
+The engine executes table, cross-table family, and deferred-constraint phases.
+Use `SqlRenderer` for SQL output or implement a sink for another in-process
+destination. The sink receives typed `GeneratedValue` values rather than SQL
+literal strings.
+
+### `SqlRenderer`
+
+`SqlRenderer<W: Write>` implements `RowSink`. `RenderOptions` controls dialect,
+schema/data mode, PostgreSQL COPY behavior, batch size, and MSSQL conventions.
+Call `finish()` to flush and recover the writer. Renderer warnings should be
+merged into the caller's report when driving stages manually.
+
+## Profiling and inference
+
+```rust
+use sql_splitter::profile::{DumpProfiler, ModelInference, ProfileDepth};
+
+let profile = DumpProfiler::builder()
+    .depth(ProfileDepth::Basic)
+    .seed(42)
+    .build()
+    .profile_path(std::path::Path::new("source.sql"))?;
+
+let inferred = ModelInference::standard()
+    .infer(&profile.schema, &profile)?;
+let model = inferred.model;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`DumpProfile` contains the portable schema, table/column evidence, and
+structured profiling diagnostics. `InferenceResult` contains the complete
+model, decisions, structured diagnostics, and source-literal metadata.
+
+`ModelMerger::merge(base, overrides)` returns the merged model plus a diagnostic
+bag on success. Preserve that bag: fingerprint and other warning diagnostics
+must not disappear simply because the merge produced a model.
+
+## Errors and diagnostics
+
+`GenerateError` distinguishes several layers:
+
+| Variant                      | Meaning                                                      |
+| ---------------------------- | ------------------------------------------------------------ |
+| `Diagnostics(DiagnosticBag)` | Multiple load, merge, or compile diagnostics                 |
+| `Diagnostic(Diagnostic)`     | One structured runtime, rendering, or verification failure   |
+| `TypeMismatch`               | A runtime operator received the wrong generated value shape  |
+| `Overflow`                   | Checked generator/planner arithmetic overflowed              |
+| `Exhausted`                  | A bounded constraint such as `unique` could not be satisfied |
+| `InvalidInput`               | Uncoded extension/internal runtime input failure             |
+
+Built-in structured diagnostics use canonical definitions from
+`sql_splitter::diagnostic::codes`. A diagnostic includes code, severity, YAML or
+runtime path, message, optional help, related locations, and a documentation
+URL. Extension diagnostics may use their own namespaced string codes; they do
+not receive a built-in documentation link.

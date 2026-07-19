@@ -164,7 +164,7 @@ tables:
       slug:
         generator: { kind: text.slug }
         modifiers:
-          - { kind: unique, attempts: 20, on_exhaustion: error }
+          - { kind: unique, max_attempts: 20, on_exhaustion: error }
       created_at:
         generator: { kind: datetime }
       updated_at:
@@ -203,7 +203,7 @@ tables:
       email:
         generator: { kind: internet.email }
         modifiers:
-          - { kind: unique, attempts: 20, on_exhaustion: error }
+          - { kind: unique, max_attempts: 20, on_exhaustion: error }
       name:
         generator: { kind: person.full_name }
       role:

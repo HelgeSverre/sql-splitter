@@ -39,8 +39,8 @@ use serde_yaml_ng::Value;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
-    Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism, PlannerDescriptor,
-    PlannerFactory, Verification,
+    ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
+    PlannerDescriptor, PlannerFactory, Verification,
 };
 use crate::generate::seed::{SeedRoot, StreamId};
 use crate::generate::value::{GenerateError, GeneratedValue};
@@ -63,7 +63,64 @@ pub static COMMERCE_ORDER_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescript
     kind: "commerce.order_family",
     aliases: &[],
     summary: "Coordinates an orders/order_items parent-child family with exact minor-unit money.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "children",
+            required: true,
+            summary: "Name of the line-item table coordinated by this parent planner.",
+        },
+        ArgumentSpec {
+            name: "relationship",
+            required: true,
+            summary: "Relationship on the child table that references the parent table.",
+        },
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps parent subtotal, total, and optional discount, tax, and shipping roles.",
+        },
+        ArgumentSpec {
+            name: "child_columns",
+            required: true,
+            summary:
+                "Maps child quantity, unit price, line total, and optional discount and tax roles.",
+        },
+        ArgumentSpec {
+            name: "currency_scale",
+            required: true,
+            summary: "Decimal scale shared by every parent and child money column.",
+        },
+        ArgumentSpec {
+            name: "rounding",
+            required: true,
+            summary: "Exact residual allocation mode: largest_remainder, last_line, or bankers.",
+        },
+        ArgumentSpec {
+            name: "quantity",
+            required: false,
+            summary: "Per-line integer quantity range.",
+        },
+        ArgumentSpec {
+            name: "unit_price",
+            required: false,
+            summary: "Per-line unit-price range in minor or major currency units.",
+        },
+        ArgumentSpec {
+            name: "tax",
+            required: false,
+            summary: "Fixed or weighted tax-rate configuration.",
+        },
+        ArgumentSpec {
+            name: "discount",
+            required: false,
+            summary: "Fixed or weighted discount-rate configuration.",
+        },
+        ArgumentSpec {
+            name: "shipping",
+            required: false,
+            summary: "Fixed shipping amount in minor or major currency units.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -702,7 +759,7 @@ fn compile_order_family(
 
     if !child_found {
         bag.error(
-            "GEN-ORDER-FAMILY-CHILD-UNKNOWN",
+            crate::diagnostic::codes::ORDER_FAMILY_CHILD_UNKNOWN.code,
             format!("{path}.children"),
             format!(
                 "commerce.order_family `children` names table `{child_name}`, which is not a table in the model"
@@ -719,7 +776,7 @@ fn compile_order_family(
         .unwrap_or(false);
     if child_found && !rel_on_child {
         bag.error(
-            "GEN-ORDER-FAMILY-RELATIONSHIP",
+            crate::diagnostic::codes::ORDER_FAMILY_RELATIONSHIP.code,
             format!("{path}.relationship"),
             format!(
                 "commerce.order_family `relationship` `{rel_name}` is not a relationship declared on child table `{child_name}` that references parent `{}`",
@@ -732,7 +789,7 @@ fn compile_order_family(
         Some(scale) => scale,
         None => {
             bag.error(
-                "GEN-ORDER-FAMILY-CONFIG",
+                crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,
                 format!("{path}.currency_scale"),
                 "commerce.order_family requires a `currency_scale`".to_string(),
             );
@@ -745,7 +802,7 @@ fn compile_order_family(
             Some(rounding) => rounding,
             None => {
                 bag.error(
-                    "GEN-ORDER-FAMILY-CONFIG",
+                    crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,
                     format!("{path}.rounding"),
                     format!("commerce.order_family `rounding` `{name}` is not one of `largest_remainder`, `last_line`, `bankers`"),
                 );
@@ -754,7 +811,7 @@ fn compile_order_family(
         },
         None => {
             bag.error(
-                "GEN-ORDER-FAMILY-CONFIG",
+                crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,
                 format!("{path}.rounding"),
                 "commerce.order_family requires a `rounding` mode".to_string(),
             );
@@ -832,7 +889,7 @@ fn reject_flat_form(config: &PlannerConfig, path: &str, bag: &mut DiagnosticBag)
     ] {
         if config.args.contains_key(key) {
             bag.error(
-                "GEN-ORDER-FAMILY-UNKNOWN-FIELD",
+                crate::diagnostic::codes::ORDER_FAMILY_UNKNOWN_FIELD.code,
                 format!("{path}.{key}"),
                 format!(
                     "commerce.order_family does not accept a top-level `{key}`; map parent columns under `columns` and child columns under `child_columns` (the old flat form is not supported)"
@@ -879,7 +936,7 @@ fn resolve_parent_roles(
         let Some(name) = role_name(columns, key) else {
             if required {
                 bag.error(
-                    "GEN-ORDER-FAMILY-COLUMN-MISSING",
+                    crate::diagnostic::codes::ORDER_FAMILY_COLUMN_MISSING.code,
                     format!("{path}.columns.{key}"),
                     format!("commerce.order_family requires a `{key}` column under `columns`"),
                 );
@@ -902,7 +959,7 @@ fn resolve_parent_roles(
             }
             None => {
                 bag.error(
-                    "GEN-ORDER-FAMILY-COLUMN-MISSING",
+                    crate::diagnostic::codes::ORDER_FAMILY_COLUMN_MISSING.code,
                     format!("{path}.columns.{key}"),
                     format!(
                         "commerce.order_family `{key}` column `{name}` does not exist on parent table `{}`",
@@ -933,7 +990,7 @@ fn resolve_child_roles(
         let Some(name) = role_name(columns, key) else {
             if required {
                 bag.error(
-                    "GEN-ORDER-FAMILY-COLUMN-MISSING",
+                    crate::diagnostic::codes::ORDER_FAMILY_COLUMN_MISSING.code,
                     format!("{path}.child_columns.{key}"),
                     format!(
                         "commerce.order_family requires a `{key}` column under `child_columns`"
@@ -966,7 +1023,7 @@ fn resolve_child_roles(
             }
             None => {
                 bag.error(
-                    "GEN-ORDER-FAMILY-COLUMN-MISSING",
+                    crate::diagnostic::codes::ORDER_FAMILY_COLUMN_MISSING.code,
                     format!("{path}.child_columns.{key}"),
                     format!(
                         "commerce.order_family `{key}` column `{name}` does not exist on child table `{child_name}`"
@@ -995,7 +1052,7 @@ fn check_money_scale(
     if let Some((_, declared_scale)) = decimal_precision_scale(source_type) {
         if declared_scale != scale {
             bag.error(
-                "GEN-ORDER-FAMILY-SCALE",
+                crate::diagnostic::codes::ORDER_FAMILY_SCALE.code,
                 path.to_string(),
                 format!(
                     "commerce.order_family `currency_scale` is {scale}, but money column `{column}` is declared `{source_type}` with scale {declared_scale}; the currency scale is ambiguous"
@@ -1033,7 +1090,7 @@ fn compile_line_range(facts: Option<&Value>, path: &str, bag: &mut DiagnosticBag
     let max_lines = max.max(0.0).floor() as i128;
     if max_lines < min_lines || (max_lines == 0 && min_lines > 0) {
         bag.error(
-            "GEN-ORDER-FAMILY-ZERO-LINES",
+            crate::diagnostic::codes::ORDER_FAMILY_ZERO_LINES.code,
             path.to_string(),
             format!(
                 "commerce.order_family child distribution allows at most {max_lines} line(s) but requires at least {min_lines}; no order could satisfy the minimum"
@@ -1071,7 +1128,7 @@ fn compile_rate(
             let weights = number_list(value.get("weights"));
             if rates.is_empty() || weights.len() != rates.len() {
                 bag.error(
-                    "GEN-ORDER-FAMILY-CONFIG",
+                    crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,
                     format!("{path}.{what}"),
                     format!("commerce.order_family `{what}` weighted_choice needs matching `rates` and `weights` lists"),
                 );
@@ -1135,7 +1192,7 @@ fn check_overflow(
         Some(value) => value,
         None => {
             bag.error(
-                "GEN-ORDER-FAMILY-OVERFLOW",
+                crate::diagnostic::codes::ORDER_FAMILY_OVERFLOW.code,
                 path.to_string(),
                 "commerce.order_family maximum line subtotal (quantity * unit_price) overflows i128".to_string(),
             );
@@ -1193,7 +1250,7 @@ fn report_capacity(
             .unwrap_or(i128::MAX);
         if max_minor > capacity {
             bag.error(
-                "GEN-ORDER-FAMILY-OVERFLOW",
+                crate::diagnostic::codes::ORDER_FAMILY_OVERFLOW.code,
                 path.to_string(),
                 format!(
                     "commerce.order_family can reach {max_minor} minor units, exceeding the capacity {capacity} of money column `{column}` on table `{table}` (declared `{source_type}`)"

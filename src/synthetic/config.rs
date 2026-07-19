@@ -53,8 +53,14 @@ impl ConfigLoader {
         let root_value = read_yaml(path)?;
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-        let envelope: ImportEnvelope = serde_yaml_ng::from_value(root_value.clone())
-            .map_err(|err| single_error("GEN-CONFIG-PARSE", &path.display().to_string(), &err))?;
+        let envelope: ImportEnvelope =
+            serde_yaml_ng::from_value(root_value.clone()).map_err(|err| {
+                single_error(
+                    crate::diagnostic::codes::CONFIG_PARSE.code,
+                    &path.display().to_string(),
+                    &err,
+                )
+            })?;
 
         let mut bag = DiagnosticBag::default();
         let mut imports = Vec::with_capacity(envelope.imports.len());
@@ -69,8 +75,13 @@ impl ConfigLoader {
         }
 
         let merged = merge_yaml(root_value, imports)?;
-        SyntheticFile::parse_value(merged)
-            .map_err(|err| single_error("GEN-CONFIG-ROLE", &path.display().to_string(), &err))
+        SyntheticFile::parse_value(merged).map_err(|err| {
+            single_error(
+                crate::diagnostic::codes::CONFIG_ROLE.code,
+                &path.display().to_string(),
+                &err,
+            )
+        })
     }
 }
 
@@ -81,7 +92,7 @@ fn resolve_import(base_dir: &Path, raw: &str) -> Result<(PathBuf, Value), Diagno
     if raw.contains("://") || Path::new(raw).is_absolute() {
         let mut bag = DiagnosticBag::default();
         bag.error(
-            "GEN-IMPORT-REMOTE",
+            crate::diagnostic::codes::IMPORT_REMOTE.code,
             "imports",
             format!("import path `{raw}` must be local and relative; remote or absolute paths are rejected"),
         );
@@ -90,13 +101,18 @@ fn resolve_import(base_dir: &Path, raw: &str) -> Result<(PathBuf, Value), Diagno
 
     let resolved = base_dir.join(raw);
     let value = read_yaml(&resolved)?;
-    let envelope: ImportEnvelope = serde_yaml_ng::from_value(value.clone())
-        .map_err(|err| single_error("GEN-CONFIG-PARSE", &resolved.display().to_string(), &err))?;
+    let envelope: ImportEnvelope = serde_yaml_ng::from_value(value.clone()).map_err(|err| {
+        single_error(
+            crate::diagnostic::codes::CONFIG_PARSE.code,
+            &resolved.display().to_string(),
+            &err,
+        )
+    })?;
 
     if envelope.kind.as_deref() != Some("overrides") {
         let mut bag = DiagnosticBag::default();
         bag.error(
-            "GEN-IMPORT-KIND",
+            crate::diagnostic::codes::IMPORT_KIND.code,
             "imports",
             format!(
                 "imported file `{}` must be `kind: overrides`, found `kind: {}`",
@@ -109,7 +125,7 @@ fn resolve_import(base_dir: &Path, raw: &str) -> Result<(PathBuf, Value), Diagno
     if !envelope.imports.is_empty() {
         let mut bag = DiagnosticBag::default();
         bag.error(
-            "GEN-IMPORT-NESTED",
+            crate::diagnostic::codes::IMPORT_NESTED.code,
             "imports",
             format!(
                 "imported file `{}` declares its own `imports:`; imported files cannot themselves import",
@@ -126,10 +142,20 @@ fn resolve_import(base_dir: &Path, raw: &str) -> Result<(PathBuf, Value), Diagno
 /// failures (including `serde_yaml_ng`'s duplicate-key rejection) as
 /// diagnostics.
 fn read_yaml(path: &Path) -> Result<Value, DiagnosticBag> {
-    let text = fs::read_to_string(path)
-        .map_err(|err| single_error("GEN-CONFIG-IO", &path.display().to_string(), &err))?;
-    serde_yaml_ng::from_str(&text)
-        .map_err(|err| single_error("GEN-CONFIG-PARSE", &path.display().to_string(), &err))
+    let text = fs::read_to_string(path).map_err(|err| {
+        single_error(
+            crate::diagnostic::codes::CONFIG_IO.code,
+            &path.display().to_string(),
+            &err,
+        )
+    })?;
+    serde_yaml_ng::from_str(&text).map_err(|err| {
+        single_error(
+            crate::diagnostic::codes::CONFIG_PARSE.code,
+            &path.display().to_string(),
+            &err,
+        )
+    })
 }
 
 fn single_error(code: &str, path: &str, err: &impl std::fmt::Display) -> DiagnosticBag {
@@ -262,7 +288,7 @@ fn check_path_collision(
         return;
     }
     bag.error(
-        "GEN-IMPORT-COLLISION",
+        crate::diagnostic::codes::IMPORT_COLLISION.code,
         path,
         format!("`{path}` is defined by more than one import"),
     )

@@ -69,7 +69,7 @@ tables:
       name: { generator: { kind: company.name } }
       code:
         generator: { kind: pattern, pattern: "DLR-[A-Z]{3}[0-9]{2}" }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       address: { generator: { kind: address.line1 } }
       city: { generator: { kind: address.city } }
       region:
@@ -115,7 +115,7 @@ tables:
       name: { generator: { kind: person.full_name } }
       email:
         generator: { kind: internet.email }
-        modifiers: [{ kind: unique, attempts: 64, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
       phone:
         generator: { kind: phone.number }
         modifiers: [{ kind: null_rate, probability: 0.2 }]
@@ -180,7 +180,7 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       name:
         generator: { kind: choice, values: [Toyota, Volkswagen, Tesla, BMW, Volvo, Audi, Ford, Kia, Hyundai, Peugeot, Skoda, Nissan, Mercedes, Mazda, Polestar] }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: widen }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: widen }]
       country:
         generator: { kind: address.country }
         modifiers: [{ kind: null_rate, probability: 0.2 }]
@@ -228,7 +228,7 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       name:
         generator: { kind: text.word }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: widen }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: widen }]
       category:
         generator: { kind: choice, values: [comfort, safety, tech, exterior, drivetrain] }
 
@@ -276,10 +276,10 @@ tables:
       model_id: { generator: { kind: relation.foreign_key, relationship: listing_model } }
       stock_number:
         generator: { kind: pattern, pattern: "ST[0-9]{6}[A-Z]{2}" }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       vin:
         generator: { kind: pattern, pattern: "[A-HJ-NPR-Z0-9]{17}" }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       title: { generator: { kind: text.sentence } }
       slug: { generator: { kind: template, template: "{stock_number}-{title}" } }
       year: { generator: { kind: integer, min: 2005, max: 2026 } }
@@ -658,7 +658,7 @@ tables:
         generator: { kind: relation.foreign_key, relationship: sale_test_drive, nullable: true, null_rate: 0.45 }
       reference:
         generator: { kind: pattern, pattern: "SALE-[0-9]{4}-[0-9]{6}" }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       currency: { generator: { kind: constant, value: NOK } }
       deposit:
         generator: { kind: lognormal, min: 0, max: 100000, scale: 2 }
@@ -934,7 +934,7 @@ tables:
       name: { generator: { kind: text.word } }
       slug:
         generator: { kind: text.slug }
-        modifiers: [{ kind: unique, attempts: 16, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 16, on_exhaustion: error }]
     planners:
       - kind: hierarchy.tree
         relationship: cat_parent
@@ -1004,10 +1004,10 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       name:
         generator: { kind: text.word }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: widen }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: widen }]
       slug:
         generator: { kind: text.slug }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
 
   blog_post_tag:
     # Junction: blog_posts <-> blog_tags.

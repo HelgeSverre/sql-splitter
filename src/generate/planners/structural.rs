@@ -45,8 +45,8 @@ use serde_yaml_ng::Value;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
-    Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism, PlannerDescriptor,
-    PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
+    ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
+    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
@@ -413,7 +413,28 @@ pub static TEMPORAL_TIMESTAMPS_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor
     kind: "temporal.timestamps",
     aliases: &[],
     summary: "Coordinates created_at/updated_at (plus optional trailing timestamps) so update never precedes creation.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps created_at, updated_at, and optional trailing timestamp roles to columns.",
+        },
+        ArgumentSpec {
+            name: "created",
+            required: true,
+            summary: "Configures the created timestamp range or monotonic sequence.",
+        },
+        ArgumentSpec {
+            name: "update_delay",
+            required: false,
+            summary: "Configures the non-negative delay from creation to update.",
+        },
+        ArgumentSpec {
+            name: "other_delay",
+            required: false,
+            summary: "Configures the delay from creation for additional timestamp roles.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -496,9 +517,9 @@ fn compile_timestamps(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<TemporalTimestampsPlanner, DiagnosticBag> {
-    const CODE: &str = "GEN-TIMESTAMPS-COLUMN-MISSING";
-    const RANGE_CODE: &str = "GEN-TIMESTAMPS-RANGE";
-    const DELAY_CODE: &str = "GEN-TIMESTAMPS-DELAY";
+    const CODE: &str = crate::diagnostic::codes::TIMESTAMPS_COLUMN_MISSING.code;
+    const RANGE_CODE: &str = crate::diagnostic::codes::TIMESTAMPS_RANGE.code;
+    const DELAY_CODE: &str = crate::diagnostic::codes::TIMESTAMPS_DELAY.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -688,7 +709,23 @@ pub static TEMPORAL_SOFT_DELETE_DESCRIPTOR: PlannerDescriptor = PlannerDescripto
     kind: "temporal.soft_delete",
     aliases: &[],
     summary: "Coordinates a deleted_at timestamp and optional is_deleted flag so a deletion probability produces a coherent null/non-null pair.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps the required deleted_at role and optional is_deleted role to columns.",
+        },
+        ArgumentSpec {
+            name: "deletion_probability",
+            required: false,
+            summary: "Probability that a generated row is marked deleted.",
+        },
+        ArgumentSpec {
+            name: "deleted_range",
+            required: true,
+            summary: "Configures the range or monotonic sequence for deletion timestamps.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -773,9 +810,9 @@ fn compile_soft_delete(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<TemporalSoftDeletePlanner, DiagnosticBag> {
-    const CODE: &str = "GEN-SOFT-DELETE-COLUMN-MISSING";
-    const RANGE_CODE: &str = "GEN-SOFT-DELETE-RANGE";
-    const NULLABILITY_CODE: &str = "GEN-SOFT-DELETE-NULLABILITY";
+    const CODE: &str = crate::diagnostic::codes::SOFT_DELETE_COLUMN_MISSING.code;
+    const RANGE_CODE: &str = crate::diagnostic::codes::SOFT_DELETE_RANGE.code;
+    const NULLABILITY_CODE: &str = crate::diagnostic::codes::SOFT_DELETE_NULLABILITY.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -924,7 +961,33 @@ pub static TEMPORAL_LIFECYCLE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor 
     kind: "temporal.lifecycle",
     aliases: &[],
     summary: "Coordinates a status column that only reaches legal states, each carrying a correctly-ordered timestamp.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps the status role and each lifecycle state to its timestamp column.",
+        },
+        ArgumentSpec {
+            name: "states",
+            required: true,
+            summary: "Ordered lifecycle state vocabulary.",
+        },
+        ArgumentSpec {
+            name: "weights",
+            required: false,
+            summary: "Terminal-state weights in the same order as states.",
+        },
+        ArgumentSpec {
+            name: "start",
+            required: true,
+            summary: "Configures the first lifecycle timestamp range or sequence.",
+        },
+        ArgumentSpec {
+            name: "step",
+            required: false,
+            summary: "Configures the non-negative delay between lifecycle states.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -1042,13 +1105,13 @@ fn compile_lifecycle(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<TemporalLifecyclePlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-LIFECYCLE-COLUMN-MISSING";
-    const STATES_CODE: &str = "GEN-LIFECYCLE-STATES";
-    const VOCAB_CODE: &str = "GEN-LIFECYCLE-STATUS-VOCABULARY";
-    const WEIGHTS_CODE: &str = "GEN-LIFECYCLE-WEIGHTS";
-    const RANGE_CODE: &str = "GEN-LIFECYCLE-RANGE";
-    const STEP_CODE: &str = "GEN-LIFECYCLE-STEP";
-    const NULLABILITY_CODE: &str = "GEN-LIFECYCLE-NULLABILITY";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::LIFECYCLE_COLUMN_MISSING.code;
+    const STATES_CODE: &str = crate::diagnostic::codes::LIFECYCLE_STATES.code;
+    const VOCAB_CODE: &str = crate::diagnostic::codes::LIFECYCLE_STATUS_VOCABULARY.code;
+    const WEIGHTS_CODE: &str = crate::diagnostic::codes::LIFECYCLE_WEIGHTS.code;
+    const RANGE_CODE: &str = crate::diagnostic::codes::LIFECYCLE_RANGE.code;
+    const STEP_CODE: &str = crate::diagnostic::codes::LIFECYCLE_STEP.code;
+    const NULLABILITY_CODE: &str = crate::diagnostic::codes::LIFECYCLE_NULLABILITY.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -1307,7 +1370,38 @@ pub static HIERARCHY_TREE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     kind: "hierarchy.tree",
     aliases: &[],
     summary: "Builds a self-referential parent_id tree: configurable-ratio roots (null parent) and bounded-depth, bounded-branching descendants that reference an earlier row.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps the parent role to the nullable self-reference column.",
+        },
+        ArgumentSpec {
+            name: "relationship",
+            required: false,
+            summary: "Self-relationship used to derive the referenced dense key recipe.",
+        },
+        ArgumentSpec {
+            name: "key",
+            required: false,
+            summary: "Explicit dense key start and step, overriding relationship-derived values.",
+        },
+        ArgumentSpec {
+            name: "root_ratio",
+            required: false,
+            summary: "Fraction of rows generated as roots with a null parent.",
+        },
+        ArgumentSpec {
+            name: "max_depth",
+            required: false,
+            summary: "Maximum tree depth, including roots.",
+        },
+        ArgumentSpec {
+            name: "max_branching",
+            required: false,
+            summary: "Maximum number of direct children per parent; omitted means unbounded.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -1435,11 +1529,11 @@ fn compile_tree(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<HierarchyTreePlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-TREE-COLUMN-MISSING";
-    const DEPTH_CODE: &str = "GEN-TREE-DEPTH";
-    const ROOT_CODE: &str = "GEN-TREE-ROOT-RATIO";
-    const BRANCH_CODE: &str = "GEN-TREE-BRANCHING";
-    const CYCLE_CODE: &str = "GEN-TREE-REQUIRED-CYCLE";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::TREE_COLUMN_MISSING.code;
+    const DEPTH_CODE: &str = crate::diagnostic::codes::TREE_DEPTH.code;
+    const ROOT_CODE: &str = crate::diagnostic::codes::TREE_ROOT_RATIO.code;
+    const BRANCH_CODE: &str = crate::diagnostic::codes::TREE_BRANCHING.code;
+    const CYCLE_CODE: &str = crate::diagnostic::codes::TREE_REQUIRED_CYCLE.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -1689,7 +1783,23 @@ pub static RELATION_JUNCTION_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescrip
     kind: "relation.junction_pair",
     aliases: &[],
     summary: "Fills a junction row's two foreign keys with a UNIQUE (left, right) pair, using a deterministic pair-index permutation so edges never repeat.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps the left and right roles to the junction table's foreign-key columns.",
+        },
+        ArgumentSpec {
+            name: "left_relationship",
+            required: true,
+            summary: "Relationship that supplies the left dense key domain.",
+        },
+        ArgumentSpec {
+            name: "right_relationship",
+            required: true,
+            summary: "Relationship that supplies the right dense key domain.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -1767,10 +1877,10 @@ fn compile_junction_pair(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<RelationJunctionPairPlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-JUNCTION-COLUMN-MISSING";
-    const REL_CODE: &str = "GEN-JUNCTION-RELATIONSHIP";
-    const KEY_CODE: &str = "GEN-JUNCTION-KEY-UNSUPPORTED";
-    const EXHAUSTED_CODE: &str = "GEN-JUNCTION-EXHAUSTED";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::JUNCTION_COLUMN_MISSING.code;
+    const REL_CODE: &str = crate::diagnostic::codes::JUNCTION_RELATIONSHIP.code;
+    const KEY_CODE: &str = crate::diagnostic::codes::JUNCTION_KEY_UNSUPPORTED.code;
+    const EXHAUSTED_CODE: &str = crate::diagnostic::codes::JUNCTION_EXHAUSTED.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -1913,7 +2023,18 @@ pub static RELATION_POLYMORPHIC_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDesc
     kind: "relation.polymorphic_pair",
     aliases: &[],
     summary: "Fills a (type, id) polymorphic pair atomically: a weighted choice picks a target table, then a valid key from that same target's key domain.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps the polymorphic type and id roles to columns.",
+        },
+        ArgumentSpec {
+            name: "targets",
+            required: true,
+            summary: "Weighted target tables with optional type labels and id-column overrides.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -1997,10 +2118,10 @@ fn compile_polymorphic_pair(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<RelationPolymorphicPairPlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-POLYMORPHIC-COLUMN-MISSING";
-    const TARGETS_CODE: &str = "GEN-POLYMORPHIC-TARGETS";
-    const TARGET_UNKNOWN_CODE: &str = "GEN-POLYMORPHIC-TARGET-UNKNOWN";
-    const KEY_CODE: &str = "GEN-POLYMORPHIC-KEY-UNSUPPORTED";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::POLYMORPHIC_COLUMN_MISSING.code;
+    const TARGETS_CODE: &str = crate::diagnostic::codes::POLYMORPHIC_TARGETS.code;
+    const TARGET_UNKNOWN_CODE: &str = crate::diagnostic::codes::POLYMORPHIC_TARGET_UNKNOWN.code;
+    const KEY_CODE: &str = crate::diagnostic::codes::POLYMORPHIC_KEY_UNSUPPORTED.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -2157,7 +2278,28 @@ pub static RELATION_TENANT_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescrip
     kind: "relation.tenant_family",
     aliases: &[],
     summary: "Selects a same-tenant foreign key: the parent rows are partitioned into tenant blocks, and each child's FK is drawn from the block of the child's own tenant.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps tenant and parent roles to the child table's columns.",
+        },
+        ArgumentSpec {
+            name: "relationship",
+            required: true,
+            summary: "Relationship that supplies the parent dense key domain.",
+        },
+        ArgumentSpec {
+            name: "num_tenants",
+            required: false,
+            summary: "Number of contiguous tenant partitions.",
+        },
+        ArgumentSpec {
+            name: "tenant_start",
+            required: false,
+            summary: "First generated tenant identifier.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -2257,10 +2399,10 @@ fn compile_tenant_family(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<RelationTenantFamilyPlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-TENANT-COLUMN-MISSING";
-    const REL_CODE: &str = "GEN-TENANT-RELATIONSHIP";
-    const KEY_CODE: &str = "GEN-TENANT-KEY-UNSUPPORTED";
-    const PARTITION_CODE: &str = "GEN-TENANT-PARTITION";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::TENANT_COLUMN_MISSING.code;
+    const REL_CODE: &str = crate::diagnostic::codes::TENANT_RELATIONSHIP.code;
+    const KEY_CODE: &str = crate::diagnostic::codes::TENANT_KEY_UNSUPPORTED.code;
+    const PARTITION_CODE: &str = crate::diagnostic::codes::TENANT_PARTITION.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -2389,7 +2531,23 @@ pub static GEO_COORDINATE_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor
     kind: "geo.coordinate_pair",
     aliases: &[],
     summary: "Draws a coherent (latitude, longitude) pair within [-90, 90] x [-180, 180] (or a configured bounding box), at a configurable decimal precision.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps latitude and longitude roles to decimal columns.",
+        },
+        ArgumentSpec {
+            name: "precision",
+            required: false,
+            summary: "Number of decimal places, from 0 through 9.",
+        },
+        ArgumentSpec {
+            name: "bounds",
+            required: false,
+            summary: "Optional minimum and maximum latitude and longitude bounding box.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -2487,9 +2645,9 @@ fn compile_coordinate_pair(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<GeoCoordinatePairPlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-COORDINATE-COLUMN-MISSING";
-    const BOUNDS_CODE: &str = "GEN-COORDINATE-BOUNDS";
-    const PRECISION_CODE: &str = "GEN-COORDINATE-PRECISION";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::COORDINATE_COLUMN_MISSING.code;
+    const BOUNDS_CODE: &str = crate::diagnostic::codes::COORDINATE_BOUNDS.code;
+    const PRECISION_CODE: &str = crate::diagnostic::codes::COORDINATE_PRECISION.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();
@@ -2811,7 +2969,28 @@ pub static FILE_METADATA_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     kind: "file.metadata",
     aliases: &[],
     summary: "Coordinates a coherent file name/extension/mime_type/size/hash: the extension matches the name's suffix, mime_type matches the extension, size is a plausible byte count, and hash is a clearly-synthetic digest-shaped string.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps name and optional extension, MIME type, size, and hash roles to columns.",
+        },
+        ArgumentSpec {
+            name: "extensions",
+            required: false,
+            summary: "Allow-list of recognized file extensions.",
+        },
+        ArgumentSpec {
+            name: "size",
+            required: false,
+            summary: "Minimum and maximum generated byte size.",
+        },
+        ArgumentSpec {
+            name: "hash_kind",
+            required: false,
+            summary: "Synthetic digest shape: md5, sha1, sha256, or sha512.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -2922,10 +3101,10 @@ fn compile_file_metadata(
     config: &PlannerConfig,
     context: &CompileContext<'_>,
 ) -> Result<FileMetadataPlanner, DiagnosticBag> {
-    const COLUMN_CODE: &str = "GEN-FILE-COLUMN-MISSING";
-    const SIZE_CODE: &str = "GEN-FILE-SIZE-RANGE";
-    const HASH_CODE: &str = "GEN-FILE-HASH-KIND";
-    const EXTENSIONS_CODE: &str = "GEN-FILE-EXTENSIONS";
+    const COLUMN_CODE: &str = crate::diagnostic::codes::FILE_COLUMN_MISSING.code;
+    const SIZE_CODE: &str = crate::diagnostic::codes::FILE_SIZE_RANGE.code;
+    const HASH_CODE: &str = crate::diagnostic::codes::FILE_HASH_KIND.code;
+    const EXTENSIONS_CODE: &str = crate::diagnostic::codes::FILE_EXTENSIONS.code;
     let mut bag = DiagnosticBag::default();
     let table = context.table();
     let path = context.path();

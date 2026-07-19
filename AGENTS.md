@@ -156,8 +156,9 @@ dump and/or YAML
   output, and verification.
 - `src/render/` renders generated values and DDL without coupling generators to
   a SQL dialect.
-- `docs/generate/` is the detailed model, generator, planner, diagnostics,
-  privacy, and library API reference.
+- `website/src/content/docs/commands/generate/` is the canonical user-facing
+  model, generator, planner, diagnostics, privacy, and library API reference.
+- `docs/generate/` contains compatibility pointers plus maintainer guidance.
 - `tests/fixtures/generate/` contains committed models and schema fixtures;
   `tests/generate_*` cover each pipeline stage.
 
@@ -214,8 +215,9 @@ support, or common workflow, review:
 - `skills/sql-splitter/SKILL.md`
 - generated man pages and JSON schemas, when applicable
 
-When changing synthetic model semantics, also update the relevant page under
-`docs/generate/` and `website/src/content/docs/commands/generate.mdx`.
+When changing synthetic model semantics, update the relevant canonical page
+under `website/src/content/docs/commands/generate/` and follow
+`docs/generate/maintainers.md`.
 
 Update `skills/sql-splitter/SKILL.md` when a change affects command selection,
 common agent workflows, or important flags. Keep it focused on when and how to

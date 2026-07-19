@@ -30,7 +30,7 @@ use crate::generate::{
 };
 use crate::parser::SqlDialect;
 use crate::profile::ProfileDepth;
-use crate::synthetic::{OutputMode, SourceValueUse};
+use crate::synthetic::OutputMode;
 
 use super::common::{dash_is_stdout, FILTERING};
 
@@ -536,8 +536,6 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
         emit_stdout_temp,
     } = prepared;
 
-    let had_source_dump = request.input.is_some();
-
     match Generate::run(request) {
         Ok(report) => {
             if let Some(temp) = &stdout_temp {
@@ -546,12 +544,6 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
             if let Some(temp) = &emit_stdout_temp {
                 stream_to_stdout(temp.path())?;
             }
-
-            // The conservative source-derived safety notice always reaches
-            // stderr — even under `--quiet` — and never carries values. It is
-            // deliberately kept out of the diagnostics bag, so `--strict` does
-            // not promote this allowed use to a blocking error.
-            print_source_values_notice(&report.source_values, had_source_dump);
 
             let warnings_are_fatal = strict
                 && report
@@ -572,38 +564,17 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
             write_diagnostics(&bag, json)?;
             Ok(ExitCode::FAILURE)
         }
+        Err(GenerateError::Diagnostic(diagnostic)) => {
+            write_diagnostics(
+                &DiagnosticBag {
+                    diagnostics: vec![*diagnostic],
+                },
+                json,
+            )?;
+            Ok(ExitCode::FAILURE)
+        }
         Err(error) => Err(error.into()),
     }
-}
-
-/// Print the single conservative `GEN-SOURCE-VALUES` safety notice to stderr
-/// when the resolved model replays any literal values. Lists the rule locations
-/// and kinds; never the values themselves.
-///
-/// The phrasing is gated on whether a source dump was actually profiled: a
-/// dump run may replay values *derived from the source dump* (a real
-/// re-identification concern), whereas a `--config`-only run replays only
-/// hand-authored literals, so the notice states the output is synthetic rather
-/// than asserting a source dump that was never read.
-fn print_source_values_notice(uses: &[SourceValueUse], had_source_dump: bool) {
-    if uses.is_empty() {
-        return;
-    }
-    let locations = uses
-        .iter()
-        .map(|used| format!("{} ({})", used.path, used.rule_kind))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let body = if had_source_dump {
-        "replay literal values derived from the source dump; review before sharing the output"
-    } else {
-        "replay hand-authored literal values (e.g. weighted_choice/constant); output is \
-         synthetic, not anonymized source data"
-    };
-    eprintln!(
-        "warning[GEN-SOURCE-VALUES] {} rule(s) {body}. Locations: {locations}",
-        uses.len()
-    );
 }
 
 /// Stream the SQL rendered to a temporary file (the stdout-output case; see
@@ -654,7 +625,6 @@ fn write_report(
             rows_written: report.rows_written,
             effective_seed: report.effective_seed,
             diagnostics: diagnostic_entries(&report.diagnostics),
-            source_values: source_value_entries(&report.source_values),
             explain: if explain {
                 explain_entries(&report.explain)
             } else {
@@ -666,6 +636,14 @@ fn write_report(
     }
 
     if quiet {
+        for diagnostic in report
+            .diagnostics
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Advisory)
+        {
+            eprintln!("{diagnostic}");
+        }
         return Ok(());
     }
 
@@ -731,26 +709,7 @@ pub(crate) struct GenerateJsonOutput {
     effective_seed: Option<u64>,
     diagnostics: Vec<DiagnosticEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    source_values: Vec<SourceValueEntry>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     explain: Vec<ExplainEntry>,
-}
-
-/// One source-derived literal use, reshaped for JSON reporting. Carries the
-/// location and rule kind only — never the observed values.
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct SourceValueEntry {
-    path: String,
-    rule_kind: String,
-}
-
-fn source_value_entries(uses: &[SourceValueUse]) -> Vec<SourceValueEntry> {
-    uses.iter()
-        .map(|used| SourceValueEntry {
-            path: used.path.clone(),
-            rule_kind: used.rule_kind.clone(),
-        })
-        .collect()
 }
 
 /// One column's inference decision, reshaped for JSON `--explain` reporting.
@@ -806,7 +765,18 @@ pub(crate) struct DiagnosticEntry {
     path: String,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    documentation_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     help: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    related: Vec<RelatedLocationEntry>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct RelatedLocationEntry {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 fn diagnostic_entries(bag: &DiagnosticBag) -> Vec<DiagnosticEntry> {
@@ -815,12 +785,23 @@ fn diagnostic_entries(bag: &DiagnosticBag) -> Vec<DiagnosticEntry> {
         .map(|diagnostic| DiagnosticEntry {
             code: diagnostic.code.clone(),
             severity: match diagnostic.severity {
+                Severity::Info => "info".to_string(),
+                Severity::Advisory => "advisory".to_string(),
                 Severity::Warning => "warning".to_string(),
                 Severity::Error => "error".to_string(),
             },
             path: diagnostic.path.clone(),
             message: diagnostic.message.clone(),
+            documentation_url: diagnostic.documentation_url(),
             help: diagnostic.help.clone(),
+            related: diagnostic
+                .related
+                .iter()
+                .map(|location| RelatedLocationEntry {
+                    path: location.path.clone(),
+                    description: location.description.clone(),
+                })
+                .collect(),
         })
         .collect()
 }

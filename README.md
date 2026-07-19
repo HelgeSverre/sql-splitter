@@ -537,7 +537,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Generate Options
 
-`generate` produces **synthetic**, not anonymized, SQL data — from a hand-authored YAML model, a profiled dump, or both. See [`docs/generate/`](docs/generate/README.md) for the full model language, generator/planner catalog, and privacy notes.
+`generate` produces **synthetic**, not anonymized, SQL data — from a hand-authored YAML model, a profiled dump, or both. See the [complete generate documentation](https://sql-splitter.dev/commands/generate/) for the model language, generator/modifier/planner catalogs, inference, privacy, verification, diagnostics, and library API.
 
 | Flag                            | Description                                                                                  | Default               |
 | ------------------------------- | -------------------------------------------------------------------------------------------- | --------------------- |
@@ -546,7 +546,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | `--emit-config`                 | Write the resolved model as YAML instead of generating                                       | —                     |
 | `-o, --output`                  | Output SQL file; `-` for stdout                                                              | stdout                |
 | `--profile-depth`               | Profiling depth: `basic`, `full`                                                             | `basic`               |
-| `--profile-sample`              | Row sample size while profiling                                                              | depth default         |
+| `--profile-sample`              | Retained sample capacity per column while profiling                                          | `1000`                |
 | `--input-dialect`               | Dialect of `[INPUT]`, if profiling                                                           | auto-detect           |
 | `--dialect`                     | Output SQL dialect                                                                           | preserve source/model |
 | `--scale`                       | Global multiplicative row-count scale                                                        | —                     |

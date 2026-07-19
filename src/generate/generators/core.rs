@@ -507,7 +507,7 @@ impl GeneratorFactory for NullFactory {
         let col = column(context);
         if !col.nullable {
             bag.error(
-                "GEN-NULL-ON-NON-NULLABLE",
+                crate::diagnostic::codes::NULL_ON_NON_NULLABLE.code,
                 context.path(),
                 format!(
                     "`null` cannot generate column `{}`, which is not nullable",
@@ -562,7 +562,7 @@ impl GeneratorFactory for SequenceFactory {
         let mut bag = DiagnosticBag::default();
         if step == 0 {
             bag.error(
-                "GEN-SEQUENCE-ZERO-STEP",
+                crate::diagnostic::codes::SEQUENCE_ZERO_STEP.code,
                 context.path(),
                 "`sequence.step` must not be zero",
             );
@@ -615,7 +615,7 @@ impl GeneratorFactory for CopyFactory {
             .map(str::to_string)
         else {
             bag.error(
-                "GEN-COPY-MISSING-SOURCE",
+                crate::diagnostic::codes::COPY_MISSING_SOURCE.code,
                 context.path(),
                 "`copy` requires a `source` column name",
             );
@@ -625,7 +625,7 @@ impl GeneratorFactory for CopyFactory {
         match find_column(context.table(), &source) {
             None => {
                 bag.error(
-                    "GEN-COPY-UNKNOWN-FIELD",
+                    crate::diagnostic::codes::COPY_UNKNOWN_FIELD.code,
                     context.path(),
                     format!(
                         "`copy.source` references unknown column `{source}` on table `{}`",
@@ -635,7 +635,7 @@ impl GeneratorFactory for CopyFactory {
             }
             Some(found) if found.family != column(context).family => {
                 bag.error(
-                    "GEN-COPY-TYPE-MISMATCH",
+                    crate::diagnostic::codes::COPY_TYPE_MISMATCH.code,
                     context.path(),
                     format!(
                         "`copy.source` column `{source}` has family {:?}, but `{}` has family {:?}",
@@ -693,7 +693,7 @@ impl GeneratorFactory for TemplateFactory {
         let mut bag = DiagnosticBag::default();
         let Some(parts) = config.args.get("parts").and_then(|v| v.as_sequence()) else {
             bag.error(
-                "GEN-TEMPLATE-MISSING-PARTS",
+                crate::diagnostic::codes::TEMPLATE_MISSING_PARTS.code,
                 context.path(),
                 "`template` requires a `parts` list",
             );
@@ -709,7 +709,7 @@ impl GeneratorFactory for TemplateFactory {
                         Some(name) => {
                             if find_column(context.table(), name).is_none() {
                                 bag.error(
-                                    "GEN-TEMPLATE-UNKNOWN-FIELD",
+                                    crate::diagnostic::codes::TEMPLATE_UNKNOWN_FIELD.code,
                                     context.path(),
                                     format!(
                                         "`template` references unknown column `{name}` on table `{}`",
@@ -721,7 +721,7 @@ impl GeneratorFactory for TemplateFactory {
                         }
                         None => {
                             bag.error(
-                                "GEN-TEMPLATE-INVALID-PART",
+                                crate::diagnostic::codes::TEMPLATE_INVALID_PART.code,
                                 context.path(),
                                 "each `template.parts` mapping entry needs a `field` key",
                             );
@@ -778,7 +778,7 @@ impl GeneratorFactory for PatternFactory {
             .map(str::to_string)
         else {
             bag.error(
-                "GEN-PATTERN-MISSING-MASK",
+                crate::diagnostic::codes::PATTERN_MISSING_MASK.code,
                 context.path(),
                 "`pattern` requires a `mask` string",
             );
@@ -857,7 +857,11 @@ impl GeneratorFactory for JsonValueFactory {
             Some(value) => match json_from_yaml(value) {
                 Ok(json) => json,
                 Err(message) => {
-                    bag.error("GEN-JSON-VALUE-INVALID", context.path(), message);
+                    bag.error(
+                        crate::diagnostic::codes::JSON_VALUE_INVALID.code,
+                        context.path(),
+                        message,
+                    );
                     "{}".to_string()
                 }
             },
@@ -911,7 +915,7 @@ impl GeneratorFactory for IntegerFactory {
         let mut bag = DiagnosticBag::default();
         if min > max {
             bag.error(
-                "GEN-INTEGER-RANGE",
+                crate::diagnostic::codes::INTEGER_RANGE.code,
                 context.path(),
                 format!("`integer.min` ({min}) must not exceed `integer.max` ({max})"),
             );
@@ -976,7 +980,7 @@ impl GeneratorFactory for DecimalFactory {
             Ok(scale) if scale <= 18 => scale,
             _ => {
                 bag.error(
-                    "GEN-DECIMAL-SCALE",
+                    crate::diagnostic::codes::DECIMAL_SCALE.code,
                     context.path(),
                     "`decimal.scale` must be between 0 and 18",
                 );
@@ -998,7 +1002,7 @@ impl GeneratorFactory for DecimalFactory {
             });
         if min_minor > max_minor {
             bag.error(
-                "GEN-DECIMAL-RANGE",
+                crate::diagnostic::codes::DECIMAL_RANGE.code,
                 context.path(),
                 format!(
                     "`decimal.min` ({}) must not exceed `decimal.max` ({})",
@@ -1074,7 +1078,7 @@ impl GeneratorFactory for BooleanFactory {
         let mut bag = DiagnosticBag::default();
         if !(0.0..=1.0).contains(&probability) {
             bag.error(
-                "GEN-BOOLEAN-PROBABILITY",
+                crate::diagnostic::codes::BOOLEAN_PROBABILITY.code,
                 context.path(),
                 "`boolean.probability` must be between 0 and 1",
             );
@@ -1148,7 +1152,7 @@ impl GeneratorFactory for StringFactory {
         let mut bag = DiagnosticBag::default();
         if min_len > max_len {
             bag.error(
-                "GEN-STRING-LENGTH-RANGE",
+                crate::diagnostic::codes::STRING_LENGTH_RANGE.code,
                 context.path(),
                 "`string.min_length` must not exceed `string.max_length`",
             );
@@ -1213,7 +1217,7 @@ impl GeneratorFactory for BytesFactory {
         let mut bag = DiagnosticBag::default();
         if min_len > max_len {
             bag.error(
-                "GEN-BYTES-LENGTH-RANGE",
+                crate::diagnostic::codes::BYTES_LENGTH_RANGE.code,
                 context.path(),
                 "`bytes.min_length` must not exceed `bytes.max_length`",
             );
@@ -1292,7 +1296,7 @@ impl GeneratorFactory for ChoiceFactory {
         let mut bag = DiagnosticBag::default();
         let Some(raw_values) = config.args.get("values").and_then(|v| v.as_sequence()) else {
             bag.error(
-                "GEN-CHOICE-MISSING-VALUES",
+                crate::diagnostic::codes::CHOICE_MISSING_VALUES.code,
                 context.path(),
                 "`choice` requires a `values` list",
             );
@@ -1300,7 +1304,7 @@ impl GeneratorFactory for ChoiceFactory {
         };
         if raw_values.is_empty() {
             bag.error(
-                "GEN-CHOICE-EMPTY",
+                crate::diagnostic::codes::CHOICE_EMPTY.code,
                 context.path(),
                 "`choice.values` must not be empty",
             );
@@ -1313,7 +1317,11 @@ impl GeneratorFactory for ChoiceFactory {
             match coerce_value(raw, family) {
                 Ok(value) => values.push(value),
                 Err(message) => {
-                    bag.error("GEN-CHOICE-INVALID-VALUE", context.path(), message);
+                    bag.error(
+                        crate::diagnostic::codes::CHOICE_INVALID_VALUE.code,
+                        context.path(),
+                        message,
+                    );
                 }
             }
         }
@@ -1361,7 +1369,7 @@ impl GeneratorFactory for WeightedChoiceFactory {
         let mut bag = DiagnosticBag::default();
         let Some(raw_choices) = config.args.get("choices").and_then(|v| v.as_sequence()) else {
             bag.error(
-                "GEN-WEIGHTED-CHOICE-MISSING-CHOICES",
+                crate::diagnostic::codes::WEIGHTED_CHOICE_MISSING_CHOICES.code,
                 context.path(),
                 "`weighted_choice` requires a `choices` list",
             );
@@ -1369,7 +1377,7 @@ impl GeneratorFactory for WeightedChoiceFactory {
         };
         if raw_choices.is_empty() {
             bag.error(
-                "GEN-WEIGHTED-CHOICE-EMPTY",
+                crate::diagnostic::codes::WEIGHTED_CHOICE_EMPTY.code,
                 context.path(),
                 "`weighted_choice.choices` must not be empty",
             );
@@ -1385,7 +1393,7 @@ impl GeneratorFactory for WeightedChoiceFactory {
             let weight_field = choice.get("weight").and_then(parse_f64);
             let (Some(raw_value), Some(weight)) = (value_field, weight_field) else {
                 bag.error(
-                    "GEN-WEIGHTED-CHOICE-INVALID-ENTRY",
+                    crate::diagnostic::codes::WEIGHTED_CHOICE_INVALID_ENTRY.code,
                     context.path(),
                     "each `weighted_choice.choices` entry needs a `value` and a numeric `weight`",
                 );
@@ -1393,7 +1401,7 @@ impl GeneratorFactory for WeightedChoiceFactory {
             };
             if !weight.is_finite() || weight < 0.0 {
                 bag.error(
-                    "GEN-WEIGHTED-CHOICE-INVALID-WEIGHT",
+                    crate::diagnostic::codes::WEIGHTED_CHOICE_INVALID_WEIGHT.code,
                     context.path(),
                     format!("`weighted_choice` weight {weight} must be finite and non-negative"),
                 );
@@ -1406,13 +1414,17 @@ impl GeneratorFactory for WeightedChoiceFactory {
                     cumulative.push(total);
                 }
                 Err(message) => {
-                    bag.error("GEN-WEIGHTED-CHOICE-INVALID-VALUE", context.path(), message);
+                    bag.error(
+                        crate::diagnostic::codes::WEIGHTED_CHOICE_INVALID_VALUE.code,
+                        context.path(),
+                        message,
+                    );
                 }
             }
         }
         if total <= 0.0 {
             bag.error(
-                "GEN-WEIGHTED-CHOICE-ALL-ZERO",
+                crate::diagnostic::codes::WEIGHTED_CHOICE_ALL_ZERO.code,
                 context.path(),
                 "`weighted_choice.choices` weights must not all be zero",
             );
@@ -1484,7 +1496,7 @@ impl ModifierFactory for NullRateFactory {
         let mut bag = DiagnosticBag::default();
         let Some(rate) = config.args.get("rate").and_then(parse_f64) else {
             bag.error(
-                "GEN-NULL-RATE-MISSING-RATE",
+                crate::diagnostic::codes::NULL_RATE_MISSING_RATE.code,
                 context.path(),
                 "`null_rate` requires a numeric `rate`",
             );
@@ -1492,14 +1504,14 @@ impl ModifierFactory for NullRateFactory {
         };
         if !(0.0..=1.0).contains(&rate) {
             bag.error(
-                "GEN-NULL-RATE-RANGE",
+                crate::diagnostic::codes::NULL_RATE_RANGE.code,
                 context.path(),
                 "`null_rate.rate` must be between 0 and 1",
             );
         }
         if !column(context).nullable {
             bag.error(
-                "GEN-NULL-RATE-ON-NON-NULLABLE",
+                crate::diagnostic::codes::NULL_RATE_ON_NON_NULLABLE.code,
                 context.path(),
                 format!(
                     "`null_rate` cannot apply to column `{}`, which is not nullable",
@@ -1758,7 +1770,7 @@ impl ModifierFactory for UniqueFactory {
             Some("widen") => OnExhaustion::Widen,
             Some(other) => {
                 bag.error(
-                    "GEN-UNIQUE-INVALID-ON-EXHAUSTION",
+                    crate::diagnostic::codes::UNIQUE_INVALID_ON_EXHAUSTION.code,
                     context.path(),
                     format!(
                         "`unique.on_exhaustion` must be error, warn, or widen, found `{other}`"
@@ -1771,7 +1783,7 @@ impl ModifierFactory for UniqueFactory {
             && !family_supports_widening(&column(context).family)
         {
             bag.error(
-                "GEN-UNIQUE-WIDEN-UNSUPPORTED",
+                crate::diagnostic::codes::UNIQUE_WIDEN_UNSUPPORTED.code,
                 context.path(),
                 format!(
                     "`unique.on_exhaustion: widen` is not supported for column `{}`'s type family {:?}",
@@ -1860,7 +1872,7 @@ fn compile_affix(
         .map(str::to_string)
     else {
         bag.error(
-            "GEN-AFFIX-MISSING-VALUE",
+            crate::diagnostic::codes::AFFIX_MISSING_VALUE.code,
             context.path(),
             "`prefix`/`suffix` requires a `value` string",
         );
@@ -1980,7 +1992,7 @@ impl ModifierFactory for TruncateFactory {
         let mut bag = DiagnosticBag::default();
         let Some(max_length) = config.args.get("max_length").and_then(parse_usize) else {
             bag.error(
-                "GEN-TRUNCATE-MISSING-MAX-LENGTH",
+                crate::diagnostic::codes::TRUNCATE_MISSING_MAX_LENGTH.code,
                 context.path(),
                 "`truncate` requires a `max_length`",
             );
@@ -2068,7 +2080,7 @@ impl ModifierFactory for CaseFactory {
             Some("title") => CaseMode::Title,
             other => {
                 bag.error(
-                    "GEN-CASE-INVALID-MODE",
+                    crate::diagnostic::codes::CASE_INVALID_MODE.code,
                     context.path(),
                     format!(
                         "`case.mode` must be upper, lower, or title, found `{}`",
@@ -2161,7 +2173,7 @@ impl ModifierFactory for ClampFactory {
         let max = config.args.get("max").and_then(parse_f64);
         let (Some(min), Some(max)) = (min, max) else {
             bag.error(
-                "GEN-CLAMP-MISSING-BOUNDS",
+                crate::diagnostic::codes::CLAMP_MISSING_BOUNDS.code,
                 context.path(),
                 "`clamp` requires numeric `min` and `max`",
             );
@@ -2169,7 +2181,7 @@ impl ModifierFactory for ClampFactory {
         };
         if min > max {
             bag.error(
-                "GEN-CLAMP-RANGE",
+                crate::diagnostic::codes::CLAMP_RANGE.code,
                 context.path(),
                 format!("`clamp.min` ({min}) must not exceed `clamp.max` ({max})"),
             );
@@ -2243,7 +2255,7 @@ impl ModifierFactory for RoundFactory {
         let mut bag = DiagnosticBag::default();
         let Some(scale) = config.args.get("scale").and_then(parse_usize) else {
             bag.error(
-                "GEN-ROUND-MISSING-SCALE",
+                crate::diagnostic::codes::ROUND_MISSING_SCALE.code,
                 context.path(),
                 "`round` requires a `scale`",
             );
@@ -2251,7 +2263,7 @@ impl ModifierFactory for RoundFactory {
         };
         let Ok(scale) = u32::try_from(scale) else {
             bag.error(
-                "GEN-ROUND-SCALE-RANGE",
+                crate::diagnostic::codes::ROUND_SCALE_RANGE.code,
                 context.path(),
                 "`round.scale` is out of range",
             );
@@ -2316,7 +2328,7 @@ impl ModifierFactory for FormatFactory {
             .map(str::to_string)
         else {
             bag.error(
-                "GEN-FORMAT-MISSING-TEMPLATE",
+                crate::diagnostic::codes::FORMAT_MISSING_TEMPLATE.code,
                 context.path(),
                 "`format` requires a `template` string",
             );

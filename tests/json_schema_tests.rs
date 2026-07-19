@@ -905,6 +905,45 @@ fn generate_config_schema_rejects_invalid_planner_kind() {
 }
 
 #[test]
+fn generate_config_schema_rejects_planner_with_unknown_argument_name() {
+    let schema = load_schema("generate-config");
+    let yaml = format!(
+        "{}\n    planners:\n      - kind: geo.coordinate_pair\n        columns: {{ latitude: email, longitude: email }}\n        bogus: true\n",
+        valid_model_yaml()
+    );
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "a planner with an unknown top-level argument must be rejected"
+    );
+}
+
+#[test]
+fn generate_config_schema_rejects_planner_missing_required_argument() {
+    let schema = load_schema("generate-config");
+    let yaml = format!(
+        "{}\n    planners:\n      - {{ kind: geo.coordinate_pair }}\n",
+        valid_model_yaml()
+    );
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "a planner missing its required `columns` argument must be rejected"
+    );
+}
+
+#[test]
+fn generate_config_schema_rejects_unique_attempts_typo() {
+    let schema = load_schema("generate-config");
+    let yaml = valid_model_yaml().replace(
+        "generator: { kind: string, min_length: 5, max_length: 20 }",
+        "generator: { kind: string, min_length: 5, max_length: 20 }\n        modifiers: [{ kind: unique, attempts: 20 }]",
+    );
+    assert!(
+        !schema.is_valid(&yaml_to_json(&yaml)),
+        "`unique` accepts `max_attempts`; the inert `attempts` typo must be rejected"
+    );
+}
+
+#[test]
 fn generate_config_schema_rejects_structurally_invalid_rows_rule() {
     let schema = load_schema("generate-config");
     // `relation.children` requires `parent`/`distribution`; a bare `count`

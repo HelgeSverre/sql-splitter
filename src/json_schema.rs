@@ -117,40 +117,18 @@ enum GenerateConfigRoot {
 /// placeholder with a `oneOf` composed from [`ExtensionRegistry::standard`]'s
 /// descriptors — one branch per registered generator/modifier/planner,
 /// keying on `kind` (primary name and aliases) and listing that operator's
-/// declared [`ArgumentSpec`]s (required ones enforced; see the
-/// argument-strictness note below for why the argument set stays open).
+/// declared [`ArgumentSpec`]s, with required arguments enforced.
 ///
 /// This documents the *standard* registry only: a statically-linked custom
 /// registry (extra generators/modifiers/planners compiled in by a
 /// downstream embedder) is validated at runtime by the compiler, not by this
 /// shipped schema.
 ///
-/// Argument-strictness depth: each branch enumerates its `kind` (rejecting
-/// an unregistered generator/modifier/planner kind) and requires any
-/// argument [`ArgumentSpec`] marks `required`. Most branches are fully
-/// closed (`additionalProperties: false`): an unrecognized argument name is
-/// rejected. Two categories stay open (`additionalProperties: true`)
-/// because a closed set there would reject committed, runtime-valid
-/// fixtures, not because of a general gap in this task:
-///
-/// * **Every planner branch.** Every standard
-///   [`PlannerDescriptor`](crate::generate::registry::PlannerDescriptor) ships an
-///   empty `arguments` list even though its `compile` reads real config
-///   keys (e.g. `relation.junction_pair` reads `columns`,
-///   `left_relationship`, `right_relationship`); this is a metadata gap in
-///   `src/generate/planners/**`, out of scope for this schema task.
-/// * **The `unique` modifier only.** At least one committed fixture passes
-///   `attempts` where `unique`'s `compile` actually reads `max_attempts`
-///   (silently inert at runtime — the real parser never closes registry
-///   argument maps either); closing this one branch would reject that
-///   fixture.
-///
-/// Every `GeneratorConfig` branch and every other `ModifierConfig` branch
-/// (`case`/`clamp`/`format`/`null_rate`/`prefix`/`round`/`suffix`/
-/// `truncate`) has no such mismatch in any committed, validated fixture, so
-/// those stay closed: an unrecognized argument name (e.g. a typo) is
-/// rejected. Per-argument *value types* are still never enforced
-/// (`ArgumentSpec` carries no value type).
+/// Argument-strictness depth: each branch enumerates its `kind`, requires any
+/// argument [`ArgumentSpec`] marks `required`, and rejects unrecognized
+/// top-level argument names (`additionalProperties: false`). Per-argument
+/// value types and nested object shapes are still checked by each factory's
+/// compiler because [`ArgumentSpec`] deliberately carries no value schema.
 pub fn generate_config_schema() -> Schema {
     let settings = SchemaSettings::default().with_transform(RestrictFormats::default());
     let generator = settings.into_generator();
@@ -162,7 +140,6 @@ pub fn generate_config_schema() -> Schema {
         .generators()
         .map(|factory| {
             let d = factory.descriptor();
-            // Closed: no committed fixture uses an undeclared generator arg.
             operator_branch(d.kind, d.aliases, d.arguments, true)
         })
         .collect();
@@ -170,19 +147,14 @@ pub fn generate_config_schema() -> Schema {
         .modifiers()
         .map(|factory| {
             let d = factory.descriptor();
-            // Open only for `unique`, whose descriptor's `max_attempts`
-            // diverges from at least one committed fixture's `attempts`.
-            let closed = d.kind != "unique";
-            operator_branch(d.kind, d.aliases, d.arguments, closed)
+            operator_branch(d.kind, d.aliases, d.arguments, true)
         })
         .collect();
     let planner_branches: Vec<Value> = registry
         .planners()
         .map(|factory| {
             let d = factory.descriptor();
-            // Open: every standard planner ships an empty `arguments` list
-            // despite reading real config keys (see doc comment above).
-            operator_branch(d.kind, d.aliases, d.arguments, false)
+            operator_branch(d.kind, d.aliases, d.arguments, true)
         })
         .collect();
 
@@ -224,9 +196,8 @@ fn replace_def(defs: &mut Map<String, Value>, name: &str, branches: Vec<Value>) 
 /// One `oneOf` branch for a single registered operator: `kind` is restricted
 /// to the operator's primary name and aliases, each declared argument is
 /// accepted (required arguments are required). When `closed` is `true`, no
-/// other property is allowed (`additionalProperties: false`); when `false`,
-/// extra properties are permitted — see `generate_config_schema`'s doc
-/// comment for exactly which branches pass `false` and why.
+/// other property is allowed (`additionalProperties: false`); `closed` exists
+/// for callers that build extension schemas with intentionally open maps.
 fn operator_branch(
     kind: &str,
     aliases: &[&str],

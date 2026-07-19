@@ -1,0 +1,112 @@
+---
+title: Modifiers
+description: Ordered post-generation transformations, constraints, and formatting
+sidebar:
+  order: 4
+---
+
+Modifiers transform the base value produced by a generator. They run in list
+order, so changing their order can change nullability, uniqueness, length, and
+formatting.
+
+```yaml
+generator: { kind: internet.email }
+modifiers:
+  - { kind: case, mode: lower }
+  - { kind: prefix, value: "test+" }
+  - { kind: truncate, max_length: 255 }
+  - { kind: unique, max_attempts: 20 }
+```
+
+All built-in modifiers operate only on their own column, stream row by row, and
+are deterministic under a fixed seed.
+
+## `null_rate`
+
+Required `rate` in `0..1`; accepts every family. The target schema column must
+be nullable. The modifier replaces the current value with SQL `NULL` at the
+configured probability.
+
+Place it after any modifier that cannot accept `NULL`. If it runs first, a
+later text or numeric modifier can fail on the null value.
+
+## `unique`
+
+| Argument        | Default   | Meaning                                     |
+| --------------- | --------- | ------------------------------------------- |
+| `max_attempts`  | `10`      | Candidate mutations tried after a collision |
+| `on_exhaustion` | `error`   | `error`, `warn`, or `widen`                 |
+| `max_tracked`   | `1000000` | Maximum distinct values retained in memory  |
+
+`unique` tracks complete typed values up to `max_tracked`. On collision it can
+mutate integers/decimals, append to text, extend bytes, and retry. UUID values
+are normally unique by construction. Boolean and some other families cannot be
+widened.
+
+- `error` fails generation when attempts or tracking capacity are exhausted.
+- `warn` accepts the final duplicate candidate. Despite the policy name, the
+  current runtime does not add a separate warning diagnostic.
+- `widen` tries ten times the configured attempt budget, then accepts the final
+  candidate like `warn`. It is rejected for families with no mutation strategy.
+
+For large keys, prefer `sequence`, UUID, or another inherently unique shape.
+Global uniqueness necessarily retains state and is bounded by `max_tracked`.
+
+## `prefix` and `suffix`
+
+Required string `value`; optional `max_length`. Both accept text. `prefix`
+prepends and `suffix` appends, then truncates to the first `max_length` Unicode
+scalar values if configured.
+
+```yaml
+modifiers:
+  - { kind: prefix, value: "DEV-", max_length: 32 }
+  - { kind: suffix, value: "-synthetic", max_length: 64 }
+```
+
+## `truncate`
+
+Required `max_length`; accepts text. Keeps the first N Unicode scalar values.
+This is character-oriented, not a byte-length or grapheme-cluster guarantee.
+
+## `case`
+
+Required `mode`: `upper`, `lower`, or `title`; accepts text. Title mode
+uppercases the first scalar of each whitespace-delimited segment and otherwise
+preserves the remainder.
+
+## `clamp`
+
+Required numeric `min` and `max`; accepts integer, big-integer, and decimal.
+Bounds are inclusive and `min` must not exceed `max`.
+
+```yaml
+modifiers: [{ kind: clamp, min: 0, max: 100 }]
+```
+
+Decimal bounds are converted to the generated value's scale before clamping.
+
+## `round`
+
+Required non-negative `scale`; accepts decimal. Uses half-up rounding when the
+target scale is smaller and is a no-op when it is equal or larger.
+
+## `format`
+
+Required string `template`; accepts text. Every literal `{value}` placeholder is
+replaced with the current text.
+
+```yaml
+modifiers: [{ kind: format, template: "https://example.test/{value}" }]
+```
+
+It is not a general expression language and does not read sibling columns; use
+the `template` generator for cross-column composition.
+
+## Type and ordering failures
+
+A modifier attached to an unsupported SQL family fails compilation with
+`GEN-MODIFIER-TYPE`. A runtime type mismatch can still occur when an earlier
+modifier changes the generated value into a shape the next modifier cannot
+consume. Keep null-producing steps last unless later steps explicitly tolerate
+nulls.

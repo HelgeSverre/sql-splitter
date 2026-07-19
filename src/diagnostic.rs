@@ -14,16 +14,79 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod codes;
+
+/// Canonical website page for built-in synthetic-generation diagnostics.
+pub const DIAGNOSTICS_DOCUMENTATION_URL: &str =
+    "https://sql-splitter.dev/commands/generate/diagnostics/";
+
 /// Stable diagnostic code, e.g. `GEN-MISSING-TABLE`.
 ///
 /// Kept as a plain string (not an enum) so extensions can define their own
 /// namespaced codes without a dependency on this crate's enum.
 pub type DiagnosticCode = String;
 
+/// Area of the generate pipeline that owns a built-in diagnostic definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticCategory {
+    Config,
+    Selection,
+    Generator,
+    Modifier,
+    Planner,
+    Inference,
+    Profiling,
+    Rendering,
+    Verification,
+    Runtime,
+    Registry,
+    Privacy,
+}
+
+/// Usual severity of a built-in diagnostic code.
+///
+/// A definition may be [`Variable`](TypicalSeverity::Variable) when policy
+/// selects the actual severity for each occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypicalSeverity {
+    Info,
+    Advisory,
+    Warning,
+    Error,
+    Variable,
+}
+
+/// Stable metadata shared by every occurrence of a built-in diagnostic code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiagnosticDefinition {
+    pub code: &'static str,
+    pub title: &'static str,
+    pub category: DiagnosticCategory,
+    pub typical_severity: TypicalSeverity,
+    pub summary: &'static str,
+}
+
+impl DiagnosticDefinition {
+    /// Canonical case-preserving anchor for this built-in diagnostic.
+    pub fn documentation_url(&self) -> String {
+        format!("{DIAGNOSTICS_DOCUMENTATION_URL}#{}", self.code)
+    }
+}
+
+impl From<&'static DiagnosticDefinition> for DiagnosticCode {
+    fn from(definition: &'static DiagnosticDefinition) -> Self {
+        definition.code.to_string()
+    }
+}
+
 /// How serious a [`Diagnostic`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
+    Info,
+    Advisory,
     Warning,
     Error,
 }
@@ -60,9 +123,67 @@ pub struct Diagnostic {
     pub related: Vec<SourceLocation>,
 }
 
+impl Diagnostic {
+    /// Creates a diagnostic occurrence with no help or related locations.
+    pub fn new(
+        severity: Severity,
+        code: impl Into<DiagnosticCode>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            path: path.into(),
+            message: message.into(),
+            help: None,
+            related: Vec::new(),
+        }
+    }
+
+    pub fn info(
+        code: impl Into<DiagnosticCode>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(Severity::Info, code, path, message)
+    }
+
+    pub fn advisory(
+        code: impl Into<DiagnosticCode>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(Severity::Advisory, code, path, message)
+    }
+
+    pub fn warning(
+        code: impl Into<DiagnosticCode>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(Severity::Warning, code, path, message)
+    }
+
+    pub fn error(
+        code: impl Into<DiagnosticCode>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(Severity::Error, code, path, message)
+    }
+
+    /// Canonical documentation URL for built-ins, or `None` for extension codes.
+    pub fn documentation_url(&self) -> Option<String> {
+        codes::find(&self.code).map(DiagnosticDefinition::documentation_url)
+    }
+}
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let severity = match self.severity {
+            Severity::Info => "info",
+            Severity::Advisory => "advisory",
             Severity::Error => "error",
             Severity::Warning => "warning",
         };
@@ -76,6 +197,9 @@ impl fmt::Display for Diagnostic {
         if let Some(help) = &self.help {
             lines.push(format!("  help: {help}"));
         }
+        if let Some(definition) = codes::find(&self.code) {
+            lines.push(format!("  docs: {}", definition.documentation_url()));
+        }
         write!(f, "{}", lines.join("\n"))
     }
 }
@@ -87,6 +211,28 @@ pub struct DiagnosticBag {
 }
 
 impl DiagnosticBag {
+    /// Records an informational diagnostic. Informational diagnostics never
+    /// block generation and are not promoted by strict mode.
+    pub fn info(
+        &mut self,
+        code: impl Into<String>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
+        self.push(Severity::Info, code, path, message)
+    }
+
+    /// Records an advisory diagnostic. Advisories are non-fatal safety notices
+    /// that remain visible even when ordinary reporting is quiet.
+    pub fn advisory(
+        &mut self,
+        code: impl Into<String>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
+        self.push(Severity::Advisory, code, path, message)
+    }
+
     /// Records an error-severity diagnostic and returns it for further
     /// customization (e.g. setting `help` or `related`).
     pub fn error(
@@ -116,14 +262,8 @@ impl DiagnosticBag {
         path: impl Into<String>,
         message: impl Into<String>,
     ) -> &mut Diagnostic {
-        self.diagnostics.push(Diagnostic {
-            code: code.into(),
-            severity,
-            path: path.into(),
-            message: message.into(),
-            help: None,
-            related: Vec::new(),
-        });
+        self.diagnostics
+            .push(Diagnostic::new(severity, code, path, message));
         self.diagnostics
             .last_mut()
             .expect("just pushed a diagnostic")

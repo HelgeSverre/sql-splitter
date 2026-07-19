@@ -1,0 +1,57 @@
+---
+title: Generator reference
+description: Choose and configure base value producers for generated columns
+sidebar:
+  order: 3
+---
+
+A generator owns one column and produces its base value. The compiler checks
+the generator's accepted SQL families, validates its arguments, and orders any
+sibling-column reads before execution. [Modifiers](/commands/generate/modifiers/) run afterward
+in the order declared.
+
+```yaml
+columns:
+  email:
+    generator: { kind: internet.email }
+    modifiers:
+      - { kind: case, mode: lower }
+      - { kind: unique, max_attempts: 20 }
+```
+
+## Choose by intent
+
+| Need                              | Start with                                                                                                                                                                                                                           |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| IDs and deterministic counters    | [`sequence`](/commands/generate/generators/core/#sequence), [`uuid`](/commands/generate/generators/core/#uuid), [`monotonic`](/commands/generate/generators/observed-statistical/#monotonic)                                         |
+| Bounded random primitives         | [`integer`](/commands/generate/generators/core/#integer), [`decimal`](/commands/generate/generators/core/#decimal), [`boolean`](/commands/generate/generators/core/#boolean), [`string`](/commands/generate/generators/core/#string) |
+| Realistic domain-shaped text      | [Semantic generators](/commands/generate/generators/semantic/)                                                                                                                                                                       |
+| Passwords, tokens, and secrets    | [Credential generators](/commands/generate/generators/credentials/)                                                                                                                                                                  |
+| Preserve an observed distribution | [Observed and statistical generators](/commands/generate/generators/observed-statistical/)                                                                                                                                           |
+| Foreign-key values                | [Relationship generators](/commands/generate/generators/relationships/) or a planner                                                                                                                                                 |
+| Derive from another column        | [`copy`](/commands/generate/generators/core/#copy), [`template`](/commands/generate/generators/core/#template), [`before`/`after`](/commands/generate/generators/semantic/#relative-times)                                           |
+| Let the database fill the value   | [`database_default`](/commands/generate/generators/core/#database_default)                                                                                                                                                           |
+
+## Common rules
+
+- `kind` is required and must name a registered generator or alias.
+- Unknown arguments are rejected. Required arguments are checked by both the
+  published schema and the compiler.
+- A generator can attach only to a compatible `schema.columns[].family`.
+- Cross-column generators may read only columns that exist and are ordered
+  before them without forming a dependency cycle.
+- Every generator is deterministic under a fixed seed unless its documentation
+  explicitly says otherwise. All current built-ins are deterministic.
+- A generator that embeds literal choices can trigger the non-fatal
+  `GEN-SOURCE-VALUES` advisory. See [Privacy](/commands/generate/privacy-verification/).
+
+## Catalog
+
+- [Core](/commands/generate/generators/core/) — primitives, categorical values, templates, IDs, and defaults
+- [Semantic](/commands/generate/generators/semantic/) — names, addresses, internet, commerce, temporal, and file shapes
+- [Credentials](/commands/generate/generators/credentials/) — synthetic-only secrets and placeholders
+- [Observed and statistical](/commands/generate/generators/observed-statistical/) — samples, histograms, distributions, and monotonic values
+- [Relationships](/commands/generate/generators/relationships/) — ordinary and composite foreign keys
+
+For correlated multi-column or cross-table invariants, use a
+[planner](/commands/generate/planners/) instead of independent generators.

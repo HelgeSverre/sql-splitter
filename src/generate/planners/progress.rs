@@ -35,8 +35,8 @@ use serde_yaml_ng::Value;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
-    Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism, PlannerDescriptor,
-    PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
+    ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
+    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
@@ -53,7 +53,48 @@ pub static WORKFLOW_PROGRESS_COUNTERS_DESCRIPTOR: PlannerDescriptor = PlannerDes
     kind: "workflow.progress_counters",
     aliases: &[],
     summary: "Coordinates total/processed/succeeded/failed/pending counters, status, and completion so each row's lifecycle counters agree exactly.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps total and optional counter, status, and completion roles to columns.",
+        },
+        ArgumentSpec {
+            name: "total",
+            required: false,
+            summary: "Configures the fixed or uniform total-count draw.",
+        },
+        ArgumentSpec {
+            name: "progress",
+            required: false,
+            summary: "Selects a fixed lifecycle state or a weighted state mixture.",
+        },
+        ArgumentSpec {
+            name: "partition",
+            required: false,
+            summary: "Selects exact or allow_unclassified counter partitioning.",
+        },
+        ArgumentSpec {
+            name: "unclassified_ratio",
+            required: false,
+            summary: "Share of processed rows left unclassified under allow_unclassified partitioning.",
+        },
+        ArgumentSpec {
+            name: "success_ratio",
+            required: false,
+            summary: "Share of classified processed rows assigned to succeeded rather than failed.",
+        },
+        ArgumentSpec {
+            name: "completed_statuses",
+            required: false,
+            summary: "Status labels available to completed rows.",
+        },
+        ArgumentSpec {
+            name: "active_statuses",
+            required: false,
+            summary: "Status labels available to active and not-started rows.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -490,7 +531,7 @@ fn compile_progress(
                 let capacity = family_capacity(&slot.family);
                 if maximum > capacity {
                     bag.error(
-                        "GEN-PROGRESS-OVERFLOW",
+                        crate::diagnostic::codes::PROGRESS_OVERFLOW.code,
                         format!("{path}.total"),
                         format!(
                             "workflow.progress_counters `total` can reach {maximum}, exceeding the capacity {capacity} of counter column `{}`",
@@ -507,14 +548,14 @@ fn compile_progress(
     if has_role(Role::Status) {
         if complete_reachable && completed_statuses.is_empty() {
             bag.error(
-                "GEN-PROGRESS-STATUS-VOCABULARY",
+                crate::diagnostic::codes::PROGRESS_STATUS_VOCABULARY.code,
                 format!("{path}.completed_statuses"),
                 "workflow.progress_counters produces completed rows but `completed_statuses` is empty; supply at least one completed status".to_string(),
             );
         }
         if (active_reachable || not_started_reachable) && active_statuses.is_empty() {
             bag.error(
-                "GEN-PROGRESS-STATUS-VOCABULARY",
+                crate::diagnostic::codes::PROGRESS_STATUS_VOCABULARY.code,
                 format!("{path}.active_statuses"),
                 "workflow.progress_counters produces active or not-started rows but `active_statuses` is empty; supply at least one active status".to_string(),
             );
@@ -526,7 +567,7 @@ fn compile_progress(
     if let Some(slot) = slots.iter().find(|slot| slot.role == Role::CompletedAt) {
         if (active_reachable || not_started_reachable) && !column_nullable(table, &slot.name) {
             bag.error(
-                "GEN-PROGRESS-COMPLETION",
+                crate::diagnostic::codes::PROGRESS_COMPLETION.code,
                 format!("{path}.columns.completed_at"),
                 format!(
                     "workflow.progress_counters `completed_at` column `{}` is not nullable, but active and not-started rows leave completion null",
@@ -578,7 +619,7 @@ fn resolve_slots(
         let Some(name) = role_name(columns, role_key) else {
             if role == Role::Total {
                 bag.error(
-                    "GEN-PROGRESS-COLUMN-MISSING",
+                    crate::diagnostic::codes::PROGRESS_COLUMN_MISSING.code,
                     format!("{path}.columns.total"),
                     "workflow.progress_counters requires a `total` column under `columns`"
                         .to_string(),
@@ -594,7 +635,7 @@ fn resolve_slots(
             }),
             None => {
                 bag.error(
-                    "GEN-PROGRESS-COLUMN-MISSING",
+                    crate::diagnostic::codes::PROGRESS_COLUMN_MISSING.code,
                     format!("{path}.columns.{role_key}"),
                     format!(
                         "workflow.progress_counters `{role_key}` column `{name}` does not exist on table `{}`",
@@ -618,7 +659,7 @@ fn compile_total(total: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> 
             let value = field("value").unwrap_or(0);
             if value < 0 {
                 bag.error(
-                    "GEN-PROGRESS-TOTAL",
+                    crate::diagnostic::codes::PROGRESS_TOTAL.code,
                     format!("{path}.total.value"),
                     format!("workflow.progress_counters `total.value` `{value}` is negative"),
                 );
@@ -632,7 +673,7 @@ fn compile_total(total: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> 
             let max = field("max").unwrap_or(min);
             if min < 0 {
                 bag.error(
-                    "GEN-PROGRESS-TOTAL",
+                    crate::diagnostic::codes::PROGRESS_TOTAL.code,
                     format!("{path}.total.min"),
                     format!("workflow.progress_counters `total.min` `{min}` is negative"),
                 );
@@ -640,7 +681,7 @@ fn compile_total(total: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> 
             }
             if max < min {
                 bag.error(
-                    "GEN-PROGRESS-TOTAL",
+                    crate::diagnostic::codes::PROGRESS_TOTAL.code,
                     format!("{path}.total"),
                     "workflow.progress_counters `total.max` is below `total.min`".to_string(),
                 );
@@ -667,7 +708,7 @@ fn compile_partition(config: &PlannerConfig, path: &str, bag: &mut DiagnosticBag
         Some("exact") | None => Partition::Exact,
         Some(other) => {
             bag.error(
-                "GEN-PROGRESS-PARTITION",
+                crate::diagnostic::codes::PROGRESS_PARTITION.code,
                 format!("{path}.partition"),
                 format!(
                     "workflow.progress_counters `partition` `{other}` is not one of `exact` or `allow_unclassified`"
@@ -703,7 +744,7 @@ fn compile_state(
             // A relaxed partition falls back to a documented default mixture.
             if let Partition::Exact = partition {
                 bag.error(
-                    "GEN-PROGRESS-OBSERVED",
+                    crate::diagnostic::codes::PROGRESS_OBSERVED.code,
                     format!("{path}.progress"),
                     "workflow.progress_counters `progress.kind: observed` needs observed evidence to form an exact partition, but none is available; supply explicit mixture weights or use `partition: allow_unclassified`".to_string(),
                 );
@@ -754,7 +795,7 @@ fn compile_mixture(
     let weights = [complete, active, not_started];
     if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
         bag.error(
-            "GEN-PROGRESS-WEIGHTS",
+            crate::diagnostic::codes::PROGRESS_WEIGHTS.code,
             format!("{path}.progress"),
             "workflow.progress_counters mixture weights must be finite and non-negative"
                 .to_string(),
@@ -764,7 +805,7 @@ fn compile_mixture(
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
         bag.error(
-            "GEN-PROGRESS-WEIGHTS",
+            crate::diagnostic::codes::PROGRESS_WEIGHTS.code,
             format!("{path}.progress"),
             "workflow.progress_counters mixture weights sum to zero; at least one weight must be positive".to_string(),
         );

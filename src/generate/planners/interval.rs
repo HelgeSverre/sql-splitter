@@ -30,8 +30,8 @@ use serde_yaml_ng::Value;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
-    Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism, PlannerDescriptor,
-    PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
+    ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
+    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
@@ -46,7 +46,43 @@ pub static TEMPORAL_INTERVAL_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
     kind: "temporal.interval",
     aliases: &[],
     summary: "Coordinates a start/end/duration/open interval group so closed rows satisfy end = start + duration.",
-    arguments: &[],
+    arguments: &[
+        ArgumentSpec {
+            name: "columns",
+            required: true,
+            summary: "Maps the required start, end, and duration roles plus an optional open role to columns.",
+        },
+        ArgumentSpec {
+            name: "start",
+            required: true,
+            summary: "Configures the range, observed range, or monotonic start timestamp draw.",
+        },
+        ArgumentSpec {
+            name: "duration",
+            required: false,
+            summary: "Configures the fixed, uniform, normal, histogram, or observed duration draw.",
+        },
+        ArgumentSpec {
+            name: "open_probability",
+            required: false,
+            summary: "Probability that a row is open and therefore has no end timestamp.",
+        },
+        ArgumentSpec {
+            name: "open_value",
+            required: false,
+            summary: "Boolean value written to the optional open column for an open row.",
+        },
+        ArgumentSpec {
+            name: "end_inclusive",
+            required: false,
+            summary: "Whether the end timestamp is inclusive of the final duration unit.",
+        },
+        ArgumentSpec {
+            name: "timezone",
+            required: false,
+            summary: "Timestamp rendering zone: preserve, utc, or an IANA timezone name.",
+        },
+    ],
     writes: ColumnScope::Configured,
     reads: ColumnScope::None,
     determinism: Determinism::Deterministic,
@@ -377,7 +413,7 @@ fn compile_interval(
     let open_col = role_name(columns, "open").and_then(|name| {
         find_column(table, name).or_else(|| {
             bag.error(
-                "GEN-INTERVAL-COLUMN-MISSING",
+                crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code,
                 format!("{path}.columns.open"),
                 format!(
                     "temporal.interval `open` column `{name}` does not exist on table `{}`",
@@ -400,7 +436,7 @@ fn compile_interval(
         if let Some(end) = end_col {
             if !end.nullable {
                 bag.error(
-                    "GEN-INTERVAL-OPEN-END",
+                    crate::diagnostic::codes::INTERVAL_OPEN_END.code,
                     format!("{path}.open_probability"),
                     format!(
                         "temporal.interval has open_probability {open_probability} but its `end` column `{}` is not nullable; an open row needs a null end",
@@ -428,7 +464,7 @@ fn compile_interval(
         if let Some(draw) = &duration_draw {
             if min_duration_units(draw) < 1 {
                 bag.error(
-                    "GEN-INTERVAL-DURATION",
+                    crate::diagnostic::codes::INTERVAL_DURATION.code,
                     format!("{path}.duration"),
                     "temporal.interval `end_inclusive: true` requires a minimum duration of at least 1 unit; a zero-length closed interval is impossible".to_string(),
                 );
@@ -518,7 +554,7 @@ fn resolve_role<'a>(
 ) -> Option<&'a PortableColumn> {
     let Some(name) = role_name(columns, role) else {
         bag.error(
-            "GEN-INTERVAL-COLUMN-MISSING",
+            crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code,
             format!("{path}.columns.{role}"),
             format!("temporal.interval requires a `{role}` column under `columns`"),
         );
@@ -527,7 +563,7 @@ fn resolve_role<'a>(
     let column = find_column(table, name);
     if column.is_none() {
         bag.error(
-            "GEN-INTERVAL-COLUMN-MISSING",
+            crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code,
             format!("{path}.columns.{role}"),
             format!(
                 "temporal.interval `{role}` column `{name}` does not exist on table `{}`",
@@ -556,7 +592,7 @@ fn compile_start(start: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> 
         .and_then(as_instant_ns)
         .or_else(|| {
             bag.error(
-                "GEN-INTERVAL-START",
+                crate::diagnostic::codes::INTERVAL_START.code,
                 format!("{path}.start.min"),
                 "temporal.interval `start` requires a parseable `min` timestamp".to_string(),
             );
@@ -582,7 +618,7 @@ fn compile_start(start: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> 
                 .and_then(as_instant_ns)
                 .or_else(|| {
                     bag.error(
-                        "GEN-INTERVAL-START",
+                        crate::diagnostic::codes::INTERVAL_START.code,
                         format!("{path}.start.max"),
                         "temporal.interval `start` range requires a parseable `max` timestamp"
                             .to_string(),
@@ -591,7 +627,7 @@ fn compile_start(start: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> 
                 })?;
             if max_ns < min_ns {
                 bag.error(
-                    "GEN-INTERVAL-START",
+                    crate::diagnostic::codes::INTERVAL_START.code,
                     format!("{path}.start"),
                     "temporal.interval `start.max` is before `start.min`".to_string(),
                 );
@@ -615,7 +651,7 @@ fn compile_duration(
         .unwrap_or("seconds");
     let Some(unit_nanos) = unit_nanos(unit) else {
         bag.error(
-            "GEN-INTERVAL-DURATION",
+            crate::diagnostic::codes::INTERVAL_DURATION.code,
             format!("{path}.duration.unit"),
             format!("temporal.interval `duration.unit` `{unit}` is not a recognized time unit"),
         );
@@ -681,13 +717,13 @@ fn min_duration_units(draw: &DurationDraw) -> i128 {
 fn check_nonneg_bounded(units: i128, unit_nanos: i128, path: &str, bag: &mut DiagnosticBag) {
     if units < 0 {
         bag.error(
-            "GEN-INTERVAL-DURATION",
+            crate::diagnostic::codes::INTERVAL_DURATION.code,
             format!("{path}.duration"),
             format!("temporal.interval duration `{units}` is negative; durations must be >= 0"),
         );
     } else if units.checked_mul(unit_nanos).is_none() {
         bag.error(
-            "GEN-INTERVAL-DURATION",
+            crate::diagnostic::codes::INTERVAL_DURATION.code,
             format!("{path}.duration"),
             format!(
                 "temporal.interval duration `{units}` overflows the representable nanosecond range at this unit"
@@ -705,7 +741,7 @@ fn compile_zone(zone: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> Op
             Ok(tz) => Some(RenderZone::Named(tz)),
             Err(_) => {
                 bag.error(
-                    "GEN-INTERVAL-TIMEZONE",
+                    crate::diagnostic::codes::INTERVAL_TIMEZONE.code,
                     format!("{path}.timezone"),
                     format!("temporal.interval `timezone` `{name}` is not a valid IANA zone name"),
                 );

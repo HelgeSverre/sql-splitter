@@ -720,13 +720,13 @@ impl<F: ?Sized + FactoryMeta> Catalog<F> {
 
         if self.primary.contains_key(kind) {
             bag.error(
-                "GEN-REGISTRY-DUPLICATE",
+                crate::diagnostic::codes::REGISTRY_DUPLICATE.code,
                 format!("registry.{}s.{kind}", self.label),
                 format!("duplicate {} kind `{kind}`", self.label),
             );
         } else if self.aliases.contains_key(kind) {
             bag.error(
-                "GEN-REGISTRY-DUPLICATE",
+                crate::diagnostic::codes::REGISTRY_DUPLICATE.code,
                 format!("registry.{}s.{kind}", self.label),
                 format!(
                     "{} kind `{kind}` is already registered as an alias",
@@ -740,19 +740,19 @@ impl<F: ?Sized + FactoryMeta> Catalog<F> {
             let path = format!("registry.{}s.{kind}.aliases.{alias}", self.label);
             if alias == kind {
                 bag.error(
-                    "GEN-REGISTRY-ALIAS-DUPLICATE",
+                    crate::diagnostic::codes::REGISTRY_ALIAS_DUPLICATE.code,
                     path,
                     format!("alias `{alias}` duplicates its own kind"),
                 );
             } else if self.primary.contains_key(alias) {
                 bag.error(
-                    "GEN-REGISTRY-ALIAS-SHADOWS-KIND",
+                    crate::diagnostic::codes::REGISTRY_ALIAS_SHADOWS_KIND.code,
                     path,
                     format!("alias `{alias}` shadows an existing {} kind", self.label),
                 );
             } else if self.aliases.contains_key(alias) || seen.insert(alias, ()).is_some() {
                 bag.error(
-                    "GEN-REGISTRY-ALIAS-DUPLICATE",
+                    crate::diagnostic::codes::REGISTRY_ALIAS_DUPLICATE.code,
                     path,
                     format!("duplicate alias `{alias}`"),
                 );

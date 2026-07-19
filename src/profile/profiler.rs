@@ -30,6 +30,7 @@ use std::path::Path;
 
 use ahash::AHashMap;
 
+use crate::diagnostic::{codes, Diagnostic};
 use crate::parser::mysql_insert::{
     hash_pk_tuple, parse_insert_tuple, InsertRowContext, ParsedRow, PkTuple, PkValue, RowExtraction,
 };
@@ -43,10 +44,6 @@ use crate::synthetic::schema::PortableSchema;
 
 use super::evidence::{ColumnEvidence, DumpProfile, RelationshipEvidence, TableEvidence};
 use super::{ColumnSketches, ProfileBudget, ProfileDepth, ProfileValue};
-
-/// Stable code emitted when a table's data preceded its DDL by more than the
-/// retained sample, so the bounded replay could not cover every early row.
-const SCHEMA_LATE_CODE: &str = "GEN-PROFILE-SCHEMA-LATE";
 
 /// Streams a SQL dump into a [`DumpProfile`]. Build one with
 /// [`DumpProfiler::builder`].
@@ -330,7 +327,7 @@ struct ProfileRun {
     /// two tables both have COPY data before either's DDL.
     pending_copy_key: Option<String>,
     pending: AHashMap<String, PendingTable>,
-    warnings: Vec<String>,
+    warnings: Vec<Diagnostic>,
     next_seed: u64,
 }
 
@@ -641,10 +638,11 @@ impl ProfileRun {
             return;
         }
         table.decode_warned = true;
-        self.warnings.push(format!(
-            "GEN-PROFILE-DECODE-SKIPPED: table `{}` had rows that failed value decoding; \
-             they are counted in the exact row total but contributed no per-column evidence",
-            table.name
+        self.warnings.push(Diagnostic::warning(
+            &codes::PROFILE_DECODE_SKIPPED,
+            format!("tables.{}", table.name),
+            "rows failed value decoding; they are counted in the exact row total but \
+             contributed no per-column evidence",
         ));
     }
 
@@ -787,12 +785,15 @@ impl ProfileRun {
             self.tables[table_idx].row_count = pending.row_count;
         }
         if pending.overflowed {
-            self.warnings.push(format!(
-                "{SCHEMA_LATE_CODE}: table `{}` had {} data rows before its DDL; \
-                 only {} were retained for value profiling (counts remain exact)",
-                self.tables[table_idx].name,
-                pending.row_count,
-                pending.retained.len()
+            self.warnings.push(Diagnostic::warning(
+                &codes::PROFILE_SCHEMA_LATE,
+                format!("tables.{}", self.tables[table_idx].name),
+                format!(
+                    "had {} data rows before its DDL; only {} were retained for value profiling \
+                     (counts remain exact)",
+                    pending.row_count,
+                    pending.retained.len()
+                ),
             ));
         }
     }
@@ -814,10 +815,13 @@ impl ProfileRun {
         // and warn that its columns could not be profiled.
         let leftovers: Vec<(String, PendingTable)> = self.pending.drain().collect();
         for (key, pending) in leftovers {
-            self.warnings.push(format!(
-                "{SCHEMA_LATE_CODE}: table `{key}` had {} data rows but no CREATE TABLE \
-                 was seen; it could not be profiled",
-                pending.row_count
+            self.warnings.push(Diagnostic::warning(
+                &codes::PROFILE_SCHEMA_LATE,
+                format!("tables.{key}"),
+                format!(
+                    "had {} data rows but no CREATE TABLE was seen; it could not be profiled",
+                    pending.row_count
+                ),
             ));
         }
 

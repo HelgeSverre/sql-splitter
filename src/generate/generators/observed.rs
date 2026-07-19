@@ -190,7 +190,7 @@ impl GeneratorFactory for ObservedSampleFactory {
         let mut bag = DiagnosticBag::default();
         let Some(raw) = config.args.get("values").and_then(|v| v.as_sequence()) else {
             bag.error(
-                "GEN-OBSERVED-SAMPLE-MISSING-VALUES",
+                crate::diagnostic::codes::OBSERVED_SAMPLE_MISSING_VALUES.code,
                 context.path(),
                 "`observed_sample` requires a non-empty `values` list",
             );
@@ -198,7 +198,7 @@ impl GeneratorFactory for ObservedSampleFactory {
         };
         if raw.is_empty() {
             bag.error(
-                "GEN-OBSERVED-SAMPLE-EMPTY",
+                crate::diagnostic::codes::OBSERVED_SAMPLE_EMPTY.code,
                 context.path(),
                 "`observed_sample.values` must not be empty",
             );
@@ -219,7 +219,7 @@ impl GeneratorFactory for ObservedSampleFactory {
             };
             if !weight.is_finite() || weight < 0.0 {
                 bag.error(
-                    "GEN-OBSERVED-SAMPLE-INVALID-WEIGHT",
+                    crate::diagnostic::codes::OBSERVED_SAMPLE_INVALID_WEIGHT.code,
                     context.path(),
                     format!("`observed_sample` weight {weight} must be finite and non-negative"),
                 );
@@ -232,13 +232,17 @@ impl GeneratorFactory for ObservedSampleFactory {
                     cumulative.push(total);
                 }
                 Err(message) => {
-                    bag.error("GEN-OBSERVED-SAMPLE-INVALID-VALUE", context.path(), message);
+                    bag.error(
+                        crate::diagnostic::codes::OBSERVED_SAMPLE_INVALID_VALUE.code,
+                        context.path(),
+                        message,
+                    );
                 }
             }
         }
         if total <= 0.0 {
             bag.error(
-                "GEN-OBSERVED-SAMPLE-ALL-ZERO",
+                crate::diagnostic::codes::OBSERVED_SAMPLE_ALL_ZERO.code,
                 context.path(),
                 "`observed_sample.values` weights must not all be zero",
             );
@@ -321,7 +325,7 @@ impl GeneratorFactory for HistogramFactory {
         let mut bag = DiagnosticBag::default();
         let Some(raw) = config.args.get("bins").and_then(|v| v.as_sequence()) else {
             bag.error(
-                "GEN-HISTOGRAM-MISSING-BINS",
+                crate::diagnostic::codes::HISTOGRAM_MISSING_BINS.code,
                 context.path(),
                 "`histogram` requires a non-empty `bins` list",
             );
@@ -329,7 +333,7 @@ impl GeneratorFactory for HistogramFactory {
         };
         if raw.is_empty() {
             bag.error(
-                "GEN-HISTOGRAM-EMPTY",
+                crate::diagnostic::codes::HISTOGRAM_EMPTY.code,
                 context.path(),
                 "`histogram.bins` must not be empty",
             );
@@ -346,7 +350,7 @@ impl GeneratorFactory for HistogramFactory {
             let count = entry.get("count").and_then(parse_f64).unwrap_or(1.0);
             let (Some(min), Some(max)) = (min, max) else {
                 bag.error(
-                    "GEN-HISTOGRAM-INVALID-BIN",
+                    crate::diagnostic::codes::HISTOGRAM_INVALID_BIN.code,
                     context.path(),
                     "each `histogram.bins` entry needs numeric `min` and `max`",
                 );
@@ -354,7 +358,7 @@ impl GeneratorFactory for HistogramFactory {
             };
             if !min.is_finite() || !max.is_finite() || !count.is_finite() || count < 0.0 {
                 bag.error(
-                    "GEN-HISTOGRAM-NON-FINITE",
+                    crate::diagnostic::codes::HISTOGRAM_NON_FINITE.code,
                     context.path(),
                     "`histogram` bin bounds and counts must be finite, counts non-negative",
                 );
@@ -362,7 +366,7 @@ impl GeneratorFactory for HistogramFactory {
             }
             if min > max {
                 bag.error(
-                    "GEN-HISTOGRAM-RANGE",
+                    crate::diagnostic::codes::HISTOGRAM_RANGE.code,
                     context.path(),
                     format!("`histogram` bin min ({min}) must not exceed max ({max})"),
                 );
@@ -371,7 +375,7 @@ impl GeneratorFactory for HistogramFactory {
             if let Some(prev) = previous_max {
                 if min < prev {
                     bag.error(
-                        "GEN-HISTOGRAM-UNSORTED",
+                        crate::diagnostic::codes::HISTOGRAM_UNSORTED.code,
                         context.path(),
                         "`histogram.bins` must be sorted and non-overlapping",
                     );
@@ -384,7 +388,7 @@ impl GeneratorFactory for HistogramFactory {
         }
         if total <= 0.0 {
             bag.error(
-                "GEN-HISTOGRAM-ALL-ZERO",
+                crate::diagnostic::codes::HISTOGRAM_ALL_ZERO.code,
                 context.path(),
                 "`histogram.bins` counts must not all be zero",
             );
@@ -544,7 +548,7 @@ fn compile_gaussian(
     let spread = config.args.get(second_arg).and_then(parse_f64);
     let (Some(center), Some(spread)) = (center, spread) else {
         bag.error(
-            "GEN-GAUSSIAN-MISSING-PARAMS",
+            crate::diagnostic::codes::GAUSSIAN_MISSING_PARAMS.code,
             context.path(),
             format!("`{kind}` requires numeric `{first_arg}` and `{second_arg}`"),
         );
@@ -552,7 +556,7 @@ fn compile_gaussian(
     };
     if !center.is_finite() || !spread.is_finite() || spread < 0.0 {
         bag.error(
-            "GEN-GAUSSIAN-NON-FINITE",
+            crate::diagnostic::codes::GAUSSIAN_NON_FINITE.code,
             context.path(),
             format!("`{kind}` parameters must be finite and `{second_arg}` non-negative"),
         );
@@ -562,7 +566,7 @@ fn compile_gaussian(
     if let (Some(min), Some(max)) = (min, max) {
         if min > max {
             bag.error(
-                "GEN-GAUSSIAN-RANGE",
+                crate::diagnostic::codes::GAUSSIAN_RANGE.code,
                 context.path(),
                 format!("`{kind}.min` ({min}) must not exceed `{kind}.max` ({max})"),
             );
@@ -706,7 +710,7 @@ impl GeneratorFactory for MonotonicFactory {
         let step = config.args.get("step").and_then(parse_i128).unwrap_or(1);
         if step < 0 {
             bag.error(
-                "GEN-MONOTONIC-STEP",
+                crate::diagnostic::codes::MONOTONIC_STEP.code,
                 context.path(),
                 "`monotonic.step` must not be negative",
             );

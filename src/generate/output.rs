@@ -139,8 +139,10 @@ impl CancellationToken {
     /// value a loop returns so its guards run.
     pub fn check(&self) -> Result<(), GenerateError> {
         if self.is_cancelled() {
-            Err(GenerateError::InvalidInput(
-                "GEN-CANCELLED: generation was interrupted".to_string(),
+            Err(GenerateError::diagnostic(
+                &crate::diagnostic::codes::CANCELLED,
+                "runtime",
+                "generation was interrupted",
             ))
         } else {
             Ok(())

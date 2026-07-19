@@ -1502,15 +1502,20 @@ fn fk_slug(child_table: &str, rel: &RelSpec) -> String {
 
 fn open_reader(path: &Path) -> Result<std::fs::File, GenerateError> {
     std::fs::File::open(path).map_err(|error| {
-        GenerateError::InvalidInput(format!(
-            "GEN-VERIFY-IO: cannot open `{}` for verification: {error}",
-            path.display()
-        ))
+        GenerateError::diagnostic(
+            &crate::diagnostic::codes::VERIFY_IO,
+            path.display().to_string(),
+            format!("cannot open `{}` for verification: {error}", path.display()),
+        )
     })
 }
 
 fn parse_error(error: anyhow::Error) -> GenerateError {
-    GenerateError::InvalidInput(format!("GEN-VERIFY-PARSE: {error}"))
+    GenerateError::diagnostic(
+        &crate::diagnostic::codes::VERIFY_PARSE,
+        "verification",
+        error.to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------

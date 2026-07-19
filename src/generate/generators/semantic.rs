@@ -611,7 +611,7 @@ impl GeneratorFactory for RandomStringFactory {
                 Some(alphabet) => alphabet,
                 None => {
                     bag.error(
-                        "GEN-RANDOM-STRING-INVALID-ALPHABET",
+                        crate::diagnostic::codes::RANDOM_STRING_INVALID_ALPHABET.code,
                         context.path(),
                         format!("unknown alphabet `{name}`"),
                     );
@@ -1075,7 +1075,7 @@ impl GeneratorFactory for RangedIntegerFactory {
             .unwrap_or(self.0.default_max);
         if min > max {
             bag.error(
-                "GEN-RANGED-INTEGER-RANGE",
+                crate::diagnostic::codes::RANGED_INTEGER_RANGE.code,
                 context.path(),
                 format!(
                     "`{}.min` ({min}) must not exceed `{}.max` ({max})",
@@ -1268,7 +1268,7 @@ impl GeneratorFactory for CommerceMoneyFactory {
             Ok(scale) if scale <= 18 => scale,
             _ => {
                 bag.error(
-                    "GEN-COMMERCE-MONEY-SCALE",
+                    crate::diagnostic::codes::COMMERCE_MONEY_SCALE.code,
                     context.path(),
                     "`commerce.money.scale` must be between 0 and 18",
                 );
@@ -1280,7 +1280,7 @@ impl GeneratorFactory for CommerceMoneyFactory {
         let max_minor = config.args.get("max").and_then(parse_i128).unwrap_or(1000) * factor;
         if min_minor > max_minor {
             bag.error(
-                "GEN-COMMERCE-MONEY-RANGE",
+                crate::diagnostic::codes::COMMERCE_MONEY_RANGE.code,
                 context.path(),
                 format!(
                     "`commerce.money.min` ({}) must not exceed `commerce.money.max` ({})",
@@ -1616,7 +1616,7 @@ impl GeneratorFactory for RelativeFactory {
             .map(str::to_string)
         else {
             bag.error(
-                "GEN-RELATIVE-MISSING-SOURCE",
+                crate::diagnostic::codes::RELATIVE_MISSING_SOURCE.code,
                 context.path(),
                 format!("`{}` requires a `source` column name", self.descriptor.kind),
             );
@@ -1624,7 +1624,7 @@ impl GeneratorFactory for RelativeFactory {
         };
         if find_column(context.table(), &source).is_none() {
             bag.error(
-                "GEN-RELATIVE-UNKNOWN-SOURCE",
+                crate::diagnostic::codes::RELATIVE_UNKNOWN_SOURCE.code,
                 context.path(),
                 format!(
                     "`{}.source` references unknown column `{source}` on table `{}`",
@@ -1645,7 +1645,7 @@ impl GeneratorFactory for RelativeFactory {
             .unwrap_or(86_400);
         if min_seconds > max_seconds {
             bag.error(
-                "GEN-RELATIVE-RANGE",
+                crate::diagnostic::codes::RELATIVE_RANGE.code,
                 context.path(),
                 format!(
                     "`{}.min_seconds` ({min_seconds}) must not exceed `{}.max_seconds` ({max_seconds})",

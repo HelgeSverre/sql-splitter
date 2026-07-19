@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use sql_splitter::diagnostic::Severity;
+use sql_splitter::diagnostic::{codes, Severity};
 use sql_splitter::generate::{CompileOptions, Generate, GenerateError, RunMode};
 use sql_splitter::parser::SqlDialect;
 
@@ -215,12 +215,11 @@ kind: overrides
         .run()
         .unwrap_err();
 
-    match err {
-        GenerateError::InvalidInput(message) => {
-            assert!(message.contains("GEN-OVERRIDES-NO-BASE"));
-        }
-        other => panic!("expected GenerateError::InvalidInput, got {other:?}"),
-    }
+    assert!(matches!(
+        err,
+        GenerateError::Diagnostic(diagnostic)
+            if diagnostic.code == codes::OVERRIDES_NO_BASE.code
+    ));
 }
 
 #[test]
@@ -230,13 +229,21 @@ fn missing_input_and_config_is_a_clear_error() {
         .output(dir.path().join("out.sql"))
         .run()
         .unwrap_err();
-    assert!(matches!(err, GenerateError::InvalidInput(_)));
+    assert!(matches!(
+        err,
+        GenerateError::Diagnostic(diagnostic)
+            if diagnostic.code == codes::REQUEST_SOURCE.code
+    ));
 }
 
 #[test]
 fn generate_mode_without_output_is_a_shape_error() {
     let err = Generate::builder().config(SIMPLE_MODEL).run().unwrap_err();
-    assert!(matches!(err, GenerateError::InvalidInput(_)));
+    assert!(matches!(
+        err,
+        GenerateError::Diagnostic(diagnostic)
+            if diagnostic.code == codes::REQUEST_OUTPUT.code
+    ));
 }
 
 /// A synthetic MySQL dump reproducing three everyday shapes (invented names

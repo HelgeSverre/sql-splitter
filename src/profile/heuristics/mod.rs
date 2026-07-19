@@ -39,6 +39,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::diagnostic::{codes, Diagnostic};
 use crate::generate::registry::ExtensionRegistry;
 use crate::profile::evidence::{ColumnEvidence, DumpProfile, TableEvidence};
 use crate::synthetic::model::{
@@ -212,7 +213,7 @@ pub struct Decision {
 pub struct InferenceResult {
     pub model: SyntheticModel,
     pub decisions: Vec<Decision>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Diagnostic>,
     /// `"table.column"` -> the literal source values its winning rule persists.
     source_literals: BTreeMap<String, Vec<String>>,
 }
@@ -328,9 +329,13 @@ impl ModelInference {
 
         for table_evidence in &profile.tables {
             let Some(portable) = schema.tables.get(&table_evidence.table) else {
-                warnings.push(format!(
-                    "GEN-INFER-TABLE-UNKNOWN: profiled table `{}` is not in the schema; skipped",
-                    table_evidence.table
+                warnings.push(Diagnostic::warning(
+                    &codes::INFER_TABLE_UNKNOWN,
+                    format!("tables.{}", table_evidence.table),
+                    format!(
+                        "profiled table `{}` is not in the schema; skipped",
+                        table_evidence.table
+                    ),
                 ));
                 continue;
             };
@@ -400,7 +405,7 @@ impl ModelInference {
         portable: &PortableTable,
         evidence: Option<&TableEvidence>,
         decisions: &mut Vec<Decision>,
-        warnings: &mut Vec<String>,
+        warnings: &mut Vec<Diagnostic>,
         profiles: &mut BTreeMap<String, ProfileMetadata>,
         source_literals: &mut BTreeMap<String, Vec<String>>,
     ) -> TableModel {
@@ -447,11 +452,14 @@ impl ModelInference {
             let (rule, decision, literals) = resolve_column(&ctx, &key, candidates);
 
             if !literals.is_empty() {
-                warnings.push(format!(
-                    "GEN-INFER-SOURCE-DERIVED: `{key}` persists {} source-derived literal value(s) \
-                     required by its `{}` rule",
-                    literals.len(),
-                    decision.generator_kind
+                warnings.push(Diagnostic::warning(
+                    &codes::INFER_SOURCE_DERIVED,
+                    key.clone(),
+                    format!(
+                        "persists {} source-derived literal value(s) required by its `{}` rule",
+                        literals.len(),
+                        decision.generator_kind
+                    ),
                 ));
                 source_literals.insert(key.clone(), literals);
             }
@@ -467,7 +475,7 @@ impl ModelInference {
         }
 
         // Planner reconnaissance runs at table scope. Nominations remain
-        // warnings so inference does not insert planner configuration.
+        // informational so inference does not insert planner configuration.
         warnings.extend(planner::nominations(portable, evidence));
 
         TableModel {

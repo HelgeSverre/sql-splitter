@@ -1,0 +1,115 @@
+---
+title: Privacy and verification
+description: Literal-value safety, temporary files, atomic publication, and verification coverage
+sidebar:
+  order: 7
+---
+
+## Synthetic output can contain source literals
+
+`generate` is not a redaction tool. A model may intentionally carry:
+
+- `constant`, `weighted_choice`, or `observed_sample` values;
+- a source schema default used through `database_default`;
+- literal text inside a preserved check constraint.
+
+Those values can reappear in generated SQL. Use [`redact`](/commands/redact/)
+when values must be irreversibly transformed.
+
+## `GEN-SOURCE-VALUES`
+
+The resolved model is scanned before execution. When literal-bearing rules are
+present, the report receives one advisory diagnostic:
+
+```text
+advisory[GEN-SOURCE-VALUES] tables
+  2 rule(s) replay literal values that may have been derived from the source dump; review the listed rules before sharing the output
+    - tables.orders.columns.status (weighted_choice)
+    - tables.customers.columns.plan (observed_sample)
+  docs: https://sql-splitter.dev/commands/generate/diagnostics/#GEN-SOURCE-VALUES
+```
+
+Properties:
+
+- Values are never included; only YAML paths and rule kinds appear.
+- It is a regular structured diagnostic in human and JSON output.
+- Its severity is `advisory`, so `--strict` never promotes it.
+- It remains visible under `--quiet`.
+- Wording distinguishes a run that profiled a dump from a model-only run whose
+  literals are hand-authored.
+
+Library callers can also inspect `GenerateReport.source_values`, which contains
+the same path/rule-kind locations without values.
+
+## Build a literal-free model
+
+1. Replace `constant`, `weighted_choice`, and `observed_sample` with semantic,
+   statistical, structural, or planner-owned rules.
+2. Replace `database_default` when its preserved source default contains a
+   sensitive literal.
+3. Review preserved check constraints.
+4. Generate and confirm there is no `GEN-SOURCE-VALUES` diagnostic, or verify
+   that `GenerateReport.source_values` is empty in a library integration.
+
+Credential inference already avoids literal-bearing generators. An explicit
+model remains authoritative and may choose one; the advisory then reports it.
+
+## Verified generation
+
+```bash
+sql-splitter generate --config model.yaml --verify -o synthetic.sql
+```
+
+Verification requires a filesystem destination. The command:
+
+1. creates protected temporary output beside the destination;
+2. generates the complete SQL there;
+3. audits the generated rows against the compiled plan;
+4. renames the temporary file into place only after a full pass.
+
+A failed audit leaves an existing destination untouched. If a resolved model is
+also requested, SQL is published first and the model second; a failure during
+the second publication is reported precisely as a partial publication because
+two independent filesystem renames cannot be one atomic transaction.
+
+## Exact checks
+
+Where supported, verification checks:
+
+- row counts and row arity;
+- non-null, primary-key, and unique constraints;
+- ordinary foreign-key membership;
+- planner predicates such as temporal ordering, null/flag coherence, counter
+  equations, selected ranges, and simple cross-table sums.
+
+Verification parses the generated SQL. PostgreSQL COPY rows have less exact
+coverage than ordinary INSERT rows.
+
+## Honest coverage gaps
+
+Some invariants are guaranteed by construction but cannot be expressed by the
+current verifier. A passing run reports `GEN-VERIFY-NOTCHECKED` when configured
+capabilities were not checked exactly. Known examples include:
+
+- all product/offset equations in `commerce.order_family`;
+- atomic type/id agreement in `relation.polymorphic_pair`;
+- decimal bounds in `geo.coordinate_pair`;
+- filename/extension/MIME textual agreement in `file.metadata`.
+
+Such a run exits successfully because every check it could perform passed, but
+the warning makes the boundary explicit. `--strict` can promote that warning to
+a failure when complete independent coverage is required.
+
+## Temporary-file guarantees and limits
+
+Protected verification and planner-spool files use unpredictable names,
+exclusive creation, and owner-only permissions on Unix. Normal completion,
+ordinary errors, and handled Ctrl-C interrupts clean them through object
+destruction.
+
+No process can clean up after `SIGKILL`, power loss, or an aborting runtime. A
+protected temporary file may remain in those cases. Final output files follow
+normal destination permissions and are not exposed until publication.
+
+Cross-table planners can spill bounded family state to protected temporary
+storage. Spilling changes performance, not deterministic output.

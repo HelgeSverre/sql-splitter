@@ -483,9 +483,10 @@ fn dump_workflow_emit_and_execute_are_consistent_and_trimmable() {
     }
 }
 
-/// The conservative source-derived safety notice fires (the dump's categorical
-/// `status` column replays observed literals), survives `--quiet`, and the JSON
-/// report lists paths and rule kinds but never the values.
+/// The conservative source-derived advisory fires (the dump's categorical
+/// `status` column replays observed literals), survives `--quiet` and
+/// `--strict`, and the JSON diagnostic lists paths and rule kinds but never the
+/// values.
 #[test]
 fn dump_workflow_source_values_notice_survives_quiet_and_json_hides_values() {
     let dir = tempfile::tempdir().unwrap();
@@ -503,7 +504,8 @@ fn dump_workflow_source_values_notice_survives_quiet_and_json_hides_values() {
     // The notice never leaks a value (e.g. the observed status `paid`).
     assert!(!stderr.contains("paid"), "stderr leaked a value: {stderr}");
 
-    // --json: structured source_values carry paths + rule kinds, not values.
+    // --json: one ordinary advisory diagnostic carries paths + rule kinds, not
+    // values. There is no second source_values reporting shape.
     let out_json = dir.path().join("synthetic_json.sql");
     let json = sql_splitter_bin()
         .args(["generate", PRODUCTION_DUMP, "--seed", "42", "--json", "-o"])
@@ -514,22 +516,85 @@ fn dump_workflow_source_values_notice_survives_quiet_and_json_hides_values() {
     let stdout = String::from_utf8_lossy(&json.stdout);
     let report: serde_json::Value =
         serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("failed to parse JSON: {stdout}"));
-    let source_values = report["source_values"]
-        .as_array()
-        .expect("source_values array");
     assert!(
-        !source_values.is_empty(),
-        "expected source_values: {stdout}"
+        report.get("source_values").is_none(),
+        "redundant shape: {stdout}"
     );
-    for entry in source_values {
+    let advisory = report["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "GEN-SOURCE-VALUES")
+        .expect("GEN-SOURCE-VALUES advisory");
+    assert_eq!(advisory["severity"], "advisory");
+    assert_eq!(
+        advisory["documentation_url"],
+        "https://sql-splitter.dev/commands/generate/diagnostics/#GEN-SOURCE-VALUES"
+    );
+    let related = advisory["related"].as_array().expect("related locations");
+    assert!(
+        !related.is_empty(),
+        "expected related locations: {advisory}"
+    );
+    for entry in related {
         assert!(entry.get("path").is_some(), "entry missing path: {entry}");
         assert!(
-            entry.get("rule_kind").is_some(),
-            "entry missing rule_kind: {entry}"
+            entry.get("description").is_some(),
+            "entry missing rule kind: {entry}"
         );
     }
     // No observed value string appears anywhere in the JSON report.
     assert!(!stdout.contains("paid"), "json leaked a value: {stdout}");
+
+    let strict = sql_splitter_bin()
+        .args([
+            "generate",
+            PRODUCTION_DUMP,
+            "--seed",
+            "42",
+            "--strict",
+            "--quiet",
+            "-o",
+        ])
+        .arg(dir.path().join("strict.sql"))
+        .output()
+        .expect("failed to run sql-splitter");
+    assert_eq!(
+        strict.status.code(),
+        Some(0),
+        "advisories are never strict-fatal: {}",
+        String::from_utf8_lossy(&strict.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&strict.stderr).contains("GEN-SOURCE-VALUES"),
+        "advisory must survive quiet+strict"
+    );
+}
+
+#[test]
+fn runtime_generate_error_uses_the_json_diagnostic_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let overrides = dir.path().join("overrides.yaml");
+    fs::write(&overrides, "version: 1\nkind: overrides\ntables: {}\n").unwrap();
+
+    let output = sql_splitter_bin()
+        .args(["generate", "--config"])
+        .arg(&overrides)
+        .arg("--json")
+        .output()
+        .expect("failed to run sql-splitter");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("invalid JSON: {stdout}"));
+    let diagnostic = &report["diagnostics"][0];
+    assert_eq!(diagnostic["code"], "GEN-OVERRIDES-NO-BASE");
+    assert_eq!(diagnostic["severity"], "error");
+    assert_eq!(
+        diagnostic["documentation_url"],
+        "https://sql-splitter.dev/commands/generate/diagnostics/#GEN-OVERRIDES-NO-BASE"
+    );
 }
 
 /// A seeded emit records the seed for byte-equivalent reload; an unseeded run

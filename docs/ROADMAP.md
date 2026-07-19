@@ -42,7 +42,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Next:**
 
-- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models (implemented; documented in `docs/generate/`)
+- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models (implemented; documented at <https://sql-splitter.dev/commands/generate/>)
 - v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.18.0: Migrate — Schema migration generation
 - v1.19.0: DBML — Import/export DBML schema definitions
@@ -564,7 +564,7 @@ data — that crate has been removed.
 (describes the original design — for the shipped/actual behavior, see the
 docs below, which win where they differ).
 
-**Documentation:** [`docs/generate/`](generate/README.md) — model
+**Documentation:** [Generate documentation](https://sql-splitter.dev/commands/generate/) — model
 reference, generator/planner catalog, profiling and privacy, library API,
 and diagnostics.
 

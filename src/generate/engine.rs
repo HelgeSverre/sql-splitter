@@ -580,9 +580,11 @@ fn render_family_child(
 
 /// Wrap a family spool I/O failure as a generation error.
 fn family_spool_error(error: std::io::Error) -> GenerateError {
-    GenerateError::InvalidInput(format!(
-        "GEN-FAMILY-SPOOL: buffering family child rows failed: {error}"
-    ))
+    GenerateError::diagnostic(
+        &crate::diagnostic::codes::FAMILY_SPOOL,
+        "runtime.family_spool",
+        format!("buffering family child rows failed: {error}"),
+    )
 }
 
 /// Whether a generator kind is a foreign-key marker driven by the engine rather
@@ -671,9 +673,15 @@ fn build_key_domains(
 /// The `GEN-KEY-DOMAIN-UNSUPPORTED` error for a parent key that cannot be
 /// reproduced by random access (a stateful or otherwise non-describable key).
 fn unsupported_key(parent_table: &str, parent_column: &str) -> GenerateError {
-    GenerateError::InvalidInput(format!(
-        "GEN-KEY-DOMAIN-UNSUPPORTED: parent key `{parent_table}.{parent_column}` cannot be materialized for random access; supported: bare integer primary keys, `sequence`, and `uuid` keys (stateful keys await protected key spooling)"
-    ))
+    GenerateError::diagnostic(
+        &crate::diagnostic::codes::KEY_DOMAIN_UNSUPPORTED,
+        format!("tables.{parent_table}.columns.{parent_column}"),
+        format!(
+            "parent key `{parent_table}.{parent_column}` cannot be materialized for random \
+             access; supported: bare integer primary keys, `sequence`, and `uuid` keys \
+             (stateful keys await protected key spooling)"
+        ),
+    )
 }
 
 /// The per-column execution plan for one table: which columns are constant

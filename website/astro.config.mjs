@@ -8,6 +8,7 @@ import starlightGitHubAlerts from "starlight-github-alerts";
 import starlightLlmsTxt from "starlight-llms-txt";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import remarkExplicitHeadingIds from "./src/remark-explicit-heading-ids.mjs";
 
 function getVersion() {
   const cargoPath = resolve(import.meta.dirname, "../Cargo.toml");
@@ -31,6 +32,9 @@ const SQL_SPLITTER_VERSION = getVersion();
 
 export default defineConfig({
   site: "https://sql-splitter.dev",
+  markdown: {
+    remarkPlugins: [remarkExplicitHeadingIds],
+  },
   env: {
     schema: {
       SQL_SPLITTER_VERSION: envField.string({
@@ -74,7 +78,45 @@ export default defineConfig({
         },
         {
           label: "Commands",
-          items: [{ autogenerate: { directory: "commands" } }],
+          items: [
+            { slug: "commands", label: "Overview" },
+            "commands/analyze",
+            "commands/completions",
+            "commands/convert",
+            "commands/diff",
+            {
+              label: "Generate",
+              items: [
+                { slug: "commands/generate", label: "Overview" },
+                "commands/generate/model-reference",
+                {
+                  slug: "commands/generate/generators",
+                  label: "Generator reference",
+                },
+                "commands/generate/modifiers",
+                "commands/generate/planners",
+                "commands/generate/inference",
+                "commands/generate/privacy-verification",
+                {
+                  slug: "commands/generate/diagnostics",
+                  label: "Diagnostics",
+                },
+                {
+                  slug: "commands/generate/library-api",
+                  label: "Rust API",
+                },
+              ],
+            },
+            "commands/graph",
+            "commands/merge",
+            "commands/order",
+            "commands/query",
+            "commands/redact",
+            "commands/sample",
+            "commands/shard",
+            "commands/split",
+            "commands/validate",
+          ],
         },
         {
           label: "Cookbook",

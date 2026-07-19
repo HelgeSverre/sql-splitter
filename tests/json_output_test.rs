@@ -553,6 +553,12 @@ fn test_generate_json_reports_diagnostics_on_model_failure() {
     assert!(json.get("diagnostics").is_some());
     assert!(json["diagnostics"].is_array());
     assert!(!json["diagnostics"].as_array().unwrap().is_empty());
+    for diagnostic in json["diagnostics"].as_array().unwrap() {
+        assert!(
+            diagnostic.get("documentation_url").is_some(),
+            "built-in diagnostic lacks canonical documentation URL: {diagnostic}"
+        );
+    }
 }
 
 // =============================================================================

@@ -1,0 +1,286 @@
+---
+title: generate
+description: Generate relational synthetic SQL from a model, a source dump, or both
+sidebar:
+  order: 1
+---
+
+`generate` produces relational synthetic SQL from a hand-authored YAML model,
+an inferred model built from a source dump, or an inferred model plus explicit
+overrides. Its alias is `gen`.
+
+:::caution[Synthetic is not anonymized]
+An inferred model can preserve literal choices, sampled values, source defaults,
+and constraint literals. `GEN-SOURCE-VALUES` identifies every rule that can
+replay literals without printing the values themselves. Use
+[`redact`](/commands/redact/) when the goal is irreversible anonymization.
+:::
+
+## Choose a workflow
+
+### Generate directly from a dump
+
+The command streams the dump once, profiles its schema and values, infers a
+model, compiles it, and writes synthetic rows:
+
+```bash
+sql-splitter generate production.sql -o synthetic.sql
+```
+
+### Emit an editable model
+
+Capture the resolved model, review it, then generate without reading the source
+again:
+
+```bash
+sql-splitter generate production.sql --emit-config synthetic.yaml
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+```
+
+An emitted model is self-contained. It freezes row counts, uses
+`defaults.inference: disabled`, and records a seed only when one was explicitly
+chosen.
+
+### Generate from a model
+
+```bash
+sql-splitter generate --config model.yaml -o synthetic.sql --seed 42
+```
+
+This is the safest repeatable workflow for CI fixtures and development seeds:
+the model is reviewable, no source dump is read, and the same seed produces the
+same output.
+
+### Apply an overrides document
+
+An overrides document patches the model inferred from the dump. It is not
+self-contained and therefore requires a source input:
+
+```bash
+sql-splitter generate production.sql \
+  --config overrides.yaml \
+  --emit-config resolved.yaml \
+  --scale 0.1 \
+  -o synthetic.sql
+```
+
+## Pipeline and precedence
+
+1. **Profile.** If an input dump is present, gather schema facts, exact row/null
+   counts, and bounded value evidence in one streaming pass.
+2. **Infer or load.** Infer a complete model, load a complete `kind: model`, or
+   load `kind: overrides` to patch the inferred base.
+3. **Compile.** Resolve row counts, table selection, names, type compatibility,
+   ownership, dependencies, planner reads/writes, and deterministic seeds.
+4. **Generate.** Execute tables and cross-table families in dependency order.
+5. **Render.** Stream SQL in the selected dialect. With `--verify`, render to a
+   protected temporary file, audit it, and publish only after a full pass.
+
+When several controls affect the same value, precedence is:
+
+```text
+source facts < inferred rules < YAML overrides < broad CLI overrides < per-table CLI overrides
+```
+
+## Complete model example
+
+The compiler requires one owner for every generated column. In this example,
+`sequence` owns `id`, `internet.email` owns `email`, and `unique` modifies each
+generated email after generation.
+
+{/* validate-generate-model */}
+
+```yaml
+version: 1
+kind: model
+defaults:
+  inference: disabled
+seed: 42
+output:
+  dialect: postgres
+  batch_size: 1000
+tables:
+  customers:
+    rows:
+      kind: fixed
+      count: 100
+    schema:
+      name: customers
+      primary_key: [id]
+      columns:
+        - name: id
+          source_type: bigint
+          family: big_integer
+          nullable: false
+          primary_key: true
+          unique: true
+          identity: false
+          generated: false
+        - name: email
+          source_type: varchar(255)
+          family: text
+          nullable: false
+          primary_key: false
+          unique: true
+          identity: false
+          generated: false
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      email:
+        generator: { kind: internet.email }
+        modifiers:
+          - { kind: unique, max_attempts: 20 }
+```
+
+Use the [model reference](/commands/generate/model-reference/) for the complete YAML grammar,
+the [generator catalog](/commands/generate/generators/) for column rules, and the
+[planner catalog](/commands/generate/planners/) for coordinated multi-column rules.
+
+## Preflight and reporting
+
+```bash
+# Parse and compile a complete model; write nothing
+sql-splitter generate --config model.yaml --check
+
+# Resolve counts and dependencies without generating rows
+sql-splitter generate --config model.yaml --dry-run
+
+# Show why inference chose each column rule
+sql-splitter generate production.sql --dry-run --explain
+
+# Treat warning-severity diagnostics as failures
+sql-splitter generate --config model.yaml --check --strict
+
+# Return a machine-readable report on stdout
+sql-splitter generate --config model.yaml -o synthetic.sql --json
+```
+
+`--strict` promotes warnings only. Informational diagnostics and advisories,
+including `GEN-SOURCE-VALUES`, remain non-fatal. `--quiet` suppresses the normal
+human summary, but safety advisories still reach stderr.
+
+## Scale and select tables
+
+```bash
+# Scale all table counts
+sql-splitter generate --config model.yaml -o out.sql --scale 0.1
+
+# Set root counts, then override one table and apply a final cap
+sql-splitter generate --config model.yaml -o out.sql \
+  --rows 10000 --table-rows audit_events=500 --max-rows 100000
+
+# Use comma-separated globs. Required dependencies are included or diagnosed.
+sql-splitter generate --config model.yaml -o out.sql --tables users,orders
+sql-splitter generate --config model.yaml -o out.sql --exclude 'audit_*,*_log'
+```
+
+`--scale` and `--rows` conflict. A table cannot be targeted by both
+`--table-rows` and `--table-scale`. `--max-rows` is applied last.
+
+## Seeds and reproducibility
+
+- `--seed N` overrides the model's root seed.
+- `--randomize` ignores a configured seed and draws fresh entropy.
+- A table with no `seed` inherits the root seed.
+- A table with `seed: null` opts out of deterministic inheritance.
+- A table with an integer seed uses its own stable stream.
+
+Determinism assumes the same model, selected tables, row counts, sql-splitter
+version, and render options. Random streams are derived by table, column, and
+operator identity, so unrelated operators do not share one global RNG stream.
+
+## Render and verify
+
+```bash
+# Preserve the source dialect by default, or select a target explicitly
+sql-splitter generate --config model.yaml -o out.sql --dialect sqlite
+
+# PostgreSQL uses COPY by default; request INSERT instead
+sql-splitter generate --config model.yaml -o out.sql \
+  --dialect postgres --no-copy
+
+# Generate, audit exact checks, then publish atomically
+sql-splitter generate --config model.yaml --verify -o out.sql
+```
+
+`--schema-only` and `--data-only` select one half of the output. `--batch-size`
+controls rows per `INSERT` or `COPY` batch. MSSQL can additionally use
+`--mssql-production-style` and `--mssql-go N`.
+
+Verification requires a real output path, not stdout. See
+[privacy and verification](/commands/generate/privacy-verification/) for the exact coverage and
+known gaps.
+
+## Options
+
+| Input and output            | Meaning                           | Default                   |
+| --------------------------- | --------------------------------- | ------------------------- |
+| `[INPUT]`                   | SQL dump or schema to profile     | none                      |
+| `-c, --config <PATH>`       | Complete model or overrides YAML  | none                      |
+| `--emit-config <PATH>`      | Write the resolved complete model | none                      |
+| `-o, --output <PATH>`       | Generated SQL; `-` means stdout   | stdout                    |
+| `--input-dialect <DIALECT>` | Force source parsing dialect      | auto-detect               |
+| `--dialect <DIALECT>`       | Render dialect                    | model, source, then MySQL |
+
+| Volume and selection           | Meaning                                           | Default |
+| ------------------------------ | ------------------------------------------------- | ------- |
+| `--scale <FACTOR>`             | Multiply every resolved count                     | none    |
+| `--rows <COUNT>`               | Set absolute root-table counts                    | none    |
+| `--table-rows <TABLE=COUNT>`   | Per-table absolute count; repeatable              | none    |
+| `--table-scale <TABLE=FACTOR>` | Per-table scale; repeatable                       | none    |
+| `--max-rows <COUNT>`           | Cap every table after other count controls        | none    |
+| `--tables <GLOBS>`             | Include matching tables and required dependencies | all     |
+| `--exclude <GLOBS>`            | Exclude matching tables                           | none    |
+
+| Profiling and randomness        | Meaning                          | Default                |
+| ------------------------------- | -------------------------------- | ---------------------- |
+| `--profile-depth <basic\|full>` | Bounded evidence depth           | `basic`                |
+| `--profile-sample <COUNT>`      | Override retained rows per table | depth budget           |
+| `--seed <U64>`                  | Stable root seed                 | model or fresh entropy |
+| `--randomize`                   | Force fresh entropy              | false                  |
+
+| Rendering                  | Meaning                                          | Default |
+| -------------------------- | ------------------------------------------------ | ------- |
+| `--schema-only`            | Emit DDL only                                    | false   |
+| `--data-only`              | Emit rows only                                   | false   |
+| `--batch-size <COUNT>`     | Rows per output batch                            | `1000`  |
+| `--no-copy`                | Use PostgreSQL `INSERT` instead of `COPY`        | false   |
+| `--mssql-production-style` | Add production-style MSSQL DDL conventions       | false   |
+| `--mssql-go <COUNT>`       | Emit `GO` every N MSSQL insert batches           | none    |
+| `--compress <FORMAT>`      | Reserved; currently returns an unavailable error | none    |
+
+| Preflight and reporting | Meaning                                        | Default |
+| ----------------------- | ---------------------------------------------- | ------- |
+| `--check`               | Compile only                                   | false   |
+| `--dry-run`             | Compile and report resolved counts             | false   |
+| `--verify`              | Generate, audit, and publish atomically        | false   |
+| `--explain`             | Include inference decisions                    | false   |
+| `--strict`              | Fail on warning-severity diagnostics           | false   |
+| `--json`                | Print the report as JSON on stdout             | false   |
+| `--quiet`               | Suppress ordinary human reporting              | false   |
+| `--progress`            | Accepted but not currently wired to generation | false   |
+
+## Output ownership and conflicts
+
+- `--check`, `--dry-run`, and `--verify` are mutually exclusive.
+- `--schema-only` and `--data-only` are mutually exclusive.
+- `--seed` and `--randomize` are mutually exclusive.
+- `--scale` and `--rows` are mutually exclusive.
+- `--quiet` and `--progress` are mutually exclusive.
+- `--json`, `--output -`, and `--emit-config -` each own stdout; only one may
+  be selected.
+- `--check` requires a complete model and cannot profile an input dump.
+- `--verify` requires `-o <real-path>` and cannot combine with compression.
+- MSSQL-specific flags require an explicit MSSQL output dialect.
+
+## Exit codes
+
+| Code | Meaning                                                            |
+| ---- | ------------------------------------------------------------------ |
+| `0`  | Generation or the requested preflight mode succeeded               |
+| `1`  | Model, warning-under-strict, runtime, I/O, or verification failure |
+| `2`  | Invalid CLI usage or conflicting flags                             |
+
+Every built-in diagnostic includes a stable code and a direct URL to the
+[diagnostic reference](/commands/generate/diagnostics/).

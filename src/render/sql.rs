@@ -302,10 +302,16 @@ impl<W: Write> SqlRenderer<W> {
                 }
                 let schema = &column.schema;
                 if schema.default_sql.is_none() && !schema.identity && !schema.generated {
-                    return Err(GenerateError::InvalidInput(format!(
-                        "GEN-RENDER-COPY-DEFAULT: table `{}` column `{}` renders as DEFAULT but has no database default/identity for PostgreSQL COPY to fall back on; render with `no_copy` (multi-row INSERT) instead",
-                        table.name, schema.name
-                    )));
+                    return Err(GenerateError::diagnostic(
+                        &crate::diagnostic::codes::RENDER_COPY_DEFAULT,
+                        format!("tables.{}.columns.{}", table.name, schema.name),
+                        format!(
+                            "table `{}` column `{}` renders as DEFAULT but has no database \
+                             default/identity for PostgreSQL COPY to fall back on; render with \
+                             `no_copy` (multi-row INSERT) instead",
+                            table.name, schema.name
+                        ),
+                    ));
                 }
             }
         }
@@ -462,16 +468,24 @@ impl<W: Write> RowSink for SqlRenderer<W> {
 
 /// Map an [`io::Error`] into the closed [`GenerateError`] set: the
 /// [`RowSink`] contract has no I/O variant, so a write
-/// failure surfaces as `InvalidInput` with a distinguishing `GEN-RENDER-IO`
-/// prefix rather than silently panicking or being swallowed.
+/// failure surfaces as a `GEN-RENDER-IO` diagnostic rather than silently
+/// panicking or being swallowed.
 fn io_err(err: io::Error) -> GenerateError {
-    GenerateError::InvalidInput(format!("GEN-RENDER-IO: {err}"))
+    GenerateError::diagnostic(
+        &crate::diagnostic::codes::RENDER_IO,
+        "output",
+        err.to_string(),
+    )
 }
 
 /// Map a [`fmt::Error`] the same way as [`io_err`]; writing into an in-memory
 /// buffer is infallible in practice; this only exists so `?` type-checks.
 fn fmt_err(_: fmt::Error) -> GenerateError {
-    GenerateError::InvalidInput("GEN-RENDER-IO: formatting error".to_string())
+    GenerateError::diagnostic(
+        &crate::diagnostic::codes::RENDER_IO,
+        "output",
+        "formatting error",
+    )
 }
 
 /// Quote and comma-join the table's column names at `indices`, in order.

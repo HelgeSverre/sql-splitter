@@ -1,0 +1,125 @@
+---
+title: Semantic generators
+description: Realistic names, addresses, commerce, network, file, and time values
+sidebar:
+  order: 2
+---
+
+Semantic generators produce domain-shaped synthetic values without retaining a
+source value vocabulary. The built-in catalog currently uses the English
+locale. Apply `unique` explicitly where the schema requires uniqueness; most
+semantic domains are not unique by construction.
+
+## No-argument text catalog
+
+These generators accept `text`, take no arguments, and stream deterministic
+catalog draws:
+
+| Domain   | Kinds                                                                                                        |
+| -------- | ------------------------------------------------------------------------------------------------------------ |
+| Person   | `person.first_name`, `person.last_name`, `person.full_name`, `person.username`, `person.title`               |
+| Internet | `internet.email`, `internet.domain`, `internet.url`, `internet.ipv4`, `internet.ipv6`, `internet.user_agent` |
+| Phone    | `phone.number`, `phone.country_code`                                                                         |
+| Company  | `company.name`, `company.department`, `company.job_title`                                                    |
+| Address  | `address.line1`, `address.line2`, `address.city`, `address.region`, `address.postcode`, `address.country`    |
+| Commerce | `commerce.currency`                                                                                          |
+| Text     | `text.word`, `text.sentence`, `text.paragraph`, `text.slug`                                                  |
+| File     | `file.name`, `file.extension`, `file.mime_type`                                                              |
+| Network  | `network.mac`                                                                                                |
+
+```yaml
+columns:
+  name:
+    generator: { kind: person.full_name }
+  email:
+    generator: { kind: internet.email }
+    modifiers: [{ kind: unique }]
+```
+
+Independent generators do not coordinate their semantics. For example,
+`file.name`, `file.extension`, and `file.mime_type` chosen independently need
+not agree; use the `file.metadata` planner for a coherent tuple.
+
+## Coordinates
+
+`address.latitude` and `address.longitude` accept `decimal` or `text`, take no
+arguments, and draw from the full global ranges at six decimal places. Use the
+`geo.coordinate_pair` planner when latitude and longitude need shared custom
+bounds or coordinated ownership.
+
+## Commerce
+
+| Kind                    | Arguments                      | Accepts              | Notes                           |
+| ----------------------- | ------------------------------ | -------------------- | ------------------------------- |
+| `commerce.product_name` | none                           | text                 | Two capitalized synthetic words |
+| `commerce.sku`          | none                           | text                 | `AAA-###-####` shape            |
+| `commerce.money`        | `min=0`, `max=1000`, `scale=2` | decimal, text        | Ordered bounds; scale `0..18`   |
+| `commerce.quantity`     | `min=1`, `max=100`             | integer, big_integer | Inclusive non-negative range    |
+
+Independent money columns do not preserve accounting equations. Use
+`commerce.order_family` for coordinated line items, subtotal, tax, discounts,
+shipping, and total.
+
+## Files, network, and duration
+
+| Kind           | Arguments               | Accepts              | Notes                |
+| -------------- | ----------------------- | -------------------- | -------------------- |
+| `file.size`    | `min=1`, `max=10000000` | integer, big_integer | Size in bytes        |
+| `network.port` | `min=1`, `max=65535`    | integer, big_integer | Inclusive port range |
+| `duration`     | `min=0`, `max=86400`    | integer, big_integer | Duration in seconds  |
+
+Every minimum must not exceed its maximum. These generators produce one value;
+they do not coordinate with file-name or temporal endpoint columns.
+
+## Identifiers
+
+### `identifier.token`
+
+`length=32`, `alphabet=alphanumeric`, `prefix=""`. Alphabets are
+`alphanumeric`, `hex`, `numeric`, `alpha`, and `url_safe`.
+
+### `identifier.nanoid`
+
+`length=21`, `alphabet=url_safe`, `prefix=""`. This is NanoID-shaped output;
+choose an explicit length if another system expects a fixed width.
+
+### `identifier.ulid`
+
+No arguments. Emits a 26-character Crockford-base32 ULID-shaped identifier.
+
+### `identifier.hash`
+
+`length=64`. Emits lowercase hexadecimal text. This is random hash-shaped data,
+not a digest of another generated column.
+
+## Dates and times
+
+| Kind       | Arguments | Range                             | Accepts         |
+| ---------- | --------- | --------------------------------- | --------------- |
+| `date`     | none      | `1970-01-01` through `2035-12-31` | date_time, text |
+| `time`     | none      | `00:00:00` through `23:59:59`     | date_time, text |
+| `datetime` | none      | `1970-01-01` through `2035-12-31` | date_time, text |
+
+The bounds of these single-column generators are fixed. Use a temporal planner
+for configurable ranges and ordering across several columns.
+
+## Relative times
+
+`before` and `after` read a required sibling `source` column. They accept
+`date_time` or `text` and use `min_seconds=1`, `max_seconds=86400` by default.
+
+```yaml
+columns:
+  created_at:
+    generator: { kind: datetime }
+  expires_at:
+    generator:
+      kind: after
+      source: created_at
+      min_seconds: 3600
+      max_seconds: 86400
+```
+
+The source must exist, be generated earlier without a dependency cycle, and
+contain a supported timestamp format at runtime. Bounds must be ordered and fit
+the supported timestamp arithmetic range.

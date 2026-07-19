@@ -580,7 +580,7 @@ CREATE TABLE widgets (id INT NOT NULL PRIMARY KEY, label VARCHAR(32) NOT NULL);
         profile
             .warnings
             .iter()
-            .any(|w| w.contains("GEN-PROFILE-SCHEMA-LATE")),
+            .any(|warning| warning.code == codes::PROFILE_SCHEMA_LATE.code),
         "overflow must raise GEN-PROFILE-SCHEMA-LATE, got {:?}",
         profile.warnings
     );
@@ -658,6 +658,7 @@ INSERT INTO metrics (id, qty) VALUES (1,10),(2,20),(3,30),(4,40),(5,50);
 // Infer explicit models from a dump profile
 // ---------------------------------------------------------------------------
 
+use sql_splitter::diagnostic::{codes, Severity};
 use sql_splitter::generate::{
     CompileOptions, GeneratedRow, GenerationEngine, ModelCompiler, PlannedTable, RowSink,
 };
@@ -1087,10 +1088,48 @@ fn observed_sample_source_literal_marker_propagates() {
         result
             .warnings
             .iter()
-            .any(|w| w.contains("GEN-INFER-SOURCE-DERIVED")),
+            .any(|warning| warning.code == codes::INFER_SOURCE_DERIVED.code),
         "source-derived marker missing from warnings: {:?}",
         result.warnings
     );
+}
+
+#[test]
+fn planner_nomination_is_informational_and_names_the_exact_kind() {
+    let table = PortableTable {
+        name: "events".to_string(),
+        columns: vec![
+            portable_column("created_at", "datetime", SqlTypeFamily::DateTime),
+            portable_column("updated_at", "datetime", SqlTypeFamily::DateTime),
+        ],
+        primary_key: Vec::new(),
+        unique_constraints: Vec::new(),
+        check_constraints: Vec::new(),
+        indexes: Vec::new(),
+        create_statement: None,
+        relationships: Vec::new(),
+    };
+    let schema = PortableSchema {
+        dialect: "mysql".to_string(),
+        tables: BTreeMap::from([("events".to_string(), table)]),
+    };
+    let profile = DumpProfile {
+        depth: ProfileDepth::Schema,
+        schema: schema.clone(),
+        tables: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    let nomination = result
+        .warnings
+        .iter()
+        .find(|warning| warning.code == codes::INFER_PLANNER_NOMINATE.code)
+        .expect("temporal planner nomination");
+
+    assert_eq!(nomination.severity, Severity::Info);
+    assert!(nomination.message.contains("temporal.timestamps"));
+    assert!(!nomination.message.contains("temporal-ordering"));
 }
 
 /// A boolean column with observed true/false counts replays the observed rate.

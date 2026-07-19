@@ -1,7 +1,9 @@
 //! Tests for the synthetic-data-generation diagnostics module and the typed
 //! extension registry.
 
-use sql_splitter::diagnostic::{Diagnostic, DiagnosticBag, Severity, SourceLocation};
+use sql_splitter::diagnostic::{
+    codes, Diagnostic, DiagnosticBag, DiagnosticCategory, Severity, SourceLocation, TypicalSeverity,
+};
 use sql_splitter::generate::{
     Buffering, ColumnScope, CompileContext, CompiledGenerator, ConstantFactory, Determinism,
     ExtensionRegistry, GeneratedValue, GeneratorDescriptor, GeneratorFactory, RowContext,
@@ -87,6 +89,10 @@ tables.orders.columns.total is produced by both:\n    \
 - columns.total.generator\n    \
 - planners[0] (commerce.order_family)\n  \
 help: remove the column generator or remove `total` from the planner mapping";
+    let expected = format!(
+        "{expected}\n  docs: {}",
+        codes::COLUMN_OWNER_CONFLICT.documentation_url()
+    );
 
     assert_eq!(rendered, expected);
 }
@@ -104,7 +110,10 @@ fn diagnostic_display_omits_help_and_related_when_absent() {
 
     assert_eq!(
         diagnostic.to_string(),
-        "error[GEN-MISSING-TABLE] tables.orders\n  table does not exist"
+        format!(
+            "error[GEN-MISSING-TABLE] tables.orders\n  table does not exist\n  docs: {}",
+            codes::MISSING_TABLE.documentation_url()
+        )
     );
 }
 
@@ -138,6 +147,164 @@ fn diagnostic_json_roundtrips_through_serde() {
     let json = serde_json::to_string(&bag).unwrap();
     let restored: DiagnosticBag = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.diagnostics, bag.diagnostics);
+}
+
+#[test]
+fn built_in_diagnostic_catalog_has_unique_codes_and_canonical_urls() {
+    let mut seen = std::collections::BTreeSet::new();
+    for definition in codes::ALL {
+        assert!(definition.code.starts_with("GEN-"));
+        assert!(
+            seen.insert(definition.code),
+            "duplicate {}",
+            definition.code
+        );
+        assert_eq!(
+            definition.documentation_url(),
+            format!(
+                "https://sql-splitter.dev/commands/generate/diagnostics/#{}",
+                definition.code
+            )
+        );
+        assert!(!definition.title.is_empty());
+        assert!(!definition.summary.is_empty());
+    }
+
+    assert_eq!(
+        codes::find("GEN-INFER-PLANNER-NOMINATE"),
+        Some(&codes::INFER_PLANNER_NOMINATE)
+    );
+    assert_eq!(
+        codes::INFER_PLANNER_NOMINATE.category,
+        DiagnosticCategory::Inference
+    );
+    assert_eq!(
+        codes::INFER_PLANNER_NOMINATE.typical_severity,
+        TypicalSeverity::Info
+    );
+    assert_eq!(
+        codes::SOURCE_VALUES.typical_severity,
+        TypicalSeverity::Advisory
+    );
+    assert!(codes::find("EXT-EXAMPLE").is_none());
+}
+
+#[test]
+fn every_production_gen_code_is_registered() {
+    fn visit(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !path.ends_with("src/diagnostic/codes.rs")
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(std::path::Path::new("src"), &mut files);
+    let pattern = regex::Regex::new(r"GEN-[A-Z0-9-]+").unwrap();
+    let ignored = [
+        "GEN-INFER",
+        "GEN-PLANNER-",
+        "GEN-PROFILE",
+        "GEN-UNUSED-COLUMN",
+    ];
+    let registered: std::collections::BTreeSet<_> = codes::ALL
+        .iter()
+        .map(|definition| definition.code)
+        .collect();
+    let mut missing = std::collections::BTreeSet::new();
+
+    for file in files {
+        let source = std::fs::read_to_string(file).unwrap();
+        for found in pattern.find_iter(&source).map(|matched| matched.as_str()) {
+            if !ignored.contains(&found) && !registered.contains(found) {
+                missing.insert(found.to_string());
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "production diagnostic codes missing from diagnostic::codes::ALL: {missing:#?}"
+    );
+}
+
+#[test]
+fn production_code_does_not_embed_raw_gen_code_strings() {
+    fn visit(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !path.ends_with("src/diagnostic/codes.rs")
+                && !path.ends_with("src/diagnostic.rs")
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(std::path::Path::new("src"), &mut files);
+    let pattern = regex::Regex::new(r#"\"GEN-[A-Z0-9-]+"#).unwrap();
+    let mut raw_literals = Vec::new();
+
+    for file in files {
+        let source = std::fs::read_to_string(&file).unwrap();
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("//") && pattern.is_match(line) {
+                raw_literals.push(format!("{}:{}: {}", file.display(), index + 1, trimmed));
+            }
+        }
+    }
+
+    assert!(
+        raw_literals.is_empty(),
+        "use diagnostic::codes definitions instead of raw GEN strings:\n{}",
+        raw_literals.join("\n")
+    );
+}
+
+#[test]
+fn info_and_advisory_diagnostics_are_non_fatal() {
+    let mut bag = DiagnosticBag::default();
+    bag.info(
+        &codes::INFER_PLANNER_NOMINATE,
+        "tables.events",
+        "candidate for temporal.timestamps",
+    );
+    bag.advisory(
+        &codes::SOURCE_VALUES,
+        "tables.users.columns.status",
+        "literal choices are replayed",
+    );
+
+    assert!(!bag.has_errors());
+    assert_eq!(bag.into_result(42).unwrap(), 42);
+}
+
+#[test]
+fn built_in_display_includes_docs_but_extension_display_does_not() {
+    let mut bag = DiagnosticBag::default();
+    bag.warning(
+        &codes::CONFIG_COMPLETE_MODEL,
+        "model.yaml",
+        "the complete model wins",
+    );
+    bag.warning("EXT-EXAMPLE", "model.yaml", "extension warning");
+
+    let built_in = bag.diagnostics[0].to_string();
+    assert!(built_in.contains(
+        "docs: https://sql-splitter.dev/commands/generate/diagnostics/#GEN-CONFIG-COMPLETE-MODEL"
+    ));
+    assert!(!bag.diagnostics[1].to_string().contains("docs:"));
 }
 
 // --- Extension registry -----------------------------------------------------
@@ -273,6 +440,116 @@ fn standard_registry_installs_the_constant_generator() {
         registry.generator("constant").unwrap().descriptor().kind,
         "constant"
     );
+}
+
+#[test]
+fn standard_planner_descriptors_publish_their_complete_top_level_arguments() {
+    let registry = ExtensionRegistry::standard();
+    let expected = [
+        (
+            "commerce.order_family",
+            &[
+                "child_columns",
+                "children",
+                "columns",
+                "currency_scale",
+                "discount",
+                "quantity",
+                "relationship",
+                "rounding",
+                "shipping",
+                "tax",
+                "unit_price",
+            ][..],
+        ),
+        (
+            "file.metadata",
+            &["columns", "extensions", "hash_kind", "size"][..],
+        ),
+        (
+            "geo.coordinate_pair",
+            &["bounds", "columns", "precision"][..],
+        ),
+        (
+            "hierarchy.tree",
+            &[
+                "columns",
+                "key",
+                "max_branching",
+                "max_depth",
+                "relationship",
+                "root_ratio",
+            ][..],
+        ),
+        (
+            "relation.junction_pair",
+            &["columns", "left_relationship", "right_relationship"][..],
+        ),
+        ("relation.polymorphic_pair", &["columns", "targets"][..]),
+        (
+            "relation.tenant_family",
+            &["columns", "num_tenants", "relationship", "tenant_start"][..],
+        ),
+        (
+            "temporal.interval",
+            &[
+                "columns",
+                "duration",
+                "end_inclusive",
+                "open_probability",
+                "open_value",
+                "start",
+                "timezone",
+            ][..],
+        ),
+        (
+            "temporal.lifecycle",
+            &["columns", "start", "states", "step", "weights"][..],
+        ),
+        (
+            "temporal.soft_delete",
+            &["columns", "deleted_range", "deletion_probability"][..],
+        ),
+        (
+            "temporal.timestamps",
+            &["columns", "created", "other_delay", "update_delay"][..],
+        ),
+        (
+            "workflow.progress_counters",
+            &[
+                "active_statuses",
+                "columns",
+                "completed_statuses",
+                "partition",
+                "progress",
+                "success_ratio",
+                "total",
+                "unclassified_ratio",
+            ][..],
+        ),
+    ];
+
+    let actual: Vec<_> = registry
+        .planners()
+        .map(|factory| {
+            let descriptor = factory.descriptor();
+            let mut arguments: Vec<_> = descriptor
+                .arguments
+                .iter()
+                .map(|argument| argument.name)
+                .collect();
+            arguments.sort_unstable();
+            (descriptor.kind, arguments)
+        })
+        .collect();
+
+    assert_eq!(actual.len(), expected.len());
+    for ((actual_kind, actual_arguments), (expected_kind, expected_arguments)) in
+        actual.iter().zip(expected)
+    {
+        assert_eq!(*actual_kind, expected_kind);
+        assert_eq!(actual_arguments, expected_arguments);
+    }
 }
 
 // --- Model compiler: selection and exact row counts -------------------------

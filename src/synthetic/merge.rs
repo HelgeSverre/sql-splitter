@@ -77,7 +77,7 @@ impl ModelMerger {
                 }
                 None => {
                     bag.error(
-                        "GEN-MISSING-TABLE",
+                        crate::diagnostic::codes::MISSING_TABLE.code,
                         format!("tables.{name}"),
                         "override table does not exist in the source/base model",
                     );
@@ -126,10 +126,18 @@ fn apply_source(
             match policy {
                 FingerprintPolicy::Ignore => {}
                 FingerprintPolicy::Warn => {
-                    bag.warning("GEN-SOURCE-FINGERPRINT", "source.fingerprint", message);
+                    bag.warning(
+                        crate::diagnostic::codes::SOURCE_FINGERPRINT.code,
+                        "source.fingerprint",
+                        message,
+                    );
                 }
                 FingerprintPolicy::Require => {
-                    bag.error("GEN-SOURCE-FINGERPRINT", "source.fingerprint", message);
+                    bag.error(
+                        crate::diagnostic::codes::SOURCE_FINGERPRINT.code,
+                        "source.fingerprint",
+                        message,
+                    );
                 }
             }
         }
@@ -179,7 +187,7 @@ impl TableOverride {
             let column_path = format!("{table_path}.columns.{column_name}");
             if !table.schema.columns.iter().any(|c| c.name == column_name) {
                 bag.error(
-                    "GEN-MISSING-COLUMN",
+                    crate::diagnostic::codes::MISSING_COLUMN.code,
                     column_path,
                     format!(
                         "override column `{column_name}` does not exist in table `{}`'s schema",
@@ -225,7 +233,7 @@ impl PortableTableOverride {
         if let Some(name) = &self.name {
             if name != &schema.name {
                 bag.error(
-                    "GEN-SCHEMA-MISMATCH",
+                    crate::diagnostic::codes::SCHEMA_MISMATCH.code,
                     format!("{table_path}.schema.name"),
                     format!(
                         "override asserts table name `{name}`, but the source/base schema names it `{}`; overrides cannot rename or otherwise restructure DDL",
@@ -237,7 +245,7 @@ impl PortableTableOverride {
         if let Some(create_statement) = &self.create_statement {
             if Some(create_statement) != schema.create_statement.as_ref() {
                 bag.error(
-                    "GEN-SCHEMA-MISMATCH",
+                    crate::diagnostic::codes::SCHEMA_MISMATCH.code,
                     format!("{table_path}.schema.create_statement"),
                     "override's create_statement does not match the source/base schema; overrides cannot redefine DDL structure",
                 );
@@ -283,7 +291,7 @@ impl RowsOverride {
                     Some(count) => *rows = RowsModel::Fixed { count },
                     None => {
                         bag.error(
-                            "GEN-INCOMPLETE-ROWS",
+                            crate::diagnostic::codes::INCOMPLETE_ROWS.code,
                             path,
                             "rows override switches to `fixed` but supplies no `count`, and the base table's rows are not already `fixed`",
                         );
@@ -304,7 +312,7 @@ impl RowsOverride {
                     Some(count) => *rows = RowsModel::Observed { count },
                     None => {
                         bag.error(
-                            "GEN-INCOMPLETE-ROWS",
+                            crate::diagnostic::codes::INCOMPLETE_ROWS.code,
                             path,
                             "rows override switches to `observed` but supplies neither `count` nor a `scale` against an already-`observed` base count",
                         );
@@ -327,7 +335,7 @@ impl RowsOverride {
                     }
                     _ => {
                         bag.error(
-                            "GEN-INCOMPLETE-ROWS",
+                            crate::diagnostic::codes::INCOMPLETE_ROWS.code,
                             path,
                             "rows override switches to `scale` but is missing `base` and/or `factor`",
                         );
@@ -361,7 +369,7 @@ impl RowsOverride {
                     }
                     _ => {
                         bag.error(
-                            "GEN-INCOMPLETE-ROWS",
+                            crate::diagnostic::codes::INCOMPLETE_ROWS.code,
                             path,
                             "rows override switches to `relation.children` but is missing `parent`, `count`, and/or `distribution`",
                         );

@@ -112,7 +112,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::convert::ConvertWarning;
-use crate::diagnostic::DiagnosticBag;
+use crate::diagnostic::{codes, Diagnostic, DiagnosticBag, SourceLocation};
 use crate::parser::SqlDialect;
 use crate::profile::evidence::DumpProfile;
 use crate::profile::{
@@ -257,12 +257,13 @@ pub struct GenerateReport {
     /// after the fact, even though its emitted model records no seed.
     pub effective_seed: Option<u64>,
     /// Every diagnostic collected while loading, merging, and compiling the
-    /// model. Warning-only on success; see [`GenerateError::Diagnostics`]
+    /// model. Non-error diagnostics only on success; see
+    /// [`GenerateError::Diagnostics`]
     /// for the failure path.
     pub diagnostics: DiagnosticBag,
     /// Every place the resolved model's rules replay literal values derived
     /// from the source dump. Locations and rule kinds only, never values — the
-    /// conservative `GEN-SOURCE-VALUES` safety notice is built from this.
+    /// `GEN-SOURCE-VALUES` advisory is built from this.
     pub source_values: Vec<SourceValueUse>,
     /// The per-column inference explanation, populated only when the request
     /// asked for it (`--explain`). Never carries observed values.
@@ -318,10 +319,9 @@ impl Generate {
     /// (`request.emit`) from that same plan, and optionally executes the same
     /// plan under `request.mode`.
     ///
-    /// Structured problems (a missing/invalid config, a compile error, a bad
-    /// merge) come back as [`GenerateError::Diagnostics`]; a request that
-    /// cannot be satisfied at all (no source, or `kind: overrides` with no
-    /// base model) comes back as [`GenerateError::InvalidInput`].
+    /// Structured problems discovered during loading, compilation, or runtime
+    /// come back as [`GenerateError::Diagnostics`] or
+    /// [`GenerateError::Diagnostic`].
     pub fn run(request: GenerateRequest) -> Result<GenerateReport, GenerateError> {
         let GenerateRequest {
             input,
@@ -336,6 +336,8 @@ impl Generate {
             verify,
             source,
         } = request;
+
+        let had_source_dump = input.is_some();
 
         let ResolvedModel {
             model,
@@ -367,6 +369,29 @@ impl Generate {
         // Scan the final resolved model (explicit + inferred rules) for
         // source-derived literals.
         let source_values = model.source_value_uses();
+        if !source_values.is_empty() {
+            let message = if had_source_dump {
+                format!(
+                    "{} rule(s) replay literal values that may have been derived from the source \
+                     dump; review the listed rules before sharing the output",
+                    source_values.len()
+                )
+            } else {
+                format!(
+                    "{} rule(s) replay hand-authored literal values; the output is synthetic, \
+                     not anonymized source data",
+                    source_values.len()
+                )
+            };
+            let diagnostic = diagnostics.advisory(&codes::SOURCE_VALUES, "tables", message);
+            diagnostic.related = source_values
+                .iter()
+                .map(|used| SourceLocation {
+                    path: used.path.clone(),
+                    description: Some(used.rule_kind.clone()),
+                })
+                .collect();
+        }
 
         // Under `--verify` the SQL is rendered to a protected temp, audited, and
         // published atomically *only if* the audit passes; an emitted model is
@@ -408,7 +433,7 @@ impl Generate {
             // as a warning so the user sees exactly what was NOT checked.
             if !not_checked.is_empty() {
                 out.diagnostics.warning(
-                    "GEN-VERIFY-NOTCHECKED",
+                    crate::diagnostic::codes::VERIFY_NOTCHECKED.code,
                     String::new(),
                     format!(
                         "verification passed but {} capability/capabilities could not be \
@@ -452,7 +477,7 @@ struct VerifiedRun {
 /// Render SQL to a protected temp beside the destination, verify it against the
 /// compiled plan, and publish atomically only if the full audit passes. A failed
 /// audit leaves every prior destination untouched and returns
-/// [`GenerateError::VerificationFailed`]. When a resolved model is also requested
+/// [`GenerateError::Diagnostic`] with `GEN-VERIFY-FAILED`. When a resolved model is also requested
 /// it is published *after* SQL verification succeeds; a failure publishing the
 /// second file is reported as a precise partial publication rather than as a
 /// pretended pairwise-atomic write.
@@ -464,14 +489,16 @@ fn run_verified(
     emit: Option<OutputTarget>,
     render: RenderOptions,
 ) -> Result<VerifiedRun, GenerateError> {
-    let destination =
-        match output {
-            OutputTarget::Path(path) => path,
-            OutputTarget::Discard => return Err(GenerateError::InvalidInput(
-                "GEN-VERIFY-NO-FILE: --verify requires a filesystem SQL destination, not stdout"
-                    .into(),
-            )),
-        };
+    let destination = match output {
+        OutputTarget::Path(path) => path,
+        OutputTarget::Discard => {
+            return Err(GenerateError::diagnostic(
+                &codes::VERIFY_NO_FILE,
+                "output",
+                "--verify requires a filesystem SQL destination, not stdout",
+            ))
+        }
+    };
 
     // Stage the resolved model YAML up front so a serialization error fails
     // before anything is rendered.
@@ -487,10 +514,14 @@ fn run_verified(
 
     // Render SQL into a protected temp file beside the destination.
     let mut sql_output = AtomicOutput::create(&destination).map_err(|error| {
-        GenerateError::InvalidInput(format!(
-            "GEN-VERIFY-STAGE: cannot stage output beside `{}`: {error}",
-            destination.display()
-        ))
+        GenerateError::diagnostic(
+            &codes::VERIFY_STAGE,
+            destination.display().to_string(),
+            format!(
+                "cannot stage output beside `{}`: {error}",
+                destination.display()
+            ),
+        )
     })?;
     let temp_path = sql_output.temp_path().to_path_buf();
     let (rows_written, render_warnings) = {
@@ -509,7 +540,22 @@ fn run_verified(
             .map(|check| format!("{} ({})", check.name, check.detail))
             .collect();
         // Dropping `sql_output` removes the temp; the destination is untouched.
-        return Err(GenerateError::VerificationFailed(failures));
+        let mut diagnostic = Diagnostic::error(
+            &codes::VERIFY_FAILED,
+            destination.display().to_string(),
+            format!(
+                "generated output failed verification and was not published; {} check(s) failed",
+                failures.len()
+            ),
+        );
+        diagnostic.related = failures
+            .into_iter()
+            .map(|failure| SourceLocation {
+                path: destination.display().to_string(),
+                description: Some(failure),
+            })
+            .collect();
+        return Err(GenerateError::Diagnostic(Box::new(diagnostic)));
     }
     let not_checked: Vec<String> = report
         .checks
@@ -522,21 +568,32 @@ fn run_verified(
     let mut outputs = vec![sql_output];
     if let Some((path, yaml)) = emit_plan {
         let mut model_output = AtomicOutput::create(&path).map_err(|error| {
-            GenerateError::InvalidInput(format!(
-                "GEN-VERIFY-STAGE: cannot stage model beside `{}`: {error}",
-                path.display()
-            ))
+            GenerateError::diagnostic(
+                &codes::VERIFY_STAGE,
+                path.display().to_string(),
+                format!("cannot stage model beside `{}`: {error}", path.display()),
+            )
         })?;
         use std::io::Write;
         model_output
             .writer()
             .write_all(yaml.as_bytes())
-            .map_err(|error| GenerateError::InvalidInput(format!("GEN-EMIT-IO: {error}")))?;
+            .map_err(|error| {
+                GenerateError::diagnostic(
+                    &codes::EMIT_IO,
+                    path.display().to_string(),
+                    error.to_string(),
+                )
+            })?;
         outputs.push(model_output);
     }
 
     publish_in_order(outputs).map_err(|partial| {
-        GenerateError::InvalidInput(format!("GEN-VERIFY-PARTIAL-PUBLISH: {partial}"))
+        GenerateError::diagnostic(
+            &codes::VERIFY_PARTIAL_PUBLISH,
+            "output",
+            partial.to_string(),
+        )
     })?;
 
     Ok(VerifiedRun {
@@ -563,8 +620,10 @@ fn assemble_model(
     source: &SourceOptions,
 ) -> Result<ResolvedModel, GenerateError> {
     match (input, config) {
-        (None, None) => Err(GenerateError::InvalidInput(
-            "GEN-REQUEST-SOURCE: at least one of `.input()` or `.config()` is required".into(),
+        (None, None) => Err(GenerateError::diagnostic(
+            &codes::REQUEST_SOURCE,
+            "request",
+            "at least one of `.input()` or `.config()` is required",
         )),
         (None, Some(config_path)) => {
             match ConfigLoader::load(config_path).map_err(GenerateError::Diagnostics)? {
@@ -573,12 +632,16 @@ fn assemble_model(
                     diagnostics: DiagnosticBag::default(),
                     decisions: Vec::new(),
                 }),
-                SyntheticFile::Overrides(_) => Err(GenerateError::InvalidInput(format!(
-                    "GEN-OVERRIDES-NO-BASE: `{}` is a `kind: overrides` document but no base \
-                     model is available; supply a source dump to profile (`.input()`) so the \
-                     overrides have a base to merge onto",
-                    config_path.display()
-                ))),
+                SyntheticFile::Overrides(_) => Err(GenerateError::diagnostic(
+                    &codes::OVERRIDES_NO_BASE,
+                    config_path.display().to_string(),
+                    format!(
+                        "`{}` is a `kind: overrides` document but no base model is available; \
+                         supply a source dump to profile (`.input()`) so the overrides have a \
+                         base to merge onto",
+                        config_path.display()
+                    ),
+                )),
             }
         }
         (Some(input_path), config) => {
@@ -586,12 +649,21 @@ fn assemble_model(
             let inference = ModelInference::standard()
                 .infer(&profile.schema, &profile)
                 .map_err(|error| {
-                    GenerateError::InvalidInput(format!("GEN-INFER-FAILED: {error}"))
+                    GenerateError::diagnostic(
+                        &codes::INFER_FAILED,
+                        input_path.display().to_string(),
+                        error.to_string(),
+                    )
                 })?;
 
             let mut diagnostics = DiagnosticBag::default();
-            push_coded_warnings(&mut diagnostics, "GEN-PROFILE", &profile.warnings);
-            push_coded_warnings(&mut diagnostics, "GEN-INFER", &inference.warnings);
+            diagnostics.diagnostics.extend(profile.warnings);
+            diagnostics.diagnostics.extend(
+                inference
+                    .warnings
+                    .into_iter()
+                    .filter(|diagnostic| diagnostic.code != codes::INFER_SOURCE_DERIVED.code),
+            );
 
             let base = inference.model;
             let decisions = inference.decisions;
@@ -619,7 +691,7 @@ fn assemble_model(
                             // model is authoritative and stands alone, so use it
                             // and note that the profiled base was set aside.
                             diagnostics.warning(
-                                "GEN-CONFIG-COMPLETE-MODEL",
+                                crate::diagnostic::codes::CONFIG_COMPLETE_MODEL.code,
                                 config_path.display().to_string(),
                                 "a complete `kind: model` config was supplied with a source dump; \
                                  using the config model and ignoring the profiled base",
@@ -660,25 +732,7 @@ fn profile_source(path: &Path, source: &SourceOptions) -> Result<DumpProfile, Ge
 
 /// Wrap an I/O / profiling failure as a `GEN-SOURCE-IO` invalid-input error.
 fn source_error(error: impl std::fmt::Display) -> GenerateError {
-    GenerateError::InvalidInput(format!("GEN-SOURCE-IO: {error}"))
-}
-
-/// Fold plain-string warnings (whose message often already begins with a
-/// `GEN-*` code) into structured diagnostics, splitting the leading code off
-/// the message when present and falling back to `default_code` otherwise.
-fn push_coded_warnings(bag: &mut DiagnosticBag, default_code: &str, messages: &[String]) {
-    for message in messages {
-        match message.split_once(": ") {
-            Some((code, rest))
-                if code.starts_with("GEN-") && !code.contains(char::is_whitespace) =>
-            {
-                bag.warning(code.to_string(), String::new(), rest.to_string());
-            }
-            _ => {
-                bag.warning(default_code.to_string(), String::new(), message.clone());
-            }
-        }
-    }
+    GenerateError::diagnostic(&codes::SOURCE_IO, "input", error.to_string())
 }
 
 /// Serialize the resolved model as a self-contained `--emit-config` document.
@@ -709,8 +763,9 @@ fn resolved_model_yaml(
     emit.defaults.inference = InferenceMode::Disabled;
     emit.seed = explicit_seed;
 
-    serde_yaml_ng::to_string(&emit)
-        .map_err(|error| GenerateError::InvalidInput(format!("GEN-EMIT-SERIALIZE: {error}")))
+    serde_yaml_ng::to_string(&emit).map_err(|error| {
+        GenerateError::diagnostic(&codes::EMIT_SERIALIZE, "emit_config", error.to_string())
+    })
 }
 
 fn emit_model(
@@ -723,10 +778,11 @@ fn emit_model(
 
     match target {
         OutputTarget::Path(path) => fs::write(path, yaml).map_err(|error| {
-            GenerateError::InvalidInput(format!(
-                "GEN-EMIT-IO: failed to write `{}`: {error}",
-                path.display()
-            ))
+            GenerateError::diagnostic(
+                &codes::EMIT_IO,
+                path.display().to_string(),
+                format!("failed to write `{}`: {error}", path.display()),
+            )
         }),
         // The builder/CLI only ever routes emit to a real path (a stdout emit
         // is spooled through a temp file), so this arm is unreachable in
@@ -794,10 +850,11 @@ fn run_generate(
     match output {
         OutputTarget::Path(path) => {
             let file = fs::File::create(&path).map_err(|err| {
-                GenerateError::InvalidInput(format!(
-                    "GEN-OUTPUT-IO: failed to create `{}`: {err}",
-                    path.display()
-                ))
+                GenerateError::diagnostic(
+                    &codes::OUTPUT_IO,
+                    path.display().to_string(),
+                    format!("failed to create `{}`: {err}", path.display()),
+                )
             })?;
             let mut renderer = SqlRenderer::new(file, render);
             let report = engine.run(&mut renderer)?;
@@ -889,8 +946,8 @@ fn resolve_render_options(
 fn merge_render_warnings(diagnostics: &mut DiagnosticBag, warnings: &[ConvertWarning]) {
     for warning in warnings {
         let code = match warning {
-            ConvertWarning::LossyConversion { .. } => "GEN-LOSSY-TYPE",
-            _ => "GEN-RENDER-WARNING",
+            ConvertWarning::LossyConversion { .. } => crate::diagnostic::codes::LOSSY_TYPE.code,
+            _ => crate::diagnostic::codes::RENDER_WARNING.code,
         };
         diagnostics.warning(code, "output", warning.to_string());
     }
@@ -1032,9 +1089,11 @@ impl GenerateBuilder {
         factor: f64,
     ) -> Result<Self, GenerateError> {
         if !factor.is_finite() || factor < 0.0 {
-            return Err(GenerateError::InvalidInput(format!(
-                "GEN-TABLE-SCALE-INVALID: table scale must be a finite, non-negative number, found {factor}"
-            )));
+            return Err(GenerateError::diagnostic(
+                &codes::TABLE_SCALE_INVALID,
+                format!("tables.{}", table.into()),
+                format!("table scale must be a finite, non-negative number, found {factor}"),
+            ));
         }
         self.compile
             .table_rows
@@ -1075,17 +1134,20 @@ impl GenerateBuilder {
     /// later, from [`Generate::run`].
     fn build(self) -> Result<GenerateRequest, GenerateError> {
         if self.verify && self.mode != RunMode::Generate {
-            return Err(GenerateError::InvalidInput(
-                "GEN-VERIFY-MODE: --verify generates and publishes; it cannot be combined with \
-                 check/dry-run/emit-only modes"
-                    .into(),
+            return Err(GenerateError::diagnostic(
+                &codes::VERIFY_MODE,
+                "request.verify",
+                "--verify generates and publishes; it cannot be combined with \
+                 check/dry-run/emit-only modes",
             ));
         }
         let output = match (self.mode, self.output) {
             (RunMode::Generate, Some(path)) => OutputTarget::Path(path),
             (RunMode::Generate, None) => {
-                return Err(GenerateError::InvalidInput(
-                    "GEN-REQUEST-OUTPUT: `.output()` is required under `RunMode::Generate`".into(),
+                return Err(GenerateError::diagnostic(
+                    &codes::REQUEST_OUTPUT,
+                    "request.output",
+                    "`.output()` is required under `RunMode::Generate`",
                 ))
             }
             (RunMode::Check | RunMode::DryRun | RunMode::EmitModel, Some(path)) => {
@@ -1095,8 +1157,10 @@ impl GenerateBuilder {
         };
 
         if self.verify && !matches!(output, OutputTarget::Path(_)) {
-            return Err(GenerateError::InvalidInput(
-                "GEN-VERIFY-NO-FILE: --verify requires a filesystem SQL destination".into(),
+            return Err(GenerateError::diagnostic(
+                &codes::VERIFY_NO_FILE,
+                "request.output",
+                "--verify requires a filesystem SQL destination",
             ));
         }
 

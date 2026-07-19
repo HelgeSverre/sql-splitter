@@ -1,0 +1,1132 @@
+---
+title: Diagnostic reference
+description: Every built-in generate diagnostic, with stable case-sensitive anchors
+sidebar:
+  order: 9
+---
+
+Every built-in generation diagnostic has a stable code, severity, path,
+message, and canonical documentation URL. Human output appends that URL; JSON
+output exposes it as `documentation_url`.
+
+Diagnostic codes identify the class of problem. The occurrence's `path`,
+`message`, optional `help`, and `related` locations explain the specific
+context. Two occurrences of the same code can therefore have different reasons
+or related locations without minting new codes.
+
+## Severity behavior
+
+| Severity   | Exit behavior                                            |
+| ---------- | -------------------------------------------------------- |
+| `info`     | Never blocks generation; not promoted by `--strict`      |
+| `advisory` | Non-fatal safety notice; remains visible under `--quiet` |
+| `warning`  | Non-fatal normally; becomes a failure under `--strict`   |
+| `error`    | Blocks the current operation                             |
+
+A URL such as
+`https://sql-splitter.dev/commands/generate/diagnostics/#GEN-INFER-PLANNER-NOMINATE`
+jumps directly to the exact, case-preserving heading below.
+
+## GEN-AFFIX-MISSING-VALUE — Affix value is missing \{#GEN-AFFIX-MISSING-VALUE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A prefix or suffix modifier does not declare the value it should add.
+
+## GEN-BOOLEAN-PROBABILITY — Boolean probability is invalid \{#GEN-BOOLEAN-PROBABILITY\}
+
+Typical severity: **error** · Category: **generator**
+
+A boolean generator probability falls outside the supported zero-to-one range.
+
+## GEN-BYTES-LENGTH-RANGE — Byte length range is invalid \{#GEN-BYTES-LENGTH-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A bytes generator has incompatible minimum and maximum lengths.
+
+## GEN-CANCELLED — Generation was cancelled \{#GEN-CANCELLED\}
+
+Typical severity: **error** · Category: **runtime**
+
+The generation loop observed a cancellation request before it finished.
+
+## GEN-CASE-INVALID-MODE — Case mode is invalid \{#GEN-CASE-INVALID-MODE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A case modifier names a mode other than the supported lower, upper, or title transformations.
+
+## GEN-CHILD-COUNT-IMPOSSIBLE — Child row count is impossible \{#GEN-CHILD-COUNT-IMPOSSIBLE\}
+
+Typical severity: **error** · Category: **selection**
+
+The resolved child count cannot satisfy the configured minimum fan-out for every parent.
+
+## GEN-CHOICE-EMPTY — Choice list is empty \{#GEN-CHOICE-EMPTY\}
+
+Typical severity: **error** · Category: **generator**
+
+A choice generator has no values from which to draw.
+
+## GEN-CHOICE-INVALID-VALUE — Choice value is incompatible \{#GEN-CHOICE-INVALID-VALUE\}
+
+Typical severity: **error** · Category: **generator**
+
+A choice value cannot be represented by the target column type.
+
+## GEN-CHOICE-MISSING-VALUES — Choice values are missing \{#GEN-CHOICE-MISSING-VALUES\}
+
+Typical severity: **error** · Category: **generator**
+
+A choice generator omits its required values list.
+
+## GEN-CLAMP-MISSING-BOUNDS — Clamp bounds are missing \{#GEN-CLAMP-MISSING-BOUNDS\}
+
+Typical severity: **error** · Category: **modifier**
+
+A clamp modifier supplies neither a minimum nor a maximum bound.
+
+## GEN-CLAMP-RANGE — Clamp range is invalid \{#GEN-CLAMP-RANGE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A clamp modifier's maximum is below its minimum.
+
+## GEN-COLUMN-CYCLE — Column dependency cycle \{#GEN-COLUMN-CYCLE\}
+
+Typical severity: **error** · Category: **selection**
+
+Column and planner read/write dependencies contain a cycle that no single planner owns.
+
+## GEN-COLUMN-OWNER-CONFLICT — Column has multiple owners \{#GEN-COLUMN-OWNER-CONFLICT\}
+
+Typical severity: **error** · Category: **selection**
+
+More than one generator or planner claims responsibility for the same output column.
+
+## GEN-COLUMN-OWNER-MISSING — Column has no owner \{#GEN-COLUMN-OWNER-MISSING\}
+
+Typical severity: **error** · Category: **selection**
+
+A generated column has no generator, planner, or structural source that can produce its value.
+
+## GEN-COMMERCE-MONEY-RANGE — Money range is invalid \{#GEN-COMMERCE-MONEY-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A commerce money generator has incompatible amount bounds.
+
+## GEN-COMMERCE-MONEY-SCALE — Money scale is invalid \{#GEN-COMMERCE-MONEY-SCALE\}
+
+Typical severity: **error** · Category: **generator**
+
+A commerce money generator requests an unsupported decimal scale.
+
+## GEN-CONFIG-COMPLETE-MODEL — Complete model overrides the profiled base \{#GEN-CONFIG-COMPLETE-MODEL\}
+
+Typical severity: **warning** · Category: **config**
+
+A complete model was supplied with a source dump, so the complete model is authoritative.
+
+## GEN-CONFIG-IO — Configuration file could not be read \{#GEN-CONFIG-IO\}
+
+Typical severity: **error** · Category: **config**
+
+The root configuration or an imported configuration file could not be read.
+
+## GEN-CONFIG-PARSE — Configuration YAML is invalid \{#GEN-CONFIG-PARSE\}
+
+Typical severity: **error** · Category: **config**
+
+A configuration document is not valid YAML or contains a duplicate mapping key.
+
+## GEN-CONFIG-ROLE — Configuration role is invalid \{#GEN-CONFIG-ROLE\}
+
+Typical severity: **error** · Category: **config**
+
+A merged document cannot be parsed as its declared model or overrides role.
+
+## GEN-COORDINATE-BOUNDS — Coordinate bounds are invalid \{#GEN-COORDINATE-BOUNDS\}
+
+Typical severity: **error** · Category: **planner**
+
+A coordinate planner bounding box is inverted or outside valid latitude or longitude limits.
+
+## GEN-COORDINATE-COLUMN-MISSING — Coordinate column is missing \{#GEN-COORDINATE-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A coordinate planner role names a column that does not exist.
+
+## GEN-COORDINATE-PRECISION — Coordinate precision is invalid \{#GEN-COORDINATE-PRECISION\}
+
+Typical severity: **error** · Category: **planner**
+
+A coordinate planner precision falls outside the supported range.
+
+## GEN-COPY-MISSING-SOURCE — Copy source is missing \{#GEN-COPY-MISSING-SOURCE\}
+
+Typical severity: **error** · Category: **generator**
+
+A copy generator omits the sibling column it should read.
+
+## GEN-COPY-TYPE-MISMATCH — Copy source type is incompatible \{#GEN-COPY-TYPE-MISMATCH\}
+
+Typical severity: **error** · Category: **generator**
+
+A copy generator's source value cannot populate the target column type.
+
+## GEN-COPY-UNKNOWN-FIELD — Copy source column is unknown \{#GEN-COPY-UNKNOWN-FIELD\}
+
+Typical severity: **error** · Category: **generator**
+
+A copy generator names a sibling column that does not exist.
+
+## GEN-COUNT-CONTROL-CONFLICT — Global count controls conflict \{#GEN-COUNT-CONTROL-CONFLICT\}
+
+Typical severity: **error** · Category: **selection**
+
+Mutually exclusive global row-count controls were supplied together.
+
+## GEN-DECIMAL-RANGE — Decimal range is invalid \{#GEN-DECIMAL-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A decimal generator's maximum is below its minimum.
+
+## GEN-DECIMAL-SCALE — Decimal scale is invalid \{#GEN-DECIMAL-SCALE\}
+
+Typical severity: **error** · Category: **generator**
+
+A decimal generator's scale cannot represent its configured range or target type.
+
+## GEN-DETACHED-DEPENDENCY — Optional dependency was detached \{#GEN-DETACHED-DEPENDENCY\}
+
+Typical severity: **warning** · Category: **selection**
+
+A nullable foreign key points to an excluded table and its rendered constraint was omitted.
+
+## GEN-EMIT-IO — Resolved model could not be written \{#GEN-EMIT-IO\}
+
+Typical severity: **error** · Category: **rendering**
+
+Writing the resolved model configuration failed.
+
+## GEN-EMIT-SERIALIZE — Resolved model could not be serialized \{#GEN-EMIT-SERIALIZE\}
+
+Typical severity: **error** · Category: **rendering**
+
+The resolved model could not be encoded as YAML.
+
+## GEN-EXCLUDED-DEPENDENCY — Required dependency was excluded \{#GEN-EXCLUDED-DEPENDENCY\}
+
+Typical severity: **error** · Category: **selection**
+
+A selected table depends on another table that filtering excluded.
+
+## GEN-FAMILY-SPOOL — Family spool failed \{#GEN-FAMILY-SPOOL\}
+
+Typical severity: **error** · Category: **runtime**
+
+A buffered cross-table planner could not write or replay its protected temporary data.
+
+## GEN-FILE-COLUMN-MISSING — File metadata column is missing \{#GEN-FILE-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A file metadata role names a column that does not exist.
+
+## GEN-FILE-EXTENSIONS — File extension list is invalid \{#GEN-FILE-EXTENSIONS\}
+
+Typical severity: **error** · Category: **planner**
+
+A file metadata planner has no usable recognized extension.
+
+## GEN-FILE-HASH-KIND — File hash kind is invalid \{#GEN-FILE-HASH-KIND\}
+
+Typical severity: **error** · Category: **planner**
+
+A file metadata planner requests an unsupported digest shape.
+
+## GEN-FILE-SIZE-RANGE — File size range is invalid \{#GEN-FILE-SIZE-RANGE\}
+
+Typical severity: **error** · Category: **planner**
+
+A file metadata size range is negative or inverted.
+
+## GEN-FOREIGN-KEY-UNRESOLVED — Foreign key value cannot be resolved \{#GEN-FOREIGN-KEY-UNRESOLVED\}
+
+Typical severity: **error** · Category: **selection**
+
+A relationship-owned foreign-key column has no usable value source.
+
+## GEN-FORMAT-MISSING-TEMPLATE — Format template is missing \{#GEN-FORMAT-MISSING-TEMPLATE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A format modifier omits its required template.
+
+## GEN-GAUSSIAN-MISSING-PARAMS — Gaussian parameters are missing \{#GEN-GAUSSIAN-MISSING-PARAMS\}
+
+Typical severity: **error** · Category: **generator**
+
+A gaussian generator omits required distribution parameters.
+
+## GEN-GAUSSIAN-NON-FINITE — Gaussian parameter is not finite \{#GEN-GAUSSIAN-NON-FINITE\}
+
+Typical severity: **error** · Category: **generator**
+
+A gaussian generator contains a NaN or infinite parameter.
+
+## GEN-GAUSSIAN-RANGE — Gaussian range is invalid \{#GEN-GAUSSIAN-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A gaussian generator's configured bounds are incompatible.
+
+## GEN-GENERATOR-TYPE — Generator does not support the column type \{#GEN-GENERATOR-TYPE\}
+
+Typical severity: **error** · Category: **generator**
+
+The selected generator cannot produce values for the target SQL type family.
+
+## GEN-GENERATOR-UNKNOWN — Generator kind is unknown \{#GEN-GENERATOR-UNKNOWN\}
+
+Typical severity: **error** · Category: **generator**
+
+The model names a generator kind that is not registered.
+
+## GEN-HISTOGRAM-ALL-ZERO — Histogram weights are all zero \{#GEN-HISTOGRAM-ALL-ZERO\}
+
+Typical severity: **error** · Category: **generator**
+
+A histogram has no bin with positive probability.
+
+## GEN-HISTOGRAM-EMPTY — Histogram is empty \{#GEN-HISTOGRAM-EMPTY\}
+
+Typical severity: **error** · Category: **generator**
+
+A histogram generator has no bins from which to draw.
+
+## GEN-HISTOGRAM-INVALID-BIN — Histogram bin is invalid \{#GEN-HISTOGRAM-INVALID-BIN\}
+
+Typical severity: **error** · Category: **generator**
+
+A histogram bin is malformed or cannot be represented by the target column.
+
+## GEN-HISTOGRAM-MISSING-BINS — Histogram bins are missing \{#GEN-HISTOGRAM-MISSING-BINS\}
+
+Typical severity: **error** · Category: **generator**
+
+A histogram generator omits its required bins.
+
+## GEN-HISTOGRAM-NON-FINITE — Histogram value is not finite \{#GEN-HISTOGRAM-NON-FINITE\}
+
+Typical severity: **error** · Category: **generator**
+
+A histogram bin contains a NaN or infinite bound or weight.
+
+## GEN-HISTOGRAM-RANGE — Histogram range is invalid \{#GEN-HISTOGRAM-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A histogram bin or overall range has incompatible bounds.
+
+## GEN-HISTOGRAM-UNSORTED — Histogram bins are unsorted \{#GEN-HISTOGRAM-UNSORTED\}
+
+Typical severity: **error** · Category: **generator**
+
+Histogram bin boundaries are not in ascending order.
+
+## GEN-IMPORT-COLLISION — Imported settings collide \{#GEN-IMPORT-COLLISION\}
+
+Typical severity: **error** · Category: **config**
+
+Two imports define the same configuration path without an unambiguous owner.
+
+## GEN-IMPORT-KIND — Imported document has the wrong kind \{#GEN-IMPORT-KIND\}
+
+Typical severity: **error** · Category: **config**
+
+An imported document is not an overrides document.
+
+## GEN-IMPORT-NESTED — Nested imports are not allowed \{#GEN-IMPORT-NESTED\}
+
+Typical severity: **error** · Category: **config**
+
+An imported overrides document declares its own imports.
+
+## GEN-IMPORT-REMOTE — Remote import is not allowed \{#GEN-IMPORT-REMOTE\}
+
+Typical severity: **error** · Category: **config**
+
+An import path is absolute or looks like a remote URL.
+
+## GEN-INCOMPLETE-ROWS — Row-count override is incomplete \{#GEN-INCOMPLETE-ROWS\}
+
+Typical severity: **error** · Category: **config**
+
+An override changes the row-count rule kind without supplying the fields that kind needs.
+
+## GEN-INFER-FAILED — Model inference failed \{#GEN-INFER-FAILED\}
+
+Typical severity: **error** · Category: **inference**
+
+Profiling evidence could not be converted into a complete synthetic model.
+
+## GEN-INFER-PLANNER-NOMINATE — Schema matches an optional planner \{#GEN-INFER-PLANNER-NOMINATE\}
+
+Typical severity: **info** · Category: **inference**
+
+The schema has the columns required by a planner that inference does not enable automatically.
+
+## GEN-INFER-SOURCE-DERIVED — Inference retained source-derived literals \{#GEN-INFER-SOURCE-DERIVED\}
+
+Typical severity: **warning** · Category: **inference**
+
+An inferred rule embeds bounded literal values observed in the source dump.
+
+## GEN-INFER-TABLE-UNKNOWN — Profiled table is absent from the schema \{#GEN-INFER-TABLE-UNKNOWN\}
+
+Typical severity: **warning** · Category: **inference**
+
+Profiling produced evidence for a table that the inferred schema does not contain.
+
+## GEN-INTEGER-RANGE — Integer range is invalid \{#GEN-INTEGER-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+An integer generator's maximum is below its minimum.
+
+## GEN-INTERVAL-COLUMN-MISSING — Interval column is missing \{#GEN-INTERVAL-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A temporal interval role names a column that does not exist.
+
+## GEN-INTERVAL-DURATION — Interval duration is invalid \{#GEN-INTERVAL-DURATION\}
+
+Typical severity: **error** · Category: **planner**
+
+A temporal interval duration is negative, overflowing, or incompatible with inclusive ends.
+
+## GEN-INTERVAL-OPEN-END — Open interval cannot represent a missing end \{#GEN-INTERVAL-OPEN-END\}
+
+Typical severity: **error** · Category: **planner**
+
+Open rows are possible but the configured end column is not nullable.
+
+## GEN-INTERVAL-START — Interval start configuration is invalid \{#GEN-INTERVAL-START\}
+
+Typical severity: **error** · Category: **planner**
+
+A temporal interval start range is missing, unparsable, or inverted.
+
+## GEN-INTERVAL-TIMEZONE — Interval timezone is invalid \{#GEN-INTERVAL-TIMEZONE\}
+
+Typical severity: **error** · Category: **planner**
+
+A temporal interval names an unknown timezone.
+
+## GEN-INVALID-GLOB — Table glob is invalid \{#GEN-INVALID-GLOB\}
+
+Typical severity: **error** · Category: **selection**
+
+A table include or exclude pattern cannot be compiled as a glob.
+
+## GEN-JSON-VALUE-INVALID — JSON value is invalid \{#GEN-JSON-VALUE-INVALID\}
+
+Typical severity: **error** · Category: **generator**
+
+A JSON value generator contains text that is not valid JSON.
+
+## GEN-JUNCTION-COLUMN-MISSING — Junction column is missing \{#GEN-JUNCTION-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A junction planner role names a column that does not exist.
+
+## GEN-JUNCTION-EXHAUSTED — Junction pair space is exhausted \{#GEN-JUNCTION-EXHAUSTED\}
+
+Typical severity: **error** · Category: **planner**
+
+The requested junction rows exceed the number of distinct left/right pairs.
+
+## GEN-JUNCTION-KEY-UNSUPPORTED — Junction key domain is unsupported \{#GEN-JUNCTION-KEY-UNSUPPORTED\}
+
+Typical severity: **error** · Category: **planner**
+
+A junction relationship does not expose a dense key domain.
+
+## GEN-JUNCTION-RELATIONSHIP — Junction relationship is invalid \{#GEN-JUNCTION-RELATIONSHIP\}
+
+Typical severity: **error** · Category: **planner**
+
+A junction planner omits or names an unknown left or right relationship.
+
+## GEN-KEY-DOMAIN-UNSUPPORTED — Relationship key domain is unsupported \{#GEN-KEY-DOMAIN-UNSUPPORTED\}
+
+Typical severity: **error** · Category: **runtime**
+
+A relationship targets a parent key that cannot be enumerated as a supported dense domain.
+
+## GEN-LIFECYCLE-COLUMN-MISSING — Lifecycle column is missing \{#GEN-LIFECYCLE-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A lifecycle planner role names a column that does not exist.
+
+## GEN-LIFECYCLE-NULLABILITY — Lifecycle column nullability is impossible \{#GEN-LIFECYCLE-NULLABILITY\}
+
+Typical severity: **error** · Category: **planner**
+
+A timestamp can be absent in a reachable state but its target column is not nullable.
+
+## GEN-LIFECYCLE-RANGE — Lifecycle start range is invalid \{#GEN-LIFECYCLE-RANGE\}
+
+Typical severity: **error** · Category: **planner**
+
+A lifecycle start range is missing, unparsable, or inverted.
+
+## GEN-LIFECYCLE-STATES — Lifecycle states are invalid \{#GEN-LIFECYCLE-STATES\}
+
+Typical severity: **error** · Category: **planner**
+
+A lifecycle planner has an empty or duplicate state chain.
+
+## GEN-LIFECYCLE-STATUS-VOCABULARY — Lifecycle status vocabulary is inconsistent \{#GEN-LIFECYCLE-STATUS-VOCABULARY\}
+
+Typical severity: **error** · Category: **planner**
+
+A lifecycle column mapping names a state outside the declared state chain.
+
+## GEN-LIFECYCLE-STEP — Lifecycle step is invalid \{#GEN-LIFECYCLE-STEP\}
+
+Typical severity: **error** · Category: **planner**
+
+A lifecycle timestamp step is negative, overflowing, or uses an unknown unit.
+
+## GEN-LIFECYCLE-WEIGHTS — Lifecycle weights are invalid \{#GEN-LIFECYCLE-WEIGHTS\}
+
+Typical severity: **error** · Category: **planner**
+
+Lifecycle terminal-state weights are malformed, negative, or sum to zero.
+
+## GEN-LOSSY-TYPE — Type conversion is lossy \{#GEN-LOSSY-TYPE\}
+
+Typical severity: **warning** · Category: **rendering**
+
+Cross-dialect rendering cannot preserve a source column type exactly.
+
+## GEN-MAX-ROWS-CAPPED — Maximum row cap reduced a table \{#GEN-MAX-ROWS-CAPPED\}
+
+Typical severity: **warning** · Category: **selection**
+
+The final maximum-row limit reduced a table's resolved row count.
+
+## GEN-MISSING-COLUMN — Override column does not exist \{#GEN-MISSING-COLUMN\}
+
+Typical severity: **error** · Category: **config**
+
+An overrides document names a column absent from the base model.
+
+## GEN-MISSING-TABLE — Override table does not exist \{#GEN-MISSING-TABLE\}
+
+Typical severity: **error** · Category: **config**
+
+An overrides document names a table absent from the base model.
+
+## GEN-MODIFIER-TYPE — Modifier does not support the column type \{#GEN-MODIFIER-TYPE\}
+
+Typical severity: **error** · Category: **modifier**
+
+The selected modifier cannot transform the target SQL type family.
+
+## GEN-MODIFIER-UNKNOWN — Modifier kind is unknown \{#GEN-MODIFIER-UNKNOWN\}
+
+Typical severity: **error** · Category: **modifier**
+
+The model names a modifier kind that is not registered.
+
+## GEN-MONOTONIC-STEP — Monotonic step is invalid \{#GEN-MONOTONIC-STEP\}
+
+Typical severity: **error** · Category: **generator**
+
+A monotonic generator uses a zero or otherwise invalid step.
+
+## GEN-NULL-ON-NON-NULLABLE — Null generator targets a non-nullable column \{#GEN-NULL-ON-NON-NULLABLE\}
+
+Typical severity: **error** · Category: **generator**
+
+A rule can emit null for a column whose schema forbids null values.
+
+## GEN-NULL-RATE-MISSING-RATE — Null-rate probability is missing \{#GEN-NULL-RATE-MISSING-RATE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A null-rate modifier omits its required rate.
+
+## GEN-NULL-RATE-ON-NON-NULLABLE — Null-rate modifier targets a non-nullable column \{#GEN-NULL-RATE-ON-NON-NULLABLE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A null-rate modifier can emit null for a column whose schema forbids it.
+
+## GEN-NULL-RATE-RANGE — Null-rate probability is invalid \{#GEN-NULL-RATE-RANGE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A null-rate probability falls outside the supported zero-to-one range.
+
+## GEN-OBSERVED-SAMPLE-ALL-ZERO — Observed-sample weights are all zero \{#GEN-OBSERVED-SAMPLE-ALL-ZERO\}
+
+Typical severity: **error** · Category: **generator**
+
+An observed sample has no value with positive probability.
+
+## GEN-OBSERVED-SAMPLE-EMPTY — Observed sample is empty \{#GEN-OBSERVED-SAMPLE-EMPTY\}
+
+Typical severity: **error** · Category: **generator**
+
+An observed-sample generator has no values from which to draw.
+
+## GEN-OBSERVED-SAMPLE-INVALID-VALUE — Observed-sample value is incompatible \{#GEN-OBSERVED-SAMPLE-INVALID-VALUE\}
+
+Typical severity: **error** · Category: **generator**
+
+An observed sample value cannot be represented by the target column type.
+
+## GEN-OBSERVED-SAMPLE-INVALID-WEIGHT — Observed-sample weight is invalid \{#GEN-OBSERVED-SAMPLE-INVALID-WEIGHT\}
+
+Typical severity: **error** · Category: **generator**
+
+An observed sample contains a negative, NaN, or infinite weight.
+
+## GEN-OBSERVED-SAMPLE-MISSING-VALUES — Observed-sample values are missing \{#GEN-OBSERVED-SAMPLE-MISSING-VALUES\}
+
+Typical severity: **error** · Category: **generator**
+
+An observed-sample generator omits its required values.
+
+## GEN-ORDER-FAMILY-CHILD-UNKNOWN — Order-family child table is unknown \{#GEN-ORDER-FAMILY-CHILD-UNKNOWN\}
+
+Typical severity: **error** · Category: **planner**
+
+An order-family planner names a child table absent from the model.
+
+## GEN-ORDER-FAMILY-COLUMN-MISSING — Order-family column is missing \{#GEN-ORDER-FAMILY-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A required parent or child money role is absent or names an unknown column.
+
+## GEN-ORDER-FAMILY-CONFIG — Order-family configuration is invalid \{#GEN-ORDER-FAMILY-CONFIG\}
+
+Typical severity: **error** · Category: **planner**
+
+An order-family planner omits or misconfigures a required top-level option.
+
+## GEN-ORDER-FAMILY-OVERFLOW — Order-family arithmetic overflow \{#GEN-ORDER-FAMILY-OVERFLOW\}
+
+Typical severity: **error** · Category: **planner**
+
+Order-family minor-unit arithmetic exceeds the representable range.
+
+## GEN-ORDER-FAMILY-RELATIONSHIP — Order-family relationship is invalid \{#GEN-ORDER-FAMILY-RELATIONSHIP\}
+
+Typical severity: **error** · Category: **planner**
+
+The named child relationship does not reference the planner's parent table.
+
+## GEN-ORDER-FAMILY-SCALE — Order-family currency scale is inconsistent \{#GEN-ORDER-FAMILY-SCALE\}
+
+Typical severity: **error** · Category: **planner**
+
+A configured money column does not match the planner's currency scale.
+
+## GEN-ORDER-FAMILY-UNKNOWN-FIELD — Order-family field is unknown \{#GEN-ORDER-FAMILY-UNKNOWN-FIELD\}
+
+Typical severity: **error** · Category: **planner**
+
+An order-family planner uses a removed flat field instead of the parent or child column maps.
+
+## GEN-ORDER-FAMILY-ZERO-LINES — Order-family line count is impossible \{#GEN-ORDER-FAMILY-ZERO-LINES\}
+
+Typical severity: **error** · Category: **planner**
+
+A configured line distribution can yield zero lines where the planner requires at least one.
+
+## GEN-OUTPUT-IO — Generated output could not be written \{#GEN-OUTPUT-IO\}
+
+Typical severity: **error** · Category: **runtime**
+
+Opening, writing, flushing, or publishing the generated SQL output failed.
+
+## GEN-OVERRIDES-NO-BASE — Overrides document has no base model \{#GEN-OVERRIDES-NO-BASE\}
+
+Typical severity: **error** · Category: **config**
+
+An overrides document was supplied without a source dump or other base model.
+
+## GEN-PATTERN-MISSING-MASK — Pattern mask is missing \{#GEN-PATTERN-MISSING-MASK\}
+
+Typical severity: **error** · Category: **generator**
+
+A pattern generator omits the mask that describes its output.
+
+## GEN-PLANNER-UNKNOWN — Planner kind is unknown \{#GEN-PLANNER-UNKNOWN\}
+
+Typical severity: **error** · Category: **planner**
+
+The model names a planner kind that is not registered.
+
+## GEN-POLYMORPHIC-COLUMN-MISSING — Polymorphic column is missing \{#GEN-POLYMORPHIC-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A polymorphic planner role names a column that does not exist.
+
+## GEN-POLYMORPHIC-KEY-UNSUPPORTED — Polymorphic key domain is unsupported \{#GEN-POLYMORPHIC-KEY-UNSUPPORTED\}
+
+Typical severity: **error** · Category: **planner**
+
+A polymorphic target does not expose a supported dense key domain.
+
+## GEN-POLYMORPHIC-TARGET-UNKNOWN — Polymorphic target is unknown \{#GEN-POLYMORPHIC-TARGET-UNKNOWN\}
+
+Typical severity: **error** · Category: **planner**
+
+A polymorphic target table or identifier column does not exist.
+
+## GEN-POLYMORPHIC-TARGETS — Polymorphic targets are invalid \{#GEN-POLYMORPHIC-TARGETS\}
+
+Typical severity: **error** · Category: **planner**
+
+A polymorphic planner has no usable target with rows and a valid weight.
+
+## GEN-PROFILE-DECODE-SKIPPED — Some source values could not be decoded \{#GEN-PROFILE-DECODE-SKIPPED\}
+
+Typical severity: **warning** · Category: **profiling**
+
+The profiler counted rows whose values could not all be decoded into column evidence.
+
+## GEN-PROFILE-SCHEMA-LATE — Source schema arrived after data \{#GEN-PROFILE-SCHEMA-LATE\}
+
+Typical severity: **warning** · Category: **profiling**
+
+The dump declared a table after more data rows than the bounded late-schema buffer could retain.
+
+## GEN-PROGRESS-COLUMN-MISSING — Progress column is missing \{#GEN-PROGRESS-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A progress-counter role names a column that does not exist.
+
+## GEN-PROGRESS-COMPLETION — Progress completion state is impossible \{#GEN-PROGRESS-COMPLETION\}
+
+Typical severity: **error** · Category: **planner**
+
+Configured completion timestamps or nullability cannot represent every reachable progress state.
+
+## GEN-PROGRESS-OBSERVED — Observed progress lacks evidence \{#GEN-PROGRESS-OBSERVED\}
+
+Typical severity: **error** · Category: **planner**
+
+Observed progress was requested where no planner evidence can form the required exact partition.
+
+## GEN-PROGRESS-OVERFLOW — Progress counter can overflow \{#GEN-PROGRESS-OVERFLOW\}
+
+Typical severity: **error** · Category: **planner**
+
+A possible total exceeds the capacity of one or more counter columns.
+
+## GEN-PROGRESS-PARTITION — Progress partition mode is invalid \{#GEN-PROGRESS-PARTITION\}
+
+Typical severity: **error** · Category: **planner**
+
+A progress planner names an unsupported partition mode.
+
+## GEN-PROGRESS-STATUS-VOCABULARY — Progress status vocabulary is incomplete \{#GEN-PROGRESS-STATUS-VOCABULARY\}
+
+Typical severity: **error** · Category: **planner**
+
+A reachable progress state has no status label available.
+
+## GEN-PROGRESS-TOTAL — Progress total range is invalid \{#GEN-PROGRESS-TOTAL\}
+
+Typical severity: **error** · Category: **planner**
+
+A progress total is negative or has an inverted range.
+
+## GEN-PROGRESS-WEIGHTS — Progress weights are invalid \{#GEN-PROGRESS-WEIGHTS\}
+
+Typical severity: **error** · Category: **planner**
+
+Progress-state weights are non-finite, negative, or sum to zero.
+
+## GEN-RANDOM-STRING-INVALID-ALPHABET — Random-string alphabet is invalid \{#GEN-RANDOM-STRING-INVALID-ALPHABET\}
+
+Typical severity: **error** · Category: **generator**
+
+A random-string generator has an empty or unsupported alphabet.
+
+## GEN-RANGED-INTEGER-RANGE — Ranged integer bounds are invalid \{#GEN-RANGED-INTEGER-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A ranged-integer generator has incompatible bounds.
+
+## GEN-REGISTRY-ALIAS-DUPLICATE — Registry alias is duplicated \{#GEN-REGISTRY-ALIAS-DUPLICATE\}
+
+Typical severity: **error** · Category: **registry**
+
+Two registered operators claim the same alias.
+
+## GEN-REGISTRY-ALIAS-SHADOWS-KIND — Registry alias shadows a kind \{#GEN-REGISTRY-ALIAS-SHADOWS-KIND\}
+
+Typical severity: **error** · Category: **registry**
+
+An operator alias collides with a registered canonical kind.
+
+## GEN-REGISTRY-DUPLICATE — Registry kind is duplicated \{#GEN-REGISTRY-DUPLICATE\}
+
+Typical severity: **error** · Category: **registry**
+
+The same canonical operator kind was registered more than once.
+
+## GEN-RELATIONSHIP-UNKNOWN — Relationship is unknown \{#GEN-RELATIONSHIP-UNKNOWN\}
+
+Typical severity: **error** · Category: **planner**
+
+A rule or planner names a relationship absent from the table schema.
+
+## GEN-RELATIVE-MISSING-SOURCE — Relative source is missing \{#GEN-RELATIVE-MISSING-SOURCE\}
+
+Typical severity: **error** · Category: **generator**
+
+A relative generator omits the sibling column it should offset.
+
+## GEN-RELATIVE-RANGE — Relative offset range is invalid \{#GEN-RELATIVE-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A relative generator has negative, inverted, or overflowing offset bounds.
+
+## GEN-RELATIVE-UNKNOWN-SOURCE — Relative source column is unknown \{#GEN-RELATIVE-UNKNOWN-SOURCE\}
+
+Typical severity: **error** · Category: **generator**
+
+A relative generator names a sibling column that does not exist.
+
+## GEN-RENDER-COPY-DEFAULT — PostgreSQL COPY cannot render DEFAULT \{#GEN-RENDER-COPY-DEFAULT\}
+
+Typical severity: **error** · Category: **rendering**
+
+A COPY row requests DEFAULT for a column without a database default, identity, or generated expression.
+
+## GEN-RENDER-IO — SQL rendering failed \{#GEN-RENDER-IO\}
+
+Typical severity: **error** · Category: **rendering**
+
+The renderer could not write or format generated SQL.
+
+## GEN-RENDER-WARNING — SQL renderer reported a warning \{#GEN-RENDER-WARNING\}
+
+Typical severity: **warning** · Category: **rendering**
+
+The renderer encountered a non-fatal condition without a more specific diagnostic code.
+
+## GEN-REQUEST-OUTPUT — Generation output request is invalid \{#GEN-REQUEST-OUTPUT\}
+
+Typical severity: **error** · Category: **runtime**
+
+The requested output or resolved-model destination is unavailable or conflicting.
+
+## GEN-REQUEST-SOURCE — Generation source is missing \{#GEN-REQUEST-SOURCE\}
+
+Typical severity: **error** · Category: **runtime**
+
+Neither a source dump nor a complete model configuration was supplied.
+
+## GEN-ROUND-MISSING-SCALE — Round scale is missing \{#GEN-ROUND-MISSING-SCALE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A round modifier omits the number of decimal places to retain.
+
+## GEN-ROUND-SCALE-RANGE — Round scale is invalid \{#GEN-ROUND-SCALE-RANGE\}
+
+Typical severity: **error** · Category: **modifier**
+
+A round modifier's requested scale falls outside the supported range.
+
+## GEN-ROWS-CYCLE — Row-count dependency cycle \{#GEN-ROWS-CYCLE\}
+
+Typical severity: **error** · Category: **selection**
+
+Parent-derived table row-count rules contain a dependency cycle.
+
+## GEN-ROWS-OBSERVED-MISSING — Observed row count is unavailable \{#GEN-ROWS-OBSERVED-MISSING\}
+
+Typical severity: **error** · Category: **selection**
+
+An observed row-count rule has no attached profile count to resolve.
+
+## GEN-SCHEMA-MISMATCH — Override schema assertion does not match \{#GEN-SCHEMA-MISMATCH\}
+
+Typical severity: **error** · Category: **config**
+
+An override's schema name or create statement disagrees with the base model.
+
+## GEN-SEQUENCE-ZERO-STEP — Sequence step is zero \{#GEN-SEQUENCE-ZERO-STEP\}
+
+Typical severity: **error** · Category: **generator**
+
+A sequence generator cannot advance because its configured step is zero.
+
+## GEN-SOFT-DELETE-COLUMN-MISSING — Soft-delete column is missing \{#GEN-SOFT-DELETE-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A soft-delete role names a column that does not exist.
+
+## GEN-SOFT-DELETE-NULLABILITY — Soft-delete nullability is impossible \{#GEN-SOFT-DELETE-NULLABILITY\}
+
+Typical severity: **error** · Category: **planner**
+
+Non-deleted rows are possible but the deleted timestamp column is not nullable.
+
+## GEN-SOFT-DELETE-RANGE — Soft-delete timestamp range is invalid \{#GEN-SOFT-DELETE-RANGE\}
+
+Typical severity: **error** · Category: **planner**
+
+A deletion timestamp range is missing, unparsable, or inverted.
+
+## GEN-SOURCE-FINGERPRINT — Source fingerprint does not match \{#GEN-SOURCE-FINGERPRINT\}
+
+Typical severity: **variable** · Category: **config**
+
+An overrides document's source fingerprint differs from the base model under the configured policy.
+
+## GEN-SOURCE-IO — Source dump could not be profiled \{#GEN-SOURCE-IO\}
+
+Typical severity: **error** · Category: **runtime**
+
+Reading or profiling the source SQL dump failed.
+
+## GEN-SOURCE-VALUES — Generated output replays literal values \{#GEN-SOURCE-VALUES\}
+
+Typical severity: **advisory** · Category: **privacy**
+
+One or more rules replay literal values and should be reviewed before sharing generated output.
+
+## GEN-STRING-LENGTH-RANGE — String length range is invalid \{#GEN-STRING-LENGTH-RANGE\}
+
+Typical severity: **error** · Category: **generator**
+
+A string generator has incompatible minimum and maximum lengths.
+
+## GEN-TABLE-COUNT-CONFLICT — Per-table count controls conflict \{#GEN-TABLE-COUNT-CONFLICT\}
+
+Typical severity: **error** · Category: **selection**
+
+The same table matches both an absolute and a scaled row-count override.
+
+## GEN-TABLE-SCALE-INVALID — Per-table scale is invalid \{#GEN-TABLE-SCALE-INVALID\}
+
+Typical severity: **error** · Category: **selection**
+
+A table scale is negative, non-finite, or otherwise unsupported.
+
+## GEN-TEMPLATE-INVALID-PART — Template part is invalid \{#GEN-TEMPLATE-INVALID-PART\}
+
+Typical severity: **error** · Category: **generator**
+
+A template part is neither a supported literal nor a valid sibling-column reference.
+
+## GEN-TEMPLATE-MISSING-PARTS — Template parts are missing \{#GEN-TEMPLATE-MISSING-PARTS\}
+
+Typical severity: **error** · Category: **generator**
+
+A template generator omits its required parts list.
+
+## GEN-TEMPLATE-UNKNOWN-FIELD — Template field is unknown \{#GEN-TEMPLATE-UNKNOWN-FIELD\}
+
+Typical severity: **error** · Category: **generator**
+
+A template generator references a sibling column that does not exist.
+
+## GEN-TENANT-COLUMN-MISSING — Tenant-family column is missing \{#GEN-TENANT-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A tenant-family role names a column that does not exist.
+
+## GEN-TENANT-KEY-UNSUPPORTED — Tenant-family key domain is unsupported \{#GEN-TENANT-KEY-UNSUPPORTED\}
+
+Typical severity: **error** · Category: **planner**
+
+The parent relationship does not expose a supported dense key domain.
+
+## GEN-TENANT-PARTITION — Tenant partition is invalid \{#GEN-TENANT-PARTITION\}
+
+Typical severity: **error** · Category: **planner**
+
+The requested tenant partition count cannot be formed from the available parent rows.
+
+## GEN-TENANT-RELATIONSHIP — Tenant-family relationship is invalid \{#GEN-TENANT-RELATIONSHIP\}
+
+Typical severity: **error** · Category: **planner**
+
+A tenant-family planner omits or names an unknown parent relationship.
+
+## GEN-TIMESTAMPS-COLUMN-MISSING — Timestamp column is missing \{#GEN-TIMESTAMPS-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A temporal timestamps role names a column that does not exist.
+
+## GEN-TIMESTAMPS-DELAY — Timestamp delay is invalid \{#GEN-TIMESTAMPS-DELAY\}
+
+Typical severity: **error** · Category: **planner**
+
+A temporal delay is negative, overflowing, inverted, or uses an unknown unit.
+
+## GEN-TIMESTAMPS-RANGE — Timestamp range is invalid \{#GEN-TIMESTAMPS-RANGE\}
+
+Typical severity: **error** · Category: **planner**
+
+A created timestamp range is missing, unparsable, or inverted.
+
+## GEN-TREE-BRANCHING — Tree branching limit is invalid \{#GEN-TREE-BRANCHING\}
+
+Typical severity: **error** · Category: **planner**
+
+A hierarchy tree branching limit is below one.
+
+## GEN-TREE-COLUMN-MISSING — Tree parent column is missing \{#GEN-TREE-COLUMN-MISSING\}
+
+Typical severity: **error** · Category: **planner**
+
+A hierarchy tree parent role names a column that does not exist.
+
+## GEN-TREE-DEPTH — Tree depth is invalid \{#GEN-TREE-DEPTH\}
+
+Typical severity: **error** · Category: **planner**
+
+A hierarchy tree maximum depth is below one.
+
+## GEN-TREE-REQUIRED-CYCLE — Tree root cannot be represented \{#GEN-TREE-REQUIRED-CYCLE\}
+
+Typical severity: **error** · Category: **planner**
+
+The self-reference column is non-nullable, so the hierarchy cannot create a root row.
+
+## GEN-TREE-ROOT-RATIO — Tree root ratio is invalid \{#GEN-TREE-ROOT-RATIO\}
+
+Typical severity: **error** · Category: **planner**
+
+A hierarchy tree root ratio falls outside the supported zero-to-one range.
+
+## GEN-TRUNCATE-MISSING-MAX-LENGTH — Truncate length is missing \{#GEN-TRUNCATE-MISSING-MAX-LENGTH\}
+
+Typical severity: **error** · Category: **modifier**
+
+A truncate modifier omits its required maximum length.
+
+## GEN-UNIQUE-INVALID-ON-EXHAUSTION — Unique exhaustion policy is invalid \{#GEN-UNIQUE-INVALID-ON-EXHAUSTION\}
+
+Typical severity: **error** · Category: **modifier**
+
+A unique modifier names an unsupported behavior for exhausted retries.
+
+## GEN-UNIQUE-WIDEN-UNSUPPORTED — Unique widening is unsupported \{#GEN-UNIQUE-WIDEN-UNSUPPORTED\}
+
+Typical severity: **error** · Category: **modifier**
+
+The target type has no safe widening strategy for unique-value exhaustion.
+
+## GEN-VERIFY-FAILED — Generated output failed verification \{#GEN-VERIFY-FAILED\}
+
+Typical severity: **error** · Category: **verification**
+
+One or more exact verification checks failed and the destination was not published.
+
+## GEN-VERIFY-IO — Verification input could not be read \{#GEN-VERIFY-IO\}
+
+Typical severity: **error** · Category: **verification**
+
+The verifier could not read the staged generated output.
+
+## GEN-VERIFY-MODE — Verification mode is invalid \{#GEN-VERIFY-MODE\}
+
+Typical severity: **error** · Category: **verification**
+
+Verification was requested with an incompatible generation mode.
+
+## GEN-VERIFY-NO-FILE — Verification requires a file \{#GEN-VERIFY-NO-FILE\}
+
+Typical severity: **error** · Category: **verification**
+
+Verification cannot audit output that has no real file destination.
+
+## GEN-VERIFY-NOTCHECKED — Some capabilities were not checked \{#GEN-VERIFY-NOTCHECKED\}
+
+Typical severity: **warning** · Category: **verification**
+
+Verification passed, but one or more capabilities had no exact audit predicate.
+
+## GEN-VERIFY-PARSE — Generated SQL could not be parsed for verification \{#GEN-VERIFY-PARSE\}
+
+Typical severity: **error** · Category: **verification**
+
+The verifier could not parse the staged generated SQL.
+
+## GEN-VERIFY-PARTIAL-PUBLISH — Verified outputs were only partially published \{#GEN-VERIFY-PARTIAL-PUBLISH\}
+
+Typical severity: **error** · Category: **verification**
+
+Publishing a verified output set failed after one destination had already changed.
+
+## GEN-VERIFY-STAGE — Verification staging failed \{#GEN-VERIFY-STAGE\}
+
+Typical severity: **error** · Category: **verification**
+
+Creating or writing protected temporary output for verification failed.
+
+## GEN-WEIGHTED-CHOICE-ALL-ZERO — Weighted-choice weights are all zero \{#GEN-WEIGHTED-CHOICE-ALL-ZERO\}
+
+Typical severity: **error** · Category: **generator**
+
+A weighted choice has no entry with positive probability.
+
+## GEN-WEIGHTED-CHOICE-EMPTY — Weighted choice is empty \{#GEN-WEIGHTED-CHOICE-EMPTY\}
+
+Typical severity: **error** · Category: **generator**
+
+A weighted-choice generator has no choices from which to draw.
+
+## GEN-WEIGHTED-CHOICE-INVALID-ENTRY — Weighted-choice entry is invalid \{#GEN-WEIGHTED-CHOICE-INVALID-ENTRY\}
+
+Typical severity: **error** · Category: **generator**
+
+A weighted choice contains a malformed entry.
+
+## GEN-WEIGHTED-CHOICE-INVALID-VALUE — Weighted-choice value is incompatible \{#GEN-WEIGHTED-CHOICE-INVALID-VALUE\}
+
+Typical severity: **error** · Category: **generator**
+
+A weighted choice value cannot be represented by the target column type.
+
+## GEN-WEIGHTED-CHOICE-INVALID-WEIGHT — Weighted-choice weight is invalid \{#GEN-WEIGHTED-CHOICE-INVALID-WEIGHT\}
+
+Typical severity: **error** · Category: **generator**
+
+A weighted choice contains a negative, NaN, or infinite weight.
+
+## GEN-WEIGHTED-CHOICE-MISSING-CHOICES — Weighted choices are missing \{#GEN-WEIGHTED-CHOICE-MISSING-CHOICES\}
+
+Typical severity: **error** · Category: **generator**
+
+A weighted-choice generator omits its required choices.

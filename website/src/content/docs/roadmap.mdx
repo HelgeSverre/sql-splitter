@@ -44,14 +44,16 @@ sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql
 **Features:**
 
 - Bounded basic/full profiling and exact emitted row counts
-- Editable per-table and per-column YAML rules, with generators, modifiers, and planners for relational and multi-column invariants (see [`generate`](/commands/generate))
+- Editable per-table and per-column YAML rules, with generators, modifiers, and planners for relational and multi-column invariants (see [`generate`](/commands/generate/))
 - Stable global, table, column, and operator seed streams
 - Public library API using the same compiler and engine as the CLI
 - Neutral profile evidence reusable by the future `infer` command (see below) — profiler internals are not frozen around `infer`'s unbuilt needs
 
-Full documentation: [`generate` command reference](/commands/generate),
-and the [model reference, generator/planner catalog, and library API](https://github.com/helgesverre/sql-splitter/tree/main/docs/generate)
-in the repository.
+Full documentation: [`generate` command reference](/commands/generate/),
+[model reference](/commands/generate/model-reference/),
+[generator catalog](/commands/generate/generators/),
+[planner catalog](/commands/generate/planners/), and
+[library API](/commands/generate/library-api/).
 
 ### v1.16.0 — Zip Input + Adaptive I/O Profiles (shipped)
 

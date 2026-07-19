@@ -64,7 +64,7 @@ tables:
       slug:
         generator: { kind: text.slug }
         modifiers:
-          - { kind: unique, attempts: 32, on_exhaustion: error }
+          - { kind: unique, max_attempts: 32, on_exhaustion: error }
       plan:
         generator:
           kind: weighted_choice
@@ -104,7 +104,7 @@ tables:
       email:
         generator: { kind: internet.email }
         modifiers:
-          - { kind: unique, attempts: 64, on_exhaustion: error }
+          - { kind: unique, max_attempts: 64, on_exhaustion: error }
       full_name:
         generator: { kind: person.full_name }
       password_hash:
@@ -401,7 +401,7 @@ tables:
       token:
         generator: { kind: credential.token, length: 64, alphabet: alphanumeric }
         modifiers:
-          - { kind: unique, attempts: 16, on_exhaustion: error }
+          - { kind: unique, max_attempts: 16, on_exhaustion: error }
       abilities:
         generator: { kind: json_value }
         modifiers:

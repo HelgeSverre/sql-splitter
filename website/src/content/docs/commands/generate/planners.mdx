@@ -1,0 +1,346 @@
+---
+title: Planners
+description: Coordinate multi-column and cross-table invariants during generation
+sidebar:
+  order: 5
+---
+
+A planner owns several columns as one unit. Use one when independent generators
+could produce individually valid values that violate a shared equation,
+ordering, state transition, or relationship.
+
+```yaml
+tables:
+  sessions:
+    planners:
+      - kind: temporal.interval
+        columns:
+          { start: started_at, end: ended_at, duration: duration_seconds }
+        start: { kind: range, min: 2025-01-01, max: 2025-12-31 }
+        duration: { kind: uniform, unit: seconds, min: 60, max: 3600 }
+```
+
+Planner-owned columns must not also have column generators. The compiler
+resolves the planner's configured reads/writes, rejects missing columns and
+ownership conflicts, and orders planners with other column dependencies.
+
+:::note[Row counts are separate]
+`relation.children` is a row-count rule under `tables.<name>.rows`, not a
+planner. It decides how many child rows belong to each parent. A planner may
+consume that fan-out, but it does not replace the row rule.
+:::
+
+## Planner capabilities
+
+| Planner                      | Scope          | Primary invariant                                |
+| ---------------------------- | -------------- | ------------------------------------------------ |
+| `temporal.interval`          | same table     | `end = start + duration` and open-row coherence  |
+| `workflow.progress_counters` | same table     | counter partitions, status, and completion agree |
+| `commerce.order_family`      | parent + child | line-item arithmetic sums to order totals        |
+| `temporal.timestamps`        | same table     | created/updated/extra timestamps are causal      |
+| `temporal.soft_delete`       | same table     | deleted timestamp and flag agree                 |
+| `temporal.lifecycle`         | same table     | ordered state-machine timestamps and status      |
+| `hierarchy.tree`             | same table     | bounded acyclic self-parent tree                 |
+| `relation.junction_pair`     | cross-table    | distinct left/right parent pairs                 |
+| `relation.polymorphic_pair`  | cross-table    | atomic type/id target pair                       |
+| `relation.tenant_family`     | cross-table    | child and selected parent share a tenant         |
+| `geo.coordinate_pair`        | same table     | latitude/longitude stay within one bounding box  |
+| `file.metadata`              | same table     | filename, extension, MIME, size, and hash agree  |
+
+## `temporal.interval`
+
+```yaml
+planners:
+  - kind: temporal.interval
+    columns:
+      start: started_at
+      end: ended_at
+      duration: duration_seconds
+      open: is_open
+    start:
+      kind: range # range | observed_range | monotonic
+      min: 2025-01-01
+      max: 2025-12-31
+    duration:
+      kind: normal # fixed | uniform | normal | histogram | observed
+      unit: seconds
+      mean: 900
+      stddev: 120
+      min: 60
+      max: 3600
+    open_probability: 0.05
+    end_inclusive: false
+    timezone: preserve
+```
+
+Required roles are `columns.start`, `columns.end`, and `columns.duration`;
+`columns.open` is optional. Start kinds `range` and `observed_range` need
+parseable `min`/`max`. `monotonic` uses `step_seconds=1` by default.
+
+Duration kinds:
+
+- `fixed` uses `value`.
+- `uniform` uses `min` and `max`.
+- `normal` uses `mean`, `stddev`, and bounds.
+- `histogram`/`observed` currently use a bounded min-skewed placeholder within
+  `min`/`max`; profiled bucket evidence is not threaded into the planner.
+
+Units include nanoseconds through days and their common abbreviations.
+`open_probability` is within `0..1`; when positive, `end` must be nullable.
+Closed rows satisfy the interval equation. `end_inclusive` requires a duration
+of at least one unit. `timezone` accepts `preserve`, `utc`, or an IANA zone;
+`preserve` currently renders UTC because per-row source zones are not retained.
+
+## `workflow.progress_counters`
+
+```yaml
+planners:
+  - kind: workflow.progress_counters
+    columns:
+      total: total_rows
+      processed: processed_rows
+      succeeded: succeeded_rows
+      failed: failed_rows
+      pending: pending_rows
+      status: status
+      completed_at: completed_at
+    total: { kind: uniform, min: 10, max: 500 }
+    progress:
+      kind: mixture # mixture | complete | in_progress | not_started | observed
+      complete_weight: 0.72
+      active_weight: 0.23
+      not_started_weight: 0.05
+    partition: exact # exact | allow_unclassified
+    success_ratio: 0.9
+    completed_statuses: [completed, failed]
+    active_statuses: [queued, running]
+```
+
+Only `columns.total` is required; configure the counters the table actually
+has. `total` supports fixed and inclusive uniform shapes. Exact partitioning
+guarantees `succeeded + failed = processed` and
+`pending = total - processed`. `allow_unclassified` reserves an unclassified
+share while keeping the whole processed count exact.
+
+`progress.kind` can force one state or choose a weighted mixture. `observed`
+has no planner profile input today: exact partitioning rejects it, while
+`allow_unclassified` falls back to a 0.70/0.25/0.05 mixture. If a status role is
+configured, reachable completed and active states need non-empty vocabularies.
+Completed rows use `processed = total` and a completion timestamp; incomplete
+rows keep it null.
+
+## `commerce.order_family`
+
+This cross-table planner coordinates one parent order with its child line
+items using integer minor-unit arithmetic.
+
+```yaml
+planners:
+  - kind: commerce.order_family
+    children: order_items
+    relationship: order_items_order
+    columns:
+      subtotal: subtotal
+      discount: discount_total
+      tax: tax_total
+      shipping: shipping_total
+      total: grand_total
+    child_columns:
+      quantity: quantity
+      unit_price: unit_price
+      discount: discount_amount
+      tax: tax_amount
+      line_total: line_total
+    currency_scale: 2
+    rounding: largest_remainder # largest_remainder | last_line | bankers
+    quantity: { min: 1, max: 5 }
+    unit_price: { min_minor: 100, max_minor: 10000 }
+    tax:
+      kind: weighted_choice
+      rates: [0.0, 0.08, 0.25]
+      weights: [0.05, 0.15, 0.80]
+    discount: { kind: fixed_rate, rate: 0.0 }
+    shipping: { amount_minor: 0 }
+```
+
+`children`, `relationship`, parent `subtotal`/`total`, child
+`quantity`/`unit_price`/`line_total`, `currency_scale`, and `rounding` are
+required. Optional parent/child tax and discount roles are written only when
+mapped. Money columns must use the configured decimal scale.
+
+The child table's `rows.distribution` is the sole line-count source; the
+planner intentionally has no line-count argument. Tax and discount support a
+fixed rate or weighted rate choice. Shipping accepts major or minor units.
+Largest-remainder rounding distributes residual minor units so child sums match
+the parent exactly; `last_line` places the residual on the final line.
+
+The descriptor reports verification as unsupported. Runtime verification can
+check simple tax/discount sums, but cannot independently express all subtotal,
+product, shipping, and total equations.
+
+## `temporal.timestamps`
+
+```yaml
+planners:
+  - kind: temporal.timestamps
+    columns:
+      created_at: created_at
+      updated_at: updated_at
+      archived_at: archived_at
+    created: { kind: range, min: 2020-01-01, max: 2026-01-01 }
+    update_delay: { kind: uniform, unit: hours, min: 0, max: 72 }
+    other_delay: { kind: uniform, unit: days, min: 0, max: 30 }
+```
+
+`columns.created_at` and `columns.updated_at` are required. Any additional flat
+keys directly below `columns` are extra timestamp roles; do not nest them.
+`created` defines the initial range. `update_delay` controls updated time and
+`other_delay` controls extra roles, defaulting to the update block. Every later
+timestamp is at or after creation.
+
+## `temporal.soft_delete`
+
+```yaml
+planners:
+  - kind: temporal.soft_delete
+    columns: { deleted_at: deleted_at, is_deleted: is_deleted }
+    deletion_probability: 0.1
+    deleted_range: { kind: range, min: 2024-01-01, max: 2026-01-01 }
+```
+
+`columns.deleted_at` is required; `is_deleted` is optional.
+`deletion_probability` defaults to zero and is within `0..1`. If it is less
+than one, `deleted_at` must be nullable. With a flag role, flag and timestamp
+nullness are verified together; without it, only timestamp range is checked.
+
+## `temporal.lifecycle`
+
+```yaml
+planners:
+  - kind: temporal.lifecycle
+    columns:
+      status: status
+      draft: created_at
+      active: activated_at
+      archived: archived_at
+    states: [draft, active, archived]
+    weights: [0.1, 0.7, 0.2]
+    start: { kind: range, min: 2024-01-01, max: 2026-01-01 }
+    step: { kind: uniform, unit: days, min: 1, max: 14 }
+```
+
+`columns.status`, `states`, `weights`, `start`, and `step` define a finite state
+machine. State-to-column entries are flat siblings under `columns`. The planner
+chooses a terminal state, stamps each reached state in order, and leaves later
+state timestamps null. Weights must match the states and contain a positive
+total. Any state timestamp that can remain unreached must be nullable.
+
+## `hierarchy.tree`
+
+```yaml
+planners:
+  - kind: hierarchy.tree
+    columns: { parent: parent_id }
+    root_ratio: 0.1
+    max_depth: 6
+    max_branching: 4
+```
+
+The required parent role names a nullable self-reference. `root_ratio` defaults
+to `0.1`; `max_depth` defaults to `6`; `max_branching` is unlimited when
+omitted. Rows choose only eligible earlier rows as parents, guaranteeing no
+cycle. The first row and any row without an eligible parent become roots.
+
+## `relation.junction_pair`
+
+```yaml
+planners:
+  - kind: relation.junction_pair
+    columns: { left: user_id, right: role_id }
+    left_relationship: user_roles_user
+    right_relationship: user_roles_role
+```
+
+Both relationships and both output roles are required. Parent keys must use
+supported random-access domains. The planner maps row indices into the Cartesian
+pair space without repeats. A requested row count above
+`left_count * right_count` is `GEN-JUNCTION-EXHAUSTED`.
+
+## `relation.polymorphic_pair`
+
+```yaml
+planners:
+  - kind: relation.polymorphic_pair
+    columns: { type: commentable_type, id: commentable_id }
+    targets:
+      - { table: posts, weight: 0.7 }
+      - { table: photos, weight: 0.3, type: photo, id_column: id }
+```
+
+The type/id roles and a non-empty target list are required. Target `type`
+defaults to its table name and `id_column` to the target primary key. Weights
+are non-negative with a positive total. Zero-row targets are dropped. Every
+remaining target needs a supported parent-key domain. Type/id atomicity is
+guaranteed by construction but has no separate verification predicate today.
+
+## `relation.tenant_family`
+
+```yaml
+planners:
+  - kind: relation.tenant_family
+    columns: { tenant: tenant_id, parent: customer_id }
+    relationship: orders_customer
+    num_tenants: 8
+    tenant_start: 1
+```
+
+Tenant and parent roles, a parent relationship, and a positive `num_tenants`
+are required. `tenant_start` defaults to `1`. Parent rows are split into
+contiguous balanced tenant blocks. Each child chooses a tenant, then a parent
+from the same block. Parent keys must use supported random-access domains.
+
+## `geo.coordinate_pair`
+
+```yaml
+planners:
+  - kind: geo.coordinate_pair
+    columns: { latitude: lat, longitude: lng }
+    precision: 6
+    bounds: { min_lat: 35, max_lat: 71, min_lon: -25, max_lon: 45 }
+```
+
+Both roles are required. `precision` defaults to six decimal places. Bounds
+default to the global latitude/longitude ranges, must be ordered, and must stay
+within valid geographic limits. Generation guarantees bounds, but the current
+verification predicate set cannot independently audit decimal coordinate
+ranges.
+
+## `file.metadata`
+
+```yaml
+planners:
+  - kind: file.metadata
+    columns:
+      name: file_name
+      extension: extension
+      mime_type: mime_type
+      size: size_bytes
+      hash: checksum
+    extensions: [pdf, jpg, png, docx]
+    size: { min: 1024, max: 5000000 }
+    hash_kind: sha256 # md5 | sha1 | sha256 | sha512
+```
+
+All five roles are required. Omit `extensions` to use the built-in catalog; a
+provided list must contain supported extensions. Size defaults to the planner's
+built-in non-negative range and must be ordered. Hash kind controls the output
+hex length. The tuple is coherent by construction. Verification currently
+checks size non-negativity, not textual filename/extension/MIME agreement.
+
+## Verification expectations
+
+Descriptor-level support means a planner can provide predicates, not that every
+capability is expressible. A passing verified run reports
+`GEN-VERIFY-NOTCHECKED` when a configured capability could not be checked
+exactly. Review [Privacy and verification](/commands/generate/privacy-verification/) before
+treating verified output as an independent proof of every planner invariant.

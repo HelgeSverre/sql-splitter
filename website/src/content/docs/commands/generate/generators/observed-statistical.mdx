@@ -1,0 +1,92 @@
+---
+title: Observed and statistical generators
+description: Replay bounded evidence through samples, histograms, distributions, and monotonic values
+sidebar:
+  order: 4
+---
+
+These generators preserve a distribution or progression. Inferred models use
+them when observed evidence is stronger than a semantic match.
+
+## `observed_sample`
+
+Required non-empty `values`; accepts every family. Values may be bare literals
+or weighted entries.
+
+```yaml
+generator:
+  kind: observed_sample
+  values:
+    - { value: pending, weight: 73 }
+    - { value: complete, weight: 27 }
+```
+
+Weights must be finite and non-negative, with at least one positive entry.
+Because this generator replays literals, every use participates in the
+`GEN-SOURCE-VALUES` advisory. Prefer a semantic or statistical generator when
+literal replay is unacceptable.
+
+## `histogram`
+
+Required non-empty `bins`; optional `scale=0`. Accepts integer, big-integer, and
+decimal families.
+
+```yaml
+generator:
+  kind: histogram
+  scale: 0
+  bins:
+    - { min: 0, max: 9, count: 50 }
+    - { min: 10, max: 49, count: 35 }
+    - { min: 50, max: 100, count: 15 }
+```
+
+Bins must be sorted, non-overlapping, finite, and have ordered bounds. Counts
+are frequency weights and cannot all be zero. A bin is selected by count, then
+a value is drawn uniformly inside it.
+
+## `normal`
+
+Required `mean` and `std`; optional `min`, `max`, and `scale=0`. `std` must be
+finite and non-negative. Optional bounds clamp the Gaussian draw and must be
+ordered.
+
+```yaml
+generator: { kind: normal, mean: 72, std: 12, min: 18, max: 110 }
+```
+
+Accepts integer, big-integer, and decimal families. Integer output rounds the
+draw; decimal output uses the configured scale.
+
+## `lognormal`
+
+Required `mu` and `sigma`; optional `min`, `max`, and `scale=0`. It draws
+`exp(Normal(mu, sigma))`, making it suitable for positive, right-skewed sizes,
+durations, and amounts. `sigma` must be finite and non-negative.
+
+```yaml
+generator: { kind: lognormal, mu: 4.5, sigma: 0.8, min: 1, max: 10000 }
+```
+
+## `monotonic`
+
+`start=0`, `step=1`. Accepts integer and big-integer families. The value is
+`start + row_index * step`, so it is stable, ordered, and independent of batch
+boundaries. Step must be non-negative; arithmetic overflow fails generation.
+
+Use `monotonic` when a nondecreasing metric is intended. Use `sequence` when a
+non-zero signed step and random-access relationship key recipe are required.
+
+## Choosing among them
+
+| Evidence or intent                                     | Generator         |
+| ------------------------------------------------------ | ----------------- |
+| Small categorical vocabulary whose exact labels matter | `observed_sample` |
+| Irregular numeric density represented by buckets       | `histogram`       |
+| Symmetric bell-shaped numeric data                     | `normal`          |
+| Positive right-skewed data                             | `lognormal`       |
+| Ordered counter tied to row position                   | `monotonic`       |
+
+Statistical resemblance is approximate. Bounded profiling does not retain a
+complete population, and generation does not promise exact bucket counts unless
+a planner explicitly defines an exact invariant.

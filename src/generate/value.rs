@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::diagnostic::DiagnosticBag;
+use crate::diagnostic::{Diagnostic, DiagnosticBag, DiagnosticDefinition};
 use crate::synthetic::schema::SqlTypeFamily;
 
 /// A single value produced by a generator, independent of any target SQL
@@ -175,10 +175,9 @@ pub enum GenerateError {
     /// Carries the full bag, including any warnings, so a caller can report
     /// every problem rather than just the first.
     Diagnostics(DiagnosticBag),
-    /// `--verify` audited the generated SQL and one or more exact checks
-    /// failed; the prior destination is left untouched. Carries a value-free
-    /// summary of each failed check.
-    VerificationFailed(Vec<String>),
+    /// One structured runtime diagnostic. Unlike [`Self::Diagnostics`], this
+    /// variant represents a single failure discovered after compilation.
+    Diagnostic(Box<Diagnostic>),
 }
 
 impl GenerateError {
@@ -187,6 +186,15 @@ impl GenerateError {
             expected,
             found: found.kind_name(),
         }
+    }
+
+    /// Construct a structured built-in runtime failure.
+    pub fn diagnostic(
+        definition: &'static DiagnosticDefinition,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        GenerateError::Diagnostic(Box::new(Diagnostic::error(definition, path, message)))
     }
 }
 
@@ -200,13 +208,7 @@ impl fmt::Display for GenerateError {
             GenerateError::Exhausted(message) => write!(f, "{message}"),
             GenerateError::InvalidInput(message) => write!(f, "{message}"),
             GenerateError::Diagnostics(bag) => write!(f, "{bag}"),
-            GenerateError::VerificationFailed(failures) => write!(
-                f,
-                "GEN-VERIFY-FAILED: generated output failed verification and was not published; \
-                 {} check(s) failed: {}",
-                failures.len(),
-                failures.join("; ")
-            ),
+            GenerateError::Diagnostic(diagnostic) => write!(f, "{diagnostic}"),
         }
     }
 }

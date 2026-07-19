@@ -71,7 +71,7 @@ tables:
       name: { generator: { kind: company.name } }
       bic:
         generator: { kind: pattern, pattern: "[A-Z]{4}NO[A-Z0-9]{2}" }
-        modifiers: [{ kind: unique, attempts: 16, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 16, on_exhaustion: error }]
       country: { generator: { kind: constant, value: NO } }
 
   accounts:
@@ -107,7 +107,7 @@ tables:
       owner_email: { generator: { kind: internet.email } }
       iban:
         generator: { kind: pattern, pattern: "NO[0-9]{2}[0-9]{11}" }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       currency_code: { generator: { kind: relation.foreign_key, relationship: account_currency } }
       balance:
         generator: { kind: normal, mean: 25000.0, stddev: 40000.0, min: -50000.0, max: 5000000.0, scale: 4 }
@@ -299,7 +299,7 @@ tables:
       fee_minor: { generator: { kind: integer, min: 0, max: 5000 } }
       reference:
         generator: { kind: pattern, pattern: "TRF[0-9]{10}" }
-        modifiers: [{ kind: unique, attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       executed_at: { generator: { kind: datetime } }
 
   webhooks:

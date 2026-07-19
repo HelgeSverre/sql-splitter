@@ -214,10 +214,9 @@ columns or a parent/child family together (temporal intervals, workflow
 progress counters, commerce order totals, hierarchies, polymorphic/junction/
 tenant relationships, geo coordinates, file metadata).
 
-**Privacy:** a `warning[GEN-SOURCE-VALUES]` on stderr (never suppressed by
-`--quiet`, never promotable to a failure by `--strict`) flags any rule that
-can replay a literal value observed in a source dump — it never prints the
-values themselves.
+**Privacy:** an `advisory[GEN-SOURCE-VALUES]` diagnostic (never suppressed by
+`--quiet`, never promotable to a failure by `--strict`) flags rules that can
+replay literal values — it includes paths and rule kinds, never the values.
 
 **Choosing `generate` vs `redact`:** use `generate` to _create_ new synthetic
 data (CI fixtures, load testing, seeding an empty dev database) from a model
@@ -226,8 +225,9 @@ must keep structurally identical while removing/replacing sensitive values.
 `generate` is not a substitute for `redact` when the goal is sharing real
 production data safely.
 
-**Full documentation:** `docs/generate/` in the repository (model reference,
-generator/planner catalog, profiling and privacy, library API, diagnostics).
+**Full documentation:** <https://sql-splitter.dev/commands/generate/> (model
+reference, generator/modifier/planner catalogs, inference, privacy,
+verification, library API, and diagnostics).
 
 ### graph
 

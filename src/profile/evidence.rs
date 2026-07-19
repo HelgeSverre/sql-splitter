@@ -11,6 +11,7 @@
 //! same size evidence as one that scans a thousand. Raw values are never
 //! retained beyond a small, budget-capped sample.
 
+use crate::diagnostic::Diagnostic;
 use crate::profile::ProfileDepth;
 use crate::synthetic::schema::PortableSchema;
 use serde::{Deserialize, Serialize};
@@ -26,11 +27,11 @@ pub struct DumpProfile {
     pub schema: PortableSchema,
     /// Per-table evidence, in discovery order.
     pub tables: Vec<TableEvidence>,
-    /// Stable diagnostic codes raised while profiling (e.g.
+    /// Structured diagnostics raised while profiling (e.g.
     /// `GEN-PROFILE-SCHEMA-LATE` when data preceded its table's DDL by more than
     /// the retained sample). Empty on a clean, schema-before-data dump.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// Evidence gathered for a single table.
