@@ -428,12 +428,14 @@ impl Generate {
             } = run_verified(
                 &model,
                 plan,
-                explicit_seed,
-                output,
-                emit,
-                render,
                 diagnostics,
-                strict,
+                VerifiedOptions {
+                    explicit_seed,
+                    output,
+                    emit,
+                    render,
+                    strict,
+                },
             )?;
             let out = GenerateReport {
                 rows_written,
@@ -490,6 +492,14 @@ struct VerifiedRun {
     diagnostics: DiagnosticBag,
 }
 
+struct VerifiedOptions {
+    explicit_seed: Option<u64>,
+    output: OutputTarget,
+    emit: Option<OutputTarget>,
+    render: RenderOptions,
+    strict: bool,
+}
+
 /// Render SQL to a protected temp beside the destination, verify it against the
 /// compiled plan, and publish atomically only if the full audit passes. A failed
 /// audit leaves every prior destination untouched and returns
@@ -500,13 +510,16 @@ struct VerifiedRun {
 fn run_verified(
     model: &SyntheticModel,
     plan: GenerationPlan,
-    explicit_seed: Option<u64>,
-    output: OutputTarget,
-    emit: Option<OutputTarget>,
-    render: RenderOptions,
     mut diagnostics: DiagnosticBag,
-    strict: bool,
+    options: VerifiedOptions,
 ) -> Result<VerifiedRun, GenerateError> {
+    let VerifiedOptions {
+        explicit_seed,
+        output,
+        emit,
+        render,
+        strict,
+    } = options;
     let destination = match output {
         OutputTarget::Path(path) => path,
         OutputTarget::Discard => {
