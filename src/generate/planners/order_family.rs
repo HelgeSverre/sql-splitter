@@ -181,6 +181,7 @@ impl Rounding {
 /// sum(weights)`; the floors are assigned first and the leftover units (there are
 /// fewer than `weights.len()`) are handed out per `mode`. All arithmetic is
 /// `i128`; no float rounding can perturb the exact sum.
+#[cfg(test)]
 fn apportion(total: i128, weights: &[i128], mode: Rounding) -> Vec<i128> {
     let count = weights.len();
     let weight_total: i128 = weights.iter().sum();
@@ -232,6 +233,7 @@ fn apportion(total: i128, weights: &[i128], mode: Rounding) -> Vec<i128> {
 /// Order two lines whose fractional remainders tie. `LargestRemainder` keeps the
 /// lower index first (stable); `Bankers` prefers the line whose current floor is
 /// odd, so the extra unit rounds it toward even.
+#[cfg(test)]
 fn tie_break(mode: Rounding, parts: &[i128], a: usize, b: usize) -> std::cmp::Ordering {
     match mode {
         Rounding::Bankers => {
@@ -442,18 +444,25 @@ pub struct OrderFamilyPlanner {
     /// Fixed shipping charge in minor units (0 when unconfigured).
     shipping_minor: i128,
     seed: SeedRoot,
-    /// Child rows produced by the most recent `generate_row`, awaiting the engine.
-    pending_children: Vec<Vec<GeneratedValue>>,
+    /// Bounded summary for the most recent parent row. Child rows are replayed
+    /// lazily from this summary when the engine asks for them.
+    pending_family: Option<OrderSummary>,
 }
 
-/// The fully computed money breakdown of one order family.
-struct OrderTotals {
+/// The bounded money summary of one order family.
+///
+/// It retains only scalar aggregates, allocation thresholds, and the RNG state
+/// needed to replay raw lines. Memory is independent of the parent's fan-out.
+struct OrderSummary {
     subtotal: i128,
     discount: i128,
     tax: i128,
     shipping: i128,
     grand_total: i128,
-    lines: Vec<LineTotals>,
+    line_count: usize,
+    line_rng: rand_chacha::ChaCha8Rng,
+    discount_plan: AllocationPlan,
+    tax_plan: AllocationPlan,
 }
 
 /// One child line's computed minor-unit values.
@@ -465,54 +474,339 @@ struct LineTotals {
     line_total: i128,
 }
 
+/// One replayable raw line before order-level discount/tax apportionment.
+struct RawLine {
+    quantity: i128,
+    unit_price: i128,
+    subtotal: i128,
+}
+
+/// Draw one raw line using the same RNG order as the original family
+/// implementation: quantity first, then unit price.
+fn draw_raw_line(
+    rng: &mut rand_chacha::ChaCha8Rng,
+    quantity: IntRange,
+    unit_price: IntRange,
+) -> Result<RawLine, GenerateError> {
+    let quantity = quantity.draw(rng).max(0);
+    let unit_price = unit_price.draw(rng).max(0);
+    let subtotal = quantity
+        .checked_mul(unit_price)
+        .ok_or_else(|| overflow("line subtotal (quantity * unit_price)"))?;
+    Ok(RawLine {
+        quantity,
+        unit_price,
+        subtotal,
+    })
+}
+
+/// Replays a fixed number of raw lines from a cloned per-parent RNG state.
+struct RawLines {
+    rng: rand_chacha::ChaCha8Rng,
+    remaining: usize,
+    quantity: IntRange,
+    unit_price: IntRange,
+}
+
+impl RawLines {
+    fn new(
+        rng: rand_chacha::ChaCha8Rng,
+        count: usize,
+        quantity: IntRange,
+        unit_price: IntRange,
+    ) -> Self {
+        Self {
+            rng,
+            remaining: count,
+            quantity,
+            unit_price,
+        }
+    }
+}
+
+impl Iterator for RawLines {
+    type Item = Result<RawLine, GenerateError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(draw_raw_line(&mut self.rng, self.quantity, self.unit_price))
+    }
+}
+
+/// Bounded representation of an exact proportional allocation.
+///
+/// Ranked rounding stores the cutoff remainder and tie counts instead of a
+/// row-sized sorted vector. The cutoff is found by repeated streaming scans of
+/// the replayable weights; this trades bounded CPU for memory independent of
+/// fan-out while preserving Hamilton/banker's ordering exactly.
+#[derive(Clone)]
+struct AllocationPlan {
+    total: i128,
+    weight_total: i128,
+    count: usize,
+    mode: Rounding,
+    leftover: i128,
+    threshold: Option<i128>,
+    tie_slots: usize,
+    odd_ties: usize,
+}
+
+impl AllocationPlan {
+    fn build<F, I>(total: i128, mode: Rounding, weights: F) -> Result<Self, GenerateError>
+    where
+        F: Fn() -> I,
+        I: Iterator<Item = Result<i128, GenerateError>>,
+    {
+        let mut count = 0usize;
+        let mut weight_total = 0i128;
+        for weight in weights() {
+            let weight = weight?.max(0);
+            weight_total = weight_total
+                .checked_add(weight)
+                .ok_or_else(|| overflow("allocation weight total"))?;
+            count += 1;
+        }
+
+        let mut plan = Self {
+            total,
+            weight_total,
+            count,
+            mode,
+            leftover: 0,
+            threshold: None,
+            tie_slots: 0,
+            odd_ties: 0,
+        };
+        if count == 0 || total == 0 || weight_total <= 0 {
+            return Ok(plan);
+        }
+
+        let mut allocated = 0i128;
+        for weight in weights() {
+            let (floor, _) = proportional_share(total, weight?.max(0), weight_total)?;
+            allocated = allocated
+                .checked_add(floor)
+                .ok_or_else(|| overflow("allocated family amount"))?;
+        }
+        plan.leftover = total
+            .checked_sub(allocated)
+            .ok_or_else(|| overflow("family allocation residual"))?;
+
+        if mode == Rounding::LastLine || plan.leftover <= 0 {
+            return Ok(plan);
+        }
+
+        let wanted = usize::try_from(plan.leftover)
+            .map_err(|_| overflow("family allocation residual count"))?;
+        // Remainders lie in [0, weight_total). Find the greatest cutoff with at
+        // least `wanted` values at or above it: the wanted-th largest value.
+        let mut low = 0i128;
+        let mut high = weight_total;
+        while low + 1 < high {
+            let mid = low + (high - low) / 2;
+            let mut at_or_above = 0usize;
+            for weight in weights() {
+                let (_, remainder) = proportional_share(total, weight?.max(0), weight_total)?;
+                if remainder >= mid {
+                    at_or_above += 1;
+                }
+            }
+            if at_or_above >= wanted {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        plan.threshold = Some(low);
+
+        let mut greater = 0usize;
+        let mut odd_ties = 0usize;
+        for weight in weights() {
+            let (floor, remainder) = proportional_share(total, weight?.max(0), weight_total)?;
+            if remainder > low {
+                greater += 1;
+            } else if remainder == low && floor.rem_euclid(2) == 1 {
+                odd_ties += 1;
+            }
+        }
+        plan.tie_slots = wanted.saturating_sub(greater);
+        plan.odd_ties = odd_ties;
+        Ok(plan)
+    }
+
+    fn cursor(&self) -> AllocationCursor {
+        AllocationCursor {
+            plan: self.clone(),
+            tied_seen: 0,
+            odd_seen: 0,
+            even_seen: 0,
+        }
+    }
+}
+
+/// Sequential cursor over one bounded allocation plan.
+struct AllocationCursor {
+    plan: AllocationPlan,
+    tied_seen: usize,
+    odd_seen: usize,
+    even_seen: usize,
+}
+
+impl AllocationCursor {
+    fn part(&mut self, index: usize, weight: i128) -> Result<i128, GenerateError> {
+        if self.plan.count == 0 || self.plan.total == 0 {
+            return Ok(0);
+        }
+        if self.plan.weight_total <= 0 {
+            return Ok(if index + 1 == self.plan.count {
+                self.plan.total
+            } else {
+                0
+            });
+        }
+
+        let (floor, remainder) =
+            proportional_share(self.plan.total, weight.max(0), self.plan.weight_total)?;
+        if self.plan.mode == Rounding::LastLine {
+            return if index + 1 == self.plan.count {
+                floor
+                    .checked_add(self.plan.leftover)
+                    .ok_or_else(|| overflow("last-line allocation"))
+            } else {
+                Ok(floor)
+            };
+        }
+
+        let Some(threshold) = self.plan.threshold else {
+            return Ok(floor);
+        };
+        let receives_extra = if remainder > threshold {
+            true
+        } else if remainder < threshold {
+            false
+        } else {
+            match self.plan.mode {
+                Rounding::LargestRemainder => {
+                    let selected = self.tied_seen < self.plan.tie_slots;
+                    self.tied_seen += 1;
+                    selected
+                }
+                Rounding::Bankers => {
+                    let odd_slots = self.plan.tie_slots.min(self.plan.odd_ties);
+                    if floor.rem_euclid(2) == 1 {
+                        let selected = self.odd_seen < odd_slots;
+                        self.odd_seen += 1;
+                        selected
+                    } else {
+                        let selected = self.even_seen < self.plan.tie_slots - odd_slots;
+                        self.even_seen += 1;
+                        selected
+                    }
+                }
+                Rounding::LastLine => false,
+            }
+        };
+        if receives_extra {
+            floor
+                .checked_add(1)
+                .ok_or_else(|| overflow("ranked allocation"))
+        } else {
+            Ok(floor)
+        }
+    }
+}
+
+fn proportional_share(
+    total: i128,
+    weight: i128,
+    weight_total: i128,
+) -> Result<(i128, i128), GenerateError> {
+    let numerator = total
+        .checked_mul(weight)
+        .ok_or_else(|| overflow("proportional allocation"))?;
+    Ok((
+        numerator.div_euclid(weight_total),
+        numerator.rem_euclid(weight_total),
+    ))
+}
+
+/// Replays taxable line weights while building the tax allocation plan.
+struct TaxWeights {
+    raw: RawLines,
+    discount: AllocationCursor,
+    index: usize,
+}
+
+impl Iterator for TaxWeights {
+    type Item = Result<i128, GenerateError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let raw = self.raw.next()?;
+        Some(raw.and_then(|raw| {
+            let discount = self.discount.part(self.index, raw.subtotal)?;
+            self.index += 1;
+            raw.subtotal
+                .checked_sub(discount)
+                .ok_or_else(|| overflow("taxable line amount"))
+        }))
+    }
+}
+
 impl OrderFamilyPlanner {
-    /// Compute the entire money family for the order at `order_index`, seeded by
+    /// Compute a bounded money summary for the order at `order_index`, seeded by
     /// that index so the result is independent of any spill threshold.
-    fn compute(&self, order_index: u64) -> Result<OrderTotals, GenerateError> {
+    fn compute(&self, order_index: u64) -> Result<OrderSummary, GenerateError> {
         let mut rng = self.seed.stream(StreamId::operator(
             self.parent_table.clone(),
             "commerce.order_family",
             format!("family.{order_index}"),
         ));
 
-        let line_count = self.lines.draw(&mut rng).max(0) as usize;
+        let line_count = usize::try_from(self.lines.draw(&mut rng).max(0))
+            .map_err(|_| overflow("order-family line count"))?;
+        let line_rng = rng.clone();
 
-        // Draw the raw per-line quantities and prices, then the order-level rate
-        // picks — all from the one order-seeded stream, in a fixed order.
-        let mut quantities = Vec::with_capacity(line_count);
-        let mut unit_prices = Vec::with_capacity(line_count);
-        let mut line_subtotals = Vec::with_capacity(line_count);
+        // First pass: retain only the aggregate while advancing the original RNG
+        // to the exact point where the order-level rate draws have always lived.
         let mut subtotal: i128 = 0;
         for _ in 0..line_count {
-            let quantity = self.quantity.draw(&mut rng).max(0);
-            let unit_price = self.unit_price_minor.draw(&mut rng).max(0);
-            let line_subtotal = quantity
-                .checked_mul(unit_price)
-                .ok_or_else(|| overflow("line subtotal (quantity * unit_price)"))?;
+            let raw = draw_raw_line(&mut rng, self.quantity, self.unit_price_minor)?;
             subtotal = subtotal
-                .checked_add(line_subtotal)
+                .checked_add(raw.subtotal)
                 .ok_or_else(|| overflow("order subtotal"))?;
-            quantities.push(quantity);
-            unit_prices.push(unit_price);
-            line_subtotals.push(line_subtotal);
         }
 
         let discount_rate = self.discount.sample(rng.random::<f64>());
         let tax_rate = self.tax.sample(rng.random::<f64>());
 
-        // Order-level discount, rounded once then apportioned to the lines.
         let discount_total = rounded_rate(subtotal, discount_rate)?;
-        let line_discounts = apportion(discount_total, &line_subtotals, self.rounding);
+        let discount_plan = AllocationPlan::build(discount_total, self.rounding, || {
+            RawLines::new(
+                line_rng.clone(),
+                line_count,
+                self.quantity,
+                self.unit_price_minor,
+            )
+            .map(|raw| raw.map(|line| line.subtotal))
+        })?;
 
-        // Taxable base per line = line subtotal minus its allocated discount.
-        let taxables: Vec<i128> = line_subtotals
-            .iter()
-            .zip(&line_discounts)
-            .map(|(sub, disc)| sub - disc)
-            .collect();
-        let order_taxable = subtotal - discount_total;
+        let order_taxable = subtotal
+            .checked_sub(discount_total)
+            .ok_or_else(|| overflow("order taxable amount"))?;
         let tax_total = rounded_rate(order_taxable, tax_rate)?;
-        let line_taxes = apportion(tax_total, &taxables, self.rounding);
+        let tax_plan = AllocationPlan::build(tax_total, self.rounding, || TaxWeights {
+            raw: RawLines::new(
+                line_rng.clone(),
+                line_count,
+                self.quantity,
+                self.unit_price_minor,
+            ),
+            discount: discount_plan.cursor(),
+            index: 0,
+        })?;
 
         let shipping = self.shipping_minor;
         let grand_total = subtotal
@@ -521,25 +815,16 @@ impl OrderFamilyPlanner {
             .and_then(|value| value.checked_add(shipping))
             .ok_or_else(|| overflow("order grand total"))?;
 
-        let mut lines = Vec::with_capacity(line_count);
-        for i in 0..line_count {
-            let line_total = line_subtotals[i] - line_discounts[i] + line_taxes[i];
-            lines.push(LineTotals {
-                quantity: quantities[i],
-                unit_price: unit_prices[i],
-                discount: line_discounts[i],
-                tax: line_taxes[i],
-                line_total,
-            });
-        }
-
-        Ok(OrderTotals {
+        Ok(OrderSummary {
             subtotal,
             discount: discount_total,
             tax: tax_total,
             shipping,
             grand_total,
-            lines,
+            line_count,
+            line_rng,
+            discount_plan,
+            tax_plan,
         })
     }
 
@@ -559,7 +844,7 @@ impl OrderFamilyPlanner {
     fn parent_value(
         &self,
         role: ParentRole,
-        totals: &OrderTotals,
+        totals: &OrderSummary,
         family: &SqlTypeFamily,
     ) -> GeneratedValue {
         let minor = match role {
@@ -594,6 +879,74 @@ impl OrderFamilyPlanner {
     }
 }
 
+/// Incremental child-row replay for one parent order.
+struct OrderFamilyChildRows<'a> {
+    planner: &'a OrderFamilyPlanner,
+    raw: RawLines,
+    discount: AllocationCursor,
+    tax: AllocationCursor,
+    index: usize,
+}
+
+impl<'a> OrderFamilyChildRows<'a> {
+    fn new(planner: &'a OrderFamilyPlanner, summary: OrderSummary) -> Self {
+        Self {
+            raw: RawLines::new(
+                summary.line_rng,
+                summary.line_count,
+                planner.quantity,
+                planner.unit_price_minor,
+            ),
+            discount: summary.discount_plan.cursor(),
+            tax: summary.tax_plan.cursor(),
+            planner,
+            index: 0,
+        }
+    }
+}
+
+impl Iterator for OrderFamilyChildRows<'_> {
+    type Item = Result<Vec<GeneratedValue>, GenerateError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let raw = match self.raw.next()? {
+            Ok(raw) => raw,
+            Err(error) => return Some(Err(error)),
+        };
+        let result = (|| {
+            let discount = self.discount.part(self.index, raw.subtotal)?;
+            let taxable = raw
+                .subtotal
+                .checked_sub(discount)
+                .ok_or_else(|| overflow("taxable line amount"))?;
+            let tax = self.tax.part(self.index, taxable)?;
+            let line_total = taxable
+                .checked_add(tax)
+                .ok_or_else(|| overflow("child line total"))?;
+            self.index += 1;
+
+            let line = LineTotals {
+                quantity: raw.quantity,
+                unit_price: raw.unit_price,
+                discount,
+                tax,
+                line_total,
+            };
+            let mut values = Vec::with_capacity(self.planner.child_writes.len());
+            for (role, family) in self
+                .planner
+                .child_roles
+                .iter()
+                .zip(&self.planner.child_families)
+            {
+                values.push(self.planner.child_value(*role, &line, family));
+            }
+            Ok(values)
+        })();
+        Some(result)
+    }
+}
+
 impl CompiledPlanner for OrderFamilyPlanner {
     fn writes(&self) -> &[String] {
         &self.parent_writes
@@ -611,16 +964,7 @@ impl CompiledPlanner for OrderFamilyPlanner {
             *slot = self.parent_value(*role, &totals, family);
         }
 
-        // Stash the child rows for the engine to spool.
-        let mut children = Vec::with_capacity(totals.lines.len());
-        for line in &totals.lines {
-            let mut values = Vec::with_capacity(self.child_writes.len());
-            for (role, family) in self.child_roles.iter().zip(&self.child_families) {
-                values.push(self.child_value(*role, line, family));
-            }
-            children.push(values);
-        }
-        self.pending_children = children;
+        self.pending_family = Some(totals);
         Ok(())
     }
 
@@ -636,8 +980,13 @@ impl CompiledPlanner for OrderFamilyPlanner {
         &self.child_writes
     }
 
-    fn take_family_children(&mut self) -> Vec<Vec<GeneratedValue>> {
-        std::mem::take(&mut self.pending_children)
+    fn take_family_children(
+        &mut self,
+    ) -> Box<dyn Iterator<Item = Result<Vec<GeneratedValue>, GenerateError>> + '_> {
+        match self.pending_family.take() {
+            Some(summary) => Box::new(OrderFamilyChildRows::new(self, summary)),
+            None => Box::new(std::iter::empty()),
+        }
     }
 
     fn family_sum_checks(&self) -> Vec<crate::generate::registry::FamilySumCheck> {
@@ -873,7 +1222,7 @@ fn compile_order_family(
         discount,
         shipping_minor,
         seed: context.seed(),
-        pending_children: Vec::new(),
+        pending_family: None,
     })
 }
 
@@ -1421,6 +1770,39 @@ mod tests {
         // 10 split by equal weights: 3,3,3 floors leave 1 -> last line gets it.
         let parts = apportion(10, &[1, 1, 1], Rounding::LastLine);
         assert_eq!(parts, vec![3, 3, 4]);
+    }
+
+    #[test]
+    fn bounded_allocation_matches_the_reference_algorithms() {
+        let cases: &[&[i128]] = &[
+            &[],
+            &[0],
+            &[0, 0, 0],
+            &[1, 1, 1],
+            &[300, 500, 200],
+            &[7, 2, 13, 13, 1],
+        ];
+        for mode in [
+            Rounding::LargestRemainder,
+            Rounding::LastLine,
+            Rounding::Bankers,
+        ] {
+            for &weights in cases {
+                for total in [0, 1, 7, 10, 100, 999] {
+                    let plan =
+                        AllocationPlan::build(total, mode, || weights.iter().copied().map(Ok))
+                            .unwrap();
+                    let mut cursor = plan.cursor();
+                    let actual: Vec<i128> = weights
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(index, weight)| cursor.part(index, weight).unwrap())
+                        .collect();
+                    assert_eq!(actual, apportion(total, weights, mode));
+                }
+            }
+        }
     }
 
     #[test]

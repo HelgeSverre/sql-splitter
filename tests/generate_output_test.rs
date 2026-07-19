@@ -342,3 +342,24 @@ fn family_buffer_spills_deterministically_when_it_crosses_its_budget() {
     // retained in an unbounded in-memory Vec.
     assert_eq!(buffer.drain_rows().unwrap(), rows);
 }
+
+#[test]
+fn spilled_family_rows_can_be_replayed_incrementally() {
+    let mut buffer = FamilyBuffer::new(
+        FamilyBudget { max_bytes: 0 },
+        3,
+        TempConfig::default(),
+        SpillKind::Child,
+    );
+    let expected: Vec<SpooledRow> = (0..128).map(every_shape_row).collect();
+    for row in &expected {
+        buffer.push(row.clone()).unwrap();
+    }
+    assert!(buffer.is_spilled());
+
+    let mut rows = buffer.replay_rows().unwrap();
+    for expected_row in expected {
+        assert_eq!(rows.next().unwrap().unwrap(), expected_row);
+    }
+    assert!(rows.next().is_none());
+}

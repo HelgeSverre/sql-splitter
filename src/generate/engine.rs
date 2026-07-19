@@ -363,10 +363,10 @@ impl GenerationEngine {
                     // spool them (bounded — spills past the family budget) so
                     // they can be drained when the child table is reached.
                     if let Some(child_name) = planner.family_child_table().map(str::to_string) {
-                        let child_rows = planner.take_family_children();
-                        if !child_rows.is_empty() {
-                            let child_index =
-                                table_index_by_name.get(&child_name).copied().unwrap_or(0);
+                        let child_index =
+                            table_index_by_name.get(&child_name).copied().unwrap_or(0);
+                        let mut child_rows = planner.take_family_children();
+                        if let Some(first) = child_rows.next() {
                             let buffer = family_buffers.entry(child_name).or_insert_with(|| {
                                 FamilyBuffer::new(
                                     family_budget,
@@ -375,7 +375,8 @@ impl GenerationEngine {
                                     SpillKind::Child,
                                 )
                             });
-                            for values in child_rows {
+                            for values in std::iter::once(first).chain(child_rows) {
+                                let values = values?;
                                 buffer
                                     .push(SpooledRow {
                                         table_id: child_index as u32,
@@ -509,14 +510,16 @@ fn render_family_child(
         })
         .unwrap_or_default();
 
-    let drained = match family_buffers.remove(&table.name) {
-        Some(mut buffer) => buffer.drain_rows().map_err(family_spool_error)?,
-        None => Vec::new(),
+    let mut family_buffer = family_buffers.remove(&table.name);
+    let mut replay = match family_buffer.as_mut() {
+        Some(buffer) => Some(buffer.replay_rows().map_err(family_spool_error)?),
+        None => None,
     };
 
     let mut rows_written = 0u64;
     let mut buffer = vec![GeneratedValue::Null; ncols];
-    for (child_index, spooled) in drained.into_iter().enumerate() {
+    for (child_index, spooled) in replay.iter_mut().flatten().enumerate() {
+        let spooled = spooled.map_err(family_spool_error)?;
         let child_index = child_index as u64;
         let parent_index = spooled.row_index;
         for value in buffer.iter_mut() {

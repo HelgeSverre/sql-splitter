@@ -658,6 +658,13 @@ impl CompiledPlanner for NoopPlanner {
     }
 }
 
+#[test]
+fn family_planner_child_contract_is_incremental() {
+    let mut planner: Box<dyn CompiledPlanner> = Box::new(NoopPlanner);
+    let mut children = planner.take_family_children();
+    assert!(children.next().is_none());
+}
+
 impl PlannerFactory for TestFamilyFactory {
     fn descriptor(&self) -> &'static PlannerDescriptor {
         &TEST_FAMILY_DESCRIPTOR

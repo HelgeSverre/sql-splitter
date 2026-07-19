@@ -486,13 +486,15 @@ pub trait CompiledPlanner: Send {
         &[]
     }
 
-    /// Take the child rows produced by the most recent
-    /// [`generate_row`](Self::generate_row) call — one value vector per child
-    /// line, aligned with [`child_writes`](Self::child_writes). The engine calls
-    /// this once per parent row for a family planner and spools the rows.
-    /// Default: none.
-    fn take_family_children(&mut self) -> Vec<Vec<GeneratedValue>> {
-        Vec::new()
+    /// Take an incremental stream of child rows produced by the most recent
+    /// [`generate_row`](Self::generate_row) call. Each item is one child line,
+    /// aligned with [`child_writes`](Self::child_writes), so the engine can spool
+    /// it immediately without retaining a parent-sized child vector.
+    /// Default: an empty stream.
+    fn take_family_children(
+        &mut self,
+    ) -> Box<dyn Iterator<Item = Result<Vec<GeneratedValue>, GenerateError>> + '_> {
+        Box::new(std::iter::empty())
     }
 
     /// Cross-table sum invariants this family planner guarantees between a

@@ -863,6 +863,29 @@ pub enum FamilyState {
     TableSpool(ProtectedSpool),
 }
 
+/// Incremental replay of buffered family rows.
+///
+/// In-memory rows are moved into an owning iterator. Spilled rows are decoded
+/// one record at a time from the protected spool, so replay retains at most one
+/// decoded row instead of rebuilding the complete family in memory.
+pub enum FamilyRowReplay<'a> {
+    /// Rows that remained within the configured memory budget.
+    Memory(std::vec::IntoIter<SpooledRow>),
+    /// Rows decoded incrementally from a protected spool.
+    Spool(SpoolReader<&'a mut File>),
+}
+
+impl Iterator for FamilyRowReplay<'_> {
+    type Item = io::Result<SpooledRow>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(rows) => rows.next().map(Ok),
+            Self::Spool(reader) => reader.read_row().transpose(),
+        }
+    }
+}
+
 /// Buffers a family's rows under an exact byte budget, spilling deterministically
 /// to a [`ProtectedSpool`] the moment a push would cross the budget.
 ///
@@ -950,20 +973,26 @@ impl FamilyBuffer {
         }
     }
 
-    /// Collect every buffered row in push order, from memory or by reading the
-    /// spool back.
-    pub fn drain_rows(&mut self) -> io::Result<Vec<SpooledRow>> {
+    /// Replay buffered rows in push order without materializing a spilled
+    /// family in memory.
+    pub fn replay_rows(&mut self) -> io::Result<FamilyRowReplay<'_>> {
         match &mut self.state {
-            FamilyState::ParentState(rows) => Ok(std::mem::take(rows)),
+            FamilyState::ParentState(rows) => {
+                Ok(FamilyRowReplay::Memory(std::mem::take(rows).into_iter()))
+            }
             FamilyState::ChildSpool(spool) | FamilyState::TableSpool(spool) => {
-                let mut reader = spool.rewind()?;
-                let mut rows = Vec::new();
-                while let Some(row) = reader.read_row()? {
-                    rows.push(row);
-                }
-                Ok(rows)
+                Ok(FamilyRowReplay::Spool(spool.rewind()?))
             }
         }
+    }
+
+    /// Collect every buffered row in push order.
+    ///
+    /// Prefer [`replay_rows`](Self::replay_rows) on generation paths: this
+    /// compatibility helper intentionally materializes the result for callers
+    /// that need an owned collection.
+    pub fn drain_rows(&mut self) -> io::Result<Vec<SpooledRow>> {
+        self.replay_rows()?.collect()
     }
 
     /// Move any in-memory rows into a fresh protected spool and switch state.
