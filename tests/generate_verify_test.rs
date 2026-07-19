@@ -607,6 +607,21 @@ fn membership_index_io_errors_abort_verification() {
 }
 
 #[test]
+fn family_index_io_errors_abort_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_temp = dir.path().join("missing-temp-directory");
+    let plan = compile(ORDER_FAMILY);
+    let verifier = GenerationVerifier::new(&plan).temp_directory(&missing_temp);
+    let sql = render(plan);
+    let path = write(dir.path(), "family-io.sql", &sql);
+
+    let error = verifier
+        .verify_path(&path)
+        .expect_err("family spool creation must be propagated");
+    assert!(error.to_string().contains("family index"), "{error}");
+}
+
+#[test]
 fn failed_verification_leaves_a_prior_destination_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("dest.sql");

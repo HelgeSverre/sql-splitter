@@ -31,8 +31,8 @@
 //!
 //! Uniqueness and membership indexes hold exact keys in memory under a byte
 //! budget and spill their key bytes to a [`ProtectedSpool`] once the budget is
-//! exceeded, keeping only 64-bit hashes in memory and confirming collisions
-//! against the on-disk key bytes. Dense integer key domains stay in memory.
+//! exceeded. Spilled indexes scan the disk-backed exact keys without retaining
+//! an entry per key in memory. Dense integer key domains stay in memory.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader};
@@ -363,7 +363,7 @@ impl GenerationVerifier {
             })
             .map_err(parse_error)?;
 
-        audit.finish(&mut report, &self.distributions);
+        audit.finish(&mut report, &self.distributions)?;
         Ok(report)
     }
 }
@@ -652,10 +652,47 @@ struct TableState {
     member_groups: Vec<GroupKey>,
     /// Planner predicate failures, keyed by a stable check slug.
     predicate_failures: HashMap<String, u64>,
-    /// Sampled category tallies, keyed by column name.
-    category_counts: HashMap<String, HashMap<String, u64>>,
-    /// Category columns to tally (from distribution expectations).
-    category_columns: Vec<String>,
+    /// Sampled category tallies, bounded to categories named by expectations.
+    categories: CategoryTallies,
+}
+
+/// Expected categorical values and their observed counts. Values absent from
+/// `expected` are deliberately never retained, so high-cardinality generated
+/// text cannot turn a sampled check into an unbounded map.
+#[derive(Default)]
+struct CategoryTallies {
+    expected: HashMap<String, HashSet<String>>,
+    counts: HashMap<String, HashMap<String, u64>>,
+}
+
+impl CategoryTallies {
+    fn register(&mut self, expectation: &DistributionExpectation) {
+        self.expected
+            .entry(expectation.column.clone())
+            .or_default()
+            .extend(
+                expectation
+                    .categories
+                    .iter()
+                    .map(|(value, _)| value.clone()),
+            );
+    }
+
+    fn record(&mut self, column: &str, value: &str) {
+        if !self
+            .expected
+            .get(column)
+            .is_some_and(|values| values.contains(value))
+        {
+            return;
+        }
+        *self
+            .counts
+            .entry(column.to_string())
+            .or_default()
+            .entry(value.to_string())
+            .or_insert(0) += 1;
+    }
 }
 
 /// A single family-sum accumulator across a parent/child pair.
@@ -674,12 +711,144 @@ struct FamilyAcc {
     child_fk_columns: Vec<String>,
     /// Parent referenced columns forming the join key.
     parent_key_columns: Vec<String>,
-    /// Parent value (in minor units) keyed by the join-key hash.
-    parent_values: HashMap<u64, (i128, u32)>,
-    /// Summed child value keyed by the join-key hash.
-    child_sums: HashMap<u64, (i128, u32)>,
+    /// Parent aggregate records in protected, disk-backed exact storage.
+    parent_values: FamilyValueStore,
+    /// Individual child values in protected, disk-backed exact storage.
+    child_values: FamilyValueStore,
     /// Whether any decode/scale problem made the check inexact.
     inexact: bool,
+}
+
+/// A family aggregate contribution stored without a per-parent memory entry.
+struct FamilyValueRecord {
+    hash: u64,
+    key: Vec<u8>,
+    minor: (i128, u32),
+}
+
+/// Protected disk-backed family records. Parents and individual child
+/// contributions are appended once; final comparison rescans the child file
+/// for each parent. This deliberately trades CPU for a constant memory bound.
+struct FamilyValueStore {
+    temp: TempConfig,
+    spool: Option<ProtectedSpool>,
+}
+
+impl FamilyValueStore {
+    fn new(temp: TempConfig) -> Self {
+        Self { temp, spool: None }
+    }
+
+    fn append(&mut self, key: &[u8], hash: u64, minor: (i128, u32)) -> io::Result<()> {
+        let spool = match &mut self.spool {
+            Some(spool) => spool,
+            None => self.spool.insert(ProtectedSpool::create(&self.temp)?),
+        };
+        spool.write_row(&SpooledRow {
+            table_id: 0,
+            row_index: hash,
+            values: vec![
+                GeneratedValue::Bytes(key.to_vec()),
+                GeneratedValue::Integer(minor.0),
+                GeneratedValue::Integer(i128::from(minor.1)),
+            ],
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.spool {
+            Some(spool) => spool.flush(),
+            None => Ok(()),
+        }
+    }
+
+    fn replay(&self) -> io::Result<FamilyValueReplay> {
+        let reader = match &self.spool {
+            Some(spool) => Some(SpoolReader::new(BufReader::new(std::fs::File::open(
+                spool.path(),
+            )?))),
+            None => None,
+        };
+        Ok(FamilyValueReplay { reader })
+    }
+
+    fn sum_for(&self, parent: &FamilyValueRecord) -> io::Result<Option<(i128, u32)>> {
+        let mut sum = None;
+        for child in self.replay()? {
+            let child = child?;
+            if child.hash == parent.hash && child.key == parent.key {
+                match &mut sum {
+                    Some(acc) => add_minor(acc, child.minor),
+                    None => sum = Some(child.minor),
+                }
+            }
+        }
+        Ok(sum)
+    }
+}
+
+struct FamilyValueReplay {
+    reader: Option<SpoolReader<BufReader<std::fs::File>>>,
+}
+
+impl Iterator for FamilyValueReplay {
+    type Item = io::Result<FamilyValueRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let reader = self.reader.as_mut()?;
+        match reader.read_row() {
+            Ok(Some(row)) => Some(decode_family_value(row)),
+            Ok(None) => {
+                self.reader = None;
+                None
+            }
+            Err(error) => Some(Err(error)),
+        }
+    }
+}
+
+fn decode_family_value(row: SpooledRow) -> io::Result<FamilyValueRecord> {
+    let [GeneratedValue::Bytes(key), GeneratedValue::Integer(mantissa), GeneratedValue::Integer(scale)] =
+        row.values.as_slice()
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "family spool record has an invalid shape",
+        ));
+    };
+    let scale = u32::try_from(*scale).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "family spool record has an invalid scale",
+        )
+    })?;
+    Ok(FamilyValueRecord {
+        hash: row.row_index,
+        key: key.clone(),
+        minor: (*mantissa, scale),
+    })
+}
+
+impl FamilyAcc {
+    fn compare(&mut self) -> io::Result<(u64, bool)> {
+        self.parent_values.flush()?;
+        self.child_values.flush()?;
+
+        let mut failed = 0u64;
+        let mut missing = false;
+        for parent in self.parent_values.replay()? {
+            let parent = parent?;
+            match self.child_values.sum_for(&parent)? {
+                Some(child) if !minor_eq(parent.minor, child) => failed += 1,
+                None if parent.minor.0 != 0 => {
+                    failed += 1;
+                    missing = true;
+                }
+                _ => {}
+            }
+        }
+        Ok((failed, missing))
+    }
 }
 
 /// The whole-file audit.
@@ -758,8 +927,7 @@ impl<'a> Audit<'a> {
                     unique_groups,
                     member_groups,
                     predicate_failures: HashMap::new(),
-                    category_counts: HashMap::new(),
-                    category_columns: Vec::new(),
+                    categories: CategoryTallies::default(),
                 },
             );
         }
@@ -775,8 +943,8 @@ impl<'a> Audit<'a> {
                 child_column: family.child_column.clone(),
                 child_fk_columns: family.child_fk_columns.clone(),
                 parent_key_columns: family.parent_key_columns.clone(),
-                parent_values: HashMap::new(),
-                child_sums: HashMap::new(),
+                parent_values: FamilyValueStore::new(temp.clone()),
+                child_values: FamilyValueStore::new(temp.clone()),
                 inexact: false,
             })
             .collect();
@@ -795,9 +963,7 @@ impl<'a> Audit<'a> {
     fn register_distributions(&mut self, distributions: &[DistributionExpectation]) {
         for expectation in distributions {
             if let Some(state) = self.tables.get_mut(&expectation.table) {
-                if !state.category_columns.contains(&expectation.column) {
-                    state.category_columns.push(expectation.column.clone());
-                }
+                state.categories.register(expectation);
             }
         }
     }
@@ -883,15 +1049,20 @@ impl<'a> Audit<'a> {
         let fk_failures = self.check_foreign_keys(planned, &value_of)?;
 
         // Family accumulation.
-        self.accumulate_families(table_name, &value_of);
+        self.accumulate_families(table_name, &value_of)?;
 
         // Sampled category tallies.
         let category_hits: Vec<(String, String)> = {
             let state = &self.tables[table_name];
             state
-                .category_columns
-                .iter()
-                .filter_map(|col| value_of(col).and_then(text_of).map(|v| (col.clone(), v)))
+                .categories
+                .expected
+                .keys()
+                .filter_map(|col| {
+                    value_of(col)
+                        .and_then(text_of)
+                        .map(|value| (col.clone(), value))
+                })
                 .collect()
         };
 
@@ -930,12 +1101,7 @@ impl<'a> Audit<'a> {
             *state.predicate_failures.entry(slug).or_insert(0) += 1;
         }
         for (col, value) in category_hits {
-            *state
-                .category_counts
-                .entry(col)
-                .or_default()
-                .entry(value)
-                .or_insert(0) += 1;
+            state.categories.record(&col, &value);
         }
         Ok(())
     }
@@ -982,28 +1148,34 @@ impl<'a> Audit<'a> {
         &mut self,
         table_name: &str,
         value_of: &impl Fn(&str) -> Option<&'v PkValue>,
-    ) {
+    ) -> Result<(), GenerateError> {
         for family in &mut self.families {
             if family.parent_table == table_name {
-                if let Some((_, hash)) = encode_group(&family.parent_key_columns, value_of) {
+                if let Some((key, hash)) = encode_group(&family.parent_key_columns, value_of) {
                     if let Some(minor) = value_of(&family.parent_column).and_then(money_minor) {
-                        family.parent_values.insert(hash, minor);
+                        family
+                            .parent_values
+                            .append(&key, hash, minor)
+                            .map_err(family_index_error)?;
                     } else {
                         family.inexact = true;
                     }
                 }
             }
             if family.child_table == table_name {
-                if let Some((_, hash)) = encode_group(&family.child_fk_columns, value_of) {
+                if let Some((key, hash)) = encode_group(&family.child_fk_columns, value_of) {
                     if let Some(minor) = value_of(&family.child_column).and_then(money_minor) {
-                        let entry = family.child_sums.entry(hash).or_insert((0, minor.1));
-                        add_minor(entry, minor);
+                        family
+                            .child_values
+                            .append(&key, hash, minor)
+                            .map_err(family_index_error)?;
                     } else {
                         family.inexact = true;
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Record the expected-tables / expected-DDL checks.
@@ -1033,7 +1205,7 @@ impl<'a> Audit<'a> {
         &mut self,
         report: &mut VerificationReport,
         distributions: &[DistributionExpectation],
-    ) {
+    ) -> Result<(), GenerateError> {
         for planned in &self.spec.tables {
             let state = &self.tables[&planned.name];
 
@@ -1137,26 +1309,8 @@ impl<'a> Audit<'a> {
         }
 
         // Family sum checks.
-        for family in &self.families {
-            let mut failed = 0u64;
-            let mut missing = false;
-            for (key, parent) in &family.parent_values {
-                match family.child_sums.get(key) {
-                    Some(child) => {
-                        if !minor_eq(*parent, *child) {
-                            failed += 1;
-                        }
-                    }
-                    None => {
-                        // No children summed to this parent — only a mismatch if
-                        // the parent expects a nonzero aggregate.
-                        if parent.0 != 0 {
-                            failed += 1;
-                            missing = true;
-                        }
-                    }
-                }
-            }
+        for family in &mut self.families {
+            let (failed, missing) = family.compare().map_err(family_index_error)?;
             let status = if family.inexact {
                 CheckStatus::NotChecked
             } else {
@@ -1179,6 +1333,7 @@ impl<'a> Audit<'a> {
 
         // Sampled distributions.
         self.finish_distributions(report, distributions);
+        Ok(())
     }
 
     fn finish_distributions(
@@ -1196,7 +1351,7 @@ impl<'a> Audit<'a> {
                 );
                 continue;
             };
-            let counts = state.category_counts.get(&expectation.column);
+            let counts = state.categories.counts.get(&expectation.column);
             let total = state.rows.max(1) as f64;
             let mut worst = 0.0f64;
             if let Some(counts) = counts {
@@ -1567,6 +1722,14 @@ fn membership_index_error(error: io::Error) -> GenerateError {
     )
 }
 
+fn family_index_error(error: io::Error) -> GenerateError {
+    GenerateError::diagnostic(
+        &crate::diagnostic::codes::VERIFY_IO,
+        "verification.family",
+        format!("family index I/O failed: {error}"),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Bounded membership/uniqueness index
 // ---------------------------------------------------------------------------
@@ -1589,18 +1752,15 @@ type KeyBuckets = HashMap<u64, SmallVec<[Box<[u8]>; 1]>>;
 ///
 /// While under `budget` bytes it holds the full key bytes in memory (exact, no
 /// false positives). Once the budget is crossed it spills every key's bytes to a
-/// [`ProtectedSpool`] and keeps only 64-bit hashes in memory; membership and
-/// duplicate detection then confirm a hash hit by rescanning the spool for the
-/// exact key bytes. Memory after spill is bounded by the hash set (8 bytes per
-/// distinct hash), not by the key payloads.
+/// [`ProtectedSpool`]. Membership and duplicate detection then rescan the spool
+/// for the exact key bytes. No per-key memory index survives the spill; this
+/// deliberately trades lookup time for a fixed memory bound.
 struct KeySet {
     budget: usize,
     used: usize,
     temp: TempConfig,
     /// Present until the first spill.
     memory: Option<KeyBuckets>,
-    /// Present after spilling: the observed hashes.
-    hashes: HashSet<u64>,
     spool: Option<ProtectedSpool>,
 }
 
@@ -1611,7 +1771,6 @@ impl KeySet {
             used: 0,
             temp,
             memory: Some(HashMap::new()),
-            hashes: HashSet::new(),
             spool: None,
         }
     }
@@ -1631,12 +1790,13 @@ impl KeySet {
             }
             return Ok(true);
         }
-        // Spilled: confirm a possible duplicate on a hash hit, else append.
-        if self.hashes.contains(&hash) && self.scan_matches(key, hash)? {
+        // Spilled: confirm an exact duplicate on disk, else append. The scan is
+        // intentionally unconditional because retaining a hash per key would
+        // make memory grow with the input again.
+        if self.scan_matches(key, hash)? {
             return Ok(false);
         }
         self.append_spool(key, hash)?;
-        self.hashes.insert(hash);
         Ok(true)
     }
 
@@ -1646,9 +1806,6 @@ impl KeySet {
             return Ok(memory
                 .get(&hash)
                 .is_some_and(|bucket| bucket.iter().any(|e| e.as_ref() == key)));
-        }
-        if !self.hashes.contains(&hash) {
-            return Ok(false);
         }
         self.scan_matches(key, hash)
     }
@@ -1660,7 +1817,6 @@ impl KeySet {
             for (hash, bucket) in memory {
                 for key in bucket {
                     write_key(&mut spool, hash, &key)?;
-                    self.hashes.insert(hash);
                 }
             }
         }
@@ -1698,6 +1854,14 @@ impl KeySet {
         }
         Ok(false)
     }
+
+    #[cfg(test)]
+    fn spilled_memory_entries(&self) -> usize {
+        self.memory
+            .as_ref()
+            .map(|buckets| buckets.values().map(SmallVec::len).sum())
+            .unwrap_or(0)
+    }
 }
 
 fn write_key(spool: &mut ProtectedSpool, hash: u64, key: &[u8]) -> io::Result<()> {
@@ -1707,4 +1871,42 @@ fn write_key(spool: &mut ProtectedSpool, hash: u64, key: &[u8]) -> io::Result<()
         values: vec![GeneratedValue::Bytes(key.to_vec())],
     };
     spool.write_row(&row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spilled_key_set_does_not_retain_one_memory_entry_per_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keys = KeySet::new(0, TempConfig::in_dir(dir.path()));
+
+        for key in 0u64..256 {
+            let bytes = key.to_le_bytes();
+            keys.insert(&bytes, key).unwrap();
+        }
+
+        assert_eq!(keys.spilled_memory_entries(), 0);
+        assert!(keys.contains(&42u64.to_le_bytes(), 42).unwrap());
+    }
+
+    #[test]
+    fn category_tallies_retain_only_configured_values() {
+        let mut tallies = CategoryTallies::default();
+        tallies.register(&DistributionExpectation {
+            table: "events".into(),
+            column: "kind".into(),
+            categories: vec![("configured".into(), 1.0)],
+            tolerance: 0.1,
+        });
+
+        for value in 0..10_000 {
+            tallies.record("kind", &value.to_string());
+        }
+        tallies.record("kind", "configured");
+
+        assert_eq!(tallies.counts["kind"].len(), 1);
+        assert_eq!(tallies.counts["kind"]["configured"], 1);
+    }
 }
