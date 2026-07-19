@@ -321,8 +321,10 @@ pub enum ResolvedTableSeed {
     Inherited(SeedRoot),
     /// Pinned to an independent, table-local seed.
     Fixed(SeedRoot),
-    /// Opted out of determinism; the runtime draws fresh entropy per run.
-    Random,
+    /// Opted out of deterministic inheritance. The compiler draws and records
+    /// a fresh table-local root so compiled operators and runtime relationship
+    /// streams consume the same entropy for this run.
+    Random(SeedRoot),
 }
 
 /// Cost and size estimates for a plan.

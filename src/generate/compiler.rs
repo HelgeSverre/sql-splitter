@@ -174,8 +174,11 @@ impl ModelCompiler {
         // rendered from its normalized schema (see `plan_table`).
         let schema_changed = selected.len() < model.tables.len();
 
-        let root_seed = options.seed.or(model.seed);
-        let rounding_root = SeedRoot::new(root_seed.unwrap_or(0));
+        // Resolve an omitted model seed once per compilation so every inherited
+        // table shares one fresh run root. Explicit `seed: null` tables draw
+        // their own independent roots in `resolve_seed` below.
+        let root_seed = options.seed.or(model.seed).unwrap_or_else(rand::random);
+        let rounding_root = SeedRoot::new(root_seed);
         let (order, cyclic) = topo_order(&selected, &all_parents);
         if !cyclic.is_empty() {
             // Tables left unordered by the Kahn drain form a mutual
@@ -485,7 +488,7 @@ impl ModelCompiler {
         name: &str,
         table: &TableModel,
         rows: u64,
-        root_seed: Option<u64>,
+        root_seed: u64,
         inference: InferenceMode,
         family_ctx: &FamilyContext,
         resolved: &BTreeMap<String, u64>,
@@ -1501,13 +1504,12 @@ fn relationship_of(table: &TableModel, column: &str) -> Option<String> {
         })
 }
 
-/// The [`SeedRoot`] a resolved seed compiles operators against; a `Random`
-/// table has no fixed root, so operators compile against the zero seed and
-/// draw fresh entropy at run time.
+/// The concrete [`SeedRoot`] a resolved seed compiles operators against.
 fn seed_root_of(seed: &ResolvedTableSeed) -> SeedRoot {
     match seed {
-        ResolvedTableSeed::Inherited(root) | ResolvedTableSeed::Fixed(root) => *root,
-        ResolvedTableSeed::Random => SeedRoot::new(0),
+        ResolvedTableSeed::Inherited(root)
+        | ResolvedTableSeed::Fixed(root)
+        | ResolvedTableSeed::Random(root) => *root,
     }
 }
 
@@ -2130,13 +2132,10 @@ fn fold_foreign_key_generators(
 }
 
 /// Resolve a table's seed against the run's root seed.
-fn resolve_seed(seed: &TableSeed, root_seed: Option<u64>) -> ResolvedTableSeed {
+fn resolve_seed(seed: &TableSeed, root_seed: u64) -> ResolvedTableSeed {
     match seed {
-        TableSeed::Inherit => match root_seed {
-            Some(root) => ResolvedTableSeed::Inherited(SeedRoot::new(root)),
-            None => ResolvedTableSeed::Random,
-        },
-        TableSeed::Random => ResolvedTableSeed::Random,
+        TableSeed::Inherit => ResolvedTableSeed::Inherited(SeedRoot::new(root_seed)),
+        TableSeed::Random => ResolvedTableSeed::Random(SeedRoot::new(rand::random())),
         TableSeed::Fixed(seed) => ResolvedTableSeed::Fixed(SeedRoot::new(*seed)),
     }
 }

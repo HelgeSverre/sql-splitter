@@ -602,13 +602,14 @@ fn is_integer_family(family: &crate::synthetic::schema::SqlTypeFamily) -> bool {
     matches!(family, SqlTypeFamily::Integer | SqlTypeFamily::BigInteger)
 }
 
-/// The [`SeedRoot`] a resolved table seed derives runtime streams from; a
-/// `Random` table falls back to the zero root (per-run entropy for
-/// relationship assignment is a follow-up).
+/// The concrete [`SeedRoot`] a resolved table seed derives runtime streams
+/// from. Random roots are drawn during compilation so runtime streams match the
+/// roots that compiled the table's operators.
 fn seed_root_of(seed: &ResolvedTableSeed) -> SeedRoot {
     match seed {
-        ResolvedTableSeed::Inherited(root) | ResolvedTableSeed::Fixed(root) => *root,
-        ResolvedTableSeed::Random => SeedRoot::new(0),
+        ResolvedTableSeed::Inherited(root)
+        | ResolvedTableSeed::Fixed(root)
+        | ResolvedTableSeed::Random(root) => *root,
     }
 }
 

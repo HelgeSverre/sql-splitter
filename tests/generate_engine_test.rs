@@ -1729,6 +1729,31 @@ fn render_model(model_yaml: &str, dialect: SqlDialect) -> String {
     render_model_with(model_yaml, |options| options.dialect = dialect)
 }
 
+#[test]
+fn random_table_seed_draws_fresh_entropy_for_each_compilation() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+tables:
+  events:
+    seed: null
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: events
+      columns:
+        - { name: token, type: "varchar(16)", nullable: false }
+    columns:
+      token: { generator: { kind: string, min_length: 16, max_length: 16 } }
+"#;
+
+    let first = render_model(model, SqlDialect::MySql);
+    let second = render_model(model, SqlDialect::MySql);
+
+    assert_ne!(first, second, "`seed: null` must not use a fixed zero root");
+}
+
 fn render_fixture_with(path: &str, configure: impl FnOnce(&mut RenderOptions)) -> String {
     let yaml = std::fs::read_to_string(path).expect("fixture readable");
     render_model_with(&yaml, configure)
