@@ -34,7 +34,7 @@ test("the Starlight header shows the Cargo package version", () => {
   expect(html).toContain(`v${cargoVersion}`);
 });
 
-test("the Generate sidebar exposes one shallow reference section", () => {
+test("generate is a command and Synthetic data owns its reference pages", () => {
   const html = readFileSync(
     join(dist, "commands", "generate", "index.html"),
     "utf8",
@@ -46,18 +46,28 @@ test("the Generate sidebar exposes one shallow reference section", () => {
   expect(sidebarEnd).toBeGreaterThan(sidebarStart);
 
   const sidebar = html.slice(sidebarStart, sidebarEnd);
-  const generateLinks = Array.from(
-    sidebar.matchAll(
+  const commandsStart = sidebar.indexOf(">Commands</span>");
+  const syntheticDataStart = sidebar.indexOf(">Synthetic data</span>");
+  const cookbookStart = sidebar.indexOf(">Cookbook</span>");
+
+  expect(commandsStart).toBeGreaterThan(-1);
+  expect(syntheticDataStart).toBeGreaterThan(commandsStart);
+  expect(cookbookStart).toBeGreaterThan(syntheticDataStart);
+
+  const commands = sidebar.slice(commandsStart, syntheticDataStart);
+  const syntheticData = sidebar.slice(syntheticDataStart, cookbookStart);
+  const referenceLinks = Array.from(
+    syntheticData.matchAll(
       /<a href="(\/commands\/generate\/[^"#]*)"[^>]*><span[^>]*>([^<]+)<\/span><\/a>/g,
     ),
     ([, href, label]) => [href, label],
   );
 
-  expect(sidebar).toMatch(
-    /<summary[^>]*><span[^>]*><span[^>]*>Generate<\/span>/,
+  expect(commands).toMatch(
+    /<a href="\/commands\/generate\/"[^>]*><span[^>]*>generate<\/span><\/a>/,
   );
-  expect(generateLinks).toEqual([
-    ["/commands/generate/", "Overview"],
+  expect(commands).not.toMatch(/<summary[^>]*>[\s\S]*?>Generate<\/span>/);
+  expect(referenceLinks).toEqual([
     ["/commands/generate/model-reference/", "Model reference"],
     ["/commands/generate/generators/", "Generator reference"],
     ["/commands/generate/modifiers/", "Modifiers"],

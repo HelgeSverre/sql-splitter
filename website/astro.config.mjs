@@ -84,29 +84,7 @@ export default defineConfig({
             "commands/completions",
             "commands/convert",
             "commands/diff",
-            {
-              label: "Generate",
-              items: [
-                { slug: "commands/generate", label: "Overview" },
-                "commands/generate/model-reference",
-                {
-                  slug: "commands/generate/generators",
-                  label: "Generator reference",
-                },
-                "commands/generate/modifiers",
-                "commands/generate/planners",
-                "commands/generate/inference",
-                "commands/generate/privacy-verification",
-                {
-                  slug: "commands/generate/diagnostics",
-                  label: "Diagnostics",
-                },
-                {
-                  slug: "commands/generate/library-api",
-                  label: "Rust API",
-                },
-              ],
-            },
+            "commands/generate",
             "commands/graph",
             "commands/merge",
             "commands/order",
@@ -116,6 +94,28 @@ export default defineConfig({
             "commands/shard",
             "commands/split",
             "commands/validate",
+          ],
+        },
+        {
+          label: "Synthetic data",
+          items: [
+            "commands/generate/model-reference",
+            {
+              slug: "commands/generate/generators",
+              label: "Generator reference",
+            },
+            "commands/generate/modifiers",
+            "commands/generate/planners",
+            "commands/generate/inference",
+            "commands/generate/privacy-verification",
+            {
+              slug: "commands/generate/diagnostics",
+              label: "Diagnostics",
+            },
+            {
+              slug: "commands/generate/library-api",
+              label: "Rust API",
+            },
           ],
         },
         {
