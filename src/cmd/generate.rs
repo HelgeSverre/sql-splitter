@@ -211,8 +211,8 @@ pub struct GenerateArgs {
 }
 
 /// A [`GenerateRequest`] plus the CLI-only knobs [`run`] needs once
-/// [`Generate::run`] returns: how to report the outcome, whether warnings
-/// should fail the run, and (when generated SQL has nowhere else to go) the
+/// [`Generate::run`] returns: how to report the outcome and (when generated SQL
+/// has nowhere else to go) the
 /// temporary file it was rendered to so it can be streamed to stdout.
 struct PreparedRequest {
     request: GenerateRequest,
@@ -221,7 +221,6 @@ struct PreparedRequest {
     explain: bool,
     json: bool,
     quiet: bool,
-    strict: bool,
     /// Present only when SQL renders to stdout: [`GenerateRequest`] has no
     /// stdout [`OutputTarget`], so this stdout case renders to a temp file
     /// first and [`run`] streams it to stdout after a successful run.
@@ -474,6 +473,7 @@ impl GenerateArgs {
             mode,
             explain: self.explain,
             verify: self.verify,
+            strict: self.strict,
             source,
         };
 
@@ -484,7 +484,6 @@ impl GenerateArgs {
             emit_stdout_temp,
             json: self.json,
             quiet: self.quiet,
-            strict: self.strict,
             stdout_temp,
         })
     }
@@ -531,7 +530,6 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
         explain,
         json,
         quiet,
-        strict,
         stdout_temp,
         emit_stdout_temp,
     } = prepared;
@@ -545,20 +543,8 @@ pub fn run(args: GenerateArgs) -> anyhow::Result<ExitCode> {
                 stream_to_stdout(temp.path())?;
             }
 
-            let warnings_are_fatal = strict
-                && report
-                    .diagnostics
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.severity == Severity::Warning);
-
-            if warnings_are_fatal {
-                write_diagnostics(&report.diagnostics, json)?;
-                Ok(ExitCode::FAILURE)
-            } else {
-                write_report(&report, mode, explain, json, quiet, stdout_temp.is_some())?;
-                Ok(ExitCode::SUCCESS)
-            }
+            write_report(&report, mode, explain, json, quiet, stdout_temp.is_some())?;
+            Ok(ExitCode::SUCCESS)
         }
         Err(GenerateError::Diagnostics(bag)) => {
             write_diagnostics(&bag, json)?;

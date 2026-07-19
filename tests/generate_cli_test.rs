@@ -859,13 +859,18 @@ fn lossy_cross_dialect_conversion_fails_under_strict() {
     let dir = tempfile::tempdir().unwrap();
     let model = dir.path().join("model.yaml");
     let out = dir.path().join("out.sql");
+    let emitted = dir.path().join("resolved.yaml");
     fs::write(&model, LOSSY_ENUM_MODEL).unwrap();
+    fs::write(&out, "previous SQL\n").unwrap();
+    fs::write(&emitted, "previous model\n").unwrap();
 
     // The SAME run under --strict promotes the lossy warning to a failure.
     let run = sql_splitter_bin()
         .args(["generate", "--config"])
         .arg(&model)
-        .args(["--dialect", "postgres", "--strict", "-o"])
+        .args(["--dialect", "postgres", "--strict", "--emit-config"])
+        .arg(&emitted)
+        .arg("-o")
         .arg(&out)
         .output()
         .expect("failed to run sql-splitter");
@@ -877,6 +882,26 @@ fn lossy_cross_dialect_conversion_fails_under_strict() {
         "expected strict failure; stderr: {stderr}"
     );
     assert!(stderr.contains("GEN-LOSSY-TYPE"), "stderr: {stderr}");
+    assert_eq!(fs::read_to_string(out).unwrap(), "previous SQL\n");
+    assert_eq!(fs::read_to_string(emitted).unwrap(), "previous model\n");
+}
+
+#[test]
+fn strict_render_warning_writes_no_sql_to_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("model.yaml");
+    fs::write(&model, LOSSY_ENUM_MODEL).unwrap();
+
+    let run = sql_splitter_bin()
+        .args(["generate", "--config"])
+        .arg(&model)
+        .args(["--dialect", "postgres", "--strict"])
+        .output()
+        .expect("failed to run sql-splitter");
+
+    assert_eq!(run.status.code(), Some(1));
+    assert!(run.stdout.is_empty(), "strict failure leaked generated SQL");
+    assert!(String::from_utf8_lossy(&run.stderr).contains("GEN-LOSSY-TYPE"));
 }
 
 #[test]

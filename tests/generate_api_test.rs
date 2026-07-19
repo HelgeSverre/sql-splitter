@@ -262,6 +262,34 @@ fn a_warning_surfaces_in_the_report_on_success() {
 }
 
 #[test]
+fn strict_compile_warning_preserves_existing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql_output = dir.path().join("synthetic.sql");
+    let model_output = dir.path().join("resolved.yaml");
+    fs::write(&sql_output, "previous SQL\n").unwrap();
+    fs::write(&model_output, "previous model\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&sql_output)
+        .emit(&model_output)
+        .compile(CompileOptions {
+            max_rows: Some(2),
+            ..Default::default()
+        })
+        .strict(true)
+        .run()
+        .expect_err("strict must promote the max-rows warning before publication");
+
+    assert!(matches!(error, GenerateError::Diagnostics(_)));
+    assert_eq!(fs::read_to_string(sql_output).unwrap(), "previous SQL\n");
+    assert_eq!(
+        fs::read_to_string(model_output).unwrap(),
+        "previous model\n"
+    );
+}
+
+#[test]
 fn overrides_without_a_base_model_is_a_clear_error() {
     let dir = tempfile::tempdir().unwrap();
     let overrides_path = dir.path().join("overrides.yaml");

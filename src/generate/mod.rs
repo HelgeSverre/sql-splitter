@@ -239,6 +239,9 @@ pub struct GenerateRequest {
     /// atomically only if the audit passes (`--verify`). Requires a filesystem
     /// SQL destination under [`RunMode::Generate`].
     pub verify: bool,
+    /// Treat warnings as fatal and publish no SQL or emitted model when any
+    /// compile-, render-, or verification-stage warning is produced.
+    pub strict: bool,
     /// How to profile `input`, if given.
     pub source: SourceOptions,
 }
@@ -336,6 +339,7 @@ impl Generate {
             mode,
             explain,
             verify,
+            strict,
             source,
         } = request;
 
@@ -409,32 +413,33 @@ impl Generate {
             explain,
         };
 
+        // Compile/profile warnings are already known, so strict mode can stop
+        // before staging or generating anything. Render and verification
+        // warnings are gated inside their staged paths below, before publish.
+        if strict && has_warnings(&report.diagnostics) {
+            return Err(GenerateError::Diagnostics(report.diagnostics));
+        }
+
         if verify {
+            let diagnostics = report.diagnostics.clone();
             let VerifiedRun {
                 rows_written,
-                not_checked,
-                render_warnings,
-            } = run_verified(&model, plan, explicit_seed, output, emit, render)?;
-            let mut out = GenerateReport {
+                diagnostics,
+            } = run_verified(
+                &model,
+                plan,
+                explicit_seed,
+                output,
+                emit,
+                render,
+                diagnostics,
+                strict,
+            )?;
+            let out = GenerateReport {
                 rows_written,
+                diagnostics,
                 ..report
             };
-            merge_render_warnings(&mut out.diagnostics, &render_warnings);
-            // An honest coverage gap must never be silent on a green exit: if the
-            // audit passed but could not evaluate some capabilities, surface them
-            // as a warning so the user sees exactly what was NOT checked.
-            if !not_checked.is_empty() {
-                out.diagnostics.warning(
-                    crate::diagnostic::codes::VERIFY_NOTCHECKED.code,
-                    String::new(),
-                    format!(
-                        "verification passed but {} capability/capabilities could not be \
-                         checked exactly: {}",
-                        not_checked.len(),
-                        not_checked.join(", ")
-                    ),
-                );
-            }
             return Ok(out);
         }
 
@@ -458,13 +463,20 @@ impl Generate {
                 })
             }
             RunMode::Generate => {
-                let (engine_report, render_warnings) =
-                    run_generate(GenerationEngine::new(plan), output, model_output, render)?;
-                let mut out = GenerateReport {
+                let diagnostics = report.diagnostics.clone();
+                let (engine_report, diagnostics) = run_generate(
+                    GenerationEngine::new(plan),
+                    output,
+                    model_output,
+                    render,
+                    diagnostics,
+                    strict,
+                )?;
+                let out = GenerateReport {
                     rows_written: engine_report.rows_written,
+                    diagnostics,
                     ..report
                 };
-                merge_render_warnings(&mut out.diagnostics, &render_warnings);
                 Ok(out)
             }
         }
@@ -475,8 +487,7 @@ impl Generate {
 /// capabilities the audit could not evaluate exactly (surfaced as a warning).
 struct VerifiedRun {
     rows_written: u64,
-    not_checked: Vec<String>,
-    render_warnings: Vec<ConvertWarning>,
+    diagnostics: DiagnosticBag,
 }
 
 /// Render SQL to a protected temp beside the destination, verify it against the
@@ -493,6 +504,8 @@ fn run_verified(
     output: OutputTarget,
     emit: Option<OutputTarget>,
     render: RenderOptions,
+    mut diagnostics: DiagnosticBag,
+    strict: bool,
 ) -> Result<VerifiedRun, GenerateError> {
     let destination = match output {
         OutputTarget::Path(path) => path,
@@ -569,6 +582,14 @@ fn run_verified(
         .map(|check| check.name.clone())
         .collect();
 
+    merge_render_warnings(&mut diagnostics, &render_warnings);
+    merge_not_checked_warning(&mut diagnostics, &not_checked);
+    if strict && has_warnings(&diagnostics) {
+        // `sql_output` still names only a protected temp. Returning drops it,
+        // and the resolved model has not been published either.
+        return Err(GenerateError::Diagnostics(diagnostics));
+    }
+
     // Verification passed: publish the SQL, then the model (if any).
     let mut outputs = vec![sql_output];
     if let Some((path, yaml)) = emit_plan {
@@ -603,8 +624,7 @@ fn run_verified(
 
     Ok(VerifiedRun {
         rows_written,
-        not_checked,
-        render_warnings,
+        diagnostics,
     })
 }
 
@@ -882,7 +902,9 @@ fn run_generate(
     output: OutputTarget,
     model_output: Option<AtomicOutput>,
     render: RenderOptions,
-) -> Result<(EngineReport, Vec<ConvertWarning>), GenerateError> {
+    mut diagnostics: DiagnosticBag,
+    strict: bool,
+) -> Result<(EngineReport, DiagnosticBag), GenerateError> {
     match output {
         OutputTarget::Path(path) => {
             let mut sql_output = AtomicOutput::create(&path).map_err(|err| {
@@ -901,6 +923,13 @@ fn run_generate(
                 (report, warnings)
             };
 
+            merge_render_warnings(&mut diagnostics, &warnings);
+            if strict && has_warnings(&diagnostics) {
+                // Both outputs are staged only. Returning drops their temps and
+                // preserves every previous destination byte.
+                return Err(GenerateError::Diagnostics(diagnostics));
+            }
+
             if let Some(model_output) = model_output {
                 // SQL is the primary artifact, so publish it first. The files
                 // cannot form one cross-filesystem transaction; if publishing
@@ -917,13 +946,13 @@ fn run_generate(
                     )
                 })?;
             }
-            Ok((report, warnings))
+            Ok((report, diagnostics))
         }
         OutputTarget::Discard => {
             let mut sink = DiscardSink;
             let report = engine.run(&mut sink)?;
             publish_model(model_output)?;
-            Ok((report, Vec::new()))
+            Ok((report, diagnostics))
         }
     }
 }
@@ -1011,6 +1040,30 @@ fn merge_render_warnings(diagnostics: &mut DiagnosticBag, warnings: &[ConvertWar
     }
 }
 
+/// Surface verification coverage gaps as warnings before the staged output is
+/// published, so strict mode can reject them without changing destinations.
+fn merge_not_checked_warning(diagnostics: &mut DiagnosticBag, not_checked: &[String]) {
+    if not_checked.is_empty() {
+        return;
+    }
+    diagnostics.warning(
+        crate::diagnostic::codes::VERIFY_NOTCHECKED.code,
+        String::new(),
+        format!(
+            "verification passed but {} capability/capabilities could not be checked exactly: {}",
+            not_checked.len(),
+            not_checked.join(", ")
+        ),
+    );
+}
+
+fn has_warnings(diagnostics: &DiagnosticBag) -> bool {
+    diagnostics
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Warning)
+}
+
 /// A [`RowSink`] that counts rows (via [`GenerationEngine::run`]'s own
 /// bookkeeping) but writes nothing; backs a `RunMode::Generate` request built
 /// directly (bypassing [`GenerateBuilder`]) with `OutputTarget::Discard` —
@@ -1053,6 +1106,7 @@ pub struct GenerateBuilder {
     mode: RunMode,
     explain: bool,
     verify: bool,
+    strict: bool,
     source: SourceOptions,
 }
 
@@ -1174,6 +1228,13 @@ impl GenerateBuilder {
         self
     }
 
+    /// Treat every warning as fatal and publish no requested output when one
+    /// is discovered.
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
     /// The profiling depth for `.input()` (defaults to the profiler's full
     /// depth when unset).
     pub fn profile_depth(mut self, depth: ProfileDepth) -> Self {
@@ -1233,6 +1294,7 @@ impl GenerateBuilder {
             mode: self.mode,
             explain: self.explain,
             verify: self.verify,
+            strict: self.strict,
             source: self.source,
         })
     }
