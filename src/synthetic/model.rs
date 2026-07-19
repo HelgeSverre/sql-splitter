@@ -6,7 +6,7 @@
 //! the `version`/`kind` envelope first, then deserializes into the
 //! role-specific, unknown-field-safe struct for that role.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
@@ -487,19 +487,29 @@ impl SyntheticModel {
     /// Rewrite each table's `rows` count to the resolved value from a compiled
     /// plan. Already-authoritative `fixed`/`observed` counts keep their kind;
     /// derived `scale`/`relation.children` policies become `fixed` so a reload
-    /// cannot derive a different count.
+    /// cannot derive a different count, except for named relation children whose
+    /// distribution is still consumed by a cross-table family planner.
     ///
     /// An `observed` table stays `kind: observed` with a frozen integer count,
     /// which is what `--emit-config` needs for a self-contained model that
     /// reproduces the same row counts on reload without re-passing volume
     /// flags. Tables absent from `resolved` are left untouched.
-    pub fn freeze_row_counts(&mut self, resolved: &BTreeMap<String, u64>) {
+    pub fn freeze_row_counts(
+        &mut self,
+        resolved: &BTreeMap<String, u64>,
+        family_children: &HashSet<String>,
+    ) {
         for (name, table) in &mut self.tables {
             let Some(&count) = resolved.get(name) else {
                 continue;
             };
             match &mut table.rows {
                 RowsModel::Fixed { count: current } | RowsModel::Observed { count: current } => {
+                    *current = count;
+                }
+                RowsModel::RelationChildren { count: current, .. }
+                    if family_children.contains(name) =>
+                {
                     *current = count;
                 }
                 RowsModel::Scale { .. } | RowsModel::RelationChildren { .. } => {

@@ -241,6 +241,40 @@ tables:
 }
 
 #[test]
+fn order_family_emit_reloads_to_byte_identical_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolved = dir.path().join("resolved.yaml");
+    let first = dir.path().join("first.sql");
+    let second = dir.path().join("second.sql");
+
+    let first_report = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&first)
+        .emit(&resolved)
+        .seed(7)
+        .run()
+        .unwrap();
+    let second_report = Generate::builder()
+        .config(&resolved)
+        .output(&second)
+        .run()
+        .unwrap();
+
+    assert_eq!(first_report.rows_written, 65);
+    assert_eq!(second_report.rows_written, 65);
+    assert_eq!(
+        fs::read(&first).unwrap(),
+        fs::read(&second).unwrap(),
+        "the emitted model must retain the order-family child distribution"
+    );
+    let emitted = fs::read_to_string(&resolved).unwrap();
+    assert!(
+        emitted.contains("kind: relation.children"),
+        "family child row facts were erased: {emitted}"
+    );
+}
+
+#[test]
 fn check_mode_compiles_but_writes_no_sql() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("synthetic.sql");
@@ -300,6 +334,48 @@ fn sql_and_model_outputs_cannot_publish_to_the_same_destination() {
         .emit(&destination)
         .run()
         .expect_err("SQL and model outputs must not overwrite each other");
+
+    assert!(matches!(error, GenerateError::Diagnostic(_)));
+    assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");
+}
+
+#[test]
+fn relative_and_absolute_output_aliases_cannot_publish_to_the_same_destination() {
+    let cwd = std::env::current_dir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("generate-output-alias-")
+        .tempdir_in(&cwd)
+        .unwrap();
+    let destination = dir.path().join("synthetic.out");
+    let relative = destination.strip_prefix(&cwd).unwrap();
+    fs::write(&destination, "previous bytes\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(relative)
+        .emit(&destination)
+        .run()
+        .expect_err("relative and absolute aliases must be rejected before staging");
+
+    assert!(matches!(error, GenerateError::Diagnostic(_)));
+    assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");
+}
+
+#[test]
+fn parent_component_output_aliases_cannot_publish_to_the_same_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let alias_component = dir.path().join("alias-component");
+    fs::create_dir(&alias_component).unwrap();
+    let destination = dir.path().join("synthetic.out");
+    let alias = alias_component.join("..").join("synthetic.out");
+    fs::write(&destination, "previous bytes\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&alias)
+        .emit(&destination)
+        .run()
+        .expect_err("parent-component aliases must be rejected before staging");
 
     assert!(matches!(error, GenerateError::Diagnostic(_)));
     assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");

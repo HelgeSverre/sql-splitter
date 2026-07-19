@@ -180,7 +180,10 @@ rows:
 | `relation.children` | `parent`, `count`, `distribution` | Child count and per-parent fan-out derived from the final parent count |
 
 Complete and emitted models store `count` even for derived rules. This freezes
-the resolved result for source-free reuse.
+the resolved result for source-free reuse. An emitted child produced by a
+cross-table family planner keeps its `relation.children` rule as well as the
+resolved `count`, because the planner still needs the distribution to reproduce
+the same child rows.
 
 A child distribution has `kind`, `mean`, `min`, and `max`. Supported kinds are
 `observed`, `fixed`, `uniform`, `poisson`, and `histogram`. The minimum must be

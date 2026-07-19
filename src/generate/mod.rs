@@ -107,8 +107,8 @@ pub mod seed;
 pub mod value;
 pub mod verify;
 
-use std::collections::BTreeMap;
-use std::io::Write;
+use std::collections::{BTreeMap, HashSet};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::convert::ConvertWarning;
@@ -343,20 +343,20 @@ impl Generate {
             source,
         } = request;
 
-        let conflicting_output = match (&output, &emit) {
-            (OutputTarget::Path(sql), Some(OutputTarget::Path(model)))
-                if mode == RunMode::Generate && sql == model =>
-            {
-                Some(sql)
+        if mode == RunMode::Generate {
+            if let (OutputTarget::Path(sql), Some(OutputTarget::Path(model))) = (&output, &emit) {
+                let sql_identity = normalized_destination(sql)
+                    .map_err(|error| output_identity_error(sql, error))?;
+                let model_identity = normalized_destination(model)
+                    .map_err(|error| output_identity_error(model, error))?;
+                if sql_identity == model_identity {
+                    return Err(GenerateError::diagnostic(
+                        &codes::REQUEST_OUTPUT,
+                        sql.display().to_string(),
+                        "generated SQL and the resolved model require different destinations",
+                    ));
+                }
             }
-            _ => None,
-        };
-        if let Some(path) = conflicting_output {
-            return Err(GenerateError::diagnostic(
-                &codes::REQUEST_OUTPUT,
-                path.display().to_string(),
-                "generated SQL and the resolved model require different destinations",
-            ));
         }
 
         let had_source_dump = input.is_some();
@@ -499,6 +499,54 @@ impl Generate {
             }
         }
     }
+}
+
+/// Resolve a requested output to the filesystem identity it would publish to.
+///
+/// Existing paths are canonicalized in full. For a not-yet-created output,
+/// canonicalize the deepest existing ancestor (resolving symlinks and `..`)
+/// and append the missing suffix. This compares aliases before either output is
+/// staged while still allowing normal publication to a new filename.
+fn normalized_destination(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{}` has no existing filesystem ancestor", path.display()),
+            )
+        })?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("`{}` has no parent destination", path.display()),
+            )
+        })?;
+    }
+
+    let mut identity = ancestor.canonicalize()?;
+    for component in suffix.iter().rev() {
+        identity.push(component);
+    }
+    Ok(identity)
+}
+
+fn output_identity_error(path: &Path, error: io::Error) -> GenerateError {
+    GenerateError::diagnostic(
+        &codes::REQUEST_OUTPUT,
+        path.display().to_string(),
+        format!(
+            "cannot resolve output destination `{}`: {error}",
+            path.display()
+        ),
+    )
 }
 
 /// The outcome of a successful `--verify` publish: the rows written plus any
@@ -836,7 +884,13 @@ fn resolved_model_yaml(
             })
         });
     }
-    emit.freeze_row_counts(&resolved);
+    let family_children: HashSet<String> = plan
+        .tables
+        .iter()
+        .flat_map(|table| table.planners.iter())
+        .filter_map(|planner| planner.family_child_table().map(str::to_owned))
+        .collect();
+    emit.freeze_row_counts(&resolved, &family_children);
     emit.defaults.inference = InferenceMode::Disabled;
     emit.seed = explicit_seed;
 
