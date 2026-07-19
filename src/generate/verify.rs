@@ -433,8 +433,10 @@ struct PlanSpec {
 struct TableSpec {
     name: String,
     rows: u64,
-    /// Column count for the arity check.
-    column_count: usize,
+    /// Columns the compiled engine must render on every row. Database-produced
+    /// columns are excluded unless a relationship requires the engine to
+    /// materialize that parent key.
+    rendered_columns: Vec<String>,
     /// Non-nullable columns whose value must never be `NULL` (database-produced
     /// columns excluded, since they legitimately render nothing).
     non_null_columns: Vec<String>,
@@ -469,14 +471,33 @@ struct FamilySpec {
 
 impl PlanSpec {
     fn from_plan(plan: &GenerationPlan) -> Self {
-        let tables = plan.tables.iter().map(TableSpec::from_table).collect();
+        let materialized_parent_keys: HashSet<(String, String)> = plan
+            .tables
+            .iter()
+            .flat_map(|table| {
+                table.relationships.iter().flat_map(|relationship| {
+                    relationship
+                        .parent_columns
+                        .iter()
+                        .map(|column| (relationship.parent_table.clone(), column.clone()))
+                })
+            })
+            .collect();
+        let tables = plan
+            .tables
+            .iter()
+            .map(|table| TableSpec::from_table(table, &materialized_parent_keys))
+            .collect();
         let families = extract_families(plan);
         Self { tables, families }
     }
 }
 
 impl TableSpec {
-    fn from_table(table: &PlannedTable) -> Self {
+    fn from_table(
+        table: &PlannedTable,
+        materialized_parent_keys: &HashSet<(String, String)>,
+    ) -> Self {
         let mut unique_groups: Vec<Vec<String>> = Vec::new();
         if !table.schema.primary_key.is_empty() {
             unique_groups.push(table.schema.primary_key.clone());
@@ -493,12 +514,18 @@ impl TableSpec {
             }
         }
 
+        let rendered_columns: Vec<String> = table
+            .columns
+            .iter()
+            .filter(|column| rendered_by_engine(table, column, materialized_parent_keys))
+            .map(|column| column.schema.name.clone())
+            .collect();
         let non_null_columns = table
             .schema
             .columns
             .iter()
-            .filter(|col| !col.nullable && !database_produced(table, &col.name))
-            .map(|col| col.name.clone())
+            .filter(|column| !column.nullable && rendered_columns.contains(&column.name))
+            .map(|column| column.name.clone())
             .collect();
 
         let relationships = table
@@ -521,7 +548,7 @@ impl TableSpec {
         Self {
             name: table.name.clone(),
             rows: table.rows,
-            column_count: table.schema.columns.len(),
+            rendered_columns,
             non_null_columns,
             primary_key: table.schema.primary_key.clone(),
             unique_groups,
@@ -531,17 +558,21 @@ impl TableSpec {
     }
 }
 
-/// Whether a non-null column is produced by the database (so verification does
-/// not expect a literal value for it).
-fn database_produced(table: &PlannedTable, column: &str) -> bool {
-    matches!(
-        table
-            .columns
-            .iter()
-            .find(|c| c.schema.name == column)
-            .map(|c| &c.owner),
-        Some(ColumnOwner::GeneratedByDatabase | ColumnOwner::DatabaseDefault)
-    )
+/// Whether the compiled engine renders `column` on every row.
+fn rendered_by_engine(
+    table: &PlannedTable,
+    column: &super::plan::PlannedColumn,
+    materialized_parent_keys: &HashSet<(String, String)>,
+) -> bool {
+    match &column.owner {
+        ColumnOwner::Generator { kind, .. } => kind != "database_default",
+        ColumnOwner::Planner { .. }
+        | ColumnOwner::FamilyChild { .. }
+        | ColumnOwner::Relationship { .. } => true,
+        ColumnOwner::DatabaseDefault | ColumnOwner::GeneratedByDatabase => {
+            materialized_parent_keys.contains(&(table.name.clone(), column.schema.name.clone()))
+        }
+    }
 }
 
 /// Resolve every family planner's sum checks into fully-named [`FamilySpec`]s.
@@ -605,12 +636,9 @@ struct TableState {
     undecodable: u64,
     /// Non-null violations per column name.
     null_violations: HashMap<String, u64>,
-    /// Arity violations (a row whose value count differs from its siblings').
+    /// Arity violations (a row that differs from the plan-derived rendered
+    /// column set).
     arity_violations: u64,
-    /// The value count established by the first observed row; later rows that
-    /// deviate are arity violations. Established per table because the renderer
-    /// legitimately omits database-produced/DEFAULT columns from every row.
-    expected_width: Option<usize>,
     /// Uniqueness key groups (PK + unique constraints).
     unique_groups: Vec<GroupKey>,
     /// Membership indexes this table exposes for children (parent-column groups).
@@ -720,7 +748,6 @@ impl<'a> Audit<'a> {
                     undecodable: 0,
                     null_violations: HashMap::new(),
                     arity_violations: 0,
-                    expected_width: None,
                     unique_groups,
                     member_groups,
                     predicate_failures: HashMap::new(),
@@ -800,21 +827,20 @@ impl<'a> Audit<'a> {
             all_values.get(val_idx)
         };
 
-        // Arity: a row's value count must match its siblings'. The width is
-        // established by the first row of the table (the renderer omits
-        // database-produced/DEFAULT columns uniformly, so the plan's full column
-        // count is not the rendered width), and can never exceed it.
+        // Arity is fixed by compiled ownership, not learned from the first row:
+        // every non-database-produced column must be present on every row.
         let observed_width = all_values.len();
-        let _ = planned.column_count;
+        let arity_violation = observed_width != planned.rendered_columns.len()
+            || planned
+                .rendered_columns
+                .iter()
+                .any(|column| value_of(column).is_none());
 
         // Collect the failures first (immutable borrows of the spec), then apply
         // them to the table's mutable state.
         let mut null_hits: Vec<String> = Vec::new();
         for col in &planned.non_null_columns {
-            // Only an explicitly rendered `NULL` is a violation. A column absent
-            // from the row was rendered as `DEFAULT` (omitted from the INSERT),
-            // which the database fills — not a null violation.
-            if matches!(value_of(col), Some(PkValue::Null)) {
+            if matches!(value_of(col), None | Some(PkValue::Null)) {
                 null_hits.push(col.clone());
             }
         }
@@ -865,10 +891,8 @@ impl<'a> Audit<'a> {
         // Now apply everything mutably.
         let state = self.tables.get_mut(table_name).expect("table state exists");
         state.rows += 1;
-        match state.expected_width {
-            None => state.expected_width = Some(observed_width),
-            Some(width) if width != observed_width => state.arity_violations += 1,
-            Some(_) => {}
+        if arity_violation {
+            state.arity_violations += 1;
         }
         for name in null_hits {
             *state.null_violations.entry(name).or_insert(0) += 1;

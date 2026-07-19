@@ -174,6 +174,27 @@ fn corrupt_arity_fails_the_named_check() {
 }
 
 #[test]
+fn omitting_a_required_column_from_every_row_fails_exact_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        let sql = replace_once(
+            sql,
+            "INSERT INTO `users` (`id`, `code`, `name`) VALUES",
+            "INSERT INTO `users` (`id`, `code`) VALUES",
+        );
+        let start = sql.find("INSERT INTO `users`").expect("users insert");
+        let end = sql[start..].find(";\n").expect("users insert end") + start + 2;
+        let rows = regex::Regex::new(r", '[^']*'\)")
+            .unwrap()
+            .replace_all(&sql[start..end], ")");
+        format!("{}{}{}", &sql[..start], rows, &sql[end..])
+    });
+    assert!(report.failed("arity:users"), "{:?}", report.checks);
+    assert!(report.failed("non_null:users"), "{:?}", report.checks);
+}
+
+#[test]
 fn corrupt_primary_key_fails_the_named_check() {
     let dir = tempfile::tempdir().unwrap();
     let plan = compile(CORE);
