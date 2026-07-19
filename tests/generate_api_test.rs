@@ -175,6 +175,71 @@ fn dry_run_mode_reports_the_plan_without_writing_sql() {
 }
 
 #[test]
+fn output_staging_failure_preserves_an_existing_emitted_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_output = dir.path().join("resolved.yaml");
+    fs::write(&model_output, "previous model\n").unwrap();
+
+    let err = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(dir.path().join("missing").join("synthetic.sql"))
+        .emit(&model_output)
+        .run()
+        .unwrap_err();
+
+    assert!(matches!(err, GenerateError::Diagnostic(_)));
+    assert_eq!(
+        fs::read_to_string(model_output).unwrap(),
+        "previous model\n"
+    );
+}
+
+#[test]
+fn runtime_failure_preserves_existing_sql_and_emitted_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("overflow.yaml");
+    let sql_output = dir.path().join("synthetic.sql");
+    let model_output = dir.path().join("resolved.yaml");
+    fs::write(
+        &config,
+        format!(
+            r#"version: 1
+kind: model
+defaults: {{ inference: disabled }}
+tables:
+  values:
+    rows: {{ kind: fixed, count: 3 }}
+    schema:
+      name: values
+      columns:
+        - {{ name: value, type: bigint, nullable: false }}
+    columns:
+      value:
+        generator: {{ kind: sequence, start: "{}", step: 1 }}
+"#,
+            i128::MAX - 1
+        ),
+    )
+    .unwrap();
+    fs::write(&sql_output, "previous SQL\n").unwrap();
+    fs::write(&model_output, "previous model\n").unwrap();
+
+    let err = Generate::builder()
+        .config(&config)
+        .output(&sql_output)
+        .emit(&model_output)
+        .run()
+        .unwrap_err();
+
+    assert!(matches!(err, GenerateError::Overflow(_)));
+    assert_eq!(fs::read_to_string(sql_output).unwrap(), "previous SQL\n");
+    assert_eq!(
+        fs::read_to_string(model_output).unwrap(),
+        "previous model\n"
+    );
+}
+
+#[test]
 fn a_warning_surfaces_in_the_report_on_success() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("synthetic.sql");

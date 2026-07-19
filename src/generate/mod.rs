@@ -108,7 +108,7 @@ pub mod value;
 pub mod verify;
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::convert::ConvertWarning;
@@ -182,7 +182,9 @@ pub enum RunMode {
 /// Where a [`Generate::run`] renders its SQL, or whether it renders none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputTarget {
-    /// Write to this path, creating or truncating the file.
+    /// Publish to this path atomically after generation succeeds. An existing
+    /// file remains untouched if staging, generation, rendering, or flushing
+    /// fails.
     Path(PathBuf),
     /// Produce no SQL output (the default under [`RunMode::Check`] and
     /// [`RunMode::DryRun`] when no output path was given).
@@ -393,16 +395,6 @@ impl Generate {
                 .collect();
         }
 
-        // Under `--verify` the SQL is rendered to a protected temp, audited, and
-        // published atomically *only if* the audit passes; an emitted model is
-        // published alongside it (never before verification succeeds). So the
-        // ordinary direct emit is skipped for the verify path.
-        if !verify {
-            if let Some(target) = &emit {
-                emit_model(&model, &plan, explicit_seed, target)?;
-            }
-        }
-
         let explain = if explain {
             build_explain(&decisions)
         } else {
@@ -446,15 +438,28 @@ impl Generate {
             return Ok(out);
         }
 
+        // Serialize and stage the emitted model before generation, but do not
+        // publish it yet. A later staging, generation, rendering, or flush
+        // failure drops this protected temp and leaves every destination at
+        // its previous bytes.
+        let model_output = stage_model(&model, &plan, explicit_seed, emit.as_ref())?;
+
         match mode {
-            RunMode::Check | RunMode::EmitModel => Ok(report),
-            RunMode::DryRun => Ok(GenerateReport {
-                rows_written: plan.estimates.total_rows,
-                ..report
-            }),
+            RunMode::Check | RunMode::EmitModel => {
+                publish_model(model_output)?;
+                Ok(report)
+            }
+            RunMode::DryRun => {
+                let rows_written = plan.estimates.total_rows;
+                publish_model(model_output)?;
+                Ok(GenerateReport {
+                    rows_written,
+                    ..report
+                })
+            }
             RunMode::Generate => {
                 let (engine_report, render_warnings) =
-                    run_generate(GenerationEngine::new(plan), output, render)?;
+                    run_generate(GenerationEngine::new(plan), output, model_output, render)?;
                 let mut out = GenerateReport {
                     rows_written: engine_report.rows_written,
                     ..report
@@ -745,8 +750,8 @@ fn source_error(error: impl std::fmt::Display) -> GenerateError {
 /// Build the resolved, self-contained `--emit-config` YAML for `model`/`plan`.
 ///
 /// Freezes each table's resolved row count, pins `inference: disabled`, and
-/// records the seed only for an explicitly-seeded run. Shared by the direct
-/// [`emit_model`] write and the `--verify` atomic-emit path.
+/// records the seed only for an explicitly-seeded run. Shared by normal and
+/// verified atomic publication paths.
 fn resolved_model_yaml(
     model: &SyntheticModel,
     plan: &GenerationPlan,
@@ -768,27 +773,57 @@ fn resolved_model_yaml(
     })
 }
 
-fn emit_model(
+fn stage_model(
     model: &SyntheticModel,
     plan: &GenerationPlan,
     explicit_seed: Option<u64>,
-    target: &OutputTarget,
-) -> Result<(), GenerateError> {
+    target: Option<&OutputTarget>,
+) -> Result<Option<AtomicOutput>, GenerateError> {
+    let Some(target) = target else {
+        return Ok(None);
+    };
     let yaml = resolved_model_yaml(model, plan, explicit_seed)?;
 
     match target {
-        OutputTarget::Path(path) => fs::write(path, yaml).map_err(|error| {
-            GenerateError::diagnostic(
-                &codes::EMIT_IO,
-                path.display().to_string(),
-                format!("failed to write `{}`: {error}", path.display()),
-            )
-        }),
+        OutputTarget::Path(path) => {
+            let mut output = AtomicOutput::create(path).map_err(|error| {
+                GenerateError::diagnostic(
+                    &codes::EMIT_IO,
+                    path.display().to_string(),
+                    format!("cannot stage model beside `{}`: {error}", path.display()),
+                )
+            })?;
+            output
+                .writer()
+                .write_all(yaml.as_bytes())
+                .map_err(|error| {
+                    GenerateError::diagnostic(
+                        &codes::EMIT_IO,
+                        path.display().to_string(),
+                        format!("failed to stage `{}`: {error}", path.display()),
+                    )
+                })?;
+            Ok(Some(output))
+        }
         // The builder/CLI only ever routes emit to a real path (a stdout emit
         // is spooled through a temp file), so this arm is unreachable in
         // practice; discard rather than panic if a caller wires it directly.
-        OutputTarget::Discard => Ok(()),
+        OutputTarget::Discard => Ok(None),
     }
+}
+
+fn publish_model(output: Option<AtomicOutput>) -> Result<(), GenerateError> {
+    let Some(output) = output else {
+        return Ok(());
+    };
+    let path = output.destination().to_path_buf();
+    output.commit().map_err(|error| {
+        GenerateError::diagnostic(
+            &codes::EMIT_IO,
+            path.display().to_string(),
+            format!("failed to publish `{}`: {error}", path.display()),
+        )
+    })
 }
 
 /// Reshape inference [`Decision`]s into the value-free `--explain` report.
@@ -845,27 +880,50 @@ fn precedence_label(precedence: Precedence) -> &'static str {
 fn run_generate(
     engine: GenerationEngine,
     output: OutputTarget,
+    model_output: Option<AtomicOutput>,
     render: RenderOptions,
 ) -> Result<(EngineReport, Vec<ConvertWarning>), GenerateError> {
     match output {
         OutputTarget::Path(path) => {
-            let file = fs::File::create(&path).map_err(|err| {
+            let mut sql_output = AtomicOutput::create(&path).map_err(|err| {
                 GenerateError::diagnostic(
                     &codes::OUTPUT_IO,
                     path.display().to_string(),
-                    format!("failed to create `{}`: {err}", path.display()),
+                    format!("cannot stage output beside `{}`: {err}", path.display()),
                 )
             })?;
-            let mut renderer = SqlRenderer::new(file, render);
-            let report = engine.run(&mut renderer)?;
-            // Drain the renderer's warnings before `finish` consumes it.
-            let warnings = renderer.warnings().to_vec();
-            renderer.finish()?;
+            let (report, warnings) = {
+                let mut renderer = SqlRenderer::new(sql_output.writer(), render);
+                let report = engine.run(&mut renderer)?;
+                // Drain the renderer's warnings before `finish` consumes it.
+                let warnings = renderer.warnings().to_vec();
+                renderer.finish()?;
+                (report, warnings)
+            };
+
+            if let Some(model_output) = model_output {
+                // SQL is the primary artifact, so publish it first. The files
+                // cannot form one cross-filesystem transaction; if publishing
+                // the model then fails, report exactly what already landed.
+                publish_in_order(vec![sql_output, model_output]).map_err(|partial| {
+                    GenerateError::diagnostic(&codes::OUTPUT_IO, "output", partial.to_string())
+                })?;
+            } else {
+                sql_output.commit().map_err(|error| {
+                    GenerateError::diagnostic(
+                        &codes::OUTPUT_IO,
+                        path.display().to_string(),
+                        format!("failed to publish `{}`: {error}", path.display()),
+                    )
+                })?;
+            }
             Ok((report, warnings))
         }
         OutputTarget::Discard => {
             let mut sink = DiscardSink;
-            Ok((engine.run(&mut sink)?, Vec::new()))
+            let report = engine.run(&mut sink)?;
+            publish_model(model_output)?;
+            Ok((report, Vec::new()))
         }
     }
 }
@@ -1014,15 +1072,15 @@ impl GenerateBuilder {
         self
     }
 
-    /// The path rendered SQL is written to (created/truncated). Required
-    /// under `RunMode::Generate`; optional under `Check`/`DryRun`, which
-    /// never write SQL regardless.
+    /// The path rendered SQL is published to atomically after successful
+    /// generation. Required under `RunMode::Generate`; optional under
+    /// `Check`/`DryRun`, which never write SQL regardless.
     pub fn output(mut self, path: impl Into<PathBuf>) -> Self {
         self.output = Some(path.into());
         self
     }
 
-    /// The path the resolved, self-contained model is written to
+    /// The path the resolved, self-contained model is published to atomically
     /// (`--emit-config`). Emitting fires alongside whatever `mode` runs.
     pub fn emit(mut self, path: impl Into<PathBuf>) -> Self {
         self.emit = Some(path.into());
