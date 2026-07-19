@@ -26,6 +26,17 @@ fn sql_splitter_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_sql-splitter"))
 }
 
+#[test]
+fn generate_benchmark_profiles_only_supported_depths_and_propagates_failures() {
+    let script = include_str!("../scripts/benchmark-generate.sh");
+
+    assert!(script.contains("for depth in basic full; do"));
+    assert!(
+        !script.contains("|| true"),
+        "benchmark failures must make the harness fail"
+    );
+}
+
 // ===========================================================================
 // Clap-level conflicts
 // ===========================================================================
@@ -210,6 +221,18 @@ fn check_with_an_input_dump_exits_with_usage_code() {
     let normalized = stderr.to_ascii_lowercase();
     assert!(!normalized.contains("phase"), "stderr: {stderr}");
     assert!(!normalized.contains("task"), "stderr: {stderr}");
+}
+
+#[test]
+fn check_without_a_config_exits_with_usage_code() {
+    let output = sql_splitter_bin()
+        .args(["generate", "--check"])
+        .output()
+        .expect("failed to run sql-splitter");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("stderr is valid UTF-8");
+    assert!(stderr.contains("--config"), "stderr: {stderr}");
 }
 
 #[test]

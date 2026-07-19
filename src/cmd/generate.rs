@@ -270,14 +270,20 @@ impl GenerateArgs {
     /// just presence), reject not-yet-implemented flags with a clear error,
     /// and assemble a [`PreparedRequest`].
     ///
-    /// Model-level problems (a missing/invalid config, a compile error)
-    /// intentionally are not checked here — those surface from
-    /// [`Generate::run`] itself, as [`GenerateError`].
+    /// Model-level problems (an invalid config or a compile error) intentionally
+    /// are not checked here — those surface from [`Generate::run`] itself, as
+    /// [`GenerateError`]. Check mode's required config *presence* is a CLI-shape
+    /// rule and is rejected here with the usage exit code.
     fn try_into_request(self) -> Result<PreparedRequest, RequestError> {
         if self.check && self.input.is_some() {
             return Err(RequestError::usage(
                 "--check requires a complete `--config` model and cannot profile an input dump; \
                  omit `[INPUT]`",
+            ));
+        }
+        if self.check && self.config.is_none() {
+            return Err(RequestError::usage(
+                "--check requires a complete model supplied with `--config <PATH>`",
             ));
         }
 

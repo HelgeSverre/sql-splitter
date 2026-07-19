@@ -13,7 +13,7 @@
 #   - hand-authored order-family planner model (money aggregates + line items)
 #   - hand-authored model with the core generators (seeded)
 #   - seeded vs unseeded (RNG-draw overhead)
-#   - profile depths (schema / basic / full) against a source dump
+#   - profile depths (basic / full) against a source dump
 #   - one exemplar planner (relation.children via the FK chain)
 #   - family spill forced vs not forced (byte-identical output)
 #   - 1 / 10 / 100 tables at a fixed rows-per-table
@@ -174,11 +174,19 @@ main() {
     run_case "tables_100" "$CHAIN_100" mysql "$ROWS"
 
     # Profile depths against a source dump (profile → infer → generate).
-    for depth in schema basic full; do
+    for depth in basic full; do
         local out; out=$(mktemp); local tlog; tlog=$(mktemp)
-        $TIME_CMD -v "$BINARY" generate "$DUMP" \
+        if $TIME_CMD -v "$BINARY" generate "$DUMP" \
             --profile-depth "$depth" --rows "$ROWS" --seed "$SEED" \
-            --output "$out" --quiet 2>"$tlog" >/dev/null || true
+            --output "$out" --quiet 2>"$tlog" >/dev/null; then
+            :
+        else
+            local status=$?
+            echo "profile_${depth}: FAILED" >&2
+            sed -n '1,8p' "$tlog" >&2
+            rm -f "$out" "$tlog"
+            return "$status"
+        fi
         local rss_kb wall
         rss_kb=$(grep "Maximum resident set size" "$tlog" | awk '{print $NF}')
         wall=$(grep "Elapsed (wall clock)" "$tlog" | awk '{print $NF}')
