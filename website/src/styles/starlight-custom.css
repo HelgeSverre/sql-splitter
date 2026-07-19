@@ -100,6 +100,34 @@ nav.sidebar a:hover {
   color: var(--sl-color-accent);
 }
 
+/* Nested sidebar groups should read like their sibling links. */
+nav.sidebar ul:not(.top-level) > li > details > summary {
+  color: var(--sl-color-gray-2);
+  font-size: var(--sl-text-base);
+  font-weight: 400;
+}
+
+nav.sidebar
+  ul:not(.top-level)
+  > li
+  > details
+  > summary
+  > .group-label
+  > .large {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+nav.sidebar
+  ul:not(.top-level)
+  > li
+  > details:has(a[aria-current="page"])
+  > summary {
+  color: var(--sl-color-accent);
+  font-weight: 600;
+}
+
 /* Active sidebar item - blue text, no background */
 nav.sidebar a[aria-current="page"] {
   background: transparent !important;
@@ -182,5 +210,11 @@ footer {
 @media (max-width: 50rem) {
   :root {
     --sl-sidebar-width: 100%;
+  }
+}
+
+@media (min-width: 50rem) {
+  nav.sidebar ul:not(.top-level) > li > details > summary {
+    font-size: var(--sl-text-sm);
   }
 }

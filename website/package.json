@@ -18,6 +18,7 @@
     "validate": "ajv compile -s 'public/schemas/*.schema.json' --spec=draft2020 -c ajv-formats"
   },
   "dependencies": {
+    "@astrojs/markdown-remark": "^7.2.1",
     "@astrojs/sitemap": "^3.7.3",
     "@astrojs/starlight": "^0.41.3",
     "@fontsource/roboto": "^5.2.10",
@@ -37,6 +38,6 @@
     "ajv-cli": "^5.0.0",
     "ajv-formats": "^3.0.1",
     "tailwindcss": "^4.3.3",
-    "typescript": "^6.0.0"
+    "typescript": "^6.0.3"
   }
 }

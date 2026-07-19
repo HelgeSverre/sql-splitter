@@ -1,4 +1,5 @@
 import { defineConfig, envField } from "astro/config";
+import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
 import indexnow from "astro-indexnow";
@@ -33,7 +34,7 @@ const SQL_SPLITTER_VERSION = getVersion();
 export default defineConfig({
   site: "https://sql-splitter.dev",
   markdown: {
-    remarkPlugins: [remarkExplicitHeadingIds],
+    processor: unified({ remarkPlugins: [remarkExplicitHeadingIds] }),
   },
   env: {
     schema: {
@@ -101,8 +102,19 @@ export default defineConfig({
           items: [
             "commands/generate/model-reference",
             {
-              slug: "commands/generate/generators",
-              label: "Generator reference",
+              label: "Generators",
+              collapsed: true,
+              items: [
+                {
+                  slug: "commands/generate/generators",
+                  label: "Overview",
+                },
+                "commands/generate/generators/core",
+                "commands/generate/generators/semantic",
+                "commands/generate/generators/credentials",
+                "commands/generate/generators/observed-statistical",
+                "commands/generate/generators/relationships",
+              ],
             },
             "commands/generate/modifiers",
             "commands/generate/planners",

@@ -34,6 +34,18 @@ test("the Starlight header shows the Cargo package version", () => {
   expect(html).toContain(`v${cargoVersion}`);
 });
 
+test("the Starlight header links to Context7", () => {
+  const html = readFileSync(
+    join(dist, "getting-started", "index.html"),
+    "utf8",
+  );
+
+  expect(html).toContain("https://context7.com/helgesverre/sql-splitter");
+  expect(html).toContain("Context7");
+  expect(html).toContain("data-context7-icon");
+  expect(html).not.toContain("context7-icon-green.svg");
+});
+
 test("generate is a command and Synthetic data owns its reference pages", () => {
   const html = readFileSync(
     join(dist, "commands", "generate", "index.html"),
@@ -58,7 +70,7 @@ test("generate is a command and Synthetic data owns its reference pages", () => 
   const syntheticData = sidebar.slice(syntheticDataStart, cookbookStart);
   const referenceLinks = Array.from(
     syntheticData.matchAll(
-      /<a href="(\/commands\/generate\/[^"#]*)"[^>]*><span[^>]*>([^<]+)<\/span><\/a>/g,
+      /<a href="(\/commands\/generate\/(?!generators\/)[^"#]*)"[^>]*><span[^>]*>([^<]+)<\/span><\/a>/g,
     ),
     ([, href, label]) => [href, label],
   );
@@ -67,9 +79,12 @@ test("generate is a command and Synthetic data owns its reference pages", () => 
     /<a href="\/commands\/generate\/"[^>]*><span[^>]*>generate<\/span><\/a>/,
   );
   expect(commands).not.toMatch(/<summary[^>]*>[\s\S]*?>Generate<\/span>/);
+  expect(syntheticData).toMatch(
+    /<summary[^>]*>[\s\S]*?<span[^>]*>Generators<\/span>[\s\S]*?<svg[^>]*class="caret/,
+  );
+  expect(syntheticData).not.toContain(">Generator reference</span>");
   expect(referenceLinks).toEqual([
     ["/commands/generate/model-reference/", "Model reference"],
-    ["/commands/generate/generators/", "Generator reference"],
     ["/commands/generate/modifiers/", "Modifiers"],
     ["/commands/generate/planners/", "Planners"],
     ["/commands/generate/inference/", "Profiling and inference"],
@@ -77,6 +92,47 @@ test("generate is a command and Synthetic data owns its reference pages", () => 
     ["/commands/generate/diagnostics/", "Diagnostics"],
     ["/commands/generate/library-api/", "Rust API"],
   ]);
+
+  const generatorSubitems = syntheticData.matchAll(
+    /<a href="\/commands\/generate\/generators\/([^"#]*)"[^>]*><span[^>]*>([^<]+)<\/span><\/a>/g,
+  );
+
+  expect(
+    Array.from(generatorSubitems, ([, href, label]) => [href, label]),
+  ).toEqual([
+    ["", "Overview"],
+    ["core/", "Core generators"],
+    ["semantic/", "Semantic generators"],
+    ["credentials/", "Credential generators"],
+    ["observed-statistical/", "Observed and statistical generators"],
+    ["relationships/", "Relationship generators"],
+  ]);
+});
+
+test("the Generators group expands only for generator pages", () => {
+  const generateHtml = readFileSync(
+    join(dist, "commands", "generate", "index.html"),
+    "utf8",
+  );
+  const generatorHtml = readFileSync(
+    join(dist, "commands", "generate", "generators", "core", "index.html"),
+    "utf8",
+  );
+
+  const groupTag = (html: string) => {
+    const labelIndex = html.indexOf(">Generators</span>");
+    const detailsStart = html.lastIndexOf("<details", labelIndex);
+    const detailsEnd = html.indexOf(">", detailsStart);
+
+    expect(labelIndex).toBeGreaterThan(-1);
+    expect(detailsStart).toBeGreaterThan(-1);
+    expect(detailsEnd).toBeGreaterThan(detailsStart);
+
+    return html.slice(detailsStart, detailsEnd + 1);
+  };
+
+  expect(groupTag(generateHtml)).not.toContain(" open");
+  expect(groupTag(generatorHtml)).toContain(" open");
 });
 
 test("the website schema mirror matches the authoritative schemas", () => {
