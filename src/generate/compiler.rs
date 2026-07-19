@@ -549,6 +549,24 @@ impl ModelCompiler {
             false
         });
 
+        for relationship in &relationships {
+            let parent_is_empty = resolved
+                .get(&relationship.parent_table)
+                .is_some_and(|count| *count == 0);
+            if rows > 0 && parent_is_empty && !fk_columns_all_nullable(table, &relationship.columns)
+            {
+                bag.error(
+                    crate::diagnostic::codes::FOREIGN_KEY_UNRESOLVED.code,
+                    format!("tables.{name}.relationships"),
+                    format!(
+                        "table `{name}` resolves to {rows} row(s), but required relationship `{}` targets empty parent table `{}`",
+                        relationship.name.as_deref().unwrap_or("(unnamed)"),
+                        relationship.parent_table
+                    ),
+                );
+            }
+        }
+
         let planners =
             self.compile_planners(model, name, table, compile_seed, family_ctx, resolved, bag);
         let claims = collect_claims(table, &planners);
@@ -1314,6 +1332,19 @@ fn fk_columns_all_non_null(table: &TableModel, columns: &[String]) -> bool {
             .find(|candidate| &candidate.name == column)
             .map(|candidate| !candidate.nullable)
             .unwrap_or(true)
+    })
+}
+
+/// Whether every column of a foreign key can represent the all-NULL composite
+/// used when its parent domain is empty. Unknown columns are not nullable.
+fn fk_columns_all_nullable(table: &TableModel, columns: &[String]) -> bool {
+    columns.iter().all(|column| {
+        table
+            .schema
+            .columns
+            .iter()
+            .find(|candidate| &candidate.name == column)
+            .is_some_and(|candidate| candidate.nullable)
     })
 }
 

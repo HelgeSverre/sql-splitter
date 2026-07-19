@@ -327,7 +327,7 @@ impl GenerationEngine {
             }
 
             sink.begin_table(&table)?;
-            let exec = TableExec::build(&table, &key_domains);
+            let exec = TableExec::build(&table, &key_domains)?;
             let names: Vec<String> = table
                 .columns
                 .iter()
@@ -476,7 +476,7 @@ fn render_family_child(
     sink: &mut dyn RowSink,
 ) -> Result<u64, GenerateError> {
     sink.begin_table(table)?;
-    let exec = TableExec::build(table, key_domains);
+    let exec = TableExec::build(table, key_domains)?;
     let names: Vec<String> = table
         .columns
         .iter()
@@ -707,7 +707,10 @@ struct TableExec {
 }
 
 impl TableExec {
-    fn build(table: &PlannedTable, key_domains: &BTreeMap<(String, String), ParentKey>) -> Self {
+    fn build(
+        table: &PlannedTable,
+        key_domains: &BTreeMap<(String, String), ParentKey>,
+    ) -> Result<Self, GenerateError> {
         let mut dense: Vec<(usize, (String, String))> = Vec::new();
         let mut dense_indices: BTreeSet<usize> = BTreeSet::new();
         for (i, column) in table.columns.iter().enumerate() {
@@ -722,7 +725,8 @@ impl TableExec {
         let mut selectors: Vec<FkSelector> = Vec::new();
         let mut member_indices: BTreeSet<usize> = BTreeSet::new();
         for relationship in &table.relationships {
-            if let Some(selector) = FkSelector::build(table, relationship, key_domains, seed_root) {
+            if let Some(selector) = FkSelector::build(table, relationship, key_domains, seed_root)?
+            {
                 member_indices.extend(selector.members.iter().copied());
                 selectors.push(selector);
             }
@@ -774,13 +778,13 @@ impl TableExec {
             }
         }
 
-        TableExec {
+        Ok(TableExec {
             defaults,
             dense,
             dense_indices,
             selectors,
             planners,
-        }
+        })
     }
 }
 
@@ -824,8 +828,8 @@ impl FkSelector {
         relationship: &CompiledRelationship,
         key_domains: &BTreeMap<(String, String), ParentKey>,
         seed_root: SeedRoot,
-    ) -> Option<Self> {
-        let members: Vec<usize> = relationship
+    ) -> Result<Option<Self>, GenerateError> {
+        let Some(members): Option<Vec<usize>> = relationship
             .columns
             .iter()
             .map(|name| {
@@ -834,18 +838,27 @@ impl FkSelector {
                     .iter()
                     .position(|column| &column.schema.name == name)
             })
-            .collect::<Option<_>>()?;
+            .collect()
+        else {
+            return Ok(None);
+        };
 
         // Each parent key column contributes a cloneable recipe; a single index
         // is chosen per child row and every component is derived from it.
-        let parents: Vec<&ParentKey> = relationship
+        let Some(parents): Option<Vec<&ParentKey>> = relationship
             .parent_columns
             .iter()
             .map(|parent_column| {
                 key_domains.get(&(relationship.parent_table.clone(), parent_column.clone()))
             })
-            .collect::<Option<_>>()?;
-        let parent_count = parents.first()?.count;
+            .collect()
+        else {
+            return Ok(None);
+        };
+        let Some(parent) = parents.first() else {
+            return Ok(None);
+        };
+        let parent_count = parent.count;
 
         let domain = if parents.len() == 1 {
             match parents[0].shape {
@@ -873,6 +886,19 @@ impl FkSelector {
                 .find(|column| &column.schema.name == name)
                 .is_some_and(|column| column.schema.nullable)
         });
+        if table.rows > 0 && parent_count == 0 && !nullable {
+            return Err(GenerateError::diagnostic(
+                &crate::diagnostic::codes::FOREIGN_KEY_UNRESOLVED,
+                format!("tables.{}.relationships", table.name),
+                format!(
+                    "table `{}` has {} row(s), but required relationship `{}` targets empty parent table `{}`",
+                    table.name,
+                    table.rows,
+                    relationship.name.as_deref().unwrap_or("(unnamed)"),
+                    relationship.parent_table
+                ),
+            ));
+        }
         let null_rate = f64::from(relationship.null_permille) / 1000.0;
         let rng = seed_root.stream(StreamId::operator(
             table.name.as_str(),
@@ -886,7 +912,7 @@ impl FkSelector {
             RelationshipDistribution::Uniform | RelationshipDistribution::Sequential => Vec::new(),
         };
 
-        Some(FkSelector {
+        Ok(Some(FkSelector {
             members,
             domain,
             parent_count,
@@ -895,7 +921,7 @@ impl FkSelector {
             nullable,
             rng,
             histogram,
-        })
+        }))
     }
 
     /// Assign this relationship's key(s) for the child at `row_index`.

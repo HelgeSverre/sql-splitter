@@ -1128,6 +1128,106 @@ fn compile(model_yaml: &str) -> GenerationPlan {
         .expect("model compiles cleanly")
 }
 
+fn empty_parent_model(child_nullable: bool) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: disabled }}
+seed: 7
+tables:
+  parents:
+    rows: {{ kind: fixed, count: 0 }}
+    schema:
+      name: parents
+      primary_key: [id]
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  children:
+    rows: {{ kind: fixed, count: 1 }}
+    schema:
+      name: children
+      primary_key: [id]
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: parent_id, type: bigint, nullable: {child_nullable} }}
+      relationships:
+        - {{ name: children_parent, columns: [parent_id], referenced_table: parents, referenced_columns: [id] }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+      parent_id: {{ generator: {{ kind: relation.foreign_key, relationship: children_parent }} }}
+    relationships:
+      - {{ name: children_parent, columns: [parent_id], references: {{ table: parents, columns: [id] }} }}
+"#
+    )
+}
+
+#[test]
+fn required_child_rows_against_an_empty_parent_are_rejected() {
+    let model = SyntheticFile::parse_str(&empty_parent_model(false))
+        .unwrap()
+        .into_model()
+        .unwrap();
+    let error = ModelCompiler::standard()
+        .compile(model, CompileOptions::default())
+        .expect_err("a required foreign key cannot target an empty parent domain");
+
+    assert!(error.has_code("GEN-FOREIGN-KEY-UNRESOLVED"));
+}
+
+#[test]
+fn nullable_child_rows_against_an_empty_parent_receive_null() {
+    let plan = compile(&empty_parent_model(true));
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+
+    assert!(matches!(
+        sink.values("children", "parent_id").next(),
+        Some(GeneratedValue::Null)
+    ));
+}
+
+#[test]
+fn partially_nullable_composite_fk_against_an_empty_parent_is_rejected() {
+    let model = SyntheticFile::parse_str(
+        r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  cells:
+    rows: { kind: fixed, count: 0 }
+    schema:
+      name: cells
+      primary_key: [x, y]
+      columns:
+        - { name: x, type: bigint, nullable: false, primary_key: true }
+        - { name: y, type: bigint, nullable: false, primary_key: true }
+  readings:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: readings
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: cell_x, type: bigint, nullable: true }
+        - { name: cell_y, type: bigint, nullable: false }
+    relationships:
+      - { columns: [cell_x, cell_y], references: { table: cells, columns: [x, y] } }
+"#,
+    )
+    .unwrap()
+    .into_model()
+    .unwrap();
+    let error = ModelCompiler::standard()
+        .compile(model, CompileOptions::default())
+        .expect_err("every component must be nullable to represent an absent parent");
+
+    assert!(error.has_code("GEN-FOREIGN-KEY-UNRESOLVED"));
+}
+
 /// A `customers` (10 rows) → `orders` (fan-out 4 = 40 rows) model whose FK is a
 /// generation relationship carrying an optional assignment `distribution`.
 fn customers_orders(seed: u64, distribution: Option<&str>) -> String {
