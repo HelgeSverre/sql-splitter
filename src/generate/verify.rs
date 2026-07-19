@@ -31,9 +31,12 @@
 //!
 //! Uniqueness and membership indexes hold exact keys in memory under a byte
 //! budget and spill their key bytes to a [`ProtectedSpool`] once the budget is
-//! exceeded. Spilled indexes scan the disk-backed exact keys without retaining
-//! an entry per key in memory. Dense integer key domains stay in memory.
+//! exceeded. Spilled indexes external-sort bounded runs, then use adjacent-key
+//! and linear merge-join checks without retaining an entry per key in memory.
+//! Dense integer key domains stay in memory.
 
+use std::cell::Cell;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
@@ -650,6 +653,8 @@ struct TableState {
     unique_groups: Vec<GroupKey>,
     /// Membership indexes this table exposes for children (parent-column groups).
     member_groups: Vec<GroupKey>,
+    /// Child FK occurrences, one append-only index per declared relationship.
+    foreign_keys: Vec<KeySet>,
     /// Planner predicate failures, keyed by a stable check slug.
     predicate_failures: HashMap<String, u64>,
     /// Sampled category tallies, bounded to categories named by expectations.
@@ -717,6 +722,8 @@ struct FamilyAcc {
     child_values: FamilyValueStore,
     /// Whether any decode/scale problem made the check inexact.
     inexact: bool,
+    /// Exact record reads/writes performed by external sorting and merge.
+    operations: u64,
 }
 
 /// A family aggregate contribution stored without a per-parent memory entry.
@@ -726,20 +733,223 @@ struct FamilyValueRecord {
     minor: (i128, u32),
 }
 
-/// Protected disk-backed family records. Parents and individual child
-/// contributions are appended once; final comparison rescans the child file
-/// for each parent. This deliberately trades CPU for a constant memory bound.
+/// One exact-key record handled by the bounded external sorter. `payload` is
+/// empty for membership keys and carries `(mantissa, scale)` for family sums.
+#[derive(Clone)]
+struct SortRecord {
+    hash: u64,
+    key: Vec<u8>,
+    payload: Vec<GeneratedValue>,
+}
+
+impl SortRecord {
+    fn from_spooled(row: SpooledRow) -> io::Result<Self> {
+        let mut values = row.values.into_iter();
+        let Some(GeneratedValue::Bytes(key)) = values.next() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sorted spool record has an invalid key",
+            ));
+        };
+        Ok(Self {
+            hash: row.row_index,
+            key,
+            payload: values.collect(),
+        })
+    }
+
+    fn encoded_size(&self) -> usize {
+        self.key.len() + self.payload.len() * std::mem::size_of::<GeneratedValue>() + 32
+    }
+}
+
+fn sort_record_cmp(left: &SortRecord, right: &SortRecord) -> Ordering {
+    left.hash
+        .cmp(&right.hash)
+        .then_with(|| left.key.cmp(&right.key))
+}
+
+fn exact_key_cmp(left_hash: u64, left: &[u8], right_hash: u64, right: &[u8]) -> Ordering {
+    left_hash.cmp(&right_hash).then_with(|| left.cmp(right))
+}
+
+#[derive(Default)]
+struct SortStats {
+    operations: u64,
+}
+
+fn read_sort_record<R: io::Read>(
+    reader: &mut SpoolReader<R>,
+    stats: &mut SortStats,
+) -> io::Result<Option<SortRecord>> {
+    let Some(row) = reader.read_row()? else {
+        return Ok(None);
+    };
+    stats.operations += 1;
+    SortRecord::from_spooled(row).map(Some)
+}
+
+fn write_sort_record(
+    spool: &mut ProtectedSpool,
+    record: SortRecord,
+    stats: &mut SortStats,
+) -> io::Result<()> {
+    let mut values = Vec::with_capacity(record.payload.len() + 1);
+    values.push(GeneratedValue::Bytes(record.key));
+    values.extend(record.payload);
+    spool.write_row(&SpooledRow {
+        table_id: 0,
+        row_index: record.hash,
+        values,
+    })?;
+    stats.operations += 1;
+    Ok(())
+}
+
+fn write_sorted_chunk(
+    mut chunk: Vec<SortRecord>,
+    temp: &TempConfig,
+    stats: &mut SortStats,
+) -> io::Result<ProtectedSpool> {
+    chunk.sort_unstable_by(sort_record_cmp);
+    let mut run = ProtectedSpool::create(temp)?;
+    for record in chunk {
+        write_sort_record(&mut run, record, stats)?;
+    }
+    run.flush()?;
+    Ok(run)
+}
+
+fn merge_sorted_runs(
+    mut left: ProtectedSpool,
+    mut right: ProtectedSpool,
+    temp: &TempConfig,
+    stats: &mut SortStats,
+) -> io::Result<ProtectedSpool> {
+    left.flush()?;
+    right.flush()?;
+    let mut left_reader = SpoolReader::new(BufReader::new(std::fs::File::open(left.path())?));
+    let mut right_reader = SpoolReader::new(BufReader::new(std::fs::File::open(right.path())?));
+    let mut left_record = read_sort_record(&mut left_reader, stats)?;
+    let mut right_record = read_sort_record(&mut right_reader, stats)?;
+    let mut merged = ProtectedSpool::create(temp)?;
+
+    while left_record.is_some() || right_record.is_some() {
+        let take_left = match (&left_record, &right_record) {
+            (Some(left), Some(right)) => sort_record_cmp(left, right) != Ordering::Greater,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_left {
+            if let Some(record) = left_record.take() {
+                write_sort_record(&mut merged, record, stats)?;
+            }
+            left_record = read_sort_record(&mut left_reader, stats)?;
+        } else {
+            if let Some(record) = right_record.take() {
+                write_sort_record(&mut merged, record, stats)?;
+            }
+            right_record = read_sort_record(&mut right_reader, stats)?;
+        }
+    }
+    merged.flush()?;
+    Ok(merged)
+}
+
+/// Sort an append-only protected spool with bounded record memory. Runs are
+/// merged eagerly like a binary counter, so at most one run per size level is
+/// retained and every record participates in `O(log n)` sequential disk I/O.
+fn external_sort(
+    mut source: ProtectedSpool,
+    temp: &TempConfig,
+    budget: usize,
+    stats: &mut SortStats,
+) -> io::Result<Option<ProtectedSpool>> {
+    source.flush()?;
+    let mut reader = SpoolReader::new(BufReader::new(std::fs::File::open(source.path())?));
+    let mut levels: Vec<Option<ProtectedSpool>> = Vec::new();
+    let mut chunk = Vec::new();
+    let mut used = 0usize;
+
+    while let Some(record) = read_sort_record(&mut reader, stats)? {
+        let size = record.encoded_size();
+        if !chunk.is_empty() && used.saturating_add(size) > budget {
+            let run = write_sorted_chunk(std::mem::take(&mut chunk), temp, stats)?;
+            add_sorted_run(&mut levels, run, temp, stats)?;
+            used = 0;
+        }
+        used = used.saturating_add(size);
+        chunk.push(record);
+    }
+    if !chunk.is_empty() {
+        let run = write_sorted_chunk(chunk, temp, stats)?;
+        add_sorted_run(&mut levels, run, temp, stats)?;
+    }
+
+    let mut result = None;
+    for run in levels.into_iter().flatten() {
+        result = Some(match result {
+            Some(existing) => merge_sorted_runs(existing, run, temp, stats)?,
+            None => run,
+        });
+    }
+    Ok(result)
+}
+
+fn add_sorted_run(
+    levels: &mut Vec<Option<ProtectedSpool>>,
+    mut run: ProtectedSpool,
+    temp: &TempConfig,
+    stats: &mut SortStats,
+) -> io::Result<()> {
+    let mut level = 0usize;
+    loop {
+        if level == levels.len() {
+            levels.push(Some(run));
+            return Ok(());
+        }
+        match levels[level].take() {
+            Some(existing) => {
+                run = merge_sorted_runs(existing, run, temp, stats)?;
+                level += 1;
+            }
+            None => {
+                levels[level] = Some(run);
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Protected disk-backed family records. Appends are externally sorted once;
+/// final comparison can then merge parents and children in one linear pass.
 struct FamilyValueStore {
     temp: TempConfig,
+    budget: usize,
     spool: Option<ProtectedSpool>,
+    sorted: Option<ProtectedSpool>,
+    operations: u64,
 }
 
 impl FamilyValueStore {
-    fn new(temp: TempConfig) -> Self {
-        Self { temp, spool: None }
+    fn new(temp: TempConfig, budget: usize) -> Self {
+        Self {
+            temp,
+            budget,
+            spool: None,
+            sorted: None,
+            operations: 0,
+        }
     }
 
     fn append(&mut self, key: &[u8], hash: u64, minor: (i128, u32)) -> io::Result<()> {
+        if self.sorted.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot append to a finalized family index",
+            ));
+        }
         let spool = match &mut self.spool {
             Some(spool) => spool,
             None => self.spool.insert(ProtectedSpool::create(&self.temp)?),
@@ -755,35 +965,27 @@ impl FamilyValueStore {
         })
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        match &mut self.spool {
-            Some(spool) => spool.flush(),
-            None => Ok(()),
+    fn finalize(&mut self) -> io::Result<()> {
+        if self.sorted.is_some() || self.spool.is_none() {
+            return Ok(());
         }
+        let mut stats = SortStats::default();
+        let Some(spool) = self.spool.take() else {
+            return Ok(());
+        };
+        self.sorted = external_sort(spool, &self.temp, self.budget, &mut stats)?;
+        self.operations += stats.operations;
+        Ok(())
     }
 
     fn replay(&self) -> io::Result<FamilyValueReplay> {
-        let reader = match &self.spool {
+        let reader = match &self.sorted {
             Some(spool) => Some(SpoolReader::new(BufReader::new(std::fs::File::open(
                 spool.path(),
             )?))),
             None => None,
         };
         Ok(FamilyValueReplay { reader })
-    }
-
-    fn sum_for(&self, parent: &FamilyValueRecord) -> io::Result<Option<(i128, u32)>> {
-        let mut sum = None;
-        for child in self.replay()? {
-            let child = child?;
-            if child.hash == parent.hash && child.key == parent.key {
-                match &mut sum {
-                    Some(acc) => add_minor(acc, child.minor),
-                    None => sum = Some(child.minor),
-                }
-            }
-        }
-        Ok(sum)
     }
 }
 
@@ -831,24 +1033,82 @@ fn decode_family_value(row: SpooledRow) -> io::Result<FamilyValueRecord> {
 
 impl FamilyAcc {
     fn compare(&mut self) -> io::Result<(u64, bool)> {
-        self.parent_values.flush()?;
-        self.child_values.flush()?;
+        self.parent_values.finalize()?;
+        self.child_values.finalize()?;
 
         let mut failed = 0u64;
         let mut missing = false;
-        for parent in self.parent_values.replay()? {
-            let parent = parent?;
-            match self.child_values.sum_for(&parent)? {
-                Some(child) if !minor_eq(parent.minor, child) => failed += 1,
-                None if parent.minor.0 != 0 => {
-                    failed += 1;
-                    missing = true;
+        let mut operations = 0u64;
+        let mut children = self.child_values.replay()?;
+        let mut child = next_family_record(&mut children, &mut operations)?;
+        let mut parents = self.parent_values.replay()?;
+        let mut parent = next_family_record(&mut parents, &mut operations)?;
+        while let Some(first_parent) = parent.take() {
+            while child.as_ref().is_some_and(|child| {
+                exact_key_cmp(child.hash, &child.key, first_parent.hash, &first_parent.key)
+                    == Ordering::Less
+            }) {
+                child = next_family_record(&mut children, &mut operations)?;
+            }
+
+            let mut sum = None;
+            while child.as_ref().is_some_and(|child| {
+                exact_key_cmp(child.hash, &child.key, first_parent.hash, &first_parent.key)
+                    == Ordering::Equal
+            }) {
+                let Some(contribution) = child.take().map(|child| child.minor) else {
+                    break;
+                };
+                match &mut sum {
+                    Some(acc) => add_minor(acc, contribution),
+                    None => sum = Some(contribution),
                 }
-                _ => {}
+                child = next_family_record(&mut children, &mut operations)?;
+            }
+
+            let mut current_parent = first_parent;
+            loop {
+                match sum {
+                    Some(child) if !minor_eq(current_parent.minor, child) => failed += 1,
+                    None if current_parent.minor.0 != 0 => {
+                        failed += 1;
+                        missing = true;
+                    }
+                    _ => {}
+                }
+
+                parent = next_family_record(&mut parents, &mut operations)?;
+                let same_key = parent.as_ref().is_some_and(|next| {
+                    exact_key_cmp(
+                        next.hash,
+                        &next.key,
+                        current_parent.hash,
+                        &current_parent.key,
+                    ) == Ordering::Equal
+                });
+                if !same_key {
+                    break;
+                }
+                let Some(next_parent) = parent.take() else {
+                    break;
+                };
+                current_parent = next_parent;
             }
         }
+        self.operations = self.parent_values.operations + self.child_values.operations + operations;
         Ok((failed, missing))
     }
+}
+
+fn next_family_record(
+    replay: &mut FamilyValueReplay,
+    operations: &mut u64,
+) -> io::Result<Option<FamilyValueRecord>> {
+    let Some(record) = replay.next() else {
+        return Ok(None);
+    };
+    *operations += 1;
+    record.map(Some)
 }
 
 /// The whole-file audit.
@@ -915,6 +1175,11 @@ impl<'a> Audit<'a> {
                     }
                 }
             }
+            let foreign_keys = table
+                .relationships
+                .iter()
+                .map(|_| KeySet::new(membership_budget, temp.clone()))
+                .collect();
 
             tables.insert(
                 table.name.clone(),
@@ -926,6 +1191,7 @@ impl<'a> Audit<'a> {
                     arity_violations: 0,
                     unique_groups,
                     member_groups,
+                    foreign_keys,
                     predicate_failures: HashMap::new(),
                     categories: CategoryTallies::default(),
                 },
@@ -943,9 +1209,10 @@ impl<'a> Audit<'a> {
                 child_column: family.child_column.clone(),
                 child_fk_columns: family.child_fk_columns.clone(),
                 parent_key_columns: family.parent_key_columns.clone(),
-                parent_values: FamilyValueStore::new(temp.clone()),
-                child_values: FamilyValueStore::new(temp.clone()),
+                parent_values: FamilyValueStore::new(temp.clone(), membership_budget),
+                child_values: FamilyValueStore::new(temp.clone(), membership_budget),
                 inexact: false,
+                operations: 0,
             })
             .collect();
 
@@ -1045,8 +1312,19 @@ impl<'a> Audit<'a> {
                 .collect()
         };
 
-        // FK membership: check each relationship's child key against the parent.
-        let fk_failures = self.check_foreign_keys(planned, &value_of)?;
+        // FK keys are appended now and checked in one sorted merge after the
+        // row pass. NULL composite keys remain optional and are not indexed.
+        let foreign_keys: Vec<Option<(Vec<u8>, u64)>> = planned
+            .relationships
+            .iter()
+            .map(|rel| {
+                if is_all_null(&rel.columns, &value_of) {
+                    None
+                } else {
+                    encode_group(&rel.columns, &value_of)
+                }
+            })
+            .collect();
 
         // Family accumulation.
         self.accumulate_families(table_name, &value_of)?;
@@ -1097,49 +1375,15 @@ impl<'a> Audit<'a> {
                     .map_err(membership_index_error)?;
             }
         }
-        for slug in fk_failures {
-            *state.predicate_failures.entry(slug).or_insert(0) += 1;
+        for (index, key) in state.foreign_keys.iter_mut().zip(foreign_keys) {
+            if let Some((bytes, hash)) = key {
+                index.append(&bytes, hash).map_err(membership_index_error)?;
+            }
         }
         for (col, value) in category_hits {
             state.categories.record(&col, &value);
         }
         Ok(())
-    }
-
-    /// Check every foreign key of `planned` against the parent's exposed
-    /// membership index. Returns the slugs of any failed relationships.
-    fn check_foreign_keys<'v>(
-        &self,
-        planned: &TableSpec,
-        value_of: &impl Fn(&str) -> Option<&'v PkValue>,
-    ) -> Result<Vec<String>, GenerateError> {
-        let mut failures = Vec::new();
-        for rel in &planned.relationships {
-            let Some((bytes, hash)) = encode_group(&rel.columns, value_of) else {
-                // A NULL foreign key is allowed (optional relationship); skip.
-                continue;
-            };
-            // All-null composite key → treated as absent, not a violation.
-            if is_all_null(&rel.columns, value_of) {
-                continue;
-            }
-            let parent = self.tables.get(&rel.parent_table);
-            let Some(parent) = parent else { continue };
-            let group = parent
-                .member_groups
-                .iter()
-                .find(|g| g.columns == rel.parent_columns);
-            if let Some(group) = group {
-                let present = group
-                    .index
-                    .contains(&bytes, hash)
-                    .map_err(membership_index_error)?;
-                if !present {
-                    failures.push(fk_slug(&planned.name, rel));
-                }
-            }
-        }
-        Ok(failures)
     }
 
     /// Accumulate parent totals and child sums for every family this row
@@ -1200,12 +1444,55 @@ impl<'a> Audit<'a> {
         );
     }
 
+    /// Finalize every append-only key index, then evaluate child FK indexes
+    /// against their parent membership indexes by sorted merge join.
+    fn finalize_indexes(&mut self) -> Result<HashMap<(String, String), u64>, GenerateError> {
+        for state in self.tables.values_mut() {
+            for group in &mut state.unique_groups {
+                group.duplicate |= group.index.finalize().map_err(membership_index_error)?;
+            }
+            for group in &mut state.member_groups {
+                group.index.finalize().map_err(membership_index_error)?;
+            }
+            for index in &mut state.foreign_keys {
+                index.finalize().map_err(membership_index_error)?;
+            }
+        }
+
+        let mut failures = HashMap::new();
+        for planned in &self.spec.tables {
+            let child = &self.tables[&planned.name];
+            for (relationship, child_keys) in planned.relationships.iter().zip(&child.foreign_keys)
+            {
+                let Some(parent) = self.tables.get(&relationship.parent_table) else {
+                    continue;
+                };
+                let Some(parent_keys) = parent
+                    .member_groups
+                    .iter()
+                    .find(|group| group.columns == relationship.parent_columns)
+                else {
+                    continue;
+                };
+                let missing = child_keys
+                    .missing_from(&parent_keys.index)
+                    .map_err(membership_index_error)?;
+                failures.insert(
+                    (planned.name.clone(), fk_slug(&planned.name, relationship)),
+                    missing,
+                );
+            }
+        }
+        Ok(failures)
+    }
+
     /// Emit every accumulated check into the report.
     fn finish(
         &mut self,
         report: &mut VerificationReport,
         distributions: &[DistributionExpectation],
     ) -> Result<(), GenerateError> {
+        let foreign_key_failures = self.finalize_indexes()?;
         for planned in &self.spec.tables {
             let state = &self.tables[&planned.name];
 
@@ -1279,7 +1566,10 @@ impl<'a> Audit<'a> {
             // Foreign keys / composite keys.
             for rel in &planned.relationships {
                 let slug = fk_slug(&planned.name, rel);
-                let failed = state.predicate_failures.get(&slug).copied().unwrap_or(0);
+                let failed = foreign_key_failures
+                    .get(&(planned.name.clone(), slug.clone()))
+                    .copied()
+                    .unwrap_or(0);
                 report.record(
                     slug,
                     CheckStatus::Exact,
@@ -1748,20 +2038,26 @@ impl GroupKey {
 /// keys per 64-bit hash) held while a [`KeySet`] is under budget.
 type KeyBuckets = HashMap<u64, SmallVec<[Box<[u8]>; 1]>>;
 
-/// An exact-in-memory, spill-to-disk set of key tuples.
+enum KeyStorage {
+    Memory(KeyBuckets),
+    UnsortedSpool(ProtectedSpool),
+    SortedMemory(Vec<SortRecord>),
+    SortedSpool(ProtectedSpool),
+    Empty,
+}
+
+/// An exact-in-memory, spill-to-disk collection of key tuples.
 ///
-/// While under `budget` bytes it holds the full key bytes in memory (exact, no
-/// false positives). Once the budget is crossed it spills every key's bytes to a
-/// [`ProtectedSpool`]. Membership and duplicate detection then rescan the spool
-/// for the exact key bytes. No per-key memory index survives the spill; this
-/// deliberately trades lookup time for a fixed memory bound.
+/// While under `budget` bytes it holds exact key bytes in memory. Once the
+/// budget is crossed, insertion becomes append-only. Finalization external
+/// sorts bounded chunks and pairwise-merges protected runs; uniqueness and FK
+/// membership then use adjacent records or a linear merge join.
 struct KeySet {
     budget: usize,
     used: usize,
     temp: TempConfig,
-    /// Present until the first spill.
-    memory: Option<KeyBuckets>,
-    spool: Option<ProtectedSpool>,
+    storage: KeyStorage,
+    operations: Cell<u64>,
 }
 
 impl KeySet {
@@ -1770,98 +2066,211 @@ impl KeySet {
             budget,
             used: 0,
             temp,
-            memory: Some(HashMap::new()),
-            spool: None,
+            storage: KeyStorage::Memory(HashMap::new()),
+            operations: Cell::new(0),
         }
     }
 
     /// Insert a key; returns `Ok(true)` if newly added, `Ok(false)` if an exact
     /// duplicate was already present.
     fn insert(&mut self, key: &[u8], hash: u64) -> io::Result<bool> {
-        if let Some(memory) = &mut self.memory {
-            let bucket = memory.entry(hash).or_default();
-            if bucket.iter().any(|existing| existing.as_ref() == key) {
-                return Ok(false);
+        let mut spill = false;
+        match &mut self.storage {
+            KeyStorage::Memory(memory) => {
+                let bucket = memory.entry(hash).or_default();
+                if bucket.iter().any(|existing| existing.as_ref() == key) {
+                    return Ok(false);
+                }
+                bucket.push(key.into());
+                self.used += key.len() + 24;
+                spill = self.used > self.budget;
             }
-            bucket.push(key.into());
-            self.used += key.len() + 24;
-            if self.used > self.budget {
-                self.spill()?;
+            KeyStorage::UnsortedSpool(spool) => write_key(spool, hash, key)?,
+            KeyStorage::SortedMemory(_) | KeyStorage::SortedSpool(_) | KeyStorage::Empty => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cannot insert into a finalized key index",
+                ));
             }
-            return Ok(true);
         }
-        // Spilled: confirm an exact duplicate on disk, else append. The scan is
-        // intentionally unconditional because retaining a hash per key would
-        // make memory grow with the input again.
-        if self.scan_matches(key, hash)? {
-            return Ok(false);
+        if spill {
+            self.spill()?;
         }
-        self.append_spool(key, hash)?;
         Ok(true)
     }
 
-    /// Whether `key` is present.
-    fn contains(&self, key: &[u8], hash: u64) -> io::Result<bool> {
-        if let Some(memory) = &self.memory {
-            return Ok(memory
-                .get(&hash)
-                .is_some_and(|bucket| bucket.iter().any(|e| e.as_ref() == key)));
+    /// Append a key while retaining duplicates, used for child FK occurrences.
+    fn append(&mut self, key: &[u8], hash: u64) -> io::Result<()> {
+        let mut spill = false;
+        match &mut self.storage {
+            KeyStorage::Memory(memory) => {
+                memory.entry(hash).or_default().push(key.into());
+                self.used += key.len() + 24;
+                spill = self.used > self.budget;
+            }
+            KeyStorage::UnsortedSpool(spool) => write_key(spool, hash, key)?,
+            KeyStorage::SortedMemory(_) | KeyStorage::SortedSpool(_) | KeyStorage::Empty => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cannot append to a finalized key index",
+                ));
+            }
         }
-        self.scan_matches(key, hash)
+        if spill {
+            self.spill()?;
+        }
+        Ok(())
     }
 
     /// Move the in-memory keys to a fresh protected spool and switch modes.
     fn spill(&mut self) -> io::Result<()> {
+        let storage = std::mem::replace(&mut self.storage, KeyStorage::Empty);
+        let KeyStorage::Memory(memory) = storage else {
+            self.storage = storage;
+            return Ok(());
+        };
         let mut spool = ProtectedSpool::create(&self.temp)?;
-        if let Some(memory) = self.memory.take() {
-            for (hash, bucket) in memory {
-                for key in bucket {
-                    write_key(&mut spool, hash, &key)?;
-                }
+        for (hash, bucket) in memory {
+            for key in bucket {
+                write_key(&mut spool, hash, &key)?;
             }
         }
         spool.flush()?;
-        self.spool = Some(spool);
+        self.storage = KeyStorage::UnsortedSpool(spool);
         Ok(())
     }
 
-    fn append_spool(&mut self, key: &[u8], hash: u64) -> io::Result<()> {
-        if let Some(spool) = &mut self.spool {
-            write_key(spool, hash, key)?;
-            spool.flush()?;
-        }
-        Ok(())
-    }
-
-    /// Scan the spool for a record whose hash and key bytes both match — the
-    /// collision-confirmation step. Re-opens the spool file read-only (writes are
-    /// flushed after every append), so it needs only `&self`.
-    fn scan_matches(&self, key: &[u8], hash: u64) -> io::Result<bool> {
-        let spool = match &self.spool {
-            Some(spool) => spool,
-            None => return Ok(false),
-        };
-        let file = std::fs::File::open(spool.path())?;
-        let mut reader = SpoolReader::new(BufReader::new(file));
-        while let Some(row) = reader.read_row()? {
-            if row.row_index == hash {
-                if let Some(GeneratedValue::Bytes(bytes)) = row.values.first() {
-                    if bytes.as_slice() == key {
-                        return Ok(true);
-                    }
+    /// Finalize the index and report whether any exact duplicate exists.
+    fn finalize(&mut self) -> io::Result<bool> {
+        let storage = std::mem::replace(&mut self.storage, KeyStorage::Empty);
+        self.storage = match storage {
+            KeyStorage::Memory(memory) => {
+                let mut records: Vec<SortRecord> = memory
+                    .into_iter()
+                    .flat_map(|(hash, bucket)| {
+                        bucket.into_iter().map(move |key| SortRecord {
+                            hash,
+                            key: key.into_vec(),
+                            payload: Vec::new(),
+                        })
+                    })
+                    .collect();
+                records.sort_unstable_by(sort_record_cmp);
+                KeyStorage::SortedMemory(records)
+            }
+            KeyStorage::UnsortedSpool(spool) => {
+                let mut stats = SortStats::default();
+                let sorted = external_sort(spool, &self.temp, self.budget, &mut stats)?;
+                self.operations
+                    .set(self.operations.get() + stats.operations);
+                match sorted {
+                    Some(spool) => KeyStorage::SortedSpool(spool),
+                    None => KeyStorage::SortedMemory(Vec::new()),
                 }
             }
+            finalized @ (KeyStorage::SortedMemory(_) | KeyStorage::SortedSpool(_)) => finalized,
+            KeyStorage::Empty => KeyStorage::SortedMemory(Vec::new()),
+        };
+
+        let mut replay = self.replay()?;
+        let mut previous: Option<SortRecord> = None;
+        let mut duplicate = false;
+        let mut operations = 0u64;
+        for record in &mut replay {
+            let record = record?;
+            operations += 1;
+            if previous.as_ref().is_some_and(|previous| {
+                exact_key_cmp(previous.hash, &previous.key, record.hash, &record.key)
+                    == Ordering::Equal
+            }) {
+                duplicate = true;
+            }
+            previous = Some(record);
         }
-        Ok(false)
+        self.operations.set(self.operations.get() + operations);
+        Ok(duplicate)
+    }
+
+    fn replay(&self) -> io::Result<SortedRecordReplay<'_>> {
+        match &self.storage {
+            KeyStorage::SortedMemory(records) => Ok(SortedRecordReplay::Memory(records.iter())),
+            KeyStorage::SortedSpool(spool) => Ok(SortedRecordReplay::Spool(SpoolReader::new(
+                BufReader::new(std::fs::File::open(spool.path())?),
+            ))),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "key index must be finalized before replay",
+            )),
+        }
+    }
+
+    /// Count child-key occurrences absent from the finalized parent set.
+    fn missing_from(&self, parent: &Self) -> io::Result<u64> {
+        let mut children = self.replay()?;
+        let mut parents = parent.replay()?;
+        let mut operations = 0u64;
+        let mut parent_record = next_sorted_record(&mut parents, &mut operations)?;
+        let mut missing = 0u64;
+
+        while let Some(child) = next_sorted_record(&mut children, &mut operations)? {
+            while parent_record.as_ref().is_some_and(|parent| {
+                exact_key_cmp(parent.hash, &parent.key, child.hash, &child.key) == Ordering::Less
+            }) {
+                parent_record = next_sorted_record(&mut parents, &mut operations)?;
+            }
+            if !parent_record.as_ref().is_some_and(|parent| {
+                exact_key_cmp(parent.hash, &parent.key, child.hash, &child.key) == Ordering::Equal
+            }) {
+                missing += 1;
+            }
+        }
+        self.operations.set(self.operations.get() + operations);
+        Ok(missing)
+    }
+
+    #[cfg(test)]
+    fn sort_operations(&self) -> u64 {
+        self.operations.get()
     }
 
     #[cfg(test)]
     fn spilled_memory_entries(&self) -> usize {
-        self.memory
-            .as_ref()
-            .map(|buckets| buckets.values().map(SmallVec::len).sum())
-            .unwrap_or(0)
+        match &self.storage {
+            KeyStorage::Memory(buckets) => buckets.values().map(SmallVec::len).sum(),
+            _ => 0,
+        }
     }
+}
+
+enum SortedRecordReplay<'a> {
+    Memory(std::slice::Iter<'a, SortRecord>),
+    Spool(SpoolReader<BufReader<std::fs::File>>),
+}
+
+impl Iterator for SortedRecordReplay<'_> {
+    type Item = io::Result<SortRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(records) => records.next().cloned().map(Ok),
+            Self::Spool(reader) => match reader.read_row() {
+                Ok(Some(row)) => Some(SortRecord::from_spooled(row)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
+        }
+    }
+}
+
+fn next_sorted_record(
+    replay: &mut SortedRecordReplay<'_>,
+    operations: &mut u64,
+) -> io::Result<Option<SortRecord>> {
+    let Some(record) = replay.next() else {
+        return Ok(None);
+    };
+    *operations += 1;
+    record.map(Some)
 }
 
 fn write_key(spool: &mut ProtectedSpool, hash: u64, key: &[u8]) -> io::Result<()> {
@@ -1888,7 +2297,92 @@ mod tests {
         }
 
         assert_eq!(keys.spilled_memory_entries(), 0);
-        assert!(keys.contains(&42u64.to_le_bytes(), 42).unwrap());
+        assert!(!keys.finalize().unwrap());
+    }
+
+    #[test]
+    fn spilled_key_sort_and_fk_merge_work_is_subquadratic() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = TempConfig::in_dir(dir.path());
+        let count = 1_024u64;
+        let mut unique = KeySet::new(0, temp.clone());
+        let mut parents = KeySet::new(0, temp.clone());
+        let mut children = KeySet::new(0, temp);
+
+        for key in 0..count {
+            let bytes = key.to_le_bytes();
+            unique.insert(&bytes, key).unwrap();
+            parents.insert(&bytes, key).unwrap();
+            children.append(&bytes, key).unwrap();
+        }
+        unique
+            .insert(&(count - 1).to_le_bytes(), count - 1)
+            .unwrap();
+        children.append(&count.to_le_bytes(), count).unwrap();
+
+        assert!(unique.finalize().unwrap(), "spilled duplicate was missed");
+        assert!(!parents.finalize().unwrap());
+        assert!(!children.finalize().unwrap());
+        assert_eq!(children.missing_from(&parents).unwrap(), 1);
+
+        let record_io =
+            unique.sort_operations() + parents.sort_operations() + children.sort_operations();
+        assert!(
+            record_io < count * 3 * 32,
+            "external sort/merge did {record_io} record operations for {count} keys per set"
+        );
+    }
+
+    #[test]
+    fn spilled_family_merge_work_is_subquadratic() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = TempConfig::in_dir(dir.path());
+        let count = 512u64;
+        let mut family = FamilyAcc {
+            slug: "family_sum:orders:total->order_items:total".into(),
+            parent_table: "orders".into(),
+            parent_column: "total".into(),
+            child_table: "order_items".into(),
+            child_column: "total".into(),
+            child_fk_columns: vec!["order_id".into()],
+            parent_key_columns: vec!["id".into()],
+            parent_values: FamilyValueStore::new(temp.clone(), 0),
+            child_values: FamilyValueStore::new(temp, 0),
+            inexact: false,
+            operations: 0,
+        };
+
+        for key in 0..count {
+            family
+                .parent_values
+                .append(&key.to_le_bytes(), key, (2, 0))
+                .unwrap();
+        }
+        // A corrupt duplicate parent is reported by the independent uniqueness
+        // check; the family check must still compare the same child sum to both
+        // parent records, matching the exact pre-sort behavior.
+        family
+            .parent_values
+            .append(&0u64.to_le_bytes(), 0, (2, 0))
+            .unwrap();
+        for key in (0..count).rev() {
+            family
+                .child_values
+                .append(&key.to_le_bytes(), key, (1, 0))
+                .unwrap();
+            family
+                .child_values
+                .append(&key.to_le_bytes(), key, (1, 0))
+                .unwrap();
+        }
+
+        assert_eq!(family.compare().unwrap(), (0, false));
+        let records = count * 3 + 1;
+        assert!(
+            family.operations < records * 32,
+            "family external sort/merge did {} record operations for {records} records",
+            family.operations
+        );
     }
 
     #[test]

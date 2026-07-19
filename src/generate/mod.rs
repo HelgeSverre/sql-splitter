@@ -503,19 +503,30 @@ impl Generate {
 
 /// Resolve a requested output to the filesystem identity it would publish to.
 ///
-/// Existing paths are canonicalized in full. For a not-yet-created output,
-/// canonicalize the deepest existing ancestor (resolving symlinks and `..`)
-/// and append the missing suffix. This compares aliases before either output is
-/// staged while still allowing normal publication to a new filename.
+/// Canonicalize the deepest existing parent directory (resolving directory
+/// symlinks and `..`) and append the missing suffix plus filename. The final
+/// filename itself is kept lexical because atomic publication replaces that
+/// directory entry rather than following a final symlink.
 fn normalized_destination(path: &Path) -> io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    let mut ancestor = absolute.as_path();
+    let filename = absolute.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("`{}` has no output filename", path.display()),
+        )
+    })?;
+    let mut ancestor = absolute.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("`{}` has no parent destination", path.display()),
+        )
+    })?;
     let mut suffix = Vec::new();
-    while !ancestor.exists() {
+    while !ancestor.try_exists()? {
         let name = ancestor.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -535,6 +546,7 @@ fn normalized_destination(path: &Path) -> io::Result<PathBuf> {
     for component in suffix.iter().rev() {
         identity.push(component);
     }
+    identity.push(filename);
     Ok(identity)
 }
 

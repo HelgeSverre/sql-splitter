@@ -82,6 +82,11 @@ Where supported, verification checks:
 - planner predicates such as temporal ordering, null/flag coherence, counter
   equations, selected ranges, and simple cross-table sums.
 
+Exact uniqueness, foreign-key, and family checks remain bounded for large
+outputs. Once their in-memory key budget is exceeded, verification writes
+protected sorted runs, merges them on disk, and evaluates exact key bytes in a
+linear merge pass.
+
 Verification parses the generated SQL. PostgreSQL COPY rows have less exact
 coverage than ordinary INSERT rows.
 
