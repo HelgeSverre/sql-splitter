@@ -14,12 +14,20 @@ use crate::generate::registry::{ArgumentSpec, ExtensionRegistry};
 /// Returns all JSON schemas for commands that support --json output.
 /// Uses BTreeMap for deterministic ordering (important for diffable output).
 pub fn all_schemas() -> BTreeMap<&'static str, Schema> {
+    let mut schemas = schemars_schemas();
+    schemas.insert("generate-config", generate_config_schema());
+    schemas
+}
+
+/// The schemars-derived `--json` output schemas. Kept separate from the
+/// hand-built `generate-config` schema so requesting any one command's schema
+/// does not eagerly build (and depend on the schemars-shape assumptions of)
+/// the generate-config schema.
+fn schemars_schemas() -> BTreeMap<&'static str, Schema> {
     let settings = SchemaSettings::default().with_transform(RestrictFormats::default());
     let generator = settings.into_generator();
 
     let mut schemas = BTreeMap::new();
-
-    schemas.insert("generate-config", generate_config_schema());
 
     schemas.insert(
         "analyze",
@@ -87,7 +95,13 @@ pub fn all_schemas() -> BTreeMap<&'static str, Schema> {
 
 /// Generate a single schema by command name.
 pub fn get_schema(command: &str) -> Option<Schema> {
-    all_schemas().remove(command)
+    // Build only what was asked for: `generate-config` is expensive and carries
+    // schemars-shape assumptions, so requesting another command's schema must
+    // not build it.
+    if command == "generate-config" {
+        return Some(generate_config_schema());
+    }
+    schemars_schemas().remove(command)
 }
 
 /// Schema-only view of the `generate` YAML root: either a `kind: model` or a
