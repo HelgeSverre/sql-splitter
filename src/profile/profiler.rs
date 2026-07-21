@@ -625,10 +625,17 @@ impl ProfileRun {
         } else if let Some(key) = self.pending_copy_key.clone() {
             // Schema-late COPY: route by the explicitly tracked open-block key,
             // never a predicate scan (which would misroute with two pending
-            // COPY tables). Buffer genuine data lines only.
-            if copy_line_is_data(line, false) {
-                let cap = self.budget.sample_rows;
-                if let Some(table) = self.pending.get_mut(&key) {
+            // COPY tables). Buffer genuine data lines only. The COPY header's
+            // column list gives the arity even before the CREATE TABLE, so a
+            // single-column block correctly treats a blank line as an
+            // empty-string row rather than padding.
+            let cap = self.budget.sample_rows;
+            if let Some(table) = self.pending.get_mut(&key) {
+                let single_col = table
+                    .copy_columns
+                    .as_ref()
+                    .is_some_and(|columns| columns.len() == 1);
+                if copy_line_is_data(line, single_col) {
                     table.push_copy(line, cap);
                 }
             }

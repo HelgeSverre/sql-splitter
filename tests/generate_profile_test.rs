@@ -625,6 +625,33 @@ CREATE TABLE widgets (id INT NOT NULL PRIMARY KEY, label VARCHAR(32) NOT NULL);
     );
 }
 
+#[test]
+fn schema_late_single_column_copy_counts_empty_string_rows() {
+    // A blank line in a single-column COPY is a legitimate empty-string row.
+    // Even when the COPY precedes its CREATE TABLE (schema-late), the COPY
+    // header's single-column list means the blank row must still be counted.
+    let dump = "\
+COPY public.notes (body) FROM stdin;
+first
+
+third
+\\.
+CREATE TABLE public.notes (body text);
+";
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Basic)
+        .dialect(SqlDialect::Postgres)
+        .build()
+        .profile_reader(dump.as_bytes(), SqlDialect::Postgres)
+        .expect("profile schema-late single-column COPY");
+    let notes = table(&profile, "notes");
+    assert_eq!(
+        notes.row_count,
+        Some(3),
+        "the empty-string row between `first` and `third` must be counted"
+    );
+}
+
 /// Two tables whose COPY data both precede their DDL must route to the CORRECT
 /// table. Pre-fix, `on_copy_row` scanned pending entries by predicate and let
 /// hashmap iteration order silently pick a target, mixing beta's rows into
