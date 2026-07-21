@@ -1200,6 +1200,57 @@ fn excluding_a_family_child_leaves_no_dangling_family_phase() {
     }
 }
 
+const NULLABLE_FK_CYCLE: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  a:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: a
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: b_id, type: bigint, nullable: true }
+    relationships:
+      - name: a_b
+        columns: [b_id]
+        references: { table: b, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      b_id: { generator: { kind: relation.foreign_key, relationship: a_b } }
+  b:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: b
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: a_id, type: bigint, nullable: true }
+    relationships:
+      - name: b_a
+        columns: [a_id]
+        references: { table: a, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      a_id: { generator: { kind: relation.foreign_key, relationship: b_a } }
+"#;
+
+#[test]
+fn nullable_foreign_key_cycle_compiles_with_a_warning() {
+    // A cycle of nullable foreign keys does not constrain generation order, so it
+    // must compile (with a warning) rather than hard-fail as a ROWS-CYCLE error.
+    let plan = compiler()
+        .compile(model_from_yaml(NULLABLE_FK_CYCLE), CompileOptions::default())
+        .expect("a nullable FK cycle must compile, not hard-fail");
+    assert!(plan.table("a").is_some() && plan.table("b").is_some());
+    assert!(
+        plan.diagnostics.iter().any(|d| d.code == "GEN-FK-CYCLE"),
+        "expected a nullable FK-cycle warning: {:?}",
+        plan.diagnostics
+    );
+}
+
 #[test]
 fn max_rows_cap_emits_a_warning_that_survives_a_successful_compile() {
     let options = CompileOptions {

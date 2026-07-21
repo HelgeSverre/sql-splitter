@@ -67,6 +67,7 @@ define_diagnostics! {
     FILE_EXTENSIONS, "GEN-FILE-EXTENSIONS", "File extension list is invalid", Planner, Error, "A file metadata planner has no usable recognized extension.";
     FILE_HASH_KIND, "GEN-FILE-HASH-KIND", "File hash kind is invalid", Planner, Error, "A file metadata planner requests an unsupported digest shape.";
     FILE_SIZE_RANGE, "GEN-FILE-SIZE-RANGE", "File size range is invalid", Planner, Error, "A file metadata size range is negative or inverted.";
+    FOREIGN_KEY_CYCLE, "GEN-FK-CYCLE", "Nullable foreign-key cycle", Selection, Warning, "Nullable foreign keys form a cycle; the cyclic tables cannot all be ordered parent-before-child in the output.";
     FOREIGN_KEY_UNRESOLVED, "GEN-FOREIGN-KEY-UNRESOLVED", "Foreign key value cannot be resolved", Selection, Error, "A relationship-owned foreign-key column has no usable value source.";
     FORMAT_MISSING_TEMPLATE, "GEN-FORMAT-MISSING-TEMPLATE", "Format template is missing", Modifier, Error, "A format modifier omits its required template.";
     GAUSSIAN_MISSING_PARAMS, "GEN-GAUSSIAN-MISSING-PARAMS", "Gaussian parameters are missing", Generator, Error, "A gaussian generator omits required distribution parameters.";

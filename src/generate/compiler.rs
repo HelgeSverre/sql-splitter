@@ -179,19 +179,37 @@ impl ModelCompiler {
         // their own independent roots in `resolve_seed` below.
         let root_seed = options.seed.or(model.seed).unwrap_or_else(rand::random);
         let rounding_root = SeedRoot::new(root_seed);
-        let (order, cyclic) = topo_order(&selected, &all_parents);
+        let (mut order, mut cyclic) = topo_order(&selected, &all_parents);
         if !cyclic.is_empty() {
-            // Tables left unordered by the Kahn drain form a mutual
-            // relation-children dependency cycle: each derives its count from a
-            // parent that in turn derives from it. Resolving them would silently
-            // yield zero rows. This row-count dependency error is distinct from
-            // column-generation cycles and foreign-key cycles handled through
-            // deferred constraints.
+            // A cycle under the full edge set may consist only of nullable
+            // foreign keys, which do not constrain generation order (values index
+            // into the parent key domain, and the FK can be NULL/deferred at
+            // load). Retry using only *required* edges — non-null FKs,
+            // relation.children parents, polymorphic targets. If that graph is
+            // acyclic, the cycle was purely nullable FKs: order by required edges
+            // and warn that the cyclic tables are not parent-before-child.
+            let (required_order, required_cyclic) = topo_order(&selected, &required);
+            if required_cyclic.is_empty() {
+                order = required_order;
+                cyclic = Vec::new();
+                bag.warning(
+                    crate::diagnostic::codes::FOREIGN_KEY_CYCLE.code,
+                    "tables",
+                    "nullable foreign keys form a dependency cycle; the cyclic tables cannot all be ordered parent-before-child in the output",
+                );
+            }
+        }
+        if !cyclic.is_empty() {
+            // A cycle remains among required dependencies: either mutual
+            // relation.children counts (each table's count derives from a parent
+            // that ultimately derives from it, which would silently yield zero
+            // rows) or a non-null foreign-key cycle. Neither can be resolved in a
+            // single ordered pass.
             bag.error(
                 crate::diagnostic::codes::ROWS_CYCLE.code,
                 "tables",
                 format!(
-                    "relation-children row counts form a dependency cycle among tables: {}; each table's count derives from a parent that ultimately derives from it",
+                    "required dependencies (non-null foreign keys or relation.children row counts) form a cycle among tables: {}; each derives from a parent that ultimately derives from it",
                     cyclic.join(", ")
                 ),
             );
