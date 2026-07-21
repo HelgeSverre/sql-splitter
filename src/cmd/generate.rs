@@ -316,6 +316,14 @@ impl GenerateArgs {
                 "--json and `--emit-config -` both claim stdout; choose one",
             ));
         }
+        if mode == RunMode::Generate && self.json && self.output.is_none() {
+            // `--json` takes stdout for the report, so generated SQL would have
+            // nowhere to go and be silently discarded. Require a real output
+            // file, or use --check/--dry-run for a report-only run.
+            return Err(RequestError::usage(
+                "--json in generate mode writes only the report to stdout; add `-o <path>` for the generated SQL, or use --check/--dry-run for a report-only run",
+            ));
+        }
         if sql_wants_stdout && emit_config_dash {
             return Err(RequestError::usage(
                 "generated SQL and `--emit-config -` both claim stdout; choose one",

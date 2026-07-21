@@ -149,6 +149,18 @@ fn json_and_explicit_stdout_output_exit_with_usage_code() {
 }
 
 #[test]
+fn json_generate_without_an_output_file_exits_with_usage_code() {
+    // `generate --json` with no `-o` would render SQL and then discard it;
+    // require a real output file (or --check/--dry-run) instead of silent loss.
+    let output = sql_splitter_bin()
+        .args(["generate", "--config", SIMPLE_MODEL, "--json"])
+        .output()
+        .expect("failed to run sql-splitter");
+
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn json_and_explicit_emit_config_stdout_exit_with_usage_code() {
     // `--json` (the report) and `--emit-config -` both claim stdout; this
     // usage rejection must fire before `--emit-config`'s "not available
@@ -604,6 +616,8 @@ fn runtime_generate_error_uses_the_json_diagnostic_envelope() {
         .args(["generate", "--config"])
         .arg(&overrides)
         .arg("--json")
+        .arg("-o")
+        .arg(dir.path().join("out.sql"))
         .output()
         .expect("failed to run sql-splitter");
 
