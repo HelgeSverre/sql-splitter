@@ -476,7 +476,7 @@ fn render_family_child(
     sink: &mut dyn RowSink,
 ) -> Result<u64, GenerateError> {
     sink.begin_table(table)?;
-    let exec = TableExec::build(table, key_domains)?;
+    let mut exec = TableExec::build(table, key_domains)?;
     let names: Vec<String> = table
         .columns
         .iter()
@@ -509,6 +509,9 @@ fn render_family_child(
                 .collect()
         })
         .unwrap_or_default();
+    // The child column slots carrying the family key, used to skip the family
+    // relationship's own selector (it is bound per-parent, not distributed).
+    let family_member_slots: Vec<usize> = fk.iter().map(|(slot, _)| *slot).collect();
 
     let mut family_buffer = family_buffers.remove(&table.name);
     let mut replay = match family_buffer.as_mut() {
@@ -536,6 +539,17 @@ fn render_family_child(
             if let Some(slot) = slot {
                 buffer[*slot] = value;
             }
+        }
+        // Other relationships on this child (e.g. a `product_id` FK) are assigned
+        // by their selectors, exactly as on a non-family table. The family
+        // relationship's own selector is skipped: its key is bound below to the
+        // exact parent that produced this line, not by the child-row
+        // distribution.
+        for selector in exec.selectors.iter_mut() {
+            if selector.members == family_member_slots {
+                continue;
+            }
+            selector.assign(child_index, &mut buffer);
         }
         // Foreign key(s) bound to the exact parent that produced this line.
         for (slot, key) in &fk {

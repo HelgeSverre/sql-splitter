@@ -1218,6 +1218,120 @@ fn order_family_seeded_output_repeats_and_differs_by_seed() {
     );
 }
 
+/// An orders/order_items family whose `order_items` child *also* carries a
+/// second, non-family foreign key (`product_id` → `products`). Exercises the
+/// family-child render path's handling of the child's other relationships.
+fn order_family_with_products_model() -> &'static str {
+    r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 7
+tables:
+  products:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: products
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+  orders:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: subtotal, type: "decimal(18,2)", nullable: false }
+        - { name: discount_total, type: "decimal(18,2)", nullable: false }
+        - { name: tax_total, type: "decimal(18,2)", nullable: false }
+        - { name: shipping_total, type: "decimal(18,2)", nullable: false }
+        - { name: grand_total, type: "decimal(18,2)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: order_items_order
+        columns:
+          subtotal: subtotal
+          discount: discount_total
+          tax: tax_total
+          shipping: shipping_total
+          total: grand_total
+        child_columns:
+          quantity: quantity
+          unit_price: unit_price
+          discount: discount_amount
+          tax: tax_amount
+          line_total: line_total
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: { min: 1, max: 5 }
+        unit_price: { min_minor: 100, max_minor: 50000 }
+        tax: { kind: fixed, rate: 0.08 }
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: { kind: fixed, mean: 2.0, min: 1.0, max: 3.0 }
+    schema:
+      name: order_items
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: product_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(18,2)", nullable: false }
+        - { name: discount_amount, type: "decimal(18,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(18,2)", nullable: false }
+        - { name: line_total, type: "decimal(18,2)", nullable: false }
+    relationships:
+      - name: order_items_order
+        columns: [order_id]
+        references: { table: orders, columns: [id] }
+      - name: order_items_product
+        columns: [product_id]
+        references: { table: products, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      order_id: { generator: { kind: relation.foreign_key, relationship: order_items_order } }
+      product_id: { generator: { kind: relation.foreign_key, relationship: order_items_product } }
+"#
+}
+
+#[test]
+fn family_child_assigns_its_non_family_foreign_keys() {
+    // A family child (order_items) that also references products via a second,
+    // non-family relationship must receive a valid product_id for every row,
+    // never a NULL. Regression: the family-child render path previously ran
+    // only the family relationship and skipped the child's other FK selectors.
+    let sink = run_multi(order_family_with_products_model());
+
+    let product_ids: std::collections::BTreeSet<i128> = sink
+        .rows("products")
+        .iter()
+        .map(|row| int_of(&row[sink.index("products", "id")]))
+        .collect();
+    assert!(!product_ids.is_empty(), "products were generated");
+
+    let pid = sink.index("order_items", "product_id");
+    let lines = sink.rows("order_items");
+    assert!(!lines.is_empty(), "order_items lines were generated");
+    for line in lines {
+        assert!(
+            !matches!(line[pid], GeneratedValue::Null),
+            "family child product_id must not be NULL"
+        );
+        let value = int_of(&line[pid]);
+        assert!(
+            product_ids.contains(&value),
+            "family child product_id {value} must reference a generated product"
+        );
+    }
+}
+
 // --- Compile diagnostics ----------------------------------------------------
 
 /// A minimal valid extra block for compile-error models.
