@@ -583,6 +583,25 @@ fn assert_row_invariants(
 }
 
 #[test]
+fn progress_overlapping_status_vocabularies_are_a_compile_error() {
+    // A status label in both completed_statuses and active_statuses would make a
+    // row satisfy both the completed and active verification predicates — a
+    // contradiction. Reject the overlap at compile time.
+    let yaml = progress_model(1, 10, "          kind: complete", "").replace(
+        "active_statuses: [queued, running]",
+        "active_statuses: [queued, completed]",
+    );
+    let codes: Vec<String> = compile_result(&yaml)
+        .err()
+        .map(|bag| bag.diagnostics.into_iter().map(|d| d.code).collect())
+        .unwrap_or_default();
+    assert!(
+        codes.contains(&"GEN-PROGRESS-STATUS-VOCABULARY".to_string()),
+        "overlapping status vocabularies must be rejected: {codes:?}"
+    );
+}
+
+#[test]
 fn progress_counters_complete_mixture_holds_exact_invariants() {
     let sink = run(&progress_model(4, 500, "          kind: complete", ""));
     for i in 0..sink.rows.len() {

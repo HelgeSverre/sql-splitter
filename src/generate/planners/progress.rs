@@ -560,6 +560,21 @@ fn compile_progress(
                 "workflow.progress_counters produces active or not-started rows but `active_statuses` is empty; supply at least one active status".to_string(),
             );
         }
+        // A label shared by both vocabularies would make a row satisfy the
+        // completed *and* the active verification predicates at once — a
+        // contradiction. Each status must belong to a single lifecycle group.
+        if let Some(shared) = completed_statuses
+            .iter()
+            .find(|status| active_statuses.contains(status))
+        {
+            bag.error(
+                crate::diagnostic::codes::PROGRESS_STATUS_VOCABULARY.code,
+                format!("{path}.active_statuses"),
+                format!(
+                    "workflow.progress_counters status `{shared}` appears in both `completed_statuses` and `active_statuses`; a status must belong to only one lifecycle group"
+                ),
+            );
+        }
     }
 
     // Completion: a non-nullable completion column cannot hold the null an
