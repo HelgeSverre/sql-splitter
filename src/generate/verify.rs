@@ -657,6 +657,10 @@ struct TableState {
     foreign_keys: Vec<KeySet>,
     /// Planner predicate failures, keyed by a stable check slug.
     predicate_failures: HashMap<String, u64>,
+    /// Rows a planner predicate could not evaluate because a required input was
+    /// present but unparseable, keyed by the same slug. A non-zero count
+    /// downgrades the check to `NotChecked` rather than a silent Exact pass.
+    predicate_unevaluated: HashMap<String, u64>,
     /// Sampled category tallies, bounded to categories named by expectations.
     categories: CategoryTallies,
 }
@@ -1193,6 +1197,7 @@ impl<'a> Audit<'a> {
                     member_groups,
                     foreign_keys,
                     predicate_failures: HashMap::new(),
+                    predicate_unevaluated: HashMap::new(),
                     categories: CategoryTallies::default(),
                 },
             );
@@ -1285,11 +1290,19 @@ impl<'a> Audit<'a> {
             }
         }
 
-        // Predicate evaluation.
+        // Predicate evaluation. A predicate that holds but whose required inputs
+        // include a present-but-unparseable value could not actually be
+        // evaluated for this row — record it separately so the check is not a
+        // silent Exact pass.
         let mut predicate_hits: Vec<String> = Vec::new();
+        let mut predicate_unevaluated_hits: Vec<String> = Vec::new();
         for predicate in &planned.predicates {
-            if let Some(slug) = evaluate_predicate(predicate, table_name, &value_of) {
-                predicate_hits.push(slug);
+            match evaluate_predicate(predicate, table_name, &value_of) {
+                Some(slug) => predicate_hits.push(slug),
+                None if predicate_unevaluable(predicate, &value_of) => {
+                    predicate_unevaluated_hits.push(predicate_slug(predicate, table_name));
+                }
+                None => {}
             }
         }
 
@@ -1355,6 +1368,9 @@ impl<'a> Audit<'a> {
         }
         for slug in predicate_hits {
             *state.predicate_failures.entry(slug).or_insert(0) += 1;
+        }
+        for slug in predicate_unevaluated_hits {
+            *state.predicate_unevaluated.entry(slug).or_insert(0) += 1;
         }
         for (group, key) in state.unique_groups.iter_mut().zip(unique_keys) {
             if let Some((bytes, hash)) = key {
@@ -1607,12 +1623,27 @@ impl<'a> Audit<'a> {
             declared.dedup();
             for slug in declared {
                 let failed = state.predicate_failures.get(&slug).copied().unwrap_or(0);
-                report.record(
-                    slug,
-                    CheckStatus::Exact,
-                    failed == 0,
-                    format!("{failed} row(s) violated the planner invariant"),
-                );
+                let unevaluated = state.predicate_unevaluated.get(&slug).copied().unwrap_or(0);
+                let (status, passed, detail) = if failed > 0 {
+                    (
+                        CheckStatus::Exact,
+                        false,
+                        format!("{failed} row(s) violated the planner invariant"),
+                    )
+                } else if unevaluated > 0 {
+                    (
+                        CheckStatus::NotChecked,
+                        false,
+                        format!("{unevaluated} row(s) had unparseable inputs; invariant not verified"),
+                    )
+                } else {
+                    (
+                        CheckStatus::Exact,
+                        true,
+                        "0 row(s) violated the planner invariant".to_string(),
+                    )
+                };
+                report.record(slug, status, passed, detail);
             }
         }
 
@@ -1794,6 +1825,49 @@ fn evaluate_predicate<'v>(
         }
     };
     violated.then_some(slug)
+}
+
+/// Whether a guard-selected row has a required predicate input that is present
+/// (non-null) but cannot be interpreted as the type the predicate needs. Such a
+/// row could not actually be evaluated (as opposed to holding), so the check
+/// must be surfaced as `NotChecked` rather than a silent Exact pass over
+/// corruption. Predicates that only test presence/nullness (`NullWhen`,
+/// `NotNullWhen`) and cases already treated as violations (a missing `end` in an
+/// `Equation`) are never "unevaluable" here.
+fn predicate_unevaluable<'v>(
+    predicate: &PlannerPredicate,
+    value_of: &impl Fn(&str) -> Option<&'v PkValue>,
+) -> bool {
+    let bad_int = |col: &str| {
+        matches!(value_of(col), Some(v) if !matches!(v, PkValue::Null) && int_of(v).is_none())
+    };
+    let bad_ns = |col: &str| {
+        matches!(value_of(col), Some(v) if !matches!(v, PkValue::Null) && epoch_nanos(v).is_none())
+    };
+    match predicate {
+        PlannerPredicate::Equation {
+            start,
+            duration,
+            guard,
+            ..
+        } => guard_selects(guard.as_ref(), value_of) && (bad_ns(start) || bad_int(duration)),
+        PlannerPredicate::InRange { column, .. } => bad_ns(column),
+        PlannerPredicate::CounterSum {
+            addends,
+            sum,
+            guard,
+        } => {
+            guard_selects(guard.as_ref(), value_of)
+                && (addends.iter().any(|a| bad_int(a)) || bad_int(sum))
+        }
+        PlannerPredicate::NonNegative { columns } => columns.iter().any(|c| bad_int(c)),
+        PlannerPredicate::Ordering {
+            earlier,
+            later,
+            guard,
+        } => guard_selects(guard.as_ref(), value_of) && (bad_ns(earlier) || bad_ns(later)),
+        PlannerPredicate::NullWhen { .. } | PlannerPredicate::NotNullWhen { .. } => false,
+    }
 }
 
 /// A stable check slug for a predicate on `table`.

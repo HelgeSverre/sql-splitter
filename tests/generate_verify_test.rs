@@ -497,6 +497,25 @@ fn corrupt_progress_counter_fails_the_named_check() {
     );
 }
 
+#[test]
+fn progress_predicate_with_unparseable_input_is_not_a_silent_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(PROGRESS);
+    // Corrupt the first row's total_rows (index 0) to a non-numeric value: the
+    // non-negative predicate can no longer evaluate that (present, non-null)
+    // counter. A predicate that couldn't be evaluated must not be reported as a
+    // passing Exact check.
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        rewrite_first_tuple_value(sql, "INSERT INTO `jobs`", 0, "'not-a-number'")
+    });
+    assert_eq!(
+        report.status_of("planner_non_negative:jobs"),
+        Some(CheckStatus::NotChecked),
+        "an unparseable predicate input must not pass as Exact: {:?}",
+        report.checks
+    );
+}
+
 // --- temporal.timestamps ordering ------------------------------------------
 //
 // `temporal.timestamps` guarantees created_at <= updated_at by construction
