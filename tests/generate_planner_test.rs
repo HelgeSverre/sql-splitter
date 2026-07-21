@@ -983,7 +983,7 @@ tables:
     let mut max_seen = 0;
     for row in &sink.rows {
         let depth = int_of(&row[i_depth]);
-        assert!(depth >= 0 && depth <= 5, "depth {depth} out of [0,5]");
+        assert!((0..=5).contains(&depth), "depth {depth} out of [0,5]");
         max_seen = max_seen.max(depth);
         match &row[i_parent] {
             GeneratedValue::Null => {
