@@ -1135,7 +1135,17 @@ fn compile_order_family(
     }
 
     let scale = match config.args.get("currency_scale").and_then(as_u32) {
-        Some(scale) => scale,
+        // Bound to 0..=18: money math and formatting use 10i128.pow(scale),
+        // which overflows i128 past 18.
+        Some(scale) if scale <= 18 => scale,
+        Some(scale) => {
+            bag.error(
+                crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,
+                format!("{path}.currency_scale"),
+                format!("commerce.order_family `currency_scale` must be between 0 and 18 (got {scale})"),
+            );
+            0
+        }
         None => {
             bag.error(
                 crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,

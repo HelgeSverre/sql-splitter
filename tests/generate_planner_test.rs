@@ -1377,6 +1377,23 @@ fn order_family_total_overflow_counts_shipping() {
 }
 
 #[test]
+fn order_family_currency_scale_above_18_is_a_compile_error() {
+    // currency_scale drives 10i128.pow(scale) in money formatting; a scale > 18
+    // overflows i128. Reject it at compile time.
+    let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
+    let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA)
+        .replace("currency_scale: 2", "currency_scale: 39");
+    let codes: Vec<String> = compile_result(&yaml)
+        .err()
+        .map(|bag| bag.diagnostics.into_iter().map(|d| d.code).collect())
+        .unwrap_or_default();
+    assert!(
+        codes.contains(&"GEN-ORDER-FAMILY-CONFIG".to_string()),
+        "currency_scale 39 must be rejected: {codes:?}"
+    );
+}
+
+#[test]
 fn order_family_undefined_child_is_a_compile_error() {
     let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
     let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA)
