@@ -255,6 +255,12 @@ Typical severity: **error** · Category: **planner**
 
 A file metadata size range is negative or inverted.
 
+## GEN-FK-CYCLE — Nullable foreign-key cycle \{#GEN-FK-CYCLE\}
+
+Typical severity: **warning** · Category: **selection**
+
+Nullable foreign keys form a cycle; the cyclic tables cannot all be ordered parent-before-child in the output.
+
 ## GEN-FOREIGN-KEY-UNRESOLVED — Foreign key value cannot be resolved \{#GEN-FOREIGN-KEY-UNRESOLVED\}
 
 Typical severity: **error** · Category: **selection**
