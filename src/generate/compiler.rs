@@ -158,6 +158,17 @@ impl ModelCompiler {
                 "`--scale` and `--rows` are mutually exclusive global row controls",
             );
         }
+        if let Some(scale) = options.scale {
+            // A negative or non-finite global scale would silently floor every
+            // table to zero rows; reject it instead.
+            if !scale.is_finite() || scale < 0.0 {
+                bag.error(
+                    crate::diagnostic::codes::TABLE_SCALE_INVALID.code,
+                    "options",
+                    format!("`--scale` must be a finite, non-negative number (got {scale})"),
+                );
+            }
+        }
 
         let overrides = self.collect_table_overrides(&options, &mut bag);
         let selected = self.select_tables(&model, &options, &mut bag);

@@ -1252,6 +1252,21 @@ fn nullable_foreign_key_cycle_compiles_with_a_warning() {
 }
 
 #[test]
+fn negative_global_scale_is_a_compile_error() {
+    // A negative (or non-finite) global --scale must be rejected, not silently
+    // collapse every table to zero rows.
+    let options = CompileOptions {
+        scale: Some(-1.0),
+        ..Default::default()
+    };
+    let err = compiler().compile(users_model(1000), options).unwrap_err();
+    assert!(
+        err.to_string().contains("GEN-TABLE-SCALE-INVALID"),
+        "{err}"
+    );
+}
+
+#[test]
 fn max_rows_cap_emits_a_warning_that_survives_a_successful_compile() {
     let options = CompileOptions {
         max_rows: Some(300),
