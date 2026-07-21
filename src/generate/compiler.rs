@@ -527,6 +527,22 @@ impl ModelCompiler {
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
         let compile_seed = seed_root_of(&seed);
+        // Reject a table that declares the same column name more than once — a
+        // schema authoring error that otherwise surfaces as a confusing
+        // owner-missing error or a bare DEFAULT at render time.
+        let mut seen_columns: BTreeSet<&str> = BTreeSet::new();
+        for column in &table.schema.columns {
+            if !seen_columns.insert(column.name.as_str()) {
+                bag.error(
+                    crate::diagnostic::codes::DUPLICATE_COLUMN.code,
+                    format!("tables.{name}.schema.columns"),
+                    format!(
+                        "table `{name}` declares column `{}` more than once",
+                        column.name
+                    ),
+                );
+            }
+        }
         self.validate_column_operator_arguments(name, table, bag);
         let mut relationships: Vec<CompiledRelationship> = table
             .relationships

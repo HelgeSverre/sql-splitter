@@ -59,6 +59,7 @@ define_diagnostics! {
     DECIMAL_RANGE, "GEN-DECIMAL-RANGE", "Decimal range is invalid", Generator, Error, "A decimal generator's maximum is below its minimum.";
     DECIMAL_SCALE, "GEN-DECIMAL-SCALE", "Decimal scale is invalid", Generator, Error, "A decimal generator's scale cannot represent its configured range or target type.";
     DETACHED_DEPENDENCY, "GEN-DETACHED-DEPENDENCY", "Optional dependency was detached", Selection, Warning, "A nullable foreign key points to an excluded table and its rendered constraint was omitted.";
+    DUPLICATE_COLUMN, "GEN-DUPLICATE-COLUMN", "Duplicate column name", Selection, Error, "A table's schema declares the same column name more than once.";
     EMIT_IO, "GEN-EMIT-IO", "Resolved model could not be written", Rendering, Error, "Writing the resolved model configuration failed.";
     EMIT_SERIALIZE, "GEN-EMIT-SERIALIZE", "Resolved model could not be serialized", Rendering, Error, "The resolved model could not be encoded as YAML.";
     EXCLUDED_DEPENDENCY, "GEN-EXCLUDED-DEPENDENCY", "Required dependency was excluded", Selection, Error, "A selected table depends on another table that filtering excluded.";

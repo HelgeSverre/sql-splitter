@@ -1371,6 +1371,38 @@ tables:
 }
 
 #[test]
+fn duplicate_column_name_is_a_compile_error() {
+    // A table declaring the same column name twice must be rejected clearly at
+    // compile time, not surface as a confusing owner-missing / render error.
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  t:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: t
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: dup, type: integer, nullable: false }
+        - { name: dup, type: integer, nullable: false }
+"#,
+    );
+    let codes: Vec<String> = compiler()
+        .compile(model, CompileOptions::default())
+        .err()
+        .map(|bag| bag.diagnostics.into_iter().map(|d| d.code).collect())
+        .unwrap_or_default();
+    assert!(
+        codes.contains(&"GEN-DUPLICATE-COLUMN".to_string()),
+        "a duplicate column name must be rejected clearly: {codes:?}"
+    );
+}
+
+#[test]
 fn negative_global_scale_is_a_compile_error() {
     // A negative (or non-finite) global --scale must be rejected, not silently
     // collapse every table to zero rows.
