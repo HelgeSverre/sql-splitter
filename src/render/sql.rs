@@ -222,13 +222,27 @@ impl<W: Write> SqlRenderer<W> {
         } else {
             ""
         };
-        writeln!(
-            self.writer,
-            "INSERT INTO {} ({column_list}){overriding} VALUES",
-            state.quoted_table
-        )
-        .map_err(io_err)?;
-        writeln!(self.writer, "{};", state.row_batch.as_str()).map_err(io_err)?;
+        if indices.is_empty() && dialect != SqlDialect::MySql {
+            // Every column is a database default/identity: PostgreSQL, SQLite,
+            // and SQL Server reject `() VALUES ()`, so emit one `DEFAULT VALUES`
+            // row per buffered row (MySQL keeps the valid `() VALUES (),()` form).
+            for _ in 0..state.row_batch.row_count() {
+                writeln!(
+                    self.writer,
+                    "INSERT INTO {} DEFAULT VALUES;",
+                    state.quoted_table
+                )
+                .map_err(io_err)?;
+            }
+        } else {
+            writeln!(
+                self.writer,
+                "INSERT INTO {} ({column_list}){overriding} VALUES",
+                state.quoted_table
+            )
+            .map_err(io_err)?;
+            writeln!(self.writer, "{};", state.row_batch.as_str()).map_err(io_err)?;
+        }
         if dialect == SqlDialect::Mssql {
             let should_go = match mssql_go {
                 // Group `n` INSERT batches per GO instead of one-per-batch.

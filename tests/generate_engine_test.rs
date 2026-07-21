@@ -2076,6 +2076,38 @@ tables:
 }
 
 #[test]
+fn all_default_columns_render_default_values_not_empty_tuple() {
+    // A table whose only column is a database sequence produces all-DEFAULT
+    // rows. PostgreSQL rejects `INSERT INTO t () VALUES ()`; emit the
+    // `DEFAULT VALUES` form instead.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  t:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: t
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+"#;
+    let insert_sql = render_model_with(model, |options| {
+        options.dialect = SqlDialect::Postgres;
+        options.no_copy = true;
+    });
+    assert!(
+        insert_sql.contains("DEFAULT VALUES"),
+        "expected DEFAULT VALUES form: {insert_sql}"
+    );
+    assert!(
+        !insert_sql.contains("() VALUES"),
+        "must not emit an empty column/value list: {insert_sql}"
+    );
+}
+
+#[test]
 fn mssql_renders_unicode_string_literals_and_go_batch_separators() {
     let model = r#"
 version: 1
