@@ -1190,6 +1190,7 @@ fn compile_order_family(
         &quantity,
         &unit_price_minor,
         &tax,
+        shipping_minor,
         &parent_writes,
         parent,
         facts,
@@ -1523,6 +1524,7 @@ fn check_overflow(
     quantity: &IntRange,
     unit_price: &IntRange,
     tax: &RateChoice,
+    shipping_minor: i128,
     parent_writes: &[String],
     parent: &PortableTable,
     facts: Option<&Value>,
@@ -1550,7 +1552,11 @@ fn check_overflow(
     };
     let subtotal_max = per_line.saturating_mul(lines.max.max(0));
     let tax_max = subtotal_max.saturating_mul(max_rate) / RATE_DEN;
-    let grand_max = subtotal_max.saturating_add(tax_max);
+    // The grand total is subtotal - discount + tax + shipping; discount only
+    // lowers it, so the maximum adds subtotal, tax, and the full shipping fee.
+    let grand_max = subtotal_max
+        .saturating_add(tax_max)
+        .saturating_add(shipping_minor.max(0));
     // A single child line can carry at most its OWN tax, never the whole order's,
     // so bound child columns by the per-line value (+ per-line tax) — bounding by
     // the order-wide `tax_max` would spuriously reject valid configs.

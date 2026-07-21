@@ -1357,6 +1357,26 @@ const OF_EXTRA: &str =
     "        quantity: { min: 1, max: 3 }\n        unit_price: { min_minor: 100, max_minor: 1000 }";
 
 #[test]
+fn order_family_total_overflow_counts_shipping() {
+    // A large shipping must count toward the parent grand-total capacity check:
+    // a `total` column too small to hold subtotal + tax + shipping is rejected.
+    let dist = "{ kind: fixed, mean: 1.0, min: 1.0, max: 1.0 }";
+    let extra = "        quantity: { min: 1, max: 1 }\n        unit_price: { min_minor: 100, max_minor: 100 }\n        shipping: { kind: fixed, amount_minor: 100000000 }";
+    let yaml = order_family_model(1, 3, 2, "largest_remainder", dist, extra).replace(
+        r#"{ name: grand_total, type: "decimal(18,2)", nullable: false }"#,
+        r#"{ name: grand_total, type: "decimal(5,2)", nullable: false }"#,
+    );
+    let codes: Vec<String> = compile_result(&yaml)
+        .err()
+        .map(|bag| bag.diagnostics.into_iter().map(|d| d.code).collect())
+        .unwrap_or_default();
+    assert!(
+        codes.contains(&"GEN-ORDER-FAMILY-OVERFLOW".to_string()),
+        "large shipping must overflow the small total column: {codes:?}"
+    );
+}
+
+#[test]
 fn order_family_undefined_child_is_a_compile_error() {
     let dist = "{ kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }";
     let yaml = order_family_model(1, 5, 2, "largest_remainder", dist, OF_EXTRA)
