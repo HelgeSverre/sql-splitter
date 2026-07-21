@@ -341,6 +341,23 @@ fn observed_numeric_generators_reject_out_of_range_decimal_scale() {
 }
 
 #[test]
+fn commerce_money_bounds_overflow_is_a_compile_error() {
+    // A min/max whose minor-unit scaling (value * 10^scale) overflows i128 must
+    // be rejected at compile time, not panic (debug) or wrap (release).
+    let err = generate_three(
+        "commerce.money",
+        yaml("{ kind: commerce.money, min: \"1000000000000000000000000000000\", max: \"2000000000000000000000000000000\", scale: 18 }"),
+        SqlTypeFamily::Decimal,
+        7,
+    )
+    .expect_err("overflowing money bounds must be a compile error");
+    assert!(
+        err.to_lowercase().contains("representable") || err.to_lowercase().contains("range"),
+        "expected an overflow/range diagnostic, got: {err}"
+    );
+}
+
+#[test]
 fn decimal_generator_respects_bounds_and_scale() {
     let values = generate_three(
         "decimal",

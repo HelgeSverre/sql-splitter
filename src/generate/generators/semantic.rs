@@ -1276,8 +1276,23 @@ impl GeneratorFactory for CommerceMoneyFactory {
             }
         };
         let factor = 10i128.pow(scale);
-        let min_minor = config.args.get("min").and_then(parse_i128).unwrap_or(0) * factor;
-        let max_minor = config.args.get("max").and_then(parse_i128).unwrap_or(1000) * factor;
+        let raw_min = config.args.get("min").and_then(parse_i128).unwrap_or(0);
+        let raw_max = config.args.get("max").and_then(parse_i128).unwrap_or(1000);
+        // Scale bounds to minor units with a checked multiply: a large min/max
+        // times `factor` (up to 10^18) can overflow i128 (panic in debug, wrap
+        // in release into a bogus range).
+        let (min_minor, max_minor) = match (raw_min.checked_mul(factor), raw_max.checked_mul(factor))
+        {
+            (Some(min), Some(max)) => (min, max),
+            _ => {
+                bag.error(
+                    crate::diagnostic::codes::COMMERCE_MONEY_RANGE.code,
+                    context.path(),
+                    "`commerce.money` min/max scaled to minor units exceeds the representable range",
+                );
+                (0, 0)
+            }
+        };
         if min_minor > max_minor {
             bag.error(
                 crate::diagnostic::codes::COMMERCE_MONEY_RANGE.code,
