@@ -1370,6 +1370,51 @@ tables:
     assert_eq!(plan.estimates.total_rows, u64::MAX);
 }
 
+const JUNCTION_IDENTITY: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  users:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: users
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+  roles:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: roles
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+  user_roles:
+    rows: { kind: fixed, count: 10 }
+    schema:
+      name: user_roles
+      columns:
+        - { name: user_id, type: bigint, nullable: false }
+        - { name: role_id, type: bigint, nullable: false }
+    relationships:
+      - { name: ur_user, columns: [user_id], references: { table: users, columns: [id] } }
+      - { name: ur_role, columns: [role_id], references: { table: roles, columns: [id] } }
+    planners:
+      - kind: relation.junction_pair
+        columns: { left: user_id, right: role_id }
+        left_relationship: ur_user
+        right_relationship: ur_role
+"#;
+
+#[test]
+fn cross_table_planner_accepts_identity_primary_key_targets() {
+    // A cross-table planner (junction/polymorphic/tenant) must accept an
+    // identity integer PK as a dense target — the regular FK engine path already
+    // treats a database-generated integer PK as the dense sequence 1..=count.
+    compiler()
+        .compile(model_from_yaml(JUNCTION_IDENTITY), CompileOptions::default())
+        .expect("a junction over identity primary keys should compile");
+}
+
 #[test]
 fn duplicate_column_name_is_a_compile_error() {
     // A table declaring the same column name twice must be rejected clearly at

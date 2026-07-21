@@ -2054,8 +2054,12 @@ fn dense_key_recipe(table: &TableModel, column: &str) -> Option<(i128, i128)> {
         }
     }
     let column = table.schema.columns.iter().find(|c| c.name == column)?;
+    // A bare integer primary key OR an identity integer primary key is a
+    // database sequence rendered as `1..=count` — the engine's FK key-domain
+    // path (`build_key_domains`) treats both the same, so cross-table planners
+    // must accept both as the dense recipe `(1, 1)` too. (A `generated`/computed
+    // column has no such closed form.)
     if column.primary_key
-        && !column.identity
         && !column.generated
         && matches!(
             column.family,
