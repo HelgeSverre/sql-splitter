@@ -451,6 +451,48 @@ tables:
         timezone: utc
 "#;
 
+const INTERVAL_INCLUSIVE: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 3
+tables:
+  jobs:
+    rows: { kind: fixed, count: 50 }
+    schema:
+      name: jobs
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: started_at, type: timestamp, nullable: false }
+        - { name: ended_at, type: timestamp, nullable: false }
+        - { name: duration_seconds, type: bigint, nullable: false }
+    planners:
+      - kind: temporal.interval
+        columns: { start: started_at, end: ended_at, duration: duration_seconds }
+        start: { kind: range, min: "2024-01-01T00:00:00Z", max: "2025-01-01T00:00:00Z" }
+        duration: { kind: uniform, unit: seconds, min: 60, max: 3600 }
+        end_inclusive: true
+        timezone: utc
+"#;
+
+#[test]
+fn interval_end_inclusive_output_passes_its_own_verification() {
+    // An inclusive interval renders `end = start + duration - 1` at second
+    // precision. The rendered end must satisfy the verifier's equation
+    // regardless of the sub-second component of the drawn start.
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(INTERVAL_INCLUSIVE);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "incl.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.passed(),
+        "end_inclusive output must pass its own verification: {:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn corrupt_interval_equation_fails_the_named_check() {
     let dir = tempfile::tempdir().unwrap();

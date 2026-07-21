@@ -212,7 +212,13 @@ impl CompiledPlanner for TemporalIntervalPlanner {
         // Draw all three streams unconditionally and in a fixed order so the
         // open decision never perturbs the duration stream: a seeded run
         // repeats regardless of which rows land open.
-        let start_ns = self.draw_start(row_index);
+        // Rendering and verification operate at whole-second precision, so align
+        // the drawn start to a second boundary. Otherwise a sub-second start
+        // absorbs the inclusive `end = start + span - 1ns` adjustment and the
+        // rendered end lands a second later than the verifier — which recomputes
+        // from the second-precision start it parses back — expects.
+        let start_ns =
+            self.draw_start(row_index).div_euclid(NANOS_PER_SECOND) * NANOS_PER_SECOND;
         let is_open =
             self.open_probability > 0.0 && self.open_rng.random::<f64>() < self.open_probability;
         let duration_units = self.draw_duration();
