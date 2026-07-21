@@ -28,7 +28,7 @@ literal replay is unacceptable.
 
 ## `histogram`
 
-Required non-empty `bins`; optional `scale=0`. Accepts integer, big-integer, and
+Required non-empty `bins`; optional `scale=0` (0..18). Accepts integer, big-integer, and
 decimal families.
 
 ```yaml
@@ -47,7 +47,7 @@ a value is drawn uniformly inside it.
 
 ## `normal`
 
-Required `mean` and `std`; optional `min`, `max`, and `scale=0`. `std` must be
+Required `mean` and `std`; optional `min`, `max`, and `scale=0` (0..18). `std` must be
 finite and non-negative. Optional bounds clamp the Gaussian draw and must be
 ordered.
 
@@ -60,7 +60,7 @@ draw; decimal output uses the configured scale.
 
 ## `lognormal`
 
-Required `mu` and `sigma`; optional `min`, `max`, and `scale=0`. It draws
+Required `mu` and `sigma`; optional `min`, `max`, and `scale=0` (0..18). It draws
 `exp(Normal(mu, sigma))`, making it suitable for positive, right-skewed sizes,
 durations, and amounts. `sigma` must be finite and non-negative.
 

@@ -92,7 +92,7 @@ reporting, but safety advisories still reach stderr.
 | `--dialect <DIALECT>`      | Output SQL dialect                         | model, source, then MySQL |
 | `--schema-only`            | Emit DDL only                              | false                     |
 | `--data-only`              | Emit row data only                         | false                     |
-| `--batch-size <COUNT>`     | Rows per `INSERT` or `COPY` batch          | `1000`                    |
+| `--batch-size <COUNT>`     | Rows per `INSERT` or `COPY` batch (1–1,000,000) | `1000`               |
 | `--no-copy`                | Use PostgreSQL `INSERT` instead of `COPY`  | false                     |
 | `--mssql-production-style` | Add production-style MSSQL DDL conventions | false                     |
 | `--mssql-go <COUNT>`       | Emit `GO` every N MSSQL insert batches     | every batch               |
@@ -132,6 +132,7 @@ reporting, but safety advisories still reach stderr.
 - `--scale` and `--rows` are mutually exclusive.
 - A table cannot receive both `--table-rows` and `--table-scale`.
 - `--json`, `--output -`, and `--emit-config -` each own stdout; select only one.
+- `--json` in generate mode writes only the report to stdout, so it requires `-o <path>` for the generated SQL (or use `--check`/`--dry-run` for a report-only run).
 - `--check` requires a complete model and cannot profile `[INPUT]`.
 - `--verify` requires a real output path and cannot use compression.
 - MSSQL-specific flags require an explicit `--dialect mssql`.

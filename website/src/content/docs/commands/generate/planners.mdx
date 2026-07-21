@@ -166,7 +166,8 @@ planners:
 `children`, `relationship`, parent `subtotal`/`total`, child
 `quantity`/`unit_price`/`line_total`, `currency_scale`, and `rounding` are
 required. Optional parent/child tax and discount roles are written only when
-mapped. Money columns must use the configured decimal scale.
+mapped. Money columns must use the configured `currency_scale`, which must be
+between 0 and 18.
 
 The child table's `rows.distribution` is the sole line-count source; the
 planner intentionally has no line-count argument. Tax and discount support a
