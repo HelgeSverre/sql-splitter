@@ -233,7 +233,7 @@ impl ModelCompiler {
             ));
         }
 
-        let phases = build_phases(&order, &family_ctx, family_budget_bytes);
+        let phases = build_phases(&order, &family_ctx, family_budget_bytes, &mut bag);
 
         let estimates = PlanEstimates {
             total_rows: resolved.values().sum(),
@@ -2142,7 +2142,9 @@ fn build_phases(
     order: &[String],
     family_ctx: &FamilyContext,
     budget_bytes: u64,
+    bag: &mut DiagnosticBag,
 ) -> Vec<ExecutionPhase> {
+    let ordered: BTreeSet<&str> = order.iter().map(String::as_str).collect();
     let child_tables: BTreeSet<&str> = family_ctx
         .families
         .iter()
@@ -2158,11 +2160,27 @@ fn build_phases(
             .iter()
             .find(|family| &family.parent == name)
         {
-            Some(family) => phases.push(ExecutionPhase::Family(FamilyPhase {
-                name: name.clone(),
-                tables: vec![name.clone(), family.child.clone()],
-                budget_bytes,
-            })),
+            // Only pair the parent with its child when the child is actually
+            // generated; otherwise the family phase would name an ungenerated
+            // table (and mis-route its spooled rows).
+            Some(family) if ordered.contains(family.child.as_str()) => {
+                phases.push(ExecutionPhase::Family(FamilyPhase {
+                    name: name.clone(),
+                    tables: vec![name.clone(), family.child.clone()],
+                    budget_bytes,
+                }));
+            }
+            Some(family) => {
+                bag.warning(
+                    crate::diagnostic::codes::DETACHED_DEPENDENCY.code,
+                    format!("tables.{name}.planners"),
+                    format!(
+                        "family child `{}` of `{name}` was excluded; generating `{name}` without its correlated child rows",
+                        family.child
+                    ),
+                );
+                phases.push(ExecutionPhase::Table(name.clone()));
+            }
             None => phases.push(ExecutionPhase::Table(name.clone())),
         }
     }

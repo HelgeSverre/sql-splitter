@@ -1116,6 +1116,90 @@ fn excluded_required_dependency_reports_the_parent_path() {
     assert!(text.contains("customers"));
 }
 
+const ORDER_FAMILY_COMPILE: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 4242
+tables:
+  orders:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: subtotal, type: "decimal(18,2)", nullable: false }
+        - { name: tax_total, type: "decimal(18,2)", nullable: false }
+        - { name: grand_total, type: "decimal(18,2)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: order_items_order
+        columns: { subtotal: subtotal, tax: tax_total, total: grand_total }
+        child_columns: { quantity: quantity, unit_price: unit_price, tax: tax_amount, line_total: line_total }
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: { min: 1, max: 6 }
+        unit_price: { min_minor: 100, max_minor: 90000 }
+        tax: { kind: fixed, rate: 0.08 }
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 6.0 }
+    schema:
+      name: order_items
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(18,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(18,2)", nullable: false }
+        - { name: line_total, type: "decimal(18,2)", nullable: false }
+    relationships:
+      - name: order_items_order
+        columns: [order_id]
+        references: { table: orders, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      order_id: { generator: { kind: relation.foreign_key, relationship: order_items_order } }
+"#;
+
+#[test]
+fn excluding_a_family_child_leaves_no_dangling_family_phase() {
+    // Excluding a family child (order_items) must not leave an execution phase
+    // that names an ungenerated table: every table in every phase must have a
+    // PlannedTable.
+    let options = CompileOptions {
+        exclude: vec!["order_items".to_string()],
+        ..Default::default()
+    };
+    let plan = compiler()
+        .compile(model_from_yaml(ORDER_FAMILY_COMPILE), options)
+        .expect("excluding a family child should still compile");
+    let planned: std::collections::BTreeSet<&str> =
+        plan.tables.iter().map(|t| t.name.as_str()).collect();
+    for phase in &plan.phases {
+        let tables: Vec<&str> = match phase {
+            ExecutionPhase::Table(name) => vec![name.as_str()],
+            ExecutionPhase::Family(family) => family.tables.iter().map(String::as_str).collect(),
+            ExecutionPhase::DeferredConstraints(deferred) => {
+                deferred.tables.iter().map(String::as_str).collect()
+            }
+        };
+        for table in tables {
+            assert!(
+                planned.contains(table),
+                "phase references ungenerated table `{table}`; phases={:?}",
+                plan.phases
+            );
+        }
+    }
+}
+
 #[test]
 fn max_rows_cap_emits_a_warning_that_survives_a_successful_compile() {
     let options = CompileOptions {
