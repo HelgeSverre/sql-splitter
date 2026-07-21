@@ -914,6 +914,13 @@ impl FkSelector {
             ));
         }
         let null_rate = f64::from(relationship.null_permille) / 1000.0;
+        // TODO(deferred, L4): `columns.join(",")` is an ambiguous stream
+        // identity — a column literally named `a,b` collides with the set
+        // `[a, b]`, and two relationships over the same child columns share a
+        // stream (correlating FK selectors that should be independent). A robust
+        // identity (length-prefixed columns, or the relationship name + parent
+        // table) would change every seeded FK stream, so this is deferred to
+        // avoid churning all reproducible FK output for a pathological case.
         let rng = seed_root.stream(StreamId::operator(
             table.name.as_str(),
             relationship.columns.join(","),

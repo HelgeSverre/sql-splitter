@@ -56,6 +56,13 @@ const SPOOL_VERSION: u8 = 1;
 
 /// The largest single spool record the reader will accept. A length prefix
 /// larger than this is refused before any allocation.
+///
+/// TODO(deferred, L5): this ceiling is only enforced on the spill path
+/// (`write_record`), so an identical oversized row succeeds when its family
+/// stays in memory. Whether a >64 MiB row is rejected therefore depends on the
+/// family budget rather than the row itself. Enforcing the same per-row ceiling
+/// on the in-memory path would remove the asymmetry; deferred because it only
+/// bites pathologically large single values.
 const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
 /// The largest single text/bytes field the reader will accept, refused before
@@ -676,13 +683,15 @@ fn published_mode(destination: &Path, dir: &Path) -> io::Result<Option<u32>> {
             return Ok(Some(metadata.mode() & 0o777));
         }
         // New destination: probe the umask-adjusted default with a normal
-        // create, read its mode, then remove the probe.
+        // create, read its mode, then remove the probe. Read the mode into a
+        // Result first so the probe is removed even when `metadata` fails,
+        // rather than leaking the temp file on that error path.
         let probe = dir.join(random_name(".sqlspl-probe-"));
         let file = File::create(&probe)?;
-        let mode = file.metadata()?.mode() & 0o777;
+        let mode = file.metadata().map(|metadata| metadata.mode() & 0o777);
         drop(file);
         let _ = fs::remove_file(&probe);
-        Ok(Some(mode))
+        Ok(Some(mode?))
     }
     #[cfg(not(unix))]
     {
@@ -918,6 +927,11 @@ pub struct FamilyBuffer {
     temp: TempConfig,
     spill_kind: SpillKind,
     state: FamilyState,
+    /// Whether the rows have already been replayed. Replay is single-shot: the
+    /// in-memory state is drained on first replay, so a second call would
+    /// silently yield nothing. Guard against that so a future second pass fails
+    /// loudly instead — the spilled and in-memory arms stay consistent.
+    replayed: bool,
 }
 
 impl FamilyBuffer {
@@ -935,6 +949,7 @@ impl FamilyBuffer {
             temp,
             spill_kind,
             state: FamilyState::ParentState(Vec::new()),
+            replayed: false,
         }
     }
 
@@ -993,6 +1008,12 @@ impl FamilyBuffer {
     /// Replay buffered rows in push order without materializing a spilled
     /// family in memory.
     pub fn replay_rows(&mut self) -> io::Result<FamilyRowReplay<'_>> {
+        if self.replayed {
+            return Err(invalid_data(
+                "FamilyBuffer::replay_rows is single-shot and was already replayed",
+            ));
+        }
+        self.replayed = true;
         match &mut self.state {
             FamilyState::ParentState(rows) => {
                 Ok(FamilyRowReplay::Memory(std::mem::take(rows).into_iter()))
@@ -1060,6 +1081,27 @@ mod tests {
         assert!(!is_ignorable_dir_sync_error(&io::Error::other(
             "input/output error"
         )));
+    }
+
+    #[test]
+    fn family_buffer_replay_is_single_shot() {
+        // Replay drains the in-memory rows, so a second replay would silently
+        // yield an empty family. It must fail loudly instead, keeping the
+        // in-memory and spilled arms consistent.
+        let mut buffer =
+            FamilyBuffer::new(FamilyBudget::default(), 0, TempConfig::default(), SpillKind::Child);
+        buffer
+            .push(SpooledRow {
+                table_id: 0,
+                row_index: 0,
+                values: vec![GeneratedValue::Integer(1)],
+            })
+            .unwrap();
+        assert!(buffer.replay_rows().is_ok());
+        assert!(
+            buffer.replay_rows().is_err(),
+            "a second replay must fail loudly, not silently return an empty family"
+        );
     }
 
     #[test]

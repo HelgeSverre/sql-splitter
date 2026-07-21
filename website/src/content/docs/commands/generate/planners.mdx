@@ -249,8 +249,10 @@ planners:
 
 The required parent role names a nullable self-reference. `root_ratio` defaults
 to `0.1`; `max_depth` defaults to `6`; `max_branching` is unlimited when
-omitted. Rows choose only eligible earlier rows as parents, guaranteeing no
-cycle. The first row and any row without an eligible parent become roots.
+omitted. Roots are at depth 0, so `max_depth` is the deepest level a node may
+occupy — a tree with `max_depth: 6` spans depths 0 through 6. Rows choose only
+eligible earlier rows as parents, guaranteeing no cycle. The first row and any
+row without an eligible parent become roots.
 
 ## `relation.junction_pair`
 

@@ -103,6 +103,10 @@ impl ColumnType {
             // Boolean types. A bare BIT is MSSQL's boolean type; retain
             // parameterized bit strings such as MySQL BIT(8) as unknown.
             "bool" | "boolean" => ColumnType::Bool,
+            // TODO(deferred, L23): a bare `bit` maps to Bool for SQL Server's
+            // boolean `bit`, which also reclassifies MySQL's bare `BIT` from
+            // Other to Bool. Harmless today (no PK/FK impact); dialect-specific
+            // handling would be needed to treat MySQL's `BIT` differently.
             "bit" if type_lower.trim() == "bit" => ColumnType::Bool,
             // Binary types
             "binary" | "varbinary" | "blob" | "bytea" => {

@@ -1394,7 +1394,7 @@ pub static HIERARCHY_TREE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
         ArgumentSpec {
             name: "max_depth",
             required: false,
-            summary: "Maximum tree depth, including roots.",
+            summary: "The deepest node's depth; roots are depth 0, so depths span 0..=max_depth.",
         },
         ArgumentSpec {
             name: "max_branching",

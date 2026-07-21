@@ -656,10 +656,12 @@ struct CopyValue<'a>(&'a GeneratedValue);
 impl fmt::Display for CopyValue<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            // `Default` cannot reach a COPY stream: `classify_columns`
-            // excludes every DEFAULT column from `indices` before any
-            // `CopyValue` is ever constructed.
-            GeneratedValue::Null | GeneratedValue::Default => f.write_str("\\N"),
+            GeneratedValue::Null => f.write_str("\\N"),
+            // `Default` cannot reach a COPY stream: `classify_columns` excludes
+            // every DEFAULT column from `indices` before any `CopyValue` is
+            // constructed. Fail loudly if that invariant is ever broken rather
+            // than silently corrupting a default into a NULL.
+            GeneratedValue::Default => Err(fmt::Error),
             GeneratedValue::Boolean(value) => f.write_str(if *value { "t" } else { "f" }),
             GeneratedValue::Integer(value) => write!(f, "{value}"),
             GeneratedValue::Decimal { minor, scale } => write_decimal(f, *minor, *scale),
@@ -688,4 +690,25 @@ fn write_copy_escaped(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_value_default_is_a_hard_error_not_silent_null() {
+        // A `Default` reaching a COPY stream is an invariant violation and must
+        // fail, not silently corrupt into a NULL (`\N`). A real NULL still emits
+        // `\N`.
+        let mut buf = String::new();
+        assert!(
+            write!(&mut buf, "{}", CopyValue(&GeneratedValue::Default)).is_err(),
+            "Default in COPY must error, rendered `{buf}`"
+        );
+
+        let mut null = String::new();
+        write!(&mut null, "{}", CopyValue(&GeneratedValue::Null)).unwrap();
+        assert_eq!(null, "\\N");
+    }
 }

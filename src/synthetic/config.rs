@@ -152,6 +152,11 @@ fn read_yaml(path: &Path) -> Result<Value, DiagnosticBag> {
             &err,
         )
     })?;
+    // TODO(deferred, L15): serde_yaml_ng expands anchors/aliases with no depth
+    // or size limit, so a crafted "billion laughs" model file can blow up memory
+    // here. A size/expansion guard (or documenting the trust boundary) would
+    // close it. Deferred because model files are the user's own inputs, not
+    // untrusted network input.
     serde_yaml_ng::from_str(&text).map_err(|err| {
         single_error(
             crate::diagnostic::codes::CONFIG_PARSE.code,

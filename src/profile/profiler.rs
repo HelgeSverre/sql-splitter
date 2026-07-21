@@ -596,6 +596,14 @@ impl ProfileRun {
             // Schema-late COPY: record which table this open block belongs to so
             // its rows route unambiguously, and stash the column layout for
             // replay (single-layout-per-pending-table assumption).
+            //
+            // TODO(deferred, L21): if a `CREATE TABLE` for this key arrives while
+            // this block is still open, `register_table` removes the pending
+            // entry, leaving `pending_copy_key` dangling so the block's remaining
+            // rows are silently dropped. Adopting the open block into the newly
+            // registered table would fix it. Deferred: pg_dump never interleaves
+            // a table definition inside its own open COPY block (malformed input
+            // only).
             let entry = self
                 .pending
                 .entry(key.clone())
