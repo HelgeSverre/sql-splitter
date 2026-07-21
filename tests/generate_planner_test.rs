@@ -940,6 +940,66 @@ tables:
     }
 }
 
+#[test]
+fn tree_writes_each_row_depth_when_a_depth_role_is_mapped() {
+    // With a `depth` role mapped, hierarchy.tree fills it: roots are depth 0 and
+    // every non-root's depth is its parent's depth + 1, bounded by max_depth.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 5
+tables:
+  nodes:
+    rows: { kind: fixed, count: 200 }
+    schema:
+      name: nodes
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: parent_id, type: bigint, nullable: true }
+        - { name: depth, type: integer, nullable: false }
+    relationships:
+      - { name: nodes_parent, columns: [parent_id], references: { table: nodes, columns: [id] } }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: hierarchy.tree
+        columns: { parent: parent_id, depth: depth }
+        relationship: nodes_parent
+        root_ratio: 0.2
+        max_depth: 5
+"#;
+    let sink = run(model);
+    let (i_id, i_parent, i_depth) = (
+        sink.columns.iter().position(|c| c == "id").unwrap(),
+        sink.columns.iter().position(|c| c == "parent_id").unwrap(),
+        sink.columns.iter().position(|c| c == "depth").unwrap(),
+    );
+    let mut depth_by_id: std::collections::BTreeMap<i128, i128> = std::collections::BTreeMap::new();
+    for row in &sink.rows {
+        depth_by_id.insert(int_of(&row[i_id]), int_of(&row[i_depth]));
+    }
+    let mut saw_root = false;
+    let mut max_seen = 0;
+    for row in &sink.rows {
+        let depth = int_of(&row[i_depth]);
+        assert!(depth >= 0 && depth <= 5, "depth {depth} out of [0,5]");
+        max_seen = max_seen.max(depth);
+        match &row[i_parent] {
+            GeneratedValue::Null => {
+                assert_eq!(depth, 0, "a root must have depth 0");
+                saw_root = true;
+            }
+            parent => {
+                let parent_depth = depth_by_id[&int_of(parent)];
+                assert_eq!(depth, parent_depth + 1, "child depth must be parent depth + 1");
+            }
+        }
+    }
+    assert!(saw_root, "tree must have at least one root");
+    assert!(max_seen >= 2, "a 200-node tree should reach a non-trivial depth");
+}
+
 // === commerce.order_family ==================================================
 //
 // The order-family planner coordinates an `orders` parent and an `order_items`

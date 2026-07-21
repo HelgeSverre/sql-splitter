@@ -1374,7 +1374,7 @@ pub static HIERARCHY_TREE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
         ArgumentSpec {
             name: "columns",
             required: true,
-            summary: "Maps the parent role to the nullable self-reference column.",
+            summary: "Maps the required `parent` role to the nullable self-reference column, and an optional `depth` role to a column that receives each row's depth (roots = 0).",
         },
         ArgumentSpec {
             name: "relationship",
@@ -1434,6 +1434,9 @@ impl PlannerFactory for HierarchyTreeFactory {
 struct HierarchyTreePlanner {
     writes: Vec<String>,
     parent_family: SqlTypeFamily,
+    /// The family of the optional `depth` output column; `None` when no `depth`
+    /// role is mapped. When set, each row's depth (roots = 0) is written to it.
+    depth_family: Option<SqlTypeFamily>,
     root_ratio: f64,
     max_depth: u32,
     /// Maximum children per node; `None` is unbounded.
@@ -1524,6 +1527,16 @@ impl CompiledPlanner for HierarchyTreePlanner {
         }
 
         output[0] = parent_value;
+        // Optional depth output (roots = 0), in the representation the column
+        // expects. `writes` places it at slot 1 when a `depth` role is mapped.
+        if let Some(family) = &self.depth_family {
+            output[1] = match family {
+                SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => {
+                    GeneratedValue::Integer(i128::from(depth))
+                }
+                _ => GeneratedValue::Text(depth.to_string()),
+            };
+        }
         Ok(())
     }
 
@@ -1642,8 +1655,36 @@ fn compile_tree(
         return Err(bag);
     }
 
+    // An optional `depth` role: the planner writes each row's depth (roots = 0)
+    // into the mapped column, so a tree can carry a materialized depth level.
+    let depth = match columns.and_then(|c| c.get("depth")).and_then(Value::as_str) {
+        None => None,
+        Some(depth_name) => match table.columns.iter().find(|col| col.name == depth_name) {
+            Some(col) => Some(col.clone()),
+            None => {
+                bag.error(
+                    COLUMN_CODE,
+                    format!("{path}.columns.depth"),
+                    format!(
+                        "hierarchy.tree `depth` column `{depth_name}` does not exist on table `{}`",
+                        table.name
+                    ),
+                );
+                None
+            }
+        },
+    };
+
+    if bag.has_errors() {
+        return Err(bag);
+    }
+
     let parent = parent_col.expect("parent resolved without errors");
-    let writes = vec![parent.name.clone()];
+    let mut writes = vec![parent.name.clone()];
+    if let Some(depth) = &depth {
+        writes.push(depth.name.clone());
+    }
+    let depth_family = depth.map(|col| col.family);
     let mut predicates = Vec::new();
     // Every produced key is `key_start + step * index` with non-negative index;
     // with a non-negative start and step the parent column is never negative
@@ -1668,6 +1709,7 @@ fn compile_tree(
     Ok(HierarchyTreePlanner {
         writes,
         parent_family: parent.family.clone(),
+        depth_family,
         root_ratio,
         max_depth: max_depth as u32,
         max_branching,
