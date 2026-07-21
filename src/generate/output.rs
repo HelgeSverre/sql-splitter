@@ -648,9 +648,10 @@ impl AtomicOutput {
         fs::rename(&self.temp_path, &self.destination)?;
         // Durability of the rename itself: without a directory fsync a commit
         // that returned `Ok` could still lose the published directory entry on
-        // power loss right after the rename. Best-effort — some filesystems do
-        // not support a directory fsync.
-        sync_parent_dir(&self.destination);
+        // power loss right after the rename. A real I/O error here fails the
+        // commit; a filesystem that simply doesn't support directory fsync is
+        // tolerated.
+        sync_parent_dir(&self.destination)?;
         self.committed = true;
         Ok(())
     }
@@ -694,24 +695,40 @@ fn published_mode(destination: &Path, dir: &Path) -> io::Result<Option<u32>> {
 /// `rename` into it durable across power loss.
 ///
 /// Opening a directory and calling `fsync` on it is the POSIX way to persist a
-/// directory entry. It is best-effort: some platforms/filesystems refuse a
-/// directory `fsync`, and it is a no-op off Unix. Failures are ignored — the
-/// file contents were already `sync_all`'d before the rename.
-fn sync_parent_dir(path: &Path) {
+/// directory entry. Some platforms/filesystems refuse a directory `fsync`
+/// (returning an "unsupported" error), which is ignored; a *genuine* I/O error
+/// (e.g. `EIO`) is propagated so `commit` never reports durability it did not
+/// achieve. A no-op off Unix.
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         let parent = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
+        let dir = File::open(parent)?;
+        if let Err(err) = dir.sync_all() {
+            if !is_ignorable_dir_sync_error(&err) {
+                return Err(err);
+            }
         }
     }
     #[cfg(not(unix))]
     {
         let _ = path;
     }
+    Ok(())
+}
+
+/// Whether a directory `fsync` error only means "this filesystem does not
+/// support fsync-ing a directory" (safe to ignore) rather than a real I/O
+/// failure. `ENOTSUP`/`EOPNOTSUPP` map to `Unsupported` and `EINVAL` to
+/// `InvalidInput`; anything else (notably `EIO`) is a genuine durability error.
+fn is_ignorable_dir_sync_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+    )
 }
 
 /// Apply the published mode to the finished temp file before rename.
@@ -1029,6 +1046,22 @@ impl FamilyBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_fsync_errors_distinguish_unsupported_from_real_io() {
+        // "Filesystem doesn't support a directory fsync" is ignorable; a genuine
+        // I/O error must propagate so `commit` never reports false durability.
+        assert!(is_ignorable_dir_sync_error(&io::Error::from(
+            io::ErrorKind::Unsupported
+        )));
+        assert!(is_ignorable_dir_sync_error(&io::Error::from(
+            io::ErrorKind::InvalidInput
+        )));
+        assert!(!is_ignorable_dir_sync_error(&io::Error::new(
+            io::ErrorKind::Other,
+            "input/output error"
+        )));
+    }
 
     #[test]
     fn spool_round_trip_preserves_every_value_shape() {
