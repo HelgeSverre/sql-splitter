@@ -886,6 +886,41 @@ fn interval_normal_duration_with_inverted_range_does_not_panic() {
     }
 }
 
+#[test]
+fn after_generator_respects_date_column_granularity() {
+    // `after` on a DATE column must emit a date-only literal, not a full
+    // datetime that a strict DATE column would reject or truncate.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 3
+tables:
+  t:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: t
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: created_on, type: date, nullable: false }
+        - { name: due_on, type: date, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      created_on: { generator: { kind: date } }
+      due_on: { generator: { kind: after, source: created_on, min_seconds: 86400, max_seconds: 864000 } }
+"#;
+    let sink = run(model);
+    let due: Vec<&GeneratedValue> = sink.column("due_on").collect();
+    assert_eq!(due.len(), 4);
+    for value in due {
+        let text = datetime_text(value);
+        assert!(
+            !text.contains(':'),
+            "a DATE column must not carry a time component: {text}"
+        );
+    }
+}
+
 // === commerce.order_family ==================================================
 //
 // The order-family planner coordinates an `orders` parent and an `order_items`

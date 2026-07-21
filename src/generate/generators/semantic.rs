@@ -1410,6 +1410,22 @@ impl TemporalShape {
         }
     }
 
+    /// Classify a column's declared SQL type into a temporal granularity.
+    /// Full-precision types (`datetime`/`timestamp`) are checked first since
+    /// their names contain both `date` and `time`.
+    fn from_source_type(source_type: &str) -> Self {
+        let lower = source_type.to_ascii_lowercase();
+        if lower.contains("datetime") || lower.contains("timestamp") {
+            Self::DateTime
+        } else if lower.starts_with("date") {
+            Self::Date
+        } else if lower.starts_with("time") {
+            Self::Time
+        } else {
+            Self::DateTime
+        }
+    }
+
     /// The default `[min, max]` bound, as epoch seconds.
     fn default_bounds(self) -> (i64, i64) {
         match self {
@@ -1671,11 +1687,14 @@ impl GeneratorFactory for RelativeFactory {
         bag.into_result(())?;
 
         let rng = stream(context, self.descriptor.kind);
-        let family = column(context).family.clone();
+        let target = column(context);
+        let family = target.family.clone();
+        let shape = TemporalShape::from_source_type(&target.source_type);
         Ok(Box::new(CompiledRelative {
             family,
             source,
             forward: self.forward,
+            shape,
             min_seconds,
             max_seconds,
             rng,
@@ -1687,6 +1706,7 @@ struct CompiledRelative {
     family: SqlTypeFamily,
     source: String,
     forward: bool,
+    shape: TemporalShape,
     min_seconds: i128,
     max_seconds: i128,
     rng: ChaCha8Rng,
@@ -1734,7 +1754,7 @@ impl CompiledGenerator for CompiledRelative {
             ))
         })?;
 
-        let formatted = result.format("%Y-%m-%d %H:%M:%S").to_string();
+        let formatted = result.format(self.shape.format()).to_string();
         *output = temporal_value(&self.family, formatted);
         Ok(())
     }
