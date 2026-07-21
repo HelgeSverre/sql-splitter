@@ -1444,15 +1444,21 @@ struct HierarchyTreePlanner {
     key_step: i128,
     decision_rng: ChaCha8Rng,
     select_rng: ChaCha8Rng,
-    /// Depth of every row produced so far, indexed by row index.
-    depths: Vec<u32>,
-    /// Remaining children each produced row may still take (only tracked when
-    /// `max_branching` is set).
-    remaining: Vec<u32>,
-    /// Row indices that can still parent a new child (depth < max_depth and, when
-    /// bounded, remaining branching > 0).
-    eligible: Vec<usize>,
+    /// The frontier of rows that can still parent a new child (depth < max_depth
+    /// and, when bounded, remaining branching > 0). A node's depth and remaining
+    /// branching are only ever read while it is eligible, so this is the *only*
+    /// per-node state kept — memory stays bounded by the live frontier, not the
+    /// total row count (`Buffering::Streaming`).
+    eligible: Vec<EligibleNode>,
     predicates: Vec<PlannerPredicate>,
+}
+
+/// A row still on the tree frontier: its row index (for the child's parent key),
+/// its depth, and how many more children it may still take.
+struct EligibleNode {
+    index: usize,
+    depth: u32,
+    remaining: u32,
 }
 
 impl HierarchyTreePlanner {
@@ -1496,24 +1502,25 @@ impl CompiledPlanner for HierarchyTreePlanner {
         } else {
             let slot = (selection * self.eligible.len() as f64) as usize;
             let slot = slot.min(self.eligible.len() - 1);
-            let parent_row = self.eligible[slot];
-            let depth = self.depths[parent_row] + 1;
+            let parent_index = self.eligible[slot].index;
+            let depth = self.eligible[slot].depth + 1;
             if self.max_branching.is_some() {
-                self.remaining[parent_row] -= 1;
-                if self.remaining[parent_row] == 0 {
+                self.eligible[slot].remaining -= 1;
+                if self.eligible[slot].remaining == 0 {
                     self.eligible.swap_remove(slot);
                 }
             }
-            (self.render_key(self.key_of(parent_row)), depth)
+            (self.render_key(self.key_of(parent_index)), depth)
         };
 
-        self.depths.push(depth);
-        self.remaining
-            .push(self.max_branching.unwrap_or(u32::MAX).max(1));
         // A node can parent future children only while it stays under the depth
         // bound (a child would sit at `depth + 1`).
         if depth < self.max_depth {
-            self.eligible.push(n);
+            self.eligible.push(EligibleNode {
+                index: n,
+                depth,
+                remaining: self.max_branching.unwrap_or(u32::MAX).max(1),
+            });
         }
 
         output[0] = parent_value;
@@ -1668,8 +1675,6 @@ fn compile_tree(
         key_step,
         decision_rng,
         select_rng,
-        depths: Vec::new(),
-        remaining: Vec::new(),
         eligible: Vec::new(),
         predicates,
     })
