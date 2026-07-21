@@ -71,6 +71,20 @@ fn is_narrowed_by_conversion(source_type: &str, to: SqlDialect) -> bool {
     {
         return true;
     }
+    // Exact fixed-point (DECIMAL/NUMERIC) becomes a binary float (REAL) on
+    // SQLite, silently losing precision.
+    if (lower.contains("decimal") || lower.contains("numeric")) && to == SqlDialect::Sqlite {
+        return true;
+    }
+    // A time-zone-bearing timestamp loses its zone when mapped to MySQL
+    // DATETIME (which has no tz). MSSQL keeps it via DATETIMEOFFSET, and the
+    // SQLite mapping renders TEXT that retains the zoned literal.
+    // ("without time zone" does not contain the substring "with time zone".)
+    if (lower.contains("timestamptz") || lower.contains("with time zone"))
+        && to == SqlDialect::MySql
+    {
+        return true;
+    }
     false
 }
 
@@ -855,6 +869,53 @@ mod map_column_type_tests {
         // MSSQL has UNIQUEIDENTIFIER, so a UUID keeps its native domain there.
         let mut kept = WarningCollector::new();
         map_column_type("UUID", SqlDialect::Postgres, SqlDialect::Mssql, &mut kept);
+        assert!(!kept.has_warnings());
+    }
+
+    #[test]
+    fn decimal_to_sqlite_real_is_lossy() {
+        // SQLite has no exact fixed-point type; the mapper renders DECIMAL as
+        // REAL (binary float), silently losing exact precision.
+        let mut warnings = WarningCollector::new();
+        map_column_type(
+            "DECIMAL(10,2)",
+            SqlDialect::MySql,
+            SqlDialect::Sqlite,
+            &mut warnings,
+        );
+        assert!(warnings.has_warnings());
+
+        // PostgreSQL keeps a native DECIMAL, so the same source is not lossy.
+        let mut kept = WarningCollector::new();
+        map_column_type(
+            "DECIMAL(10,2)",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut kept,
+        );
+        assert!(!kept.has_warnings());
+    }
+
+    #[test]
+    fn timestamptz_to_mysql_drops_the_timezone_and_is_lossy() {
+        // MySQL DATETIME has no time-zone component, so the tz is dropped.
+        let mut warnings = WarningCollector::new();
+        map_column_type(
+            "TIMESTAMPTZ",
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert!(warnings.has_warnings());
+
+        // MSSQL DATETIMEOFFSET preserves the time zone, so it is not lossy.
+        let mut kept = WarningCollector::new();
+        map_column_type(
+            "TIMESTAMPTZ",
+            SqlDialect::Postgres,
+            SqlDialect::Mssql,
+            &mut kept,
+        );
         assert!(!kept.has_warnings());
     }
 }
