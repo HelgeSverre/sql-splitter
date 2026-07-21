@@ -323,10 +323,12 @@ pub fn build_schema_graph(tables_dir: &Path, dialect: SqlDialect) -> anyhow::Res
 
 /// Quote an identifier for the given dialect.
 pub fn quote_ident(dialect: SqlDialect, name: &str) -> String {
+    // Double any occurrence of the closing delimiter so an identifier can never
+    // terminate its own quoting early (malformed / injectable SQL otherwise).
     match dialect {
-        SqlDialect::MySql => format!("`{}`", name),
-        SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name),
-        SqlDialect::Mssql => format!("[{}]", name),
+        SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
+        SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
+        SqlDialect::Mssql => format!("[{}]", name.replace(']', "]]")),
     }
 }
 
@@ -539,6 +541,16 @@ mod tests {
         assert_eq!(quote_ident(SqlDialect::Postgres, "t"), "\"t\"");
         assert_eq!(quote_ident(SqlDialect::Sqlite, "t"), "\"t\"");
         assert_eq!(quote_ident(SqlDialect::Mssql, "t"), "[t]");
+    }
+
+    #[test]
+    fn quote_ident_escapes_the_closing_delimiter() {
+        // A delimiter character inside an identifier must be doubled so it cannot
+        // terminate the quoted identifier early (malformed / injectable SQL).
+        assert_eq!(quote_ident(SqlDialect::MySql, "a`b"), "`a``b`");
+        assert_eq!(quote_ident(SqlDialect::Postgres, "a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident(SqlDialect::Sqlite, "a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident(SqlDialect::Mssql, "a]b"), "[a]]b]");
     }
 
     #[test]
