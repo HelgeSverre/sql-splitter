@@ -1446,7 +1446,10 @@ impl<'a> Audit<'a> {
 
     /// Finalize every append-only key index, then evaluate child FK indexes
     /// against their parent membership indexes by sorted merge join.
-    fn finalize_indexes(&mut self) -> Result<Vec<Vec<u64>>, GenerateError> {
+    /// Returns, per table and per relationship, `Some(missing)` when the parent
+    /// membership index was available (so the FK was actually checked) or `None`
+    /// when the parent table was not generated (so membership is unverifiable).
+    fn finalize_indexes(&mut self) -> Result<Vec<Vec<Option<u64>>>, GenerateError> {
         for state in self.tables.values_mut() {
             for group in &mut state.unique_groups {
                 group.duplicate |= group.index.finalize().map_err(membership_index_error)?;
@@ -1475,10 +1478,15 @@ impl<'a> Audit<'a> {
                             .find(|group| group.columns == relationship.parent_columns)
                     });
                 let missing = match parent_keys {
-                    Some(parent_keys) => child_keys
-                        .missing_from(&parent_keys.index)
-                        .map_err(membership_index_error)?,
-                    None => 0,
+                    Some(parent_keys) => Some(
+                        child_keys
+                            .missing_from(&parent_keys.index)
+                            .map_err(membership_index_error)?,
+                    ),
+                    // The parent table was not generated, so its membership index
+                    // does not exist: the FK cannot be verified (fail-closed as
+                    // NotChecked in `finish`, never a silent green pass).
+                    None => None,
                 };
                 relationship_failures.push(missing);
             }
@@ -1567,17 +1575,25 @@ impl<'a> Audit<'a> {
             // Foreign keys / composite keys.
             for (relationship_index, rel) in planned.relationships.iter().enumerate() {
                 let slug = fk_slug(&planned.name, rel);
-                let failed = foreign_key_failures
+                let missing = foreign_key_failures
                     .get(plan_index)
                     .and_then(|failures| failures.get(relationship_index))
                     .copied()
-                    .unwrap_or(0);
-                report.record(
-                    slug,
-                    CheckStatus::Exact,
-                    failed == 0,
-                    format!("{failed} foreign-key value(s) missing from the parent"),
-                );
+                    .unwrap_or(Some(0));
+                let (status, passed, detail) = match missing {
+                    None => (
+                        CheckStatus::NotChecked,
+                        false,
+                        "parent table not generated; foreign-key membership not verified"
+                            .to_string(),
+                    ),
+                    Some(failed) => (
+                        CheckStatus::Exact,
+                        failed == 0,
+                        format!("{failed} foreign-key value(s) missing from the parent"),
+                    ),
+                };
+                report.record(slug, status, passed, detail);
             }
 
             // Planner predicates: report each declared predicate so a passing

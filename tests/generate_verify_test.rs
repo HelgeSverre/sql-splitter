@@ -679,6 +679,29 @@ fn corrupt_order_family_sum_fails_the_named_check() {
     assert!(report.failed("family_sum:orders"), "{:?}", report.checks);
 }
 
+#[test]
+fn foreign_key_to_an_ungenerated_parent_is_not_a_silent_pass() {
+    // If a child relationship's parent table is not among the generated tables
+    // (e.g. an externally-referenced parent), the verifier cannot establish FK
+    // membership. It must surface that as NotChecked — never a green Exact pass.
+    let dir = tempfile::tempdir().unwrap();
+    let sql = render(compile(CORE));
+    let path = write(dir.path(), "core.sql", &sql);
+
+    // Drop `users` from the plan the verifier sees, keeping orders' relationship
+    // to it: `self.tables` no longer holds the parent membership index.
+    let mut plan = compile(CORE);
+    plan.tables.retain(|table| table.name != "users");
+    let report = GenerationVerifier::new(&plan).verify_path(&path).unwrap();
+
+    assert_eq!(
+        report.status_of("foreign_key:orders"),
+        Some(CheckStatus::NotChecked),
+        "an unverifiable FK must be NotChecked, not a green Exact pass: {:?}",
+        report.checks
+    );
+}
+
 // --- Bounded membership: spill path -----------------------------------------
 
 #[test]
