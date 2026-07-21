@@ -1057,8 +1057,7 @@ mod tests {
         assert!(is_ignorable_dir_sync_error(&io::Error::from(
             io::ErrorKind::InvalidInput
         )));
-        assert!(!is_ignorable_dir_sync_error(&io::Error::new(
-            io::ErrorKind::Other,
+        assert!(!is_ignorable_dir_sync_error(&io::Error::other(
             "input/output error"
         )));
     }
