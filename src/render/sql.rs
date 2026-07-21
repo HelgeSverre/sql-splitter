@@ -361,7 +361,7 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             use_copy,
             batch_size,
             insert_columns: None,
-            row_batch: RowBatch::with_capacity(batch_size, batch_size * 64),
+            row_batch: RowBatch::with_capacity(batch_size, batch_size.saturating_mul(64)),
             copy_batch: String::new(),
             copy_rows: 0,
             identity_insert: None,

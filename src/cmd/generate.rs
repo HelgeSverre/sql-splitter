@@ -345,6 +345,14 @@ impl GenerateArgs {
         if self.batch_size == 0 {
             return Err(RequestError::usage("--batch-size must be at least 1"));
         }
+        // Cap at a generous ceiling: beyond this the multi-row INSERT capacity
+        // hint would overflow and the batch buffer preallocation is unbounded.
+        const MAX_BATCH_SIZE: usize = 1_000_000;
+        if self.batch_size > MAX_BATCH_SIZE {
+            return Err(RequestError::usage(format!(
+                "--batch-size must be at most {MAX_BATCH_SIZE}"
+            )));
+        }
 
         if self.compress.is_some() && (self.output.is_none() || output_explicit_dash) {
             return Err(RequestError::usage(

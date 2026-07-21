@@ -258,6 +258,27 @@ fn verify_without_a_real_output_file_exits_with_usage_code() {
 }
 
 #[test]
+fn excessive_batch_size_exits_with_usage_code() {
+    // An absurdly large --batch-size would overflow the capacity hint and try
+    // to preallocate an unbounded buffer; reject it at the CLI.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.sql");
+    let output = sql_splitter_bin()
+        .args([
+            "generate",
+            "--config",
+            SIMPLE_MODEL,
+            "--batch-size",
+            "2000000",
+            "-o",
+        ])
+        .arg(&out)
+        .output()
+        .expect("failed to run sql-splitter");
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn zero_batch_size_exits_with_usage_code() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.sql");
