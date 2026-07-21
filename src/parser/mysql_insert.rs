@@ -68,12 +68,16 @@ pub fn hash_pk_tuple(pk: &PkTuple) -> u64 {
 
     for v in pk {
         match v {
+            // Int and BigInt of the same integer must hash identically: a value
+            // dumped unquoted (Int) and the same value dumped quoted in a wider
+            // column (BigInt) are the same key for hash-based FK/PK matching.
+            // Normalize both to a common tag and width.
             PkValue::Int(i) => {
                 0u8.hash(&mut hasher);
-                i.hash(&mut hasher);
+                i128::from(*i).hash(&mut hasher);
             }
             PkValue::BigInt(i) => {
-                1u8.hash(&mut hasher);
+                0u8.hash(&mut hasher);
                 i.hash(&mut hasher);
             }
             PkValue::Text(s) => {

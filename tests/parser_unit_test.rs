@@ -362,9 +362,23 @@ INSERT INTO notes VALUES (1, 'Use `backticks` for code');
 
 mod mysql_insert_tests {
     use sql_splitter::parser::mysql_insert::{
-        parse_mysql_insert_rows, parse_mysql_insert_rows_raw, PkValue,
+        hash_pk_tuple, parse_mysql_insert_rows, parse_mysql_insert_rows_raw, PkTuple, PkValue,
     };
     use sql_splitter::schema::{Column, ColumnId, ColumnType, ForeignKey, TableId, TableSchema};
+
+    #[test]
+    fn int_and_bigint_of_the_same_value_hash_equal_for_fk_matching() {
+        // A parent PK dumped unquoted (Int) and a child FK dumped quoted in a
+        // bigint column (BigInt) are the same value; hash-based FK resolution
+        // must treat them as equal, or the FK silently fails to match.
+        let as_int: PkTuple = [PkValue::Int(42)].into_iter().collect();
+        let as_bigint: PkTuple = [PkValue::BigInt(42)].into_iter().collect();
+        assert_eq!(hash_pk_tuple(&as_int), hash_pk_tuple(&as_bigint));
+
+        // Different integer values must still differ.
+        let other: PkTuple = [PkValue::BigInt(43)].into_iter().collect();
+        assert_ne!(hash_pk_tuple(&as_int), hash_pk_tuple(&other));
+    }
 
     fn create_simple_schema() -> TableSchema {
         let mut schema = TableSchema::new("users".to_string(), TableId(0));
