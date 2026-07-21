@@ -460,6 +460,31 @@ fn import_paths_must_be_local_and_relative() {
 }
 
 #[test]
+fn import_paths_must_not_traverse_out_of_the_model_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    // A file OUTSIDE the model directory.
+    fs::write(
+        dir.path().join("secret.yaml"),
+        "version: 1\nkind: overrides\ntables: {}\n",
+    )
+    .unwrap();
+    // The model lives in a subdirectory; a `../secret.yaml` import escapes it.
+    let sub = dir.path().join("model");
+    fs::create_dir(&sub).unwrap();
+    fs::write(
+        sub.join("root.yaml"),
+        "version: 1\nkind: overrides\nimports: [\"../secret.yaml\"]\ntables: {}\n",
+    )
+    .unwrap();
+
+    let err = ConfigLoader::load(&sub.join("root.yaml")).unwrap_err();
+    assert!(
+        err.to_string().contains("GEN-IMPORT-REMOTE"),
+        "a traversing import path must be rejected: {err}"
+    );
+}
+
+#[test]
 fn imports_cannot_themselves_import() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

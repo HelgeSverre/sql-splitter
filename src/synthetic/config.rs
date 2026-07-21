@@ -89,12 +89,15 @@ impl ConfigLoader {
 /// imported file itself: it must be `kind: overrides` and must not declare
 /// any imports of its own.
 fn resolve_import(base_dir: &Path, raw: &str) -> Result<(PathBuf, Value), DiagnosticBag> {
-    if raw.contains("://") || Path::new(raw).is_absolute() {
+    let traverses_up = Path::new(raw)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir));
+    if raw.contains("://") || Path::new(raw).is_absolute() || traverses_up {
         let mut bag = DiagnosticBag::default();
         bag.error(
             crate::diagnostic::codes::IMPORT_REMOTE.code,
             "imports",
-            format!("import path `{raw}` must be local and relative; remote or absolute paths are rejected"),
+            format!("import path `{raw}` must be local and relative and must stay within the model directory; remote, absolute, or `..`-traversing paths are rejected"),
         );
         return Err(bag);
     }
