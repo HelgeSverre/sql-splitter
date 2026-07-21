@@ -626,6 +626,36 @@ CREATE TABLE widgets (id INT NOT NULL PRIMARY KEY, label VARCHAR(32) NOT NULL);
 }
 
 #[test]
+fn orphaned_schema_late_warnings_are_emitted_in_sorted_order() {
+    // Several tables with COPY data but no CREATE TABLE each raise a schema-late
+    // warning. The order must be deterministic (sorted), not the arbitrary order
+    // of a randomized hashmap drain.
+    let mut dump = String::new();
+    for name in ["zeta", "alpha", "mu", "gamma", "xi", "beta"] {
+        dump.push_str(&format!("COPY public.{name} (id) FROM stdin;\n1\n\\.\n"));
+    }
+    let profile = DumpProfiler::builder()
+        .depth(ProfileDepth::Basic)
+        .dialect(SqlDialect::Postgres)
+        .build()
+        .profile_reader(dump.as_bytes(), SqlDialect::Postgres)
+        .expect("profile orphaned schema-late tables");
+    let warned: Vec<String> = profile
+        .warnings
+        .iter()
+        .filter(|w| w.code == codes::PROFILE_SCHEMA_LATE.code)
+        .map(|w| w.path.clone())
+        .collect();
+    assert_eq!(warned.len(), 6, "one warning per orphaned table");
+    let mut sorted = warned.clone();
+    sorted.sort();
+    assert_eq!(
+        warned, sorted,
+        "schema-late warnings must be emitted in deterministic sorted order"
+    );
+}
+
+#[test]
 fn schema_late_single_column_copy_counts_empty_string_rows() {
     // A blank line in a single-column COPY is a legitimate empty-string row.
     // Even when the COPY precedes its CREATE TABLE (schema-late), the COPY

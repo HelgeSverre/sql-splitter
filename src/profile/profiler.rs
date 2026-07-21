@@ -827,7 +827,10 @@ impl ProfileRun {
 
         // Any pending table that never got its DDL: surface its exact row count
         // and warn that its columns could not be profiled.
-        let leftovers: Vec<(String, PendingTable)> = self.pending.drain().collect();
+        // Sort by table key so the warnings are deterministic; the pending map
+        // is a randomized-seed hashmap whose drain order varies run to run.
+        let mut leftovers: Vec<(String, PendingTable)> = self.pending.drain().collect();
+        leftovers.sort_by(|a, b| a.0.cmp(&b.0));
         for (key, pending) in leftovers {
             self.warnings.push(Diagnostic::warning(
                 &codes::PROFILE_SCHEMA_LATE,
