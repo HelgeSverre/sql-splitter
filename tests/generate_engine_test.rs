@@ -315,6 +315,32 @@ fn choice_generator_rejects_a_value_that_does_not_coerce_to_the_column_family() 
 }
 
 #[test]
+fn observed_numeric_generators_reject_out_of_range_decimal_scale() {
+    // scale > 18 makes 10i128.pow(scale) overflow at render; the observed
+    // normal/lognormal/histogram factories must reject it at compile time, like
+    // the core decimal generator.
+    let cases: [(&str, GeneratorConfig); 3] = [
+        ("normal", yaml("{ kind: normal, mean: 0, std: 1, scale: 39 }")),
+        (
+            "lognormal",
+            yaml("{ kind: lognormal, mu: 0, sigma: 1, scale: 39 }"),
+        ),
+        (
+            "histogram",
+            yaml("{ kind: histogram, bins: [{ min: 0, max: 10, count: 1 }], scale: 39 }"),
+        ),
+    ];
+    for (name, config) in cases {
+        let err = generate_three(name, config, SqlTypeFamily::Decimal, 42)
+            .expect_err(&format!("{name} scale 39 must be a compile error"));
+        assert!(
+            err.to_lowercase().contains("scale"),
+            "{name}: expected a scale diagnostic, got: {err}"
+        );
+    }
+}
+
+#[test]
 fn decimal_generator_respects_bounds_and_scale() {
     let values = generate_three(
         "decimal",

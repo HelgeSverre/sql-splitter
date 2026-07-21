@@ -68,6 +68,27 @@ fn parse_u32(value: &serde_yaml_ng::Value) -> Option<u32> {
     parse_i128(value).and_then(|n| u32::try_from(n).ok())
 }
 
+/// Parse and validate a decimal `scale` argument, bounding it to `0..=18` — the
+/// range `10i128.pow(scale)` fits in an `i128` without overflow (the core
+/// `decimal` generator enforces the same limit). Out-of-range records a
+/// `DECIMAL_SCALE` diagnostic on `bag` and returns a safe default.
+fn decimal_scale(
+    config: &GeneratorConfig,
+    context: &CompileContext<'_>,
+    bag: &mut DiagnosticBag,
+) -> u32 {
+    let scale = config.args.get("scale").and_then(parse_u32).unwrap_or(0);
+    if scale > 18 {
+        bag.error(
+            crate::diagnostic::codes::DECIMAL_SCALE.code,
+            context.path(),
+            "`scale` must be between 0 and 18",
+        );
+        return 0;
+    }
+    scale
+}
+
 /// Render a scalar YAML value as the text an `observed_sample` replays for a
 /// text-family column.
 fn display_yaml(value: &serde_yaml_ng::Value) -> String {
@@ -393,9 +414,9 @@ impl GeneratorFactory for HistogramFactory {
                 "`histogram.bins` counts must not all be zero",
             );
         }
+        let scale = decimal_scale(config, context, &mut bag);
         bag.into_result(())?;
 
-        let scale = config.args.get("scale").and_then(parse_u32).unwrap_or(0);
         let family = column(context).family.clone();
         let rng = stream(context, "histogram");
         Ok(Box::new(CompiledHistogram {
@@ -572,9 +593,9 @@ fn compile_gaussian(
             );
         }
     }
+    let scale = decimal_scale(config, context, &mut bag);
     bag.into_result(())?;
 
-    let scale = config.args.get("scale").and_then(parse_u32).unwrap_or(0);
     let family = column(context).family.clone();
     let rng = stream(context, kind);
     Ok(Box::new(CompiledGaussian {
