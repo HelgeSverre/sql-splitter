@@ -96,9 +96,12 @@ fn sql_string_escapes_each_dialect_without_intermediate_contract_changes() {
         SqlString::new(SqlDialect::MySql, input).to_string(),
         "'a\\'b\\\\c\\n\\r\\t'"
     );
+    // The backslash forces a Postgres E'' escape string with a doubled
+    // backslash (standard_conforming_strings-independent); SQLite has no
+    // backslash escaping so it stays a plain literal.
     assert_eq!(
         SqlString::new(SqlDialect::Postgres, input).to_string(),
-        "'a''b\\c\n\r\t'"
+        "E'a''b\\\\c\n\r\t'"
     );
     assert_eq!(
         SqlString::new(SqlDialect::Sqlite, input).to_string(),
@@ -2060,12 +2063,16 @@ tables:
         options.no_copy = true;
     });
     assert!(insert_sql.contains("INSERT INTO"), "{insert_sql}");
-    // Same value, INSERT-literal escaped: quoted verbatim (Postgres string
-    // literals leave `\t`/`\n`/`\\` untouched; only `'` would be doubled).
+    // Same value, INSERT-literal escaped: the backslash forces an E'' escape
+    // string with the backslash doubled (so the literal is unambiguous
+    // regardless of standard_conforming_strings); tab/newline stay literal.
+    let insert_literal = format!("E'{}'", original.replace('\\', "\\\\"));
     assert!(
-        insert_sql.contains(&format!("'{original}'")),
+        insert_sql.contains(&insert_literal),
         "{insert_sql}"
     );
+    // And never the ambiguous plain-quoted form.
+    assert!(!insert_sql.contains(&format!("'{original}'")), "{insert_sql}");
 }
 
 #[test]
