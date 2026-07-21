@@ -1,7 +1,7 @@
 # Stress fixture 6 of 6 — THE EVERYTHING FIXTURE (capstone / ultimate stress test).
 #
 # A single self-contained `kind: model` that exercises the supported surface
-# in one file: every generator family, every modifier, every row-count rule and
+# in one file: a broad generator/modifier catalog, every row-count rule and
 # child distribution kind, composite primary keys, an FK cycle resolved via
 # deferred constraints, per-table seed overrides, and all twelve planners:
 #
@@ -58,27 +58,28 @@ tables:
       name: { generator: { kind: company.name } }
       slug:
         generator: { kind: text.slug }
-        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
+        modifiers: [{ kind: suffix, value: "-inc" }, { kind: unique, max_attempts: 32, on_exhaustion: error }]
       plan:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: free, weight: 0.4 }
             - { value: pro, weight: 0.4 }
             - { value: enterprise, weight: 0.2 }
       settings:
         generator: { kind: json_value }
-        modifiers: [{ kind: null_rate, probability: 0.2 }]
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
     planners:
       - kind: geo.coordinate_pair
         columns: { latitude: hq_latitude, longitude: hq_longitude }
-        bounding_box: { min_lat: -55.0, max_lat: 71.0, min_lon: -168.0, max_lon: 178.0 }
+        bounds: { min_lat: -55.0, max_lat: 71.0, min_lon: -168.0, max_lon: 178.0 }
         precision: 6
       - kind: temporal.timestamps
         columns: { created_at: created_at, updated_at: updated_at }
-        range: { min: 2019-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        created: { kind: range, min: 2019-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        update_delay: { kind: uniform, unit: days, min: 0, max: 365 }
 
-  # ---- Users: every semantic / credential / identifier generator ----------
+  # ---- Users: broad semantic / credential / identifier catalog ------------
   users:
     rows: { kind: fixed, count: 6000 }
     schema:
@@ -116,62 +117,70 @@ tables:
       nanoid: { generator: { kind: identifier.nanoid } }
       first_name: { generator: { kind: person.first_name } }
       last_name: { generator: { kind: person.last_name } }
-      full_name: { generator: { kind: template, template: "{first_name} {last_name}" } }
+      full_name:
+        generator:
+          kind: template
+          parts:
+            - { field: first_name }
+            - " "
+            - { field: last_name }
       username:
         generator: { kind: person.username }
-        modifiers: [{ kind: lowercase }, { kind: unique, max_attempts: 64, on_exhaustion: widen }]
+        modifiers: [{ kind: case, mode: lower }, { kind: unique, max_attempts: 64, on_exhaustion: widen }]
       email:
         generator: { kind: internet.email }
         modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
       password_hash: { generator: { kind: credential.password_hash } }
       api_key:
         generator: { kind: credential.api_key }
-        modifiers: [{ kind: null_rate, probability: 0.5 }]
+        modifiers: [{ kind: prefix, value: "ak_" }, { kind: null_rate, rate: 0.5 }]
       phone:
         generator: { kind: phone.number }
-        modifiers: [{ kind: null_rate, probability: 0.3 }]
+        modifiers: [{ kind: null_rate, rate: 0.3 }]
       address_line1:
         generator: { kind: address.line1 }
-        modifiers: [{ kind: null_rate, probability: 0.2 }]
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
       address_line2:
         generator: { kind: address.line2 }
-        modifiers: [{ kind: null_rate, probability: 0.8 }]
+        modifiers: [{ kind: null_rate, rate: 0.8 }]
       city:
         generator: { kind: address.city }
-        modifiers: [{ kind: null_rate, probability: 0.2 }]
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
       region:
         generator: { kind: address.region }
-        modifiers: [{ kind: null_rate, probability: 0.3 }]
+        modifiers: [{ kind: null_rate, rate: 0.3 }]
       postcode:
         generator: { kind: address.postcode }
-        modifiers: [{ kind: null_rate, probability: 0.2 }]
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
       country:
         generator: { kind: address.country }
-        modifiers: [{ kind: null_rate, probability: 0.1 }]
+        modifiers: [{ kind: truncate, max_length: 2 }, { kind: case, mode: upper }, { kind: null_rate, rate: 0.1 }]
       user_agent:
         generator: { kind: internet.user_agent }
-        modifiers: [{ kind: null_rate, probability: 0.3 }]
+        modifiers: [{ kind: null_rate, rate: 0.3 }]
       locale:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: en, weight: 0.6 }
             - { value: nb, weight: 0.15 }
             - { value: de, weight: 0.15 }
             - { value: ja, weight: 0.1 }
       karma:
-        generator: { kind: normal, mean: 500, stddev: 350, min: 0, max: 100000, scale: 6 }
+        generator: { kind: normal, mean: 500, std: 350, min: 0, max: 100000, scale: 6 }
         modifiers: [{ kind: clamp, min: 0, max: 100000 }, { kind: round, scale: 6 }]
       signature:
-        generator: { kind: bytes, min_len: 32, max_len: 256 }
-        modifiers: [{ kind: null_rate, probability: 0.85 }]
+        generator: { kind: bytes, min_length: 32, max_length: 256 }
+        modifiers: [{ kind: null_rate, rate: 0.85 }]
     planners:
       - kind: temporal.timestamps
         columns: { created_at: created_at, updated_at: updated_at }
-        range: { min: 2019-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        created: { kind: range, min: 2019-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        update_delay: { kind: uniform, unit: hours, min: 0, max: 8760 }
       - kind: temporal.soft_delete
         columns: { deleted_at: deleted_at }
-        deleted_probability: 0.07
+        deletion_probability: 0.07
+        deleted_range: { kind: range, min: 2020-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
 
   # ---- Junction with composite PK ----------------------------------------
   memberships:
@@ -198,24 +207,24 @@ tables:
       role:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: owner, weight: 0.05 }
             - { value: admin, weight: 0.15 }
             - { value: member, weight: 0.8 }
+      joined_at: { generator: { kind: datetime } }
     planners:
       - kind: relation.junction_pair
-        left: membership_tenant
-        right: membership_user
-        unique: true
-        columns: { created_at: joined_at }
+        columns: { left: tenant_id, right: user_id }
+        left_relationship: membership_tenant
+        right_relationship: membership_user
 
-  # ---- Hierarchy tree + tenant family ------------------------------------
+  # ---- Hierarchy tree ----------------------------------------------------
   categories:
     rows:
       kind: relation.children
       parent: tenants
       count: 2000
-      distribution: { kind: uniform, min: 5, max: 100 }
+      distribution: { kind: uniform, mean: 30, min: 5, max: 100 }
     schema:
       name: categories
       columns:
@@ -233,19 +242,19 @@ tables:
         references: { table: categories, columns: [id] }
     columns:
       id: { generator: { kind: sequence, start: 1 } }
+      tenant_id: { generator: { kind: relation.foreign_key, relationship: category_tenant } }
       name: { generator: { kind: text.word } }
+      # `hierarchy.tree` has no depth output; a plain generator fills the column.
+      depth: { generator: { kind: integer, min: 0, max: 5 } }
     planners:
-      - kind: relation.tenant_family
-        tenant: category_tenant
-        scoped_relationships: [category_parent]
       - kind: hierarchy.tree
+        columns: { parent: parent_id }
         relationship: category_parent
-        depth_column: depth
         root_ratio: 0.15
         max_depth: 5
-        branching: { kind: histogram, mean: 4, min: 0, max: 15 }
+        max_branching: 6
 
-  # ---- Products: pattern + file metadata + statistical money -------------
+  # ---- Products: mask + file metadata + statistical money ----------------
   products:
     rows:
       kind: relation.children
@@ -280,29 +289,27 @@ tables:
         references: { table: categories, columns: [id] }
     columns:
       id: { generator: { kind: sequence, start: 1 } }
+      tenant_id: { generator: { kind: relation.foreign_key, relationship: product_tenant } }
       category_id:
-        generator: { kind: relation.foreign_key, relationship: product_category, nullable: true, null_rate: 0.15 }
+        generator: { kind: relation.foreign_key, relationship: product_category, null_rate: 0.15 }
       name: { generator: { kind: commerce.product_name } }
-      sku: { generator: { kind: pattern, pattern: "SKU-[A-Z0-9]{8}" } }
+      sku: { generator: { kind: pattern, mask: "SKU-????????" } }
       currency:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: USD, weight: 0.5 }
             - { value: EUR, weight: 0.3 }
             - { value: NOK, weight: 0.2 }
       unit_price:
-        generator: { kind: lognormal, min: 0.99, max: 9999.0, scale: 2 }
+        generator: { kind: lognormal, mu: 4.0, sigma: 1.2, min: 0.99, max: 9999.0, scale: 2 }
         modifiers: [{ kind: clamp, min: 0.99, max: 9999.0 }]
       cost:
-        generator: { kind: lognormal, min: 0.10, max: 8000.0, scale: 4 }
+        generator: { kind: lognormal, mu: 3.5, sigma: 1.2, min: 0.10, max: 8000.0, scale: 4 }
       weight_g:
-        generator: { kind: lognormal, min: 1, max: 50000 }
-        modifiers: [{ kind: null_rate, probability: 0.2 }, { kind: round }]
+        generator: { kind: lognormal, mu: 5.0, sigma: 1.5, min: 1, max: 50000 }
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
     planners:
-      - kind: relation.tenant_family
-        tenant: product_tenant
-        scoped_relationships: [product_category]
       - kind: file.metadata
         columns:
           name: image_name
@@ -310,14 +317,15 @@ tables:
           mime_type: image_mime
           size: image_size
           hash: image_hash
-        null_probability: 0.25
-        size: { kind: lognormal, min: 4096, max: 8388608 }
+        size: { min: 4096, max: 8388608 }
         extensions: [jpg, png, webp]
+        hash_kind: sha256
       - kind: temporal.timestamps
         columns: { created_at: created_at, updated_at: updated_at }
-        range: { min: 2020-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        created: { kind: range, min: 2020-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        update_delay: { kind: uniform, unit: days, min: 0, max: 365 }
 
-  # ---- Commerce order family (exact minor-unit money) --------------------
+  # ---- Commerce order family (exact minor-unit money) + tenant family -----
   orders:
     rows:
       kind: relation.children
@@ -349,27 +357,28 @@ tables:
         references: { table: users, columns: [id] }
     columns:
       id: { generator: { kind: sequence, start: 1 } }
-      buyer_id: { generator: { kind: relation.foreign_key, relationship: order_buyer } }
       reference:
-        generator: { kind: pattern, pattern: "ORD-[0-9]{4}-[0-9]{6}" }
+        generator: { kind: pattern, mask: "ORD-####-######" }
         modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       currency: { generator: { kind: constant, value: USD } }
       status:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: pending, weight: 0.1 }
             - { value: paid, weight: 0.5 }
             - { value: shipped, weight: 0.25 }
             - { value: refunded, weight: 0.05 }
             - { value: cancelled, weight: 0.1 }
       placed_at: { generator: { kind: datetime } }
-      updated_at: { generator: { kind: after, source: placed_at, unit: seconds, min: 0, max: 2592000 } }
-      # subtotal/discount/tax/shipping/grand_total owned by order_family.
+      updated_at: { generator: { kind: after, source: placed_at, min_seconds: 0, max_seconds: 2592000 } }
+      # tenant_id/buyer_id owned by tenant_family; the money columns by order_family.
     planners:
       - kind: relation.tenant_family
-        tenant: order_tenant
-        scoped_relationships: []
+        columns: { tenant: tenant_id, parent: buyer_id }
+        relationship: order_buyer
+        num_tenants: 40
+        tenant_start: 1
       - kind: commerce.order_family
         children: order_items
         relationship: order_item_order
@@ -396,8 +405,13 @@ tables:
     rows:
       kind: relation.children
       parent: orders
-      count: 1800000
-      distribution: { kind: histogram, mean: 4.5, min: 1, max: 60 }
+      count: 1600000
+      # `fixed` (integer mean): commerce.order_family owns this child's line
+      # count and draws it per order from this distribution. A deterministic
+      # count keeps the family-produced total exactly equal to the resolved
+      # `orders * mean`, which the row_count verifier checks; a mean-respecting
+      # kind (poisson/histogram) would make the total drift off that estimate.
+      distribution: { kind: fixed, mean: 4, min: 4, max: 4 }
     schema:
       name: order_items
       columns:
@@ -421,7 +435,7 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       order_id: { generator: { kind: relation.foreign_key, relationship: order_item_order } }
       product_id:
-        generator: { kind: relation.foreign_key, relationship: order_item_product, nullable: true, null_rate: 0.03 }
+        generator: { kind: relation.foreign_key, relationship: order_item_product, null_rate: 0.03 }
       description: { generator: { kind: commerce.product_name } }
       # quantity/prices/discount/tax/line_total owned by order_family.
 
@@ -464,6 +478,7 @@ tables:
           pending: pending
           status: status
           completed_at: completed_at
+        total: { kind: uniform, min: 10, max: 5000 }
         progress:
           kind: mixture
           complete_weight: 0.6
@@ -515,10 +530,14 @@ tables:
           min: 5
           max: 86400
         open_probability: 0.05
-        end_inclusive: true
+        # Half-open [start, end): `end = start + duration` renders exactly at the
+        # column's second precision. `end_inclusive: true` would subtract 1ns,
+        # which second-precision datetime rendering drops, breaking the verified
+        # end = start + duration equation.
+        end_inclusive: false
         timezone: preserve
 
-  # ---- Tasks: tree + lifecycle + soft delete + tenant family -------------
+  # ---- Tasks: tree + timestamps + lifecycle + soft delete ----------------
   tasks:
     rows:
       kind: relation.children
@@ -551,35 +570,33 @@ tables:
         references: { table: users, columns: [id] }
     columns:
       id: { generator: { kind: sequence, start: 1 } }
+      tenant_id: { generator: { kind: relation.foreign_key, relationship: task_tenant } }
       assignee_id:
-        generator: { kind: relation.foreign_key, relationship: task_assignee, nullable: true, null_rate: 0.3 }
+        generator: { kind: relation.foreign_key, relationship: task_assignee, null_rate: 0.3 }
       title: { generator: { kind: text.sentence } }
+      # `hierarchy.tree` has no depth output; a plain generator fills the column.
+      depth: { generator: { kind: integer, min: 0, max: 5 } }
+      updated_at: { generator: { kind: datetime } }
     planners:
-      - kind: relation.tenant_family
-        tenant: task_tenant
-        scoped_relationships: [task_parent]
       - kind: hierarchy.tree
+        columns: { parent: parent_id }
         relationship: task_parent
-        depth_column: depth
         root_ratio: 0.6
         max_depth: 5
-        branching: { kind: uniform, min: 0, max: 8 }
+        max_branching: 8
       - kind: temporal.lifecycle
         columns:
           status: status
-          created_at: created_at
-          updated_at: updated_at
-          terminal_at: closed_at
-        states: [todo, doing, review, done, archived]
-        terminal_states: [done, archived]
-        transitions:
-          - { from: todo, to: [doing, archived] }
-          - { from: doing, to: [review, archived] }
-          - { from: review, to: [done, doing] }
-        range: { min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+          created: created_at
+          closed: closed_at
+        states: [created, in_progress, closed]
+        weights: [0.2, 0.5, 0.3]
+        start: { kind: range, min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        step: { kind: uniform, unit: days, min: 1, max: 30 }
       - kind: temporal.soft_delete
         columns: { deleted_at: deleted_at }
-        deleted_probability: 0.1
+        deletion_probability: 0.1
+        deleted_range: { kind: range, min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
 
   # ---- Polymorphic comments ----------------------------------------------
   comments:
@@ -604,12 +621,11 @@ tables:
       created_at: { generator: { kind: datetime } }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: commentable_type
-        id_column: commentable_id
+        columns: { type: commentable_type, id: commentable_id }
         targets:
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.5 }
-          - { type: order, references: { table: orders, columns: [id] }, weight: 0.3 }
-          - { type: product, references: { table: products, columns: [id] }, weight: 0.2 }
+          - { table: tasks, type: task, weight: 0.5 }
+          - { table: orders, type: order, weight: 0.3 }
+          - { table: products, type: product, weight: 0.2 }
 
   # ---- Tags + polymorphic junction ---------------------------------------
   tags:
@@ -623,7 +639,7 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       name:
         generator: { kind: text.word }
-        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: widen }]
+        modifiers: [{ kind: format, template: "{value}-tag" }, { kind: unique, max_attempts: 32, on_exhaustion: widen }]
 
   taggables:
     rows: { kind: fixed, count: 400000 }
@@ -643,11 +659,10 @@ tables:
       tag_id: { generator: { kind: relation.foreign_key, relationship: taggable_tag } }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: taggable_type
-        id_column: taggable_id
+        columns: { type: taggable_type, id: taggable_id }
         targets:
-          - { type: product, references: { table: products, columns: [id] }, weight: 0.5 }
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.5 }
+          - { table: products, type: product, weight: 0.5 }
+          - { table: tasks, type: task, weight: 0.5 }
 
   # ---- Attachments: file metadata + polymorphic --------------------------
   attachments:
@@ -669,12 +684,11 @@ tables:
       uploaded_at: { generator: { kind: datetime } }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: attachable_type
-        id_column: attachable_id
+        columns: { type: attachable_type, id: attachable_id }
         targets:
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.4 }
-          - { type: comment, references: { table: comments, columns: [id] }, weight: 0.3 }
-          - { type: order, references: { table: orders, columns: [id] }, weight: 0.3 }
+          - { table: tasks, type: task, weight: 0.4 }
+          - { table: comments, type: comment, weight: 0.3 }
+          - { table: orders, type: order, weight: 0.3 }
       - kind: file.metadata
         columns:
           name: file_name
@@ -682,8 +696,9 @@ tables:
           mime_type: mime_type
           size: size_bytes
           hash: sha256
-        size: { kind: lognormal, min: 1024, max: 52428800 }
+        size: { min: 1024, max: 52428800 }
         extensions: [pdf, png, jpg, docx, xlsx, csv, zip, mp4]
+        hash_kind: sha256
 
   # ---- Payments: decimal scales + monotonic + FK cycle -------------------
   accounts:
@@ -715,27 +730,27 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       tenant_id: { generator: { kind: relation.foreign_key, relationship: account_tenant } }
       iban:
-        generator: { kind: pattern, pattern: "NO[0-9]{2}[0-9]{11}" }
+        generator: { kind: pattern, mask: "NO#############" }
         modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
       currency:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: USD, weight: 0.5 }
             - { value: JPY, weight: 0.2 }
             - { value: BHD, weight: 0.3 }
       minor_scale:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: 2, weight: 0.5 }
             - { value: 0, weight: 0.2 }
             - { value: 3, weight: 0.3 }
       balance:
-        generator: { kind: normal, mean: 50000, stddev: 80000, min: -100000, max: 10000000, scale: 4 }
+        generator: { kind: normal, mean: 50000, std: 80000, min: -100000, max: 10000000, scale: 4 }
         modifiers: [{ kind: clamp, min: -100000, max: 10000000 }, { kind: round, scale: 4 }]
       last_transaction_id:
-        generator: { kind: relation.foreign_key, relationship: account_last_txn, nullable: true, null_rate: 0.2 }
+        generator: { kind: relation.foreign_key, relationship: account_last_txn, null_rate: 0.2 }
       opened_at: { generator: { kind: datetime } }
 
   payments:
@@ -753,7 +768,11 @@ tables:
         - { name: amount_minor, type: bigint, nullable: false }
         - { name: running_balance, type: "decimal(20,4)", nullable: false }
         - { name: method, type: varchar(16), nullable: false }
-        - { name: reference, type: varchar(32), nullable: false, unique: true }
+        # No `unique: true`: at 2M rows the auto-attached unique modifier would
+        # exceed its 1M max_tracked budget, and it only treats sequence/uuid/
+        # monotonic as inherently unique. The `template` below is unique by
+        # construction (it embeds the id sequence), so no dedup is needed.
+        - { name: reference, type: varchar(32), nullable: false }
         - { name: sequence_no, type: bigint, nullable: false }
         - { name: paid_at, type: datetime, nullable: false }
     relationships:
@@ -767,20 +786,26 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       account_id: { generator: { kind: relation.foreign_key, relationship: payment_account } }
       order_id:
-        generator: { kind: relation.foreign_key, relationship: payment_order, nullable: true, null_rate: 0.4 }
+        generator: { kind: relation.foreign_key, relationship: payment_order, null_rate: 0.4 }
       amount_minor: { generator: { kind: integer, min: -100000000, max: 100000000 } }
       running_balance:
-        generator: { kind: normal, mean: 50000, stddev: 80000, min: -200000, max: 10000000, scale: 4 }
+        generator: { kind: normal, mean: 50000, std: 80000, min: -200000, max: 10000000, scale: 4 }
       method:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: card, weight: 0.6 }
             - { value: transfer, weight: 0.25 }
             - { value: wallet, weight: 0.15 }
       reference:
-        generator: { kind: pattern, pattern: "PAY-[A-Z0-9]{16}" }
-        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
+        # 2M rows exceeds the `unique` modifier's 1M max_tracked budget, so this
+        # large unique column is made inherently unique off the id sequence
+        # (the documented pattern) rather than deduplicated after the fact.
+        generator:
+          kind: template
+          parts:
+            - "PAY-"
+            - { field: id }
       sequence_no: { generator: { kind: monotonic, start: 1, step: 1 } }
       paid_at: { generator: { kind: datetime } }
 
@@ -809,7 +834,7 @@ tables:
       id: { generator: { kind: sequence, start: 1 } }
       tenant_id: { generator: { kind: relation.foreign_key, relationship: activity_tenant } }
       causer_id:
-        generator: { kind: relation.foreign_key, relationship: activity_causer, nullable: true, null_rate: 0.2 }
+        generator: { kind: relation.foreign_key, relationship: activity_causer, null_rate: 0.2 }
       event:
         # observed_sample deliberately used -> source-literal risk marker.
         generator:
@@ -817,14 +842,13 @@ tables:
           values: [created, updated, deleted, restored, published, archived, exported, imported]
       properties:
         generator: { kind: json_value }
-        modifiers: [{ kind: null_rate, probability: 0.3 }]
+        modifiers: [{ kind: null_rate, rate: 0.3 }]
       created_at: { generator: { kind: datetime } }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: subject_type
-        id_column: subject_id
+        columns: { type: subject_type, id: subject_id }
         targets:
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.3 }
-          - { type: order, references: { table: orders, columns: [id] }, weight: 0.3 }
-          - { type: product, references: { table: products, columns: [id] }, weight: 0.2 }
-          - { type: payment, references: { table: payments, columns: [id] }, weight: 0.2 }
+          - { table: tasks, type: task, weight: 0.3 }
+          - { table: orders, type: order, weight: 0.3 }
+          - { table: products, type: product, weight: 0.2 }
+          - { table: payments, type: payment, weight: 0.2 }

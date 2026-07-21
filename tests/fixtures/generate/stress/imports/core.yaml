@@ -18,8 +18,8 @@ tables:
   users:
     columns:
       email:
-        generator: { kind: internet.email, locale: en }
+        generator: { kind: internet.email }
       last_seen_at:
         generator: { kind: datetime }
         modifiers:
-          - { kind: null_rate, probability: 0.35 }
+          - { kind: null_rate, rate: 0.35 }

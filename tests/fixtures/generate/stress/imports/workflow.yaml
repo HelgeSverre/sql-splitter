@@ -10,7 +10,7 @@ tables:
   # Scale the import-job volume down for a quicker stress run without touching
   # the progress_counters planner (rules are inherited from the base model).
   import_jobs:
-    rows: { kind: scale, base: 12000, factor: 0.5, count: 6000 }
+    rows: { kind: fixed, count: 6000 }
 
   webhooks:
     seed: null   # randomize webhooks even though the model is seeded

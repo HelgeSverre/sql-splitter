@@ -5,12 +5,13 @@
 # source values are reproduced here).
 #
 # Exercises:
-#   - relation.tenant_family        (all child rows stay inside one tenant)
+#   - relation.tenant_family        (tasks: same-tenant folder foreign key)
 #   - relation.junction_pair        (memberships, task_assignees composite junction)
 #   - relation.polymorphic_pair     (comments / attachments / activity_log)
 #   - hierarchy.tree                (self-referential folders + nested tasks)
 #   - workflow.progress_counters    (import_jobs)
 #   - temporal.lifecycle / soft_delete / timestamps
+#   - file.metadata                 (attachments)
 #   - composite primary keys (tenant_id, id)
 #   - per-table `seed: null` randomization inside a seeded model
 #   - imports: (root-wins override merge across two partial documents)
@@ -68,7 +69,7 @@ tables:
       plan:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: free, weight: 0.55 }
             - { value: team, weight: 0.30 }
             - { value: business, weight: 0.12 }
@@ -76,13 +77,13 @@ tables:
       settings:
         generator: { kind: json_value }
         modifiers:
-          - { kind: null_rate, probability: 0.20 }
+          - { kind: null_rate, rate: 0.20 }
     planners:
       - kind: temporal.timestamps
         columns:
           created_at: created_at
           updated_at: updated_at
-        range: { min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        created: { min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
 
   users:
     rows: { kind: fixed, count: 4000 }
@@ -113,11 +114,11 @@ tables:
       avatar_path:
         generator: { kind: file.name }
         modifiers:
-          - { kind: null_rate, probability: 0.60 }
+          - { kind: null_rate, rate: 0.60 }
       locale:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: en, weight: 0.7 }
             - { value: nb, weight: 0.2 }
             - { value: de, weight: 0.1 }
@@ -126,7 +127,7 @@ tables:
         columns:
           created_at: created_at
           updated_at: updated_at
-        range: { min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        created: { min: 2021-01-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
 
   memberships:
     # Junction: user <-> tenant many-to-many, with a role column.
@@ -156,19 +157,23 @@ tables:
       role:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: owner, weight: 0.05 }
             - { value: admin, weight: 0.15 }
             - { value: member, weight: 0.65 }
             - { value: guest, weight: 0.15 }
+      invited_at:
+        generator: { kind: datetime }
     planners:
-      # Guarantee a distinct (tenant, user) pair per membership row.
+      # Guarantee a distinct (tenant, user) pair per membership row. Uniqueness
+      # is intrinsic to the planner (a pair-index permutation), so no `unique`
+      # flag is needed.
       - kind: relation.junction_pair
-        left: membership_tenant
-        right: membership_user
-        unique: true
+        left_relationship: membership_tenant
+        right_relationship: membership_user
         columns:
-          created_at: invited_at
+          left: tenant_id
+          right: user_id
 
   folders:
     # Self-referential tree scoped to a tenant.
@@ -195,19 +200,24 @@ tables:
     columns:
       id:
         generator: { kind: sequence, start: 1 }
+      tenant_id:
+        generator: { kind: relation.foreign_key, relationship: folder_tenant }
       name:
         generator: { kind: text.word }
+      # hierarchy.tree owns parent_id but produces no depth output, so the
+      # declared depth column gets its own bounded integer generator.
+      depth:
+        generator: { kind: integer, min: 0, max: 6 }
     planners:
-      - kind: relation.tenant_family
-        tenant: folder_tenant
-        # parent_id must reference a folder within the same tenant.
-        scoped_relationships: [folder_parent]
+      # Self-referential folder tree: null-parent roots plus bounded-depth,
+      # bounded-branching descendants that reference an earlier folder.
       - kind: hierarchy.tree
         relationship: folder_parent
-        depth_column: depth
+        columns:
+          parent: parent_id
         root_ratio: 0.15
         max_depth: 6
-        branching: { kind: histogram, mean: 3.0, min: 0, max: 12 }
+        max_branching: 12
 
   tasks:
     seed: null   # intentionally randomized even though the model is seeded
@@ -243,38 +253,48 @@ tables:
     columns:
       id:
         generator: { kind: sequence, start: 1 }
-      folder_id:
-        generator: { kind: relation.foreign_key, relationship: task_folder }
       title:
         generator: { kind: text.sentence }
       priority:
         generator: { kind: integer, min: 0, max: 3 }
     planners:
+      # Draw a same-tenant folder: partition the folder rows into 50 tenant
+      # blocks (ids 1..50, matching the 50 `tenants`) and pick this task's
+      # folder from its own tenant's block. Owns both tenant_id and folder_id.
       - kind: relation.tenant_family
-        tenant: task_tenant
-        scoped_relationships: [task_folder, task_parent]
+        relationship: task_folder
+        columns:
+          tenant: tenant_id
+          parent: folder_id
+        num_tenants: 50
+        tenant_start: 1
+      # Self-referential subtask tree.
       - kind: hierarchy.tree
         relationship: task_parent
+        columns:
+          parent: parent_id
         root_ratio: 0.7
         max_depth: 4
-        branching: { kind: uniform, min: 0, max: 6 }
+        max_branching: 6
+      # created_at <= updated_at, both within the platform lifetime.
+      - kind: temporal.timestamps
+        columns:
+          created_at: created_at
+          updated_at: updated_at
+        created: { min: 2021-06-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+      # A linear status chain; completed_at is set exactly for the terminal
+      # states (done, cancelled) and null before them.
       - kind: temporal.lifecycle
         columns:
           status: status
-          created_at: created_at
-          updated_at: updated_at
-          terminal_at: completed_at
+          done: completed_at
         states: [open, in_progress, blocked, done, cancelled]
-        terminal_states: [done, cancelled]
-        transitions:
-          - { from: open, to: [in_progress, cancelled] }
-          - { from: in_progress, to: [blocked, done, cancelled] }
-          - { from: blocked, to: [in_progress, cancelled] }
-        range: { min: 2021-06-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
+        start: { min: 2021-06-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
       - kind: temporal.soft_delete
         columns:
           deleted_at: deleted_at
-        deleted_probability: 0.08
+        deletion_probability: 0.08
+        deleted_range: { min: 2021-06-01T00:00:00Z, max: 2026-01-01T00:00:00Z }
 
   task_assignees:
     # Composite-key junction: (task_id, user_id) is the primary key.
@@ -296,13 +316,16 @@ tables:
       - name: assignee_user
         columns: [user_id]
         references: { table: users, columns: [id] }
+    columns:
+      assigned_at:
+        generator: { kind: datetime }
     planners:
       - kind: relation.junction_pair
-        left: assignee_task
-        right: assignee_user
-        unique: true
+        left_relationship: assignee_task
+        right_relationship: assignee_user
         columns:
-          created_at: assigned_at
+          left: task_id
+          right: user_id
 
   comments:
     # Polymorphic: attaches to tasks OR folders via (commentable_type, commentable_id).
@@ -327,17 +350,22 @@ tables:
     columns:
       id:
         generator: { kind: sequence, start: 1 }
+      tenant_id:
+        generator: { kind: relation.foreign_key, relationship: comment_tenant }
       author_id:
         generator: { kind: relation.foreign_key, relationship: comment_author }
       body:
         generator: { kind: text.paragraph }
+      created_at:
+        generator: { kind: datetime }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: commentable_type
-        id_column: commentable_id
+        columns:
+          type: commentable_type
+          id: commentable_id
         targets:
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.85 }
-          - { type: folder, references: { table: folders, columns: [id] }, weight: 0.15 }
+          - { table: tasks, type: task, weight: 0.85 }
+          - { table: folders, type: folder, weight: 0.15 }
 
   attachments:
     # Polymorphic + file metadata.
@@ -357,13 +385,16 @@ tables:
     columns:
       id:
         generator: { kind: sequence, start: 1 }
+      created_at:
+        generator: { kind: datetime }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: attachable_type
-        id_column: attachable_id
+        columns:
+          type: attachable_type
+          id: attachable_id
         targets:
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.6 }
-          - { type: comment, references: { table: comments, columns: [id] }, weight: 0.4 }
+          - { table: tasks, type: task, weight: 0.6 }
+          - { table: comments, type: comment, weight: 0.4 }
       - kind: file.metadata
         columns:
           name: file_name
@@ -371,7 +402,7 @@ tables:
           mime_type: mime_type
           size: size_bytes
           hash: checksum
-        size: { kind: lognormal, min: 512, max: 52428800 }
+        size: { min: 512, max: 52428800 }
         extensions: [pdf, png, jpg, docx, xlsx, csv, zip]
 
   personal_access_tokens:
@@ -405,7 +436,17 @@ tables:
       abilities:
         generator: { kind: json_value }
         modifiers:
-          - { kind: null_rate, probability: 0.30 }
+          - { kind: null_rate, rate: 0.30 }
+      last_used_at:
+        generator: { kind: datetime }
+        modifiers:
+          - { kind: null_rate, rate: 0.40 }
+      expires_at:
+        generator: { kind: datetime }
+        modifiers:
+          - { kind: null_rate, rate: 0.30 }
+      created_at:
+        generator: { kind: datetime }
 
   import_jobs:
     # workflow.progress_counters owns the counter/status/timestamp columns.
@@ -436,10 +477,14 @@ tables:
       source:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: csv, weight: 0.6 }
             - { value: api, weight: 0.3 }
             - { value: webhook, weight: 0.1 }
+      # progress_counters owns the counters/status/completed_at; started_at is
+      # an independent timestamp.
+      started_at:
+        generator: { kind: datetime }
     planners:
       - kind: workflow.progress_counters
         columns:
@@ -488,6 +533,8 @@ tables:
         generator: { kind: json_value }
       is_active:
         generator: { kind: boolean, probability: 0.85 }
+      created_at:
+        generator: { kind: datetime }
 
   activity_log:
     # Polymorphic audit trail across everything.
@@ -514,10 +561,14 @@ tables:
     columns:
       id:
         generator: { kind: sequence, start: 1 }
+      tenant_id:
+        generator: { kind: relation.foreign_key, relationship: activity_tenant }
+      causer_id:
+        generator: { kind: relation.foreign_key, relationship: activity_causer }
       event:
         generator:
           kind: weighted_choice
-          values:
+          choices:
             - { value: created, weight: 0.4 }
             - { value: updated, weight: 0.4 }
             - { value: deleted, weight: 0.1 }
@@ -525,16 +576,19 @@ tables:
       properties:
         generator: { kind: json_value }
         modifiers:
-          - { kind: null_rate, probability: 0.25 }
+          - { kind: null_rate, rate: 0.25 }
       ip_address:
         generator: { kind: internet.ipv4 }
         modifiers:
-          - { kind: null_rate, probability: 0.15 }
+          - { kind: null_rate, rate: 0.15 }
+      created_at:
+        generator: { kind: datetime }
     planners:
       - kind: relation.polymorphic_pair
-        type_column: subject_type
-        id_column: subject_id
+        columns:
+          type: subject_type
+          id: subject_id
         targets:
-          - { type: task, references: { table: tasks, columns: [id] }, weight: 0.6 }
-          - { type: folder, references: { table: folders, columns: [id] }, weight: 0.2 }
-          - { type: comment, references: { table: comments, columns: [id] }, weight: 0.2 }
+          - { table: tasks, type: task, weight: 0.6 }
+          - { table: folders, type: folder, weight: 0.2 }
+          - { table: comments, type: comment, weight: 0.2 }
