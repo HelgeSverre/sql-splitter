@@ -1600,27 +1600,34 @@ impl<'a> Audit<'a> {
             }
         }
 
-        // Family sum checks.
+        // Family sum checks. An unparseable/NULL money value makes a family
+        // `inexact`: those parent groups cannot be evaluated. But `compare`
+        // still evaluates every group it *can*, so a genuine disagreement
+        // (`failed > 0`) must fail the check regardless — an inexact row must
+        // never mask a real violation. Only when no disagreement is found does
+        // `inexact` downgrade the check to `NotChecked` (couldn't fully verify).
         for family in &mut self.families {
             let (failed, missing) = family.compare().map_err(family_index_error)?;
-            let status = if family.inexact {
-                CheckStatus::NotChecked
-            } else {
-                CheckStatus::Exact
-            };
-            report.record(
-                family.slug.clone(),
-                status,
-                failed == 0 && !family.inexact,
-                if family.inexact {
-                    "family sum not evaluated (unparseable money values)".to_string()
-                } else {
+            let (status, detail) = if failed > 0 {
+                (
+                    CheckStatus::Exact,
                     format!(
                         "{failed} parent aggregate(s) disagreed with the child sum{}",
                         if missing { " (missing children)" } else { "" }
-                    )
-                },
-            );
+                    ),
+                )
+            } else if family.inexact {
+                (
+                    CheckStatus::NotChecked,
+                    "family sum not evaluated (unparseable money values)".to_string(),
+                )
+            } else {
+                (
+                    CheckStatus::Exact,
+                    "0 parent aggregate(s) disagreed with the child sum".to_string(),
+                )
+            };
+            report.record(family.slug.clone(), status, failed == 0, detail);
         }
 
         // Sampled distributions.

@@ -86,6 +86,28 @@ fn rewrite_first_tuple_value(sql: String, marker: &str, index: usize, new_value:
     )
 }
 
+/// Rewrite the `index`-th value of the *last* tuple of the INSERT beginning with
+/// `marker` (the statement ending at the first `;` after `VALUES`). Lets a test
+/// corrupt a different row than [`rewrite_first_tuple_value`].
+fn rewrite_last_tuple_value(sql: String, marker: &str, index: usize, new_value: &str) -> String {
+    let ins = sql
+        .find(marker)
+        .unwrap_or_else(|| panic!("`{marker}` present"));
+    let values = sql[ins..].find("VALUES").expect("VALUES keyword") + ins;
+    let stmt_end = sql[values..].find(';').expect("statement terminator") + values;
+    let open = sql[values..stmt_end].rfind('(').expect("last tuple open") + values;
+    let close = sql[open..stmt_end].find(')').expect("last tuple close") + open;
+    let mut parts: Vec<String> = sql[open + 1..close].split(", ").map(String::from).collect();
+    assert!(index < parts.len(), "tuple has no value at index {index}");
+    parts[index] = new_value.to_string();
+    format!(
+        "{}({}){}",
+        &sql[..open],
+        parts.join(", "),
+        &sql[close + 1..]
+    )
+}
+
 // A model exercising PK, single-column UNIQUE, and a foreign key. Integer
 // sequence columns keep the generated ids deterministic (1.. and 100..), so a
 // corruption test can target exact literals.
@@ -616,6 +638,32 @@ fn order_family_sum_check_is_exact_and_passes_for_valid_output() {
         report.passed(),
         "{:?}",
         report.failures().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn family_sum_violation_is_not_masked_by_an_unrelated_inexact_row() {
+    // One order's parent tax_total is (legally) NULL, which makes the family
+    // "inexact"; a *different* order has a genuine child-sum disagreement. The
+    // inexact row must not mask the real violation: the report must fail.
+    let dir = tempfile::tempdir().unwrap();
+    // Allow the parent money column to be NULL so the NULL trips `inexact`
+    // without failing an unrelated non-null check.
+    let model = ORDER_FAMILY.replace(
+        r#"{ name: tax_total, type: "decimal(18,2)", nullable: false }"#,
+        r#"{ name: tax_total, type: "decimal(18,2)", nullable: true }"#,
+    );
+    let plan = compile(&model);
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        // First order_items line: a real tax disagreement on order 1.
+        let sql = rewrite_first_tuple_value(sql, "INSERT INTO `order_items`", 4, "999.99");
+        // Last order: NULL parent tax_total → family marked inexact.
+        rewrite_last_tuple_value(sql, "INSERT INTO `orders`", 2, "NULL")
+    });
+    assert!(
+        !report.passed(),
+        "a real family-sum violation must fail even when another row is inexact: {:?}",
+        report.checks
     );
 }
 
