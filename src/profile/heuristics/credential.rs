@@ -38,6 +38,15 @@ pub(super) fn is_high_confidence_credential(name: &str) -> bool {
     classify(name).is_some()
 }
 
+/// Whether a column would be credential-guarded: a credential-looking name on a
+/// string-shaped family. Callers use this to suppress source-derived rules (a
+/// declared DEFAULT, observed samples) that must never win over the synthetic
+/// credential generator for such a column.
+pub(super) fn is_guarded(ctx: &ColumnContext<'_>) -> bool {
+    let column = ctx.column();
+    guardable_family(&column.family) && classify(&column.name).is_some()
+}
+
 /// Propose the credential-guard candidate for a column, if its name looks like
 /// secret material.
 ///

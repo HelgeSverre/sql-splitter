@@ -842,6 +842,22 @@ fn explicit_schema_and_safety_rules_beat_weak_name_matches() {
     assert!(!decision.source_derived);
 }
 
+/// A credential column that also carries a DEFAULT must still get the synthetic
+/// credential generator, not `database_default` (a source-derived rule the
+/// credential guard forbids).
+#[test]
+fn credential_guard_beats_a_declared_default() {
+    let mut col = portable_column("api_key", "varchar(64)", SqlTypeFamily::Text);
+    col.default_sql = Some("NULL".to_string());
+    let schema = one_column_schema("users", col);
+    let profile = one_column_profile("users", blank_evidence("api_key", 4), 4);
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    assert_eq!(
+        generator_kind(&result, "users", "api_key"),
+        "credential.api_key"
+    );
+}
+
 /// A declared identity column outranks even the credential guard, and a
 /// declared FK column is owned structurally (no column generator).
 #[test]

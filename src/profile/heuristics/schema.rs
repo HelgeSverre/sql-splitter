@@ -23,8 +23,13 @@ pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
             "schema_identity",
             generator_with("sequence", [("start", yaml(1))]),
         ));
-    } else if column.default_sql.is_some() && !column.primary_key {
-        // A bound DEFAULT the source relied on: defer to it.
+    } else if column.default_sql.is_some()
+        && !column.primary_key
+        && !super::credential::is_guarded(ctx)
+    {
+        // A bound DEFAULT the source relied on: defer to it — but never for a
+        // credential column, whose synthetic generator must win over any
+        // source-derived rule (`database_default` renders the source's value).
         out.push(Candidate::new(
             Precedence::SchemaConstraint,
             Confidence::Medium,
