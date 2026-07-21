@@ -1331,7 +1331,7 @@ impl<'a> Audit<'a> {
             .relationships
             .iter()
             .map(|rel| {
-                if is_all_null(&rel.columns, &value_of) {
+                if is_any_null(&rel.columns, &value_of) {
                     None
                 } else {
                     encode_group(&rel.columns, &value_of)
@@ -1929,10 +1929,14 @@ fn encode_group<'v>(
     Some((encode_key(&tuple), hash))
 }
 
-fn is_all_null<'v>(columns: &[String], value_of: &impl Fn(&str) -> Option<&'v PkValue>) -> bool {
+/// Whether any component of a (possibly composite) foreign key is NULL. Under
+/// SQL `MATCH SIMPLE` (the MySQL/PostgreSQL default) a composite FK with any
+/// NULL component is not enforced, so such a row is not checked for membership.
+/// For a single-column key this is the same as "the key is NULL".
+fn is_any_null<'v>(columns: &[String], value_of: &impl Fn(&str) -> Option<&'v PkValue>) -> bool {
     columns
         .iter()
-        .all(|c| matches!(value_of(c), Some(PkValue::Null) | None))
+        .any(|c| matches!(value_of(c), Some(PkValue::Null) | None))
 }
 
 /// Normalize integer PkValues to `BigInt` so a parent rendered as `Int` and a

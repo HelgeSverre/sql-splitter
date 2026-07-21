@@ -393,6 +393,33 @@ fn corrupt_composite_foreign_key_fails_the_named_check() {
     );
 }
 
+#[test]
+fn partial_null_composite_foreign_key_is_not_a_false_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    // Nullable composite FK columns so a partial NULL is legal.
+    let model = COMPOSITE
+        .replace(
+            "{ name: cell_x, type: bigint, nullable: false }",
+            "{ name: cell_x, type: bigint, nullable: true }",
+        )
+        .replace(
+            "{ name: cell_y, type: bigint, nullable: false }",
+            "{ name: cell_y, type: bigint, nullable: true }",
+        );
+    let plan = compile(&model);
+    // NULL the first reading's cell_x while cell_y stays valid: a partial-null
+    // composite key. Under SQL MATCH SIMPLE such a key is unenforced, so the FK
+    // check must not fail.
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        rewrite_first_tuple_value(sql, "INSERT INTO `readings`", 0, "NULL")
+    });
+    assert!(
+        !report.failed("composite_foreign_key:readings"),
+        "a partial-null composite FK must not fail under MATCH SIMPLE: {:?}",
+        report.checks
+    );
+}
+
 // --- temporal.interval equation --------------------------------------------
 
 const INTERVAL: &str = r#"
