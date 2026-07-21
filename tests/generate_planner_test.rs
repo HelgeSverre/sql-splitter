@@ -868,6 +868,24 @@ fn progress_counters_ownership_collision_is_a_compile_error() {
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
 }
 
+#[test]
+fn interval_normal_duration_with_inverted_range_does_not_panic() {
+    // A normal-duration draw whose min > max must not panic (std `clamp` asserts
+    // min <= max); it collapses to `min`, matching the uniform/skewed arms.
+    let model = jobs_model(9, 32, "").replace(
+        "          kind: uniform\n          unit: seconds\n          min: 30\n          max: 43200",
+        "          kind: normal\n          unit: seconds\n          mean: 100\n          stddev: 20\n          min: 100\n          max: 5",
+    );
+    let sink = run(&model);
+    let durations: Vec<&GeneratedValue> = sink.column("duration_seconds").collect();
+    assert_eq!(durations.len(), 32);
+    for d in durations {
+        if let GeneratedValue::Integer(secs) = d {
+            assert!(*secs >= 0, "duration must be non-negative, got {secs}");
+        }
+    }
+}
+
 // === commerce.order_family ==================================================
 //
 // The order-family planner coordinates an `orders` parent and an `order_items`

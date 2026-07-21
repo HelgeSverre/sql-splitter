@@ -292,7 +292,9 @@ impl TemporalIntervalPlanner {
             } => {
                 let z = self.standard_normal();
                 let value = (mean + z * stddev).round() as i128;
-                value.clamp(min, max)
+                // Tolerate an inverted range (min > max) like the uniform/skewed
+                // arms: collapse to `min` rather than panicking in std `clamp`.
+                value.clamp(min, min.max(max))
             }
         }
     }
