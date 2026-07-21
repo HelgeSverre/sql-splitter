@@ -423,6 +423,45 @@ fn profile_depths_respect_their_budgets() {
     assert!(items.relationships.iter().any(|r| r.to_table == "orders"));
 }
 
+#[test]
+fn full_profile_does_not_retain_credential_source_values() {
+    // Credential-named columns (password, api_key, token) must never retain raw
+    // source values in evidence, even at Full depth, so secrets cannot surface
+    // downstream. Exact null/total counts are still kept, and ordinary columns
+    // (email) are unaffected.
+    let full = profile_mysql(ProfileDepth::Full);
+    let users = table(&full, "users");
+
+    for name in ["password", "api_key", "token"] {
+        let c = column(users, name);
+        assert!(
+            c.sample_values.is_empty(),
+            "credential column `{name}` retained sample values: {:?}",
+            c.sample_values
+        );
+        assert!(
+            c.top_k.is_empty(),
+            "credential column `{name}` retained top-k values"
+        );
+        assert!(
+            c.string_shape.is_none(),
+            "credential column `{name}` retained a string shape"
+        );
+    }
+
+    // Exact null/total counts remain available (api_key is NULL in 2 of 6 rows).
+    let api_key = column(users, "api_key");
+    assert_eq!(api_key.total_count, 6);
+    assert_eq!(api_key.null_count, 2);
+
+    // An ordinary (non-credential) text column still gets value-derived evidence.
+    let email = column(users, "email");
+    assert!(
+        !email.sample_values.is_empty(),
+        "non-credential column must still retain samples"
+    );
+}
+
 /// Every dialect input path (MySQL INSERT, PostgreSQL COPY, SQLite INSERT,
 /// MSSQL bracket/GO INSERT) profiles into the same neutral evidence with exact
 /// row counts.

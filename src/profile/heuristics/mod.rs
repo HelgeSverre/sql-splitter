@@ -34,6 +34,14 @@ mod relationship;
 mod schema;
 mod semantic;
 
+/// Whether a column name denotes credential material (any confidence). The
+/// profiler consults this — together with the column being string-shaped — to
+/// keep raw values of credential columns out of its sketches entirely, so
+/// secret material (hashes, tokens, keys) never enters profiling evidence.
+pub fn is_credential_name(name: &str) -> bool {
+    credential::is_high_confidence_credential(name)
+}
+
 use std::collections::BTreeMap;
 use std::fmt;
 

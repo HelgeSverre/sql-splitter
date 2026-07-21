@@ -412,7 +412,14 @@ impl ProfileRun {
             .columns
             .iter()
             .map(|col| {
-                let sketches = if self.depth == ProfileDepth::Schema {
+                let kind = ColumnKind::from_column(col);
+                // A credential-named, string-shaped column never enters the
+                // sketches: its raw values (hashes, tokens, keys) must not be
+                // retained in evidence. The exact total/null counts tracked
+                // separately below are still kept, so null-rate survives.
+                let credential = matches!(kind, ColumnKind::Text | ColumnKind::Json)
+                    && crate::profile::heuristics::is_credential_name(&col.name);
+                let sketches = if self.depth == ProfileDepth::Schema || credential {
                     None
                 } else {
                     let s = ColumnSketches::new(&self.budget, self.seed ^ self.next_seed);
@@ -421,7 +428,7 @@ impl ProfileRun {
                 };
                 ColumnAccum {
                     name: col.name.clone(),
-                    kind: ColumnKind::from_column(col),
+                    kind,
                     total: 0,
                     nulls: 0,
                     sketches,
