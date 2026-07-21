@@ -1982,10 +1982,22 @@ fn collect_family_facts(
                     }
                 }
 
-                ctx.families.push(FamilyMembership {
-                    parent: parent_name.clone(),
-                    child: child_name.to_string(),
-                });
+                if ctx.families.iter().any(|f| f.child == child_name) {
+                    // A child produced by two family planners would be emitted
+                    // twice (a Family phase per parent). Reject the ambiguity.
+                    bag.error(
+                        crate::diagnostic::codes::COLUMN_OWNER_CONFLICT.code,
+                        format!("tables.{child_name}"),
+                        format!(
+                            "child table `{child_name}` is claimed as a family child by more than one parent; a family child must have a single producing parent"
+                        ),
+                    );
+                } else {
+                    ctx.families.push(FamilyMembership {
+                        parent: parent_name.clone(),
+                        child: child_name.to_string(),
+                    });
+                }
             }
 
             ctx.facts.insert(

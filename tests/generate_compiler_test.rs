@@ -1168,6 +1168,94 @@ tables:
       order_id: { generator: { kind: relation.foreign_key, relationship: order_items_order } }
 "#;
 
+const TWO_FAMILY_PRODUCERS: &str = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  orders:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: orders
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: subtotal, type: "decimal(18,2)", nullable: false }
+        - { name: tax_total, type: "decimal(18,2)", nullable: false }
+        - { name: grand_total, type: "decimal(18,2)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: items_orders
+        columns: { subtotal: subtotal, tax: tax_total, total: grand_total }
+        child_columns: { quantity: quantity, unit_price: unit_price, tax: tax_amount, line_total: line_total }
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: { min: 1, max: 4 }
+        unit_price: { min_minor: 100, max_minor: 5000 }
+        tax: { kind: fixed, rate: 0.1 }
+  orders2:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: orders2
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: subtotal, type: "decimal(18,2)", nullable: false }
+        - { name: tax_total, type: "decimal(18,2)", nullable: false }
+        - { name: grand_total, type: "decimal(18,2)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: items_orders2
+        columns: { subtotal: subtotal, tax: tax_total, total: grand_total }
+        child_columns: { quantity: quantity, unit_price: unit_price, tax: tax_amount, line_total: line_total }
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: { min: 1, max: 4 }
+        unit_price: { min_minor: 100, max_minor: 5000 }
+        tax: { kind: fixed, rate: 0.1 }
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: { kind: fixed, mean: 2.0, min: 1.0, max: 3.0 }
+    schema:
+      name: order_items
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: order2_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(18,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(18,2)", nullable: false }
+        - { name: line_total, type: "decimal(18,2)", nullable: false }
+    relationships:
+      - { name: items_orders, columns: [order_id], references: { table: orders, columns: [id] } }
+      - { name: items_orders2, columns: [order2_id], references: { table: orders2, columns: [id] } }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      order_id: { generator: { kind: relation.foreign_key, relationship: items_orders } }
+      order2_id: { generator: { kind: relation.foreign_key, relationship: items_orders2 } }
+"#;
+
+#[test]
+fn a_child_claimed_by_two_family_producers_is_a_compile_error() {
+    let codes: Vec<String> = compiler()
+        .compile(model_from_yaml(TWO_FAMILY_PRODUCERS), CompileOptions::default())
+        .err()
+        .map(|bag| bag.diagnostics.into_iter().map(|d| d.code).collect())
+        .unwrap_or_default();
+    assert!(
+        codes.contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()),
+        "a child claimed by two family producers must be rejected: {codes:?}"
+    );
+}
+
 #[test]
 fn excluding_a_family_child_leaves_no_dangling_family_phase() {
     // Excluding a family child (order_items) must not leave an execution phase
