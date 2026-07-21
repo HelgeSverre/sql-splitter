@@ -1340,6 +1340,37 @@ fn nullable_foreign_key_cycle_compiles_with_a_warning() {
 }
 
 #[test]
+fn total_rows_estimate_saturates_instead_of_overflowing() {
+    // Two tables whose resolved counts sum past u64::MAX must not overflow the
+    // total-rows estimate (a debug panic / release wrap); saturate instead.
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 1
+tables:
+  a:
+    rows: { kind: fixed, count: 10000000000000000000 }
+    schema:
+      name: a
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+  b:
+    rows: { kind: fixed, count: 10000000000000000000 }
+    schema:
+      name: b
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+"#,
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .expect("huge counts must not overflow the estimate");
+    assert_eq!(plan.estimates.total_rows, u64::MAX);
+}
+
+#[test]
 fn negative_global_scale_is_a_compile_error() {
     // A negative (or non-finite) global --scale must be rejected, not silently
     // collapse every table to zero rows.

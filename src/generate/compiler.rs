@@ -265,7 +265,7 @@ impl ModelCompiler {
         let phases = build_phases(&order, &family_ctx, family_budget_bytes, &mut bag);
 
         let estimates = PlanEstimates {
-            total_rows: resolved.values().sum(),
+            total_rows: resolved.values().copied().fold(0u64, u64::saturating_add),
             ..PlanEstimates::default()
         };
 
