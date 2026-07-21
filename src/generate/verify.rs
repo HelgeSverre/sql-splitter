@@ -2057,19 +2057,29 @@ fn parse_decimal(text: &str) -> Option<(i128, u32)> {
 /// larger scale so mixed-scale renderings still sum exactly.
 fn add_minor(acc: &mut (i128, u32), add: (i128, u32)) {
     let scale = acc.1.max(add.1);
-    let a = rescale(acc.0, acc.1, scale);
-    let b = rescale(add.0, add.1, scale);
-    *acc = (a + b, scale);
+    // Saturate rather than panic on an absurd/corrupt money value; a saturated
+    // accumulator will simply disagree with the real total (fail-closed).
+    let a = rescale(acc.0, acc.1, scale).unwrap_or(i128::MAX);
+    let b = rescale(add.0, add.1, scale).unwrap_or(i128::MAX);
+    *acc = (a.saturating_add(b), scale);
 }
 
-fn rescale(mantissa: i128, from: u32, to: u32) -> i128 {
-    mantissa * 10i128.pow(to - from)
+/// Scale `mantissa` from `from` to `to` decimal places, or `None` if the
+/// widening overflows i128 (an absurdly wide scale gap or huge mantissa).
+fn rescale(mantissa: i128, from: u32, to: u32) -> Option<i128> {
+    10i128
+        .checked_pow(to - from)
+        .and_then(|factor| mantissa.checked_mul(factor))
 }
 
-/// Whether two `(mantissa, scale)` money values are numerically equal.
+/// Whether two `(mantissa, scale)` money values are numerically equal. An
+/// unrepresentable (overflowing) rescale compares unequal rather than panicking.
 fn minor_eq(a: (i128, u32), b: (i128, u32)) -> bool {
     let scale = a.1.max(b.1);
-    rescale(a.0, a.1, scale) == rescale(b.0, b.1, scale)
+    match (rescale(a.0, a.1, scale), rescale(b.0, b.1, scale)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
 }
 
 fn fk_slug(child_table: &str, rel: &RelSpec) -> String {
@@ -2384,6 +2394,18 @@ fn write_key(spool: &mut ProtectedSpool, hash: u64, key: &[u8]) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn money_comparison_does_not_overflow_on_absurd_values() {
+        // A huge mantissa or a wide scale gap must not panic; an
+        // unrepresentable comparison is treated as unequal (fail-closed), never
+        // a false match.
+        assert!(!minor_eq((i128::MAX, 0), (1, 18)));
+        assert!(!minor_eq((1, 0), (1, 40)));
+        // Ordinary values still compare correctly.
+        assert!(minor_eq((100, 2), (1000, 3)));
+        assert!(!minor_eq((100, 2), (200, 2)));
+    }
 
     #[test]
     fn spilled_key_set_does_not_retain_one_memory_entry_per_key() {
