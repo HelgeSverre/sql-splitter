@@ -318,6 +318,25 @@ fn choice_generator_rejects_a_value_that_does_not_coerce_to_the_column_family() 
 }
 
 #[test]
+fn observed_sample_on_a_decimal_column_produces_decimal_values() {
+    // Replaying source literals into a Decimal column must yield Decimal values
+    // (so modifiers and the renderer treat them as numbers), not quoted Text.
+    let values = generate_three(
+        "observed_sample",
+        yaml("{ kind: observed_sample, values: [\"10.50\", \"3.25\"] }"),
+        SqlTypeFamily::Decimal,
+        7,
+    )
+    .unwrap();
+    assert!(
+        values
+            .iter()
+            .all(|v| matches!(v, GeneratedValue::Decimal { .. })),
+        "observed_sample on a decimal column must produce Decimal values: {values:?}"
+    );
+}
+
+#[test]
 fn observed_numeric_generators_reject_out_of_range_decimal_scale() {
     // scale > 18 makes 10i128.pow(scale) overflow at render; the observed
     // normal/lognormal/histogram factories must reject it at compile time, like

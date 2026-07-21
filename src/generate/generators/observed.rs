@@ -124,6 +124,10 @@ fn coerce_sample(
                 display_yaml(other)
             )),
         },
+        SqlTypeFamily::Decimal => super::core::parse_decimal(value)
+            .map(|(minor, scale)| GeneratedValue::Decimal { minor, scale })
+            .ok_or_else(|| format!("expected a decimal, found `{}`", display_yaml(value))),
+        SqlTypeFamily::Bytes => Ok(GeneratedValue::Bytes(display_yaml(value).into_bytes())),
         SqlTypeFamily::DateTime => Ok(GeneratedValue::DateTime(display_yaml(value))),
         SqlTypeFamily::Json => Ok(GeneratedValue::Json(display_yaml(value))),
         _ => Ok(GeneratedValue::Text(display_yaml(value))),

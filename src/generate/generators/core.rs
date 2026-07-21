@@ -136,7 +136,7 @@ fn parse_usize(value: &serde_yaml_ng::Value) -> Option<usize> {
 
 /// Parse a decimal literal (`10`, `10.5`, `"-3.140"`) into `(minor units,
 /// scale)`, e.g. `"10.50"` -> `(1050, 2)`.
-fn parse_decimal(value: &serde_yaml_ng::Value) -> Option<(i128, u32)> {
+pub(super) fn parse_decimal(value: &serde_yaml_ng::Value) -> Option<(i128, u32)> {
     match value {
         serde_yaml_ng::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
