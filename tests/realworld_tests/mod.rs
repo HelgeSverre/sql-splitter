@@ -92,8 +92,8 @@ fn format_size(bytes: u64) -> String {
 fn ensure_downloaded(case: &TestCase) -> io::Result<PathBuf> {
     let _lock = DOWNLOAD_LOCK.lock().unwrap();
 
-    let cache_subdir = CACHE_DIR.join(&case.name);
-    let sql_path = cache_subdir.join(&case.sql_file);
+    let cache_subdir = CACHE_DIR.join(case.name);
+    let sql_path = cache_subdir.join(case.sql_file);
 
     // Check if already cached
     if sql_path.exists() {
@@ -103,11 +103,11 @@ fn ensure_downloaded(case: &TestCase) -> io::Result<PathBuf> {
     fs::create_dir_all(&cache_subdir)?;
 
     // Download the file
-    let downloaded_file = cache_subdir.join(url_filename(&case.url));
-    download_file(&case.url, &downloaded_file)?;
+    let downloaded_file = cache_subdir.join(url_filename(case.url));
+    download_file(case.url, &downloaded_file)?;
 
     // Extract if needed
-    if let Some(ref unzip_cmd) = case.unzip_cmd {
+    if let Some(unzip_cmd) = case.unzip_cmd {
         extract_file(unzip_cmd, &downloaded_file, &cache_subdir)?;
     }
 
@@ -149,13 +149,10 @@ fn download_file(url: &str, dest: &Path) -> io::Result<()> {
         .output()?;
 
     if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Download failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "Download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     Ok(())
@@ -173,6 +170,7 @@ fn extract_file(cmd: &str, archive: &Path, dest_dir: &Path) -> io::Result<()> {
             .args(["-xf", archive.to_str().unwrap()])
             .current_dir(dest_dir)
             .status()?,
+        #[cfg(feature = "compression")]
         "gunzip" => {
             let output_name = archive.file_stem().unwrap().to_str().unwrap();
             let output_path = dest_dir.join(output_name);
@@ -193,10 +191,10 @@ fn extract_file(cmd: &str, archive: &Path, dest_dir: &Path) -> io::Result<()> {
     };
 
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Extraction failed with status: {}", status),
-        ));
+        return Err(io::Error::other(format!(
+            "Extraction failed with status: {}",
+            status
+        )));
     }
 
     Ok(())

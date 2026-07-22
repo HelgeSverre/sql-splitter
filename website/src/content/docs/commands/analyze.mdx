@@ -28,6 +28,7 @@ The `analyze` command performs a **single [streaming](/reference/glossary#stream
 **Memory usage:** ~7MB peak for typical dumps. The streaming architecture keeps memory constant regardless of file size.
 
 **Exit codes:**
+
 - `0` — Analysis completed successfully
 - `1` — Error reading file or parsing SQL
 
@@ -109,8 +110,22 @@ TOTAL                                              20             -         0.15
     "total_bytes": 158720
   },
   "tables": [
-    { "name": "users", "inserts": 2, "creates": 1, "statements": 3, "bytes": 12595, "size_mb": 0.01 },
-    { "name": "orders", "inserts": 5, "creates": 1, "statements": 6, "bytes": 46284, "size_mb": 0.04 }
+    {
+      "name": "users",
+      "inserts": 2,
+      "creates": 1,
+      "statements": 3,
+      "bytes": 12595,
+      "size_mb": 0.01
+    },
+    {
+      "name": "orders",
+      "inserts": 5,
+      "creates": 1,
+      "statements": 6,
+      "bytes": 46284,
+      "size_mb": 0.04
+    }
   ]
 }
 ```

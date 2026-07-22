@@ -26,15 +26,15 @@ The `split` command uses [streaming](/reference/glossary#streaming) to process d
 
 ### What Goes Where
 
-| Statement Type | Destination |
-|----------------|-------------|
-| `CREATE TABLE users` | `users.sql` |
-| `INSERT INTO users` | `users.sql` |
-| `CREATE INDEX ON users` | `users.sql` |
-| `ALTER TABLE users` | `users.sql` |
-| `COPY users FROM stdin` (PostgreSQL) | `users.sql` |
+| Statement Type                            | Destination   |
+| ----------------------------------------- | ------------- |
+| `CREATE TABLE users`                      | `users.sql`   |
+| `INSERT INTO users`                       | `users.sql`   |
+| `CREATE INDEX ON users`                   | `users.sql`   |
+| `ALTER TABLE users`                       | `users.sql`   |
+| `COPY users FROM stdin` (PostgreSQL)      | `users.sql`   |
 | `SET`, `BEGIN`, `COMMIT`, header comments | `_global.sql` |
-| Unrecognized statements | `_global.sql` |
+| Unrecognized statements                   | `_global.sql` |
 
 Table names are sanitized for the filesystem: special characters become underscores, and names are lowercased.
 
@@ -100,18 +100,18 @@ sql-splitter split "dumps/**/*.sql.gz" -o tables/
 
 ## Options
 
-| Flag            | Short | Description                                         | Default     |
-| --------------- | ----- | --------------------------------------------------- | ----------- |
-| `--output`      | `-o`  | Output directory                                    | `output`    |
-| `--dialect`     | `-d`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--tables`      | `-t`  | Only split these tables (comma-separated)           | all         |
-| `--schema-only` |       | Only [DDL](/reference/glossary#ddl-data-definition-language) (CREATE TABLE, indexes) | false |
-| `--data-only`   |       | Only [DML](/reference/glossary#dml-data-manipulation-language) (INSERT, COPY) | false |
-| `--verbose`     | `-v`  | Show verbose output                                 | false       |
-| `--progress`    | `-p`  | Show progress bar                                   | false       |
-| `--dry-run`     |       | Preview without writing files                       | false       |
-| `--fail-fast`   |       | Stop on first error (for glob patterns)             | false       |
-| `--json`        |       | Output results as JSON                              | false       |
+| Flag            | Short | Description                                                                          | Default     |
+| --------------- | ----- | ------------------------------------------------------------------------------------ | ----------- |
+| `--output`      | `-o`  | Output directory                                                                     | `output`    |
+| `--dialect`     | `-d`  | SQL dialect: `mysql`, `postgres`, `sqlite`, `mssql`                                  | auto-detect |
+| `--tables`      | `-t`  | Only split these tables (comma-separated)                                            | all         |
+| `--schema-only` |       | Only [DDL](/reference/glossary#ddl-data-definition-language) (CREATE TABLE, indexes) | false       |
+| `--data-only`   |       | Only [DML](/reference/glossary#dml-data-manipulation-language) (INSERT, COPY)        | false       |
+| `--verbose`     | `-v`  | Show verbose output                                                                  | false       |
+| `--progress`    | `-p`  | Show progress bar                                                                    | false       |
+| `--dry-run`     |       | Preview without writing files                                                        | false       |
+| `--fail-fast`   |       | Stop on first error (for glob patterns)                                              | false       |
+| `--json`        |       | Output results as JSON                                                               | false       |
 
 ## Output Structure
 
@@ -124,6 +124,7 @@ tables/
 ```
 
 The `_global.sql` file contains:
+
 - Session settings (`SET NAMES utf8mb4`, `SET FOREIGN_KEY_CHECKS=0`)
 - Transaction markers (`BEGIN`, `COMMIT`)
 - Header comments from the dump tool
@@ -154,11 +155,11 @@ sql-splitter split dump.sql -o tables/ --json
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0`  | Success — all files written |
+| Code | Meaning                                            |
+| ---- | -------------------------------------------------- |
+| `0`  | Success — all files written                        |
 | `1`  | Error — I/O failure, parse error, or invalid input |
-| `2`  | Invalid arguments — bad CLI flags |
+| `2`  | Invalid arguments — bad CLI flags                  |
 
 See [Exit Codes](/reference/exit-codes) for scripting examples.
 
@@ -213,6 +214,7 @@ sql-splitter merge all/ --tables users,orders,order_items -o subset.sql
 **Symptom:** You expect a table but it's not in the output directory.
 
 **Causes:**
+
 - The dump only contains [DDL](/reference/glossary#ddl-data-definition-language) (schema) or only [DML](/reference/glossary#dml-data-manipulation-language) (data), and you used the opposite `--schema-only` or `--data-only` flag
 - The table name in the dump differs from what you expect (check case sensitivity)
 - The table has no statements at all in the dump
@@ -224,6 +226,7 @@ sql-splitter merge all/ --tables users,orders,order_items -o subset.sql
 **Symptom:** Table files are created but contain no data.
 
 **Causes:**
+
 - Using `--data-only` on a dump that only has `CREATE TABLE` statements
 - Using `--schema-only` on a data-only dump
 
@@ -234,6 +237,7 @@ sql-splitter merge all/ --tables users,orders,order_items -o subset.sql
 **Symptom:** Error message about unable to detect dialect, or wrong SQL syntax in output.
 
 **Causes:**
+
 - The dump lacks dialect-specific markers (backticks for MySQL, `COPY` for PostgreSQL)
 - Mixed-dialect dump (manually edited)
 

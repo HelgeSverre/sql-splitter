@@ -29,6 +29,53 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_column_type_parsing_mssql() {
+        assert_eq!(ColumnType::from_sql_type("NVARCHAR(255)"), ColumnType::Text);
+        assert_eq!(ColumnType::from_sql_type("BIT"), ColumnType::Bool);
+        assert_eq!(
+            ColumnType::from_sql_type("BIT(8)"),
+            ColumnType::Other("BIT(8)".to_string())
+        );
+    }
+
+    /// Regression for MySQL 8 integer modifiers: real dumps write `bigint
+    /// unsigned` without a display width, and the `unsigned`/`signed`/`zerofill`
+    /// modifiers must not push an integer type into the `Other` fallback.
+    /// Classifying these as `Other` mis-inferred `sequence`/`string` generators
+    /// that the compiler then rejected with `GEN-GENERATOR-TYPE`.
+    #[test]
+    fn test_column_type_parsing_unsigned_modifiers() {
+        assert_eq!(
+            ColumnType::from_mysql_type("bigint unsigned"),
+            ColumnType::BigInt
+        );
+        assert_eq!(ColumnType::from_mysql_type("int unsigned"), ColumnType::Int);
+        assert_eq!(
+            ColumnType::from_mysql_type("tinyint unsigned"),
+            ColumnType::Int
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("int(10) unsigned"),
+            ColumnType::Int
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("BIGINT UNSIGNED ZEROFILL"),
+            ColumnType::BigInt
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("decimal(10,2) unsigned"),
+            ColumnType::Decimal
+        );
+        // The modifier guard must only strip trailing unsigned/signed/zerofill
+        // words: a genuine multi-word type name is never reduced to its first
+        // token (so `double precision` is not silently treated as `double`).
+        assert!(matches!(
+            ColumnType::from_mysql_type("double precision"),
+            ColumnType::Other(_)
+        ));
+    }
+
+    #[test]
     fn test_schema_table_lookup() {
         let mut schema = Schema::new();
         let table = TableSchema::new("users".to_string(), TableId(0));
@@ -45,16 +92,28 @@ mod mod_tests {
         table.columns.push(Column {
             name: "id".to_string(),
             col_type: ColumnType::Int,
+            source_type: "INT".to_string(),
             ordinal: ColumnId(0),
             is_primary_key: true,
             is_nullable: false,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         });
         table.columns.push(Column {
             name: "email".to_string(),
             col_type: ColumnType::Text,
+            source_type: "VARCHAR(255)".to_string(),
             ordinal: ColumnId(1),
             is_primary_key: false,
             is_nullable: true,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         });
         table.primary_key = vec![ColumnId(0)];
 
@@ -224,6 +283,143 @@ mod ddl_tests {
     }
 
     #[test]
+    fn parse_column_preserves_generation_evidence() {
+        let mut builder = SchemaBuilder::new();
+        builder
+            .parse_create_table(
+                "CREATE TABLE users (\
+                 id BIGINT IDENTITY(1,1) PRIMARY KEY, \
+                 email VARCHAR(255) NOT NULL UNIQUE, \
+                 state VARCHAR(20) DEFAULT 'active', \
+                 slug VARCHAR(255) GENERATED ALWAYS AS (LOWER(email)) STORED);",
+            )
+            .unwrap();
+        let schema = builder.build();
+        let table = schema.get_table("users").expect("table");
+
+        let id = table.get_column("id").unwrap();
+        assert_eq!(id.source_type, "BIGINT");
+        assert!(id.is_identity);
+
+        let email = table.get_column("email").unwrap();
+        assert_eq!(email.source_type, "VARCHAR(255)");
+        assert!(email.is_unique);
+
+        let state = table.get_column("state").unwrap();
+        assert_eq!(state.default_sql.as_deref(), Some("'active'"));
+
+        assert!(table.get_column("slug").unwrap().is_generated);
+    }
+
+    #[test]
+    fn mysql_auto_increment_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE `widgets` (`id` int NOT NULL AUTO_INCREMENT PRIMARY KEY);",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn sqlite_autoincrement_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT);");
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn postgres_serial_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE widgets (id SERIAL PRIMARY KEY);");
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn postgres_bigserial_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE widgets (id BIGSERIAL PRIMARY KEY);");
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        assert!(table.get_column("id").unwrap().is_identity);
+    }
+
+    #[test]
+    fn postgres_generated_always_as_identity_marks_identity() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE widgets (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY);",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("widgets").expect("table");
+
+        let id = table.get_column("id").unwrap();
+        assert!(id.is_identity);
+        // This is identity, not a computed/generated column.
+        assert!(!id.is_generated);
+    }
+
+    #[test]
+    fn table_level_unique_constraint_marks_column_and_is_recorded() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(255), UNIQUE (email));",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("users").expect("table");
+
+        assert!(table.get_column("email").unwrap().is_unique);
+        assert_eq!(table.unique_constraints.len(), 1);
+        assert_eq!(
+            table.unique_constraints[0].columns,
+            vec!["email".to_string()]
+        );
+    }
+
+    #[test]
+    fn table_level_check_constraint_preserves_raw_expression_with_nested_parens_and_comma() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE orders (\
+             qty INT, \
+             price DECIMAL(10,2), \
+             CONSTRAINT chk_price CHECK (price > 0 AND (qty > 0 OR qty IS NULL)));",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("orders").expect("table");
+
+        assert_eq!(table.check_constraints.len(), 1);
+        assert_eq!(
+            table.check_constraints[0].expression,
+            "price > 0 AND (qty > 0 OR qty IS NULL)"
+        );
+    }
+
+    #[test]
+    fn collate_populates_column_collation() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "CREATE TABLE users (name VARCHAR(255) COLLATE utf8mb4_unicode_ci);",
+        );
+        let schema = builder.build();
+        let table = schema.get_table("users").expect("table");
+
+        assert_eq!(
+            table.get_column("name").unwrap().collation.as_deref(),
+            Some("utf8mb4_unicode_ci")
+        );
+    }
+
+    #[test]
     fn test_split_table_body() {
         use sql_splitter::schema::split_table_body;
 
@@ -265,9 +461,15 @@ mod graph_tests {
         users.columns.push(Column {
             name: "company_id".to_string(),
             col_type: ColumnType::Int,
+            source_type: "INT".to_string(),
             ordinal: ColumnId(1),
             is_primary_key: false,
             is_nullable: true,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         });
         users.foreign_keys.push(ForeignKey {
             name: None,

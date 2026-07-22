@@ -59,10 +59,28 @@ pub enum ColumnType {
 
 impl ColumnType {
     /// Parse a SQL type string into a ColumnType
-    /// Supports MySQL, PostgreSQL, and SQLite types
+    /// Supports MySQL, PostgreSQL, SQLite, and MSSQL types.
     pub fn from_sql_type(type_str: &str) -> Self {
         let type_lower = type_str.to_lowercase();
         let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
+
+        // MySQL numeric types can carry `unsigned`/`signed`/`zerofill`
+        // modifiers after the base name. MySQL 8 also omits the display width,
+        // so modern dumps write `bigint unsigned` (no parens). Reduce to the
+        // base name when every trailing word is one of those modifiers, while
+        // preserving genuine multi-word type names like `double precision` and
+        // `timestamp without time zone`.
+        let base_type = match base_type.split_whitespace().next() {
+            Some(first)
+                if base_type
+                    .split_whitespace()
+                    .skip(1)
+                    .all(|word| matches!(word, "unsigned" | "signed" | "zerofill")) =>
+            {
+                first
+            }
+            _ => base_type,
+        };
 
         match base_type {
             // Integer types (all dialects)
@@ -74,7 +92,7 @@ impl ColumnType {
             "bigint" | "int8" | "bigserial" => ColumnType::BigInt,
             // Text types (all dialects)
             "char" | "varchar" | "text" | "tinytext" | "mediumtext" | "longtext" | "enum"
-            | "set" | "character" => ColumnType::Text,
+            | "set" | "character" | "nchar" | "nvarchar" | "ntext" => ColumnType::Text,
             // Decimal types (all dialects)
             "decimal" | "numeric" | "float" | "double" | "real" | "float4" | "float8" | "money" => {
                 ColumnType::Decimal
@@ -82,8 +100,14 @@ impl ColumnType {
             // Date/time types (all dialects)
             "date" | "datetime" | "timestamp" | "time" | "year" | "timestamptz" | "timetz"
             | "interval" => ColumnType::DateTime,
-            // Boolean (all dialects)
+            // Boolean types. A bare BIT is MSSQL's boolean type; retain
+            // parameterized bit strings such as MySQL BIT(8) as unknown.
             "bool" | "boolean" => ColumnType::Bool,
+            // TODO(deferred, L23): a bare `bit` maps to Bool for SQL Server's
+            // boolean `bit`, which also reclassifies MySQL's bare `BIT` from
+            // Other to Bool. Harmless today (no PK/FK impact); dialect-specific
+            // handling would be needed to treat MySQL's `BIT` differently.
+            "bit" if type_lower.trim() == "bit" => ColumnType::Bool,
             // Binary types
             "binary" | "varbinary" | "blob" | "bytea" => {
                 // Could be UUID if binary(16)
@@ -111,12 +135,24 @@ pub struct Column {
     pub name: String,
     /// Column type
     pub col_type: ColumnType,
+    /// Raw SQL type as written in the DDL (e.g. `"VARCHAR(255)"`)
+    pub source_type: String,
     /// Position in table (0-indexed)
     pub ordinal: ColumnId,
     /// Whether this column is part of the primary key
     pub is_primary_key: bool,
     /// Whether this column allows NULL values
     pub is_nullable: bool,
+    /// Whether this column has a single-column UNIQUE constraint
+    pub is_unique: bool,
+    /// Raw DEFAULT expression, if any (e.g. `"'active'"`, `"(NOW())"`)
+    pub default_sql: Option<String>,
+    /// Whether this is a generated/computed column (`GENERATED ALWAYS AS (...)`)
+    pub is_generated: bool,
+    /// Whether this column is an auto-generated identity/auto-increment column
+    pub is_identity: bool,
+    /// Explicit column collation, if declared (`COLLATE ...`)
+    pub collation: Option<String>,
 }
 
 /// Index definition
@@ -130,6 +166,24 @@ pub struct IndexDef {
     pub is_unique: bool,
     /// Index type (BTREE, HASH, GIN, etc.)
     pub index_type: Option<String>,
+}
+
+/// Table-level UNIQUE constraint, covering one or more columns
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueConstraint {
+    /// Constraint name, if named explicitly
+    pub name: Option<String>,
+    /// Columns covered by the constraint, in declaration order
+    pub columns: Vec<String>,
+}
+
+/// CHECK constraint, with its raw SQL expression preserved verbatim
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckConstraint {
+    /// Constraint name, if named explicitly
+    pub name: Option<String>,
+    /// Raw CHECK expression (without the enclosing parentheses)
+    pub expression: String,
 }
 
 /// Foreign key constraint definition
@@ -162,6 +216,10 @@ pub struct TableSchema {
     pub primary_key: Vec<ColumnId>,
     /// Foreign key constraints
     pub foreign_keys: Vec<ForeignKey>,
+    /// Table-level UNIQUE constraints (single- and multi-column)
+    pub unique_constraints: Vec<UniqueConstraint>,
+    /// CHECK constraints (table-level and inline column-level)
+    pub check_constraints: Vec<CheckConstraint>,
     /// Index definitions
     pub indexes: Vec<IndexDef>,
     /// Raw CREATE TABLE statement (for output)
@@ -177,6 +235,8 @@ impl TableSchema {
             columns: Vec::new(),
             primary_key: Vec::new(),
             foreign_keys: Vec::new(),
+            unique_constraints: Vec::new(),
+            check_constraints: Vec::new(),
             indexes: Vec::new(),
             create_statement: None,
         }

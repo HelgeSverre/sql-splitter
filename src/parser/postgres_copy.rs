@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 // Re-use types from mysql_insert for consistency
 use super::mysql_insert::{coerce_text_pk, FkRef, PkValue, RowExtraction};
+use super::RowFlow;
 
 // Re-export (rather than re-declare) the shared PK tuple type.
 pub use super::mysql_insert::PkTuple;
@@ -88,8 +89,10 @@ impl<'a> CopyParser<'a> {
         self
     }
 
-    /// Parse all rows from the COPY data block
-    pub fn parse_rows(&mut self) -> anyhow::Result<Vec<ParsedCopyRow>> {
+    /// Resolve the column order / reverse map from the schema and header, and
+    /// return whether an empty line is a legitimate one-column row. Shared by
+    /// the collecting and streaming paths (and the single-line helper).
+    fn prepare(&mut self) -> bool {
         if let Some(schema) = self.table_schema {
             self.column_order = if self.column_names.is_empty() {
                 // No explicit column list - use natural schema order
@@ -108,14 +111,32 @@ impl<'a> CopyParser<'a> {
 
         // An empty line is a legitimate single empty-string value only for a
         // one-column table; for anything else it's padding and is skipped.
-        let empty_line_is_row = self
-            .table_schema
+        self.table_schema
             .map(|s| s.columns.len() == 1)
-            .unwrap_or(false);
+            .unwrap_or(false)
+    }
 
+    /// Parse all rows from the COPY data block, collecting them into a `Vec`.
+    ///
+    /// A thin collecting adapter over [`CopyParser::parse_rows_visit`].
+    pub fn parse_rows(&mut self) -> anyhow::Result<Vec<ParsedCopyRow>> {
         let mut rows = Vec::new();
-        let mut pos = 0;
+        self.parse_rows_visit(|row| {
+            rows.push(row);
+            Ok(RowFlow::Continue)
+        })?;
+        Ok(rows)
+    }
 
+    /// Stream each parsed COPY row to `f` without collecting a block-sized
+    /// `Vec`. `f` returns a [`RowFlow`] to stop early.
+    pub fn parse_rows_visit<F>(&mut self, mut f: F) -> anyhow::Result<()>
+    where
+        F: FnMut(ParsedCopyRow) -> anyhow::Result<RowFlow>,
+    {
+        let empty_line_is_row = self.prepare();
+
+        let mut pos = 0;
         while pos < self.data.len() {
             // Find end of line
             let line_end = memchr::memchr(b'\n', &self.data[pos..])
@@ -135,13 +156,41 @@ impl<'a> CopyParser<'a> {
                 continue;
             }
 
-            // Parse the row
-            rows.push(self.parse_row(line));
+            match f(self.parse_row(line))? {
+                RowFlow::Continue => {}
+                RowFlow::SkipStatement | RowFlow::Stop => break,
+            }
 
             pos = line_end + 1;
         }
 
-        Ok(rows)
+        Ok(())
+    }
+
+    /// Finish column-context setup and report whether an empty line counts as a
+    /// row, for the [`Parser::visit_events`] single-line streaming path.
+    ///
+    /// [`Parser::visit_events`]: crate::parser::Parser::visit_events
+    pub fn prepared(mut self) -> (Self, bool) {
+        let empty_line_is_row = self.prepare();
+        (self, empty_line_is_row)
+    }
+
+    /// Parse a single raw COPY data line (as delivered by
+    /// [`crate::parser::ParserEvent::CopyRow`]). Strips a trailing `\r`, and
+    /// returns `None` for a skippable blank line or the `\.` terminator, exactly
+    /// matching [`CopyParser::parse_rows_visit`]. Requires [`CopyParser::prepared`]
+    /// to have been called first.
+    pub fn parse_line(&self, line: &[u8], empty_line_is_row: bool) -> Option<ParsedCopyRow> {
+        let line = if line.last() == Some(&b'\r') {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+        if line == b"\\." || (line.is_empty() && !empty_line_is_row) {
+            return None;
+        }
+        Some(self.parse_row(line))
     }
 
     /// Parse a single tab-separated row (infallible: any line is a valid row)
@@ -366,9 +415,29 @@ pub fn parse_postgres_copy_rows_with(
     column_order: Vec<String>,
     extraction: RowExtraction,
 ) -> anyhow::Result<Vec<ParsedCopyRow>> {
+    let mut rows = Vec::new();
+    visit_postgres_copy_rows_with(data, schema, column_order, extraction, |row| {
+        rows.push(row);
+        Ok(RowFlow::Continue)
+    })?;
+    Ok(rows)
+}
+
+/// Stream the rows of a COPY data block to a visitor, one at a time, without
+/// building a block-sized `Vec`. `f` returns a [`RowFlow`] to stop early.
+pub fn visit_postgres_copy_rows_with<F>(
+    data: &[u8],
+    schema: &TableSchema,
+    column_order: Vec<String>,
+    extraction: RowExtraction,
+    f: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(ParsedCopyRow) -> anyhow::Result<RowFlow>,
+{
     let mut parser = CopyParser::new(data)
         .with_schema(schema)
         .with_column_order(column_order)
         .with_extraction(extraction);
-    parser.parse_rows()
+    parser.parse_rows_visit(f)
 }

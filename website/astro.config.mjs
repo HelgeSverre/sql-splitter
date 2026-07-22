@@ -1,39 +1,51 @@
-import { defineConfig } from "astro/config";
+import { defineConfig, envField } from "astro/config";
+import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
-import react from "@astrojs/react";
 import indexnow from "astro-indexnow";
 import tailwindcss from "@tailwindcss/vite";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightGitHubAlerts from "starlight-github-alerts";
-import { readFileSync, existsSync } from "node:fs";
+import starlightLlmsTxt from "starlight-llms-txt";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import remarkExplicitHeadingIds from "./src/remark-explicit-heading-ids.mjs";
 
-// Read version from Cargo.toml or llms.txt at config time
 function getVersion() {
   const cargoPath = resolve(import.meta.dirname, "../Cargo.toml");
-  if (existsSync(cargoPath)) {
-    const content = readFileSync(cargoPath, "utf-8");
-    const match = content.match(/^version\s*=\s*"([^"]+)"/m);
-    if (match) return match[1];
+  let cargoContent;
+
+  try {
+    cargoContent = readFileSync(cargoPath, "utf8");
+  } catch (cause) {
+    throw new Error(`Could not read version source at ${cargoPath}`, { cause });
   }
 
-  const llmsPath = resolve(import.meta.dirname, "llms.txt");
-  if (existsSync(llmsPath)) {
-    const content = readFileSync(llmsPath, "utf-8");
-    const match = content.match(/# sql-splitter (\d+\.\d+\.\d+)/);
-    if (match) return match[1];
+  const versionMatch = cargoContent.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!versionMatch) {
+    throw new Error(`Could not find package version in ${cargoPath}`);
   }
 
-  return "0.0.0";
+  return versionMatch[1];
 }
 
 const SQL_SPLITTER_VERSION = getVersion();
 
 export default defineConfig({
   site: "https://sql-splitter.dev",
+  markdown: {
+    processor: unified({ remarkPlugins: [remarkExplicitHeadingIds] }),
+  },
+  env: {
+    schema: {
+      SQL_SPLITTER_VERSION: envField.string({
+        context: "server",
+        access: "public",
+        default: SQL_SPLITTER_VERSION,
+      }),
+    },
+  },
   integrations: [
-    react(),
     starlight({
       title: "sql-splitter",
       lastUpdated: true,
@@ -41,6 +53,12 @@ export default defineConfig({
       pagination: true,
       tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
       plugins: [
+        starlightLlmsTxt({
+          projectName: "sql-splitter",
+          description:
+            "A fast Rust CLI and library for inspecting and transforming SQL dumps.",
+          promote: ["index*", "getting-started/**", "commands/index"],
+        }),
         starlightLinksValidator({
           exclude: ["/schemas/", "/schemas/**"],
         }),
@@ -61,7 +79,56 @@ export default defineConfig({
         },
         {
           label: "Commands",
-          items: [{ autogenerate: { directory: "commands" } }],
+          items: [
+            { slug: "commands", label: "Overview" },
+            "commands/analyze",
+            "commands/completions",
+            "commands/convert",
+            "commands/diff",
+            "commands/generate",
+            "commands/graph",
+            "commands/merge",
+            "commands/order",
+            "commands/query",
+            "commands/redact",
+            "commands/sample",
+            "commands/shard",
+            "commands/split",
+            "commands/validate",
+          ],
+        },
+        {
+          label: "Synthetic data",
+          items: [
+            "commands/generate/model-reference",
+            {
+              label: "Generators",
+              collapsed: true,
+              items: [
+                {
+                  slug: "commands/generate/generators",
+                  label: "Overview",
+                },
+                "commands/generate/generators/core",
+                "commands/generate/generators/semantic",
+                "commands/generate/generators/credentials",
+                "commands/generate/generators/observed-statistical",
+                "commands/generate/generators/relationships",
+              ],
+            },
+            "commands/generate/modifiers",
+            "commands/generate/planners",
+            "commands/generate/inference",
+            "commands/generate/privacy-verification",
+            {
+              slug: "commands/generate/diagnostics",
+              label: "Diagnostics",
+            },
+            {
+              slug: "commands/generate/library-api",
+              label: "Rust API",
+            },
+          ],
         },
         {
           label: "Cookbook",
@@ -132,8 +199,5 @@ export default defineConfig({
   ],
   vite: {
     plugins: [tailwindcss()],
-    define: {
-      __SQL_SPLITTER_VERSION__: JSON.stringify(SQL_SPLITTER_VERSION),
-    },
   },
 });

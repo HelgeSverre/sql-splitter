@@ -5,7 +5,10 @@
 //! - Primary key constraints
 //! - Foreign key constraints
 
-use super::{Column, ColumnId, ColumnType, ForeignKey, IndexDef, Schema, TableId, TableSchema};
+use super::{
+    CheckConstraint, Column, ColumnId, ColumnType, ForeignKey, IndexDef, Schema, TableId,
+    TableSchema, UniqueConstraint,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -283,9 +286,38 @@ fn parse_table_body(body: &str, table: &mut TableSchema) {
             if let Some(idx) = parse_inline_index(trimmed) {
                 table.indexes.push(idx);
             }
+
+            // Parse a bare table-level UNIQUE (col, ...) constraint, marking a
+            // single covered column as unique too.
+            if let Some(uc) = parse_unique_constraint(trimmed) {
+                if let [only_column] = uc.columns.as_slice() {
+                    if let Some(col) = table
+                        .columns
+                        .iter_mut()
+                        .find(|c| c.name.eq_ignore_ascii_case(only_column))
+                    {
+                        col.is_unique = true;
+                    }
+                }
+                table.unique_constraints.push(uc);
+            }
+
+            // Parse a table-level CHECK (...) constraint
+            if let Some(cc) = parse_check_constraint(trimmed) {
+                table.check_constraints.push(cc);
+            }
         } else {
             // Parse column definition
-            if let Some(col) = parse_column_def(trimmed, ColumnId(table.columns.len() as u16)) {
+            if let Some((col, inline_check)) =
+                parse_column_def(trimmed, ColumnId(table.columns.len() as u16))
+            {
+                if let Some(expression) = inline_check {
+                    table.check_constraints.push(CheckConstraint {
+                        name: None,
+                        expression,
+                    });
+                }
+
                 // Check for inline PRIMARY KEY
                 if INLINE_PRIMARY_KEY_RE.is_match(trimmed) {
                     let mut col = col;
@@ -358,21 +390,265 @@ pub fn split_table_body(body: &str) -> Vec<String> {
     parts
 }
 
-/// Parse a column definition
-fn parse_column_def(def: &str, ordinal: ColumnId) -> Option<Column> {
+/// Parse a column definition, returning the column plus any inline
+/// column-level CHECK expression found among its modifiers (callers attach
+/// that to the table's check constraints, since `Column` has no such field).
+fn parse_column_def(def: &str, ordinal: ColumnId) -> Option<(Column, Option<String>)> {
     let caps = COLUMN_DEF_RE.captures(def)?;
+    let whole = caps.get(0)?;
     let name = caps.get(1)?.as_str().to_string();
-    let type_str = caps.get(2)?.as_str();
+    let type_str = caps.get(2)?.as_str().to_string();
 
-    let col_type = ColumnType::from_mysql_type(type_str);
+    let col_type = ColumnType::from_mysql_type(&type_str);
     let is_nullable = !NOT_NULL_RE.is_match(def);
 
-    Some(Column {
+    let remainder = &def[whole.end()..];
+    let modifiers = parse_column_modifiers(remainder);
+    // PostgreSQL `serial`/`bigserial`/`smallserial` columns are backed by an
+    // implicit sequence, so they carry identity semantics even without an
+    // explicit IDENTITY/AUTO_INCREMENT modifier.
+    let is_identity = modifiers.is_identity || type_str.to_lowercase().contains("serial");
+
+    let column = Column {
         name,
         col_type,
+        source_type: type_str,
         ordinal,
         is_primary_key: false,
         is_nullable,
+        is_unique: modifiers.is_unique,
+        default_sql: modifiers.default_sql,
+        is_generated: modifiers.is_generated,
+        is_identity,
+        collation: modifiers.collation,
+    };
+
+    Some((column, modifiers.inline_check))
+}
+
+/// Modifiers found after a column's name and type: UNIQUE, DEFAULT,
+/// GENERATED .. AS (...), IDENTITY/AUTO_INCREMENT, COLLATE, and inline CHECK.
+#[derive(Debug, Default)]
+struct ColumnModifiers {
+    is_unique: bool,
+    default_sql: Option<String>,
+    is_generated: bool,
+    is_identity: bool,
+    collation: Option<String>,
+    inline_check: Option<String>,
+}
+
+/// Parse the column modifiers following the name/type, using
+/// [`tokenize_ddl`] so that quoted defaults and parenthesized expressions
+/// (e.g. `DEFAULT 'active'`, `CHECK (a > 0 AND (b < 1))`) are kept intact
+/// rather than split on whitespace.
+fn parse_column_modifiers(remainder: &str) -> ColumnModifiers {
+    let tokens = tokenize_ddl(remainder);
+    let mut modifiers = ColumnModifiers::default();
+    let mut i = 0;
+
+    while i < tokens.len() {
+        let upper = tokens[i].to_uppercase();
+        match upper.as_str() {
+            "UNIQUE" => {
+                modifiers.is_unique = true;
+                i += 1;
+            }
+            "DEFAULT" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    modifiers.default_sql = Some(value.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "COLLATE" => {
+                if let Some(value) = tokens.get(i + 1) {
+                    modifiers.collation = Some(strip_quotes(value));
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "CHECK" => {
+                if let Some(expr) = tokens.get(i + 1) {
+                    modifiers.inline_check = Some(strip_outer_parens(expr));
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "GENERATED" => {
+                // Skip ALWAYS/BY/DEFAULT until AS, then inspect what follows:
+                // `AS (expr)` is a computed column, `AS IDENTITY` is identity.
+                let mut j = i + 1;
+                while j < tokens.len() && !tokens[j].eq_ignore_ascii_case("AS") {
+                    j += 1;
+                }
+                if let Some(as_expr) = tokens.get(j + 1) {
+                    if as_expr.starts_with('(') {
+                        modifiers.is_generated = true;
+                    } else if as_expr.eq_ignore_ascii_case("IDENTITY") {
+                        modifiers.is_identity = true;
+                    }
+                }
+                i = j + 2;
+            }
+            "AUTO_INCREMENT" | "AUTOINCREMENT" => {
+                modifiers.is_identity = true;
+                i += 1;
+            }
+            _ if upper.starts_with("IDENTITY(") || upper == "IDENTITY" => {
+                modifiers.is_identity = true;
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    modifiers
+}
+
+/// Split a fragment of DDL into whitespace-separated tokens, treating
+/// single-quoted strings and parenthesized groups (including nested
+/// parentheses) as atomic units. This lets callers pull out `DEFAULT`,
+/// `CHECK`, and `GENERATED ... AS (...)` values without splitting the SQL
+/// expressions they contain on internal whitespace.
+fn tokenize_ddl(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for ch in s.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        if ch == '\\' && in_string {
+            current.push(ch);
+            escape_next = true;
+            continue;
+        }
+
+        if ch == '\'' {
+            in_string = !in_string;
+            current.push(ch);
+            continue;
+        }
+
+        if in_string {
+            current.push(ch);
+            continue;
+        }
+
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// Strip surrounding quote/bracket characters from an identifier-like token
+fn strip_quotes(s: &str) -> String {
+    s.trim_matches('\'')
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_string()
+}
+
+/// Strip a single layer of enclosing parentheses from an expression token,
+/// if present (used to store CHECK expressions without the outer parens).
+fn strip_outer_parens(s: &str) -> String {
+    let trimmed = s.trim();
+    match trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        Some(inner) => inner.trim().to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Parse a table-level UNIQUE constraint: `[CONSTRAINT name] UNIQUE (cols)`.
+/// Does not match `UNIQUE INDEX`/`UNIQUE KEY` forms, which are handled by
+/// [`parse_inline_index`].
+fn parse_unique_constraint(constraint: &str) -> Option<UniqueConstraint> {
+    let tokens = tokenize_ddl(constraint);
+    let mut i = 0;
+    let mut name = None;
+
+    if tokens.first()?.eq_ignore_ascii_case("CONSTRAINT") {
+        name = tokens.get(1).map(|s| strip_quotes(s));
+        i = 2;
+    }
+
+    if !tokens.get(i)?.eq_ignore_ascii_case("UNIQUE") {
+        return None;
+    }
+
+    let cols_token = tokens.get(i + 1)?;
+    if !cols_token.starts_with('(') {
+        // Not a bare `UNIQUE (cols)` constraint (e.g. `UNIQUE INDEX ...` or
+        // `UNIQUE KEY ...`, handled separately by `parse_inline_index`).
+        return None;
+    }
+    let columns = parse_column_list(strip_outer_parens(cols_token).as_str());
+    if columns.is_empty() {
+        return None;
+    }
+
+    Some(UniqueConstraint { name, columns })
+}
+
+/// Parse a table-level CHECK constraint: `[CONSTRAINT name] CHECK (expr)`.
+fn parse_check_constraint(constraint: &str) -> Option<CheckConstraint> {
+    let tokens = tokenize_ddl(constraint);
+    let mut i = 0;
+    let mut name = None;
+
+    if tokens.first()?.eq_ignore_ascii_case("CONSTRAINT") {
+        name = tokens.get(1).map(|s| strip_quotes(s));
+        i = 2;
+    }
+
+    if !tokens.get(i)?.eq_ignore_ascii_case("CHECK") {
+        return None;
+    }
+
+    let expr_token = tokens.get(i + 1)?;
+    if !expr_token.starts_with('(') {
+        return None;
+    }
+
+    Some(CheckConstraint {
+        name,
+        expression: strip_outer_parens(expr_token),
     })
 }
 

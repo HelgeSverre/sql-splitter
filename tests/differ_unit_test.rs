@@ -317,8 +317,10 @@ fn test_compare_schemas_with_table_filter() {
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
 
-    let mut config = DiffConfig::default();
-    config.tables = vec!["users".to_string()];
+    let config = DiffConfig {
+        tables: vec!["users".to_string()],
+        ..Default::default()
+    };
 
     let diff = compare_schemas(&old_schema, &new_schema, &config);
     // Only users should be in modified
@@ -334,8 +336,10 @@ fn test_compare_schemas_with_exclude_filter() {
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
 
-    let mut config = DiffConfig::default();
-    config.exclude = vec!["logs".to_string()];
+    let config = DiffConfig {
+        exclude: vec!["logs".to_string()],
+        ..Default::default()
+    };
 
     let diff = compare_schemas(&old_schema, &new_schema, &config);
     assert_eq!(diff.tables_modified.len(), 1);
@@ -349,8 +353,10 @@ fn test_compare_schemas_with_ignore_columns() {
     let old_schema = build_schema(old_sql);
     let new_schema = build_schema(new_sql);
 
-    let mut config = DiffConfig::default();
-    config.ignore_columns = vec!["*.created_at".to_string()];
+    let config = DiffConfig {
+        ignore_columns: vec!["*.created_at".to_string()],
+        ..Default::default()
+    };
 
     let diff = compare_schemas(&old_schema, &new_schema, &config);
     // created_at should be filtered from added columns

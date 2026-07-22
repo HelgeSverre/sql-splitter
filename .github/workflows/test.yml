@@ -38,6 +38,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -54,9 +57,9 @@ jobs:
             # dropped stdext::checked_array_iterator, which the C++ fmt library vendored inside
             # duckdb's bundled build still depends on, breaking compilation. Not fixable from
             # this repo; tracked upstream at https://github.com/duckdb/duckdb-rs/issues/413.
-            cargo test --verbose --lib --bins --no-default-features --features compression
+            cargo nextest run --lib --bins --no-default-features --features compression
           else
-            cargo test --verbose
+            cargo nextest run
           fi
         shell: bash
 

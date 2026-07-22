@@ -555,7 +555,7 @@ You can validate command output against schemas using any JSON Schema validator:
 
 ```bash
 # Using ajv (Node.js)
-npm install -g ajv-cli
+bun add -g ajv-cli
 sql-splitter analyze dump.sql --json > output.json
 ajv validate -s schemas/analyze.schema.json -d output.json
 ```

@@ -605,3 +605,95 @@ fn test_redact_gzip_input_is_decompressed() {
         "email must be redacted"
     );
 }
+
+// ============================================================================
+// RNG-lockstep regression (golden-from-base)
+// ============================================================================
+
+/// Golden output captured by building the redactor at commit `cbda248`
+/// (the commit immediately before the `fake_data` extraction — the
+/// last commit where `FakeStrategy::generate` drew its RNG block
+/// unconditionally at the top of the function, before the alias `match`)
+/// and running it against the fixture below with `--seed 42`:
+///
+/// ```text
+/// git worktree add /tmp/redact-base cbda248
+/// cd /tmp/redact-base && cargo build --release --bin sql-splitter
+/// ./target/release/sql-splitter redact <fixture>.sql -o golden.sql \
+///     -c <config>.yaml --seed 42
+/// ```
+///
+/// where `<config>.yaml` redacts `users.country` (a fixed-string alias with
+/// no `fake`-crate draw of its own) immediately before `users.name` and
+/// `users.email` (both real draws) on every row. `ValueRewriter` threads one
+/// shared, advancing RNG across every redacted cell in a run, so this
+/// ordering is exactly the shape that exposes an entropy-consumption
+/// mismatch: if `country` ever stops consuming the same 32-byte block it
+/// consumed pre-refactor, every later fake value on the same and subsequent
+/// rows shifts, and this golden stops matching byte-for-byte.
+const RNG_LOCKSTEP_INPUT: &str = r#"
+CREATE TABLE `users` (
+    `id` INT PRIMARY KEY,
+    `country` VARCHAR(100),
+    `name` VARCHAR(100),
+    `email` VARCHAR(255)
+);
+INSERT INTO `users` VALUES (1, 'Norway', 'Alice Smith', 'alice@example.com');
+INSERT INTO `users` VALUES (2, 'Germany', 'Bob Jones', 'bob@example.com');
+INSERT INTO `users` VALUES (3, 'France', 'Carol White', 'carol@example.com');
+"#;
+
+const RNG_LOCKSTEP_CONFIG: &str = r#"
+seed: 42
+rules:
+  - column: "users.country"
+    strategy: fake
+    generator: country
+  - column: "users.name"
+    strategy: fake
+    generator: name
+  - column: "users.email"
+    strategy: fake
+    generator: email
+"#;
+
+/// Golden captured from the redactor baseline build (commit `cbda248`) as
+/// documented on [`RNG_LOCKSTEP_INPUT`]. Byte-for-byte, including the
+/// `CREATE TABLE`/`INSERT` formatting this build's writer already produces.
+const RNG_LOCKSTEP_GOLDEN: &str = "\nCREATE TABLE `users` (\n    `id` INT PRIMARY KEY,\n    `country` VARCHAR(100),\n    `name` VARCHAR(100),\n    `email` VARCHAR(255)\n);INSERT INTO `users` VALUES\n(1, 'United States', 'Ray Maggio', 'walter@example.org');\nINSERT INTO `users` VALUES\n(2, 'United States', 'Antone Romaguera', 'telly@example.com');\nINSERT INTO `users` VALUES\n(3, 'United States', 'Alexandre Reilly', 'genesis@example.com');\n\n";
+
+#[test]
+fn fake_strategy_stays_in_rng_lockstep_with_the_pre_task_12_baseline() {
+    let mut input_file = NamedTempFile::new().unwrap();
+    input_file.write_all(RNG_LOCKSTEP_INPUT.as_bytes()).unwrap();
+    input_file.flush().unwrap();
+
+    let mut config_file = NamedTempFile::new().unwrap();
+    config_file
+        .write_all(RNG_LOCKSTEP_CONFIG.as_bytes())
+        .unwrap();
+    config_file.flush().unwrap();
+
+    let output_dir = TempDir::new().unwrap();
+    let output_file = output_dir.path().join("redacted.sql");
+
+    let config = RedactConfig::builder()
+        .input(input_file.path().to_path_buf())
+        .output(Some(output_file.clone()))
+        .dialect(SqlDialect::MySql)
+        .config_file(Some(config_file.path().to_path_buf()))
+        .seed(Some(42))
+        .build()
+        .unwrap();
+
+    Redactor::new(config).unwrap().run().unwrap();
+
+    let output = fs::read_to_string(&output_file).unwrap();
+    assert_eq!(
+        output, RNG_LOCKSTEP_GOLDEN,
+        "current output diverged from the golden redactor baseline — a redactor \
+         alias branch is consuming a different amount of entropy than it did \
+         before the fake_data extraction, shifting every fake value drawn \
+         after it in the shared RNG stream"
+    );
+}

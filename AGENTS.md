@@ -1,581 +1,246 @@
-# AGENTS.md
+# Repository guidance
 
-This file provides guidance when working with code in this repository.
+`sql-splitter` is a Rust CLI and library for inspecting and transforming SQL
+dumps. It supports MySQL/MariaDB, PostgreSQL, SQLite, and MSSQL workflows,
+including splitting, analysis, conversion, validation, sampling, sharding,
+redaction, synthetic-data generation, schema graphs, ordering, diffing, merging,
+and optional DuckDB queries.
 
-## Project Overview
+This file is an agent-oriented map of the repository. Keep volatile CLI details,
+benchmarks, and release steps in their authoritative locations instead of
+duplicating them here.
 
-High-performance CLI tool written in Rust for splitting large SQL dump files into individual table files.
+## Sources of truth
 
-## Available Commands
+Use these sources in descending order of authority:
 
-### Makefile Commands
+1. Rust source and tests for behavior.
+2. `sql-splitter <command> --help` for the current CLI.
+3. `just --list` and `justfile` for development commands.
+4. `website/src/content/docs/` for maintained user and contributor docs.
+5. `README.md` and `skills/sql-splitter/SKILL.md` for secondary user- and
+   agent-facing summaries.
 
-Run `make help` to see all available commands. Key commands:
+When behavior changes, update every affected user-facing source in the same
+change. Do not preserve stale prose merely because it appears in this file.
 
-| Command                 | Description                                                          |
-| ----------------------- | -------------------------------------------------------------------- |
-| `make build`            | Debug build                                                          |
-| `make release`          | Release build                                                        |
-| `make native`           | Optimized build for current CPU (best performance)                   |
-| `make test`             | Run all tests                                                        |
-| `make bench`            | Run criterion benchmarks                                             |
-| `make profile`          | Memory profile all commands (medium dataset)                         |
-| `make profile-large`    | Memory profile with large dataset (~250MB)                           |
-| `make profile-mega`     | Stress test profile (~2GB: 100 tables × 100k rows)                   |
-| `make fmt`              | Format code                                                          |
-| `make check`            | Check code without building                                          |
-| `make clippy`           | Run clippy lints                                                     |
-| `make clean`            | Clean build artifacts                                                |
-| `make install`          | Install locally (binary + shell completions)                         |
-| `make verify-realworld` | Verify against real-world SQL dumps                                  |
-| `make website-deploy`   | Deploy website to Vercel                                             |
-| `make docker-bench`     | Run benchmarks in Docker (generates 100MB test data)                 |
-| `make man`              | Generate man pages in man/ directory                                 |
-| `make schemas`          | Generate JSON schemas from Rust types, validate, and copy to website |
+## Before editing
 
-### Building and Running
+- Run `git status --short` and preserve unrelated worktree changes.
+- Read the implementation and nearby tests before changing behavior.
+- Search for the same option, command, or concept across `README.md`,
+  `website/src/content/docs/`, and `skills/sql-splitter/SKILL.md`.
+- Use `cargo run -- <command> --help` when validating CLI examples or flags.
+
+## Development commands
+
+Run `just` or `just --list` for the complete, current command list.
+
+| Task                               | Command                 |
+| ---------------------------------- | ----------------------- |
+| Debug build                        | `just build`            |
+| Release build                      | `just release`          |
+| Type-check                         | `just check`            |
+| Rust and Markdown formatting       | `just fmt`              |
+| Clippy with warnings denied        | `just clippy`           |
+| Full nextest suite                 | `just test`             |
+| Criterion benchmarks               | `just bench`            |
+| Real-world ignored tests           | `just verify-realworld` |
+| Generate and validate JSON schemas | `just schemas`          |
+| Generate man pages                 | `just man`              |
+| Website checks                     | `just website-lint`     |
+| Release preparation                | `just release-prepare`  |
+
+Useful direct commands:
 
 ```bash
-# Build (debug)
-cargo build
-# or: make build
-
-# Build (release)
-cargo build --release
-# or: make release
-
-# Build optimized for current CPU (best for benchmarking)
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-# or: make native
-
-# Run tests
-cargo test
-# or: make test
-
-# Run benchmarks
-cargo bench
-# or: make bench
-
-# Run clippy lints
+cargo run -- <command> --help
+cargo nextest run <filter>
+cargo test --doc
+cargo fmt --all -- --check
 cargo clippy -- -D warnings
-# or: make clippy
-
-# Format code
-cargo fmt
-# or: make fmt
 ```
 
-### Main Commands
+`just fmt` rewrites Rust and all Markdown files. Use the non-mutating formatting
+checks when you only need verification or when the worktree contains unrelated
+Markdown changes.
 
-```bash
-# Split a MySQL/MariaDB dump file (default)
-./target/release/sql-splitter split large-dump.sql --output=tables
+## Verification expectations
 
-# Split a PostgreSQL pg_dump file
-./target/release/sql-splitter split pg_dump.sql --output=tables --dialect=postgres
+Match verification to the change:
 
-# Split a SQLite .dump file
-./target/release/sql-splitter split sqlite.sql --output=tables --dialect=sqlite
+- Rust behavior: run focused tests first, then `just test` when practical.
+- Parser or dialect behavior: run parser tests plus the relevant integration
+  and regression tests.
+- CLI arguments or help: run the command's help, then run
+  `cargo nextest run --test cli_help_test`.
+- Public library examples: run `cargo test --doc` in addition to nextest.
+- Lint-sensitive Rust changes: run `cargo fmt --all -- --check` and
+  `just clippy`.
+- JSON output or synthetic config schema changes: run `just schemas` and check
+  in all generated copies.
+- Website changes: run `just website-lint`; use `just website-build` when routes,
+  components, configuration, or generated assets change.
+- Performance-sensitive changes: run the focused Criterion benchmark or the
+  relevant script under `scripts/`; record the environment with any numbers.
 
-# Analyze a SQL file to gather statistics
-./target/release/sql-splitter analyze database.sql --progress
+CI behavior is defined in `.github/workflows/`. Do not infer current CI coverage
+from old benchmark or test-count snapshots.
 
-# Get help
-./target/release/sql-splitter --help
-./target/release/sql-splitter split --help
+## Architecture map
+
+### Entry points and command layer
+
+- `src/main.rs` is the binary entry point.
+- `src/lib.rs` exposes the library API. The binary currently declares the same
+  source modules separately, so check both crate targets when changing module
+  visibility or conditional compilation.
+- `src/cmd/` owns Clap arguments, input validation, command orchestration, and
+  process exit codes. Business logic belongs in the domain modules, not in the
+  argument structs.
+- `src/cmd/common.rs` and `src/cmd/glob_util.rs` contain shared command plumbing.
+
+The command enum in `src/cmd/mod.rs` is the authoritative list of user-facing
+subcommands. Some developer commands, such as schema and man-page generation,
+are intentionally hidden from normal help.
+
+### SQL input, parsing, and output
+
+- `src/parser/` contains dialect detection and the streaming SQL parser. It
+  handles statement events, streamed INSERT rows, PostgreSQL COPY data, and
+  MSSQL-specific syntax.
+- `src/splitter/` coordinates input decoding, parser events, table filtering,
+  archive/compression behavior, and the writer pipeline.
+- `src/writer/` owns parallel per-table output, buffering, I/O profiles, and the
+  adaptive controller.
+- `src/archive.rs` and `src/zip_input.rs` handle feature-gated archive input and
+  output.
+- `src/copy_data.rs` and `src/parser/{mysql_insert,postgres_copy}.rs` contain
+  row-level parsing used by several commands.
+
+Keep large-input paths streaming or bounded. Do not replace event-based or
+spill-to-disk flows with whole-dump accumulation without an explicit design and
+measurements.
+
+### Schema and transformation domains
+
+- `src/schema/` parses DDL into the shared schema model and dependency graph.
+- `src/transform_common.rs` contains bounded row traversal and spill-file
+  plumbing shared by FK-aware transformations.
+- `src/analyzer/`, `src/merger/`, `src/convert/`, `src/validate/`,
+  `src/differ/`, `src/redactor/`, `src/sample/`, `src/shard/`, and `src/graph/`
+  own their respective domains.
+- `src/duckdb/` implements the optional `duckdb-query` feature.
+- `src/json_schema.rs` derives the checked-in JSON schemas from Rust types.
+
+Reuse the shared parser, schema graph, row representation, and output plumbing
+before adding command-specific copies.
+
+### Synthetic-data generation
+
+Synthetic generation is a staged library and CLI pipeline:
+
+```text
+dump and/or YAML
+  -> schema parsing and bounded profiling
+  -> model inference and override merge
+  -> model compilation and generation plan
+  -> seeded generation engine
+  -> SQL renderer, verification, and atomic output
 ```
 
-### Supported Dialects
-
-| Dialect       | Flag                        | Dump Tool     | Key Features                                              |
-| ------------- | --------------------------- | ------------- | --------------------------------------------------------- |
-| MySQL/MariaDB | `--dialect=mysql` (default) | mysqldump     | Backtick quoting, backslash escapes                       |
-| PostgreSQL    | `--dialect=postgres`        | pg_dump       | Double-quote identifiers, COPY FROM stdin, dollar-quoting |
-| SQLite        | `--dialect=sqlite`          | sqlite3 .dump | Double-quote identifiers                                  |
-
-## Architecture
-
-### High-Level Design
-
-```
-BufReader (fill_buf) → Parser (Streaming) → WriterPool (BufWriter) → Table Files
-    64KB Buffer          Statement Buffer       256KB Buffers per table
-```
-
-### Key Components
-
-#### `src/parser/mod.rs` - Streaming SQL Parser
-
-- Uses `BufReader::fill_buf()` + `consume()` pattern for streaming reads
-- String-aware parsing: tracks escaped quotes and multi-line strings
-- Manual table name extraction with regex fallback
-- Pre-compiled static regexes via `once_cell::Lazy`
-
-Key functions:
-
-- `read_statement()`: Reads complete SQL statement (handles strings, escaping)
-- `parse_statement()`: Identifies statement type and extracts table name
-- `determine_buffer_size()`: Selects optimal buffer size based on file size
-
-#### `src/writer/mod.rs` - Buffered File Writers
-
-- `TableWriter`: Manages buffered writes to single table file
-- `WriterPool`: HashMap of table writers using `ahash` for fast hashing
-- 256KB `BufWriter` per table
-- Auto-flush every 100 statements
-
-#### `src/splitter/mod.rs` - Orchestration
-
-- Coordinates parsing and writing
-- Maintains processing statistics
-- Routes statements to appropriate table writers
-- Supports dry-run and table filtering
-
-#### `src/analyzer/mod.rs` - Statistical Analysis
-
-- Counts INSERTs, CREATE TABLEs per table
-- Calculates total bytes per table
-- Optional progress tracking
-- Sorts results by INSERT count
-
-## Performance Characteristics
-
-### Key Optimizations
-
-1. **Streaming I/O**: `fill_buf` + `consume` pattern for zero-copy reading
-2. **Manual parsing**: Byte-level table name extraction before regex fallback
-3. **Fast hashing**: `ahash::AHashMap` instead of default SipHash
-4. **Pre-compiled regexes**: Static initialization via `once_cell::Lazy`
-5. **Minimal allocations**: Work with `&[u8]` slices in hot path
-6. **Buffered writes**: 256KB buffers with periodic flush
-
-### Buffer Sizes
-
-- File < 1GB: 64KB read buffer (optimal for CPU cache)
-- File > 1GB: 256KB read buffer
-- All tables: 256KB write buffers with 100-statement buffering
-
-## Testing
-
-```bash
-# All tests
-cargo test
-
-# Specific module
-cargo test parser::tests
-
-# With output
-cargo test -- --nocapture
-```
-
-## Benchmarking
-
-```bash
-# All benchmarks
-cargo bench
-
-# Specific benchmark
-cargo bench -- read_statement
-```
-
-## Memory Profiling
-
-Use GNU time to measure peak memory usage (Maximum Resident Set Size) for commands.
-
-### Prerequisites
-
-```bash
-# macOS: Install GNU time
-brew install gnu-time
-
-# Linux: GNU time is typically at /usr/bin/time
-```
-
-### Quick Profiling
-
-```bash
-# Profile a single command with gtime (macOS) or /usr/bin/time (Linux)
-gtime -v ./target/release/sql-splitter sample input.sql --percent 10 --output out.sql 2>&1 | grep "Maximum resident set size"
-
-# Full metrics
-gtime -v ./target/release/sql-splitter validate large-dump.sql --check-fk 2>&1 | tail -25
-```
-
-### Automated Profiling Script
-
-Use the profiling script to consistently benchmark all commands:
-
-```bash
-# Profile all commands with medium-sized generated test data
-./scripts/profile-memory.sh
-
-# Profile with larger test data
-./scripts/profile-memory.sh --size large
-
-# Profile with a specific file
-./scripts/profile-memory.sh --file /path/to/dump.sql
-
-# Only generate test fixtures (don't run profiling)
-./scripts/profile-memory.sh --generate-only --size xlarge
-```
-
-Size configurations:
-
-| Size   | Rows/Table | Tables | Approx File Size   |
-| ------ | ---------- | ------ | ------------------ |
-| tiny   | 500        | 10     | ~0.5MB             |
-| small  | 2,500      | 10     | ~2.5MB             |
-| medium | 25,000     | 10     | ~25MB              |
-| large  | 125,000    | 10     | ~125MB             |
-| xlarge | 250,000    | 10     | ~250MB             |
-| huge   | 500,000    | 10     | ~500MB             |
-| mega   | 100,000    | 100    | ~1GB               |
-| giga   | 1,000,000  | 100    | ~10GB (MySQL only) |
-
-### Key Metrics
-
-From GNU time output:
-
-- **Maximum resident set size (kbytes)**: Peak memory usage
-- **Elapsed (wall clock) time**: Total execution time
-- **User time (seconds)**: CPU time in user mode
-
-### Example Output (large size: ~125MB)
-
-```
-Command      Dialect      File Size     Peak RSS   Wall Time  Extra Args
-------------------------------------------------------------
-analyze      mysql        123.72 MB      6.85 MB     0:00.28
-split        mysql        123.72 MB      9.93 MB     0:00.31
-validate     mysql        123.72 MB     81.65 MB     0:01.50
-validate     mysql        123.72 MB      9.60 MB     0:00.28  --no-fk-checks
-sample       mysql        123.72 MB     15.90 MB     0:02.03
-diff         mysql        123.72 MB    131.48 MB     0:02.98
-redact       mysql        123.72 MB      9.09 MB     0:00.66
-graph        mysql        123.72 MB      8.59 MB     0:00.31
-order        mysql        123.72 MB    140.85 MB     0:00.41
-query        mysql        123.72 MB     99.89 MB     0:36.51
-shard        mysql        123.72 MB      5.65 MB     0:00.01
-convert      mysql        123.72 MB     12.26 MB     0:00.84
-```
-
-### Query Command Performance by Dialect
-
-The `query` command shows significant performance differences based on dialect:
-
-| Dialect    | File Size | Query Time | Peak RSS | Notes                            |
-| ---------- | --------- | ---------- | -------- | -------------------------------- |
-| PostgreSQL | 111 MB    | 6.4s       | 101 MB   | Uses COPY (fast batch import)    |
-| MySQL      | 124 MB    | 36.5s      | 100 MB   | Uses INSERT (row-by-row parsing) |
-| SQLite     | 124 MB    | 37.2s      | 210 MB   | Uses INSERT (row-by-row parsing) |
-
-PostgreSQL dumps are ~6x faster to query because COPY blocks are efficiently batched.
-
-### Memory Optimization Guidelines
-
-When optimizing for memory:
-
-1. Use streaming/chunked processing instead of loading all data
-2. Use hash-based sets (`PkHashSet` with 64-bit hashes) instead of storing full values
-3. Write intermediate results to temp files instead of accumulating in memory
-4. Process tables sequentially in dependency order
-
-## Key Implementation Details
-
-- **Language**: Rust 2021 edition
-- **CLI Framework**: clap v4 with derive macros
-- **Regex**: `regex` crate with bytes API
-- **HashMap**: `ahash::AHashMap` for performance
-- **Buffer management**: `std::io::{BufReader, BufWriter}`
-- **Statement types**: CREATE TABLE, INSERT INTO, CREATE INDEX, ALTER TABLE, DROP TABLE, COPY (PostgreSQL)
-
-## Release Process
-
-Follow these steps to create a new release. **Both a git tag AND a GitHub release are required.**
-
-### 1. Pre-release Checks (Automated)
-
-Use the automated release preparation command:
-
-```bash
-# Using justfile (recommended)
-just release-prepare
-
-# Or using Makefile
-make release-prepare
-```
-
-This runs: release build, tests, schema generation, and website version update.
-
-### 2. Update Version and Changelog
-
-1. Bump version in `Cargo.toml`:
-
-   ```bash
-   # Using justfile
-   just bump X.Y.Z
-
-   # Or manually edit Cargo.toml
-   ```
-
-2. Update `CHANGELOG.md`:
-   - Add new version section with today's date: `## [X.Y.Z] - YYYY-MM-DD`
-   - Move items from `[Unreleased]` to the new version section
-   - Document all notable changes under Added/Changed/Fixed/Removed
-
-3. Website version is updated automatically:
-   - `website/llms.txt` - Updated by `prebuild` script
-   - `website/src/content/docs/roadmap.mdx` - Uses dynamic import from `Cargo.toml`
-
-### 3. Commit, Tag, and Push
-
-```bash
-# Stage all release files
-git add Cargo.toml Cargo.lock CHANGELOG.md website/
-
-# Commit with descriptive message
-git commit -m "feat: <brief description> (vX.Y.Z)"
-
-# Create annotated tag
-git tag -a vX.Y.Z -m "Release vX.Y.Z
-
-<Brief summary of changes>"
-
-# Push commit and tag together
-git push origin main --tags
-```
-
-### 4. Create GitHub Release (REQUIRED)
-
-**Always create a GitHub release** - this makes the release visible on the releases page and generates release notes.
-
-```bash
-# Extract release notes for this version from CHANGELOG.md and create release
-gh release create vX.Y.Z \
-  --title "vX.Y.Z" \
-  --notes "$(sed -n '/## \[X.Y.Z\]/,/## \[/p' CHANGELOG.md | head -n -1)" \
-  --latest
-```
-
-Or manually at: https://github.com/HelgeSverre/sql-splitter/releases/new
-
-- Select the tag `vX.Y.Z`
-- Title: `vX.Y.Z`
-- Description: Copy relevant section from CHANGELOG.md
-
-### 5. Automatic crates.io Publish
-
-**crates.io publishing is automatic** when you push a new tag. The GitHub Action workflow handles this.
-
-**Setup requirement**: Add the `CARGO_REGISTRY_TOKEN` secret to your GitHub repository:
-
-1. Go to https://crates.io/settings/tokens and create a new token
-2. Go to GitHub repo → Settings → Secrets and variables → Actions
-3. Add new secret: `CARGO_REGISTRY_TOKEN` with your crates.io token
-
-Manual publish (if needed):
-
-```bash
-cargo publish --dry-run  # Test first
-cargo publish            # Publish
-```
-
-### 6. Post-release Verification
-
-- [ ] GitHub release visible: https://github.com/HelgeSverre/sql-splitter/releases
-- [ ] Tag visible: `git tag -l | grep vX.Y.Z`
-- [ ] crates.io updated (if published): https://crates.io/crates/sql-splitter
-- [ ] Website auto-deployed via Vercel (if applicable)
-
-### Versioning Guidelines
-
-Follow [Semantic Versioning](https://semver.org/):
-
-- **MAJOR** (X.0.0): Breaking changes to CLI interface or output format
-- **MINOR** (0.X.0): New features, new dialects, new commands
-- **PATCH** (0.0.X): Bug fixes, performance improvements, documentation
-
-### Quick Release Checklist
-
-```
-[ ] cargo test passes
-[ ] cargo clippy clean
-[ ] Version bumped in Cargo.toml
-[ ] CHANGELOG.md updated
-[ ] git commit + tag created
-[ ] git push origin main --tags
-[ ] gh release create vX.Y.Z (REQUIRED!)
-[ ] Verify release at github.com/HelgeSverre/sql-splitter/releases
-```
-
-## Website llms.txt Maintenance
-
-The file `website/llms.txt` provides LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification. This file helps AI tools understand how to use and install sql-splitter.
-
-### When to Update llms.txt
-
-Update `website/llms.txt` when:
-
-- Adding new CLI commands or subcommands
-- Adding/changing command-line flags or options
-- Adding support for new SQL dialects
-- Adding support for new compression formats
-- Changing installation methods
-- Updating performance benchmarks significantly
-- Adding new major features
-
-### llms.txt Format Requirements
-
-The file must follow this structure (in order):
-
-1. **H1 header**: Project name (`# sql-splitter`)
-2. **Blockquote**: Brief summary with key capabilities
-3. **Body sections**: Detailed info (no H2 headers yet)
-4. **H2 sections**: File lists with URLs to documentation/source
-
-Key guidelines:
-
-- Keep content concise and actionable for LLMs
-- Include complete CLI examples with common flags
-- Document all supported options in tables
-- Link to GitHub source files and documentation
-- Use the "Optional" H2 section for secondary resources
-
-### Example Update
-
-When adding a new `--format` flag:
-
-```markdown
-## Commands
-
-### split
-
-...
-Options:
-
-- `--format <FORMAT>`: Output format: sql, json (default: sql) # ADD THIS
-  ...
-```
-
-## Agent Skills
-
-The file `skills/sql-splitter/SKILL.md` provides a skill definition following the [Agent Skills](https://agentskills.io) specification. This enables AI coding assistants to automatically discover and use sql-splitter.
-
-### Supported Tools
-
-Agent Skills are supported by: Amp, Claude Code, VS Code / GitHub Copilot, Cursor, Goose, Letta, and OpenCode.
-
-### When to Update SKILL.md
-
-Update `skills/sql-splitter/SKILL.md` when:
-
-- Adding new CLI commands
-- Changing command patterns or workflows
-- Adding new flags that affect common usage patterns
-- Updating decision logic for when to use commands
-
-### SKILL.md Format Requirements
-
-The file follows the Agent Skills specification:
-
-1. **YAML frontmatter**: name, description, license, compatibility
-2. **Markdown body**: Step-by-step instructions, patterns, and examples
-
-Key guidelines:
-
-- Focus on **when to use** vs **when not to use**
-- Provide step-by-step patterns for common workflows
-- Include error handling guidance
-- Keep instructions actionable and concise
-
-### Installing the Skill
-
-**Amp:**
-
-```bash
-amp skill add helgesverre/sql-splitter
-```
-
-**Claude Code:**
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
-cp -r /tmp/sql-splitter/skills/sql-splitter ~/.claude/skills/
-```
-
-**VS Code / GitHub Copilot:**
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
-cp -r /tmp/sql-splitter/skills/sql-splitter .github/skills/
-```
-
-**Cursor:**
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
-cp -r /tmp/sql-splitter/skills/sql-splitter .cursor/skills/
-```
-
-**Goose:**
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
-cp -r /tmp/sql-splitter/skills/sql-splitter ~/.config/goose/skills/
-```
-
-**Letta:**
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
-cp -r /tmp/sql-splitter/skills/sql-splitter .skills/
-```
-
-**OpenCode:**
-
-```bash
-git clone https://github.com/helgesverre/sql-splitter.git /tmp/sql-splitter
-cp -r /tmp/sql-splitter/skills/sql-splitter ~/.opencode/skills/
-```
-
-**Universal Installer (via npx):**
-
-```bash
-npx ai-agent-skills install sql-splitter --agent <agent>
-# Supported agents: claude, cursor, amp, vscode, goose, opencode
-```
-
-### Skill Directory Structure
-
-```
-sql-splitter/
-└── skills/
-    └── sql-splitter/
-        └── SKILL.md
-```
-
-## Test Performance
-
-### Test Suite Overview
-
-The test suite includes 780+ tests across multiple test files:
-
-- `duckdb_test.rs`: 150 tests for DuckDB query functionality
-- Unit tests for parser, splitter, analyzer, converter, etc.
-- Integration tests for various commands
-
-### cargo test vs cargo-nextest
-
-For this codebase, both runners perform similarly:
-
-| Runner              | Wall Clock | CPU Usage | Notes                                          |
-| ------------------- | ---------- | --------- | ---------------------------------------------- |
-| `cargo test`        | ~20s       | 342%      | Default, in-process parallelism                |
-| `cargo nextest run` | ~19s       | 755%      | Per-test process isolation, better parallelism |
-
-**Recommendation:** Use `cargo test` for development (simpler). Consider `cargo nextest` when:
-
-- You need better test failure diagnostics (clearer output)
-- You need test retries (`--retries`)
-- You want maximum parallelization on many-core machines
-- Tests have resource conflicts requiring process isolation
+- `src/synthetic/` defines the portable schema, YAML model, overrides, and merge
+  semantics.
+- `src/profile/` collects bounded evidence from dumps and infers model choices.
+- `src/generate/` contains registries, compiler, planners, generators, execution,
+  output, and verification.
+- `src/render/` renders generated values and DDL without coupling generators to
+  a SQL dialect.
+- `website/src/content/docs/commands/generate/` is the canonical user-facing
+  model, generator, planner, diagnostics, privacy, and library API reference.
+- `docs/generate/` contains compatibility pointers plus maintainer guidance.
+- `tests/fixtures/generate/` contains committed models and schema fixtures;
+  `tests/generate_*` cover each pipeline stage.
+
+Generation must remain deterministic for a fixed model and seed. Profiling must
+remain bounded independently of dump size. Preserve those properties in tests.
+
+## Features and dialects
+
+Cargo features are defined in `Cargo.toml`:
+
+- `duckdb-query` gates DuckDB integration and the `query` command.
+- `compression` gates compressed input and per-file compressed output.
+- `archive` gates archive support and implies compression.
+- `man-pages` enables the hidden man-page generator.
+
+Default builds enable DuckDB queries, compression, and archives. When changing
+feature-gated code, test both the relevant feature configuration and the default
+build.
+
+Dialect behavior is centralized around `parser::SqlDialect`. Update parsing,
+rendering/conversion, CLI values, fixtures, and user documentation together when
+adding or changing dialect support.
+
+## Tests and fixtures
+
+- Unit tests live beside the code they exercise.
+- Integration and regression tests live in `tests/`.
+- Small, hand-authored dialect fixtures live in `tests/fixtures/static/`.
+- Synthetic-generation fixtures live in `tests/fixtures/generate/`.
+- Large generated or real-world datasets should remain ignored and reproducible
+  through scripts rather than committed.
+- Shared integration-test helpers belong in `tests/support/`.
+
+Prefer the narrowest test that proves a behavior, then run the broader affected
+suite. Regression tests should describe the externally visible failure rather
+than mirror private implementation details.
+
+## Generated files and documentation sync
+
+Do not hand-edit generated artifacts when a repository command owns them.
+
+- `just schemas` regenerates `schemas/*.schema.json`, validates them against CLI
+  output and generate fixtures, clears stale vendored schemas, copies them to
+  `website/public/schemas/`, and verifies both directories match.
+- `just man` regenerates `man/` from Clap definitions.
+- `bun run build` generates `llms.txt`, `llms-full.txt`, and `llms-small.txt`
+  through `starlight-llms-txt`; do not edit or commit those build outputs.
+
+When changing a command, option, output format, dialect, compression/archive
+support, or common workflow, review:
+
+- `README.md`
+- the matching page under `website/src/content/docs/commands/` or `reference/`
+- `skills/sql-splitter/SKILL.md`
+- generated man pages and JSON schemas, when applicable
+
+When changing synthetic model semantics, update the relevant canonical page
+under `website/src/content/docs/commands/generate/` and follow
+`docs/generate/maintainers.md`.
+
+Update `skills/sql-splitter/SKILL.md` when a change affects command selection,
+common agent workflows, or important flags. Keep it focused on when and how to
+use the tool; installation instructions belong in user documentation.
+
+## Benchmarking and profiling
+
+- Criterion benches live in `benches/`.
+- Reproducible benchmark and profiling entry points live in `justfile`,
+  `scripts/`, and `docker/`.
+- Current benchmark documentation lives at
+  `website/src/content/docs/contributing/benchmarking.mdx`.
+- `scripts/profile-memory.sh --help` is authoritative for data-size presets and
+  requirements.
+
+Do not place machine-specific throughput, memory, elapsed-time, or test-count
+snapshots in this file. Put dated, reproducible measurements in benchmark docs
+or change notes with hardware and command details.
+
+## Releases
+
+Follow `website/src/content/docs/contributing/release-process.mdx` and the
+release recipes in `justfile`. A release includes the version/changelog update,
+verification, tag, GitHub release/artifacts, and crates.io publication workflow.
+Check `.github/workflows/release.yml` and `.github/workflows/publish.yml` before
+changing or describing automation.

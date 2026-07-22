@@ -10,10 +10,10 @@ sql-splitter is published on [crates.io](https://crates.io/crates/sql-splitter) 
 sql-splitter = { version = "1", default-features = false, features = ["compression"] }
 ```
 
-| Feature | Default | Effect |
-|---------|---------|--------|
-| `compression` | on | Read `.gz`, `.bz2`, `.xz`, `.zst` input. Without it, compressed files fail with an `Unsupported` I/O error; plain `.sql` still works. |
-| `duckdb-query` | on | The `duckdb` module (backing the `query` command). Pulls in bundled DuckDB — a large build dependency. Implies `compression`. |
+| Feature        | Default | Effect                                                                                                                                |
+| -------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `compression`  | on      | Read `.gz`, `.bz2`, `.xz`, `.zst` input. Without it, compressed files fail with an `Unsupported` I/O error; plain `.sql` still works. |
+| `duckdb-query` | on      | The `duckdb` module (backing the `query` command). Pulls in bundled DuckDB — a large build dependency. Implies `compression`.         |
 
 For library use, `default-features = false` with `compression` is the practical baseline; add `duckdb-query` only if you need it.
 

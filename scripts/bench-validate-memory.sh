@@ -25,6 +25,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+MODEL="$PROJECT_ROOT/tests/fixtures/generate/legacy_fixture.yaml"
 
 # Defaults
 SCALES="small,medium,large"
@@ -33,6 +34,23 @@ OUTPUT_DIR="$PROJECT_ROOT/benchmark-results/memory"
 FIXTURES_DIR="$PROJECT_ROOT/benchmark-results/memory/fixtures"
 SKIP_GENERATE=false
 NO_FK=false
+
+# The old fixture generator's multi-tenant `--scale` presets (small/medium/
+# large/xlarge) scaled the tenant count only; every other global/lookup table
+# (permissions, roles, currencies, ...) stayed fixed.
+# `tests/fixtures/generate/legacy_fixture.yaml` preserves that same shape, so
+# reproducing a preset is exactly overriding the `tenants` root table's row
+# count with `--table-rows` — every per-tenant child table (users, orders,
+# ...) cascades from it via `relation.children`.
+scale_tenants() {
+    case $1 in
+        small)  echo 3 ;;
+        medium) echo 10 ;;
+        large)  echo 50 ;;
+        xlarge) echo 100 ;;
+        *) echo "Error: unknown scale '$1' (expected small, medium, large, xlarge)" >&2; exit 1 ;;
+    esac
+}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -108,16 +126,6 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-# Build generator
-echo "Building test data generator..."
-cargo build --release --quiet -p test_data_gen
-GEN_BINARY="$PROJECT_ROOT/target/release/gen-fixtures"
-
-if [[ ! -x "$GEN_BINARY" ]]; then
-    echo "Error: Generator not found at $GEN_BINARY"
-    exit 1
-fi
-
 # Generate test fixtures if needed
 IFS=',' read -ra SCALE_ARR <<< "$SCALES"
 IFS=',' read -ra DIALECT_ARR <<< "$DIALECTS"
@@ -126,10 +134,17 @@ if [[ "$SKIP_GENERATE" == "false" ]]; then
     echo ""
     echo "Generating test fixtures..."
     for scale in "${SCALE_ARR[@]}"; do
+        tenants=$(scale_tenants "$scale")
         for dialect in "${DIALECT_ARR[@]}"; do
             fixture_file="$FIXTURES_DIR/${dialect}_${scale}.sql"
-            echo "  Generating $fixture_file..."
-            "$GEN_BINARY" --dialect "$dialect" --scale "$scale" --seed 12345 --output "$fixture_file"
+            echo "  Generating $fixture_file (tenants=$tenants)..."
+            "$BINARY" generate \
+                --config "$MODEL" \
+                --dialect "$dialect" \
+                --table-rows "tenants=$tenants" \
+                --seed 12345 \
+                --output "$fixture_file" \
+                --quiet
             file_size=$(du -h "$fixture_file" | cut -f1)
             echo "    Size: $file_size"
         done

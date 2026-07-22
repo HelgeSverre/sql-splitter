@@ -33,6 +33,7 @@ Redaction runs as a [streaming](/reference/glossary#streaming) single-pass opera
 **Fake data with `--seed`:** When using `fake` strategy, the same `--seed` value produces identical fake data across runs. The fake value is derived from the original value's hash, so `alice@example.com` always becomes the same fake email (e.g., `jessica.smith@example.com`) with a given seed.
 
 **Exit codes:**
+
 - `0` - Success
 - `1` - Error (validation errors, `--strict` mode warnings, file not found, parse failure)
 - `2` - Invalid CLI arguments
@@ -124,27 +125,27 @@ sql-splitter redact dump.sql -o safe.sql \
 
 ## Redaction Strategies
 
-| Strategy   | Description                  | Use Case                  |
-| ---------- | ---------------------------- | ------------------------- |
-| `null`     | Replace with NULL            | Remove data entirely      |
-| `hash`     | SHA256 hash ([deterministic](/reference/glossary#deterministic))  | Preserve [FK](/reference/glossary#foreign-key-fk) relationships |
-| `fake`     | Generate realistic fake data | Realistic test data       |
-| `mask`     | Partial masking              | Credit cards, SSNs        |
-| `constant` | Fixed value                  | Placeholder values        |
-| `shuffle`  | Redistribute values          | Preserve distribution     |
-| `skip`     | No redaction                 | Passthrough               |
+| Strategy   | Description                                                      | Use Case                                                        |
+| ---------- | ---------------------------------------------------------------- | --------------------------------------------------------------- |
+| `null`     | Replace with NULL                                                | Remove data entirely                                            |
+| `hash`     | SHA256 hash ([deterministic](/reference/glossary#deterministic)) | Preserve [FK](/reference/glossary#foreign-key-fk) relationships |
+| `fake`     | Generate realistic fake data                                     | Realistic test data                                             |
+| `mask`     | Partial masking                                                  | Credit cards, SSNs                                              |
+| `constant` | Fixed value                                                      | Placeholder values                                              |
+| `shuffle`  | Redistribute values                                              | Preserve distribution                                           |
+| `skip`     | No redaction                                                     | Passthrough                                                     |
 
 ## Column Pattern Matching
 
 Patterns use `table.column` format with `*` as a wildcard:
 
-| Pattern | Matches |
-| ------- | ------- |
-| `*.email` | `email` column in any table (`users.email`, `orders.contact_email`) |
-| `users.email` | Only the `email` column in the `users` table |
-| `users.*` | All columns in the `users` table |
-| `*.ssn` | Any column named `ssn` in any table |
-| `audit_*.created_by` | `created_by` in tables starting with `audit_` |
+| Pattern              | Matches                                                             |
+| -------------------- | ------------------------------------------------------------------- |
+| `*.email`            | `email` column in any table (`users.email`, `orders.contact_email`) |
+| `users.email`        | Only the `email` column in the `users` table                        |
+| `users.*`            | All columns in the `users` table                                    |
+| `*.ssn`              | Any column named `ssn` in any table                                 |
+| `audit_*.created_by` | `created_by` in tables starting with `audit_`                       |
 
 Patterns are matched in order—first matching rule wins.
 
@@ -190,6 +191,7 @@ sql-splitter redact dump.sql --generate-config -o redact.yaml
 ```
 
 **Detected patterns include:**
+
 - Email: `*email*`, `*e_mail*`
 - Phone: `*phone*`, `*mobile*`, `*tel*`
 - Names: `*name*`, `*first_name*`, `*last_name*`
@@ -207,7 +209,7 @@ locale: en
 
 rules:
   - column: "*.ssn"
-    strategy: "null"   # quote it—unquoted null is a YAML null value
+    strategy: "null" # quote it—unquoted null is a YAML null value
   - column: "*.email"
     strategy: hash
   - column: "*.name"
@@ -276,6 +278,7 @@ sql-splitter convert safe.sql -o postgres.sql --to postgres
 **Cause:** Only one side of a relationship was hashed, or different patterns matched parent and child columns.
 
 **Solutions:**
+
 1. Ensure both sides use the same pattern: `--hash "*.user_id"` matches in all tables
 2. Use explicit patterns for both: `--hash "users.id" --hash "orders.user_id"`
 3. Verify with: `sql-splitter validate redacted.sql`
@@ -287,6 +290,7 @@ sql-splitter convert safe.sql -o postgres.sql --to postgres
 **Cause:** No `--seed` specified (random seed each run), or same original values produce same fake values (by design).
 
 **Solutions:**
+
 1. Use `--seed` for reproducible output: `--seed 42`
 2. Same original value → same fake value is intentional (preserves consistency)
 3. For truly random fake data each run, omit `--seed`
@@ -298,6 +302,7 @@ sql-splitter convert safe.sql -o postgres.sql --to postgres
 **Cause:** Pattern doesn't match the actual table.column name, or an earlier rule with `skip` strategy matched first.
 
 **Solutions:**
+
 1. Check exact column names: `sql-splitter analyze dump.sql` shows all table/column names
 2. Use `--dry-run` to preview what would be redacted
 3. Remember patterns match in order—more specific patterns should come before `*.column` wildcards
@@ -310,6 +315,7 @@ sql-splitter convert safe.sql -o postgres.sql --to postgres
 **Cause:** YAML syntax errors, typos in strategy names, or invalid pattern format.
 
 **Solutions:**
+
 1. Validate before running: `--validate` flag
 2. Check strategy spelling: `null`, `hash`, `fake`, `mask`, `constant`, `shuffle`, `skip`
 3. Ensure patterns are quoted in YAML: `column: "*.email"` not `column: *.email`
@@ -322,6 +328,7 @@ sql-splitter convert safe.sql -o postgres.sql --to postgres
 **Cause:** Pattern doesn't match any columns in the dump (typo or columns don't exist).
 
 **Solutions:**
+
 1. Run `sql-splitter analyze dump.sql` to see actual column names
 2. Use `--strict` to fail on unmatched rules (catches config errors early)
 3. Check for schema changes since config was created

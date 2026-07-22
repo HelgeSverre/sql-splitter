@@ -12,6 +12,82 @@ use crate::parser::SqlDialect;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use super::warnings::{ConvertWarning, WarningCollector};
+
+/// Map a single column's `source_type` from `from` to `to`, reusing the same
+/// regex-driven rules [`TypeMapper::convert`] applies to a whole statement.
+///
+/// This is the seam the synthetic-data renderer (`render::ddl`) calls
+/// instead of maintaining its own generation-only type mapping: a column's
+/// `source_type` (e.g. `"VARCHAR(255)"`) is itself a valid input to
+/// [`TypeMapper::convert`], since every rule matches on the type token with
+/// word boundaries rather than requiring surrounding `CREATE TABLE` context.
+///
+/// Same-dialect conversions are the identity (returned as-is, no warning).
+/// A conversion that narrows a MySQL `ENUM`/`SET` to a plain string type
+/// records a [`ConvertWarning::LossyConversion`] so callers that surface
+/// warnings (e.g. `--emit-config`) can report it.
+pub(crate) fn map_column_type(
+    source_type: &str,
+    from: SqlDialect,
+    to: SqlDialect,
+    warnings: &mut WarningCollector,
+) -> String {
+    if from == to {
+        return source_type.to_string();
+    }
+    let mapped = TypeMapper::convert(source_type, from, to);
+    if is_narrowed_by_conversion(source_type, to) {
+        warnings.add(ConvertWarning::LossyConversion {
+            from_type: source_type.to_string(),
+            to_type: mapped.clone(),
+            table: None,
+            column: None,
+        });
+    }
+    mapped
+}
+
+/// Whether mapping `source_type` to the `to` dialect loses type semantics the
+/// target cannot preserve — a lossy conversion the caller should warn about (and
+/// fail under `--strict`):
+///
+/// * `ENUM`/`SET` have no equivalent outside MySQL and always collapse to a
+///   plain string, for every target dialect.
+/// * `JSON`/`JSONB` become an unvalidated text column on engines without a JSON
+///   type (SQLite, MSSQL).
+/// * `UUID`/`UNIQUEIDENTIFIER` lose their fixed 128-bit domain when stored as
+///   text (MySQL, SQLite).
+fn is_narrowed_by_conversion(source_type: &str, to: SqlDialect) -> bool {
+    let lower = source_type.to_lowercase();
+    if lower.contains("enum(") || lower.contains("set(") {
+        return true;
+    }
+    if lower.contains("json") && matches!(to, SqlDialect::Sqlite | SqlDialect::Mssql) {
+        return true;
+    }
+    if (lower.contains("uuid") || lower.contains("uniqueidentifier"))
+        && matches!(to, SqlDialect::MySql | SqlDialect::Sqlite)
+    {
+        return true;
+    }
+    // Exact fixed-point (DECIMAL/NUMERIC) becomes a binary float (REAL) on
+    // SQLite, silently losing precision.
+    if (lower.contains("decimal") || lower.contains("numeric")) && to == SqlDialect::Sqlite {
+        return true;
+    }
+    // A time-zone-bearing timestamp loses its zone when mapped to MySQL
+    // DATETIME (which has no tz). MSSQL keeps it via DATETIMEOFFSET, and the
+    // SQLite mapping renders TEXT that retains the zoned literal.
+    // ("without time zone" does not contain the substring "with time zone".)
+    if (lower.contains("timestamptz") || lower.contains("with time zone"))
+        && to == SqlDialect::MySql
+    {
+        return true;
+    }
+    false
+}
+
 /// Type mapper for converting between dialects
 pub struct TypeMapper;
 
@@ -720,3 +796,126 @@ static RE_ON_PRIMARY: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\s*ON\s*\[\s*PRIMARY\s*\]").unwrap());
 static RE_CLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bCLUSTERED\s+").unwrap());
 static RE_NONCLUSTERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNONCLUSTERED\s+").unwrap());
+
+#[cfg(test)]
+mod map_column_type_tests {
+    use super::*;
+
+    #[test]
+    fn same_dialect_is_identity_and_warning_free() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "VARCHAR(255)",
+            SqlDialect::MySql,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "VARCHAR(255)");
+        assert!(!warnings.has_warnings());
+    }
+
+    #[test]
+    fn cross_dialect_reuses_the_statement_level_regex_rules() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "BIGINT(20)",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "BIGINT");
+    }
+
+    #[test]
+    fn narrowing_enum_to_a_plain_string_records_a_lossy_warning() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "ENUM('a','b')",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "VARCHAR(255)");
+        assert!(warnings.has_warnings());
+        assert!(matches!(
+            warnings.warnings()[0],
+            ConvertWarning::LossyConversion { .. }
+        ));
+    }
+
+    #[test]
+    fn json_to_an_engine_without_a_json_type_is_lossy() {
+        let mut warnings = WarningCollector::new();
+        map_column_type("JSON", SqlDialect::MySql, SqlDialect::Sqlite, &mut warnings);
+        assert!(warnings.has_warnings());
+
+        // PostgreSQL keeps a native JSON type, so the same source is not lossy.
+        let mut kept = WarningCollector::new();
+        map_column_type("JSON", SqlDialect::MySql, SqlDialect::Postgres, &mut kept);
+        assert!(!kept.has_warnings());
+    }
+
+    #[test]
+    fn uuid_stored_as_text_is_lossy() {
+        let mut warnings = WarningCollector::new();
+        map_column_type(
+            "UUID",
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert!(warnings.has_warnings());
+
+        // MSSQL has UNIQUEIDENTIFIER, so a UUID keeps its native domain there.
+        let mut kept = WarningCollector::new();
+        map_column_type("UUID", SqlDialect::Postgres, SqlDialect::Mssql, &mut kept);
+        assert!(!kept.has_warnings());
+    }
+
+    #[test]
+    fn decimal_to_sqlite_real_is_lossy() {
+        // SQLite has no exact fixed-point type; the mapper renders DECIMAL as
+        // REAL (binary float), silently losing exact precision.
+        let mut warnings = WarningCollector::new();
+        map_column_type(
+            "DECIMAL(10,2)",
+            SqlDialect::MySql,
+            SqlDialect::Sqlite,
+            &mut warnings,
+        );
+        assert!(warnings.has_warnings());
+
+        // PostgreSQL keeps a native DECIMAL, so the same source is not lossy.
+        let mut kept = WarningCollector::new();
+        map_column_type(
+            "DECIMAL(10,2)",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut kept,
+        );
+        assert!(!kept.has_warnings());
+    }
+
+    #[test]
+    fn timestamptz_to_mysql_drops_the_timezone_and_is_lossy() {
+        // MySQL DATETIME has no time-zone component, so the tz is dropped.
+        let mut warnings = WarningCollector::new();
+        map_column_type(
+            "TIMESTAMPTZ",
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert!(warnings.has_warnings());
+
+        // MSSQL DATETIMEOFFSET preserves the time zone, so it is not lossy.
+        let mut kept = WarningCollector::new();
+        map_column_type(
+            "TIMESTAMPTZ",
+            SqlDialect::Postgres,
+            SqlDialect::Mssql,
+            &mut kept,
+        );
+        assert!(!kept.has_warnings());
+    }
+}

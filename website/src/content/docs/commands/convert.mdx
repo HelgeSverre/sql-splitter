@@ -136,10 +136,10 @@ The conversion **continues successfully** even when encountering unsupported fea
 
 These types are converted to the closest equivalent, with a warning:
 
-| Feature | Converted To | Notes |
-|---------|--------------|-------|
-| MySQL `ENUM('a','b','c')` | `VARCHAR(255)` (PostgreSQL/MSSQL) or `TEXT` (SQLite) | Enum values are lost; consider adding CHECK constraints manually |
-| PostgreSQL arrays (`INT[]`) | `JSON` (MySQL), `TEXT` (SQLite), `NVARCHAR(MAX)` (MSSQL) | Data format preserved as JSON string |
+| Feature                     | Converted To                                             | Notes                                                            |
+| --------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------- |
+| MySQL `ENUM('a','b','c')`   | `VARCHAR(255)` (PostgreSQL/MSSQL) or `TEXT` (SQLite)     | Enum values are lost; consider adding CHECK constraints manually |
+| PostgreSQL arrays (`INT[]`) | `JSON` (MySQL), `TEXT` (SQLite), `NVARCHAR(MAX)` (MSSQL) | Data format preserved as JSON string                             |
 
 ### Features that are skipped entirely
 
@@ -182,6 +182,7 @@ This is especially important for CI where you want to detect actual changes, not
 ### Wrong dialect auto-detected
 
 Force the source dialect explicitly:
+
 ```bash
 sql-splitter convert ambiguous.sql --from mysql --to postgres -o pg.sql
 ```

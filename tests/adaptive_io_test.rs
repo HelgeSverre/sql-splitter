@@ -3,8 +3,9 @@
 //! verification" sections 3 and 4).
 //!
 //! These tests read/write process-global env vars (`SQL_SPLITTER_*` hidden
-//! test seams), so they run behind a single mutex to stay safe under
-//! `cargo test`'s default multi-threaded-within-one-binary execution: other
+//! test seams), so they run behind a single mutex to stay safe when a runner
+//! executes them on multiple threads within one binary (as `cargo test` does;
+//! `cargo nextest run` isolates each test in its own process). Other
 //! integration test *files* are separate processes and are unaffected.
 
 use sha2::{Digest, Sha256};

@@ -9,12 +9,12 @@ sql-splitter is designed for high throughput with minimal memory usage.
 
 Tested on Apple M2 Max:
 
-| Metric                          | Value                                   |
-| ------------------------------- | --------------------------------------- |
-| End-to-end split                | ~1 GB/s (0.8–1.4 GB/s across dialects)  |
-| Split without a disk bottleneck | 1.6–2.4 GB/s (Docker tmpfs)             |
-| Memory usage                    | ~20–150 MB, independent of file size    |
-| Cold start                      | ~5 ms                                   |
+| Metric                          | Value                                  |
+| ------------------------------- | -------------------------------------- |
+| End-to-end split                | ~1 GB/s (0.8–1.4 GB/s across dialects) |
+| Split without a disk bottleneck | 1.6–2.4 GB/s (Docker tmpfs)            |
+| Memory usage                    | ~20–150 MB, independent of file size   |
+| Cold start                      | ~5 ms                                  |
 
 End-to-end split includes reading, parsing, and writing per-table output files
 (parsing and writing are pipelined across parallel writer threads). Real-world
@@ -24,10 +24,10 @@ becomes the limit before the parser does.
 
 ### Split Benchmark
 
-| File Size                | Time     | Throughput                     |
-| ------------------------ | -------- | ------------------------------ |
-| 124 MB (MySQL)           | 0.12s    | ~1.0 GB/s                      |
-| 248 MB (MySQL)           | 0.23s    | ~1.1 GB/s                      |
+| File Size                | Time     | Throughput                      |
+| ------------------------ | -------- | ------------------------------- |
+| 124 MB (MySQL)           | 0.12s    | ~1.0 GB/s                       |
+| 248 MB (MySQL)           | 0.23s    | ~1.1 GB/s                       |
 | 1 GB (MySQL, 100 tables) | 1.2–2.5s | 0.4–0.9 GB/s (disk-write bound) |
 
 ### Slow Output Devices (`--io-strategy`)
@@ -41,11 +41,11 @@ write profile.
 What we observed on one specific device (a 1TB Seagate USB 3.0 spinning drive,
 ExFAT, 124MB–3.8GB fixtures, reading and writing on the same spindle):
 
-| Profile               | Observed throughput             |
-| --------------------- | ------------------------------- |
-| `ssd` (SSD defaults)  | 22–43 MB/s                      |
-| `hdd` (pinned)        | 55–77 MB/s                      |
-| `auto`                | matched or beat pinned `hdd`    |
+| Profile              | Observed throughput          |
+| -------------------- | ---------------------------- |
+| `ssd` (SSD defaults) | 22–43 MB/s                   |
+| `hdd` (pinned)       | 55–77 MB/s                   |
+| `auto`               | matched or beat pinned `hdd` |
 
 These numbers are indicative for similar hardware, not a general claim —
 run-to-run variance of ±25% was observed on this drive alone, and different
@@ -57,12 +57,12 @@ writer thread count, the size of each write operation, and how much data is
 staged in memory between writes. Output is byte-identical in every profile;
 only the scheduling of bytes onto the device changes.
 
-| Profile       | Writer threads              | Write size            | Staging memory | Device class it's built for |
-| ------------- | --------------------------- | --------------------- | -------------- | --------------------------- |
-| `ssd`         | up to 4 (all cores when compressing) | 256 KB       | 32 MB          | SSD/NVMe: high IOPS and internal parallelism — many small concurrent writes keep the device's queues full |
-| `hdd`         | 1                           | 8 MB chunks, coalesced up to 64 MB | 256 MB | Spinning disks: parallel writers make the head seek between files, so one writer issues long sequential writes that amortize head movement |
-| `cheap`       | 1                           | 32 MB chunks, coalesced up to 64 MB | 512 MB | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible (alias: `potato` — we know what it is like out there) |
-| `auto` (default) | starts at 1, grows to `ssd`'s count if the device proves fast | adapts | adapts | Unknown targets: an 8 MB fsync probe picks the opening profile, then runtime backpressure monitoring switches between the rows above |
+| Profile          | Writer threads                                                | Write size                          | Staging memory | Device class it's built for                                                                                                                                                                                |
+| ---------------- | ------------------------------------------------------------- | ----------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ssd`            | up to 4 (all cores when compressing)                          | 256 KB                              | 32 MB          | SSD/NVMe: high IOPS and internal parallelism — many small concurrent writes keep the device's queues full                                                                                                  |
+| `hdd`            | 1                                                             | 8 MB chunks, coalesced up to 64 MB  | 256 MB         | Spinning disks: parallel writers make the head seek between files, so one writer issues long sequential writes that amortize head movement                                                                 |
+| `cheap`          | 1                                                             | 32 MB chunks, coalesced up to 64 MB | 512 MB         | Cheap USB flash and network filesystems: per-operation cost dominates regardless of access pattern, so issue the fewest, largest operations possible (alias: `potato` — we know what it is like out there) |
+| `auto` (default) | starts at 1, grows to `ssd`'s count if the device proves fast | adapts                              | adapts         | Unknown targets: an 8 MB fsync probe picks the opening profile, then runtime backpressure monitoring switches between the rows above                                                                       |
 
 Pin `hdd` for spinning disks or `cheap` for slow-per-operation devices
 when you already know the target; `ssd` pins today's defaults.

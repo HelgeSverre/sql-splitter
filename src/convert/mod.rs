@@ -25,6 +25,11 @@ use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 
 pub use types::TypeMapper;
+// Only `render::ddl` (lib-only; see the `copy_to_insert` re-export above for
+// the same bin/lib split) calls this, so the `bin` target's parallel module
+// tree sees it as unused.
+#[allow(unused_imports)]
+pub(crate) use types::map_column_type;
 pub use warnings::{print_warnings_summary, ConvertWarning, WarningCollector};
 
 /// Configuration for the convert command

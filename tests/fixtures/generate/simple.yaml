@@ -1,0 +1,109 @@
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+tables:
+  customers:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: customers
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: name, type: "varchar(100)", nullable: false }
+        - { name: balance, type: "decimal(10,2)", nullable: false }
+        - { name: notes, type: "varchar(255)", nullable: true }
+        - { name: metadata, type: json, nullable: true }
+        - { name: created_at, type: datetime, nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      name:
+        generator: { kind: string, min_length: 5, max_length: 12 }
+      balance:
+        generator: { kind: decimal, min: 0, max: 1000, scale: 2 }
+      notes:
+        generator: { kind: constant }
+      metadata:
+        generator: { kind: json_value, value: { active: true } }
+      created_at:
+        generator: { kind: datetime }
+  orders:
+    rows:
+      kind: relation.children
+      parent: customers
+      count: 15
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 1000000.0 }
+    schema:
+      name: orders
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+        - { name: total, type: "decimal(10,2)", nullable: false }
+        - { name: status, type: "varchar(20)", nullable: false, default_sql: "'pending'" }
+        - { name: subtotal, type: "decimal(12,2)", nullable: false }
+        - { name: tax_total, type: "decimal(12,2)", nullable: false }
+        - { name: grand_total, type: "decimal(12,2)", nullable: false }
+      indexes:
+        - { name: idx_orders_customer_id, columns: [customer_id] }
+      # schema-level FK: authoritative structural constraint that drives the
+      # rendered CREATE TABLE FOREIGN KEY. Distinct from the generation-level
+      # `relationships:` below (which drives FK VALUE selection). Both are
+      # intentional — do not delete one; they are different layers.
+      relationships:
+        - { name: fk_orders_customer, columns: [customer_id], referenced_table: customers, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      total:
+        generator: { kind: decimal, min: 5, max: 500, scale: 2 }
+      status:
+        generator: { kind: database_default }
+    relationships:
+      - { name: fk_orders_customer, columns: [customer_id], references: { table: customers, columns: [id] } }
+    # The commerce.order_family planner owns the order money aggregates and the
+    # order_items child line columns as one exact minor-unit family.
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: order_items_order
+        columns:
+          subtotal: subtotal
+          tax: tax_total
+          total: grand_total
+        child_columns:
+          quantity: quantity
+          unit_price: unit_price
+          tax: tax_amount
+          line_total: line_total
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: { min: 1, max: 4 }
+        unit_price: { min_minor: 100, max_minor: 20000 }
+        tax: { kind: fixed, rate: 0.08 }
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: { kind: fixed, mean: 3.0, min: 1.0, max: 8.0 }
+    schema:
+      name: order_items
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(12,2)", nullable: false }
+        - { name: tax_amount, type: "decimal(12,2)", nullable: false }
+        - { name: line_total, type: "decimal(12,2)", nullable: false }
+      relationships:
+        - { name: order_items_order, columns: [order_id], referenced_table: orders, referenced_columns: [id] }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      order_id:
+        generator: { kind: relation.foreign_key, relationship: order_items_order }
+    relationships:
+      - { name: order_items_order, columns: [order_id], references: { table: orders, columns: [id] } }

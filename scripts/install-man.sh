@@ -11,7 +11,7 @@ MAN_SOURCE="$PROJECT_DIR/man"
 # Check if man pages exist
 if [[ ! -d "$MAN_SOURCE" ]] || [[ -z "$(ls -A "$MAN_SOURCE" 2>/dev/null)" ]]; then
     echo "Man pages not found in $MAN_SOURCE"
-    echo "Run 'make man' first to generate them."
+    echo "Run 'just man' first to generate them."
     exit 0
 fi
 

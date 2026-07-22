@@ -1,0 +1,587 @@
+//! Tests for the public [`sql_splitter::generate::Generate`] builder: the
+//! single facade that wires config loading, compilation, generation, and
+//! rendering together for a complete model.
+
+use std::fs;
+
+use sql_splitter::diagnostic::{codes, Severity};
+use sql_splitter::generate::{
+    CompileOptions, Generate, GenerateError, RunMode, TableCountOverride,
+};
+use sql_splitter::parser::SqlDialect;
+use sql_splitter::synthetic::{RowsModel, SyntheticFile};
+
+const SIMPLE_MODEL: &str = "tests/fixtures/generate/simple.yaml";
+/// A complete model whose `output:` block pins the render dialect to postgres.
+const OUTPUT_POSTGRES_MODEL: &str = "tests/fixtures/generate/output_postgres.yaml";
+/// A pg_dump-style postgres source dump (declares its dialect via COPY/quoting).
+const POSTGRES_DUMP: &str = "tests/fixtures/generate/production_shape_postgres.sql";
+
+#[test]
+fn builder_generates_from_a_complete_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&output)
+        .seed(42)
+        .run()
+        .unwrap();
+    assert!(report.rows_written > 0);
+    assert!(fs::read_to_string(output).unwrap().contains("INSERT INTO"));
+}
+
+// Dialect resolution precedence: CLI/builder `output_dialect` > model
+// `output.dialect` > source/input dialect (preserve-source) > MySQL fallback.
+
+/// (a) A model with `output: { dialect: postgres }` and NO `output_dialect`
+/// renders POSTGRES (postgres `COPY`, not a MySQL `INSERT INTO`).
+#[test]
+fn model_output_dialect_drives_the_rendered_dialect() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    Generate::builder()
+        .config(OUTPUT_POSTGRES_MODEL)
+        .output(&output)
+        .seed(42)
+        .run()
+        .unwrap();
+    let sql = fs::read_to_string(&output).unwrap();
+    assert!(sql.contains("COPY "), "expected postgres COPY, got: {sql}");
+    assert!(
+        !sql.contains("INSERT INTO"),
+        "expected no MySQL-shaped INSERT, got: {sql}"
+    );
+}
+
+/// (b) Profiling a postgres-dialect dump with NO `output_dialect` renders
+/// POSTGRES — the render dialect is preserved from the source dump.
+#[test]
+fn profiling_preserves_the_source_dialect() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    Generate::builder()
+        .input(POSTGRES_DUMP)
+        .output(&output)
+        .seed(42)
+        .run()
+        .unwrap();
+    let sql = fs::read_to_string(&output).unwrap();
+    assert!(
+        sql.contains("COPY "),
+        "expected postgres COPY (preserve-source), got: {sql}"
+    );
+    assert!(
+        !sql.contains("INSERT INTO"),
+        "expected no MySQL-shaped INSERT, got: {sql}"
+    );
+}
+
+/// (c) An explicit `output_dialect(mysql)` OVERRIDES a model's
+/// `output: { dialect: postgres }` → MySQL output.
+#[test]
+fn explicit_output_dialect_overrides_the_model_output_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    Generate::builder()
+        .config(OUTPUT_POSTGRES_MODEL)
+        .output(&output)
+        .output_dialect(SqlDialect::MySql)
+        .seed(42)
+        .run()
+        .unwrap();
+    let sql = fs::read_to_string(&output).unwrap();
+    assert!(
+        sql.contains("INSERT INTO"),
+        "explicit --dialect mysql should win over the model's postgres output: {sql}"
+    );
+    assert!(
+        !sql.contains("COPY "),
+        "expected no postgres COPY once mysql is forced, got: {sql}"
+    );
+}
+
+/// (d) A model with no `output:` block, no source dialect, and no
+/// `output_dialect` still defaults to MySQL (the unchanged fallback).
+#[test]
+fn no_output_block_no_source_no_dialect_defaults_to_mysql() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&output)
+        .seed(42)
+        .run()
+        .unwrap();
+    let sql = fs::read_to_string(&output).unwrap();
+    assert!(
+        sql.contains("INSERT INTO"),
+        "expected the MySQL-shaped default, got: {sql}"
+    );
+    assert!(
+        !sql.contains("COPY "),
+        "expected no postgres COPY, got: {sql}"
+    );
+}
+
+#[test]
+fn same_seed_reproduces_identical_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let first_path = dir.path().join("first.sql");
+    let second_path = dir.path().join("second.sql");
+
+    Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&first_path)
+        .seed(7)
+        .run()
+        .unwrap();
+    Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&second_path)
+        .seed(7)
+        .run()
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(first_path).unwrap(),
+        fs::read_to_string(second_path).unwrap()
+    );
+}
+
+#[test]
+fn filtered_child_override_emit_reloads_to_identical_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("model.yaml");
+    let resolved = dir.path().join("resolved.yaml");
+    let first = dir.path().join("first.sql");
+    let second = dir.path().join("second.sql");
+    fs::write(
+        &config,
+        r#"version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+tables:
+  parents:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: parents
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+  children:
+    rows:
+      kind: relation.children
+      parent: parents
+      count: 4
+      distribution: { kind: fixed, mean: 2.0, min: 0.0, max: 100.0 }
+    schema:
+      name: children
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - { name: children_parent, columns: [parent_id], referenced_table: parents, referenced_columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      parent_id: { generator: { kind: relation.foreign_key, relationship: children_parent } }
+    relationships:
+      - { name: children_parent, columns: [parent_id], references: { table: parents, columns: [id] } }
+  audit:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: audit
+      columns:
+        - { name: id, type: bigint, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+"#,
+    )
+    .unwrap();
+
+    Generate::builder()
+        .config(&config)
+        .output(&first)
+        .emit(&resolved)
+        .compile(CompileOptions {
+            table_rows: vec![TableCountOverride::rows("children", 7)],
+            exclude: vec!["audit".into()],
+            ..Default::default()
+        })
+        .run()
+        .unwrap();
+    Generate::builder()
+        .config(&resolved)
+        .output(&second)
+        .run()
+        .unwrap();
+
+    let emitted = fs::read_to_string(&resolved).unwrap();
+    assert!(
+        !emitted.contains("  audit:"),
+        "excluded table leaked: {emitted}"
+    );
+    let emitted_model = SyntheticFile::parse_str(&emitted)
+        .unwrap()
+        .into_model()
+        .unwrap();
+    assert!(matches!(
+        emitted_model.tables["children"].rows,
+        RowsModel::Fixed { count: 7 }
+    ));
+    assert_eq!(
+        fs::read_to_string(first).unwrap(),
+        fs::read_to_string(second).unwrap(),
+        "the emitted child override must be authoritative on reload"
+    );
+}
+
+#[test]
+fn order_family_emit_reloads_to_byte_identical_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolved = dir.path().join("resolved.yaml");
+    let first = dir.path().join("first.sql");
+    let second = dir.path().join("second.sql");
+
+    let first_report = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&first)
+        .emit(&resolved)
+        .seed(7)
+        .run()
+        .unwrap();
+    let second_report = Generate::builder()
+        .config(&resolved)
+        .output(&second)
+        .run()
+        .unwrap();
+
+    assert_eq!(first_report.rows_written, 65);
+    assert_eq!(second_report.rows_written, 65);
+    assert_eq!(
+        fs::read(&first).unwrap(),
+        fs::read(&second).unwrap(),
+        "the emitted model must retain the order-family child distribution"
+    );
+    let emitted = fs::read_to_string(&resolved).unwrap();
+    assert!(
+        emitted.contains("kind: relation.children"),
+        "family child row facts were erased: {emitted}"
+    );
+}
+
+#[test]
+fn check_mode_compiles_but_writes_no_sql() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&output)
+        .mode(RunMode::Check)
+        .run()
+        .unwrap();
+    assert_eq!(report.rows_written, 0);
+    assert!(!output.exists());
+}
+
+#[test]
+fn dry_run_mode_reports_the_plan_without_writing_sql() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&output)
+        .mode(RunMode::DryRun)
+        .run()
+        .unwrap();
+    assert!(report.rows_written > 0);
+    assert!(!output.exists());
+}
+
+#[test]
+fn output_staging_failure_preserves_an_existing_emitted_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_output = dir.path().join("resolved.yaml");
+    fs::write(&model_output, "previous model\n").unwrap();
+
+    let err = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(dir.path().join("missing").join("synthetic.sql"))
+        .emit(&model_output)
+        .run()
+        .unwrap_err();
+
+    assert!(matches!(err, GenerateError::Diagnostic(_)));
+    assert_eq!(
+        fs::read_to_string(model_output).unwrap(),
+        "previous model\n"
+    );
+}
+
+#[test]
+fn sql_and_model_outputs_cannot_publish_to_the_same_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("synthetic.out");
+    fs::write(&destination, "previous bytes\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&destination)
+        .emit(&destination)
+        .run()
+        .expect_err("SQL and model outputs must not overwrite each other");
+
+    assert!(matches!(error, GenerateError::Diagnostic(_)));
+    assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");
+}
+
+#[test]
+fn relative_and_absolute_output_aliases_cannot_publish_to_the_same_destination() {
+    let cwd = std::env::current_dir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("generate-output-alias-")
+        .tempdir_in(&cwd)
+        .unwrap();
+    let destination = dir.path().join("synthetic.out");
+    let relative = destination.strip_prefix(&cwd).unwrap();
+    fs::write(&destination, "previous bytes\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(relative)
+        .emit(&destination)
+        .run()
+        .expect_err("relative and absolute aliases must be rejected before staging");
+
+    assert!(matches!(error, GenerateError::Diagnostic(_)));
+    assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");
+}
+
+#[test]
+fn parent_component_output_aliases_cannot_publish_to_the_same_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let alias_component = dir.path().join("alias-component");
+    fs::create_dir(&alias_component).unwrap();
+    let destination = dir.path().join("synthetic.out");
+    let alias = alias_component.join("..").join("synthetic.out");
+    fs::write(&destination, "previous bytes\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&alias)
+        .emit(&destination)
+        .run()
+        .expect_err("parent-component aliases must be rejected before staging");
+
+    assert!(matches!(error, GenerateError::Diagnostic(_)));
+    assert_eq!(fs::read_to_string(destination).unwrap(), "previous bytes\n");
+}
+
+#[test]
+fn runtime_failure_preserves_existing_sql_and_emitted_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("overflow.yaml");
+    let sql_output = dir.path().join("synthetic.sql");
+    let model_output = dir.path().join("resolved.yaml");
+    fs::write(
+        &config,
+        format!(
+            r#"version: 1
+kind: model
+defaults: {{ inference: disabled }}
+tables:
+  values:
+    rows: {{ kind: fixed, count: 3 }}
+    schema:
+      name: values
+      columns:
+        - {{ name: value, type: bigint, nullable: false }}
+    columns:
+      value:
+        generator: {{ kind: sequence, start: "{}", step: 1 }}
+"#,
+            i128::MAX - 1
+        ),
+    )
+    .unwrap();
+    fs::write(&sql_output, "previous SQL\n").unwrap();
+    fs::write(&model_output, "previous model\n").unwrap();
+
+    let err = Generate::builder()
+        .config(&config)
+        .output(&sql_output)
+        .emit(&model_output)
+        .run()
+        .unwrap_err();
+
+    assert!(matches!(err, GenerateError::Overflow(_)));
+    assert_eq!(fs::read_to_string(sql_output).unwrap(), "previous SQL\n");
+    assert_eq!(
+        fs::read_to_string(model_output).unwrap(),
+        "previous model\n"
+    );
+}
+
+#[test]
+fn a_warning_surfaces_in_the_report_on_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&output)
+        .compile(CompileOptions {
+            max_rows: Some(2),
+            ..Default::default()
+        })
+        .run()
+        .unwrap();
+
+    assert!(report
+        .diagnostics
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "GEN-MAX-ROWS-CAPPED"
+            && diagnostic.severity == Severity::Warning));
+}
+
+#[test]
+fn strict_compile_warning_preserves_existing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let sql_output = dir.path().join("synthetic.sql");
+    let model_output = dir.path().join("resolved.yaml");
+    fs::write(&sql_output, "previous SQL\n").unwrap();
+    fs::write(&model_output, "previous model\n").unwrap();
+
+    let error = Generate::builder()
+        .config(SIMPLE_MODEL)
+        .output(&sql_output)
+        .emit(&model_output)
+        .compile(CompileOptions {
+            max_rows: Some(2),
+            ..Default::default()
+        })
+        .strict(true)
+        .run()
+        .expect_err("strict must promote the max-rows warning before publication");
+
+    assert!(matches!(error, GenerateError::Diagnostics(_)));
+    assert_eq!(fs::read_to_string(sql_output).unwrap(), "previous SQL\n");
+    assert_eq!(
+        fs::read_to_string(model_output).unwrap(),
+        "previous model\n"
+    );
+}
+
+#[test]
+fn overrides_without_a_base_model_is_a_clear_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let overrides_path = dir.path().join("overrides.yaml");
+    fs::write(
+        &overrides_path,
+        r#"
+version: 1
+kind: overrides
+"#,
+    )
+    .unwrap();
+
+    let err = Generate::builder()
+        .config(&overrides_path)
+        .output(dir.path().join("out.sql"))
+        .run()
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        GenerateError::Diagnostic(diagnostic)
+            if diagnostic.code == codes::OVERRIDES_NO_BASE.code
+    ));
+}
+
+#[test]
+fn missing_input_and_config_is_a_clear_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = Generate::builder()
+        .output(dir.path().join("out.sql"))
+        .run()
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        GenerateError::Diagnostic(diagnostic)
+            if diagnostic.code == codes::REQUEST_SOURCE.code
+    ));
+}
+
+#[test]
+fn generate_mode_without_output_is_a_shape_error() {
+    let err = Generate::builder().config(SIMPLE_MODEL).run().unwrap_err();
+    assert!(matches!(
+        err,
+        GenerateError::Diagnostic(diagnostic)
+            if diagnostic.code == codes::REQUEST_OUTPUT.code
+    ));
+}
+
+/// A synthetic MySQL dump reproducing three everyday shapes (invented names
+/// and values) found in real dumps.
+const REALWORLD_SHAPES_DUMP: &str = "tests/fixtures/generate/realworld_shapes.sql";
+const MSSQL_PRODUCTION_SHAPE_DUMP: &str = "tests/fixtures/generate/production_shape_mssql.sql";
+
+/// Regression for common real-world shapes: a MySQL dump using the
+/// Laravel/MySQL 8 shapes must profile, infer, compile, and generate end to
+/// end. Each of these previously aborted the run with a `GEN-GENERATOR-TYPE`
+/// error:
+///   - `bigint/int/tinyint unsigned` columns (MySQL 8 omits the display width)
+///     were classified `Other` and mis-assigned `sequence`/`string` generators;
+///   - a 0/1 `tinyint(1)` boolean-by-convention column got a `boolean`
+///     generator the compiler rejected on the integer-family column;
+///   - a `binary(16)` hash column whose name matched a semantic text rule got a
+///     Text-only generator it could not accept as a UUID-family column.
+#[test]
+fn real_world_mysql_shapes_generate_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .input(REALWORLD_SHAPES_DUMP)
+        .output(&output)
+        .seed(42)
+        .run()
+        .expect("real-world MySQL shapes must generate without a GEN-GENERATOR-TYPE error");
+
+    assert!(!report.diagnostics.has_errors());
+    assert!(report.rows_written > 0);
+
+    let sql = fs::read_to_string(&output).unwrap();
+    assert!(sql.contains("INSERT INTO"), "expected row data, got: {sql}");
+    // The 0/1 `tinyint(1)` column is integer-family, so the boolean-by-
+    // convention rule must render it as `0`/`1`, never a native boolean literal.
+    assert!(
+        !sql.contains("TRUE") && !sql.contains("FALSE"),
+        "integer boolean-by-convention column must render 0/1, got: {sql}"
+    );
+}
+
+/// Regression: MSSQL Unicode text and bit columns must retain usable portable
+/// type families so semantic inference can compile the profiled model.
+#[test]
+fn mssql_dump_generates_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("synthetic.sql");
+    let report = Generate::builder()
+        .input(MSSQL_PRODUCTION_SHAPE_DUMP)
+        .output(&output)
+        .seed(42)
+        .run()
+        .expect("MSSQL NVARCHAR and BIT columns must compile with inferred generators");
+
+    assert!(!report.diagnostics.has_errors());
+    assert_eq!(report.rows_written, 11);
+    assert!(
+        fs::read_to_string(output).unwrap().contains("INSERT INTO"),
+        "expected generated MSSQL row data"
+    );
+}

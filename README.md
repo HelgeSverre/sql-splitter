@@ -41,7 +41,7 @@ Optional features:
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install  # Installs binary + shell completions + man pages
+just install  # Installs binary + shell completions + man pages
 ```
 
 Or download pre-built binaries from [GitHub Releases](https://github.com/helgesverre/sql-splitter/releases).
@@ -55,7 +55,7 @@ For `cargo install` users, install man pages manually:
 ```bash
 git clone https://github.com/helgesverre/sql-splitter
 cd sql-splitter
-make install-man
+just install-man
 ```
 
 ## Usage
@@ -162,6 +162,24 @@ sql-splitter redact dump.sql --generate-config -o redact.yaml
 # Reproducible redaction with seed
 sql-splitter redact dump.sql -o safe.sql --null "*.password" --seed 42
 
+# Generate synthetic SQL directly from a dump (profile, infer, generate)
+sql-splitter generate production.sql -o synthetic.sql
+
+# Emit an editable model instead of SQL, then generate from it later
+sql-splitter generate production.sql --emit-config synthetic.yaml
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+
+# Generate from a model only, no source dump
+sql-splitter generate --config synthetic.yaml -o synthetic.sql
+
+# Apply overrides, freeze the resolved model, and scale row counts
+sql-splitter generate production.sql --config overrides.yaml \
+  --emit-config resolved.yaml --scale 0.1 -o synthetic.sql
+
+# Validate a model, or generate/audit/publish atomically
+sql-splitter generate --config synthetic.yaml --check
+sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql
+
 # Generate ERD (Entity-Relationship Diagram)
 sql-splitter graph dump.sql -o schema.html        # Interactive HTML (default)
 sql-splitter graph dump.sql -o schema.dot         # Graphviz DOT format
@@ -194,7 +212,7 @@ sql-splitter query dump.sql "SELECT ..." --cache  # Cache imported database
 sql-splitter query --list-cache                   # Show cached databases
 sql-splitter query --clear-cache                  # Clear all cached databases
 
-# Generate shell completions (auto-installed with make install)
+# Generate shell completions (auto-installed with just install)
 sql-splitter completions bash >> ~/.bashrc
 sql-splitter completions zsh >> ~/.zshrc
 sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
@@ -202,14 +220,14 @@ sql-splitter completions fish >> ~/.config/fish/completions/sql-splitter.fish
 
 ### Shell Completions
 
-Shell completions are automatically installed when using `make install`. For manual installation:
+Shell completions are automatically installed when using `just install`. For manual installation:
 
 ```bash
 # Install for current shell only
-make install-completions
+just install-completions
 
 # Install for all shells (bash, zsh, fish)
-make install-completions-all
+just install-completions-all
 ```
 
 ## Why sql-splitter?
@@ -517,6 +535,42 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 `email`, `name`, `first_name`, `last_name`, `phone`, `address`, `city`, `state`, `zip`, `country`, `company`, `job_title`, `username`, `url`, `ip`, `ipv6`, `uuid`, `date`, `datetime`, `credit_card`, `iban`, `ssn`, `lorem`, `paragraph`, `sentence`
 
+### Generate Options
+
+`generate` produces **synthetic**, not anonymized, SQL data — from a hand-authored YAML model, a profiled dump, or both. See the [complete generate documentation](https://sql-splitter.dev/commands/generate/) for the model language, generator/modifier/planner catalogs, inference, privacy, verification, diagnostics, and library API.
+
+| Flag                            | Description                                                                                  | Default               |
+| ------------------------------- | -------------------------------------------------------------------------------------------- | --------------------- |
+| `[INPUT]`                       | SQL dump or schema to profile (optional with a complete model)                               | —                     |
+| `-c, --config`                  | `kind: model` or `kind: overrides` YAML document                                             | —                     |
+| `--emit-config`                 | Write the resolved model as YAML instead of generating                                       | —                     |
+| `-o, --output`                  | Output SQL file; `-` for stdout                                                              | stdout                |
+| `--profile-depth`               | Profiling depth: `basic`, `full`                                                             | `basic`               |
+| `--profile-sample`              | Retained sample capacity per column while profiling                                          | `1000`                |
+| `--input-dialect`               | Dialect of `[INPUT]`, if profiling                                                           | auto-detect           |
+| `--dialect`                     | Output SQL dialect                                                                           | preserve source/model |
+| `--scale`                       | Global multiplicative row-count scale                                                        | —                     |
+| `--rows`                        | Global absolute root row count                                                               | —                     |
+| `--table-rows`                  | Per-table absolute row-count override (`table=count`, repeatable)                            | —                     |
+| `--table-scale`                 | Per-table row-count scale override (`table=factor`, repeatable)                              | —                     |
+| `--max-rows`                    | Cap applied to every table's row count, last                                                 | —                     |
+| `--tables`                      | Only generate these tables (comma-separated globs)                                           | all                   |
+| `--exclude`                     | Exclude these tables (comma-separated globs)                                                 | none                  |
+| `--seed`                        | Run root seed, overriding the model's own `seed:`                                            | —                     |
+| `--randomize`                   | Use a fresh random seed instead of the model's                                               | —                     |
+| `--schema-only` / `--data-only` | Render only DDL, or only row data                                                            | both                  |
+| `--batch-size`                  | Rows per `INSERT`/`COPY` batch                                                               | `1000`                |
+| `--no-copy`                     | Force multi-row `INSERT` for PostgreSQL instead of `COPY`                                    | —                     |
+| `--mssql-production-style`      | `[dbo].` names, named clustered PK, `ON [PRIMARY]`, ANSI header (requires `--dialect mssql`) | —                     |
+| `--mssql-go`                    | Emit `GO` every N INSERT batches (requires `--dialect mssql`)                                | —                     |
+| `--check`                       | Validate the model and exit; writes no SQL                                                   | —                     |
+| `--dry-run`                     | Compile and report resolved row counts; writes no SQL                                        | —                     |
+| `--verify`                      | Generate to protected temp storage, audit, then publish atomically                           | —                     |
+| `--explain`                     | Include inference reason/confidence/precedence in the report                                 | —                     |
+| `--strict`                      | Treat model warnings as errors                                                               | —                     |
+| `--json`                        | Output the report as JSON (owns stdout)                                                      | —                     |
+| `--quiet`                       | Suppress the non-JSON summary report                                                         | —                     |
+
 ### Query Options
 
 | Flag                | Description                                           | Default     |
@@ -553,17 +607,17 @@ See [BENCHMARKS.md](BENCHMARKS.md) for detailed comparisons.
 
 ```bash
 # Unit tests
-cargo test
+cargo nextest run
 
 # Verify against real-world SQL dumps (MySQL, PostgreSQL, WordPress, etc.)
-make verify-realworld
+just verify-realworld
 ```
 
 ## AI Agent Integration
 
 sql-splitter includes documentation optimized for AI agents:
 
-- **[llms.txt](website/llms.txt)** - LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification
+- **[llms.txt](https://sql-splitter.dev/llms.txt)** - Generated LLM-friendly documentation following the [llmstxt.org](https://llmstxt.org) specification
 - **[Agent Skill](skills/sql-splitter/SKILL.md)** - Claude Code / Amp skill for automatic tool discovery
 
 Install the skill in Claude Code / Amp:

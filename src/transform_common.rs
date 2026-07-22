@@ -15,12 +15,10 @@
 //!   value conversion
 
 use crate::parser::mysql_insert::{
-    parse_insert_rows_with, FkRef, ParsedRow, PkTuple, PkValue, RowExtraction,
+    parse_insert_tuple, FkRef, InsertRowContext, ParsedRow, PkTuple, PkValue, RowExtraction,
 };
-use crate::parser::postgres_copy::{
-    parse_copy_columns, parse_postgres_copy_rows_with, ParsedCopyRow,
-};
-use crate::parser::{ContentFilter, Parser, SqlDialect, StatementType};
+use crate::parser::postgres_copy::{parse_copy_columns, CopyParser, ParsedCopyRow};
+use crate::parser::{ContentFilter, Parser, ParserEvent, SqlDialect};
 use crate::schema::{SchemaBuilder, SchemaGraph, TableSchema};
 use crate::splitter::{Splitter, Stats as SplitStats};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -100,15 +98,10 @@ impl UnifiedRow {
     }
 }
 
-/// Control flow signal returned by [`for_each_data_row`] callbacks.
-pub enum RowFlow {
-    /// Keep iterating.
-    Continue,
-    /// Skip the remaining rows of the current statement.
-    SkipStatement,
-    /// Stop the walk entirely.
-    Stop,
-}
+// The row/event control-flow signal now lives in the parser layer so the
+// streaming row visitors and `Parser::visit_events` can share it; re-exported
+// here so the sample/shard consumers keep their existing import path.
+pub use crate::parser::RowFlow;
 
 /// Returns true if `stmt` is a PostgreSQL COPY data block (ends with the
 /// `\.` terminator).
@@ -133,48 +126,49 @@ where
 {
     let file = File::open(table_file)?;
     let mut parser = Parser::with_dialect(file, 64 * 1024, dialect);
-    let mut copy_columns: Vec<String> = Vec::new();
 
-    while let Some(stmt) = parser.read_statement()? {
-        let (stmt_type, _) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+    // Per-statement/block context, rebuilt lazily as headers arrive so each
+    // streamed row is parsed with the same column mapping the collecting parser
+    // would have used — but only the current row is ever materialized.
+    let mut insert_ctx: Option<InsertRowContext> = None;
+    let mut copy_ctx: Option<(CopyParser<'_>, bool)> = None;
 
-        match stmt_type {
-            StatementType::Insert => {
-                let rows = parse_insert_rows_with(&stmt, table_schema, dialect, extraction)?;
-                for row in rows {
-                    match f(UnifiedRow::Insert(row))? {
-                        RowFlow::Continue => {}
-                        RowFlow::SkipStatement => break,
-                        RowFlow::Stop => return Ok(()),
-                    }
-                }
+    parser.visit_events(|event| match event {
+        // DDL/control statements carry no data rows here.
+        ParserEvent::Statement(_) => Ok(RowFlow::Continue),
+        ParserEvent::InsertRow {
+            header,
+            row,
+            first_in_statement,
+        } => {
+            if first_in_statement || insert_ctx.is_none() {
+                insert_ctx = Some(InsertRowContext::from_header(header, table_schema));
             }
-            StatementType::Copy => {
-                let header = String::from_utf8_lossy(&stmt);
-                copy_columns = parse_copy_columns(&header);
+            let ctx = insert_ctx.as_ref().expect("insert_ctx set above");
+            match parse_insert_tuple(row, table_schema, ctx, dialect, extraction) {
+                Some(parsed) => f(UnifiedRow::Insert(parsed)),
+                None => Ok(RowFlow::Continue),
             }
-            StatementType::Unknown
-                if dialect == SqlDialect::Postgres && is_copy_data_block(&stmt) =>
-            {
-                let rows = parse_postgres_copy_rows_with(
-                    &stmt,
-                    table_schema,
-                    copy_columns.clone(),
-                    extraction,
-                )?;
-                for row in rows {
-                    match f(UnifiedRow::Copy(row))? {
-                        RowFlow::Continue => {}
-                        RowFlow::SkipStatement => break,
-                        RowFlow::Stop => return Ok(()),
-                    }
-                }
-            }
-            _ => {}
         }
-    }
-
-    Ok(())
+        ParserEvent::CopyStart(header) => {
+            let columns = parse_copy_columns(&String::from_utf8_lossy(header));
+            let (parser, empty_line_is_row) = CopyParser::new(&[])
+                .with_schema(table_schema)
+                .with_column_order(columns)
+                .with_extraction(extraction)
+                .prepared();
+            copy_ctx = Some((parser, empty_line_is_row));
+            Ok(RowFlow::Continue)
+        }
+        ParserEvent::CopyRow(line) => match copy_ctx.as_ref() {
+            Some((cp, empty_line_is_row)) => match cp.parse_line(line, *empty_line_is_row) {
+                Some(parsed) => f(UnifiedRow::Copy(parsed)),
+                None => Ok(RowFlow::Continue),
+            },
+            None => Ok(RowFlow::Continue),
+        },
+        ParserEvent::CopyEnd => Ok(RowFlow::Continue),
+    })
 }
 
 /// Writer for spilling selected rows to a temp file with bounded memory.
@@ -329,10 +323,12 @@ pub fn build_schema_graph(tables_dir: &Path, dialect: SqlDialect) -> anyhow::Res
 
 /// Quote an identifier for the given dialect.
 pub fn quote_ident(dialect: SqlDialect, name: &str) -> String {
+    // Double any occurrence of the closing delimiter so an identifier can never
+    // terminate its own quoting early (malformed / injectable SQL otherwise).
     match dialect {
-        SqlDialect::MySql => format!("`{}`", name),
-        SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name),
-        SqlDialect::Mssql => format!("[{}]", name),
+        SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
+        SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
+        SqlDialect::Mssql => format!("[{}]", name.replace(']', "]]")),
     }
 }
 
@@ -545,6 +541,16 @@ mod tests {
         assert_eq!(quote_ident(SqlDialect::Postgres, "t"), "\"t\"");
         assert_eq!(quote_ident(SqlDialect::Sqlite, "t"), "\"t\"");
         assert_eq!(quote_ident(SqlDialect::Mssql, "t"), "[t]");
+    }
+
+    #[test]
+    fn quote_ident_escapes_the_closing_delimiter() {
+        // A delimiter character inside an identifier must be doubled so it cannot
+        // terminate the quoted identifier early (malformed / injectable SQL).
+        assert_eq!(quote_ident(SqlDialect::MySql, "a`b"), "`a``b`");
+        assert_eq!(quote_ident(SqlDialect::Postgres, "a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident(SqlDialect::Sqlite, "a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident(SqlDialect::Mssql, "a]b"), "[a]]b]");
     }
 
     #[test]

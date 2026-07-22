@@ -1,0 +1,72 @@
+---
+title: Relationship generators
+description: Assign ordinary and composite foreign-key values from parent key domains
+sidebar:
+  order: 5
+---
+
+Relationship generators are compiler markers. The generation engine assigns
+their values from a named table-level relationship; the generator object itself
+does not invent an independent value.
+
+## `relation.foreign_key`
+
+Alias: `foreign_key`. Use for a one-column relationship.
+
+## `relation.composite_key`
+
+Alias: `composite_key`. Use for all columns of a multi-column relationship. The
+relationship is selected atomically, so its components refer to the same parent
+row.
+
+Both accept integer, big-integer, text, UUID, and other key families.
+
+| Argument       | Default                         | Meaning                                            |
+| -------------- | ------------------------------- | -------------------------------------------------- |
+| `relationship` | inferred when unambiguous       | Name from the table's `relationships` list         |
+| `distribution` | relationship/default policy     | `uniform`, `sequential`, `weighted`, or `observed` |
+| `null_rate`    | relationship/nullability policy | Probability of a null reference, within `0..1`     |
+
+```yaml
+tables:
+  orders:
+    relationships:
+      - name: orders_customer
+        columns: [customer_id]
+        references: { table: customers, columns: [id] }
+        distribution: uniform
+    columns:
+      customer_id:
+        generator:
+          kind: relation.foreign_key
+          relationship: orders_customer
+```
+
+The local columns and referenced columns must exist and have compatible
+families. A non-nullable relationship cannot generate null references.
+
+## Parent key constraints
+
+The engine must reproduce a parent key by parent row index without retaining
+the whole parent table. Supported key domains are:
+
+- a bare integer identity/primary key;
+- `sequence`;
+- UUID.
+
+A parent key owned by another stateful or non-random-access generator emits
+`GEN-KEY-DOMAIN-UNSUPPORTED` at generation time.
+
+## When a planner is required
+
+Use a planner when correctness depends on more than selecting one ordinary
+parent row:
+
+- `hierarchy.tree` for bounded self-referential trees;
+- `relation.junction_pair` for unique left/right pairs;
+- `relation.polymorphic_pair` for atomic type/id pairs;
+- `relation.tenant_family` for tenant-consistent parent selection;
+- `commerce.order_family` for parent/line-item accounting equations.
+
+The `observed` relationship distribution currently uses a deterministic fixed
+root. Do not rely on it for fresh run-to-run variation.

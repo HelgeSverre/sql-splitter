@@ -1,12 +1,22 @@
+//! Synthetic data generation, plus the SQL dump splitting/transform tools
+//! this crate started as.
+//!
+//! For generating synthetic SQL data from a model, start at
+//! [`generate::Generate`] (a one-call builder) or the staged
+//! registry/compiler/engine/renderer API documented on [`generate`].
+
 pub mod analyzer;
 #[cfg(feature = "archive")]
 pub mod archive;
 pub mod cmd;
 pub mod convert;
 pub mod copy_data;
+pub mod diagnostic;
 pub mod differ;
 #[cfg(feature = "duckdb-query")]
 pub mod duckdb;
+mod fake_data;
+pub mod generate;
 pub mod graph;
 pub mod json_schema;
 #[cfg(feature = "man-pages")]
@@ -14,12 +24,15 @@ pub mod man;
 pub mod merger;
 pub mod parser;
 pub mod pk;
+pub mod profile;
 pub mod progress;
 pub mod redactor;
+pub mod render;
 pub mod sample;
 pub mod schema;
 pub mod shard;
 pub mod splitter;
+pub mod synthetic;
 pub mod transform_common;
 pub mod validate;
 pub mod writer;

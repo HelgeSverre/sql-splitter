@@ -1,12 +1,20 @@
 //! Fake strategy - generate realistic fake data.
-
+//!
+//! The single-kind aliases below (`name`, `email`, `zip`, ...) dispatch
+//! through the shared [`crate::fake_data`] catalog, the same one the
+//! generate module's semantic generators use, so a given alias and a given
+//! semantic kind never diverge into two implementations of the same fake
+//! value. Locale is always [`Locale::En`] here regardless of the configured
+//! `self.locale`: that mirrors this strategy's behavior before the shared
+//! catalog existed (it only ever generated English-locale fakes), so
+//! extracting the catalog does not change what any existing redact config
+//! produces. Composite/non-fake-crate kinds (`address`, `credit_card`,
+//! `iban`, `ssn`, `uuid`, date/time) stay local: each draws several fields
+//! from one seeded RNG, a shape [`crate::fake_data::generate_semantic`]
+//! deliberately does not support (see its doc comment).
 use super::{RedactValue, Strategy, StrategyKind};
+use crate::fake_data::{generate_semantic, Locale, SemanticKind};
 use fake::faker::address::en::{CityName, StateName, StreetName, ZipCode};
-use fake::faker::company::en::CompanyName;
-use fake::faker::internet::en::{SafeEmail, Username};
-use fake::faker::lorem::en::{Paragraph, Sentence, Word};
-use fake::faker::name::en::{FirstName, LastName, Name};
-use fake::faker::phone_number::en::PhoneNumber;
 use fake::Fake;
 
 /// Strategy that generates fake data
@@ -22,87 +30,85 @@ impl FakeStrategy {
         Self { generator, locale }
     }
 
-    /// Generate a fake value based on the generator type
+    /// Generate a fake value based on the generator type.
+    ///
+    /// Every branch draws exactly one 32-byte block from `rng` — whether
+    /// directly (the composite/non-fake-crate branches below) or indirectly
+    /// via [`generate_semantic`] (the single-kind aliases) — so moving an
+    /// alias between the two never changes how much entropy a call consumes
+    /// from the caller's stream.
     fn generate(&self, rng: &mut dyn rand::Rng) -> String {
-        // Convert rng to StdRng for fake crate compatibility
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
-        let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
-
         match self.generator.to_lowercase().as_str() {
             // Name generators
-            "name" | "full_name" => Name().fake_with_rng(&mut fake_rng),
-            "first_name" => FirstName().fake_with_rng(&mut fake_rng),
-            "last_name" => LastName().fake_with_rng(&mut fake_rng),
+            "name" | "full_name" => {
+                generate_semantic(SemanticKind::PersonFullName, Locale::En, rng)
+            }
+            "first_name" => generate_semantic(SemanticKind::PersonFirstName, Locale::En, rng),
+            "last_name" => generate_semantic(SemanticKind::PersonLastName, Locale::En, rng),
 
             // Contact generators
-            "email" | "safe_email" => SafeEmail().fake_with_rng(&mut fake_rng),
-            "phone" | "phone_number" => PhoneNumber().fake_with_rng(&mut fake_rng),
-            "username" | "user_name" => Username().fake_with_rng(&mut fake_rng),
+            "email" | "safe_email" => {
+                generate_semantic(SemanticKind::InternetEmail, Locale::En, rng)
+            }
+            "phone" | "phone_number" => {
+                generate_semantic(SemanticKind::PhoneNumber, Locale::En, rng)
+            }
+            "username" | "user_name" => {
+                generate_semantic(SemanticKind::PersonUsername, Locale::En, rng)
+            }
 
             // Address generators
             "address" | "street_address" => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 let street: String = StreetName().fake_with_rng(&mut fake_rng);
                 let city: String = CityName().fake_with_rng(&mut fake_rng);
                 let state: String = StateName().fake_with_rng(&mut fake_rng);
                 let zip: String = ZipCode().fake_with_rng(&mut fake_rng);
                 format!("{}, {}, {} {}", street, city, state, zip)
             }
-            "street" | "street_name" => StreetName().fake_with_rng(&mut fake_rng),
-            "city" => CityName().fake_with_rng(&mut fake_rng),
-            "state" => StateName().fake_with_rng(&mut fake_rng),
-            "zip" | "zip_code" | "postal_code" => ZipCode().fake_with_rng(&mut fake_rng),
-            "country" => "United States".to_string(), // Simplified for now
+            "street" | "street_name" => {
+                generate_semantic(SemanticKind::AddressStreet, Locale::En, rng)
+            }
+            "city" => generate_semantic(SemanticKind::AddressCity, Locale::En, rng),
+            "state" => generate_semantic(SemanticKind::AddressRegion, Locale::En, rng),
+            "zip" | "zip_code" | "postal_code" => {
+                generate_semantic(SemanticKind::AddressPostcode, Locale::En, rng)
+            }
+            "country" => {
+                // Simplified for now — no `fake` crate draw needed for a
+                // fixed value, but pre-refactor every branch (including this
+                // one) drew one 32-byte block unconditionally before the
+                // match. `ValueRewriter` threads one shared, advancing RNG
+                // across every redacted cell in a run, so skipping this draw
+                // would shift every later fake/random value for any config
+                // that redacts a `country` column before another random
+                // column — preserve the draw to keep the shared stream in
+                // lockstep with the pre-refactor implementation.
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                "United States".to_string()
+            }
 
             // Business generators
-            "company" | "company_name" => CompanyName().fake_with_rng(&mut fake_rng),
-            "job_title" => {
-                // Simplified job title generator
-                let titles = [
-                    "Software Engineer",
-                    "Product Manager",
-                    "Data Analyst",
-                    "Designer",
-                    "Marketing Manager",
-                    "Sales Representative",
-                    "Customer Support",
-                    "Operations Manager",
-                ];
-                let idx = fake_rng.random_range(0..titles.len());
-                titles[idx].to_string()
+            "company" | "company_name" => {
+                generate_semantic(SemanticKind::CompanyName, Locale::En, rng)
             }
+            "job_title" => generate_semantic(SemanticKind::CompanyJobTitle, Locale::En, rng),
 
             // Internet generators
-            "url" => format!(
-                "https://example{}.com/{}",
-                fake_rng.random_range(1..1000),
-                Word().fake_with_rng::<String, _>(&mut fake_rng)
-            ),
+            "url" => generate_semantic(SemanticKind::InternetUrl, Locale::En, rng),
             "ip" | "ip_address" | "ipv4" => {
-                format!(
-                    "{}.{}.{}.{}",
-                    fake_rng.random_range(1..255),
-                    fake_rng.random_range(0..255),
-                    fake_rng.random_range(0..255),
-                    fake_rng.random_range(1..255)
-                )
+                generate_semantic(SemanticKind::InternetIpv4, Locale::En, rng)
             }
-            "ipv6" => {
-                format!(
-                    "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16),
-                    fake_rng.random_range(0..0xFFFF_u16)
-                )
-            }
+            "ipv6" => generate_semantic(SemanticKind::InternetIpv6, Locale::En, rng),
 
             // Identifier generators
             "uuid" => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 format!(
                     "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
                     fake_rng.random::<u32>(),
@@ -115,12 +121,18 @@ impl FakeStrategy {
 
             // Date/time generators
             "date" => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 let year = fake_rng.random_range(1970..2024);
                 let month = fake_rng.random_range(1..=12);
                 let day = fake_rng.random_range(1..=28);
                 format!("{:04}-{:02}-{:02}", year, month, day)
             }
             "datetime" | "date_time" => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 let year = fake_rng.random_range(1970..2024);
                 let month = fake_rng.random_range(1..=12);
                 let day = fake_rng.random_range(1..=28);
@@ -133,6 +145,9 @@ impl FakeStrategy {
                 )
             }
             "time" => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 let hour = fake_rng.random_range(0..24);
                 let minute = fake_rng.random_range(0..60);
                 let second = fake_rng.random_range(0..60);
@@ -142,6 +157,9 @@ impl FakeStrategy {
             // Financial generators
             "credit_card" => {
                 // Generate a fake credit card number (Luhn-valid would be complex, simplified)
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 format!(
                     "{:04}-{:04}-{:04}-{:04}",
                     fake_rng.random_range(1000..9999),
@@ -152,6 +170,9 @@ impl FakeStrategy {
             }
             "iban" => {
                 // Simplified IBAN (not valid, but looks realistic)
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 format!(
                     "DE{:02}{:04}{:04}{:04}{:04}{:02}",
                     fake_rng.random_range(10..99),
@@ -165,6 +186,9 @@ impl FakeStrategy {
 
             // SSN generator
             "ssn" => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
                 format!(
                     "{:03}-{:02}-{:04}",
                     fake_rng.random_range(100..999),
@@ -174,12 +198,19 @@ impl FakeStrategy {
             }
 
             // Text generators
-            "lorem" | "paragraph" => Paragraph(3..5).fake_with_rng(&mut fake_rng),
-            "sentence" => Sentence(5..10).fake_with_rng(&mut fake_rng),
-            "word" => Word().fake_with_rng(&mut fake_rng),
+            "lorem" | "paragraph" => {
+                generate_semantic(SemanticKind::TextParagraph, Locale::En, rng)
+            }
+            "sentence" => generate_semantic(SemanticKind::TextSentence, Locale::En, rng),
+            "word" => generate_semantic(SemanticKind::TextWord, Locale::En, rng),
 
             // Default: return a generic fake string
-            _ => format!("FAKE_{}", fake_rng.random_range(10000..99999)),
+            _ => {
+                let mut seed = [0u8; 32];
+                rng.fill_bytes(&mut seed);
+                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                format!("FAKE_{}", fake_rng.random_range(10000..99999))
+            }
         }
     }
 }

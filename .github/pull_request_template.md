@@ -9,7 +9,7 @@ What does this PR do? Why?
 
 ## Checklist
 
-- [ ] Tests pass (`cargo test`)
+- [ ] Tests pass (`cargo nextest run`)
 - [ ] Code is formatted (`cargo fmt`)
 - [ ] Linting passes (`cargo clippy`)
 - [ ] Documentation updated (if needed)

@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
 **Version**: 1.15.0 (current)
-**Last Updated**: 2026-07-15
-**Revision**: 3.9 — v1.16.0 zip input implemented (all input commands, single `.sql` member policy)
+**Last Updated**: 2026-07-16
+**Revision**: 4.0 — synthetic data generation promoted from a fixture utility to a product feature
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -12,7 +12,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **High Priority (v1.x):**
 
-1. ✅ Test Data Generator — Enables CI testing for all features (v1.4.0)
+1. ✅ Test Data Generator — Enables CI testing for all features (v1.4.0) — **superseded by `generate` (below); the `test_data_gen` crate has been removed**
 2. ✅ Merge — Completes split/merge roundtrip (v1.4.0)
 3. ✅ Sample — FK-aware data sampling (builds shared infra) (v1.5.0)
 4. ✅ Shard — Tenant extraction (reuses Sample infra) (v1.6.0)
@@ -42,6 +42,7 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Next:**
 
+- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models (implemented; documented at <https://sql-splitter.dev/commands/generate/>)
 - v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.18.0: Migrate — Schema migration generation
 - v1.19.0: DBML — Import/export DBML schema definitions
@@ -82,6 +83,10 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
                     └─────────────────────────────────────────┘
 ```
 
+`generate` adds a bounded `DumpProfiler` and neutral evidence model on top of
+Schema Graph and Row Parsing. The future `infer` command can reuse or extend that
+evidence without freezing profiler internals around an unbuilt consumer.
+
 ---
 
 ## Version Milestones
@@ -91,10 +96,10 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 **Released**: 2025-12-20  
 **Theme**: Deterministic fixtures + split/merge roundtrip
 
-| Feature                 | Status  | Notes                  |
-| ----------------------- | ------- | ---------------------- |
-| **Test Data Generator** | ✅ Done | `crates/test_data_gen` |
-| **Merge command**       | ✅ Done | `src/merger/`          |
+| Feature                 | Status              | Notes                                                                                                              |
+| ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Test Data Generator** | ✅ Done, superseded | Was `crates/test_data_gen`; removed and replaced by the `generate` command (see "Synthetic Data Generation" below) |
+| **Merge command**       | ✅ Done             | `src/merger/`                                                                                                      |
 
 **Delivered:**
 
@@ -330,13 +335,13 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 | └─ Both --percent and --rows   | ✅ Done | All modes optimized          |
 | **Profiling infrastructure**   | ✅ Done |                              |
 | ├─ profile-memory.sh script    | ✅ Done | Automated profiling          |
-| ├─ make profile targets        | ✅ Done | medium, large, mega, giga    |
+| ├─ just profile targets        | ✅ Done | medium, large, mega, giga    |
 | └─ Size presets                | ✅ Done | 0.5MB to 10GB                |
 
 **Delivered:**
 
 - 2.9 GB file: 8.2 GB → 114 MB peak RSS
-- `make profile` / `make profile-large` / `make profile-mega` / `make profile-giga`
+- `just profile` / `just profile-large` / `just profile-mega` / `just profile-giga`
 - `scripts/profile-memory.sh` with 8 size presets (tiny to giga)
 - Memory profiling documentation in AGENTS.md
 
@@ -533,6 +538,40 @@ Schema Graph and Row Parsing are built incrementally within Sample/Shard, not as
 ---
 
 ## Upcoming Features (v1.16+)
+
+---
+
+### `generate` — Synthetic Data Generation (implemented)
+
+**Theme**: Generate production-shaped synthetic SQL from files
+
+`generate` profiles a SQL dump or schema into a complete, editable YAML model,
+then streams relationally consistent synthetic data. The CLI and public library
+share the same model compiler and generation engine. This supersedes the old
+`test_data_gen` fixture crate (v1.4.0) as the product feature for synthetic
+data — that crate has been removed.
+
+**Deliverables:**
+
+- `sql-splitter generate production.sql -o synthetic.sql`
+- `sql-splitter generate production.sql --emit-config synthetic.yaml`
+- `sql-splitter generate --config synthetic.yaml --verify -o synthetic.sql`
+- Bounded basic/full profiling and exact emitted row counts
+- Registered typed generators, modifiers, and planners without a YAML expression language
+- Stable top-level, table, column, and operator seed streams
+
+**Design:** [Synthetic data generation](superpowers/specs/2026-07-16-synthetic-data-generation-design.md)
+(describes the original design — for the shipped/actual behavior, see the
+docs below, which win where they differ).
+
+**Documentation:** [Generate documentation](https://sql-splitter.dev/commands/generate/) — model
+reference, generator/planner catalog, profiling and privacy, library API,
+and diagnostics.
+
+**Future `infer` reuse:** the bounded `DumpProfiler`/evidence model `generate`
+introduced is public specifically so a future `infer` command (schema
+inference from data, tracked separately below under v2.1.0) can reuse or
+extend it — profiler internals are not frozen around that unbuilt consumer.
 
 ---
 
@@ -749,6 +788,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 - Index suggestion based on data patterns
 - Foreign key inference (heuristic)
 - NOT NULL constraint detection
+- Reuse or extend `generate`'s bounded neutral profile evidence
 
 **Deliverables:**
 
@@ -759,29 +799,30 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ## Feature Dependency Matrix
 
-| Feature/Module        | Depends On                  | Unlocks                               |
-| --------------------- | --------------------------- | ------------------------------------- |
-| **Test Data Gen**     | (none)                      | All integration tests                 |
-| **Merge**             | Split                       | —                                     |
-| **Schema Graph v1**   | (built in Sample)           | Sample, Shard, Validate, Diff         |
-| **Row Parsing v1**    | (built in Sample)           | Sample, Shard, Query, Redact, Convert |
-| **Sample (basic)**    | —                           | —                                     |
-| **Sample --preserve** | Schema Graph v1, Row v1     | Shard                                 |
-| **Shard**             | Schema Graph v1.5, Row v1.5 | —                                     |
-| **Convert**           | Row Parsing v1.5            | MSSQL, Enum Conversion                |
-| **Enum Conversion**   | Convert                     | —                                     |
-| **Validate**          | Schema Graph, Row Parsing   | —                                     |
-| **Diff**              | Schema Graph, Row Parsing   | —                                     |
-| **Query**             | Row Parsing                 | —                                     |
-| **Redact**            | Row Parsing                 | Detect-PII                            |
-| **Detect-PII**        | Redact                      | —                                     |
-| **Graph**             | Schema Graph                | Order, Migrate, DBML                  |
-| **Order**             | Schema Graph                | —                                     |
-| **DBML**              | Graph, Convert              | —                                     |
-| **MSSQL**             | Convert                     | —                                     |
-| **Migrate**           | Diff, Schema Graph          | —                                     |
-| **Parallel**          | (all commands)              | —                                     |
-| **Infer**             | Row Parsing                 | —                                     |
+| Feature/Module        | Depends On                     | Unlocks                               |
+| --------------------- | ------------------------------ | ------------------------------------- |
+| **Test Data Gen**     | (none)                         | All integration tests                 |
+| **Generate**          | Schema Graph, Row Parsing      | Synthetic fixtures, Infer evidence    |
+| **Merge**             | Split                          | —                                     |
+| **Schema Graph v1**   | (built in Sample)              | Sample, Shard, Validate, Diff         |
+| **Row Parsing v1**    | (built in Sample)              | Sample, Shard, Query, Redact, Convert |
+| **Sample (basic)**    | —                              | —                                     |
+| **Sample --preserve** | Schema Graph v1, Row v1        | Shard                                 |
+| **Shard**             | Schema Graph v1.5, Row v1.5    | —                                     |
+| **Convert**           | Row Parsing v1.5               | MSSQL, Enum Conversion                |
+| **Enum Conversion**   | Convert                        | —                                     |
+| **Validate**          | Schema Graph, Row Parsing      | —                                     |
+| **Diff**              | Schema Graph, Row Parsing      | —                                     |
+| **Query**             | Row Parsing                    | —                                     |
+| **Redact**            | Row Parsing                    | Detect-PII                            |
+| **Detect-PII**        | Redact                         | —                                     |
+| **Graph**             | Schema Graph                   | Order, Migrate, DBML                  |
+| **Order**             | Schema Graph                   | —                                     |
+| **DBML**              | Graph, Convert                 | —                                     |
+| **MSSQL**             | Convert                        | —                                     |
+| **Migrate**           | Diff, Schema Graph             | —                                     |
+| **Parallel**          | (all commands)                 | —                                     |
+| **Infer**             | Row Parsing, Generate evidence | —                                     |
 
 ---
 
@@ -822,14 +863,14 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ### Upcoming Features (v1.16+)
 
-| Version | Features                 | Status   |
-| ------- | ------------------------ | -------- |
-| v1.16.0 | Zip Input + Adaptive I/O | Released |
-| v1.17.0 | Enum Conversion          | Planned  |
-| v1.18.0 | Migrate                  | Planned  |
-| v1.19.0 | DBML                     | Planned  |
-| v2.0.0  | Parallel                 | Planned  |
-| v2.1.0  | Infer                    | Planned  |
+| Version | Features                                                          | Status  |
+| ------- | ----------------------------------------------------------------- | ------- |
+| v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current |
+| v1.17.0 | Enum Conversion                                                   | Planned |
+| v1.18.0 | Migrate                                | Planned     |
+| v1.19.0 | DBML                                   | Planned     |
+| v2.0.0  | Parallel                               | Planned     |
+| v2.1.0  | Infer                                  | Planned     |
 
 ---
 
@@ -1008,7 +1049,7 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ### Active
 
-- [Test Data Generator Design](TEST_DATA_GENERATOR.md)
+- [Synthetic Data Generation](superpowers/specs/2026-07-16-synthetic-data-generation-design.md)
 - [Additional Ideas](features/ADDITIONAL_IDEAS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
 - [Integration Opportunities](INTEGRATION_OPPORTUNITIES.md)
@@ -1029,7 +1070,7 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ### Completed Feature Designs (moved to archived after implementation)
 
-- [MSSQL Feasibility](features/MSSQL_FEASIBILITY.md) — v1.12.x (released)
+- [MSSQL Feasibility](archived/MSSQL_FEASIBILITY.md) — v1.12.x (released)
 
 ### Archived (Implemented)
 

@@ -1,0 +1,392 @@
+---
+title: Model reference
+description: Complete YAML grammar for generate models and overrides
+sidebar:
+  order: 2
+---
+
+The model language describes table schemas, row counts, column generators,
+relationships, and planners. A `kind: model` document is self-contained; a
+`kind: overrides` document is a partial patch applied to an inferred base.
+
+## Document envelope
+
+```yaml
+# yaml-language-server: $schema=https://sql-splitter.dev/schemas/generate-config.schema.json
+version: 1
+kind: model # model | overrides
+```
+
+Only version `1` is accepted. Duplicate keys and unknown fields are errors.
+`$schema` is optional editor metadata and is ignored by generation.
+
+| Kind        | Contract                                                                             |
+| ----------- | ------------------------------------------------------------------------------------ |
+| `model`     | Complete schema, row rule, and ownership information. Can run without a source dump. |
+| `overrides` | Partial patch. Requires a source dump from which a base model can be inferred.       |
+
+`--emit-config` always writes a complete model with resolved counts and
+`defaults.inference: disabled`.
+
+## Top-level fields
+
+| Field      | Model    | Overrides | Meaning                                                 |
+| ---------- | -------- | --------- | ------------------------------------------------------- |
+| `$schema`  | optional | optional  | Editor-only JSON Schema URL                             |
+| `version`  | required | required  | Must be `1`                                             |
+| `kind`     | required | required  | `model` or `overrides`                                  |
+| `imports`  | optional | optional  | Local override files merged before the root             |
+| `source`   | optional | optional  | Provenance, dialect, and fingerprint policy             |
+| `output`   | optional | optional  | Default render settings                                 |
+| `seed`     | optional | optional  | Root seed; `null` requests fresh entropy in an override |
+| `defaults` | optional | optional  | Column inference policy                                 |
+| `tables`   | required | optional  | Complete table map or table patches                     |
+| `profiles` | optional | optional  | Removable bounded inference metadata                    |
+
+### Source metadata
+
+```yaml
+source:
+  dialect: mysql
+  fingerprint: sha256:0123456789abcdef
+  fingerprint_policy: warn # ignore | warn | require
+```
+
+The fingerprint policy is evaluated when an overrides document containing a
+fingerprint is merged with a base model that also has one:
+
+- `ignore` accepts a mismatch silently.
+- `warn` emits `GEN-SOURCE-FINGERPRINT`.
+- `require` makes the mismatch an error.
+
+The source object from an override replaces the base object wholesale; its
+fields are not merged individually. A `generate dump.sql` run does not
+currently compute and compare a new dump fingerprint automatically.
+
+### Output defaults
+
+```yaml
+output:
+  dialect: postgres
+  mode: schema_and_data # schema_and_data | schema_only | data_only
+  inserts: auto # auto | insert | copy
+  batch_size: 1000
+```
+
+All output fields are optional in both models and overrides. Explicit CLI
+options win; the output block fills in unset CLI choices.
+
+| Field        | Effect                                                                       |
+| ------------ | ---------------------------------------------------------------------------- |
+| `dialect`    | Render target. Precedence is CLI, model, source dialect, then MySQL.         |
+| `mode`       | Emit schema and data, schema only, or data only.                             |
+| `inserts`    | `insert` forces PostgreSQL multi-row inserts; `auto` and `copy` permit COPY. |
+| `batch_size` | Rows per `INSERT` or `COPY` batch. Must be positive to affect rendering.     |
+
+A deliberately selected cross-dialect target maps types and reports lossy
+conversions. Preserving the source dialect retains original DDL where possible.
+
+### Seeds
+
+```yaml
+seed: 42
+tables:
+  inherited:
+    # omitted: inherit 42
+  independent:
+    seed: 9001
+  random_each_run:
+    seed: null
+```
+
+An omitted root seed draws fresh entropy and reports the effective seed. An
+omitted table seed inherits; an integer is independent; `null` opts that table
+out of deterministic inheritance. CLI seed controls replace the root choice,
+not explicit per-table choices.
+
+### Defaults and inference
+
+```yaml
+defaults:
+  inference: disabled # disabled | schema
+```
+
+- `disabled` requires an explicit owner for every generated column; an unowned
+  column is `GEN-COLUMN-OWNER-MISSING`.
+- `schema` infers an owner for every otherwise-unowned column. Structural facts
+  win first (identity/serial keys, foreign-key markers, bound `DEFAULT`s,
+  bare integer primary keys), then a column's **name and type** choose a
+  generator: semantic matches (`email` → `internet.email`, `first_name` →
+  `person.first_name`, `city` → `address.city`, a `price`/`amount` decimal →
+  `commerce.money`), credential names (`password`, `api_key`, …) →
+  `credential.*`, and finally a type fallback that guarantees a value for every
+  SQL family. A run under `schema` never leaves a column unowned.
+
+Schema inference still uses only the declared schema — no value evidence. It
+therefore cannot replay observed distributions, corroborate an ambiguous name
+against sampled values, or nominate planners; those require the profiling
+pipeline described in [Inference](/commands/generate/inference/). Prefer explicit
+generators when you need a specific shape.
+
+### Imports
+
+{/* validate-generate-model */}
+
+```yaml
+version: 1
+kind: model
+imports:
+  - fragments/core.yaml
+  - fragments/commerce.yaml
+tables: {}
+```
+
+Each imported document must be `kind: overrides`. Paths are relative to the
+root document, must not be absolute or remote, and may not import further
+documents. Imports merge in declaration order; the root then wins. Maps merge
+by key, while lists replace wholesale. Two imports defining the same path are
+reported as `GEN-IMPORT-COLLISION`.
+
+## Tables
+
+```yaml
+tables:
+  customers:
+    rows: { kind: fixed, count: 5000 }
+    schema: { name: customers, columns: [] }
+    columns: {}
+    relationships: []
+    planners: []
+```
+
+| Field           | Model default | Meaning                                       |
+| --------------- | ------------- | --------------------------------------------- |
+| `seed`          | inherit       | Per-table seed policy                         |
+| `rows`          | required      | Exact or derived row-count rule               |
+| `schema`        | required      | Portable SQL table schema                     |
+| `columns`       | `{}`          | Column generator and modifier rules           |
+| `relationships` | `[]`          | Generation-time foreign-key relationships     |
+| `planners`      | `[]`          | Coordinated multi-column or cross-table rules |
+
+### Row-count rules
+
+```yaml
+rows: { kind: fixed, count: 5000 }
+rows: { kind: observed, count: 9876 }
+rows: { kind: scale, base: 1000, factor: 2.0, count: 2000 }
+rows:
+  kind: relation.children
+  parent: orders
+  count: 7600
+  distribution: { kind: histogram, mean: 3.8, min: 1.0, max: 25.0 }
+```
+
+| Kind                | Fields                            | Behavior                                                               |
+| ------------------- | --------------------------------- | ---------------------------------------------------------------------- |
+| `fixed`             | `count`                           | Exact hand-chosen count                                                |
+| `observed`          | `count`                           | Count captured from the source profile                                 |
+| `scale`             | `base`, `factor`, `count`         | Scaled base with stochastic rounding where needed                      |
+| `relation.children` | `parent`, `count`, `distribution` | Child count and per-parent fan-out derived from the final parent count |
+
+Complete and emitted models store `count` even for derived rules. This freezes
+the resolved result for source-free reuse. An emitted child produced by a
+cross-table family planner keeps its `relation.children` rule as well as the
+resolved `count`, because the planner still needs the distribution to reproduce
+the same child rows.
+
+A child distribution has `kind`, `mean`, `min`, and `max`. Supported kinds are
+`observed`, `fixed`, `uniform`, `poisson`, and `histogram`. The minimum must be
+feasible for the resolved parent and child counts; otherwise compilation emits
+`GEN-CHILD-COUNT-IMPOSSIBLE`.
+
+### Portable schema
+
+```yaml
+schema:
+  name: orders
+  primary_key: [id]
+  columns:
+    - { name: id, type: bigint, nullable: false, primary_key: true }
+    - { name: customer_id, type: bigint, nullable: false }
+  unique_constraints: []
+  check_constraints: []
+  indexes: []
+  relationships:
+    - name: fk_orders_customer
+      columns: [customer_id]
+      referenced_table: customers
+      referenced_columns: [id]
+```
+
+| Field                | Default  | Meaning                                                    |
+| -------------------- | -------- | ---------------------------------------------------------- |
+| `name`               | required | Table name                                                 |
+| `columns`            | required | Ordered column list                                        |
+| `primary_key`        | `[]`     | Primary-key columns                                        |
+| `unique_constraints` | `[]`     | Named or anonymous unique column sets                      |
+| `check_constraints`  | `[]`     | Named or anonymous SQL expressions                         |
+| `indexes`            | `[]`     | Index names, columns, uniqueness, and optional source type |
+| `create_statement`   | none     | Original DDL, reusable only for compatible output          |
+| `relationships`      | `[]`     | DDL foreign keys rendered into schema output               |
+
+Schema-level relationships affect DDL. The table-level relationships described
+below affect generated values. Declare both when both behaviors are needed.
+
+### Portable columns
+
+```yaml
+- name: email
+  source_type: varchar(255)
+  family: text
+  nullable: false
+  primary_key: false
+  unique: true
+  generated: false
+  identity: false
+```
+
+| Field         | Default   | Meaning                                                                                                  |
+| ------------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| `name`        | required  | Column name                                                                                              |
+| `source_type` | required  | Original SQL type text                                                                                   |
+| `type`        | shorthand | Input alias for `source_type`; emitted models use canonical fields                                       |
+| `family`      | derived   | `integer`, `big_integer`, `decimal`, `boolean`, `text`, `bytes`, `uuid`, `date_time`, `json`, or `other` |
+| `nullable`    | required  | Whether SQL `NULL` is legal                                                                              |
+| `primary_key` | `false`   | Primary-key member                                                                                       |
+| `unique`      | `false`   | Single-column uniqueness                                                                                 |
+| `default_sql` | none      | Original SQL default expression                                                                          |
+| `generated`   | `false`   | Database-computed column                                                                                 |
+| `identity`    | `false`   | Identity/auto-increment column                                                                           |
+| `collation`   | none      | Source collation                                                                                         |
+
+The family drives generator and modifier compatibility. `source_type` remains
+available for dialect rendering and scale/precision inspection.
+
+## Column rules
+
+```yaml
+columns:
+  email:
+    semantic: internet.email
+    generator: { kind: internet.email }
+    modifiers:
+      - { kind: unique, max_attempts: 32, on_exhaustion: error }
+      - { kind: case, mode: lower }
+```
+
+| Field       | Default | Meaning                                          |
+| ----------- | ------- | ------------------------------------------------ |
+| `semantic`  | none    | Informational inference annotation               |
+| `generator` | none    | One base value producer                          |
+| `modifiers` | `[]`    | Ordered transformations applied after generation |
+
+Every generated column must have exactly one owner: a column generator, a
+planner, a relationship marker, or a structural inference rule. Conflicting
+owners emit `GEN-COLUMN-OWNER-CONFLICT`; missing owners emit
+`GEN-COLUMN-OWNER-MISSING`.
+
+Single-column primary and unique keys are protected automatically. Inherently
+unique `sequence`, `monotonic`, and UUID keys need no modifier; other producers
+receive a strict `unique` modifier unless one was explicitly configured.
+Composite uniqueness is not inferred from independent per-column uniqueness;
+model it by construction and use `--verify` to audit it.
+
+## Generation relationships
+
+```yaml
+relationships:
+  - name: orders_customer
+    columns: [customer_id]
+    references: { table: customers, columns: [id] }
+    distribution: uniform
+```
+
+| Field          | Default  | Meaning                                                             |
+| -------------- | -------- | ------------------------------------------------------------------- |
+| `name`         | none     | Required when a rule or planner names the relationship              |
+| `columns`      | required | Local foreign-key columns                                           |
+| `references`   | required | Parent table and parent columns                                     |
+| `distribution` | none     | `uniform`, `sequential`, `weighted`, or `observed` parent selection |
+
+Relationship columns use `relation.foreign_key` or
+`relation.composite_key`, either explicitly or through structural inference.
+The current random-access parent-key domains are bare integer identities,
+`sequence`, and UUID. Other target key recipes fail at generation with
+`GEN-KEY-DOMAIN-UNSUPPORTED`.
+
+Trees, polymorphic pairs, tenant-consistent references, and distinct junction
+pairs need planners because they coordinate more than an ordinary foreign key.
+
+## Overrides
+
+```yaml
+version: 1
+kind: overrides
+tables:
+  audit_events:
+    rows: { kind: observed, scale: 0.01 }
+  users:
+    columns:
+      email:
+        generator: { kind: internet.email }
+```
+
+All override fields are optional after `version` and `kind`, including
+`output`. Missing fields mean “leave the base unchanged.”
+
+| Field      | Merge behavior                                    |
+| ---------- | ------------------------------------------------- |
+| `source`   | Replace the whole source object                   |
+| `defaults` | Replace the whole defaults object                 |
+| `seed`     | Omitted inherits, `null` clears, integer replaces |
+| `output`   | Replace only present output fields                |
+| `tables`   | Apply partial patches by table name               |
+
+Within a table patch:
+
+- `rows` merges fields only when its `kind` matches the base kind. Switching
+  kind requires every field needed by the new kind.
+- `schema` is an assertion over table name or original DDL, not a schema edit.
+- `columns` replaces each present `semantic`, `generator`, or complete
+  `modifiers` list.
+- `relationships` and `planners` replace their complete lists when present.
+
+Missing tables and columns are reported independently, so one run can identify
+all stale override paths.
+
+## JSON Schema and editor validation
+
+Use the published [generate JSON Schema](/schemas/generate-config.schema.json)
+through a `$schema` key or YAML language-server modeline. It is derived from
+the model types and the standard operator registry.
+
+The schema:
+
+- restricts generator, modifier, and planner `kind` values to built-ins;
+- rejects unknown top-level operator arguments;
+- requires arguments marked required by the registry;
+- rejects unknown model fields and structurally invalid tagged objects.
+
+Argument value semantics remain compiler-owned. For example, JSON Schema can
+recognize a `unique.max_attempts` argument while the compiler validates numeric
+bounds and cross-field constraints. Custom statically linked operators are
+validated by their registry at runtime but cannot appear in the standard
+published schema.
+
+## Profiles metadata
+
+```yaml
+profiles:
+  customers.status:
+    rows: 182340
+    null_fraction: 0.0
+    distinct_estimate: 3
+    inference:
+      selected: weighted_choice
+      confidence: high
+      reasons: [low_cardinality, stable_top_values, status_name]
+```
+
+Profiles are bounded explanations keyed by `table.column`. Deleting the entire
+map does not change generation because the selected rules and counts are stored
+elsewhere in the complete model.

@@ -7,13 +7,13 @@ description: Running and writing tests
 
 ```bash
 # All tests
-cargo test
+cargo nextest run
 
 # Specific test
-cargo test test_splitter_basic
+cargo nextest run test_splitter_basic
 
 # With output
-cargo test -- --nocapture
+cargo nextest run --no-capture
 ```
 
 ## Test Categories
@@ -56,7 +56,7 @@ fn test_split_mysql_dump() {
 Test against real SQL dumps:
 
 ```bash
-make verify-realworld
+just verify-realworld
 ```
 
 ## Test Fixtures
@@ -89,7 +89,7 @@ tests/fixtures/
 1. Create fixture files in `tests/fixtures/static/`
 2. Write unit tests in the module
 3. Write integration test in `tests/`
-4. Run `cargo test`
+4. Run `cargo nextest run`
 
 ### Test Fixture Example
 

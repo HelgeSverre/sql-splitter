@@ -117,3 +117,24 @@ fn test_transaction_wrappers_sqlite() {
     assert!(output.contains("BEGIN TRANSACTION"));
     assert!(output.contains("COMMIT"));
 }
+
+/// The `gen` alias documented in `docs/generate/README.md`/`generate.mdx`
+/// for `sql-splitter generate` must actually dispatch, not just appear in
+/// `--help` (covered separately by `tests/cli_help_test.rs`).
+#[test]
+fn test_generate_gen_alias_dispatches() {
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_sql-splitter"))
+        .args([
+            "gen",
+            "--config",
+            "tests/fixtures/generate/simple.yaml",
+            "--check",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(
+        status.success(),
+        "`sql-splitter gen --check` should succeed"
+    );
+}

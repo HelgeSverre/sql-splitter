@@ -1,0 +1,14 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="512"
+  height="512"
+  viewBox="0 0 512 512"
+  role="img"
+  aria-labelledby="title"
+>
+  <title id="title">sql-splitter</title>
+  <g fill="#58a6ff">
+    <path d="M221.333 146.667h69.334V216h-69.334z" />
+    <path d="M221.333 309.333h69.334V376c0 41.333-24 68-69.334 77.333v-32c21.334-5.333 37.334-20 37.334-45.333h-37.334z" />
+  </g>
+</svg>

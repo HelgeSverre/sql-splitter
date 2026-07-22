@@ -5,6 +5,7 @@
 *.prof
 *.svg
 flamegraph.svg
+!website/public/favicon.svg
 
 # Output directories
 /output/
@@ -54,3 +55,6 @@ flamegraph.svg
 /test-output/
 
 linus-ignore-this-file.md
+
+# Code coverage (cargo-llvm-cov)
+lcov.info

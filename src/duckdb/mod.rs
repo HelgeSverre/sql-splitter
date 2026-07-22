@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```text
 //! use sql_splitter::duckdb::{QueryEngine, QueryConfig, QueryResultFormatter, OutputFormat};
 //! use std::path::Path;
 //!

@@ -1,0 +1,25 @@
+# Import for multitenant_workflow.yaml — core-domain overrides.
+#
+# Imported files are `kind: overrides`: partial patches applied to tables that
+# the root model already defines. Maps merge by key; the root document wins on
+# any leaf it also sets. Two imports may not touch the same configuration path
+# (that is why core.yaml and workflow.yaml patch disjoint tables/paths).
+
+version: 1
+kind: overrides
+
+tables:
+  # Pin tenants to a stable stream even though the root model is seeded.
+  tenants:
+    seed: 700001
+
+  # Swap the users email locale and add a light null rate on last_seen_at via a
+  # generator override (rules change, schema does not).
+  users:
+    columns:
+      email:
+        generator: { kind: internet.email }
+      last_seen_at:
+        generator: { kind: datetime }
+        modifiers:
+          - { kind: null_rate, rate: 0.35 }

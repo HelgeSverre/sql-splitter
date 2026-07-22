@@ -1,23 +1,17 @@
-//! Integration tests for the sample command using test_data_gen fixtures.
+//! Integration tests for the sample command using generated fixtures (the
+//! shared `legacy_fixture.yaml` model via the public `generate` API).
+
+mod support;
 
 use sql_splitter::parser::SqlDialect;
 use sql_splitter::sample::{run, SampleConfig, SampleMode};
 use std::fs;
-use std::io::Write;
-use tempfile::{NamedTempFile, TempDir};
-use test_data_gen::{Generator, RenderConfig, Renderer, Scale};
+use support::generated_fixture::generated_fixture;
+use tempfile::{TempDir, TempPath};
 
 /// Generate a MySQL dump with FK relationships for testing
-fn generate_test_dump() -> NamedTempFile {
-    let mut gen = Generator::new(42, Scale::Small);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::mysql());
-    let output = renderer.render_to_string(&data).unwrap();
-
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(output.as_bytes()).unwrap();
-    file.flush().unwrap();
-    file
+fn generate_test_dump() -> TempPath {
+    generated_fixture(SqlDialect::MySql, None, None, 42)
 }
 
 #[test]
@@ -27,7 +21,7 @@ fn test_sample_with_generated_fixtures() {
     let output_file = output_dir.path().join("sampled.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(50),
@@ -73,7 +67,7 @@ fn test_sample_with_preserve_relations() {
     let output_file = output_dir.path().join("sampled_fk.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Rows(10),
@@ -105,7 +99,7 @@ fn test_sample_fixed_rows() {
     let output_file = output_dir.path().join("sampled_rows.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Rows(5),
@@ -134,7 +128,7 @@ fn test_sample_with_table_filter() {
     let output_file = output_dir.path().join("sampled_filtered.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(100),
@@ -163,7 +157,7 @@ fn test_sample_with_exclude() {
     let output_file = output_dir.path().join("sampled_excluded.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(100),
@@ -191,7 +185,7 @@ fn test_sample_reproducible_with_seed() {
     // Run twice with same seed
     for output_file in [&output_file1, &output_file2] {
         let config = SampleConfig {
-            input: dump.path().to_path_buf(),
+            input: dump.to_path_buf(),
             output: Some(output_file.clone()),
             dialect: SqlDialect::MySql,
             mode: SampleMode::Rows(5),
@@ -228,7 +222,7 @@ fn test_sample_dry_run() {
     let dump = generate_test_dump();
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: None,
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(50),
@@ -277,7 +271,7 @@ tables:
     config_file.flush().unwrap();
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(10), // Will be overridden by config
@@ -309,7 +303,7 @@ fn test_sample_with_root_tables() {
     let output_file = output_dir.path().join("sampled_roots.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Rows(10),
@@ -331,7 +325,7 @@ fn test_sample_with_max_total_rows() {
     let output_file = output_dir.path().join("sampled_max.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(100),
@@ -356,7 +350,7 @@ fn test_sample_include_global_none() {
     let output_file = output_dir.path().join("sampled_no_global.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(100),
@@ -378,7 +372,7 @@ fn test_sample_no_schema() {
     let output_file = output_dir.path().join("sampled_no_schema.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::MySql,
         mode: SampleMode::Percent(100),
@@ -405,29 +399,13 @@ fn test_sample_no_schema() {
 }
 
 /// Generate a PostgreSQL dump for testing
-fn generate_postgres_dump() -> NamedTempFile {
-    let mut gen = Generator::new(42, Scale::Small);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::postgres());
-    let output = renderer.render_to_string(&data).unwrap();
-
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(output.as_bytes()).unwrap();
-    file.flush().unwrap();
-    file
+fn generate_postgres_dump() -> TempPath {
+    generated_fixture(SqlDialect::Postgres, None, None, 42)
 }
 
 /// Generate a SQLite dump for testing
-fn generate_sqlite_dump() -> NamedTempFile {
-    let mut gen = Generator::new(42, Scale::Small);
-    let data = gen.generate();
-    let renderer = Renderer::new(RenderConfig::sqlite());
-    let output = renderer.render_to_string(&data).unwrap();
-
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(output.as_bytes()).unwrap();
-    file.flush().unwrap();
-    file
+fn generate_sqlite_dump() -> TempPath {
+    generated_fixture(SqlDialect::Sqlite, None, None, 42)
 }
 
 #[test]
@@ -437,7 +415,7 @@ fn test_sample_postgres_dialect() {
     let output_file = output_dir.path().join("sampled_postgres.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Postgres,
         mode: SampleMode::Percent(50),
@@ -491,7 +469,7 @@ fn test_sample_sqlite_dialect() {
     let output_file = output_dir.path().join("sampled_sqlite.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Sqlite,
         mode: SampleMode::Percent(50),
@@ -535,7 +513,7 @@ fn test_sample_postgres_preserve_relations() {
     let output_file = output_dir.path().join("sampled_postgres_fk.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Postgres,
         mode: SampleMode::Rows(10),
@@ -570,7 +548,7 @@ fn test_sample_postgres_no_schema() {
     let output_file = output_dir.path().join("sampled_postgres_no_schema.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Postgres,
         mode: SampleMode::Percent(100),
@@ -600,7 +578,7 @@ fn test_sample_postgres_dry_run() {
     let dump = generate_postgres_dump();
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: None,
         dialect: SqlDialect::Postgres,
         mode: SampleMode::Percent(50),
@@ -623,7 +601,7 @@ fn test_sample_postgres_with_table_filter() {
     let output_file = output_dir.path().join("sampled_postgres_filtered.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Postgres,
         mode: SampleMode::Percent(100),
@@ -652,7 +630,7 @@ fn test_sample_sqlite_preserve_relations() {
     let output_file = output_dir.path().join("sampled_sqlite_fk.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Sqlite,
         mode: SampleMode::Rows(10),
@@ -682,7 +660,7 @@ fn test_sample_sqlite_no_schema() {
     let output_file = output_dir.path().join("sampled_sqlite_no_schema.sql");
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: Some(output_file.clone()),
         dialect: SqlDialect::Sqlite,
         mode: SampleMode::Percent(100),
@@ -712,7 +690,7 @@ fn test_sample_sqlite_dry_run() {
     let dump = generate_sqlite_dump();
 
     let config = SampleConfig {
-        input: dump.path().to_path_buf(),
+        input: dump.to_path_buf(),
         output: None,
         dialect: SqlDialect::Sqlite,
         mode: SampleMode::Percent(50),

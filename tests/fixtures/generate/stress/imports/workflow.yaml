@@ -1,0 +1,16 @@
+# Import for multitenant_workflow.yaml — workflow-domain overrides.
+#
+# Patches disjoint tables from core.yaml (import_jobs, webhooks) so no two
+# imports define the same configuration path.
+
+version: 1
+kind: overrides
+
+tables:
+  # Scale the import-job volume down for a quicker stress run without touching
+  # the progress_counters planner (rules are inherited from the base model).
+  import_jobs:
+    rows: { kind: fixed, count: 6000 }
+
+  webhooks:
+    seed: null   # randomize webhooks even though the model is seeded

@@ -23,18 +23,18 @@ The command parses your SQL dump, imports the schema and data into an in-memory 
 
 **Disk mode (`--disk`):** For dumps >2GB, use `--disk` to store data in a temporary file instead of RAM. The temp file is stored in your system's temp directory and **automatically deleted** when the command exits:
 
-| OS | Temp file location |
-|----|-------------------|
-| macOS | `/var/folders/.../sql-splitter-<pid>.duckdb` (via `$TMPDIR`) |
-| Linux | `/tmp/sql-splitter-<pid>.duckdb` |
+| OS      | Temp file location                                                                  |
+| ------- | ----------------------------------------------------------------------------------- |
+| macOS   | `/var/folders/.../sql-splitter-<pid>.duckdb` (via `$TMPDIR`)                        |
+| Linux   | `/tmp/sql-splitter-<pid>.duckdb`                                                    |
 | Windows | `%TEMP%\sql-splitter-<pid>.duckdb` (e.g., `C:\Users\<user>\AppData\Local\Temp\...`) |
 
 **Caching (`--cache`):** Saves the imported database persistently for fast repeated queries. Cache files are stored in your platform's cache directory and **persist until you run `--clear-cache`**:
 
-| OS | Cache directory |
-|----|----------------|
-| macOS | `~/Library/Caches/sql-splitter/duckdb/` |
-| Linux | `~/.cache/sql-splitter/duckdb/` |
+| OS      | Cache directory                                                                                    |
+| ------- | -------------------------------------------------------------------------------------------------- |
+| macOS   | `~/Library/Caches/sql-splitter/duckdb/`                                                            |
+| Linux   | `~/.cache/sql-splitter/duckdb/`                                                                    |
 | Windows | `%LOCALAPPDATA%\sql-splitter\duckdb\` (e.g., `C:\Users\<user>\AppData\Local\sql-splitter\duckdb\`) |
 
 Cache files are named `<hash>.duckdb` where the hash is based on the dump file's path, size, and modification time. If the source dump changes, a new cache is created automatically.
@@ -234,6 +234,7 @@ sql-splitter query dump.sql "SELECT * FROM large_table" -f csv | gzip > export.c
 ### "Table not found" error
 
 The dump may use schema-qualified names. Try:
+
 ```bash
 sql-splitter query dump.sql --interactive  # then run .tables to list all tables
 sql-splitter query dump.sql "SELECT * FROM public.users"  # Use schema prefix

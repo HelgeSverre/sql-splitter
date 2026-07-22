@@ -59,7 +59,7 @@ fn run_split_test(case: &'static super::cases::TestCase) {
         let files: Vec<_> = fs::read_dir(output_dir.path())
             .expect("Should read output dir")
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "sql"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sql"))
             .collect();
 
         assert!(

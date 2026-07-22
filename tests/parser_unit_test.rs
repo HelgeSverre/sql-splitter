@@ -362,9 +362,23 @@ INSERT INTO notes VALUES (1, 'Use `backticks` for code');
 
 mod mysql_insert_tests {
     use sql_splitter::parser::mysql_insert::{
-        parse_mysql_insert_rows, parse_mysql_insert_rows_raw, PkValue,
+        hash_pk_tuple, parse_mysql_insert_rows, parse_mysql_insert_rows_raw, PkTuple, PkValue,
     };
     use sql_splitter::schema::{Column, ColumnId, ColumnType, ForeignKey, TableId, TableSchema};
+
+    #[test]
+    fn int_and_bigint_of_the_same_value_hash_equal_for_fk_matching() {
+        // A parent PK dumped unquoted (Int) and a child FK dumped quoted in a
+        // bigint column (BigInt) are the same value; hash-based FK resolution
+        // must treat them as equal, or the FK silently fails to match.
+        let as_int: PkTuple = [PkValue::Int(42)].into_iter().collect();
+        let as_bigint: PkTuple = [PkValue::BigInt(42)].into_iter().collect();
+        assert_eq!(hash_pk_tuple(&as_int), hash_pk_tuple(&as_bigint));
+
+        // Different integer values must still differ.
+        let other: PkTuple = [PkValue::BigInt(43)].into_iter().collect();
+        assert_ne!(hash_pk_tuple(&as_int), hash_pk_tuple(&other));
+    }
 
     fn create_simple_schema() -> TableSchema {
         let mut schema = TableSchema::new("users".to_string(), TableId(0));
@@ -372,23 +386,41 @@ mod mysql_insert_tests {
             Column {
                 name: "id".to_string(),
                 col_type: ColumnType::Int,
+                source_type: "INT".to_string(),
                 ordinal: ColumnId(0),
                 is_primary_key: true,
                 is_nullable: false,
+                is_unique: false,
+                default_sql: None,
+                is_generated: false,
+                is_identity: false,
+                collation: None,
             },
             Column {
                 name: "name".to_string(),
                 col_type: ColumnType::Text,
+                source_type: "VARCHAR(255)".to_string(),
                 ordinal: ColumnId(1),
                 is_primary_key: false,
                 is_nullable: true,
+                is_unique: false,
+                default_sql: None,
+                is_generated: false,
+                is_identity: false,
+                collation: None,
             },
             Column {
                 name: "company_id".to_string(),
                 col_type: ColumnType::Int,
+                source_type: "INT".to_string(),
                 ordinal: ColumnId(2),
                 is_primary_key: false,
                 is_nullable: true,
+                is_unique: false,
+                default_sql: None,
+                is_generated: false,
+                is_identity: false,
+                collation: None,
             },
         ];
         schema.primary_key = vec![ColumnId(0)];
@@ -513,23 +545,41 @@ mod postgres_copy_tests {
             Column {
                 name: "id".to_string(),
                 col_type: ColumnType::Int,
+                source_type: "INT".to_string(),
                 ordinal: ColumnId(0),
                 is_primary_key: true,
                 is_nullable: false,
+                is_unique: false,
+                default_sql: None,
+                is_generated: false,
+                is_identity: false,
+                collation: None,
             },
             Column {
                 name: "name".to_string(),
                 col_type: ColumnType::Text,
+                source_type: "VARCHAR(255)".to_string(),
                 ordinal: ColumnId(1),
                 is_primary_key: false,
                 is_nullable: true,
+                is_unique: false,
+                default_sql: None,
+                is_generated: false,
+                is_identity: false,
+                collation: None,
             },
             Column {
                 name: "company_id".to_string(),
                 col_type: ColumnType::Int,
+                source_type: "INT".to_string(),
                 ordinal: ColumnId(2),
                 is_primary_key: false,
                 is_nullable: true,
+                is_unique: false,
+                default_sql: None,
+                is_generated: false,
+                is_identity: false,
+                collation: None,
             },
         ];
         schema.primary_key = vec![ColumnId(0)];
@@ -574,9 +624,15 @@ mod postgres_copy_tests {
         schema.columns = vec![Column {
             name: "label".to_string(),
             col_type: ColumnType::Text,
+            source_type: "VARCHAR(255)".to_string(),
             ordinal: ColumnId(0),
             is_primary_key: false,
             is_nullable: true,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
         }];
 
         let data = b"a\n\nb\n\\.\n";

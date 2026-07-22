@@ -15,7 +15,7 @@ sql-splitter uses [Semantic Versioning](https://semver.org/):
 
 1. Update version in `Cargo.toml`
 2. Update `CHANGELOG.md`
-3. Run tests: `cargo test`
+3. Run tests: `cargo nextest run`
 4. Build: `cargo build --release`
 5. Create git tag: `git tag v1.2.3`
 6. Push: `git push && git push --tags`
@@ -59,10 +59,10 @@ Before tagging:
 
 ```bash
 # Run all tests
-cargo test
+cargo nextest run
 
 # Verify real-world dumps
-make verify-realworld
+just verify-realworld
 
 # Build and test binary
 cargo build --release

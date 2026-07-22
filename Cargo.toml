@@ -1,10 +1,10 @@
 [workspace]
-members = [".", "crates/test_data_gen"]
+members = ["."]
 resolver = "2"
 
 [package]
 name = "sql-splitter"
-version = "1.15.0"
+version = "1.16.0"
 edition = "2021"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "High-performance CLI tool for splitting large SQL dump files into individual table files"
@@ -53,8 +53,10 @@ tar = { version = "0.4", optional = true }
 zip = { version = "6", optional = true, default-features = false, features = ["deflate"] }
 indicatif = "0.18"
 rand = "0.10"
+rand_chacha = "0.10"
 smallvec = { version = "1.13", features = ["union"] }
 chrono = "0.4"
+chrono-tz = "0.10"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -68,11 +70,21 @@ rustyline = "17"
 schemars = "1"
 clap_mangen = { version = "0.3", optional = true }
 
+# Unix-only: a real, best-effort process-level Ctrl-C (SIGINT) handler and
+# explicit file-mode control for protected temporary files. `libc` is already
+# present transitively; declaring it directly keeps the dependency honest.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
-test_data_gen = { path = "crates/test_data_gen" }
 jsonschema = "0.46"
+
+# Unix-only test support: set the umask and inspect file modes to prove the
+# protected-output permission guarantees.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [[bench]]
 name = "parser_bench"
@@ -96,6 +108,10 @@ harness = false
 
 [[bench]]
 name = "sample_bench"
+harness = false
+
+[[bench]]
+name = "generate_bench"
 harness = false
 
 [profile.release]

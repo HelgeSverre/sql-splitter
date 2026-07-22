@@ -3,7 +3,7 @@
 //! Parses INSERT INTO ... VALUES statements to extract individual rows
 //! and optionally extract PK/FK column values for dependency tracking.
 
-use crate::parser::SqlDialect;
+use crate::parser::{RowFlow, SqlDialect};
 use crate::schema::{ColumnId, ColumnType, TableSchema};
 use ahash::AHashSet;
 use smallvec::SmallVec;
@@ -68,12 +68,16 @@ pub fn hash_pk_tuple(pk: &PkTuple) -> u64 {
 
     for v in pk {
         match v {
+            // Int and BigInt of the same integer must hash identically: a value
+            // dumped unquoted (Int) and the same value dumped quoted in a wider
+            // column (BigInt) are the same key for hash-based FK/PK matching.
+            // Normalize both to a common tag and width.
             PkValue::Int(i) => {
                 0u8.hash(&mut hasher);
-                i.hash(&mut hasher);
+                i128::from(*i).hash(&mut hasher);
             }
             PkValue::BigInt(i) => {
-                1u8.hash(&mut hasher);
+                0u8.hash(&mut hasher);
                 i.hash(&mut hasher);
             }
             PkValue::Text(s) => {
@@ -402,6 +406,10 @@ pub struct InsertParser<'a> {
     dialect: SqlDialect,
     /// How much derived data to compute per row.
     extraction: RowExtraction,
+    /// Set by [`InsertParser::parse_row`]: whether the last tuple closed its
+    /// parenthesis within the available bytes (`true`) or ran out mid-tuple
+    /// (`false`). Consumed by [`scan_insert_tuple`] for incremental streaming.
+    last_complete: bool,
 }
 
 impl<'a> InsertParser<'a> {
@@ -415,6 +423,7 @@ impl<'a> InsertParser<'a> {
             col_to_value: Arc::from(Vec::new()),
             dialect: SqlDialect::MySql,
             extraction: RowExtraction::Full,
+            last_complete: true,
         }
     }
 
@@ -436,8 +445,26 @@ impl<'a> InsertParser<'a> {
         self
     }
 
-    /// Parse all rows from the INSERT statement
+    /// Parse all rows from the INSERT statement, collecting them into a `Vec`.
+    ///
+    /// A thin collecting adapter over [`InsertParser::parse_rows_visit`].
     pub fn parse_rows(&mut self) -> anyhow::Result<Vec<ParsedRow>> {
+        let mut rows = Vec::new();
+        self.parse_rows_visit(|row| {
+            rows.push(row);
+            Ok(RowFlow::Continue)
+        })?;
+        Ok(rows)
+    }
+
+    /// Stream each parsed row to `f` without collecting a statement-sized `Vec`.
+    ///
+    /// Only the current row is materialized at a time. `f` returns a
+    /// [`RowFlow`]: `SkipStatement`/`Stop` both stop this statement's rows.
+    pub fn parse_rows_visit<F>(&mut self, mut f: F) -> anyhow::Result<()>
+    where
+        F: FnMut(ParsedRow) -> anyhow::Result<RowFlow>,
+    {
         // Find the VALUES keyword
         let values_pos = self.find_values_keyword()?;
         self.pos = values_pos;
@@ -451,7 +478,6 @@ impl<'a> InsertParser<'a> {
         }
 
         // Parse each row
-        let mut rows = Vec::new();
         while self.pos < self.stmt.len() {
             self.skip_whitespace();
 
@@ -461,7 +487,10 @@ impl<'a> InsertParser<'a> {
 
             if self.stmt[self.pos] == b'(' {
                 if let Some(row) = self.parse_row() {
-                    rows.push(row);
+                    match f(row)? {
+                        RowFlow::Continue => {}
+                        RowFlow::SkipStatement | RowFlow::Stop => break,
+                    }
                 }
             } else if self.stmt[self.pos] == b',' {
                 self.pos += 1;
@@ -472,7 +501,7 @@ impl<'a> InsertParser<'a> {
             }
         }
 
-        Ok(rows)
+        Ok(())
     }
 
     /// Find the VALUES keyword and return position after it
@@ -542,6 +571,10 @@ impl<'a> InsertParser<'a> {
                 }
             }
         }
+
+        // depth == 0 means we consumed the matching ')'; depth > 0 means the
+        // slice ended mid-tuple (used by the incremental streaming scanner).
+        self.last_complete = depth == 0;
 
         let end = self.pos;
         let raw = self.stmt[start..end].to_vec();
@@ -870,17 +903,108 @@ pub fn parse_insert_rows(
 
 /// Like [`parse_insert_rows`], but with an explicit [`RowExtraction`] level so
 /// consumers that don't need `all_values` (or PK/FK at all) skip that work.
+///
+/// This is a collecting adapter over [`visit_insert_rows_with`]: it simply
+/// pushes each streamed row into a `Vec`. Existing consumers that want the
+/// whole statement's rows keep using it unchanged.
 pub fn parse_insert_rows_with(
     stmt: &[u8],
     schema: &TableSchema,
     dialect: SqlDialect,
     extraction: RowExtraction,
 ) -> anyhow::Result<Vec<ParsedRow>> {
+    let mut rows = Vec::new();
+    visit_insert_rows_with(stmt, schema, dialect, extraction, |row| {
+        rows.push(row);
+        Ok(RowFlow::Continue)
+    })?;
+    Ok(rows)
+}
+
+/// Stream the rows of an INSERT statement to a visitor, one at a time, without
+/// building a statement-sized `Vec`. `f` returns a [`RowFlow`] to stop early.
+/// Only the fields required by `extraction` are allocated per row.
+pub fn visit_insert_rows_with<F>(
+    stmt: &[u8],
+    schema: &TableSchema,
+    dialect: SqlDialect,
+    extraction: RowExtraction,
+    f: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(ParsedRow) -> anyhow::Result<RowFlow>,
+{
     let mut parser = InsertParser::new(stmt)
         .with_schema(schema)
         .with_dialect(dialect)
         .with_extraction(extraction);
-    parser.parse_rows()
+    parser.parse_rows_visit(f)
+}
+
+/// Precomputed per-statement column context, so [`Parser::visit_events`]
+/// consumers can parse individual INSERT tuples (delivered as
+/// [`crate::parser::ParserEvent::InsertRow`]) without re-deriving the column
+/// order for every row. Built once per INSERT header.
+///
+/// [`Parser::visit_events`]: crate::parser::Parser::visit_events
+pub struct InsertRowContext {
+    column_order: Vec<Option<ColumnId>>,
+    col_to_value: Arc<[Option<usize>]>,
+}
+
+impl InsertRowContext {
+    /// Build the context from an INSERT header (the statement bytes up to and
+    /// including the `VALUES` keyword) and the table schema, exactly as the
+    /// full-statement parser would.
+    pub fn from_header(header: &[u8], schema: &TableSchema) -> Self {
+        let values_pos = find_values_keyword_pos(header).unwrap_or(header.len());
+        let column_order: Vec<Option<ColumnId>> =
+            match extract_column_list_before(header, values_pos) {
+                Some(cols) => cols.iter().map(|n| schema.get_column_id(n)).collect(),
+                None => schema.columns.iter().map(|c| Some(c.ordinal)).collect(),
+            };
+        let col_to_value = build_col_to_value(&column_order, schema.columns.len());
+        Self {
+            column_order,
+            col_to_value,
+        }
+    }
+}
+
+/// Parse a single INSERT `(...)` tuple with a precomputed [`InsertRowContext`].
+///
+/// Produces a [`ParsedRow`] byte-identical to the one the full-statement parser
+/// would produce for the same tuple bytes and column context.
+pub fn parse_insert_tuple(
+    tuple: &[u8],
+    schema: &TableSchema,
+    ctx: &InsertRowContext,
+    dialect: SqlDialect,
+    extraction: RowExtraction,
+) -> Option<ParsedRow> {
+    let mut p = InsertParser::new(tuple)
+        .with_schema(schema)
+        .with_dialect(dialect)
+        .with_extraction(extraction);
+    p.column_order = ctx.column_order.clone();
+    p.col_to_value = Arc::clone(&ctx.col_to_value);
+    p.parse_row()
+}
+
+/// Find the extent of one INSERT tuple beginning at `data[0]` (which must be
+/// `(`), using the exact same logic as [`InsertParser::parse_row`].
+///
+/// Returns `(consumed, complete)`: `consumed` is the number of bytes the tuple
+/// occupies (so `data[..consumed]` is the raw tuple), and `complete` is `false`
+/// when `data` ended before the matching `)` (the caller should buffer more).
+/// Returns `None` only when `data` does not start at a `(`.
+pub(crate) fn scan_insert_tuple(data: &[u8], dialect: SqlDialect) -> Option<(usize, bool)> {
+    let mut p = InsertParser::new(data)
+        .with_dialect(dialect)
+        .with_extraction(RowExtraction::ValuesOnly);
+    // parse_row returns None only when not positioned at '('.
+    p.parse_row()?;
+    Some((p.pos, p.last_complete))
 }
 
 /// Parse all rows from a MySQL INSERT statement

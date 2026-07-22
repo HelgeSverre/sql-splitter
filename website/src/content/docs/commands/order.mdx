@@ -33,12 +33,14 @@ The command performs a two-pass operation:
    - For each table: CREATE TABLE → ALTER TABLE/CREATE INDEX → INSERT statements
 
 **What gets reordered:**
+
 - CREATE TABLE statements
 - INSERT/COPY statements (grouped with their table)
 - ALTER TABLE statements (grouped with their table)
 - CREATE INDEX statements (grouped with their table)
 
 **What stays at the top (unchanged order):**
+
 - SET statements, session configuration
 - Comments, headers
 - Statements that don't reference a specific table
@@ -70,6 +72,7 @@ sql-splitter order dump.sql --check
 ```
 
 **Exit codes:**
+
 - `0` - All tables can be ordered (no cycles)
 - `1` - Circular dependencies detected (cannot fully order)
 
@@ -95,13 +98,13 @@ sql-splitter diff old-ordered.sql new-ordered.sql
 
 ## Options
 
-| Flag        | Short | Description                                       | Default     |
-| ----------- | ----- | ------------------------------------------------- | ----------- |
-| `--output`  | `-o`  | Output SQL file                                   | stdout      |
-| `--dialect` | `-d`  | SQL dialect                                       | auto-detect |
+| Flag        | Short | Description                                                         | Default     |
+| ----------- | ----- | ------------------------------------------------------------------- | ----------- |
+| `--output`  | `-o`  | Output SQL file                                                     | stdout      |
+| `--dialect` | `-d`  | SQL dialect                                                         | auto-detect |
 | `--check`   |       | Verify ordering is possible, report order, exit (no output written) | false       |
-| `--dry-run` |       | Show topological order to stderr (no output written) | false       |
-| `--reverse` |       | Reverse order (children before parents, for DROP) | false       |
+| `--dry-run` |       | Show topological order to stderr (no output written)                | false       |
+| `--reverse` |       | Reverse order (children before parents, for DROP)                   | false       |
 
 ## Circular Dependencies
 
@@ -115,6 +118,7 @@ When tables have circular FK relationships (e.g., `orders → payments → invoi
 4. **Warning printed** - You'll see which tables are involved
 
 Example output:
+
 ```
 Warning: Circular dependencies detected!
 The following tables are part of cycles:
@@ -156,6 +160,7 @@ Use [`split`](/commands/split) to extract cyclic tables, import them separately 
 ### Exit code behavior with --check
 
 When using `--check`:
+
 - **No cycles** → exit 0, prints suggested order
 - **Cycles found** → exit 1, prints cyclic tables and suggests using `graph --cycles-only`
 
@@ -197,6 +202,7 @@ sql-splitter order dump.sql --dialect postgres -o ordered.sql
 ### Different order on each run
 
 The order should be deterministic for the same input. If you see different orders:
+
 - Check if the input file itself is changing
 - Tables with no dependencies between them may appear in different relative order (this is correct - they're interchangeable)
 

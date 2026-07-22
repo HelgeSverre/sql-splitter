@@ -1,0 +1,159 @@
+---
+title: generate
+description: Generate relational synthetic SQL from a model, a source dump, or both
+sidebar:
+  order: 1
+---
+
+`generate` creates relational synthetic SQL from a hand-authored YAML model,
+a model inferred from a SQL dump, or an inferred model plus explicit overrides.
+Its alias is `gen`.
+
+:::caution[Synthetic is not anonymized]
+Generated output can replay literal choices, samples, defaults, and constraint
+values. `GEN-SOURCE-VALUES` identifies rules that can replay literals without
+printing the values. Use [`redact`](/commands/redact/) when you need irreversible
+anonymization.
+:::
+
+## Usage
+
+```bash
+sql-splitter generate [OPTIONS] [INPUT]
+```
+
+Provide a source dump, a complete `--config` model, or both. An overrides
+document requires a source dump because it patches the inferred base model.
+
+## Common workflows
+
+Generate directly from a dump:
+
+```bash
+sql-splitter generate production.sql -o synthetic.sql
+```
+
+Generate repeatable fixtures from a reviewed model:
+
+```bash
+sql-splitter generate --config model.yaml --seed 42 -o synthetic.sql
+```
+
+Infer and save an editable model without generating SQL:
+
+```bash
+sql-splitter generate production.sql --emit-config model.yaml
+```
+
+Apply overrides while saving the resolved model and generated SQL:
+
+```bash
+sql-splitter generate production.sql \
+  --config overrides.yaml \
+  --emit-config resolved.yaml \
+  --scale 0.1 \
+  -o synthetic.sql
+```
+
+## Preflight and reporting
+
+```bash
+# Parse and compile a complete model; write nothing
+sql-splitter generate --config model.yaml --check
+
+# Resolve counts and dependencies without generating rows
+sql-splitter generate --config model.yaml --dry-run
+
+# Explain inferred column rules without printing observed values
+sql-splitter generate production.sql --dry-run --explain
+
+# Generate, audit exact checks, then publish atomically
+sql-splitter generate --config model.yaml --verify -o synthetic.sql
+```
+
+`--strict` promotes warning-severity diagnostics to failures. Informational
+diagnostics and advisories remain non-fatal. `--quiet` suppresses ordinary human
+reporting, but safety advisories still reach stderr.
+
+## Options
+
+| Input and model             | Meaning                            | Default     |
+| --------------------------- | ---------------------------------- | ----------- |
+| `[INPUT]`                   | Source SQL dump to profile         | none        |
+| `-c, --config <PATH>`       | Complete model or overrides YAML   | none        |
+| `--emit-config <PATH>`      | Write the resolved complete model  | none        |
+| `-o, --output <PATH>`       | Generated SQL; `-` means stdout    | stdout      |
+| `--profile-depth <MODE>`    | Profiling depth: `basic` or `full` | `basic`     |
+| `--profile-sample <COUNT>`  | Retained profiling sample capacity | `1000`      |
+| `--input-dialect <DIALECT>` | Force the source parsing dialect   | auto-detect |
+
+| Rendering                  | Meaning                                    | Default                   |
+| -------------------------- | ------------------------------------------ | ------------------------- |
+| `--dialect <DIALECT>`      | Output SQL dialect                         | model, source, then MySQL |
+| `--schema-only`            | Emit DDL only                              | false                     |
+| `--data-only`              | Emit row data only                         | false                     |
+| `--batch-size <COUNT>`     | Rows per `INSERT` or `COPY` batch (1–1,000,000) | `1000`               |
+| `--no-copy`                | Use PostgreSQL `INSERT` instead of `COPY`  | false                     |
+| `--mssql-production-style` | Add production-style MSSQL DDL conventions | false                     |
+| `--mssql-go <COUNT>`       | Emit `GO` every N MSSQL insert batches     | every batch               |
+| `--compress <FORMAT>`      | Reserved; currently unavailable            | none                      |
+
+| Volume and selection           | Meaning                                           | Default |
+| ------------------------------ | ------------------------------------------------- | ------- |
+| `--scale <FACTOR>`             | Multiply every resolved row count                 | none    |
+| `--rows <COUNT>`               | Set absolute root-table counts                    | none    |
+| `--table-rows <TABLE=COUNT>`   | Per-table absolute count; repeatable              | none    |
+| `--table-scale <TABLE=FACTOR>` | Per-table scale; repeatable                       | none    |
+| `--max-rows <COUNT>`           | Cap every table after other count controls        | none    |
+| `--tables <GLOBS>`             | Include matching tables and required dependencies | all     |
+| `--exclude <GLOBS>`            | Exclude matching tables                           | none    |
+
+| Randomness     | Meaning                               | Default                |
+| -------------- | ------------------------------------- | ---------------------- |
+| `--seed <U64>` | Stable root seed                      | model or fresh entropy |
+| `--randomize`  | Ignore configured seed; use a new one | false                  |
+
+| Preflight and reporting | Meaning                                   | Default |
+| ----------------------- | ----------------------------------------- | ------- |
+| `--check`               | Compile a complete model only             | false   |
+| `--dry-run`             | Compile and report resolved counts        | false   |
+| `--verify`              | Generate, audit, and publish atomically   | false   |
+| `--explain`             | Include inference decisions               | false   |
+| `--strict`              | Fail on warning-severity diagnostics      | false   |
+| `--json`                | Print a machine-readable report on stdout | false   |
+| `--quiet`               | Suppress ordinary human reporting         | false   |
+| `--progress`            | Accepted but not wired to generation      | false   |
+
+## Important constraints
+
+- `--check`, `--dry-run`, and `--verify` are mutually exclusive.
+- `--schema-only` and `--data-only` are mutually exclusive.
+- `--seed` and `--randomize` are mutually exclusive.
+- `--scale` and `--rows` are mutually exclusive.
+- A table cannot receive both `--table-rows` and `--table-scale`.
+- `--json`, `--output -`, and `--emit-config -` each own stdout; select only one.
+- `--json` in generate mode writes only the report to stdout, so it requires `-o <path>` for the generated SQL (or use `--check`/`--dry-run` for a report-only run).
+- `--check` requires a complete model and cannot profile `[INPUT]`.
+- `--verify` requires a real output path and cannot use compression.
+- MSSQL-specific flags require an explicit `--dialect mssql`.
+
+## Detailed documentation
+
+| Topic                      | Reference                                                            |
+| -------------------------- | -------------------------------------------------------------------- |
+| YAML model language        | [Model reference](/commands/generate/model-reference/)               |
+| Column value producers     | [Generator reference](/commands/generate/generators/)                |
+| Post-generation transforms | [Modifiers](/commands/generate/modifiers/)                           |
+| Coordinated invariants     | [Planners](/commands/generate/planners/)                             |
+| Dump profiling and choices | [Profiling and inference](/commands/generate/inference/)             |
+| Safety and exact checks    | [Privacy and verification](/commands/generate/privacy-verification/) |
+| Stable `GEN-*` codes       | [Diagnostics](/commands/generate/diagnostics/)                       |
+| Embedding in Rust          | [Rust API](/commands/generate/library-api/)                          |
+
+## Exit codes
+
+| Code | Meaning                                                            |
+| ---- | ------------------------------------------------------------------ |
+| `0`  | Generation or the requested preflight mode succeeded               |
+| `1`  | Model, warning-under-strict, runtime, I/O, or verification failure |
+| `2`  | Invalid CLI usage or conflicting flags                             |

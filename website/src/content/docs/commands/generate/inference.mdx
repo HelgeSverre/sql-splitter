@@ -1,0 +1,147 @@
+---
+title: Profiling and inference
+description: How a source dump becomes an explicit synthetic model
+sidebar:
+  order: 6
+---
+
+When a source dump is provided, sql-splitter reads it once to build neutral,
+bounded evidence, then resolves that evidence into an explicit model. Profiling
+records what was observed; inference decides how to generate it.
+
+## Profiling depths
+
+The CLI exposes `basic` and `full` and defaults to `basic`.
+
+| Capability                                                                    | Basic | Full |
+| ----------------------------------------------------------------------------- | ----- | ---- |
+| Schema, exact row counts, exact null counts                                   | yes   | yes  |
+| Distinct estimate, numeric summary, string shape, top values, bounded samples | yes   | yes  |
+| Declared-FK coverage and same-table temporal pair evidence                    | no    | yes  |
+
+Both modes scan the complete input. “Bounded” means retained evidence has a
+fixed capacity; it does not mean the profiler stops reading after N rows.
+
+The default per-column budget retains at most 1,000 sample values, 32 heavy
+hitters, 32 histogram bins, fixed-size distinct-count registers, and bounded
+prefix/suffix and timestamp strings. A retained individual sample is truncated
+to a safety ceiling. `--profile-sample N` replaces only the sample-value
+capacity; the other bounds stay fixed.
+
+If data arrives before its table DDL, the profiler buffers a bounded replay
+sample and keeps the row count exact. `GEN-PROFILE-SCHEMA-LATE` reports when the
+retained values cannot cover every early row. Rows that cannot be decoded still
+count toward the exact table total and emit `GEN-PROFILE-DECODE-SKIPPED` once per
+affected table.
+
+## Inference precedence
+
+Each heuristic proposes a candidate with a precedence class and confidence. A
+higher precedence class always beats a lower one; confidence only breaks ties
+inside a class.
+
+1. explicit YAML override;
+2. schema constraints such as identity and declared defaults;
+3. credential guard;
+4. declared relationship or planner;
+5. strong semantic name plus value shape;
+6. observed distribution;
+7. type fallback.
+
+The winning generator, confidence, and reason are stored in the inference
+decision. Rejected candidates are recorded without their literal values. Use
+`--explain` to inspect this information.
+
+```bash
+sql-splitter generate source.sql --dry-run --explain
+```
+
+## What gets inferred
+
+- Schema constraints can select `database_default`, an identity sequence, or a
+  relationship owner.
+- Credential-shaped columns select synthetic-only `credential.*` generators.
+- Strong names and compatible shapes select semantic generators such as
+  `internet.email` or `person.full_name`.
+- Low-cardinality evidence can become `weighted_choice`; high-cardinality
+  samples can become `observed_sample`; numeric evidence can select a
+  statistical generator.
+- Every table absent from value evidence still receives a type-based complete
+  fallback model.
+- Observed row counts are frozen into the model, and automatic inference is
+  disabled before an emitted model is written.
+
+## Keys and referential integrity
+
+Inference makes a few structural choices so a profiled model generates data that
+satisfies its own keys and foreign keys. These are driven entirely by the shape
+of the primary keys and foreign keys, not by table or column names, so they
+apply to any schema:
+
+- **Junction pivots.** A table whose primary key contains two or more
+  single-column foreign keys is a many-to-many junction, so a
+  `relation.junction_pair` planner is inserted over two of those foreign keys.
+  The generated `(left, right)` pairs are distinct, which keeps the whole
+  composite key distinct even when it also carries a discriminator column (the
+  polymorphic pivot shape).
+- **Other composite keys.** When a composite primary key has fewer than two
+  foreign keys but includes a plain (non-foreign-key) integer column, that
+  column is sequenced so every row's key tuple is distinct.
+- **Referenced text keys.** A text primary key that another table's foreign key
+  points at must be reproducible at generation time, so it is given a `uuid`
+  (a text key that regenerates per row) instead of a plain random string.
+- **Unique columns.** A single-column unique column that inference would
+  otherwise fill with a bounded or categorical generator (a bounded integer,
+  `observed_sample`, `choice`, `histogram`, …) is given a high-cardinality
+  generator instead — a `sequence` for an integer, a `uuid` for text — so it can
+  supply a distinct value for every row without exhausting its uniqueness
+  budget. This also stops replaying source literals on those columns.
+
+## Planner nomination
+
+Beyond the structural junction pivots above, inference can recognize that a
+table has the columns needed by a *name/shape* planner, but it does not silently
+insert that configuration. Instead it emits an informational
+`GEN-INFER-PLANNER-NOMINATE` diagnostic naming the exact planner.
+
+For example, compatible `created_at` and `updated_at` columns can produce:
+
+```text
+info[GEN-INFER-PLANNER-NOMINATE] tables.events
+  table `events` is a candidate for `temporal.timestamps` because it has compatible `created_at` and `updated_at` columns
+```
+
+ELI5: inference has noticed that two puzzle pieces look like they belong
+together. It points at the matching instruction (`temporal.timestamps`) but
+does not assemble them, because that would change who owns the columns and
+could override your intent. Review the nomination, then add the planner to the
+model if you want its invariant.
+
+Current nominations include `temporal.timestamps` for created/updated pairs and
+`geo.coordinate_pair` for latitude/longitude pairs. An ordinary foreign key is
+not nominated as `relation.children`: that name is a row-count rule, not a
+planner.
+
+## Source-derived rules
+
+An inference decision can use a literal-bearing generator when reproducing an
+observed categorical distribution is the strongest match. The inference result
+marks that decision as source-derived; the complete generation report aggregates
+all literal-bearing rules into one non-fatal `GEN-SOURCE-VALUES` advisory.
+
+Use semantic generators or explicit overrides to replace those rules before
+sharing output outside the source data's trust boundary.
+
+## Limitations
+
+- Schema-only inference applies structural facts plus name-and-type heuristics
+  (semantic, credential, and type fallbacks), but without value evidence it
+  cannot use observed distributions or corroborate an ambiguous name against
+  sampled data.
+- Planner nominations are suggestions; no planner is inserted automatically.
+- Bounded samples and sketches approximate distributions and cannot guarantee a
+  statistically exact replica.
+- Profiling does not currently compute a fresh source fingerprint for drift
+  comparison.
+- Observed planner-specific distributions are not all threaded into planners;
+  each planner documents its fallback behavior.

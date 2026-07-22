@@ -3,10 +3,10 @@
 //! These tests download public SQL dumps and verify that sql-splitter can
 //! correctly parse, split, convert, validate, redact, and generate ERDs from them.
 //!
-//! Run with: cargo test --test realworld -- --ignored
+//! Run with: cargo nextest run --test realworld --run-ignored only
 //!
 //! Or run a specific test case:
-//!   cargo test --test realworld mysql_classicmodels -- --ignored
+//!   cargo nextest run --test realworld mysql_classicmodels --run-ignored only
 
 #[path = "realworld_tests/mod.rs"]
 mod realworld_tests;
