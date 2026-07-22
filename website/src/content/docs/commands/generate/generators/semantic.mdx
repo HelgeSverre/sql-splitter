@@ -120,6 +120,8 @@ columns:
       max_seconds: 86400
 ```
 
-The source must exist, be generated earlier without a dependency cycle, and
-contain a supported timestamp format at runtime. Bounds must be ordered and fit
-the supported timestamp arithmetic range.
+The source must exist and contain a supported timestamp format at runtime. It
+may be declared anywhere — evaluation follows the
+[read dependency](/commands/generate/generators/#column-evaluation-order), so the
+source is produced first — but the two columns must not read each other in a
+cycle. Bounds must be ordered and fit the supported timestamp arithmetic range.

@@ -6,9 +6,20 @@ sidebar:
 ---
 
 A generator owns one column and produces its base value. The compiler checks
-the generator's accepted SQL families, validates its arguments, and orders any
-sibling-column reads before execution. [Modifiers](/commands/generate/modifiers/) run afterward
-in the order declared.
+the generator's accepted SQL families and validates its arguments.
+[Modifiers](/commands/generate/modifiers/) run afterward in the order declared.
+
+## Column evaluation order
+
+When a generator reads sibling columns on the same row — `copy`, `template`,
+`slug`, and `before`/`after` do — the engine evaluates each column after the
+columns it reads, following the read dependencies rather than the order columns
+are declared. A derived column may therefore appear anywhere in the schema,
+before or after its source. A read whose source has not been produced yet (or a
+generator reading its own column) sees no value; a set of columns that read each
+other in a cycle is rejected at compile time as
+[`GEN-COLUMN-CYCLE`](/commands/generate/diagnostics/#GEN-COLUMN-CYCLE).
+Columns that read nothing keep their declared schema order.
 
 ```yaml
 columns:

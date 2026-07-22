@@ -42,8 +42,9 @@ generator: { kind: sequence, start: 1, step: 1 }
 
 ## `copy`
 
-Required `source` names a sibling column. The source must exist, run earlier,
-and produce a family compatible with the target.
+Required `source` names a sibling column. The source must exist and produce a
+family compatible with the target; it may be declared anywhere, since evaluation
+follows the [read dependency](/commands/generate/generators/#column-evaluation-order).
 
 ```yaml
 columns:
@@ -64,7 +65,9 @@ generator:
   parts: ["INV-", { field: id }, "-", { field: region }]
 ```
 
-Every referenced field must exist and be available before the template column.
+Every referenced field must exist; each is evaluated before this column
+automatically, wherever it is declared (see
+[column evaluation order](/commands/generate/generators/#column-evaluation-order)).
 
 ## `slug`
 
@@ -74,7 +77,10 @@ non-ASCII-alphanumeric characters collapses to a single `-`, and leading and
 trailing dashes are trimmed. Optional `max_length` (a positive integer)
 truncates the result, trimming any dash left dangling at the cut.
 Non-ASCII-alphanumeric characters act as separators; the generator does not
-transliterate accents or other scripts.
+transliterate accents or other scripts. The source may be declared anywhere, as
+evaluation follows the
+[read dependency](/commands/generate/generators/#column-evaluation-order); add a
+`unique` modifier when the slug column is constrained unique.
 
 ```yaml
 columns:
