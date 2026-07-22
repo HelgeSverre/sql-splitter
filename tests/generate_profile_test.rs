@@ -1128,6 +1128,57 @@ fn unreferenced_text_primary_key_keeps_its_inferred_generator() {
     );
 }
 
+#[test]
+fn unique_integer_column_is_sequenced_not_bounded() {
+    // A unique non-key integer column (e.g. an external id) must be able to
+    // produce a distinct value per row. A bounded `integer` generator from the
+    // observed range would exhaust its auto-unique modifier at scale, so a
+    // single-column unique integer is inferred as a `sequence` instead.
+    let mut paddle = portable_column("paddle_id", "bigint", SqlTypeFamily::BigInteger);
+    paddle.unique = true;
+    let schema = schema_of(vec![table_with(
+        "subscriptions",
+        vec![
+            pk_col("id", "bigint", SqlTypeFamily::BigInteger),
+            paddle,
+        ],
+        vec!["id"],
+        vec![],
+    )]);
+    // Observed evidence that would otherwise yield a small bounded integer.
+    let mut ev = blank_evidence("paddle_id", 2000);
+    ev.numeric = Some(sql_splitter::profile::evidence::NumericEvidence {
+        min: 1.0,
+        max: 1000.0,
+        mean: 500.0,
+        p50: 500.0,
+        p90: 900.0,
+        p99: 990.0,
+    });
+    let profile = DumpProfile {
+        depth: ProfileDepth::Full,
+        schema: PortableSchema {
+            dialect: "mysql".to_string(),
+            tables: BTreeMap::new(),
+        },
+        tables: vec![TableEvidence {
+            table: "subscriptions".to_string(),
+            row_count: Some(2000),
+            columns: vec![ev],
+            relationships: Vec::new(),
+            confidence: 1.0,
+        }],
+        warnings: Vec::new(),
+    };
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    assert_eq!(
+        generator_kind(&result, "subscriptions", "paddle_id"),
+        "sequence",
+        "a unique integer column must be sequenced so it can stay distinct"
+    );
+}
+
 // --- Step 1: safety / precedence --------------------------------------------
 
 /// The credential guard beats a name/shape match and any observed-value replay:

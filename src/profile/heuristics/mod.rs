@@ -510,6 +510,44 @@ impl ModelInference {
 
             let (rule, decision, literals) = resolve_column(&ctx, &key, candidates);
 
+            // A single-column unique column must produce a distinct value per
+            // row. When inference lands on a bounded or categorical generator
+            // (observed_sample, choice, a bounded integer, …) it would exhaust
+            // the auto-unique modifier at scale, so force a high-cardinality
+            // generator by family — a sequence for integers, a uuid for text.
+            // This also drops any replayed source literals (privacy-positive).
+            let (rule, decision, literals) = if is_single_column_unique(portable, column)
+                && rule
+                    .generator
+                    .as_ref()
+                    .is_some_and(|g| is_bounded_generator(&g.kind))
+            {
+                match high_cardinality_generator(column) {
+                    Some(generator) => (
+                        ColumnRule {
+                            semantic: None,
+                            generator: Some(GeneratorConfig {
+                                kind: generator.0.clone(),
+                                args: generator.1,
+                            }),
+                            modifiers: Vec::new(),
+                        },
+                        Decision {
+                            column: key.clone(),
+                            reason: "unique_high_cardinality".to_string(),
+                            confidence: Confidence::High,
+                            generator_kind: generator.0,
+                            source_derived: false,
+                            rejected: Vec::new(),
+                        },
+                        Vec::new(),
+                    ),
+                    None => (rule, decision, literals),
+                }
+            } else {
+                (rule, decision, literals)
+            };
+
             if !literals.is_empty() {
                 warnings.push(Diagnostic::warning(
                     &codes::INFER_SOURCE_DERIVED,
@@ -688,6 +726,62 @@ fn profile_metadata(ctx: &ColumnContext<'_>, decision: &Decision) -> Option<Prof
 
 /// Declared foreign keys become explicit model relationships so the output
 /// stands alone.
+/// Whether a resolved generator kind draws from a bounded or categorical domain
+/// (so it cannot supply a distinct value per row on a large unique column).
+fn is_bounded_generator(kind: &str) -> bool {
+    matches!(
+        kind,
+        "observed_sample"
+            | "choice"
+            | "weighted_choice"
+            | "histogram"
+            | "normal"
+            | "integer"
+            | "decimal"
+            | "boolean"
+            | "constant"
+            | "null"
+            | "database_default"
+    )
+}
+
+/// A high-cardinality generator (kind + args) for a unique `column` whose
+/// inferred generator was bounded: a `sequence` for an integer, a `uuid` for
+/// text. `None` for families with no obvious high-cardinality synthetic key.
+fn high_cardinality_generator(
+    column: &PortableColumn,
+) -> Option<(String, BTreeMap<String, serde_yaml_ng::Value>)> {
+    match column.family {
+        SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => Some((
+            "sequence".to_string(),
+            [("start".to_string(), yaml(1))].into_iter().collect(),
+        )),
+        SqlTypeFamily::Text | SqlTypeFamily::Other | SqlTypeFamily::Uuid => {
+            Some(("uuid".to_string(), BTreeMap::new()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `column` is a single-column unique key of `table`: its own `unique`
+/// flag, a single-column UNIQUE constraint, or a single-column unique index.
+/// Mirrors the compiler's single-column-key test so inference and generation
+/// agree on which columns must stay distinct.
+fn is_single_column_unique(table: &PortableTable, column: &PortableColumn) -> bool {
+    if column.unique {
+        return true;
+    }
+    let single = |columns: &[String]| columns.len() == 1 && columns[0] == column.name;
+    table
+        .unique_constraints
+        .iter()
+        .any(|constraint| single(&constraint.columns))
+        || table
+            .indexes
+            .iter()
+            .any(|index| index.unique && single(&index.columns))
+}
+
 /// The single-column declared foreign key whose one column is `column`, if any.
 /// A composite (multi-column) foreign key does not qualify.
 fn single_column_fk<'a>(table: &'a PortableTable, column: &str) -> Option<&'a PortableRelationship> {
