@@ -50,7 +50,7 @@ bzip2 = { version = "0.6", optional = true }
 xz2 = { version = "0.1", optional = true }
 zstd = { version = "0.13", optional = true }
 tar = { version = "0.4", optional = true }
-zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+zip = { version = "6", optional = true, default-features = false, features = ["deflate"] }
 indicatif = "0.18"
 rand = "0.10"
 rand_chacha = "0.10"

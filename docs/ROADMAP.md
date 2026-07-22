@@ -863,11 +863,10 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ### Upcoming Features (v1.16+)
 
-| Version | Features                               | Status      |
-| ------- | -------------------------------------- | ----------- |
-| v1.16.0 | Zip Input + Adaptive I/O               | Released    |
-| vNext   | Synthetic Data Generation (`generate`) | Implemented |
-| v1.17.0 | Enum Conversion                        | Planned     |
+| Version | Features                                                          | Status  |
+| ------- | ----------------------------------------------------------------- | ------- |
+| v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current |
+| v1.17.0 | Enum Conversion                                                   | Planned |
 | v1.18.0 | Migrate                                | Planned     |
 | v1.19.0 | DBML                                   | Planned     |
 | v2.0.0  | Parallel                               | Planned     |
