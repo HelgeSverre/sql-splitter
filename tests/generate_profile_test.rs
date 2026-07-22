@@ -1076,6 +1076,58 @@ fn composite_pk_with_one_fk_sequences_a_non_fk_integer_column() {
     );
 }
 
+#[test]
+fn text_primary_key_referenced_by_a_foreign_key_becomes_a_uuid() {
+    // A text PK referenced by a child FK must be reproducible by random access,
+    // so it is inferred as `uuid` (a text key with a random-access recipe)
+    // instead of a plain `string`, which the engine cannot materialize.
+    let schema = schema_of(vec![
+        table_with(
+            "job_batches",
+            vec![pk_col("id", "varchar(255)", SqlTypeFamily::Text)],
+            vec!["id"],
+            vec![],
+        ),
+        table_with(
+            "query_batches",
+            vec![
+                pk_col("id", "bigint", SqlTypeFamily::BigInteger),
+                portable_column("job_batch_id", "varchar(255)", SqlTypeFamily::Text),
+            ],
+            vec!["id"],
+            vec![fk("qb_batch", "job_batch_id", "job_batches")],
+        ),
+    ]);
+    let profile = row_count_profile(&[("job_batches", 10), ("query_batches", 40)]);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    assert_eq!(
+        generator_kind(&result, "job_batches", "id"),
+        "uuid",
+        "a referenced text primary key must get a random-access uuid key"
+    );
+}
+
+#[test]
+fn unreferenced_text_primary_key_keeps_its_inferred_generator() {
+    // A text PK that no FK references does not need a random-access key, so it
+    // is left to ordinary inference (a plain string), not forced to uuid.
+    let schema = schema_of(vec![table_with(
+        "tokens",
+        vec![pk_col("id", "varchar(255)", SqlTypeFamily::Text)],
+        vec!["id"],
+        vec![],
+    )]);
+    let profile = row_count_profile(&[("tokens", 10)]);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    assert_ne!(
+        generator_kind(&result, "tokens", "id"),
+        "uuid",
+        "an unreferenced text PK should not be forced to uuid"
+    );
+}
+
 // --- Step 1: safety / precedence --------------------------------------------
 
 /// The credential guard beats a name/shape match and any observed-value replay:

@@ -42,7 +42,7 @@ pub fn is_credential_name(name: &str) -> bool {
     credential::is_high_confidence_credential(name)
 }
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::Serialize;
@@ -337,6 +337,21 @@ impl ModelInference {
         let mut profiles = BTreeMap::new();
         let mut source_literals = BTreeMap::new();
 
+        // Parent key columns any foreign key points at. A referenced key must be
+        // reproducible by random access at generation time, which constrains how
+        // such a column may be inferred (see `infer_table`).
+        let referenced: BTreeSet<(String, String)> = schema
+            .tables
+            .values()
+            .flat_map(|table| {
+                table.relationships.iter().flat_map(|fk| {
+                    fk.referenced_columns
+                        .iter()
+                        .map(move |column| (fk.referenced_table.clone(), column.clone()))
+                })
+            })
+            .collect();
+
         for table_evidence in &profile.tables {
             let Some(portable) = schema.tables.get(&table_evidence.table) else {
                 warnings.push(Diagnostic::warning(
@@ -352,6 +367,7 @@ impl ModelInference {
             let table_model = self.infer_table(
                 portable,
                 Some(table_evidence),
+                &referenced,
                 &mut decisions,
                 &mut warnings,
                 &mut profiles,
@@ -369,6 +385,7 @@ impl ModelInference {
             let table_model = self.infer_table(
                 portable,
                 None,
+                &referenced,
                 &mut decisions,
                 &mut warnings,
                 &mut profiles,
@@ -410,10 +427,12 @@ impl ModelInference {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn infer_table(
         &self,
         portable: &PortableTable,
         evidence: Option<&TableEvidence>,
+        referenced: &BTreeSet<(String, String)>,
         decisions: &mut Vec<Decision>,
         warnings: &mut Vec<Diagnostic>,
         profiles: &mut BTreeMap<String, ProfileMetadata>,
@@ -437,6 +456,36 @@ impl ModelInference {
                     source_derived: false,
                     rejected: Vec::new(),
                 });
+                continue;
+            }
+
+            // A text primary key that a foreign key references must be
+            // reproducible by random access at generation time. A plain `string`
+            // has no key recipe (the engine reports GEN-KEY-DOMAIN-UNSUPPORTED),
+            // so give it a `uuid`, which is a text key that reseeds per row.
+            if column.primary_key
+                && matches!(column.family, SqlTypeFamily::Text | SqlTypeFamily::Other)
+                && referenced.contains(&(portable.name.clone(), column.name.clone()))
+            {
+                decisions.push(Decision {
+                    column: key,
+                    reason: "referenced_text_key".to_string(),
+                    confidence: Confidence::High,
+                    generator_kind: "uuid".to_string(),
+                    source_derived: false,
+                    rejected: Vec::new(),
+                });
+                columns.insert(
+                    column.name.clone(),
+                    ColumnRule {
+                        semantic: None,
+                        generator: Some(GeneratorConfig {
+                            kind: "uuid".to_string(),
+                            args: BTreeMap::new(),
+                        }),
+                        modifiers: Vec::new(),
+                    },
+                );
                 continue;
             }
 
