@@ -71,11 +71,38 @@ sql-splitter generate source.sql --dry-run --explain
 - Observed row counts are frozen into the model, and automatic inference is
   disabled before an emitted model is written.
 
+## Keys and referential integrity
+
+Inference makes a few structural choices so a profiled model generates data that
+satisfies its own keys and foreign keys. These are driven entirely by the shape
+of the primary keys and foreign keys, not by table or column names, so they
+apply to any schema:
+
+- **Junction pivots.** A table whose primary key contains two or more
+  single-column foreign keys is a many-to-many junction, so a
+  `relation.junction_pair` planner is inserted over two of those foreign keys.
+  The generated `(left, right)` pairs are distinct, which keeps the whole
+  composite key distinct even when it also carries a discriminator column (the
+  polymorphic pivot shape).
+- **Other composite keys.** When a composite primary key has fewer than two
+  foreign keys but includes a plain (non-foreign-key) integer column, that
+  column is sequenced so every row's key tuple is distinct.
+- **Referenced text keys.** A text primary key that another table's foreign key
+  points at must be reproducible at generation time, so it is given a `uuid`
+  (a text key that regenerates per row) instead of a plain random string.
+- **Unique columns.** A single-column unique column that inference would
+  otherwise fill with a bounded or categorical generator (a bounded integer,
+  `observed_sample`, `choice`, `histogram`, …) is given a high-cardinality
+  generator instead — a `sequence` for an integer, a `uuid` for text — so it can
+  supply a distinct value for every row without exhausting its uniqueness
+  budget. This also stops replaying source literals on those columns.
+
 ## Planner nomination
 
-Inference can recognize that a table has the columns needed by a planner, but
-it does not silently insert planner configuration. Instead it emits an
-informational `GEN-INFER-PLANNER-NOMINATE` diagnostic naming the exact planner.
+Beyond the structural junction pivots above, inference can recognize that a
+table has the columns needed by a *name/shape* planner, but it does not silently
+insert that configuration. Instead it emits an informational
+`GEN-INFER-PLANNER-NOMINATE` diagnostic naming the exact planner.
 
 For example, compatible `created_at` and `updated_at` columns can produce:
 
