@@ -52,10 +52,10 @@ use crate::generate::registry::ExtensionRegistry;
 use crate::profile::evidence::{ColumnEvidence, DumpProfile, TableEvidence};
 use crate::synthetic::model::{
     ColumnRule, GeneratorConfig, ModelDefaults, ModelKind, ModifierConfig, OutputModel,
-    ProfileInference, ProfileMetadata, RelationshipModel, RelationshipReference, RowsModel,
-    SourceModel, SyntheticModel, TableModel, TableSeed,
+    PlannerConfig, ProfileInference, ProfileMetadata, RelationshipModel, RelationshipReference,
+    RowsModel, SourceModel, SyntheticModel, TableModel, TableSeed,
 };
-use crate::synthetic::schema::{PortableColumn, PortableSchema, PortableTable};
+use crate::synthetic::schema::{PortableColumn, PortableSchema, PortableRelationship, PortableTable};
 
 // --- Precedence & confidence -------------------------------------------------
 
@@ -482,8 +482,10 @@ impl ModelInference {
             columns.insert(column.name.clone(), rule);
         }
 
-        // Planner reconnaissance runs at table scope. Nominations remain
-        // informational so inference does not insert planner configuration.
+        // Planner reconnaissance runs at table scope. Name/shape nominations
+        // (temporal, geo) remain informational, but a structural composite-key
+        // match is inserted as real configuration so the generated pivot's
+        // primary key holds by construction.
         warnings.extend(planner::nominations(portable, evidence));
 
         TableModel {
@@ -495,7 +497,7 @@ impl ModelInference {
             schema: portable.clone(),
             columns,
             relationships: declared_relationships(portable),
-            planners: Vec::new(),
+            planners: inferred_planners(portable),
         }
     }
 }
@@ -615,6 +617,51 @@ fn profile_metadata(ctx: &ColumnContext<'_>, decision: &Decision) -> Option<Prof
 
 /// Declared foreign keys become explicit model relationships so the output
 /// stands alone.
+/// The single-column declared foreign key whose one column is `column`, if any.
+/// A composite (multi-column) foreign key does not qualify.
+fn single_column_fk<'a>(table: &'a PortableTable, column: &str) -> Option<&'a PortableRelationship> {
+    table
+        .relationships
+        .iter()
+        .find(|fk| fk.columns.len() == 1 && fk.columns[0] == column)
+}
+
+/// Infer the planners a pivot table needs so its composite primary key holds by
+/// construction. A table whose primary key is exactly two single-column foreign
+/// keys (each to a named relationship) is a many-to-many junction: emit a
+/// `relation.junction_pair` planner so the generated `(left, right)` pairs are
+/// distinct. This is a purely structural match — it keys off the shape of the
+/// primary key and its foreign keys, not any table or column name — so it covers
+/// any junction table, Laravel or otherwise. Non-junction composite keys (a
+/// discriminator or a non-foreign-key column in the primary key) are left to
+/// other mechanisms.
+fn inferred_planners(table: &PortableTable) -> Vec<PlannerConfig> {
+    let pk = &table.primary_key;
+    if pk.len() != 2 {
+        return Vec::new();
+    }
+    let (Some(left), Some(right)) = (single_column_fk(table, &pk[0]), single_column_fk(table, &pk[1]))
+    else {
+        return Vec::new();
+    };
+    let (Some(left_name), Some(right_name)) = (left.name.clone(), right.name.clone()) else {
+        return Vec::new();
+    };
+
+    let mut columns = serde_yaml_ng::Mapping::new();
+    columns.insert(yaml("left"), yaml(&pk[0]));
+    columns.insert(yaml("right"), yaml(&pk[1]));
+    let mut args = BTreeMap::new();
+    args.insert("columns".to_string(), serde_yaml_ng::Value::Mapping(columns));
+    args.insert("left_relationship".to_string(), yaml(left_name));
+    args.insert("right_relationship".to_string(), yaml(right_name));
+
+    vec![PlannerConfig {
+        kind: "relation.junction_pair".to_string(),
+        args,
+    }]
+}
+
 fn declared_relationships(table: &PortableTable) -> Vec<RelationshipModel> {
     table
         .relationships

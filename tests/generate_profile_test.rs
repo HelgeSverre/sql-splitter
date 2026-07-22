@@ -866,6 +866,121 @@ fn generator_kind(
         .unwrap_or_default()
 }
 
+// --- composite-PK pivot inference -------------------------------------------
+
+fn pk_col(name: &str, source_type: &str, family: SqlTypeFamily) -> PortableColumn {
+    let mut column = portable_column(name, source_type, family);
+    column.primary_key = true;
+    column
+}
+
+fn table_with(
+    name: &str,
+    columns: Vec<PortableColumn>,
+    primary_key: Vec<&str>,
+    relationships: Vec<sql_splitter::synthetic::schema::PortableRelationship>,
+) -> PortableTable {
+    PortableTable {
+        name: name.to_string(),
+        columns,
+        primary_key: primary_key.into_iter().map(str::to_string).collect(),
+        unique_constraints: Vec::new(),
+        check_constraints: Vec::new(),
+        indexes: Vec::new(),
+        create_statement: None,
+        relationships,
+    }
+}
+
+fn fk(name: &str, column: &str, parent: &str) -> sql_splitter::synthetic::schema::PortableRelationship {
+    sql_splitter::synthetic::schema::PortableRelationship {
+        name: Some(name.to_string()),
+        columns: vec![column.to_string()],
+        referenced_table: parent.to_string(),
+        referenced_columns: vec!["id".to_string()],
+    }
+}
+
+fn schema_of(tables: Vec<PortableTable>) -> PortableSchema {
+    let mut map = BTreeMap::new();
+    for table in tables {
+        map.insert(table.name.clone(), table);
+    }
+    PortableSchema {
+        dialect: "mysql".to_string(),
+        tables: map,
+    }
+}
+
+/// A profile carrying only per-table row counts (no column evidence), so
+/// inference is driven by the schema alone.
+fn row_count_profile(counts: &[(&str, u64)]) -> DumpProfile {
+    DumpProfile {
+        depth: ProfileDepth::Full,
+        schema: PortableSchema {
+            dialect: "mysql".to_string(),
+            tables: BTreeMap::new(),
+        },
+        tables: counts
+            .iter()
+            .map(|(table, rows)| TableEvidence {
+                table: table.to_string(),
+                row_count: Some(*rows),
+                columns: Vec::new(),
+                relationships: Vec::new(),
+                confidence: 1.0,
+            })
+            .collect(),
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn composite_pk_of_two_foreign_keys_gets_a_junction_pair_planner() {
+    // A pivot whose primary key is exactly two single-column foreign keys to
+    // distinct parents is inferred with a `relation.junction_pair` planner, so
+    // generated pairs are distinct and the composite PK holds by construction.
+    let schema = schema_of(vec![
+        table_with(
+            "permissions",
+            vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger)],
+            vec!["id"],
+            vec![],
+        ),
+        table_with(
+            "roles",
+            vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger)],
+            vec!["id"],
+            vec![],
+        ),
+        table_with(
+            "role_has_permissions",
+            vec![
+                pk_col("permission_id", "bigint", SqlTypeFamily::BigInteger),
+                pk_col("role_id", "bigint", SqlTypeFamily::BigInteger),
+            ],
+            vec!["permission_id", "role_id"],
+            vec![
+                fk("rhp_permission", "permission_id", "permissions"),
+                fk("rhp_role", "role_id", "roles"),
+            ],
+        ),
+    ]);
+    let profile = row_count_profile(&[
+        ("permissions", 20),
+        ("roles", 8),
+        ("role_has_permissions", 40),
+    ]);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    let planners = &result.model.tables["role_has_permissions"].planners;
+    assert!(
+        planners.iter().any(|p| p.kind == "relation.junction_pair"),
+        "expected a junction_pair planner, got {:?}",
+        planners.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>()
+    );
+}
+
 // --- Step 1: safety / precedence --------------------------------------------
 
 /// The credential guard beats a name/shape match and any observed-value replay:
