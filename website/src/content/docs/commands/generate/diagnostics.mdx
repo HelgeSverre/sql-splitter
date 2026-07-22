@@ -903,6 +903,24 @@ Typical severity: **error** · Category: **generator**
 
 A sequence generator cannot advance because its configured step is zero.
 
+## GEN-SLUG-MAX-LENGTH — Slug max length is invalid \{#GEN-SLUG-MAX-LENGTH\}
+
+Typical severity: **error** · Category: **generator**
+
+A slug generator's max_length is zero or not a positive integer.
+
+## GEN-SLUG-MISSING-SOURCE — Slug source is missing \{#GEN-SLUG-MISSING-SOURCE\}
+
+Typical severity: **error** · Category: **generator**
+
+A slug generator omits the sibling column it should derive from.
+
+## GEN-SLUG-UNKNOWN-FIELD — Slug source column is unknown \{#GEN-SLUG-UNKNOWN-FIELD\}
+
+Typical severity: **error** · Category: **generator**
+
+A slug generator names a sibling column that does not exist.
+
 ## GEN-SOFT-DELETE-COLUMN-MISSING — Soft-delete column is missing \{#GEN-SOFT-DELETE-COLUMN-MISSING\}
 
 Typical severity: **error** · Category: **planner**

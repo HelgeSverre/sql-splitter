@@ -62,6 +62,37 @@ fn display_value(value: &GeneratedValue) -> String {
     }
 }
 
+/// Convert arbitrary text into a URL slug: lowercase, every run of
+/// non-ASCII-alphanumeric characters collapses to a single `-`, and leading and
+/// trailing dashes are trimmed. When `max_length` is set the result is truncated
+/// to that many bytes (all slug bytes are ASCII, so bytes and chars coincide) and
+/// any dash left dangling at the cut is trimmed. Non-ASCII-alphanumeric
+/// characters (accents, CJK, …) act as separators; transliteration is out of
+/// scope for this generator.
+fn slugify(input: &str, max_length: Option<usize>) -> String {
+    let mut slug = String::with_capacity(input.len());
+    let mut pending_dash = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            // Defer the separator so trailing separators never emit a dash.
+            pending_dash = true;
+        }
+    }
+    if let Some(limit) = max_length {
+        slug.truncate(limit);
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
 /// Render `minor` units at `scale` decimal places as a fixed-point string,
 /// e.g. `(1050, 2)` -> `"10.50"`.
 fn format_decimal(minor: i128, scale: u32) -> String {
@@ -232,6 +263,10 @@ enum CoreGenerator {
     Copy {
         source: String,
     },
+    Slug {
+        source: String,
+        max_length: Option<usize>,
+    },
     Template(Vec<TemplateFragment>),
     Pattern {
         mask: String,
@@ -346,6 +381,10 @@ impl CompiledGenerator for CompiledCore {
                     .column(source)
                     .cloned()
                     .unwrap_or(GeneratedValue::Null);
+            }
+            CoreGenerator::Slug { source, max_length } => {
+                let text = context.column(source).map(display_value).unwrap_or_default();
+                *output = GeneratedValue::Text(slugify(&text, *max_length));
             }
             CoreGenerator::Template(fragments) => {
                 let mut rendered = String::new();
@@ -733,6 +772,92 @@ impl GeneratorFactory for TemplateFactory {
         }
 
         bag.into_result(Box::new(CompiledCore(CoreGenerator::Template(fragments)))
+            as Box<dyn CompiledGenerator>)
+    }
+}
+
+/// The `slug` generator: derives a URL slug from another column's value on the
+/// same row (lowercase, non-alphanumeric runs collapse to `-`, ends trimmed).
+/// Like `copy`/`template` it reads a sibling column, so its `source` is a
+/// dependency the compiler orders and cycle-checks.
+pub struct SlugFactory;
+
+static SLUG_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
+    kind: "slug",
+    aliases: &[],
+    summary: "Derives a URL slug from another column's value on the same row.",
+    arguments: &[
+        ArgumentSpec {
+            name: "source",
+            required: true,
+            summary: "The sibling column whose value is slugified.",
+        },
+        ArgumentSpec {
+            name: "max_length",
+            required: false,
+            summary: "Optional maximum slug length; a dash left at the cut is trimmed.",
+        },
+    ],
+    accepts: &[SqlTypeFamily::Text],
+    writes: ColumnScope::OwnColumn,
+    reads: ColumnScope::Configured,
+    determinism: Determinism::Deterministic,
+    buffering: Buffering::Streaming,
+    verification: Verification::Unsupported,
+};
+
+impl GeneratorFactory for SlugFactory {
+    fn descriptor(&self) -> &'static GeneratorDescriptor {
+        &SLUG_DESCRIPTOR
+    }
+
+    fn compile(
+        &self,
+        config: &GeneratorConfig,
+        context: &CompileContext<'_>,
+    ) -> Result<Box<dyn CompiledGenerator>, DiagnosticBag> {
+        let mut bag = DiagnosticBag::default();
+        let Some(source) = config
+            .args
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            bag.error(
+                crate::diagnostic::codes::SLUG_MISSING_SOURCE.code,
+                context.path(),
+                "`slug` requires a `source` column name",
+            );
+            return Err(bag);
+        };
+
+        if find_column(context.table(), &source).is_none() {
+            bag.error(
+                crate::diagnostic::codes::SLUG_UNKNOWN_FIELD.code,
+                context.path(),
+                format!(
+                    "`slug.source` references unknown column `{source}` on table `{}`",
+                    context.table().name
+                ),
+            );
+        }
+
+        let max_length = match config.args.get("max_length") {
+            None => None,
+            Some(value) => match value.as_u64().filter(|&n| n > 0) {
+                Some(n) => Some(n as usize),
+                None => {
+                    bag.error(
+                        crate::diagnostic::codes::SLUG_MAX_LENGTH.code,
+                        context.path(),
+                        "`slug.max_length` must be a positive integer",
+                    );
+                    None
+                }
+            },
+        };
+
+        bag.into_result(Box::new(CompiledCore(CoreGenerator::Slug { source, max_length }))
             as Box<dyn CompiledGenerator>)
     }
 }
@@ -2351,6 +2476,9 @@ pub(crate) fn register_all(registry: &mut ExtensionRegistry) {
         .expect("built-in generator kinds are collision-free");
     registry
         .register_generator(Box::new(TemplateFactory))
+        .expect("built-in generator kinds are collision-free");
+    registry
+        .register_generator(Box::new(SlugFactory))
         .expect("built-in generator kinds are collision-free");
     registry
         .register_generator(Box::new(PatternFactory))

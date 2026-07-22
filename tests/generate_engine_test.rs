@@ -474,6 +474,96 @@ fn template_generator_joins_literals_and_sibling_fields() {
 }
 
 #[test]
+fn slug_generator_slugifies_a_source_column() {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry.generator("slug").unwrap();
+    let title = portable_column("title", SqlTypeFamily::Text, true);
+    let slug = portable_column("slug", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![title.clone(), slug.clone()]);
+    let path = "tables.t.columns.slug.generator".to_string();
+    let context = CompileContext::for_column(&table, &slug, SeedRoot::new(1), &path);
+    let config = yaml("{ kind: slug, source: title }");
+    let mut compiled = factory.compile(&config, &context).unwrap();
+
+    let mut siblings = BTreeMap::new();
+    siblings.insert(
+        "title".to_string(),
+        GeneratedValue::Text("Hello, World!  A Post #1".to_string()),
+    );
+    let row = StubRow(siblings);
+    let mut output = GeneratedValue::Null;
+    compiled
+        .generate(&RowContext::new(0, &row), &mut output)
+        .unwrap();
+    assert_eq!(
+        output,
+        GeneratedValue::Text("hello-world-a-post-1".to_string())
+    );
+}
+
+#[test]
+fn slug_generator_truncates_to_max_length_without_a_trailing_dash() {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry.generator("slug").unwrap();
+    let title = portable_column("title", SqlTypeFamily::Text, true);
+    let slug = portable_column("slug", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![title.clone(), slug.clone()]);
+    let path = "tables.t.columns.slug.generator".to_string();
+    let context = CompileContext::for_column(&table, &slug, SeedRoot::new(1), &path);
+    // "the-quick-brown" is 15 chars; a max_length of 16 would land mid-word on a
+    // dash ("the-quick-brown-"), which must be trimmed back to "the-quick-brown".
+    let config = yaml("{ kind: slug, source: title, max_length: 16 }");
+    let mut compiled = factory.compile(&config, &context).unwrap();
+
+    let mut siblings = BTreeMap::new();
+    siblings.insert(
+        "title".to_string(),
+        GeneratedValue::Text("The Quick Brown Fox".to_string()),
+    );
+    let row = StubRow(siblings);
+    let mut output = GeneratedValue::Null;
+    compiled
+        .generate(&RowContext::new(0, &row), &mut output)
+        .unwrap();
+    assert_eq!(
+        output,
+        GeneratedValue::Text("the-quick-brown".to_string())
+    );
+}
+
+#[test]
+fn slug_generator_rejects_unknown_source_column() {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry.generator("slug").unwrap();
+    let slug = portable_column("slug", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![slug.clone()]);
+    let path = "tables.t.columns.slug.generator".to_string();
+    let context = CompileContext::for_column(&table, &slug, SeedRoot::new(1), &path);
+    let config = yaml("{ kind: slug, source: missing_column }");
+    let err = factory
+        .compile(&config, &context)
+        .err()
+        .expect("an unknown slug source must fail to compile");
+    assert!(err.to_string().contains("GEN-SLUG-UNKNOWN-FIELD"));
+}
+
+#[test]
+fn slug_generator_requires_a_source() {
+    let registry = ExtensionRegistry::standard();
+    let factory = registry.generator("slug").unwrap();
+    let slug = portable_column("slug", SqlTypeFamily::Text, true);
+    let table = portable_table("t", vec![slug.clone()]);
+    let path = "tables.t.columns.slug.generator".to_string();
+    let context = CompileContext::for_column(&table, &slug, SeedRoot::new(1), &path);
+    let config = yaml("{ kind: slug }");
+    let err = factory
+        .compile(&config, &context)
+        .err()
+        .expect("a slug without a source must fail to compile");
+    assert!(err.to_string().contains("GEN-SLUG-MISSING-SOURCE"));
+}
+
+#[test]
 fn unique_modifier_errors_when_exhausted_with_on_exhaustion_error() {
     let column = portable_column("code", SqlTypeFamily::Text, true);
     let table = portable_table("t", vec![column.clone()]);

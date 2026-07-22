@@ -66,6 +66,25 @@ generator:
 
 Every referenced field must exist and be available before the template column.
 
+## `slug`
+
+Required `source` names a sibling column; accepts text. Derives a URL slug from
+that column's value on the same row: lowercase, every run of
+non-ASCII-alphanumeric characters collapses to a single `-`, and leading and
+trailing dashes are trimmed. Optional `max_length` (a positive integer)
+truncates the result, trimming any dash left dangling at the cut.
+Non-ASCII-alphanumeric characters act as separators; the generator does not
+transliterate accents or other scripts.
+
+```yaml
+columns:
+  title:
+    generator: { kind: string, min_length: 12, max_length: 40 }
+  slug:
+    generator: { kind: slug, source: title, max_length: 60 }
+    modifiers: [{ kind: unique }]
+```
+
 ## `pattern`
 
 Required `mask`; accepts text.
