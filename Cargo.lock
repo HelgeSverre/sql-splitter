@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "sql-splitter"
-version = "1.15.0"
+version = "1.16.0"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
