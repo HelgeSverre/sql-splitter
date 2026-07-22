@@ -175,6 +175,14 @@ fixed rate or weighted rate choice. Shipping accepts major or minor units.
 Largest-remainder rounding distributes residual minor units so child sums match
 the parent exactly; `last_line` places the residual on the final line.
 
+Because the planner draws each order's line count itself, the child table's
+realized row total drifts from the compile-time `parents × mean` estimate under
+a stochastic fan-out (`poisson`, `uniform`, `histogram`, `observed`). `--verify`
+therefore reports the child's row count as sampled rather than exact — it passes
+whenever the child is non-empty as expected. The exact family-sum, arity,
+non-null, and foreign-key checks still audit that every generated line is
+well-formed and sums to its parent, so a broken family is never a silent pass.
+
 The descriptor reports verification as unsupported. Runtime verification can
 check simple tax/discount sums, but cannot independently express all subtotal,
 product, shipping, and total equations.
