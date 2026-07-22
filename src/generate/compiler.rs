@@ -1753,23 +1753,60 @@ fn report_dependency_cycles(
     }
 }
 
-/// The sibling columns a compiled column generator reads, from its config
-/// `reads` sequence (only meaningful when the generator declares
-/// `reads: Configured`).
+/// The sibling columns a compiled column generator reads on the same row. This
+/// is the single source of truth for column read edges, feeding both cycle
+/// detection ([`report_dependency_cycles`]) and the row-evaluation topological
+/// order ([`column_eval_order`]).
+///
+/// Reads come from two places: an explicit `reads:` sequence (any generator may
+/// declare one, meaningful when the descriptor declares `reads: Configured`),
+/// plus the implicit sibling reads baked into specific built-in kinds — `copy`
+/// and `slug` read their `source`, and `template` reads each `{ field: ... }`.
+/// These built-ins have no aliases, so matching the primary kind is exact.
+/// Duplicate names are collapsed so a repeated edge cannot skew the toposort's
+/// in-degree accounting.
 fn generator_reads(table: &TableModel, column: &str) -> Vec<String> {
-    table
+    let Some(config) = table
         .columns
         .get(column)
         .and_then(|rule| rule.generator.as_ref())
-        .map(|config| match config.args.get("reads") {
-            Some(serde_yaml_ng::Value::Sequence(items)) => items
-                .iter()
-                .filter_map(serde_yaml_ng::Value::as_str)
-                .map(str::to_string)
-                .collect(),
-            _ => Vec::new(),
-        })
-        .unwrap_or_default()
+    else {
+        return Vec::new();
+    };
+
+    let mut reads = Vec::new();
+    let mut push = |name: &str| {
+        let name = name.to_string();
+        if !reads.contains(&name) {
+            reads.push(name);
+        }
+    };
+
+    if let Some(serde_yaml_ng::Value::Sequence(items)) = config.args.get("reads") {
+        for name in items.iter().filter_map(serde_yaml_ng::Value::as_str) {
+            push(name);
+        }
+    }
+
+    match config.kind.as_str() {
+        "copy" | "slug" => {
+            if let Some(source) = config.args.get("source").and_then(serde_yaml_ng::Value::as_str) {
+                push(source);
+            }
+        }
+        "template" => {
+            if let Some(serde_yaml_ng::Value::Sequence(parts)) = config.args.get("parts") {
+                for part in parts {
+                    if let Some(field) = part.get("field").and_then(serde_yaml_ng::Value::as_str) {
+                        push(field);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    reads
 }
 
 /// Whether every column in a cycle is owned by one and the same planner.

@@ -1783,6 +1783,48 @@ fn ownership_reports_column_read_write_cycle() {
 }
 
 #[test]
+fn built_in_copy_source_reads_are_registered_as_dependencies() {
+    // `copy` reads its `source` column implicitly (not via a `reads:` list), so
+    // a `copy`-of-`copy` cycle must still be caught by the dependency checker.
+    let model = ownership_model(
+        "        - { name: a, type: text, nullable: false }\n        - { name: b, type: text, nullable: false }",
+        "    columns:\n      a:\n        generator: { kind: copy, source: b }\n      b:\n        generator: { kind: copy, source: a }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-CYCLE"), "{err}");
+}
+
+#[test]
+fn built_in_slug_source_reads_are_registered_as_dependencies() {
+    // A slug whose source is itself is a self-cycle the dependency checker must
+    // reject, proving the slug `source` is registered as a read edge.
+    let model = ownership_model(
+        "        - { name: slug, type: text, nullable: false }",
+        "    columns:\n      slug:\n        generator: { kind: slug, source: slug }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-CYCLE"), "{err}");
+}
+
+#[test]
+fn built_in_template_field_reads_are_registered_as_dependencies() {
+    // `template` reads each `{ field: ... }` implicitly; a two-column template
+    // cycle must be caught.
+    let model = ownership_model(
+        "        - { name: a, type: text, nullable: false }\n        - { name: b, type: text, nullable: false }",
+        "    columns:\n      a:\n        generator: { kind: template, parts: [\"x\", { field: b }] }\n      b:\n        generator: { kind: template, parts: [\"y\", { field: a }] }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-CYCLE"), "{err}");
+}
+
+#[test]
 fn ownership_allows_cycle_owned_by_one_planner() {
     let model = ownership_model(
         "        - { name: a, type: integer, nullable: false }\n        - { name: b, type: integer, nullable: false }",
