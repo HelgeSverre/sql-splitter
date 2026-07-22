@@ -672,7 +672,10 @@ fn resolve_column(
 /// `distribution` heuristics need value evidence and contribute nothing here.
 /// A generator is always returned: the type fallback is the guaranteed floor, so
 /// a caller relying on this never leaves a column unowned.
-pub fn schema_inferred_generator(table: &PortableTable, column: &PortableColumn) -> GeneratorConfig {
+pub fn schema_inferred_generator(
+    table: &PortableTable,
+    column: &PortableColumn,
+) -> GeneratorConfig {
     let ctx = ColumnContext {
         table,
         column,
@@ -784,7 +787,10 @@ fn is_single_column_unique(table: &PortableTable, column: &PortableColumn) -> bo
 
 /// The single-column declared foreign key whose one column is `column`, if any.
 /// A composite (multi-column) foreign key does not qualify.
-fn single_column_fk<'a>(table: &'a PortableTable, column: &str) -> Option<&'a PortableRelationship> {
+fn single_column_fk<'a>(
+    table: &'a PortableTable,
+    column: &str,
+) -> Option<&'a PortableRelationship> {
     table
         .relationships
         .iter()
@@ -824,7 +830,10 @@ fn inferred_planners(table: &PortableTable) -> Vec<PlannerConfig> {
     columns.insert(yaml("left"), yaml(left_col));
     columns.insert(yaml("right"), yaml(right_col));
     let mut args = BTreeMap::new();
-    args.insert("columns".to_string(), serde_yaml_ng::Value::Mapping(columns));
+    args.insert(
+        "columns".to_string(),
+        serde_yaml_ng::Value::Mapping(columns),
+    );
     args.insert("left_relationship".to_string(), yaml(left_name));
     args.insert("right_relationship".to_string(), yaml(right_name));
 

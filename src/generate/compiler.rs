@@ -1889,7 +1889,11 @@ fn generator_reads(table: &TableModel, column: &str) -> Vec<String> {
 
     match config.kind.as_str() {
         "copy" | "slug" | "before" | "after" => {
-            if let Some(source) = config.args.get("source").and_then(serde_yaml_ng::Value::as_str) {
+            if let Some(source) = config
+                .args
+                .get("source")
+                .and_then(serde_yaml_ng::Value::as_str)
+            {
                 push(source);
             }
         }

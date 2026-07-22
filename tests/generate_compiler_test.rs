@@ -1246,7 +1246,10 @@ tables:
 #[test]
 fn a_child_claimed_by_two_family_producers_is_a_compile_error() {
     let codes: Vec<String> = compiler()
-        .compile(model_from_yaml(TWO_FAMILY_PRODUCERS), CompileOptions::default())
+        .compile(
+            model_from_yaml(TWO_FAMILY_PRODUCERS),
+            CompileOptions::default(),
+        )
         .err()
         .map(|bag| bag.diagnostics.into_iter().map(|d| d.code).collect())
         .unwrap_or_default();
@@ -1329,7 +1332,10 @@ fn nullable_foreign_key_cycle_compiles_with_a_warning() {
     // A cycle of nullable foreign keys does not constrain generation order, so it
     // must compile (with a warning) rather than hard-fail as a ROWS-CYCLE error.
     let plan = compiler()
-        .compile(model_from_yaml(NULLABLE_FK_CYCLE), CompileOptions::default())
+        .compile(
+            model_from_yaml(NULLABLE_FK_CYCLE),
+            CompileOptions::default(),
+        )
         .expect("a nullable FK cycle must compile, not hard-fail");
     assert!(plan.table("a").is_some() && plan.table("b").is_some());
     assert!(
@@ -1411,7 +1417,10 @@ fn cross_table_planner_accepts_identity_primary_key_targets() {
     // identity integer PK as a dense target — the regular FK engine path already
     // treats a database-generated integer PK as the dense sequence 1..=count.
     compiler()
-        .compile(model_from_yaml(JUNCTION_IDENTITY), CompileOptions::default())
+        .compile(
+            model_from_yaml(JUNCTION_IDENTITY),
+            CompileOptions::default(),
+        )
         .expect("a junction over identity primary keys should compile");
 }
 
@@ -1456,10 +1465,7 @@ fn negative_global_scale_is_a_compile_error() {
         ..Default::default()
     };
     let err = compiler().compile(users_model(1000), options).unwrap_err();
-    assert!(
-        err.to_string().contains("GEN-TABLE-SCALE-INVALID"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("GEN-TABLE-SCALE-INVALID"), "{err}");
 }
 
 #[test]
@@ -2129,7 +2135,10 @@ fn ulid_key_gets_no_auto_unique_modifier() {
 
 #[test]
 fn monotonic_key_gets_no_auto_unique_modifier() {
-    let model = single_key_model("bigint", "generator: { kind: monotonic, start: 1, step: 1 }");
+    let model = single_key_model(
+        "bigint",
+        "generator: { kind: monotonic, start: 1, step: 1 }",
+    );
     let plan = compiler()
         .compile(model, CompileOptions::default())
         .unwrap();

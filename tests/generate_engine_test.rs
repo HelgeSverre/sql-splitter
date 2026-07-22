@@ -342,7 +342,10 @@ fn observed_numeric_generators_reject_out_of_range_decimal_scale() {
     // normal/lognormal/histogram factories must reject it at compile time, like
     // the core decimal generator.
     let cases: [(&str, GeneratorConfig); 3] = [
-        ("normal", yaml("{ kind: normal, mean: 0, std: 1, scale: 39 }")),
+        (
+            "normal",
+            yaml("{ kind: normal, mean: 0, std: 1, scale: 39 }"),
+        ),
         (
             "lognormal",
             yaml("{ kind: lognormal, mu: 0, sigma: 1, scale: 39 }"),
@@ -525,10 +528,7 @@ fn slug_generator_truncates_to_max_length_without_a_trailing_dash() {
     compiled
         .generate(&RowContext::new(0, &row), &mut output)
         .unwrap();
-    assert_eq!(
-        output,
-        GeneratedValue::Text("the-quick-brown".to_string())
-    );
+    assert_eq!(output, GeneratedValue::Text("the-quick-brown".to_string()));
 }
 
 #[test]
@@ -2352,12 +2352,12 @@ tables:
     // string with the backslash doubled (so the literal is unambiguous
     // regardless of standard_conforming_strings); tab/newline stay literal.
     let insert_literal = format!("E'{}'", original.replace('\\', "\\\\"));
+    assert!(insert_sql.contains(&insert_literal), "{insert_sql}");
+    // And never the ambiguous plain-quoted form.
     assert!(
-        insert_sql.contains(&insert_literal),
+        !insert_sql.contains(&format!("'{original}'")),
         "{insert_sql}"
     );
-    // And never the ambiguous plain-quoted form.
-    assert!(!insert_sql.contains(&format!("'{original}'")), "{insert_sql}");
 }
 
 #[test]

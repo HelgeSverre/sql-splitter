@@ -1295,8 +1295,10 @@ impl GeneratorFactory for CommerceMoneyFactory {
         // Scale bounds to minor units with a checked multiply: a large min/max
         // times `factor` (up to 10^18) can overflow i128 (panic in debug, wrap
         // in release into a bogus range).
-        let (min_minor, max_minor) = match (raw_min.checked_mul(factor), raw_max.checked_mul(factor))
-        {
+        let (min_minor, max_minor) = match (
+            raw_min.checked_mul(factor),
+            raw_max.checked_mul(factor),
+        ) {
             (Some(min), Some(max)) => (min, max),
             _ => {
                 bag.error(

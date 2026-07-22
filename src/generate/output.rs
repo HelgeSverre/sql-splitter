@@ -1088,8 +1088,12 @@ mod tests {
         // Replay drains the in-memory rows, so a second replay would silently
         // yield an empty family. It must fail loudly instead, keeping the
         // in-memory and spilled arms consistent.
-        let mut buffer =
-            FamilyBuffer::new(FamilyBudget::default(), 0, TempConfig::default(), SpillKind::Child);
+        let mut buffer = FamilyBuffer::new(
+            FamilyBudget::default(),
+            0,
+            TempConfig::default(),
+            SpillKind::Child,
+        );
         buffer
             .push(SpooledRow {
                 table_id: 0,

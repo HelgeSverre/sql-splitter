@@ -383,7 +383,10 @@ impl CompiledGenerator for CompiledCore {
                     .unwrap_or(GeneratedValue::Null);
             }
             CoreGenerator::Slug { source, max_length } => {
-                let text = context.column(source).map(display_value).unwrap_or_default();
+                let text = context
+                    .column(source)
+                    .map(display_value)
+                    .unwrap_or_default();
                 *output = GeneratedValue::Text(slugify(&text, *max_length));
             }
             CoreGenerator::Template(fragments) => {
@@ -857,8 +860,10 @@ impl GeneratorFactory for SlugFactory {
             },
         };
 
-        bag.into_result(Box::new(CompiledCore(CoreGenerator::Slug { source, max_length }))
-            as Box<dyn CompiledGenerator>)
+        bag.into_result(
+            Box::new(CompiledCore(CoreGenerator::Slug { source, max_length }))
+                as Box<dyn CompiledGenerator>,
+        )
     }
 }
 

@@ -217,8 +217,7 @@ impl CompiledPlanner for TemporalIntervalPlanner {
         // absorbs the inclusive `end = start + span - 1ns` adjustment and the
         // rendered end lands a second later than the verifier — which recomputes
         // from the second-precision start it parses back — expects.
-        let start_ns =
-            self.draw_start(row_index).div_euclid(NANOS_PER_SECOND) * NANOS_PER_SECOND;
+        let start_ns = self.draw_start(row_index).div_euclid(NANOS_PER_SECOND) * NANOS_PER_SECOND;
         let is_open =
             self.open_probability > 0.0 && self.open_rng.random::<f64>() < self.open_probability;
         let duration_units = self.draw_duration();

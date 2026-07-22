@@ -892,7 +892,11 @@ fn table_with(
     }
 }
 
-fn fk(name: &str, column: &str, parent: &str) -> sql_splitter::synthetic::schema::PortableRelationship {
+fn fk(
+    name: &str,
+    column: &str,
+    parent: &str,
+) -> sql_splitter::synthetic::schema::PortableRelationship {
     sql_splitter::synthetic::schema::PortableRelationship {
         name: Some(name.to_string()),
         columns: vec![column.to_string()],
@@ -1024,9 +1028,19 @@ fn polymorphic_pivot_with_two_fks_plus_discriminator_gets_a_junction_pair() {
         .find(|p| p.kind == "relation.junction_pair")
         .expect("expected a junction_pair planner on the two FK columns");
     // It must pair the two FK columns, not the discriminator.
-    let columns = junction.args.get("columns").and_then(|v| v.as_mapping()).unwrap();
-    assert_eq!(columns.get("left").and_then(|v| v.as_str()), Some("user_id"));
-    assert_eq!(columns.get("right").and_then(|v| v.as_str()), Some("role_id"));
+    let columns = junction
+        .args
+        .get("columns")
+        .and_then(|v| v.as_mapping())
+        .unwrap();
+    assert_eq!(
+        columns.get("left").and_then(|v| v.as_str()),
+        Some("user_id")
+    );
+    assert_eq!(
+        columns.get("right").and_then(|v| v.as_str()),
+        Some("role_id")
+    );
 }
 
 #[test]
@@ -1063,7 +1077,11 @@ fn composite_pk_with_one_fk_sequences_a_non_fk_integer_column() {
     assert!(
         mhr_model.planners.is_empty(),
         "a one-FK composite key is not a junction: {:?}",
-        mhr_model.planners.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>()
+        mhr_model
+            .planners
+            .iter()
+            .map(|p| p.kind.as_str())
+            .collect::<Vec<_>>()
     );
     let model_id = mhr_model
         .columns
@@ -1138,10 +1156,7 @@ fn unique_integer_column_is_sequenced_not_bounded() {
     paddle.unique = true;
     let schema = schema_of(vec![table_with(
         "subscriptions",
-        vec![
-            pk_col("id", "bigint", SqlTypeFamily::BigInteger),
-            paddle,
-        ],
+        vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger), paddle],
         vec!["id"],
         vec![],
     )]);

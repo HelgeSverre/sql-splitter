@@ -992,12 +992,19 @@ tables:
             }
             parent => {
                 let parent_depth = depth_by_id[&int_of(parent)];
-                assert_eq!(depth, parent_depth + 1, "child depth must be parent depth + 1");
+                assert_eq!(
+                    depth,
+                    parent_depth + 1,
+                    "child depth must be parent depth + 1"
+                );
             }
         }
     }
     assert!(saw_root, "tree must have at least one root");
-    assert!(max_seen >= 2, "a 200-node tree should reach a non-trivial depth");
+    assert!(
+        max_seen >= 2,
+        "a 200-node tree should reach a non-trivial depth"
+    );
 }
 
 // === commerce.order_family ==================================================

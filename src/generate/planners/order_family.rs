@@ -1142,7 +1142,9 @@ fn compile_order_family(
             bag.error(
                 crate::diagnostic::codes::ORDER_FAMILY_CONFIG.code,
                 format!("{path}.currency_scale"),
-                format!("commerce.order_family `currency_scale` must be between 0 and 18 (got {scale})"),
+                format!(
+                    "commerce.order_family `currency_scale` must be between 0 and 18 (got {scale})"
+                ),
             );
             0
         }

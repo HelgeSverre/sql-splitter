@@ -1672,7 +1672,9 @@ impl<'a> Audit<'a> {
                     (
                         CheckStatus::NotChecked,
                         false,
-                        format!("{unevaluated} row(s) had unparseable inputs; invariant not verified"),
+                        format!(
+                            "{unevaluated} row(s) had unparseable inputs; invariant not verified"
+                        ),
                     )
                 } else {
                     (
@@ -1876,12 +1878,8 @@ fn predicate_unevaluable<'v>(
     predicate: &PlannerPredicate,
     value_of: &impl Fn(&str) -> Option<&'v PkValue>,
 ) -> bool {
-    let bad_int = |col: &str| {
-        matches!(value_of(col), Some(v) if !matches!(v, PkValue::Null) && int_of(v).is_none())
-    };
-    let bad_ns = |col: &str| {
-        matches!(value_of(col), Some(v) if !matches!(v, PkValue::Null) && epoch_nanos(v).is_none())
-    };
+    let bad_int = |col: &str| matches!(value_of(col), Some(v) if !matches!(v, PkValue::Null) && int_of(v).is_none());
+    let bad_ns = |col: &str| matches!(value_of(col), Some(v) if !matches!(v, PkValue::Null) && epoch_nanos(v).is_none());
     match predicate {
         PlannerPredicate::Equation {
             start,
