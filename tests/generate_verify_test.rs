@@ -697,6 +697,45 @@ tables:
     );
 }
 
+#[test]
+fn schema_inferred_model_renders_and_verifies() {
+    // Under `schema` inference, a table of descriptive columns with no explicit
+    // generators is fully inferred (email, names, timestamps, flags, amounts)
+    // and the generated output passes its own verification.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+seed: 9
+tables:
+  users:
+    rows: { kind: fixed, count: 25 }
+    schema:
+      name: users
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: email, type: "varchar(255)", nullable: false, unique: true }
+        - { name: first_name, type: "varchar(80)", nullable: false }
+        - { name: last_name, type: "varchar(80)", nullable: false }
+        - { name: city, type: "varchar(120)", nullable: true }
+        - { name: is_active, type: boolean, nullable: false }
+        - { name: balance, type: "decimal(18,2)", nullable: false }
+        - { name: created_at, type: datetime, nullable: false }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "users.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.passed(),
+        "{:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+}
+
 // --- commerce.order_family --------------------------------------------------
 
 #[test]

@@ -1661,6 +1661,87 @@ fn ownership_reports_missing_owner_under_disabled_inference() {
     assert_eq!(err.errors().count(), 1);
 }
 
+/// A single-table model under the given inference mode with one extra,
+/// unowned descriptive column line.
+fn inference_model(inference: &str, column_line: &str) -> SyntheticModel {
+    model_from_yaml(&format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: {inference} }}
+seed: 7
+tables:
+  t:
+    rows: {{ kind: fixed, count: 3 }}
+    schema:
+      name: t
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+{column_line}
+"#
+    ))
+}
+
+#[test]
+fn schema_inference_gives_a_named_column_a_semantic_generator() {
+    // Under `schema` inference an unowned, descriptively-named column is given a
+    // matching generator instead of erroring GEN-COLUMN-OWNER-MISSING.
+    let model = inference_model(
+        "schema",
+        "        - { name: email, type: \"varchar(255)\", nullable: false }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    let email = table
+        .columns
+        .iter()
+        .find(|c| c.schema.name == "email")
+        .unwrap();
+    match &email.owner {
+        ColumnOwner::Generator { kind, .. } => assert_eq!(kind, "internet.email"),
+        other => panic!("expected an inferred generator, got {other:?}"),
+    }
+}
+
+#[test]
+fn schema_inference_falls_back_to_a_type_generator_for_a_plain_column() {
+    // A column with no semantic name still gets a type-appropriate generator.
+    let model = inference_model(
+        "schema",
+        "        - { name: blurb, type: \"varchar(64)\", nullable: false }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    let blurb = table
+        .columns
+        .iter()
+        .find(|c| c.schema.name == "blurb")
+        .unwrap();
+    assert!(
+        matches!(&blurb.owner, ColumnOwner::Generator { .. }),
+        "a plain text column must fall back to a type generator, got {:?}",
+        blurb.owner
+    );
+}
+
+#[test]
+fn disabled_inference_still_reports_missing_owner_for_a_named_column() {
+    // The rich inference is `schema`-only; `disabled` still requires an explicit
+    // owner for every generated column.
+    let model = inference_model(
+        "disabled",
+        "        - { name: email, type: \"varchar(255)\", nullable: false }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-OWNER-MISSING"));
+}
+
 /// A single bare integer primary key (no identity/serial flag, no generator),
 /// under the supplied inference mode.
 fn bare_pk_model(inference: &str) -> SyntheticModel {

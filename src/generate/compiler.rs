@@ -909,7 +909,7 @@ impl ModelCompiler {
             };
         }
 
-        self.infer_structural_owner(table_name, table, column, inference, bag)
+        self.infer_structural_owner(table_name, table, column, inference, seed, bag)
     }
 
     /// Resolve, type-check, and compile the explicit generator on `column`.
@@ -926,7 +926,21 @@ impl ModelCompiler {
             .generator
             .as_ref()
             .expect("generator claim implies a generator rule");
+        self.compile_generator_config(table, column, config, path, seed, bag)
+    }
 
+    /// Look up, type-check, and compile `config` into a generator owner for
+    /// `column`, attaching unknown-kind and type-mismatch diagnostics to `path`.
+    /// Shared by the explicit-generator path and schema inference.
+    fn compile_generator_config(
+        &self,
+        table: &TableModel,
+        column: &PortableColumn,
+        config: &crate::synthetic::model::GeneratorConfig,
+        path: String,
+        seed: SeedRoot,
+        bag: &mut DiagnosticBag,
+    ) -> ColumnOwner {
         let Some(factory) = self.registry.generator(&config.kind) else {
             bag.error(
                 crate::diagnostic::codes::GENERATOR_UNKNOWN.code,
@@ -971,6 +985,7 @@ impl ModelCompiler {
         table: &TableModel,
         column: &PortableColumn,
         inference: InferenceMode,
+        seed: SeedRoot,
         bag: &mut DiagnosticBag,
     ) -> ColumnOwner {
         // HARD schema facts — genuine database-supplied values, honored in BOTH
@@ -1008,24 +1023,36 @@ impl ModelCompiler {
             return ColumnOwner::GeneratedByDatabase;
         }
 
-        // Nothing structural applies. `schema` inference reports the column as
-        // unowned when its current name and constraint heuristics find no rule,
-        // so a run never invents values silently.
-        let note = match inference {
+        // Nothing structural applies. Under `schema` inference, derive a
+        // generator from the column's name and declared type (email ->
+        // internet.email, created_at -> datetime, a plain text column ->
+        // string, ...) using the same name/type heuristics the profiler applies
+        // at schema depth. The type fallback is the guaranteed floor, so this
+        // never leaves a column unowned. Under `disabled` inference every
+        // generated column needs an explicit owner, so the column is reported
+        // as `GEN-COLUMN-OWNER-MISSING`.
+        match inference {
             InferenceMode::Schema => {
-                " (schema inference has no rule for it yet; richer heuristics arrive later)"
+                let config =
+                    crate::profile::heuristics::schema_inferred_generator(&table.schema, column);
+                let path = format!(
+                    "tables.{table_name}.columns.{}.generator[inferred]",
+                    column.name
+                );
+                self.compile_generator_config(table, column, &config, path, seed, bag)
             }
-            InferenceMode::Disabled => "",
-        };
-        bag.error(
-            crate::diagnostic::codes::COLUMN_OWNER_MISSING.code,
-            format!("tables.{table_name}.columns.{}", column.name),
-            format!(
-                "column `{}` on table `{table_name}` has no generator, planner, relationship, or database default to produce its value{note}",
-                column.name
-            ),
-        );
-        ColumnOwner::GeneratedByDatabase
+            InferenceMode::Disabled => {
+                bag.error(
+                    crate::diagnostic::codes::COLUMN_OWNER_MISSING.code,
+                    format!("tables.{table_name}.columns.{}", column.name),
+                    format!(
+                        "column `{}` on table `{table_name}` has no generator, planner, relationship, or database default to produce its value",
+                        column.name
+                    ),
+                );
+                ColumnOwner::GeneratedByDatabase
+            }
+        }
     }
 
     /// Type-check every modifier declared on `column`, and compile the pipeline
@@ -1047,8 +1074,21 @@ impl ModelCompiler {
         seed: SeedRoot,
         bag: &mut DiagnosticBag,
     ) -> Vec<Box<dyn CompiledModifier>> {
-        let Some(rule) = table.columns.get(&column.name) else {
-            return Vec::new();
+        // A column inferred under `schema` mode has no explicit rule in the
+        // model; treat it as one with no declared modifiers so its generator
+        // still reaches `enforce_key_uniqueness` (an inferred key column must
+        // still be deduplicated).
+        let empty_rule;
+        let rule = match table.columns.get(&column.name) {
+            Some(rule) => rule,
+            None => {
+                empty_rule = crate::synthetic::model::ColumnRule {
+                    semantic: None,
+                    generator: None,
+                    modifiers: Vec::new(),
+                };
+                &empty_rule
+            }
         };
         let is_generator = matches!(owner, ColumnOwner::Generator { .. });
         let mut compiled: Vec<Box<dyn CompiledModifier>> = Vec::new();

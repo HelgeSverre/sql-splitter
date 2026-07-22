@@ -555,6 +555,28 @@ fn resolve_column(
     (rule, decision, winner.source_literals)
 }
 
+/// Infer one column's generator from its schema alone — declared name and type,
+/// with no value evidence — reusing the same schema, credential, and semantic
+/// heuristics (and their precedence) the profiler applies at schema depth. The
+/// `distribution` heuristics need value evidence and contribute nothing here.
+/// A generator is always returned: the type fallback is the guaranteed floor, so
+/// a caller relying on this never leaves a column unowned.
+pub fn schema_inferred_generator(table: &PortableTable, column: &PortableColumn) -> GeneratorConfig {
+    let ctx = ColumnContext {
+        table,
+        column,
+        evidence: None,
+        row_count: None,
+    };
+    let mut candidates = Vec::new();
+    candidates.extend(schema::candidates(&ctx));
+    candidates.extend(credential::candidates(&ctx));
+    candidates.extend(semantic::candidates(&ctx));
+    let (rule, _decision, _literals) = resolve_column(&ctx, &column.name, candidates);
+    rule.generator
+        .expect("resolve_column always assigns a generator")
+}
+
 /// A `null_rate` modifier replaying an observed null fraction on a nullable
 /// column, unless the winning rule already produces `NULL`/`DEFAULT` itself.
 fn sparse_modifier(ctx: &ColumnContext<'_>, winner: &Candidate) -> Option<ModifierConfig> {
