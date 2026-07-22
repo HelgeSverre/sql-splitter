@@ -657,6 +657,41 @@ fn corrupt_timestamps_ordering_fails_the_named_check() {
 
 // --- commerce.order_family --------------------------------------------------
 
+#[test]
+fn stochastic_order_family_passes_verification() {
+    // A stochastic (poisson) per-order line count makes the family child's total
+    // drift from the compile-time `parents x mean` estimate: the order_family
+    // planner draws each order's line count itself and spools a variable total,
+    // so `planned.rows` (parents x mean = 240) is only an estimate. Seed 4
+    // realizes 216 lines. That estimate is not an authoritative target for a
+    // planner-generated family child (a grossly-wrong count is still caught by
+    // the exact family-sum, arity, and FK checks), so verification must pass and
+    // the row-count check must be reported as sampled, never a failing exact.
+    let dir = tempfile::tempdir().unwrap();
+    let model = ORDER_FAMILY
+        .replace("count: 4 }", "count: 60 }")
+        .replace(
+            "distribution: { kind: fixed, mean: 4.0, min: 1.0, max: 12.0 }",
+            "distribution: { kind: poisson, mean: 4.0, min: 1.0, max: 12.0 }",
+        )
+        .replace("seed: 4242", "seed: 4");
+    let plan = compile(&model);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "ofp.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+    assert_eq!(
+        report.status_of("row_count:order_items"),
+        Some(CheckStatus::Sampled),
+        "a family child's planner-realized count is sampled, not exact"
+    );
+    assert!(
+        report.passed(),
+        "a stochastic order family must still verify: {:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+}
+
 const ORDER_FAMILY: &str = r#"
 version: 1
 kind: model

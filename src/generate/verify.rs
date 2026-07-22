@@ -458,6 +458,11 @@ struct TableSpec {
     relationships: Vec<RelSpec>,
     /// Planner invariants the table's planners guarantee.
     predicates: Vec<PlannerPredicate>,
+    /// Whether a cross-table family planner (a `commerce.order_family` child)
+    /// owns any of this table's columns. Such a child's row count is realized by
+    /// the family planner's per-parent line-count draws, so `rows` is only a
+    /// compile-time estimate and the row-count check is sampled, not exact.
+    family_child: bool,
 }
 
 /// A child→parent relationship reduced to the names the audit needs.
@@ -555,6 +560,11 @@ impl TableSpec {
             .flat_map(|planner| planner.verification_predicates())
             .collect();
 
+        let family_child = table
+            .columns
+            .iter()
+            .any(|column| matches!(column.owner, ColumnOwner::FamilyChild { .. }));
+
         Self {
             name: table.name.clone(),
             rows: table.rows,
@@ -564,6 +574,7 @@ impl TableSpec {
             unique_groups,
             relationships,
             predicates,
+            family_child,
         }
     }
 }
@@ -1521,16 +1532,43 @@ impl<'a> Audit<'a> {
         for (plan_index, planned) in self.spec.tables.iter().enumerate() {
             let state = &self.tables[&planned.name];
 
-            // Row count (exact). INSERT and COPY output are audited the same way,
-            // so a table that produced zero parseable rows when the plan expected
-            // some is always a genuine failure — never masked as NotChecked.
+            // Row count. INSERT and COPY output are audited the same way, so a
+            // table that produced zero parseable rows when the plan expected some
+            // is always a genuine failure — never masked as NotChecked.
+            //
+            // A family child (a `commerce.order_family` child) is the exception:
+            // the family planner draws each parent's line count itself and spools
+            // a variable total, so `planned.rows` (parents x mean) is only a
+            // compile-time estimate, not an authoritative target. Its realized
+            // count legitimately drifts under a stochastic fan-out distribution,
+            // so the count is reported as sampled and passes whenever it is
+            // non-empty-as-expected. The exact family-sum, arity, non-null, and
+            // FK checks still audit that every spooled child is well-formed and
+            // sums correctly, so a genuinely broken family cannot slip through.
             let expected = planned.rows;
-            report.record(
-                format!("row_count:{}", planned.name),
-                CheckStatus::Exact,
-                state.rows == expected,
-                format!("expected {expected} rows, observed {}", state.rows),
-            );
+            if planned.family_child {
+                let passed = if expected == 0 {
+                    state.rows == 0
+                } else {
+                    state.rows > 0
+                };
+                report.record(
+                    format!("row_count:{}", planned.name),
+                    CheckStatus::Sampled,
+                    passed,
+                    format!(
+                        "planner-realized family child count; observed {} row(s) (estimate {expected})",
+                        state.rows
+                    ),
+                );
+            } else {
+                report.record(
+                    format!("row_count:{}", planned.name),
+                    CheckStatus::Exact,
+                    state.rows == expected,
+                    format!("expected {expected} rows, observed {}", state.rows),
+                );
+            }
 
             // Renderability (undecodable rows).
             if state.undecodable > 0 {
