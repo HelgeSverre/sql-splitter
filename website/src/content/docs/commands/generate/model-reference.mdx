@@ -111,13 +111,22 @@ defaults:
   inference: disabled # disabled | schema
 ```
 
-- `disabled` requires an explicit owner for every generated column.
-- `schema` can infer structural type fallbacks, primary-key sequences, database
-  defaults, and relationship markers for otherwise unowned columns.
+- `disabled` requires an explicit owner for every generated column; an unowned
+  column is `GEN-COLUMN-OWNER-MISSING`.
+- `schema` infers an owner for every otherwise-unowned column. Structural facts
+  win first (identity/serial keys, foreign-key markers, bound `DEFAULT`s,
+  bare integer primary keys), then a column's **name and type** choose a
+  generator: semantic matches (`email` → `internet.email`, `first_name` →
+  `person.first_name`, `city` → `address.city`, a `price`/`amount` decimal →
+  `commerce.money`), credential names (`password`, `api_key`, …) →
+  `credential.*`, and finally a type fallback that guarantees a value for every
+  SQL family. A run under `schema` never leaves a column unowned.
 
-Schema inference is intentionally narrower than dump inference. Semantic names,
-credential guards, observed distributions, and planner nominations require the
-profiling/inference pipeline described in [Inference](/commands/generate/inference/).
+Schema inference still uses only the declared schema — no value evidence. It
+therefore cannot replay observed distributions, corroborate an ambiguous name
+against sampled values, or nominate planners; those require the profiling
+pipeline described in [Inference](/commands/generate/inference/). Prefer explicit
+generators when you need a specific shape.
 
 ### Imports
 

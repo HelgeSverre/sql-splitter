@@ -107,8 +107,10 @@ sharing output outside the source data's trust boundary.
 
 ## Limitations
 
-- Schema-only inference is structural and does not apply the richer dump
-  semantics or credential heuristics.
+- Schema-only inference applies structural facts plus name-and-type heuristics
+  (semantic, credential, and type fallbacks), but without value evidence it
+  cannot use observed distributions or corroborate an ambiguous name against
+  sampled data.
 - Planner nominations are suggestions; no planner is inserted automatically.
 - Bounded samples and sketches approximate distributions and cannot guarantee a
   statistically exact replica.
