@@ -981,6 +981,101 @@ fn composite_pk_of_two_foreign_keys_gets_a_junction_pair_planner() {
     );
 }
 
+#[test]
+fn polymorphic_pivot_with_two_fks_plus_discriminator_gets_a_junction_pair() {
+    // A polymorphic pivot (2 single-column FKs + a discriminator column in the
+    // PK) still gets a junction_pair on the two FKs: distinct FK pairs make the
+    // whole composite key distinct, whatever the discriminator holds.
+    let mut role_user = table_with(
+        "role_user",
+        vec![
+            pk_col("user_id", "bigint", SqlTypeFamily::BigInteger),
+            pk_col("role_id", "bigint", SqlTypeFamily::BigInteger),
+            pk_col("user_type", "varchar(255)", SqlTypeFamily::Text),
+        ],
+        vec!["user_id", "role_id", "user_type"],
+        vec![
+            fk("ru_user", "user_id", "users"),
+            fk("ru_role", "role_id", "roles"),
+        ],
+    );
+    role_user.columns[2].primary_key = true;
+    let schema = schema_of(vec![
+        table_with(
+            "users",
+            vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger)],
+            vec!["id"],
+            vec![],
+        ),
+        table_with(
+            "roles",
+            vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger)],
+            vec!["id"],
+            vec![],
+        ),
+        role_user,
+    ]);
+    let profile = row_count_profile(&[("users", 50), ("roles", 8), ("role_user", 60)]);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    let planners = &result.model.tables["role_user"].planners;
+    let junction = planners
+        .iter()
+        .find(|p| p.kind == "relation.junction_pair")
+        .expect("expected a junction_pair planner on the two FK columns");
+    // It must pair the two FK columns, not the discriminator.
+    let columns = junction.args.get("columns").and_then(|v| v.as_mapping()).unwrap();
+    assert_eq!(columns.get("left").and_then(|v| v.as_str()), Some("user_id"));
+    assert_eq!(columns.get("right").and_then(|v| v.as_str()), Some("role_id"));
+}
+
+#[test]
+fn composite_pk_with_one_fk_sequences_a_non_fk_integer_column() {
+    // model_has_roles shape: PK (role_id FK, model_id non-FK bigint, model_type
+    // discriminator). With only one FK, junction_pair cannot apply, so a non-FK
+    // integer PK column is sequenced to keep the composite key distinct.
+    let mut mhr = table_with(
+        "model_has_roles",
+        vec![
+            pk_col("role_id", "bigint", SqlTypeFamily::BigInteger),
+            pk_col("model_type", "varchar(255)", SqlTypeFamily::Text),
+            pk_col("model_id", "bigint", SqlTypeFamily::BigInteger),
+        ],
+        vec!["role_id", "model_id", "model_type"],
+        vec![fk("mhr_role", "role_id", "roles")],
+    );
+    for column in &mut mhr.columns {
+        column.primary_key = true;
+    }
+    let schema = schema_of(vec![
+        table_with(
+            "roles",
+            vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger)],
+            vec!["id"],
+            vec![],
+        ),
+        mhr,
+    ]);
+    let profile = row_count_profile(&[("roles", 8), ("model_has_roles", 200)]);
+
+    let result = ModelInference::standard().infer(&schema, &profile).unwrap();
+    let mhr_model = &result.model.tables["model_has_roles"];
+    assert!(
+        mhr_model.planners.is_empty(),
+        "a one-FK composite key is not a junction: {:?}",
+        mhr_model.planners.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>()
+    );
+    let model_id = mhr_model
+        .columns
+        .get("model_id")
+        .and_then(|r| r.generator.as_ref())
+        .expect("model_id has a generator");
+    assert_eq!(
+        model_id.kind, "sequence",
+        "a non-FK integer PK column must be sequenced to keep the composite key distinct"
+    );
+}
+
 // --- Step 1: safety / precedence --------------------------------------------
 
 /// The credential guard beats a name/shape match and any observed-value replay:

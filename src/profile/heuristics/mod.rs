@@ -55,7 +55,9 @@ use crate::synthetic::model::{
     PlannerConfig, ProfileInference, ProfileMetadata, RelationshipModel, RelationshipReference,
     RowsModel, SourceModel, SyntheticModel, TableModel, TableSeed,
 };
-use crate::synthetic::schema::{PortableColumn, PortableSchema, PortableRelationship, PortableTable};
+use crate::synthetic::schema::{
+    PortableColumn, PortableRelationship, PortableSchema, PortableTable, SqlTypeFamily,
+};
 
 // --- Precedence & confidence -------------------------------------------------
 
@@ -488,6 +490,26 @@ impl ModelInference {
         // primary key holds by construction.
         warnings.extend(planner::nominations(portable, evidence));
 
+        // A composite primary key holds by construction one of two ways: a
+        // junction_pair over two of its foreign keys, or — when it has fewer
+        // than two foreign keys — a sequenced non-FK integer column.
+        let planners = inferred_planners(portable);
+        if planners.is_empty() {
+            if let Some(column) = distinctness_sequence_column(portable) {
+                columns.insert(
+                    column,
+                    ColumnRule {
+                        semantic: None,
+                        generator: Some(GeneratorConfig {
+                            kind: "sequence".to_string(),
+                            args: [("start".to_string(), yaml(1))].into_iter().collect(),
+                        }),
+                        modifiers: Vec::new(),
+                    },
+                );
+            }
+        }
+
         TableModel {
             seed: TableSeed::Inherit,
             rows: match row_count {
@@ -497,7 +519,7 @@ impl ModelInference {
             schema: portable.clone(),
             columns,
             relationships: declared_relationships(portable),
-            planners: inferred_planners(portable),
+            planners,
         }
     }
 }
@@ -627,30 +649,37 @@ fn single_column_fk<'a>(table: &'a PortableTable, column: &str) -> Option<&'a Po
 }
 
 /// Infer the planners a pivot table needs so its composite primary key holds by
-/// construction. A table whose primary key is exactly two single-column foreign
-/// keys (each to a named relationship) is a many-to-many junction: emit a
-/// `relation.junction_pair` planner so the generated `(left, right)` pairs are
-/// distinct. This is a purely structural match — it keys off the shape of the
-/// primary key and its foreign keys, not any table or column name — so it covers
-/// any junction table, Laravel or otherwise. Non-junction composite keys (a
-/// discriminator or a non-foreign-key column in the primary key) are left to
-/// other mechanisms.
+/// construction. A composite primary key that contains at least two
+/// single-column foreign keys is a many-to-many junction: emit a
+/// `relation.junction_pair` planner over the first two such foreign-key columns.
+/// Distinct `(left, right)` pairs make the whole composite key distinct, even
+/// when the primary key also carries a discriminator or extra column (the
+/// polymorphic pivot shape). This is a purely structural match — it keys off the
+/// primary-key shape and its foreign keys, not any table or column name — so it
+/// covers any junction table, Laravel or otherwise. A composite key with fewer
+/// than two foreign-key columns is left to other mechanisms.
 fn inferred_planners(table: &PortableTable) -> Vec<PlannerConfig> {
     let pk = &table.primary_key;
-    if pk.len() != 2 {
+    if pk.len() < 2 {
         return Vec::new();
     }
-    let (Some(left), Some(right)) = (single_column_fk(table, &pk[0]), single_column_fk(table, &pk[1]))
-    else {
+    // The primary-key columns that are single-column foreign keys, in PK order.
+    let fk_columns: Vec<(&String, &PortableRelationship)> = pk
+        .iter()
+        .filter_map(|column| single_column_fk(table, column).map(|fk| (column, fk)))
+        .collect();
+    if fk_columns.len() < 2 {
         return Vec::new();
-    };
+    }
+    let (left_col, left) = fk_columns[0];
+    let (right_col, right) = fk_columns[1];
     let (Some(left_name), Some(right_name)) = (left.name.clone(), right.name.clone()) else {
         return Vec::new();
     };
 
     let mut columns = serde_yaml_ng::Mapping::new();
-    columns.insert(yaml("left"), yaml(&pk[0]));
-    columns.insert(yaml("right"), yaml(&pk[1]));
+    columns.insert(yaml("left"), yaml(left_col));
+    columns.insert(yaml("right"), yaml(right_col));
     let mut args = BTreeMap::new();
     args.insert("columns".to_string(), serde_yaml_ng::Value::Mapping(columns));
     args.insert("left_relationship".to_string(), yaml(left_name));
@@ -660,6 +689,26 @@ fn inferred_planners(table: &PortableTable) -> Vec<PlannerConfig> {
         kind: "relation.junction_pair".to_string(),
         args,
     }]
+}
+
+/// For a composite-primary-key table that is *not* a two-FK junction, the name
+/// of a non-foreign-key integer primary-key column to sequence so the composite
+/// key stays distinct by construction (its per-row-unique values alone make
+/// every tuple distinct). This is the fallback for polymorphic pivots whose PK
+/// mixes a single foreign key, a discriminator, and a plain integer id (e.g.
+/// `model_has_roles`). Returns `None` when the PK is not composite or has no
+/// such column, leaving the composite key to fail its own verification loudly.
+fn distinctness_sequence_column(table: &PortableTable) -> Option<String> {
+    if table.primary_key.len() < 2 {
+        return None;
+    }
+    table.primary_key.iter().find_map(|column| {
+        let is_integer = table.columns.iter().any(|c| {
+            &c.name == column
+                && matches!(c.family, SqlTypeFamily::Integer | SqlTypeFamily::BigInteger)
+        });
+        (is_integer && single_column_fk(table, column).is_none()).then(|| column.clone())
+    })
 }
 
 fn declared_relationships(table: &PortableTable) -> Vec<RelationshipModel> {
