@@ -49,8 +49,15 @@ widened.
 - `widen` tries ten times the configured attempt budget, then accepts the final
   candidate like `warn`. It is rejected for families with no mutation strategy.
 
-For large keys, prefer `sequence`, UUID, or another inherently unique shape.
-Global uniqueness necessarily retains state and is bounded by `max_tracked`.
+For large keys, prefer an inherently unique generator. The compiler recognizes
+`sequence`, `uuid`, `monotonic`, `identifier.ulid`, and any sufficiently
+high-entropy random string (a default-length `identifier.nanoid`,
+`identifier.token`, `identifier.hash`, or `credential.*`) as unique by
+construction, and will **not** auto-attach a tracking `unique` modifier to a
+single-column key that uses one — so those keys are never bounded by
+`max_tracked`. A short, low-entropy random string (for example a 4-character
+token) can still collide, so it is tracked. Global uniqueness enforced by this
+modifier necessarily retains state and is bounded by `max_tracked`.
 
 ## `prefix` and `suffix`
 

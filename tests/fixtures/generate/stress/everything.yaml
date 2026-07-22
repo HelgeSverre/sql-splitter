@@ -768,10 +768,12 @@ tables:
         - { name: amount_minor, type: bigint, nullable: false }
         - { name: running_balance, type: "decimal(20,4)", nullable: false }
         - { name: method, type: varchar(16), nullable: false }
-        # No `unique: true`: at 2M rows the auto-attached unique modifier would
-        # exceed its 1M max_tracked budget, and it only treats sequence/uuid/
-        # monotonic as inherently unique. The `template` below is unique by
-        # construction (it embeds the id sequence), so no dedup is needed.
+        # No `unique: true`: the reference is built by a `template` that embeds
+        # the id sequence, so it is unique by construction but not one of the
+        # generators the compiler recognizes as inherently unique (sequence,
+        # uuid, monotonic, ulid, and high-entropy nanoid/token/hash). Marking it
+        # unique would auto-attach a tracking modifier that exceeds its 1M
+        # max_tracked budget at 2M rows, so it is left unconstrained here.
         - { name: reference, type: varchar(32), nullable: false }
         - { name: sequence_no, type: bigint, nullable: false }
         - { name: paid_at, type: datetime, nullable: false }

@@ -2027,6 +2027,49 @@ fn uuid_primary_key_gets_no_auto_unique_modifier() {
 }
 
 #[test]
+fn high_entropy_nanoid_key_gets_no_auto_unique_modifier() {
+    // A default nanoid is ~126 bits of entropy: unique by construction, so it
+    // must not get a tracking modifier that would cap the column at max_tracked.
+    let model = single_key_model("\"varchar(21)\"", "generator: { kind: identifier.nanoid }");
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    assert_eq!(key_modifier_count(&plan), 0);
+}
+
+#[test]
+fn ulid_key_gets_no_auto_unique_modifier() {
+    let model = single_key_model("\"char(26)\"", "generator: { kind: identifier.ulid }");
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    assert_eq!(key_modifier_count(&plan), 0);
+}
+
+#[test]
+fn monotonic_key_gets_no_auto_unique_modifier() {
+    let model = single_key_model("bigint", "generator: { kind: monotonic, start: 1, step: 1 }");
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    assert_eq!(key_modifier_count(&plan), 0);
+}
+
+#[test]
+fn low_entropy_token_key_still_gets_the_auto_unique_modifier() {
+    // A 4-character alphanumeric token is only ~24 bits: it can genuinely collide
+    // at scale, so the tracking modifier must still be attached.
+    let model = single_key_model(
+        "\"varchar(4)\"",
+        "generator: { kind: identifier.token, length: 4 }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    assert_eq!(key_modifier_count(&plan), 1);
+}
+
+#[test]
 fn user_declared_unique_on_key_is_not_doubled() {
     let model = single_key_model(
         "\"varchar(16)\"",

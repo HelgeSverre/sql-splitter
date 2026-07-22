@@ -47,8 +47,7 @@ use super::plan::{
     PlanEstimates, PlannedColumn, PlannedTable, RelationshipDistribution, ResolvedTableSeed,
 };
 use super::registry::{
-    ColumnScope, CompileContext, CompiledGenerator, CompiledModifier, CompiledPlanner,
-    ExtensionRegistry,
+    ColumnScope, CompileContext, CompiledModifier, CompiledPlanner, ExtensionRegistry,
 };
 use super::seed::{SeedRoot, StreamId};
 
@@ -1126,7 +1125,6 @@ impl ModelCompiler {
         bag: &mut DiagnosticBag,
     ) {
         let ColumnOwner::Generator {
-            kind,
             compiled: generator,
             ..
         } = owner
@@ -1136,7 +1134,7 @@ impl ModelCompiler {
         if !is_single_column_key(&table.schema, column) {
             return;
         }
-        if generator_is_inherently_unique(kind, generator.as_ref()) {
+        if generator.is_inherently_unique() {
             return;
         }
         // A user-declared `unique` modifier already enforces distinctness (with
@@ -1241,16 +1239,6 @@ fn is_single_column_key(table: &PortableTable, column: &PortableColumn) -> bool 
             .indexes
             .iter()
             .any(|index| index.unique && single(&index.columns))
-}
-
-/// Whether a key column's owning generator already produces distinct values
-/// (or collides only negligibly), so no `unique` modifier is needed. A
-/// `KeyRecipe::Dense` generator (`sequence`) is unique by construction and
-/// `KeyRecipe::Uuid` collides only with astronomically small probability;
-/// `monotonic` is a row-indexed non-decreasing sequence that exposes no key
-/// recipe but is likewise inherently unique for any positive step.
-fn generator_is_inherently_unique(kind: &str, generator: &dyn CompiledGenerator) -> bool {
-    generator.key_recipe().is_some() || kind == "monotonic"
 }
 
 /// The per-table override view folded from the flat CLI list.

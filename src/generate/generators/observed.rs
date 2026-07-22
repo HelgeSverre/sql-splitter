@@ -767,6 +767,12 @@ impl CompiledGenerator for CompiledMonotonic {
         *output = GeneratedValue::Integer(value);
         Ok(())
     }
+
+    fn is_inherently_unique(&self) -> bool {
+        // A strictly increasing counter never repeats; a zero step would, so it
+        // stays trackable.
+        self.step != 0
+    }
 }
 
 // --- Registration ------------------------------------------------------------

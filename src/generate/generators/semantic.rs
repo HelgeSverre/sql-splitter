@@ -28,6 +28,7 @@ use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, Determinism,
     ExtensionRegistry, GeneratorDescriptor, GeneratorFactory, RowContext, Verification,
+    INHERENT_UNIQUENESS_ENTROPY_BITS,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
@@ -659,6 +660,13 @@ impl CompiledGenerator for CompiledRandomString {
         *output = GeneratedValue::Text(text);
         Ok(())
     }
+
+    fn is_inherently_unique(&self) -> bool {
+        // Entropy is the random suffix only; the constant prefix adds none.
+        let symbols = self.alphabet.chars().len() as f64;
+        let entropy = self.length as f64 * symbols.log2();
+        entropy >= INHERENT_UNIQUENESS_ENTROPY_BITS
+    }
 }
 
 static IDENTIFIER_TOKEN_SPEC: RandomStringSpec = RandomStringSpec {
@@ -888,6 +896,12 @@ impl CompiledGenerator for CompiledUlid {
             .collect();
         *output = GeneratedValue::Text(text);
         Ok(())
+    }
+
+    fn is_inherently_unique(&self) -> bool {
+        // 26 Crockford base32 characters ≈ 130 bits of entropy: negligible
+        // collision at any table scale.
+        true
     }
 }
 

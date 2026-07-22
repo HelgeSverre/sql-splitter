@@ -375,7 +375,26 @@ pub trait CompiledGenerator: Send {
     fn key_recipe(&self) -> Option<KeyRecipe> {
         None
     }
+
+    /// Whether this generator produces distinct values by construction (or
+    /// collides only negligibly), so a single-column key needs no auto-attached
+    /// `unique` modifier — and, crucially, is not capped by that modifier's
+    /// `max_tracked` budget on tables larger than it. The default is any
+    /// generator with a [`KeyRecipe`] (`sequence` is dense, `uuid` collides
+    /// negligibly). A high-entropy random generator (a long `nanoid`, `ulid`,
+    /// token, or hash) or a `monotonic` counter overrides this to `true`; a
+    /// short, low-entropy random string leaves it `false` so it is still tracked.
+    fn is_inherently_unique(&self) -> bool {
+        self.key_recipe().is_some()
+    }
 }
+
+/// The minimum output entropy (in bits) at which a random-string generator is
+/// treated as unique by construction. Below ~1e-9 birthday-collision
+/// probability for tables up to ten billion rows — far past any table a
+/// `unique` tracking budget could hold — so tracking such a column is pointless
+/// and only imposes the `max_tracked` ceiling.
+pub const INHERENT_UNIQUENESS_ENTROPY_BITS: f64 = 96.0;
 
 /// Compiles a [`ModifierConfig`] into a runnable modifier.
 pub trait ModifierFactory: Send + Sync {
