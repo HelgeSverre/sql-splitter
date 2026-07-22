@@ -655,6 +655,48 @@ fn corrupt_timestamps_ordering_fails_the_named_check() {
     );
 }
 
+#[test]
+fn forward_referenced_derived_chain_passes_verification() {
+    // A `id -> title -> slug` derivation where slug and title are declared before
+    // their sources. Topological evaluation produces real, distinct slugs, so the
+    // UNIQUE and non-null checks hold through the full reparse-and-verify path.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 11
+tables:
+  posts:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: posts
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: slug, type: "varchar(64)", nullable: false, unique: true }
+        - { name: title, type: "varchar(64)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      slug: { generator: { kind: slug, source: title }, modifiers: [{ kind: unique }] }
+      title: { generator: { kind: template, parts: ["Post ", { field: id }] } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "posts.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.passed(),
+        "{:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+    assert!(
+        sql.contains("'post-1'"),
+        "slug must derive from a template that itself reads id: {sql}"
+    );
+}
+
 // --- commerce.order_family --------------------------------------------------
 
 #[test]

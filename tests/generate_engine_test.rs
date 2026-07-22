@@ -2020,6 +2020,74 @@ tables:
 }
 
 #[test]
+fn diamond_dependency_resolves_when_readers_precede_their_sources() {
+    // `full` (a template) reads first and last, both declared after it. All
+    // three resolve because evaluation follows the read edges, not declaration.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  people:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: people
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: full, type: text, nullable: false }
+        - { name: first, type: text, nullable: false }
+        - { name: last, type: text, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      full: { generator: { kind: template, parts: [{ field: first }, " ", { field: last }] } }
+      first: { generator: { kind: constant, value: Ada } }
+      last: { generator: { kind: constant, value: Lovelace } }
+"#;
+    let sql = render_model(model, SqlDialect::MySql);
+    assert!(
+        sql.contains("'Ada Lovelace'"),
+        "template must join both later-declared fields: {sql}"
+    );
+}
+
+#[test]
+fn multiple_columns_derive_from_the_same_source() {
+    // Both `slug` and `mirror` read `title`, declared last. Each derivation
+    // resolves independently against the shared source.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  posts:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: posts
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: slug, type: text, nullable: false }
+        - { name: mirror, type: text, nullable: false }
+        - { name: title, type: text, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      slug: { generator: { kind: slug, source: title } }
+      mirror: { generator: { kind: copy, source: title } }
+      title: { generator: { kind: constant, value: "Hello There World" } }
+"#;
+    let sql = render_model(model, SqlDialect::MySql);
+    assert!(
+        sql.contains("'hello-there-world'"),
+        "slug derives from the shared source: {sql}"
+    );
+    assert!(
+        sql.contains("'Hello There World', 'Hello There World'"),
+        "mirror copies the shared source verbatim: {sql}"
+    );
+}
+
+#[test]
 fn relative_timestamp_reads_a_source_declared_later() {
     // `after` reads `created_at`, declared AFTER it. Topological ordering runs
     // created_at first, so the offset applies instead of the generator erroring

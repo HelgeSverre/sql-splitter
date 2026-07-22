@@ -1825,6 +1825,84 @@ fn built_in_template_field_reads_are_registered_as_dependencies() {
 }
 
 #[test]
+fn eval_order_is_schema_order_when_no_column_reads_a_sibling() {
+    // Regression guard: with no cross-column reads, evaluation order equals
+    // schema order, so every non-derived model renders byte-identically.
+    let model = ownership_model(
+        "        - { name: a, type: text, nullable: false }\n        - { name: b, type: text, nullable: false }\n        - { name: c, type: text, nullable: false }",
+        "    columns:\n      a: { generator: { kind: constant, value: x } }\n      b: { generator: { kind: constant, value: y } }\n      c: { generator: { kind: constant, value: z } }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    assert_eq!(
+        table.eval_order,
+        (0..table.columns.len()).collect::<Vec<_>>(),
+        "no reads must leave evaluation in schema order"
+    );
+}
+
+#[test]
+fn eval_order_runs_a_read_source_before_its_reader() {
+    // `slug` is declared before its `title` source; eval_order must still place
+    // title first.
+    let model = ownership_model(
+        "        - { name: slug, type: text, nullable: false }\n        - { name: title, type: text, nullable: false }",
+        "    columns:\n      slug: { generator: { kind: slug, source: title } }\n      title: { generator: { kind: constant, value: Hi } }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    let position = |name: &str| {
+        table
+            .eval_order
+            .iter()
+            .position(|&i| table.columns[i].schema.name == name)
+            .unwrap()
+    };
+    assert!(
+        position("title") < position("slug"),
+        "eval_order must run title before slug: {:?}",
+        table.eval_order
+    );
+}
+
+#[test]
+fn eval_order_is_a_total_permutation_even_with_a_diamond() {
+    // full reads first and last; both read base. eval_order must list every
+    // column exactly once and keep each source before its readers.
+    let model = ownership_model(
+        "        - { name: full, type: text, nullable: false }\n        - { name: first, type: text, nullable: false }\n        - { name: last, type: text, nullable: false }\n        - { name: base, type: text, nullable: false }",
+        "    columns:\n      full: { generator: { kind: template, parts: [{ field: first }, { field: last }] } }\n      first: { generator: { kind: copy, source: base } }\n      last: { generator: { kind: copy, source: base } }\n      base: { generator: { kind: constant, value: Seed } }",
+    );
+    let plan = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap();
+    let table = plan.table("t").unwrap();
+    let mut sorted = table.eval_order.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (0..table.columns.len()).collect::<Vec<_>>(),
+        "eval_order must be a total permutation: {:?}",
+        table.eval_order
+    );
+    let position = |name: &str| {
+        table
+            .eval_order
+            .iter()
+            .position(|&i| table.columns[i].schema.name == name)
+            .unwrap()
+    };
+    assert!(position("base") < position("first"));
+    assert!(position("base") < position("last"));
+    assert!(position("first") < position("full"));
+    assert!(position("last") < position("full"));
+}
+
+#[test]
 fn built_in_before_after_source_reads_are_registered_as_dependencies() {
     // `before`/`after` read their `source` sibling implicitly; a before<->after
     // cycle must be caught like any other read/write cycle.
