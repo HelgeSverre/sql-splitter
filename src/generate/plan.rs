@@ -144,6 +144,12 @@ pub struct PlannedTable {
     /// Declared planners are compiled here so ownership can reference and the
     /// runtime can execute them without resolving the registry again.
     pub planners: Vec<Box<dyn CompiledPlanner>>,
+    /// The order in which the engine evaluates generator-owned columns within a
+    /// row: a topological sort of the column read graph (a generator that reads
+    /// a sibling is evaluated after that sibling), tie-broken by schema position.
+    /// A model with no cross-column reads keeps its exact declared order. Indexes
+    /// into [`Self::columns`]; always a total permutation of its length.
+    pub eval_order: Vec<usize>,
 }
 
 impl fmt::Debug for PlannedTable {
@@ -161,6 +167,7 @@ impl fmt::Debug for PlannedTable {
                 "planners",
                 &format_args!("[{} compiled]", self.planners.len()),
             )
+            .field("eval_order", &self.eval_order)
             .finish()
     }
 }

@@ -1985,6 +1985,114 @@ fn render_model(model_yaml: &str, dialect: SqlDialect) -> String {
 }
 
 #[test]
+fn derived_column_reads_a_source_declared_later_in_the_schema() {
+    // `slug` is declared BEFORE `title`, its source. Per-row evaluation is
+    // ordered by declared reads, not schema position, so the slug still derives
+    // from the title instead of an empty (not-yet-generated) value.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  posts:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: posts
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: slug, type: text, nullable: false }
+        - { name: title, type: text, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      slug: { generator: { kind: slug, source: title } }
+      title: { generator: { kind: constant, value: "Hello Brave World" } }
+"#;
+    let sql = render_model(model, SqlDialect::MySql);
+    assert!(
+        sql.contains("'hello-brave-world'"),
+        "slug must derive from a later-declared source: {sql}"
+    );
+    assert!(
+        !sql.contains("'', 'Hello Brave World'"),
+        "slug must not be empty from reading an ungenerated source: {sql}"
+    );
+}
+
+#[test]
+fn relative_timestamp_reads_a_source_declared_later() {
+    // `after` reads `created_at`, declared AFTER it. Topological ordering runs
+    // created_at first, so the offset applies instead of the generator erroring
+    // that its source "has not been generated yet".
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  events:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: events
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: updated_at, type: timestamp, nullable: false }
+        - { name: created_at, type: timestamp, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      updated_at: { generator: { kind: after, source: created_at, min_seconds: 10, max_seconds: 10 } }
+      created_at: { generator: { kind: constant, value: "2024-01-01 00:00:00" } }
+"#;
+    let sql = render_model(model, SqlDialect::MySql);
+    assert!(
+        sql.contains("2024-01-01 00:00:00"),
+        "created_at literal present: {sql}"
+    );
+    assert!(
+        sql.contains("2024-01-01 00:00:10"),
+        "updated_at must be 10s after a later-declared source: {sql}"
+    );
+}
+
+#[test]
+fn derived_column_chain_resolves_across_multiple_hops() {
+    // A three-hop chain declared in reverse (c<-b<-a) must fully resolve:
+    // a is a constant, b copies a, c slugs b. Ordering follows the read edges.
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  t:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: t
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: c, type: text, nullable: false }
+        - { name: b, type: text, nullable: false }
+        - { name: a, type: text, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      c: { generator: { kind: slug, source: b } }
+      b: { generator: { kind: copy, source: a } }
+      a: { generator: { kind: constant, value: "Chained Value Here" } }
+"#;
+    let sql = render_model(model, SqlDialect::MySql);
+    // c = slug(b) = slug(copy(a)) = slug("Chained Value Here")
+    assert!(
+        sql.contains("'chained-value-here'"),
+        "chained derivation must resolve end to end: {sql}"
+    );
+    // b copied a verbatim.
+    assert!(
+        sql.contains("'Chained Value Here', 'Chained Value Here'"),
+        "b must copy a verbatim: {sql}"
+    );
+}
+
+#[test]
 fn random_table_seed_draws_fresh_entropy_for_each_compilation() {
     let model = r#"
 version: 1

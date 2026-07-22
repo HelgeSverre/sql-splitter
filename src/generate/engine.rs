@@ -35,8 +35,8 @@ use rand_chacha::ChaCha8Rng;
 
 use super::output::{FamilyBudget, FamilyBuffer, SpillKind, SpooledRow, TempConfig};
 use super::plan::{
-    ColumnOwner, CompiledRelationship, GenerationPlan, PlannedTable, RelationshipDistribution,
-    ResolvedTableSeed,
+    ColumnOwner, CompiledRelationship, GenerationPlan, PlannedColumn, PlannedTable,
+    RelationshipDistribution, ResolvedTableSeed,
 };
 use super::registry::{KeyRecipe, RowContext, RowView};
 use super::seed::{SeedRoot, StreamId};
@@ -328,15 +328,12 @@ impl GenerationEngine {
 
             sink.begin_table(&table)?;
             let exec = TableExec::build(&table, &key_domains)?;
-            let names: Vec<String> = table
-                .columns
-                .iter()
-                .map(|column| column.schema.name.clone())
-                .collect();
             let ncols = table.columns.len();
             let mut buffer = vec![GeneratedValue::Null; ncols];
             let mut selectors = exec.selectors;
             let mut planners = exec.planners;
+            let eval_order = table.eval_order.clone();
+            let mut pass = GeneratorPass::new(&table, &exec.dense_indices);
 
             for row_index in 0..table.rows {
                 // Non-reading owners first: defaults, materialized parent keys,
@@ -388,33 +385,18 @@ impl GenerationEngine {
                         }
                     }
                 }
-                // Column generators last: they may read siblings produced above.
-                // A materialized referenced key (in `dense`) is rendered from its
-                // domain, so it is skipped here even though it is generator-owned.
-                for i in 0..ncols {
-                    if exec.dense_indices.contains(&i) {
-                        continue;
-                    }
-                    let column = &mut table.columns[i];
-                    let ColumnOwner::Generator { kind, compiled } = &mut column.owner else {
-                        continue;
-                    };
-                    if is_fk_kind(kind) {
-                        continue;
-                    }
-                    let (left, right) = buffer.split_at_mut(i);
-                    let view = PartialRow {
-                        names: &names[..i],
-                        values: left,
-                    };
-                    let context = RowContext::new(row_index, &view);
-                    compiled.generate(&context, &mut right[0])?;
-                    // Owner value produced; run this column's modifier pipeline
-                    // in declared order before the row is written.
-                    for modifier in column.modifiers.iter_mut() {
-                        modifier.apply(&context, &mut right[0])?;
-                    }
-                }
+                // Column generators last, in topological read order so a
+                // generator that reads a sibling runs after it regardless of
+                // schema position. A materialized referenced key (in `dense`) is
+                // rendered from its domain, so it is skipped even though it is
+                // generator-owned.
+                pass.run(
+                    &mut table.columns,
+                    &mut buffer,
+                    &eval_order,
+                    &exec.dense_indices,
+                    row_index,
+                )?;
 
                 let generated = GeneratedRow {
                     table_index,
@@ -521,6 +503,8 @@ fn render_family_child(
 
     let mut rows_written = 0u64;
     let mut buffer = vec![GeneratedValue::Null; ncols];
+    let eval_order = table.eval_order.clone();
+    let mut pass = GeneratorPass::new(table, &exec.dense_indices);
     for (child_index, spooled) in replay.iter_mut().flatten().enumerate() {
         let spooled = spooled.map_err(family_spool_error)?;
         let child_index = child_index as u64;
@@ -557,29 +541,15 @@ fn render_family_child(
                 .get(key)
                 .map_or(GeneratedValue::Null, |parent| parent.key_at(parent_index));
         }
-        // Remaining generator-owned columns (e.g. the child primary key).
-        for i in 0..ncols {
-            if exec.dense_indices.contains(&i) {
-                continue;
-            }
-            let column = &mut table.columns[i];
-            let ColumnOwner::Generator { kind, compiled } = &mut column.owner else {
-                continue;
-            };
-            if is_fk_kind(kind) {
-                continue;
-            }
-            let (left, right) = buffer.split_at_mut(i);
-            let view = PartialRow {
-                names: &names[..i],
-                values: left,
-            };
-            let context = RowContext::new(child_index, &view);
-            compiled.generate(&context, &mut right[0])?;
-            for modifier in column.modifiers.iter_mut() {
-                modifier.apply(&context, &mut right[0])?;
-            }
-        }
+        // Remaining generator-owned columns (e.g. the child primary key), in the
+        // same topological read order as the ordinary table path.
+        pass.run(
+            &mut table.columns,
+            &mut buffer,
+            &eval_order,
+            &exec.dense_indices,
+            child_index,
+        )?;
 
         let generated = GeneratedRow {
             table_index,
@@ -1022,16 +992,107 @@ fn build_histogram(parent_count: u64) -> Vec<f64> {
 }
 
 /// A [`RowView`] over the columns produced so far in the current row.
-struct PartialRow<'a> {
-    names: &'a [String],
+/// A read-only view over the whole in-progress row, exposing every column that
+/// has already been produced this row. A column is readable once its value is
+/// present: non-generator columns are filled before the generator pass, and
+/// generator columns flip available as the pass produces them in
+/// [`PlannedTable::eval_order`]. A column not yet produced (or the reader's own
+/// slot) reads back as `None`, preserving the guarantee that a generator can
+/// only observe values that already exist — regardless of schema position.
+struct FullRow<'a> {
+    index: &'a BTreeMap<String, usize>,
     values: &'a [GeneratedValue],
+    available: &'a [bool],
 }
 
-impl RowView for PartialRow<'_> {
+impl RowView for FullRow<'_> {
     fn get(&self, column: &str) -> Option<&GeneratedValue> {
-        self.names
+        let &position = self.index.get(column)?;
+        self.available[position].then(|| &self.values[position])
+    }
+}
+
+/// Runs a table's per-row generator pass in topological read order, reused
+/// across the ordinary table loop and the family-child spool path. Precomputed
+/// once per table: a column-name index for sibling reads and the base
+/// availability mask (every column the pass does *not* produce is filled before
+/// the pass, so it is available from the start; the pass's own columns start
+/// unavailable and flip as they are produced).
+struct GeneratorPass {
+    index: BTreeMap<String, usize>,
+    base_available: Vec<bool>,
+    available: Vec<bool>,
+}
+
+impl GeneratorPass {
+    fn new(table: &PlannedTable, dense_indices: &BTreeSet<usize>) -> Self {
+        let ncols = table.columns.len();
+        let index = table
+            .columns
             .iter()
-            .position(|name| name == column)
-            .map(|i| &self.values[i])
+            .enumerate()
+            .map(|(i, column)| (column.schema.name.clone(), i))
+            .collect();
+        let mut base_available = vec![true; ncols];
+        for (i, column) in table.columns.iter().enumerate() {
+            if dense_indices.contains(&i) {
+                continue;
+            }
+            if let ColumnOwner::Generator { kind, .. } = &column.owner {
+                if !is_fk_kind(kind) {
+                    // Produced by this pass, so unavailable until generated.
+                    base_available[i] = false;
+                }
+            }
+        }
+        Self {
+            index,
+            base_available,
+            available: vec![true; ncols],
+        }
+    }
+
+    /// Generate every pass-owned column of `columns` into `buffer` in
+    /// `eval_order`, letting each generator (and its modifiers) read any sibling
+    /// already produced this row via a [`FullRow`] view.
+    fn run(
+        &mut self,
+        columns: &mut [PlannedColumn],
+        buffer: &mut [GeneratedValue],
+        eval_order: &[usize],
+        dense_indices: &BTreeSet<usize>,
+        row_index: u64,
+    ) -> Result<(), GenerateError> {
+        self.available.copy_from_slice(&self.base_available);
+        for &i in eval_order {
+            if dense_indices.contains(&i) {
+                continue;
+            }
+            let column = &mut columns[i];
+            let ColumnOwner::Generator { kind, compiled } = &mut column.owner else {
+                continue;
+            };
+            if is_fk_kind(kind) {
+                continue;
+            }
+            // Move the output slot out so the view can borrow the rest of the
+            // row immutably while the generator writes its own value.
+            let mut out = std::mem::replace(&mut buffer[i], GeneratedValue::Null);
+            {
+                let view = FullRow {
+                    index: &self.index,
+                    values: buffer,
+                    available: &self.available,
+                };
+                let context = RowContext::new(row_index, &view);
+                compiled.generate(&context, &mut out)?;
+                for modifier in column.modifiers.iter_mut() {
+                    modifier.apply(&context, &mut out)?;
+                }
+            }
+            buffer[i] = out;
+            self.available[i] = true;
+        }
+        Ok(())
     }
 }

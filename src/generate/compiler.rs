@@ -29,7 +29,8 @@
 //! three excluded dependencies reports all four. Warnings (e.g. a `--max-rows`
 //! cap) survive a successful compile via [`GenerationPlan::diagnostics`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use glob::Pattern;
 use rand::RngExt;
@@ -643,6 +644,7 @@ impl ModelCompiler {
             .collect();
 
         report_dependency_cycles(name, table, &columns, &planners, bag);
+        let eval_order = column_eval_order(table, &columns);
 
         // On a successful compile every planner resolved and compiled, so this
         // filter keeps them all in declaration order and a `ColumnOwner::
@@ -684,6 +686,7 @@ impl ModelCompiler {
             columns,
             relationships,
             planners: compiled_planners,
+            eval_order,
         }
     }
 
@@ -1753,6 +1756,73 @@ fn report_dependency_cycles(
     }
 }
 
+/// The order in which the engine evaluates generator-owned columns within a
+/// row: a topological sort of the column read graph (an edge `source -> reader`
+/// for every sibling a generator reads), tie-broken by schema position so an
+/// acyclic model with no cross-column reads keeps its declared order exactly.
+///
+/// Non-generator columns carry no read constraints — the engine fills them
+/// before the generator pass — so they float to their schema position. Any
+/// columns trapped in a cycle (which [`report_dependency_cycles`] already
+/// rejects, save the single-planner-owned exception) are appended in schema
+/// order, so the result is always a total permutation of `0..columns.len()`.
+fn column_eval_order(table: &TableModel, columns: &[PlannedColumn]) -> Vec<usize> {
+    let n = columns.len();
+    let index_of: BTreeMap<&str, usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.schema.name.as_str(), index))
+        .collect();
+
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_degree = vec![0usize; n];
+    for (reader, column) in columns.iter().enumerate() {
+        if !matches!(column.owner, ColumnOwner::Generator { .. }) {
+            continue;
+        }
+        for read in generator_reads(table, &column.schema.name) {
+            if let Some(&source) = index_of.get(read.as_str()) {
+                if source != reader {
+                    successors[source].push(reader);
+                    in_degree[reader] += 1;
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm; the min-heap yields the lowest ready index first, so
+    // independent columns emerge in schema order.
+    let mut ready: BinaryHeap<Reverse<usize>> = (0..n)
+        .filter(|&index| in_degree[index] == 0)
+        .map(Reverse)
+        .collect();
+    let mut order = Vec::with_capacity(n);
+    while let Some(Reverse(node)) = ready.pop() {
+        order.push(node);
+        for &next in &successors[node] {
+            in_degree[next] -= 1;
+            if in_degree[next] == 0 {
+                ready.push(Reverse(next));
+            }
+        }
+    }
+
+    // Cyclic remnants (already a reported error) get a deterministic slot so the
+    // permutation stays total and the engine never panics on a missing index.
+    if order.len() < n {
+        let mut placed = vec![false; n];
+        for &node in &order {
+            placed[node] = true;
+        }
+        for (node, &is_placed) in placed.iter().enumerate() {
+            if !is_placed {
+                order.push(node);
+            }
+        }
+    }
+    order
+}
+
 /// The sibling columns a compiled column generator reads on the same row. This
 /// is the single source of truth for column read edges, feeding both cycle
 /// detection ([`report_dependency_cycles`]) and the row-evaluation topological
@@ -1760,9 +1830,10 @@ fn report_dependency_cycles(
 ///
 /// Reads come from two places: an explicit `reads:` sequence (any generator may
 /// declare one, meaningful when the descriptor declares `reads: Configured`),
-/// plus the implicit sibling reads baked into specific built-in kinds — `copy`
-/// and `slug` read their `source`, and `template` reads each `{ field: ... }`.
-/// These built-ins have no aliases, so matching the primary kind is exact.
+/// plus the implicit sibling reads baked into specific built-in kinds — `copy`,
+/// `slug`, `before`, and `after` read their `source`, and `template` reads each
+/// `{ field: ... }`. These built-ins have no aliases, so matching the primary
+/// kind is exact.
 /// Duplicate names are collapsed so a repeated edge cannot skew the toposort's
 /// in-degree accounting.
 fn generator_reads(table: &TableModel, column: &str) -> Vec<String> {
@@ -1789,7 +1860,7 @@ fn generator_reads(table: &TableModel, column: &str) -> Vec<String> {
     }
 
     match config.kind.as_str() {
-        "copy" | "slug" => {
+        "copy" | "slug" | "before" | "after" => {
             if let Some(source) = config.args.get("source").and_then(serde_yaml_ng::Value::as_str) {
                 push(source);
             }

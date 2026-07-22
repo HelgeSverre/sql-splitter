@@ -1825,6 +1825,20 @@ fn built_in_template_field_reads_are_registered_as_dependencies() {
 }
 
 #[test]
+fn built_in_before_after_source_reads_are_registered_as_dependencies() {
+    // `before`/`after` read their `source` sibling implicitly; a before<->after
+    // cycle must be caught like any other read/write cycle.
+    let model = ownership_model(
+        "        - { name: a, type: timestamp, nullable: false }\n        - { name: b, type: timestamp, nullable: false }",
+        "    columns:\n      a:\n        generator: { kind: after, source: b }\n      b:\n        generator: { kind: before, source: a }",
+    );
+    let err = compiler()
+        .compile(model, CompileOptions::default())
+        .unwrap_err();
+    assert!(err.has_code("GEN-COLUMN-CYCLE"), "{err}");
+}
+
+#[test]
 fn ownership_allows_cycle_owned_by_one_planner() {
     let model = ownership_model(
         "        - { name: a, type: integer, nullable: false }\n        - { name: b, type: integer, nullable: false }",
