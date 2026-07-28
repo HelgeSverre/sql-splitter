@@ -680,3 +680,58 @@ fn test_glob_many_files() {
     assert!(stderr.contains("Validating 10 files"));
     assert!(stderr.contains("Passed: 10"));
 }
+
+/// Bug-hunt sweep: two glob inputs that share a file stem (e.g. a/dump.sql and
+/// b/dump.sql) must not both write into base/dump/ and overwrite each other.
+#[test]
+fn test_split_glob_same_stem_different_dirs_no_overwrite() {
+    let dir = TempDir::new().unwrap();
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let output_dir = dir.path().join("output");
+
+    create_sql_file(
+        &a,
+        "dump.sql",
+        "CREATE TABLE `users` (`id` INT);\nINSERT INTO `users` VALUES (1);\n",
+    );
+    create_sql_file(
+        &b,
+        "dump.sql",
+        "CREATE TABLE `users` (`id` INT);\nINSERT INTO `users` VALUES (99);\n",
+    );
+
+    let output = Command::new(binary_path())
+        .args([
+            "split",
+            &dir.path().join("**").join("dump.sql").to_string_lossy(),
+            "--output",
+            &output_dir.to_string_lossy(),
+            "--dialect",
+            "mysql",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "should succeed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // Both inputs' data must survive: gather every users.sql under output/.
+    let mut contents = Vec::new();
+    for sub in fs::read_dir(&output_dir).unwrap().flatten() {
+        let f = sub.path().join("users.sql");
+        if f.exists() {
+            contents.push(fs::read_to_string(f).unwrap());
+        }
+    }
+    let all = contents.join("\n");
+    assert!(all.contains("VALUES (1)"), "first input's data lost: {all}");
+    assert!(
+        all.contains("VALUES (99)"),
+        "second input's data lost: {all}"
+    );
+}
