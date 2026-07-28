@@ -13,7 +13,7 @@ pub use profile::{
 };
 
 use crate::splitter::Compression;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use std::collections::hash_map::Entry;
 use std::fs::{self, File};
 use std::io::Write;
@@ -215,8 +215,32 @@ fn sanitize_table_filename(table: &str) -> String {
     }
 }
 
+/// Claim a case-fold-unique filename for `table` under `dir`, so two tables
+/// differing only by case (or otherwise colliding after sanitizing) don't map
+/// to one file on a case-insensitive filesystem. The clean `<stem>.sql[.ext]`
+/// name is used when free; on collision a suffix derived from the exact table
+/// name (deterministic across runs) disambiguates.
+fn claim_table_filename(table: &str, ext: &str, reserved: &Mutex<AHashSet<String>>) -> String {
+    let stem = sanitize_table_filename(table);
+    let mut reserved = reserved.lock().unwrap_or_else(|e| e.into_inner());
+    let base = format!("{stem}.sql{ext}");
+    if reserved.insert(base.to_lowercase()) {
+        return base;
+    }
+    // Collision: disambiguate by a stable hash of the exact table name (two
+    // colliding names have different spellings → different hashes).
+    let mut candidate = format!("{stem}-{:08x}.sql{ext}", fnv1a(table));
+    let mut n = 2u32;
+    while !reserved.insert(candidate.to_lowercase()) {
+        candidate = format!("{stem}-{:08x}-{n}.sql{ext}", fnv1a(table));
+        n += 1;
+    }
+    candidate
+}
+
 impl TableSink {
     /// Create the `<table>.sql[.ext]` file and wrap it in the chosen encoder.
+    #[allow(clippy::too_many_arguments)]
     fn create(
         dir: &Path,
         table: &str,
@@ -224,9 +248,10 @@ impl TableSink {
         values: &Arc<ProfileValues>,
         throttle: &Option<Arc<Mutex<Throttle>>>,
         bytes_acked: &Arc<AtomicU64>,
+        reserved_names: &Mutex<AHashSet<String>>,
     ) -> std::io::Result<Self> {
-        let safe = sanitize_table_filename(table);
-        let path = dir.join(format!("{}.sql{}", safe, format.output_extension()));
+        let filename = claim_table_filename(table, format.output_extension(), reserved_names);
+        let path = dir.join(filename);
         let file = ProfiledFile::new(
             File::create(&path)?,
             Arc::clone(values),
@@ -341,6 +366,11 @@ pub struct ParallelWriters {
     format: Compression,
     capacity: usize,
     throttle: Option<Arc<Mutex<Throttle>>>,
+    /// Case-folded output filenames already claimed this run, shared across the
+    /// writer threads. Ensures two tables whose names differ only by case (or
+    /// otherwise collide after sanitizing) don't map to one file on a
+    /// case-insensitive filesystem.
+    reserved_names: Arc<Mutex<AHashSet<String>>>,
 }
 
 impl ParallelWriters {
@@ -363,6 +393,7 @@ impl ParallelWriters {
             intern: AHashMap::new(),
             stage: AHashMap::new(),
             shards: AHashMap::new(),
+            reserved_names: Arc::new(Mutex::new(AHashSet::new())),
             staged_bytes: 0,
             bytes_acked: Arc::new(AtomicU64::new(0)),
             stall_nanos: 0,
@@ -387,8 +418,9 @@ impl ParallelWriters {
         let values = Arc::clone(&self.values);
         let throttle = self.throttle.clone();
         let format = self.format;
+        let reserved = Arc::clone(&self.reserved_names);
         self.handles.push(std::thread::spawn(move || {
-            writer_loop(rx, dir, ef, format, acked, values, throttle)
+            writer_loop(rx, dir, ef, format, acked, values, throttle, reserved)
         }));
     }
 
@@ -516,18 +548,26 @@ impl ParallelWriters {
     }
 }
 
+/// FNV-1a hash of a string. Deterministic within (and across) runs of the same
+/// binary, so both shard assignment and filename disambiguation are stable.
+#[inline]
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in s.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// FNV-1a hash of the table name → shard index. Deterministic within a run so a
 /// table always maps to the same writer (preserving per-file order).
 #[inline]
 fn shard_index(table: &str, n: usize) -> usize {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in table.as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    (h % n as u64) as usize
+    (fnv1a(table) % n as u64) as usize
 }
 
+#[allow(clippy::too_many_arguments)]
 fn writer_loop(
     rx: Receiver<Chunk>,
     output_dir: PathBuf,
@@ -536,6 +576,7 @@ fn writer_loop(
     bytes_acked: Arc<AtomicU64>,
     values: Arc<ProfileValues>,
     throttle: Option<Arc<Mutex<Throttle>>>,
+    reserved_names: Arc<Mutex<AHashSet<String>>>,
 ) -> std::io::Result<()> {
     // Chunks arrive pre-batched at the profile's flush size; the ProfiledFile
     // beneath each sink coalesces them further up to the profile's file_buf.
@@ -556,6 +597,7 @@ fn writer_loop(
                     &values,
                     &throttle,
                     &bytes_acked,
+                    &reserved_names,
                 ) {
                     Ok(s) => e.insert(s),
                     Err(err) => {
