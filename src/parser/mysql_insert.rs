@@ -520,10 +520,12 @@ impl<'a> InsertParser<'a> {
                 }
             } else if self.stmt[self.pos] == b',' {
                 self.pos += 1;
-            } else if self.stmt[self.pos] == b';' {
-                break;
             } else {
-                self.pos += 1;
+                // The VALUES tuple list is `(row)(, row)*`; any other token
+                // (`;`, or a trailing clause like `ON DUPLICATE KEY UPDATE
+                // col = VALUES(col)`) ends it. Stopping here prevents a
+                // `VALUES(col)` reference from being parsed as a phantom row.
+                break;
             }
         }
 

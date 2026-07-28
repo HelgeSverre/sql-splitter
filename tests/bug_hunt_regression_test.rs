@@ -398,3 +398,19 @@ fn convert_auto_increment_case_insensitive_to_mssql() {
         "IDENTITY not emitted: {s}"
     );
 }
+
+// --- ON DUPLICATE KEY UPDATE phantom rows (src/parser/mysql_insert.rs) -------
+// A VALUES(col) reference in an ON DUPLICATE KEY UPDATE clause must not be
+// parsed as an extra data row.
+
+#[test]
+fn insert_on_duplicate_key_update_no_phantom_rows() {
+    let stmt = b"INSERT INTO t (a, b) VALUES (1, 2), (3, 4) ON DUPLICATE KEY UPDATE b = VALUES(b);";
+    let parsed = parse_insert_for_bulk(stmt, SqlDialect::MySql).unwrap();
+    assert_eq!(
+        parsed.rows.len(),
+        2,
+        "phantom row from VALUES(b) in ON DUPLICATE KEY UPDATE: {:?}",
+        parsed.rows
+    );
+}
