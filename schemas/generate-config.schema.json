@@ -1067,6 +1067,22 @@
           "type": "object",
           "properties": {
             "kind": {
+              "enum": ["slug"]
+            },
+            "max_length": {
+              "description": "Optional maximum slug length; a dash left at the cut is trimmed."
+            },
+            "source": {
+              "description": "The sibling column whose value is slugified."
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "source"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
               "enum": ["string"]
             },
             "max_length": {
@@ -1505,7 +1521,7 @@
           "type": "object",
           "properties": {
             "columns": {
-              "description": "Maps the parent role to the nullable self-reference column."
+              "description": "Maps the required `parent` role to the nullable self-reference column, and an optional `depth` role to a column that receives each row's depth (roots = 0)."
             },
             "key": {
               "description": "Explicit dense key start and step, overriding relationship-derived values."
@@ -1517,7 +1533,7 @@
               "description": "Maximum number of direct children per parent; omitted means unbounded."
             },
             "max_depth": {
-              "description": "Maximum tree depth, including roots."
+              "description": "The deepest node's depth; roots are depth 0, so depths span 0..=max_depth."
             },
             "relationship": {
               "description": "Self-relationship used to derive the referenced dense key recipe."
