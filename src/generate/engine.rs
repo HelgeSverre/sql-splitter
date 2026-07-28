@@ -289,7 +289,7 @@ impl GenerationEngine {
 
     /// Generate every table's rows in dependency order, writing each to `sink`.
     pub fn run(mut self, sink: &mut dyn RowSink) -> Result<EngineReport, GenerateError> {
-        let key_domains = build_key_domains(&self.plan)?;
+        let mut key_domains = build_key_domains(&self.plan)?;
         let family_budget = FamilyBudget {
             max_bytes: self.plan.family_budget_bytes,
         };
@@ -315,7 +315,7 @@ impl GenerationEngine {
         for (table_index, mut table) in tables.into_iter().enumerate() {
             // A family child: render the spooled rows produced by its parent.
             if let Some(link) = family_children.get(&table.name) {
-                rows_written += render_family_child(
+                let actual = render_family_child(
                     table_index,
                     &mut table,
                     link,
@@ -323,6 +323,16 @@ impl GenerationEngine {
                     &key_domains,
                     sink,
                 )?;
+                rows_written += actual;
+                // The realized family-child row count differs from the
+                // compile-time estimate in `parent.rows`. Retune this child's
+                // key domains to the count actually generated so a grandchild
+                // FK selects only over keys that exist (no dangling references).
+                for (domain_key, domain) in key_domains.iter_mut() {
+                    if domain_key.0 == table.name {
+                        domain.count = actual;
+                    }
+                }
                 continue;
             }
 

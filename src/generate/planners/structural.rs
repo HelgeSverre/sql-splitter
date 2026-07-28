@@ -1599,12 +1599,22 @@ fn compile_tree(
             format!("{path}.max_depth"),
             format!("hierarchy.tree `max_depth` {max_depth} must be at least 1"),
         );
+    } else if max_depth > u32::MAX as i128 {
+        // Guard the `as u32` narrowing below: an out-of-range value would
+        // silently wrap (2^32 -> 0), producing a degenerate flat tree.
+        bag.error(
+            DEPTH_CODE,
+            format!("{path}.max_depth"),
+            format!(
+                "hierarchy.tree `max_depth` {max_depth} exceeds the maximum {}",
+                u32::MAX
+            ),
+        );
     }
 
     let max_branching = match config.args.get("max_branching").and_then(as_i128) {
         None => None,
-        Some(branching) if branching >= 1 => Some(branching as u32),
-        Some(branching) => {
+        Some(branching) if branching < 1 => {
             bag.error(
                 BRANCH_CODE,
                 format!("{path}.max_branching"),
@@ -1614,6 +1624,18 @@ fn compile_tree(
             );
             None
         }
+        Some(branching) if branching > u32::MAX as i128 => {
+            bag.error(
+                BRANCH_CODE,
+                format!("{path}.max_branching"),
+                format!(
+                    "hierarchy.tree `max_branching` {branching} exceeds the maximum {}",
+                    u32::MAX
+                ),
+            );
+            None
+        }
+        Some(branching) => Some(branching as u32),
     };
 
     // Derive the emitted parent_id key recipe from the ACTUAL primary key the

@@ -149,12 +149,26 @@ pub(crate) fn bytes_to_string(bytes: &[u8]) -> String {
     }
 }
 
-/// Find the byte offset just past the `VALUES` keyword, matching it as a
-/// keyword rather than a substring: it must be word-boundaried and must not
-/// appear inside a quoted identifier (backtick / double-quote / bracket) or a
-/// string literal. This prevents tables like `product_values` or
-/// `` `order values` `` from being mistaken for the VALUES clause (bug #2).
-pub(crate) fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
+/// Outcome of scanning an INSERT statement's header for its `VALUES` keyword.
+pub(crate) enum HeaderScan {
+    /// `VALUES` found: byte offset just past the keyword.
+    Values(usize),
+    /// The statement's top-level `;` was reached before any `VALUES` keyword
+    /// (an `INSERT … SELECT` / `INSERT … SET`): byte offset just past the `;`.
+    NoValues(usize),
+    /// The slice ended with neither: the caller must buffer more input.
+    Incomplete,
+}
+
+/// Scan an INSERT statement's header, stopping at whichever comes first: the
+/// `VALUES` keyword or the statement's top-level `;`. Bounding the search to
+/// the current statement stops a VALUES-less INSERT from locking onto a later
+/// statement's `VALUES` and swallowing everything in between.
+///
+/// `VALUES` is matched as a keyword (word-boundaried, not inside a quoted
+/// identifier or string literal), so tables like `product_values` or
+/// `` `order values` `` are not mistaken for the clause (bug #2).
+pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
     let mut in_single = false;
     let mut in_double = false;
     let mut in_backtick = false;
@@ -221,6 +235,8 @@ pub(crate) fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
                 i += 1;
                 continue;
             }
+            // Top-level statement terminator reached before any VALUES clause.
+            b';' => return HeaderScan::NoValues(i + 1),
             _ => {}
         }
 
@@ -231,14 +247,24 @@ pub(crate) fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
             let before_ok = i == 0 || !is_ident_byte(stmt[i - 1]);
             let after_ok = stmt.get(i + 6).is_none_or(|&c| !is_ident_byte(c));
             if before_ok && after_ok {
-                return Some(i + 6);
+                return HeaderScan::Values(i + 6);
             }
         }
 
         i += 1;
     }
 
-    None
+    HeaderScan::Incomplete
+}
+
+/// Byte offset just past the `VALUES` keyword within a single INSERT statement,
+/// or `None` for a VALUES-less INSERT. Thin wrapper over [`scan_insert_header`]
+/// for callers that already hold one complete statement.
+pub(crate) fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
+    match scan_insert_header(stmt) {
+        HeaderScan::Values(pos) => Some(pos),
+        HeaderScan::NoValues(_) | HeaderScan::Incomplete => None,
+    }
 }
 
 /// Extract a column list `(a, b, c)` appearing immediately before the VALUES
@@ -494,10 +520,12 @@ impl<'a> InsertParser<'a> {
                 }
             } else if self.stmt[self.pos] == b',' {
                 self.pos += 1;
-            } else if self.stmt[self.pos] == b';' {
-                break;
             } else {
-                self.pos += 1;
+                // The VALUES tuple list is `(row)(, row)*`; any other token
+                // (`;`, or a trailing clause like `ON DUPLICATE KEY UPDATE
+                // col = VALUES(col)`) ends it. Stopping here prevents a
+                // `VALUES(col)` reference from being parsed as a phantom row.
+                break;
             }
         }
 
@@ -565,6 +593,12 @@ impl<'a> InsertParser<'a> {
                 }
                 _ if depth == 1 => {
                     values.push(self.parse_value());
+                }
+                // depth > 1 (inside a nested parenthesized expression): consume
+                // string literals whole so a quoted ')' or ',' cannot corrupt
+                // the parenthesis balance and truncate the tuple early.
+                b'\'' => {
+                    let _ = self.parse_string_value();
                 }
                 _ => {
                     self.pos += 1;

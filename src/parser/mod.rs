@@ -396,6 +396,18 @@ enum Peek2 {
     NeedMore,
 }
 
+/// Result of probing for a MySQL `DELIMITER` client command at a statement
+/// boundary. See [`Parser::scan_delimiter_command`].
+enum DelimiterScan {
+    /// The bytes at the boundary are not a `DELIMITER` command.
+    NotDelimiter,
+    /// A complete `DELIMITER <token>` line: switch the terminator to
+    /// `new_delim` and resume scanning the real statement at `next`.
+    Consumed { new_delim: Vec<u8>, next: usize },
+    /// The line is not fully buffered yet: grow the buffer and retry.
+    NeedMore,
+}
+
 /// Control-flow signal returned by row/event visitors.
 ///
 /// Lives in the parser layer (rather than a consumer module) so the streaming
@@ -468,6 +480,11 @@ impl Default for ParserLimits {
     }
 }
 
+/// Longest statement terminator a `DELIMITER` command may set, stored inline.
+/// Real delimiters are 1–2 bytes (`;`, `;;`, `//`, `$$`); a longer one is
+/// truncated to this cap, which no realistic dump reaches.
+const MAX_DELIMITER_LEN: usize = 8;
+
 pub struct Parser<R: Read> {
     reader: BufReader<R>,
     dialect: SqlDialect,
@@ -481,6 +498,15 @@ pub struct Parser<R: Read> {
     /// (never per-statement) so scanning stays O(n) rather than O(n²).
     buf: Vec<u8>,
     buf_pos: usize,
+    /// Current statement terminator, stored inline so constructing a `Parser`
+    /// never heap-allocates for the common `;` case. Defaults to `;`, but a
+    /// MySQL `DELIMITER` client command (as emitted by `mysqldump --routines`
+    /// around stored procedure/function/trigger bodies) switches it to e.g.
+    /// `;;` so the `;`-terminated statements inside a `BEGIN … END` body are not
+    /// split apart. Persists across `read_statement` calls for the same stream.
+    /// The active delimiter is `current_delimiter[..current_delimiter_len]`.
+    current_delimiter: [u8; MAX_DELIMITER_LEN],
+    current_delimiter_len: usize,
     /// Number of bytes dropped off the front of `buf` so far, so an absolute
     /// input offset can be reported in [`Parser::visit_events`] diagnostics.
     base: u64,
@@ -504,6 +530,12 @@ impl<R: Read> Parser<R> {
             in_copy_data: false,
             buf: Vec::new(),
             buf_pos: 0,
+            current_delimiter: {
+                let mut d = [0u8; MAX_DELIMITER_LEN];
+                d[0] = b';';
+                d
+            },
+            current_delimiter_len: 1,
             base: 0,
             peak_buffered: 0,
             limits: ParserLimits::default(),
@@ -564,6 +596,84 @@ impl<R: Read> Parser<R> {
         }
     }
 
+    /// Cheap guard for the `DELIMITER` pre-scan: `true` when the next statement
+    /// could begin a `DELIMITER` command, i.e. the first non-whitespace byte at
+    /// `buf_pos` is `D`/`d`, or the buffer ran out before a non-whitespace byte
+    /// was found (so the full scan must grow it to decide). `false` — the common
+    /// case — lets `read_statement` skip the pre-scan loop entirely.
+    #[inline]
+    fn upcoming_maybe_delimiter(&self) -> bool {
+        let mut p = self.buf_pos;
+        while p < self.buf.len() {
+            match self.buf[p] {
+                b' ' | b'\t' | b'\r' | b'\n' => p += 1,
+                b'D' | b'd' => return true,
+                _ => return false,
+            }
+        }
+        // Ran out of buffered bytes without deciding: let the full scan grow it.
+        true
+    }
+
+    /// Detect a MySQL `DELIMITER <token>` client command starting at `from`
+    /// (after leading whitespace). The command is line-terminated (not
+    /// terminated by the current delimiter) and is a mysql-client directive
+    /// with no SQL meaning, so it is consumed and not emitted as a statement.
+    fn scan_delimiter_command(&self, from: usize, at_eof: bool) -> DelimiterScan {
+        const KW: &[u8] = b"DELIMITER";
+
+        let mut p = from;
+        while p < self.buf.len() && matches!(self.buf[p], b' ' | b'\t' | b'\r' | b'\n') {
+            p += 1;
+        }
+        if self.buf.len() - p < KW.len() {
+            return if at_eof {
+                DelimiterScan::NotDelimiter
+            } else {
+                DelimiterScan::NeedMore
+            };
+        }
+        for (k, &kw) in KW.iter().enumerate() {
+            if self.buf[p + k].to_ascii_uppercase() != kw {
+                return DelimiterScan::NotDelimiter;
+            }
+        }
+        let mut q = p + KW.len();
+        // The keyword must be followed by horizontal whitespace, else it is an
+        // identifier that merely starts with "DELIMITER" (e.g. `DELIMITERS`).
+        match self.buf.get(q) {
+            Some(&c) if c == b' ' || c == b'\t' => {}
+            Some(_) => return DelimiterScan::NotDelimiter,
+            None if at_eof => return DelimiterScan::NotDelimiter,
+            None => return DelimiterScan::NeedMore,
+        }
+        while q < self.buf.len() && matches!(self.buf[q], b' ' | b'\t') {
+            q += 1;
+        }
+        let line_end = match memchr::memchr(b'\n', &self.buf[q..]) {
+            Some(off) => q + off,
+            None if at_eof => self.buf.len(),
+            None => return DelimiterScan::NeedMore,
+        };
+        // Trim trailing horizontal whitespace / CR from the delimiter token.
+        let mut end = line_end;
+        while end > q && matches!(self.buf[end - 1], b' ' | b'\t' | b'\r') {
+            end -= 1;
+        }
+        if end == q {
+            // `DELIMITER` with no argument: malformed. Leave it to normal
+            // parsing rather than swallowing the line.
+            return DelimiterScan::NotDelimiter;
+        }
+        let new_delim = self.buf[q..end].to_vec();
+        let next = if line_end < self.buf.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+        DelimiterScan::Consumed { new_delim, next }
+    }
+
     pub fn read_statement(&mut self) -> std::io::Result<Option<Vec<u8>>> {
         // If we're in PostgreSQL COPY data mode, read until we see the terminator
         if self.in_copy_data {
@@ -587,6 +697,10 @@ impl<R: Read> Parser<R> {
         let mut i = self.buf_pos;
 
         let mut inside_single_quote = false;
+        // The current single-quoted string is a PostgreSQL escape string
+        // (`E'…'`), inside which backslash is an escape character — so a
+        // backslash-escaped quote (`E'a\'b'`) does not end the string.
+        let mut in_escape_string = false;
         let mut inside_double_quote = false;
         let mut inside_backtick = false; // MySQL `identifier` quoting (bug #10)
         let mut escaped = false;
@@ -595,6 +709,40 @@ impl<R: Read> Parser<R> {
         let mut in_dollar_quote = false;
         let mut dollar_tag: Vec<u8> = Vec::new();
         let mut at_eof = false;
+
+        // Consume any leading MySQL `DELIMITER` client commands before scanning
+        // the next real statement, so `;`-terminated statements inside a stored
+        // routine body are kept whole under a `;;` (or other) delimiter.
+        //
+        // Fast path: a `DELIMITER` command begins with `D`/`d` after optional
+        // leading whitespace. When that first byte is already buffered and is
+        // not `D`/`d`, there is no command here, so skip the full scan entirely
+        // — this keeps the per-statement cost off the parser's hot loop for the
+        // overwhelmingly common non-`DELIMITER` statement.
+        if is_mysql && self.upcoming_maybe_delimiter() {
+            loop {
+                match self.scan_delimiter_command(self.buf_pos, at_eof) {
+                    DelimiterScan::NotDelimiter => break,
+                    DelimiterScan::Consumed { new_delim, next } => {
+                        let n = new_delim.len().min(MAX_DELIMITER_LEN);
+                        self.current_delimiter[..n].copy_from_slice(&new_delim[..n]);
+                        self.current_delimiter_len = n;
+                        self.buf_pos = next;
+                        start = self.buf_pos;
+                        i = self.buf_pos;
+                    }
+                    DelimiterScan::NeedMore => {
+                        let (removed, more) = self.grow_buffer(self.buf_pos)?;
+                        self.buf_pos -= removed;
+                        start = self.buf_pos;
+                        i = self.buf_pos;
+                        if !more {
+                            at_eof = true;
+                        }
+                    }
+                }
+            }
+        }
 
         // Lookup table of bytes that are significant outside strings/comments;
         // everything else can be skipped in a tight loop.
@@ -609,6 +757,13 @@ impl<R: Read> Parser<R> {
         if is_postgres {
             sig[b'$' as usize] = true;
         }
+        // A custom multi-byte delimiter (from `DELIMITER`) may start with a byte
+        // the default table does not flag; make sure the scan stops on it. The
+        // delimiter can't change during this scan (only the pre-scan above sets
+        // it), so cache it in locals to keep the hot loop off the struct fields.
+        let delim0 = self.current_delimiter[0];
+        let delim_len = self.current_delimiter_len;
+        sig[delim0 as usize] = true;
 
         loop {
             'scan: while i < self.buf.len() {
@@ -661,7 +816,7 @@ impl<R: Read> Parser<R> {
                 if inside_string {
                     let rest = &self.buf[i..];
                     let hit = if inside_single_quote {
-                        if is_mysql {
+                        if is_mysql || (is_postgres && in_escape_string) {
                             memchr::memchr2(b'\'', b'\\', rest)
                         } else {
                             memchr::memchr(b'\'', rest)
@@ -692,9 +847,13 @@ impl<R: Read> Parser<R> {
                     }
                 }
 
-                // MySQL backslash escapes apply inside both '…' and "…" string
-                // literals (but not backtick identifiers or dollar quotes).
-                if b == b'\\' && (inside_single_quote || inside_double_quote) && is_mysql {
+                // Backslash escapes apply inside MySQL '…'/"…" literals and
+                // inside a PostgreSQL E'…' escape string (but never inside
+                // backtick identifiers or dollar quotes).
+                if b == b'\\'
+                    && ((is_mysql && (inside_single_quote || inside_double_quote))
+                        || (is_postgres && inside_single_quote && in_escape_string))
+                {
                     escaped = true;
                     i += 1;
                     continue;
@@ -825,7 +984,19 @@ impl<R: Read> Parser<R> {
                 }
 
                 if b == b'\'' && !inside_double_quote && !inside_backtick && !in_dollar_quote {
-                    inside_single_quote = !inside_single_quote;
+                    if inside_single_quote {
+                        inside_single_quote = false;
+                        in_escape_string = false;
+                    } else {
+                        inside_single_quote = true;
+                        // A PostgreSQL E'…' escape string: the quote is preceded
+                        // by `E`/`e` at a word boundary (not part of an
+                        // identifier ending in e).
+                        in_escape_string = is_postgres
+                            && i > 0
+                            && matches!(self.buf[i - 1], b'E' | b'e')
+                            && (i < 2 || !is_word_byte(self.buf[i - 2]));
+                    }
                 } else if b == b'"' && !inside_single_quote && !inside_backtick && !in_dollar_quote
                 {
                     inside_double_quote = !inside_double_quote;
@@ -836,16 +1007,36 @@ impl<R: Read> Parser<R> {
                     && !in_dollar_quote
                 {
                     inside_backtick = !inside_backtick;
-                } else if b == b';' && !inside_string {
+                } else if b == delim0 && !inside_string {
                     // Statement terminator. The bytes after it stay in `buf` and
                     // become the next statement (buf_pos advances, no shifting).
-                    let result = self.buf[start..=i].to_vec();
-                    self.buf_pos = i + 1;
+                    let dl = delim_len;
+                    if dl == 1 {
+                        let result = self.buf[start..=i].to_vec();
+                        self.buf_pos = i + 1;
 
-                    if is_postgres && self.is_copy_from_stdin(&result) {
-                        self.in_copy_data = true;
+                        if is_postgres && self.is_copy_from_stdin(&result) {
+                            self.in_copy_data = true;
+                        }
+                        return Ok(Some(result));
                     }
-                    return Ok(Some(result));
+                    // Multi-byte delimiter (e.g. `;;`): the full token must match
+                    // starting at `i`. A lone first byte (a `;` inside a routine
+                    // body under a `;;` delimiter) is just an ordinary byte.
+                    if i + dl <= self.buf.len() {
+                        if self.buf[i..i + dl] == self.current_delimiter[..dl] {
+                            let result = self.buf[start..i + dl].to_vec();
+                            self.buf_pos = i + dl;
+                            return Ok(Some(result));
+                        }
+                        i += 1;
+                        continue;
+                    } else if at_eof {
+                        i += 1;
+                        continue;
+                    } else {
+                        break 'scan;
+                    }
                 }
 
                 i += 1;
@@ -1032,30 +1223,45 @@ impl<R: Read> Parser<R> {
     where
         F: FnMut(ParserEvent<'_>) -> anyhow::Result<RowFlow>,
     {
-        // Locate the VALUES keyword, buffering only the header (bounded).
+        // Locate the VALUES keyword, buffering only the header (bounded). The
+        // scan stops at the statement's own `;`, so a VALUES-less INSERT
+        // (INSERT … SELECT / SET) is emitted whole rather than absorbing later
+        // statements while hunting for a VALUES that belongs to one of them.
         let (header, values_abs) = loop {
             let stripped_len =
                 strip_leading_comments_and_whitespace(&self.buf[self.buf_pos..]).len();
             let start = self.buf.len() - stripped_len;
-            if let Some(vp) = mysql_insert::find_values_keyword_pos(&self.buf[start..]) {
-                let values_abs = start + vp;
-                break (self.buf[start..values_abs].to_vec(), values_abs);
-            }
-            if self.buf.len() - self.buf_pos > self.limits.max_header {
-                anyhow::bail!(
-                    "INSERT header exceeds max_header ({} bytes) at input offset {}",
-                    self.limits.max_header,
-                    self.base + self.buf_pos as u64
-                );
-            }
-            let (removed, more) = self.grow_buffer(self.buf_pos)?;
-            self.buf_pos -= removed;
-            if !more {
-                // No VALUES keyword (truncated / not a value INSERT): emit the
-                // remaining bytes as an opaque statement so nothing is lost.
-                let flow = on_event(ParserEvent::Statement(&self.buf[self.buf_pos..]))?;
-                self.buf_pos = self.buf.len();
-                return Ok(flow);
+            match mysql_insert::scan_insert_header(&self.buf[start..]) {
+                mysql_insert::HeaderScan::Values(vp) => {
+                    let values_abs = start + vp;
+                    break (self.buf[start..values_abs].to_vec(), values_abs);
+                }
+                mysql_insert::HeaderScan::NoValues(end_off) => {
+                    // Emit the whole statement (up to and including its `;`) as
+                    // an opaque Statement; there are no rows to stream.
+                    let stmt_end = start + end_off;
+                    let flow = on_event(ParserEvent::Statement(&self.buf[self.buf_pos..stmt_end]))?;
+                    self.buf_pos = stmt_end;
+                    return Ok(flow);
+                }
+                mysql_insert::HeaderScan::Incomplete => {
+                    if self.buf.len() - self.buf_pos > self.limits.max_header {
+                        anyhow::bail!(
+                            "INSERT header exceeds max_header ({} bytes) at input offset {}",
+                            self.limits.max_header,
+                            self.base + self.buf_pos as u64
+                        );
+                    }
+                    let (removed, more) = self.grow_buffer(self.buf_pos)?;
+                    self.buf_pos -= removed;
+                    if !more {
+                        // Truncated header at EOF: emit the remaining bytes as an
+                        // opaque statement so nothing is lost.
+                        let flow = on_event(ParserEvent::Statement(&self.buf[self.buf_pos..]))?;
+                        self.buf_pos = self.buf.len();
+                        return Ok(flow);
+                    }
+                }
             }
         };
 
@@ -1578,6 +1784,13 @@ pub(crate) fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
         // First trim leading ASCII whitespace
         data = trim_ascii_start(data);
 
+        // Strip a leading UTF-8 BOM (EF BB BF). Without this the first statement
+        // in a BOM-prefixed dump classifies as Unknown and split drops it.
+        if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            data = &data[3..];
+            continue;
+        }
+
         // Handle -- line comments
         if data.len() >= 2 && data[0] == b'-' && data[1] == b'-' {
             // Skip until end of line
@@ -1784,6 +1997,14 @@ pub(crate) fn extract_table_name_flexible(
 #[inline]
 fn is_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// True if `b` can be part of a SQL identifier (letters, digits, `_`). Used to
+/// tell a PostgreSQL `E'…'` escape-string prefix from an identifier that merely
+/// ends in `e` (e.g. `type`).
+#[inline]
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// True if `s` begins with an `INSERT INTO`/`INSERT ONLY` value statement (the

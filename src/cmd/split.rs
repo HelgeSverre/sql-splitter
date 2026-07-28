@@ -421,6 +421,32 @@ fn run_single(
     Ok(ExitCode::SUCCESS)
 }
 
+/// A distinct output-subdirectory name per input file, keyed by index. Uses
+/// each file's stem when unique; on a stem collision (same-named files in
+/// different directories, common with `**/*.sql` globs) it appends an
+/// incrementing `-N` so no two inputs share an output directory. Case-folded
+/// comparison keeps it correct on case-insensitive filesystems too.
+fn unique_output_subdirs(files: &[PathBuf]) -> Vec<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    files
+        .iter()
+        .enumerate()
+        .map(|(idx, file)| {
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("file_{idx}"));
+            let mut name = stem.clone();
+            let mut n = 2u32;
+            while !used.insert(name.to_lowercase()) {
+                name = format!("{stem}-{n}");
+                n += 1;
+            }
+            name
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_multi(
     files: Vec<PathBuf>,
@@ -438,6 +464,11 @@ fn run_multi(
     io_strategy: IoStrategy,
 ) -> anyhow::Result<ExitCode> {
     let total = files.len();
+
+    // Per-input output subdirectory names, disambiguated so two inputs that
+    // share a file stem (e.g. `a/dump.sql` and `b/dump.sql`) don't both write
+    // into `base_output/dump/` and silently overwrite each other.
+    let output_subdirs = unique_output_subdirs(&files);
 
     if !json {
         println!("Splitting {} files...\n", total);
@@ -469,11 +500,7 @@ fn run_multi(
                 );
             }
 
-            let file_stem = file
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("file_{}", idx));
-            let output_dir = base_output.join(&file_stem);
+            let output_dir = base_output.join(&output_subdirs[idx]);
 
             let file_size = match std::fs::metadata(file) {
                 Ok(m) => m.len(),

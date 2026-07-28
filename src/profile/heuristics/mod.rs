@@ -466,6 +466,11 @@ impl ModelInference {
             if column.primary_key
                 && matches!(column.family, SqlTypeFamily::Text | SqlTypeFamily::Other)
                 && referenced.contains(&(portable.name.clone(), column.name.clone()))
+                // Only assign a 36-char UUID key if the column can hold it;
+                // otherwise fall through to normal inference (which surfaces a
+                // clear GEN-KEY-DOMAIN-UNSUPPORTED diagnostic) rather than
+                // silently emitting values that overflow the declared length.
+                && text_column_fits_uuid(&column.source_type)
             {
                 decisions.push(Decision {
                     column: key,
@@ -748,6 +753,29 @@ fn is_bounded_generator(kind: &str) -> bool {
     )
 }
 
+/// The maximum character length declared by a text type such as `varchar(8)`,
+/// `char(10)` or `nvarchar(255)`. `None` for length-less text types (`text`,
+/// `longtext`, a bare `varchar`), which impose no fixed cap.
+fn declared_char_length(source_type: &str) -> Option<usize> {
+    let open = source_type.find('(')?;
+    let close = source_type[open + 1..].find(')')? + open + 1;
+    // A precision/scale pair (e.g. `decimal(10,2)`) keeps the first number;
+    // text length declarations are a single number anyway.
+    source_type[open + 1..close]
+        .split(',')
+        .next()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+}
+
+/// Whether a text column declared as `source_type` can hold a 36-char UUID
+/// string. Length-less text types have no cap and so always fit.
+fn text_column_fits_uuid(source_type: &str) -> bool {
+    const UUID_LEN: usize = 36;
+    declared_char_length(source_type).is_none_or(|n| n >= UUID_LEN)
+}
+
 /// A high-cardinality generator (kind + args) for a unique `column` whose
 /// inferred generator was bounded: a `sequence` for an integer, a `uuid` for
 /// text. `None` for families with no obvious high-cardinality synthetic key.
@@ -760,7 +788,14 @@ fn high_cardinality_generator(
             [("start".to_string(), yaml(1))].into_iter().collect(),
         )),
         SqlTypeFamily::Text | SqlTypeFamily::Other | SqlTypeFamily::Uuid => {
-            Some(("uuid".to_string(), BTreeMap::new()))
+            // A UUID string is 36 chars: don't force it into a column too short
+            // to hold it, which would emit values that violate the declared
+            // length. Fall back to the inferred (bounded) generator instead.
+            if text_column_fits_uuid(&column.source_type) {
+                Some(("uuid".to_string(), BTreeMap::new()))
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -926,4 +961,56 @@ pub(crate) fn weighted_entries(entries: &[(String, u64)]) -> serde_yaml_ng::Valu
 /// Round a fraction to four decimal places for stable, readable emission.
 fn round4(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
+}
+
+#[cfg(test)]
+mod uuid_length_tests {
+    use super::*;
+
+    fn text_col(source_type: &str) -> PortableColumn {
+        PortableColumn {
+            name: "code".to_string(),
+            source_type: source_type.to_string(),
+            family: SqlTypeFamily::Text,
+            nullable: false,
+            primary_key: false,
+            unique: true,
+            default_sql: None,
+            generated: false,
+            identity: false,
+            collation: None,
+        }
+    }
+
+    #[test]
+    fn short_text_unique_not_forced_to_uuid() {
+        // varchar(8) cannot hold a 36-char UUID; forcing one would emit values
+        // that violate the declared length.
+        assert!(
+            high_cardinality_generator(&text_col("varchar(8)")).is_none(),
+            "uuid forced into a column too short to hold it"
+        );
+    }
+
+    #[test]
+    fn long_and_unbounded_text_unique_get_uuid() {
+        assert_eq!(
+            high_cardinality_generator(&text_col("varchar(64)")).map(|(k, _)| k),
+            Some("uuid".to_string())
+        );
+        // Length-less text is unbounded, so a UUID fits.
+        assert_eq!(
+            high_cardinality_generator(&text_col("text")).map(|(k, _)| k),
+            Some("uuid".to_string())
+        );
+    }
+
+    #[test]
+    fn declared_char_length_parses_type_lengths() {
+        assert_eq!(declared_char_length("varchar(8)"), Some(8));
+        assert_eq!(declared_char_length("VARCHAR(255)"), Some(255));
+        assert_eq!(declared_char_length("char(10)"), Some(10));
+        assert_eq!(declared_char_length("text"), None);
+        assert_eq!(declared_char_length("longtext"), None);
+    }
 }

@@ -402,9 +402,9 @@ tables:
         - {{ name: value, type: bigint, nullable: false }}
     columns:
       value:
-        generator: {{ kind: sequence, start: "{}", step: 1 }}
+        generator: {{ kind: sequence, start: 0, step: "{}" }}
 "#,
-            i128::MAX - 1
+            i128::MAX
         ),
     )
     .unwrap();

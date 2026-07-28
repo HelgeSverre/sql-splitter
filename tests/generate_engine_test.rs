@@ -406,21 +406,23 @@ fn sequence_generator_reports_overflow_instead_of_wrapping() {
     let table = portable_table("t", vec![column.clone()]);
     let path = "tables.t.columns.value.generator".to_string();
     let context = CompileContext::for_column(&table, &column, SeedRoot::new(1), &path);
-    // `serde_yaml_ng` cannot parse a bare `i128`-sized integer literal, so
-    // pass `start` as a string; `sequence`'s `parse_i128` accepts both.
+    // A `start` of 0 fits the column, so the compile-time width check passes;
+    // an `i128::MAX` step then drives the counter into overflow at generation
+    // time. `serde_yaml_ng` cannot parse a bare `i128`-sized integer literal,
+    // so pass `step` as a string; `sequence`'s `parse_i128` accepts both.
     let config = yaml(&format!(
-        "{{ kind: sequence, start: \"{}\", step: 1 }}",
-        i128::MAX - 1
+        "{{ kind: sequence, start: 0, step: \"{}\" }}",
+        i128::MAX
     ));
     let mut compiled = factory.compile(&config, &context).unwrap();
     let empty = EmptyRow;
     let mut output = GeneratedValue::Null;
 
-    // Row 0 emits i128::MAX - 1 and advances the counter to i128::MAX.
+    // Row 0 emits 0 and advances the counter to i128::MAX.
     compiled
         .generate(&RowContext::new(0, &empty), &mut output)
         .unwrap();
-    assert_eq!(output, GeneratedValue::Integer(i128::MAX - 1));
+    assert_eq!(output, GeneratedValue::Integer(0));
 
     // Row 1 emits i128::MAX; advancing past it overflows i128.
     compiled

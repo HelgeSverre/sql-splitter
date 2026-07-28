@@ -2173,21 +2173,39 @@ fn collect_family_facts(
 /// (a UUID, a text key, a non-key) has no dense integer recipe and returns
 /// `None`, so an FK-side cross-table planner referencing it can reject the
 /// incompatible key at compile time.
+/// Parse a YAML value as an `i128`, matching the `sequence` generator's own
+/// `parse_i128`: a Number (widening beyond i64 via f64), or a numeric String.
+fn yaml_to_i128(value: &serde_yaml_ng::Value) -> Option<i128> {
+    match value {
+        serde_yaml_ng::Value::Number(n) => n
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_f64().map(|f| f as i128)),
+        serde_yaml_ng::Value::String(s) => s.trim().parse::<i128>().ok(),
+        _ => None,
+    }
+}
+
 fn dense_key_recipe(table: &TableModel, column: &str) -> Option<(i128, i128)> {
     if let Some(rule) = table.columns.get(column) {
         if let Some(generator) = &rule.generator {
             if generator.kind == "sequence" {
+                // Parse with the same semantics the `sequence` generator itself
+                // uses (accepting string- and float-form values), so the FK-side
+                // recipe matches the keys the generator actually emits. Using
+                // `as_i64` here returned None for e.g. `start: "1000"` and fell
+                // back to 0, producing dangling foreign keys.
                 let start = generator
                     .args
                     .get("start")
-                    .and_then(serde_yaml_ng::Value::as_i64)
+                    .and_then(yaml_to_i128)
                     .unwrap_or(0);
                 let step = generator
                     .args
                     .get("step")
-                    .and_then(serde_yaml_ng::Value::as_i64)
+                    .and_then(yaml_to_i128)
                     .unwrap_or(1);
-                return Some((i128::from(start), i128::from(step)));
+                return Some((start, step));
             }
             // Any other explicit generator is not a dense integer key.
             return None;

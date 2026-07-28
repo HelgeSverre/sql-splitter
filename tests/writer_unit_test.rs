@@ -197,3 +197,74 @@ fn test_bytes_acked_never_exceeds_bytes_on_disk() {
     let on_disk = std::fs::metadata(&file).unwrap().len();
     assert_eq!(on_disk, shipped, "flushed output size mismatch");
 }
+
+// Bug-hunt sweep: a parsed table name containing path separators or `..` must
+// not let the writer escape the output directory (path traversal).
+#[test]
+fn table_name_with_traversal_stays_in_output_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let out = temp_dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+
+    let mut writers = pool(&out, 1);
+    writers.write("../pwned", b"CREATE TABLE x (id INT);", b"");
+    writers.finish().unwrap();
+
+    // Nothing was written outside the output directory.
+    assert!(
+        !temp_dir.path().join("pwned.sql").exists(),
+        "path traversal wrote pwned.sql outside the output dir"
+    );
+
+    // The data landed in a sanitized file inside the output directory, whose
+    // name contains no path separators.
+    let names: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with(".sql")),
+        "sanitized output missing: {names:?}"
+    );
+    assert!(
+        names.iter().all(|n| !n.contains('/') && !n.contains('\\')),
+        "unsafe filename written: {names:?}"
+    );
+}
+
+// Bug-hunt sweep: two tables whose names differ only by case must not collide
+// onto one file on a case-insensitive filesystem (macOS/Windows default).
+#[test]
+fn case_only_table_name_variants_do_not_collide() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut writers = pool(temp_dir.path(), 4);
+
+    writers.write("Users", b"CREATE TABLE Users (id INT);", b"");
+    writers.write("users", b"CREATE TABLE users (id INT);", b"");
+    writers.write("Users", b"INSERT INTO Users VALUES (1);", b"");
+    writers.write("users", b"INSERT INTO users VALUES (2);", b"");
+    writers.finish().unwrap();
+
+    // Two distinct output files exist (distinct case-folded names), and no
+    // data was lost by one truncating/overwriting the other.
+    let files: Vec<(String, String)> = std::fs::read_dir(temp_dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read_to_string(e.path()).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        files.len(),
+        2,
+        "expected two files, got: {:?}",
+        files.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    let all: String = files.iter().map(|(_, c)| c.clone()).collect();
+    assert!(all.contains("VALUES (1)"), "Users data lost: {all}");
+    assert!(all.contains("VALUES (2)"), "users data lost: {all}");
+}

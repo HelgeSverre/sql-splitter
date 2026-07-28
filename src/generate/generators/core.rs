@@ -609,6 +609,23 @@ impl GeneratorFactory for SequenceFactory {
                 "`sequence.step` must not be zero",
             );
         }
+        // The start must fit the column's declared integer width; otherwise the
+        // emitted keys overflow the column (a 32-bit INT can't hold 3e9). The
+        // row count isn't known here, so at-scale overflow of a small start is
+        // not caught, but an already-out-of-range start is rejected up front.
+        if let Some((min, max)) = integer_family_bounds(&column(context).family) {
+            if start < min || start > max {
+                bag.error(
+                    crate::diagnostic::codes::SEQUENCE_OUT_OF_RANGE.code,
+                    context.path(),
+                    format!(
+                        "`sequence.start` {start} does not fit column `{}`'s type `{}` (range {min}..={max})",
+                        column(context).name,
+                        column(context).source_type
+                    ),
+                );
+            }
+        }
         bag.into_result(
             Box::new(CompiledCore(CoreGenerator::Sequence(SequenceState {
                 start,
@@ -1682,9 +1699,36 @@ fn family_supports_widening(family: &SqlTypeFamily) -> bool {
     )
 }
 
+/// The inclusive `(min, max)` value range of an integer column family, or
+/// `None` for a family with no fixed width (so no bound is enforced).
+fn integer_family_bounds(family: &SqlTypeFamily) -> Option<(i128, i128)> {
+    match family {
+        SqlTypeFamily::Integer => Some((i32::MIN as i128, i32::MAX as i128)),
+        SqlTypeFamily::BigInteger => Some((i64::MIN as i128, i64::MAX as i128)),
+        _ => None,
+    }
+}
+
+/// The declared character length of a text type such as `varchar(8)` /
+/// `char(10)` / `nvarchar(255)`. `None` for length-less text types.
+fn declared_char_length(source_type: &str) -> Option<usize> {
+    let open = source_type.find('(')?;
+    let close = source_type[open + 1..].find(')')? + open + 1;
+    source_type[open + 1..close]
+        .split(',')
+        .next()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+}
+
 /// Perturb `value` into a new candidate for the `attempt`-th retry, or `None`
 /// if this value's family has no defined mutation.
-fn mutate_candidate(value: &GeneratedValue, attempt: i128) -> Option<GeneratedValue> {
+fn mutate_candidate(
+    value: &GeneratedValue,
+    attempt: i128,
+    max_char_len: Option<usize>,
+) -> Option<GeneratedValue> {
     match value {
         GeneratedValue::Integer(i) => i.checked_add(attempt).map(GeneratedValue::Integer),
         GeneratedValue::Decimal { minor, scale } => {
@@ -1695,7 +1739,26 @@ fn mutate_candidate(value: &GeneratedValue, attempt: i128) -> Option<GeneratedVa
                     scale: *scale,
                 })
         }
-        GeneratedValue::Text(s) => Some(GeneratedValue::Text(format!("{s}-{attempt}"))),
+        GeneratedValue::Text(s) => {
+            // Append the `-N` disambiguator, but keep the result within the
+            // column's declared character length by truncating the *prefix*
+            // (never the suffix, which is what makes the value distinct).
+            let suffix = format!("-{attempt}");
+            let text = match max_char_len {
+                Some(max) if s.chars().count() + suffix.chars().count() > max => {
+                    let keep = max.saturating_sub(suffix.chars().count());
+                    let prefix: String = s.chars().take(keep).collect();
+                    let mut out = format!("{prefix}{suffix}");
+                    // Backstop for a max so small even the suffix doesn't fit.
+                    if out.chars().count() > max {
+                        out = out.chars().take(max).collect();
+                    }
+                    out
+                }
+                _ => format!("{s}{suffix}"),
+            };
+            Some(GeneratedValue::Text(text))
+        }
         GeneratedValue::Bytes(bytes) => {
             let mut mutated = bytes.clone();
             mutated.push((attempt % 256) as u8);
@@ -1773,6 +1836,10 @@ struct UniqueState {
     max_attempts: usize,
     max_tracked: usize,
     on_exhaustion: OnExhaustion,
+    /// The column's declared character length (e.g. `varchar(8)` → 8), used to
+    /// keep the collision `-N` suffix from overflowing the column width. `None`
+    /// for length-less types.
+    max_char_len: Option<usize>,
 }
 
 impl UniqueState {
@@ -1840,7 +1907,8 @@ impl CompiledModifier for UniqueState {
 
         let mut last_candidate = value.clone();
         for attempt in 1..=attempts {
-            let Some(candidate) = mutate_candidate(value, attempt as i128) else {
+            let Some(candidate) = mutate_candidate(value, attempt as i128, self.max_char_len)
+            else {
                 break;
             };
             match self.claim(value_key(&candidate)) {
@@ -1927,6 +1995,7 @@ impl ModifierFactory for UniqueFactory {
             max_attempts,
             max_tracked,
             on_exhaustion,
+            max_char_len: declared_char_length(&column(context).source_type),
         }) as Box<dyn CompiledModifier>)
     }
 }

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`GEN-SEQUENCE-OUT-OF-RANGE` diagnostic** — a `sequence` generator whose `start` does not fit the column's declared integer width (e.g. `start: 3000000000` on an `INT`/`i32` column) is now a compile error instead of silently emitting values the column cannot hold.
+
+### Fixed
+
+- **Parser / statement splitting** — several inputs that were split or parsed incorrectly:
+  - MySQL `DELIMITER` commands are honored, so a `mysqldump --routines` stored-procedure/function body stays a single statement instead of being chopped at its internal `;`; a body `INSERT` no longer leaks into a table file.
+  - An `INSERT … SELECT` (no `VALUES`) no longer swallows the following statement while hunting for a `VALUES` keyword that belongs to a later statement.
+  - A quoted `)` inside a nested parenthesized value no longer corrupts tuple-boundary detection (row counts stay correct in `sample`/`shard`).
+  - PostgreSQL `E'…'` escape strings honor backslash escapes, so a backslash-escaped quote no longer breaks statement boundaries.
+  - A leading UTF-8 BOM no longer makes the first statement classify as unknown and get dropped by `split`.
+  - A `VALUES(col)` reference in an `INSERT … ON DUPLICATE KEY UPDATE` clause is no longer parsed as a phantom data row.
+- **`convert` no longer corrupts string data** — the `::`-cast, `public.`/`dbo.` schema-prefix, and MSSQL `N'…'` rewrites now run only outside string literals, so an IPv6 address, a `dbo.`-containing value, or an `N'` inside data is preserved. MySQL→MSSQL and MySQL→PostgreSQL/SQLite backslash escapes are decoded correctly (no broken T-SQL, and no doubled backslash under `standard_conforming_strings`); `AUTO_INCREMENT` translation to SQLite/MSSQL is case-insensitive (a lowercase `auto_increment` no longer leaks through); and the COPY-to-INSERT parser strips a trailing CR so CRLF `pg_dump`s don't produce phantom rows.
+- **`sample`/`shard` no longer corrupt row data** — PostgreSQL COPY text escapes (`\n`, `\t`, `\\`) are decoded before re-quoting (and no longer double-escaped for MySQL output), and rows sourced from a native `INSERT` are passed through unchanged instead of being rewritten (which broke values ending in a backslash).
+- **Compressed input** — concatenated multi-member `gzip`/`bzip2`/`xz` streams (e.g. `cat a.gz b.gz`) are now decoded in full instead of being silently truncated to the first member.
+- **Output path safety** — a parsed table name is sanitized into a single filename component, so a name containing path separators or `..` can no longer escape the output directory; two table names differing only by case no longer collide onto one file on a case-insensitive filesystem; and a multi-file glob `split` gives inputs that share a file stem (e.g. `a/dump.sql` and `b/dump.sql`) distinct output subdirectories instead of overwriting each other.
+- **`generate`**
+  - Writes straight through to a non-regular output file such as `/dev/null` (a character device / FIFO) instead of failing with `GEN-OUTPUT-IO` when its directory is unwritable.
+  - The profiler no longer forces a 36-character `uuid` onto a text column too short to hold it (e.g. a `varchar(8)` unique column), which produced output that violated its own DDL.
+  - The dense-key recipe parses a `sequence` `start`/`step` with the same semantics the generator uses (string- and float-form values), so a start like `"1000"` no longer falls back to `0` and dangles child foreign keys.
+  - A family child's foreign-key key domain is retuned to its realized row count, so a grandchild foreign key no longer references estimate-only keys under stochastic fan-out.
+  - `hierarchy.tree` rejects `max_depth`/`max_branching` values beyond `u32` instead of silently wrapping to a degenerate flat tree, and the `unique` modifier keeps its `-N` collision suffix within the column's declared length.
+
+### Performance
+
+- **`convert` cross-dialect statement rewrites are faster** — the string-literal-aware rewrites scan per non-string segment rather than running several regex passes over the whole statement, measuring roughly 10–18% faster on the dialect-pair conversion benchmarks.
+
+### Documentation
+
+- **Restructured the `generate` command page** to follow the established command-page template (When to Use This, How It Works, Usage, Examples, Options, JSON Output, Exit Codes, Composing with Other Tools, Troubleshooting, See Also), while keeping generate's hub-and-spoke links to its reference sub-pages.
+
 ## [1.16.0] - 2026-07-22
 
 ### Added

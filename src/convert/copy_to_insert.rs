@@ -185,7 +185,13 @@ pub fn parse_copy_data(data: &[u8]) -> Vec<Vec<CopyValue>> {
             .map(|p| pos + p)
             .unwrap_or(data.len());
 
-        let line = &data[pos..line_end];
+        let mut line = &data[pos..line_end];
+        // Strip a trailing CR so CRLF-terminated dumps don't produce a phantom
+        // `\.\r` terminator, phantom `\r` empty rows, or a `\r` retained in the
+        // last column (mirrors CopyParser in parser/postgres_copy.rs).
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
 
         // Check for terminator
         if line == b"\\." || line.is_empty() {
