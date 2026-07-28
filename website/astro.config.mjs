@@ -29,7 +29,7 @@ function getVersion() {
   return versionMatch[1];
 }
 
-const SQL_SPLITTER_VERSION = getVersion();
+const SQL_SPLITTER_VERSION = process.env.SQL_SPLITTER_VERSION ?? getVersion();
 
 export default defineConfig({
   site: "https://sql-splitter.dev",

@@ -236,7 +236,7 @@ website-validate-schemas: _website-deps
 # Deploy website to Vercel (production) — refreshes schemas, lints, validates, and builds first; aborts if any step fails
 [group('website')]
 website-deploy: schemas website-lint website-validate-schemas website-build
-    cd website && vc --prod
+    sql_splitter_version="$(just version)"; cd website && vc --prod --build-env "SQL_SPLITTER_VERSION=$sql_splitter_version"
 
 # Clean website build artifacts and caches
 [group('website')]
