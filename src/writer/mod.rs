@@ -194,6 +194,27 @@ enum TableSink {
     Zstd(zstd::stream::write::Encoder<'static, ProfiledFile>),
 }
 
+/// Reduce a parsed table name to a safe single filename component before it is
+/// used to build an output path. A quoted identifier can contain path
+/// separators or `..` segments (e.g. `` `../../evil` ``); joined verbatim these
+/// would escape the output directory, and an absolute-path-like name would even
+/// replace the base directory. Taking the final path component and neutralizing
+/// all-dot names prevents that while leaving ordinary table names unchanged.
+fn sanitize_table_filename(table: &str) -> String {
+    let last = table
+        .rsplit(|c| c == '/' || c == '\\')
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    // A NUL byte would truncate the path at the OS boundary; neutralize it.
+    let cleaned: String = last.replace('\0', "_");
+    // Names consisting only of dots (`.`, `..`, …) are not usable filenames.
+    if cleaned.trim_matches('.').is_empty() {
+        "_unnamed".to_string()
+    } else {
+        cleaned
+    }
+}
+
 impl TableSink {
     /// Create the `<table>.sql[.ext]` file and wrap it in the chosen encoder.
     fn create(
@@ -204,7 +225,8 @@ impl TableSink {
         throttle: &Option<Arc<Mutex<Throttle>>>,
         bytes_acked: &Arc<AtomicU64>,
     ) -> std::io::Result<Self> {
-        let path = dir.join(format!("{}.sql{}", table, format.output_extension()));
+        let safe = sanitize_table_filename(table);
+        let path = dir.join(format!("{}.sql{}", safe, format.output_extension()));
         let file = ProfiledFile::new(
             File::create(&path)?,
             Arc::clone(values),

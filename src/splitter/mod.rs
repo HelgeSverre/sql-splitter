@@ -130,12 +130,16 @@ impl Compression {
     ) -> std::io::Result<Box<dyn Read + 'a>> {
         Ok(match self {
             Compression::None => reader,
+            // Use the multi-member/multi-stream decoders: dumps are commonly
+            // stored as concatenated members (e.g. `cat a.gz b.gz`, or tools
+            // that flush a new stream per table). The single-member decoders
+            // stop at the first member and silently truncate the rest.
             #[cfg(feature = "compression")]
-            Compression::Gzip => Box::new(flate2::read::GzDecoder::new(reader)),
+            Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(reader)),
             #[cfg(feature = "compression")]
-            Compression::Bzip2 => Box::new(bzip2::read::BzDecoder::new(reader)),
+            Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(reader)),
             #[cfg(feature = "compression")]
-            Compression::Xz => Box::new(xz2::read::XzDecoder::new(reader)),
+            Compression::Xz => Box::new(xz2::read::XzDecoder::new_multi_decoder(reader)),
             #[cfg(feature = "compression")]
             Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
             // Zip is an archive, not a stream decoder: it needs a seekable
@@ -566,5 +570,73 @@ impl Splitter {
         }
 
         Ok(stats)
+    }
+}
+
+#[cfg(all(test, feature = "compression"))]
+mod multi_member_tests {
+    use super::Compression;
+    use std::io::{Read, Write};
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn bzip2(data: &[u8]) -> Vec<u8> {
+        let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn xz(data: &[u8]) -> Vec<u8> {
+        let mut e = xz2::write::XzEncoder::new(Vec::new(), 6);
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn decoded(compression: Compression, bytes: Vec<u8>) -> Vec<u8> {
+        let reader: Box<dyn Read> = Box::new(std::io::Cursor::new(bytes));
+        let mut out = Vec::new();
+        compression
+            .wrap_reader(reader)
+            .unwrap()
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn gzip_reads_all_concatenated_members() {
+        let mut concat = gzip(b"CREATE TABLE a (id INT);\n");
+        concat.extend(gzip(b"CREATE TABLE b (id INT);\n"));
+        assert_eq!(
+            decoded(Compression::Gzip, concat),
+            b"CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);\n",
+            "second gzip member was truncated"
+        );
+    }
+
+    #[test]
+    fn bzip2_reads_all_concatenated_streams() {
+        let mut concat = bzip2(b"CREATE TABLE a (id INT);\n");
+        concat.extend(bzip2(b"CREATE TABLE b (id INT);\n"));
+        assert_eq!(
+            decoded(Compression::Bzip2, concat),
+            b"CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);\n",
+            "second bzip2 stream was truncated"
+        );
+    }
+
+    #[test]
+    fn xz_reads_all_concatenated_streams() {
+        let mut concat = xz(b"CREATE TABLE a (id INT);\n");
+        concat.extend(xz(b"CREATE TABLE b (id INT);\n"));
+        assert_eq!(
+            decoded(Compression::Xz, concat),
+            b"CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);\n",
+            "second xz stream was truncated"
+        );
     }
 }

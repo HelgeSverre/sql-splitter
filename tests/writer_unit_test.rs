@@ -197,3 +197,38 @@ fn test_bytes_acked_never_exceeds_bytes_on_disk() {
     let on_disk = std::fs::metadata(&file).unwrap().len();
     assert_eq!(on_disk, shipped, "flushed output size mismatch");
 }
+
+// Bug-hunt sweep: a parsed table name containing path separators or `..` must
+// not let the writer escape the output directory (path traversal).
+#[test]
+fn table_name_with_traversal_stays_in_output_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let out = temp_dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+
+    let mut writers = pool(&out, 1);
+    writers.write("../pwned", b"CREATE TABLE x (id INT);", b"");
+    writers.finish().unwrap();
+
+    // Nothing was written outside the output directory.
+    assert!(
+        !temp_dir.path().join("pwned.sql").exists(),
+        "path traversal wrote pwned.sql outside the output dir"
+    );
+
+    // The data landed in a sanitized file inside the output directory, whose
+    // name contains no path separators.
+    let names: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with(".sql")),
+        "sanitized output missing: {names:?}"
+    );
+    assert!(
+        names.iter().all(|n| !n.contains('/') && !n.contains('\\')),
+        "unsafe filename written: {names:?}"
+    );
+}
