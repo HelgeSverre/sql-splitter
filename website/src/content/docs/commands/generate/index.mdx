@@ -87,16 +87,16 @@ reporting, but safety advisories still reach stderr.
 | `--profile-sample <COUNT>`  | Retained profiling sample capacity | `1000`      |
 | `--input-dialect <DIALECT>` | Force the source parsing dialect   | auto-detect |
 
-| Rendering                  | Meaning                                    | Default                   |
-| -------------------------- | ------------------------------------------ | ------------------------- |
-| `--dialect <DIALECT>`      | Output SQL dialect                         | model, source, then MySQL |
-| `--schema-only`            | Emit DDL only                              | false                     |
-| `--data-only`              | Emit row data only                         | false                     |
-| `--batch-size <COUNT>`     | Rows per `INSERT` or `COPY` batch (1–1,000,000) | `1000`               |
-| `--no-copy`                | Use PostgreSQL `INSERT` instead of `COPY`  | false                     |
-| `--mssql-production-style` | Add production-style MSSQL DDL conventions | false                     |
-| `--mssql-go <COUNT>`       | Emit `GO` every N MSSQL insert batches     | every batch               |
-| `--compress <FORMAT>`      | Reserved; currently unavailable            | none                      |
+| Rendering                  | Meaning                                         | Default                   |
+| -------------------------- | ----------------------------------------------- | ------------------------- |
+| `--dialect <DIALECT>`      | Output SQL dialect                              | model, source, then MySQL |
+| `--schema-only`            | Emit DDL only                                   | false                     |
+| `--data-only`              | Emit row data only                              | false                     |
+| `--batch-size <COUNT>`     | Rows per `INSERT` or `COPY` batch (1–1,000,000) | `1000`                    |
+| `--no-copy`                | Use PostgreSQL `INSERT` instead of `COPY`       | false                     |
+| `--mssql-production-style` | Add production-style MSSQL DDL conventions      | false                     |
+| `--mssql-go <COUNT>`       | Emit `GO` every N MSSQL insert batches          | every batch               |
+| `--compress <FORMAT>`      | Reserved; currently unavailable                 | none                      |
 
 | Volume and selection           | Meaning                                           | Default |
 | ------------------------------ | ------------------------------------------------- | ------- |
