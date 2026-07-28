@@ -480,6 +480,11 @@ impl Default for ParserLimits {
     }
 }
 
+/// Longest statement terminator a `DELIMITER` command may set, stored inline.
+/// Real delimiters are 1–2 bytes (`;`, `;;`, `//`, `$$`); a longer one is
+/// truncated to this cap, which no realistic dump reaches.
+const MAX_DELIMITER_LEN: usize = 8;
+
 pub struct Parser<R: Read> {
     reader: BufReader<R>,
     dialect: SqlDialect,
@@ -493,12 +498,15 @@ pub struct Parser<R: Read> {
     /// (never per-statement) so scanning stays O(n) rather than O(n²).
     buf: Vec<u8>,
     buf_pos: usize,
-    /// Current statement terminator. Defaults to `;`, but a MySQL `DELIMITER`
-    /// client command (as emitted by `mysqldump --routines` around stored
-    /// procedure/function/trigger bodies) switches it to e.g. `;;` so the
-    /// `;`-terminated statements inside a `BEGIN … END` body are not split
-    /// apart. Persists across `read_statement` calls for the same stream.
-    current_delimiter: Vec<u8>,
+    /// Current statement terminator, stored inline so constructing a `Parser`
+    /// never heap-allocates for the common `;` case. Defaults to `;`, but a
+    /// MySQL `DELIMITER` client command (as emitted by `mysqldump --routines`
+    /// around stored procedure/function/trigger bodies) switches it to e.g.
+    /// `;;` so the `;`-terminated statements inside a `BEGIN … END` body are not
+    /// split apart. Persists across `read_statement` calls for the same stream.
+    /// The active delimiter is `current_delimiter[..current_delimiter_len]`.
+    current_delimiter: [u8; MAX_DELIMITER_LEN],
+    current_delimiter_len: usize,
     /// Number of bytes dropped off the front of `buf` so far, so an absolute
     /// input offset can be reported in [`Parser::visit_events`] diagnostics.
     base: u64,
@@ -522,7 +530,12 @@ impl<R: Read> Parser<R> {
             in_copy_data: false,
             buf: Vec::new(),
             buf_pos: 0,
-            current_delimiter: vec![b';'],
+            current_delimiter: {
+                let mut d = [0u8; MAX_DELIMITER_LEN];
+                d[0] = b';';
+                d
+            },
+            current_delimiter_len: 1,
             base: 0,
             peak_buffered: 0,
             limits: ParserLimits::default(),
@@ -581,6 +594,25 @@ impl<R: Read> Parser<R> {
             None if at_eof => Peek2::Miss,
             None => Peek2::NeedMore,
         }
+    }
+
+    /// Cheap guard for the `DELIMITER` pre-scan: `true` when the next statement
+    /// could begin a `DELIMITER` command, i.e. the first non-whitespace byte at
+    /// `buf_pos` is `D`/`d`, or the buffer ran out before a non-whitespace byte
+    /// was found (so the full scan must grow it to decide). `false` — the common
+    /// case — lets `read_statement` skip the pre-scan loop entirely.
+    #[inline]
+    fn upcoming_maybe_delimiter(&self) -> bool {
+        let mut p = self.buf_pos;
+        while p < self.buf.len() {
+            match self.buf[p] {
+                b' ' | b'\t' | b'\r' | b'\n' => p += 1,
+                b'D' | b'd' => return true,
+                _ => return false,
+            }
+        }
+        // Ran out of buffered bytes without deciding: let the full scan grow it.
+        true
     }
 
     /// Detect a MySQL `DELIMITER <token>` client command starting at `from`
@@ -681,12 +713,20 @@ impl<R: Read> Parser<R> {
         // Consume any leading MySQL `DELIMITER` client commands before scanning
         // the next real statement, so `;`-terminated statements inside a stored
         // routine body are kept whole under a `;;` (or other) delimiter.
-        if is_mysql {
+        //
+        // Fast path: a `DELIMITER` command begins with `D`/`d` after optional
+        // leading whitespace. When that first byte is already buffered and is
+        // not `D`/`d`, there is no command here, so skip the full scan entirely
+        // — this keeps the per-statement cost off the parser's hot loop for the
+        // overwhelmingly common non-`DELIMITER` statement.
+        if is_mysql && self.upcoming_maybe_delimiter() {
             loop {
                 match self.scan_delimiter_command(self.buf_pos, at_eof) {
                     DelimiterScan::NotDelimiter => break,
                     DelimiterScan::Consumed { new_delim, next } => {
-                        self.current_delimiter = new_delim;
+                        let n = new_delim.len().min(MAX_DELIMITER_LEN);
+                        self.current_delimiter[..n].copy_from_slice(&new_delim[..n]);
+                        self.current_delimiter_len = n;
                         self.buf_pos = next;
                         start = self.buf_pos;
                         i = self.buf_pos;
@@ -718,8 +758,12 @@ impl<R: Read> Parser<R> {
             sig[b'$' as usize] = true;
         }
         // A custom multi-byte delimiter (from `DELIMITER`) may start with a byte
-        // the default table does not flag; make sure the scan stops on it.
-        sig[self.current_delimiter[0] as usize] = true;
+        // the default table does not flag; make sure the scan stops on it. The
+        // delimiter can't change during this scan (only the pre-scan above sets
+        // it), so cache it in locals to keep the hot loop off the struct fields.
+        let delim0 = self.current_delimiter[0];
+        let delim_len = self.current_delimiter_len;
+        sig[delim0 as usize] = true;
 
         loop {
             'scan: while i < self.buf.len() {
@@ -963,10 +1007,10 @@ impl<R: Read> Parser<R> {
                     && !in_dollar_quote
                 {
                     inside_backtick = !inside_backtick;
-                } else if b == self.current_delimiter[0] && !inside_string {
+                } else if b == delim0 && !inside_string {
                     // Statement terminator. The bytes after it stay in `buf` and
                     // become the next statement (buf_pos advances, no shifting).
-                    let dl = self.current_delimiter.len();
+                    let dl = delim_len;
                     if dl == 1 {
                         let result = self.buf[start..=i].to_vec();
                         self.buf_pos = i + 1;
@@ -980,7 +1024,7 @@ impl<R: Read> Parser<R> {
                     // starting at `i`. A lone first byte (a `;` inside a routine
                     // body under a `;;` delimiter) is just an ordinary byte.
                     if i + dl <= self.buf.len() {
-                        if self.buf[i..i + dl] == self.current_delimiter[..] {
+                        if self.buf[i..i + dl] == self.current_delimiter[..dl] {
                             let result = self.buf[start..i + dl].to_vec();
                             self.buf_pos = i + dl;
                             return Ok(Some(result));
