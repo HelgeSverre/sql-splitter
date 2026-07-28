@@ -595,12 +595,32 @@ pub struct AtomicOutput {
     /// The Unix mode to apply to the temp file immediately before rename.
     preserved_mode: Option<u32>,
     committed: bool,
+    /// True when writing straight to `destination` (a non-regular file such as
+    /// `/dev/null`): there is no sibling temp and no rename on commit.
+    direct: bool,
 }
 
 impl AtomicOutput {
     /// Stage a protected temp output beside `destination`.
     pub fn create(destination: impl AsRef<Path>) -> io::Result<Self> {
         let destination = destination.as_ref().to_path_buf();
+
+        // A non-regular destination (a character device like `/dev/null`, a
+        // FIFO, or a socket) can't be published by staging a sibling temp and
+        // renaming over it: its directory may be unwritable (e.g. `/dev`) and
+        // an atomic replace is meaningless for it. Write straight through.
+        if is_non_regular_file(&destination) {
+            let file = OpenOptions::new().write(true).open(&destination)?;
+            return Ok(Self {
+                temp_path: destination.clone(),
+                destination,
+                file: Some(file),
+                preserved_mode: None,
+                committed: false,
+                direct: true,
+            });
+        }
+
         let dir = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -613,6 +633,7 @@ impl AtomicOutput {
             file: Some(file),
             preserved_mode,
             committed: false,
+            direct: false,
         })
     }
 
@@ -648,6 +669,13 @@ impl AtomicOutput {
             .take()
             .ok_or_else(|| invalid_data("AtomicOutput already committed"))?;
         file.flush()?;
+        if self.direct {
+            // Bytes already went to the destination; there is nothing to rename.
+            // `sync_all` may be unsupported on a special file, so tolerate it.
+            let _ = file.sync_all();
+            self.committed = true;
+            return Ok(());
+        }
         // Durability of the file contents before the rename that publishes them.
         file.sync_all()?;
         drop(file);
@@ -666,10 +694,20 @@ impl AtomicOutput {
 
 impl Drop for AtomicOutput {
     fn drop(&mut self) {
-        if !self.committed {
+        // In direct mode `temp_path` *is* the destination — never remove it.
+        if !self.committed && !self.direct {
             let _ = fs::remove_file(&self.temp_path);
         }
     }
+}
+
+/// True if `path` exists and is not a regular file (a character/block device,
+/// FIFO, or socket, e.g. `/dev/null`). Such destinations can't be published via
+/// a sibling temp and rename, so they are written through directly.
+fn is_non_regular_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|m| !m.file_type().is_file())
+        .unwrap_or(false)
 }
 
 /// The mode the published file should carry: an existing destination's own mode
@@ -1067,6 +1105,17 @@ impl FamilyBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_writes_through_to_non_regular_file() {
+        // /dev/null is a character device: staging a sibling temp in /dev and
+        // renaming over it fails (the directory is unwritable), so the output
+        // must be written straight through instead.
+        let mut out = AtomicOutput::create("/dev/null").expect("open /dev/null");
+        out.writer().write_all(b"hello, void").expect("write");
+        out.commit().expect("commit to /dev/null");
+    }
 
     #[test]
     fn directory_fsync_errors_distinguish_unsupported_from_real_io() {
