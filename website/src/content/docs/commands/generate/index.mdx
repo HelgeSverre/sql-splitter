@@ -1,20 +1,41 @@
 ---
 title: generate
 description: Generate relational synthetic SQL from a model, a source dump, or both
-sidebar:
-  order: 1
 ---
 
-`generate` creates relational synthetic SQL from a hand-authored YAML model,
-a model inferred from a SQL dump, or an inferred model plus explicit overrides.
-Its alias is `gen`.
+Generate relational synthetic SQL from a hand-authored YAML model, a model inferred from a SQL dump, or an inferred model plus explicit overrides.
+
+**Alias:** `gen` (e.g., `sql-splitter gen production.sql -o synthetic.sql`)
 
 :::caution[Synthetic is not anonymized]
 Generated output can replay literal choices, samples, defaults, and constraint
-values. `GEN-SOURCE-VALUES` identifies rules that can replay literals without
-printing the values. Use [`redact`](/commands/redact/) when you need irreversible
-anonymization.
+values from a source dump or model. The `GEN-SOURCE-VALUES` advisory names every
+rule that can replay a literal (without printing the value). Use
+[`redact`](/commands/redact/) when you need irreversible anonymization of real data.
 :::
+
+## When to Use This
+
+- **Seed relational fixtures** — Produce data that satisfies its own [primary keys](/reference/glossary#primary-key-pk) and [foreign keys](/reference/glossary#foreign-key-fk), so it loads cleanly into the same schema
+- **Share safe datasets** — Ship synthetic dumps that keep a real schema's shape without exposing its rows
+- **Make CI fixtures repeatable** — Pin `--seed` so every run produces byte-identical output
+- **Scale a dataset up or down** — Multiply or cap row counts with `--scale`, `--rows`, and per-table overrides for load tests or small demos
+- **Derive a model from a real dump** — Profile and infer a starting model automatically, then edit and reuse it
+
+Use [`redact`](/commands/redact/) instead when you must anonymize the _real_ rows rather than synthesize new ones.
+
+## How It Works
+
+`generate` turns a model into SQL. When you pass a source dump, it derives that model first, without ever loading the full dataset into memory:
+
+1. **Profile** — A bounded `basic`/`full` [streaming](/reference/glossary#streaming) profiler samples the dump's columns within a fixed memory budget
+2. **Infer** — Structural [referential-integrity](/reference/glossary#referential-integrity) and column heuristics resolve an explicit per-column rule for each table
+3. **Compile** — The model is validated and resolved into a plan (row counts, dependency order, key domains)
+4. **Render** — The engine produces `CREATE TABLE` DDL and batched `INSERT`/`COPY` rows in the target dialect
+
+A hand-authored `--config` model skips the profile and infer steps. See
+[Profiling and inference](/commands/generate/inference/) for how rules are chosen and
+[Privacy and verification](/commands/generate/privacy-verification/) for what `--verify` audits.
 
 ## Usage
 
@@ -22,32 +43,38 @@ anonymization.
 sql-splitter generate [OPTIONS] [INPUT]
 ```
 
-Provide a source dump, a complete `--config` model, or both. An overrides
-document requires a source dump because it patches the inferred base model.
+Provide a source dump, a complete `--config` model, or both. A `kind: overrides`
+document requires a source dump or base model because it patches the inferred model
+rather than standing alone.
 
-## Common workflows
+## Examples
 
-Generate directly from a dump:
+### Generate from a dump
 
 ```bash
+# Profile production.sql, infer a model, and generate synthetic SQL
 sql-splitter generate production.sql -o synthetic.sql
 ```
 
-Generate repeatable fixtures from a reviewed model:
+### Repeatable fixtures from a model
 
 ```bash
+# A pinned seed makes the output byte-identical across runs
 sql-splitter generate --config model.yaml --seed 42 -o synthetic.sql
 ```
 
-Infer and save an editable model without generating SQL:
+### Infer and save an editable model
 
 ```bash
+# Write the resolved model without generating SQL, then edit and reuse it
 sql-splitter generate production.sql --emit-config model.yaml
+sql-splitter generate --config model.yaml -o synthetic.sql
 ```
 
-Apply overrides while saving the resolved model and generated SQL:
+### Apply overrides and scale in one run
 
 ```bash
+# Patch the inferred model, save the resolved model, and emit 10% of the rows
 sql-splitter generate production.sql \
   --config overrides.yaml \
   --emit-config resolved.yaml \
@@ -55,7 +82,7 @@ sql-splitter generate production.sql \
   -o synthetic.sql
 ```
 
-## Preflight and reporting
+### Preflight (check, dry-run, verify)
 
 ```bash
 # Parse and compile a complete model; write nothing
@@ -67,64 +94,74 @@ sql-splitter generate --config model.yaml --dry-run
 # Explain inferred column rules without printing observed values
 sql-splitter generate production.sql --dry-run --explain
 
-# Generate, audit exact checks, then publish atomically
+# Generate, audit exact constraints, then publish atomically
 sql-splitter generate --config model.yaml --verify -o synthetic.sql
 ```
 
-`--strict` promotes warning-severity diagnostics to failures. Informational
-diagnostics and advisories remain non-fatal. `--quiet` suppresses ordinary human
-reporting, but safety advisories still reach stderr.
+`--strict` promotes warning-severity diagnostics to failures; informational
+diagnostics and advisories stay non-fatal. `--quiet` suppresses the ordinary human
+report, but safety advisories still reach stderr.
 
 ## Options
 
-| Input and model             | Meaning                            | Default     |
-| --------------------------- | ---------------------------------- | ----------- |
-| `[INPUT]`                   | Source SQL dump to profile         | none        |
-| `-c, --config <PATH>`       | Complete model or overrides YAML   | none        |
-| `--emit-config <PATH>`      | Write the resolved complete model  | none        |
-| `-o, --output <PATH>`       | Generated SQL; `-` means stdout    | stdout      |
-| `--profile-depth <MODE>`    | Profiling depth: `basic` or `full` | `basic`     |
-| `--profile-sample <COUNT>`  | Retained profiling sample capacity | `1000`      |
-| `--input-dialect <DIALECT>` | Force the source parsing dialect   | auto-detect |
+### Input and model
 
-| Rendering                  | Meaning                                         | Default                   |
-| -------------------------- | ----------------------------------------------- | ------------------------- |
-| `--dialect <DIALECT>`      | Output SQL dialect                              | model, source, then MySQL |
-| `--schema-only`            | Emit DDL only                                   | false                     |
-| `--data-only`              | Emit row data only                              | false                     |
-| `--batch-size <COUNT>`     | Rows per `INSERT` or `COPY` batch (1–1,000,000) | `1000`                    |
-| `--no-copy`                | Use PostgreSQL `INSERT` instead of `COPY`       | false                     |
-| `--mssql-production-style` | Add production-style MSSQL DDL conventions      | false                     |
-| `--mssql-go <COUNT>`       | Emit `GO` every N MSSQL insert batches          | every batch               |
-| `--compress <FORMAT>`      | Reserved; currently unavailable                 | none                      |
+| Flag               | Short | Description                        | Default     |
+| ------------------ | ----- | ---------------------------------- | ----------- |
+| `[INPUT]`          |       | Source SQL dump to profile         | none        |
+| `--config`         | `-c`  | Complete model or overrides YAML   | none        |
+| `--emit-config`    |       | Write the resolved complete model  | none        |
+| `--output`         | `-o`  | Generated SQL; `-` means stdout    | stdout      |
+| `--profile-depth`  |       | Profiling depth: `basic` or `full` | `basic`     |
+| `--profile-sample` |       | Retained profiling sample capacity | `1000`      |
+| `--input-dialect`  |       | Force the source parsing dialect   | auto-detect |
 
-| Volume and selection           | Meaning                                           | Default |
-| ------------------------------ | ------------------------------------------------- | ------- |
-| `--scale <FACTOR>`             | Multiply every resolved row count                 | none    |
-| `--rows <COUNT>`               | Set absolute root-table counts                    | none    |
-| `--table-rows <TABLE=COUNT>`   | Per-table absolute count; repeatable              | none    |
-| `--table-scale <TABLE=FACTOR>` | Per-table scale; repeatable                       | none    |
-| `--max-rows <COUNT>`           | Cap every table after other count controls        | none    |
-| `--tables <GLOBS>`             | Include matching tables and required dependencies | all     |
-| `--exclude <GLOBS>`            | Exclude matching tables                           | none    |
+### Rendering
 
-| Randomness     | Meaning                               | Default                |
-| -------------- | ------------------------------------- | ---------------------- |
-| `--seed <U64>` | Stable root seed                      | model or fresh entropy |
-| `--randomize`  | Ignore configured seed; use a new one | false                  |
+| Flag                       | Short | Description                                  | Default                   |
+| -------------------------- | ----- | -------------------------------------------- | ------------------------- |
+| `--dialect`                |       | Output SQL dialect                           | model, source, then MySQL |
+| `--schema-only`            |       | Emit DDL only                                | false                     |
+| `--data-only`              |       | Emit row data only                           | false                     |
+| `--batch-size`             |       | Rows per `INSERT`/`COPY` batch (1–1,000,000) | `1000`                    |
+| `--no-copy`                |       | Use PostgreSQL `INSERT` instead of `COPY`    | false                     |
+| `--mssql-production-style` |       | Add production-style MSSQL DDL conventions   | false                     |
+| `--mssql-go`               |       | Emit `GO` every N MSSQL insert batches       | every batch               |
+| `--compress`               |       | Reserved; currently unavailable              | none                      |
 
-| Preflight and reporting | Meaning                                   | Default |
-| ----------------------- | ----------------------------------------- | ------- |
-| `--check`               | Compile a complete model only             | false   |
-| `--dry-run`             | Compile and report resolved counts        | false   |
-| `--verify`              | Generate, audit, and publish atomically   | false   |
-| `--explain`             | Include inference decisions               | false   |
-| `--strict`              | Fail on warning-severity diagnostics      | false   |
-| `--json`                | Print a machine-readable report on stdout | false   |
-| `--quiet`               | Suppress ordinary human reporting         | false   |
-| `--progress`            | Accepted but not wired to generation      | false   |
+### Volume and selection
 
-## Important constraints
+| Flag            | Short | Description                                                      | Default |
+| --------------- | ----- | ---------------------------------------------------------------- | ------- |
+| `--scale`       |       | Multiply every resolved row count                                | none    |
+| `--rows`        |       | Set absolute [root-table](/reference/glossary#root-table) counts | none    |
+| `--table-rows`  |       | Per-table absolute count (`table=count`); repeatable             | none    |
+| `--table-scale` |       | Per-table scale (`table=factor`); repeatable                     | none    |
+| `--max-rows`    |       | Cap every table after other count controls                       | none    |
+| `--tables`      |       | Include matching tables and required dependencies                | all     |
+| `--exclude`     |       | Exclude matching tables                                          | none    |
+
+### Randomness
+
+| Flag          | Short | Description                               | Default                |
+| ------------- | ----- | ----------------------------------------- | ---------------------- |
+| `--seed`      |       | Stable root seed                          | model or fresh entropy |
+| `--randomize` |       | Ignore the configured seed; use a new one | false                  |
+
+### Preflight and reporting
+
+| Flag         | Short | Description                               | Default |
+| ------------ | ----- | ----------------------------------------- | ------- |
+| `--check`    |       | Compile a complete model only             | false   |
+| `--dry-run`  |       | Compile and report resolved counts        | false   |
+| `--verify`   |       | Generate, audit, and publish atomically   | false   |
+| `--explain`  |       | Include inference decisions               | false   |
+| `--strict`   |       | Fail on warning-severity diagnostics      | false   |
+| `--json`     |       | Print a machine-readable report on stdout | false   |
+| `--quiet`    |       | Suppress ordinary human reporting         | false   |
+| `--progress` |       | Accepted but not wired to generation      | false   |
+
+## Constraints
 
 - `--check`, `--dry-run`, and `--verify` are mutually exclusive.
 - `--schema-only` and `--data-only` are mutually exclusive.
@@ -132,28 +169,153 @@ reporting, but safety advisories still reach stderr.
 - `--scale` and `--rows` are mutually exclusive.
 - A table cannot receive both `--table-rows` and `--table-scale`.
 - `--json`, `--output -`, and `--emit-config -` each own stdout; select only one.
-- `--json` in generate mode writes only the report to stdout, so it requires `-o <path>` for the generated SQL (or use `--check`/`--dry-run` for a report-only run).
+- `--json` writes only the report to stdout, so it needs `-o <path>` for the generated SQL (or a report-only `--check`/`--dry-run` run).
 - `--check` requires a complete model and cannot profile `[INPUT]`.
 - `--verify` requires a real output path and cannot use compression.
 - MSSQL-specific flags require an explicit `--dialect mssql`.
 
-## Detailed documentation
+## JSON Output
 
-| Topic                      | Reference                                                            |
-| -------------------------- | -------------------------------------------------------------------- |
-| YAML model language        | [Model reference](/commands/generate/model-reference/)               |
-| Column value producers     | [Generator reference](/commands/generate/generators/)                |
-| Post-generation transforms | [Modifiers](/commands/generate/modifiers/)                           |
-| Coordinated invariants     | [Planners](/commands/generate/planners/)                             |
-| Dump profiling and choices | [Profiling and inference](/commands/generate/inference/)             |
-| Safety and exact checks    | [Privacy and verification](/commands/generate/privacy-verification/) |
-| Stable `GEN-*` codes       | [Diagnostics](/commands/generate/diagnostics/)                       |
-| Embedding in Rust          | [Rust API](/commands/generate/library-api/)                          |
+`--json` writes a machine-readable report to stdout, so pair it with `-o <path>` for
+the generated SQL (or use `--check`/`--dry-run` for a report-only run):
 
-## Exit codes
+```bash
+sql-splitter generate --config model.yaml --seed 42 -o synthetic.sql --json
+```
+
+```json
+{
+  "mode": "generate",
+  "rows_written": 65,
+  "effective_seed": 42,
+  "diagnostics": [
+    {
+      "code": "GEN-SOURCE-VALUES",
+      "severity": "advisory",
+      "path": "tables",
+      "message": "2 rule(s) replay hand-authored literal values; the output is synthetic, not anonymized source data",
+      "documentation_url": "https://sql-splitter.dev/commands/generate/diagnostics/#GEN-SOURCE-VALUES",
+      "related": [
+        { "path": "tables.customers.columns.notes", "description": "constant" },
+        {
+          "path": "tables.orders.columns.status",
+          "description": "source_default"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`mode` is `generate`, `dry_run`, or `check`. Every diagnostic carries a stable
+`code`, a `severity`, the config `path` it applies to, and a `documentation_url`.
+
+## Exit Codes
 
 | Code | Meaning                                                            |
 | ---- | ------------------------------------------------------------------ |
 | `0`  | Generation or the requested preflight mode succeeded               |
 | `1`  | Model, warning-under-strict, runtime, I/O, or verification failure |
 | `2`  | Invalid CLI usage or conflicting flags                             |
+
+See [Exit Codes](/reference/exit-codes) for scripting examples.
+
+## Composing with Other Tools
+
+### Infer → edit → reuse
+
+```bash
+# Save the inferred model, hand-tune it, then generate from the frozen model
+sql-splitter generate production.sql --emit-config model.yaml
+$EDITOR model.yaml
+sql-splitter generate --config model.yaml --seed 42 -o synthetic.sql
+```
+
+### Generate → validate
+
+```bash
+# Confirm the synthetic dump parses and its foreign keys resolve
+sql-splitter generate --config model.yaml -o synthetic.sql
+sql-splitter validate synthetic.sql
+```
+
+(`--verify` runs an equivalent audit inline and only publishes on success.)
+
+### Generate → split
+
+```bash
+# Generate one dump, then break it into per-table files
+sql-splitter generate --config model.yaml -o synthetic.sql
+sql-splitter split synthetic.sql -o tables/
+```
+
+### Sample → generate
+
+```bash
+# Reduce a huge production dump first, then synthesize from the smaller sample
+sql-splitter sample production.sql --rows 5000 -o sample.sql
+sql-splitter generate sample.sql -o synthetic.sql
+```
+
+## Troubleshooting
+
+### Conflicting flags rejected with exit code 2
+
+**Symptom:** The command exits immediately with a message about mutually exclusive options.
+
+**Cause:** Two flags that own the same behavior were passed together — for example `--check` with `--verify`, `--scale` with `--rows`, or `--seed` with `--randomize`.
+
+**Fix:** Keep one flag from each conflicting pair. See [Constraints](#constraints) for the full list.
+
+### `--json` prints a report but no SQL appears
+
+**Symptom:** With `--json` you get the report on stdout, but no generated SQL.
+
+**Cause:** In generate mode `--json` owns stdout and emits only the report, so the SQL has nowhere to go.
+
+**Fix:** Add `-o <path>` for the SQL, or use `--check`/`--dry-run` for a report-only run.
+
+### `--check` fails asking for a complete model
+
+**Symptom:** `--check` errors when you pass a source dump.
+
+**Cause:** `--check` validates a complete `--config` model and does not profile `[INPUT]`.
+
+**Fix:** Run `--check` against a `--config` model, or use `--dry-run` to compile and report counts for a profiled dump.
+
+### MSSQL flags are rejected
+
+**Symptom:** `--mssql-production-style` or `--mssql-go` errors.
+
+**Cause:** These flags only apply to MSSQL output and require the dialect to be set explicitly.
+
+**Fix:** Add `--dialect mssql`.
+
+### Output looks like real data
+
+**Symptom:** Generated values match values from the source dump, and a `GEN-SOURCE-VALUES` advisory appears.
+
+**Cause:** Some rules (constants, replayed defaults, observed samples) can reproduce literal values. The output is synthetic, not anonymized.
+
+**Fix:** Review the rules the advisory names, or replace them with non-replaying generators. To anonymize _real_ rows instead, use [`redact`](/commands/redact/).
+
+## See Also
+
+Generate's detail lives in dedicated reference pages:
+
+- [Model reference](/commands/generate/model-reference/) — the YAML model language
+- [Generators](/commands/generate/generators/) — per-column value producers
+- [Modifiers](/commands/generate/modifiers/) — post-generation value transforms
+- [Planners](/commands/generate/planners/) — coordinated multi-column and parent/child invariants
+- [Profiling and inference](/commands/generate/inference/) — how a model is derived from a dump
+- [Privacy and verification](/commands/generate/privacy-verification/) — safety advisories and exact checks
+- [Diagnostics](/commands/generate/diagnostics/) — stable `GEN-*` codes and anchors
+- [Rust API](/commands/generate/library-api/) — embedding generation in Rust
+
+Related commands and references:
+
+- [`redact`](/commands/redact/) — Anonymize real data instead of synthesizing new data
+- [`sample`](/commands/sample/) — Reduce a real dump before profiling it
+- [`validate`](/commands/validate/) — Check the generated dump's integrity
+- [Dialects](/reference/dialects) — Dialect-specific output behavior
+- [JSON Output Schema](/reference/json-output/) — Schema for `--json` output
