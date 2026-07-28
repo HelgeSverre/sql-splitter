@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-07-28
+
 ### Added
 
 - **`GEN-SEQUENCE-OUT-OF-RANGE` diagnostic** — a `sequence` generator whose `start` does not fit the column's declared integer width (e.g. `start: 3000000000` on an `INT`/`i32` column) is now a compile error instead of silently emitting values the column cannot hold.
