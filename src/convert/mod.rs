@@ -818,8 +818,10 @@ impl Converter {
     /// Convert string escape sequences
     fn convert_string_escapes(&self, stmt: &str) -> String {
         match (self.from, self.to) {
-            (SqlDialect::MySql, SqlDialect::Postgres | SqlDialect::Sqlite) => {
-                // MySQL uses \' for escaping, PostgreSQL/SQLite use ''
+            // MySQL uses backslash escapes; PostgreSQL (standard strings),
+            // SQLite and MSSQL all treat backslash as a literal byte and escape
+            // a quote by doubling it, so the same decode applies to all three.
+            (SqlDialect::MySql, SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql) => {
                 self.mysql_escapes_to_standard(stmt)
             }
             _ => stmt.to_string(),
@@ -837,29 +839,31 @@ impl Converter {
                 in_string = !in_string;
                 result.push(c);
             } else if c == '\\' && in_string {
-                // Check next character
-                if let Some(&next) = chars.peek() {
-                    match next {
-                        '\'' => {
-                            // \' → ''
-                            chars.next();
-                            result.push_str("''");
-                        }
-                        '\\' => {
-                            // \\ → keep as-is for data integrity
-                            chars.next();
-                            result.push_str("\\\\");
-                        }
-                        'n' | 'r' | 't' | '0' => {
-                            // Keep common escapes as-is
-                            result.push(c);
-                        }
-                        _ => {
-                            result.push(c);
-                        }
-                    }
-                } else {
-                    result.push(c);
+                // Decode the MySQL escape to the byte it represents. The target
+                // dialects (Postgres standard strings, SQLite, MSSQL) treat
+                // backslash as a literal, so a passed-through `\\` or `\n` would
+                // be read as two literal characters and corrupt the data.
+                match chars.next() {
+                    Some(next) => match next {
+                        // Quote becomes a doubled '' (standard SQL escaping).
+                        '\'' => result.push_str("''"),
+                        '"' => result.push('"'),
+                        // One literal backslash.
+                        '\\' => result.push('\\'),
+                        'n' => result.push('\n'),
+                        'r' => result.push('\r'),
+                        't' => result.push('\t'),
+                        '0' => result.push('\0'),
+                        'b' => result.push('\u{08}'),
+                        'Z' => result.push('\u{1a}'),
+                        // MySQL keeps the backslash for the LIKE metacharacters.
+                        '%' => result.push_str("\\%"),
+                        '_' => result.push_str("\\_"),
+                        // Any other escaped char is the char itself.
+                        other => result.push(other),
+                    },
+                    // Trailing backslash at end of input.
+                    None => result.push('\\'),
                 }
             } else {
                 result.push(c);

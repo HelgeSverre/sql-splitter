@@ -11,8 +11,7 @@
 //! - [`split_to_temp_tables`] / [`build_schema_graph`]: pipeline phases 0-1
 //! - [`write_dialect_header`] / [`write_dialect_footer`] / [`quote_ident`]:
 //!   session preamble and identifier quoting
-//! - [`convert_row_to_postgres`] / [`convert_copy_to_insert_values`]: output
-//!   value conversion
+//! - [`convert_copy_to_insert_values`]: COPY-row to INSERT-VALUES conversion
 
 use crate::parser::mysql_insert::{
     parse_insert_tuple, FkRef, InsertRowContext, ParsedRow, PkTuple, PkValue, RowExtraction,
@@ -391,10 +390,12 @@ pub fn write_insert_chunk<W: Write>(
         }
 
         let values = match format {
-            RowFormat::Insert => match dialect {
-                SqlDialect::Postgres => convert_row_to_postgres(row_bytes),
-                _ => row_bytes.clone(),
-            },
+            // A RowFormat::Insert row was captured verbatim from an input
+            // INSERT in this same dialect (sample/shard never cross-convert
+            // dialects), so it is re-emitted as-is. Rewriting escapes here — e.g.
+            // \' -> '' — corrupts native literals such as a value ending in a
+            // backslash.
+            RowFormat::Insert => row_bytes.clone(),
             RowFormat::Copy => convert_copy_to_insert_values(row_bytes, dialect),
         };
         writer.write_all(&values)?;
@@ -402,28 +403,6 @@ pub fn write_insert_chunk<W: Write>(
 
     writer.write_all(b";\n")?;
     Ok(())
-}
-
-/// Convert a MySQL-style row to PostgreSQL syntax.
-pub fn convert_row_to_postgres(row: &[u8]) -> Vec<u8> {
-    // Simple conversion: just replace escaped quotes
-    // A full implementation would handle more edge cases
-    let mut result = Vec::with_capacity(row.len());
-    let mut i = 0;
-
-    while i < row.len() {
-        if row[i] == b'\\' && i + 1 < row.len() && row[i + 1] == b'\'' {
-            // MySQL: \' -> PostgreSQL: ''
-            result.push(b'\'');
-            result.push(b'\'');
-            i += 2;
-        } else {
-            result.push(row[i]);
-            i += 1;
-        }
-    }
-
-    result
 }
 
 /// Convert PostgreSQL COPY format (tab-separated) to INSERT VALUES format.
@@ -447,9 +426,14 @@ pub fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8>
             // Numeric value - no quotes needed
             result.extend_from_slice(field);
         } else {
-            // String value - needs quoting
+            // Decode the COPY text-format escapes (\n \t \\ …) to the real
+            // bytes first, then re-escape for the target dialect's string
+            // literal. Emitting the raw COPY bytes here would leave `\n` as the
+            // two characters backslash+n (and MySQL would double the backslash
+            // into `\\n`), corrupting embedded newlines/tabs/backslashes.
+            let decoded = decode_copy_escapes(field);
             result.push(b'\'');
-            for &b in *field {
+            for &b in &decoded {
                 match b {
                     b'\'' => {
                         // Escape single quote
@@ -473,6 +457,65 @@ pub fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8>
 
     result.push(b')');
     result
+}
+
+/// Decode PostgreSQL COPY text-format escape sequences in one field to the
+/// bytes they represent. Mirrors the decoder in `convert::copy_to_insert` but
+/// stays byte-oriented so binary/`bytea` data survives the round-trip.
+fn decode_copy_escapes(field: &[u8]) -> Vec<u8> {
+    // Fast path: no escapes at all -> the field is already the raw bytes.
+    if !field.contains(&b'\\') {
+        return field.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(field.len());
+    let mut i = 0;
+    while i < field.len() {
+        if field[i] == b'\\' && i + 1 < field.len() {
+            let next = field[i + 1];
+            match next {
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'\\' => out.push(b'\\'),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0C),
+                b'v' => out.push(0x0B),
+                _ if next.is_ascii_digit() => {
+                    // Octal escape (\NNN, up to 3 digits).
+                    let mut val = 0u8;
+                    let mut consumed = 0;
+                    for j in 0..3 {
+                        match field.get(i + 1 + j) {
+                            Some(&d @ b'0'..=b'7') => {
+                                val = val.wrapping_mul(8).wrapping_add(d - b'0');
+                                consumed += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    if consumed > 0 {
+                        out.push(val);
+                        i += 1 + consumed;
+                        continue;
+                    }
+                    // Not actually octal: keep the backslash and the byte.
+                    out.push(b'\\');
+                    out.push(next);
+                }
+                // Unknown escape: keep the backslash and the following byte.
+                _ => {
+                    out.push(b'\\');
+                    out.push(next);
+                }
+            }
+            i += 2;
+        } else {
+            out.push(field[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Check if a byte slice represents a numeric value.

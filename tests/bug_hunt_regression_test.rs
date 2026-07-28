@@ -1,8 +1,12 @@
 //! Regression tests for the bug-hunt sweep (2026-07-28). Each test reproduces
 //! a confirmed defect from the sweep and asserts the corrected behavior.
 
+use sql_splitter::convert::{parse_copy_data, Converter, CopyValue};
 use sql_splitter::parser::mysql_insert::parse_insert_for_bulk;
 use sql_splitter::parser::{Parser, ParserEvent, RowFlow, SqlDialect, StatementType};
+use sql_splitter::transform_common::{
+    convert_copy_to_insert_values, write_insert_chunk, RowFormat,
+};
 
 fn read_all(sql: &[u8], dialect: SqlDialect, buf: usize) -> Vec<String> {
     let mut parser = Parser::with_dialect(sql, buf, dialect);
@@ -211,4 +215,113 @@ fn utf8_bom_first_statement_classifies() {
         "BOM-prefixed CREATE not classified"
     );
     assert_eq!(table, "users");
+}
+
+// --- COPY -> INSERT escape decoding (src/transform_common.rs) ----------------
+// sample/shard turning a COPY row into INSERT VALUES must decode COPY text
+// escapes (\n \t \\) to the real bytes before re-quoting, not emit them
+// verbatim (and, for MySQL, must not double an escape backslash).
+
+#[test]
+fn copy_backslash_decoded_before_requoting() {
+    // COPY field encoding of C:\Users\bob is C:\\Users\\bob.
+    let field = b"C:\\\\Users\\\\bob";
+
+    // Postgres (standard strings): backslash is literal -> ('C:\Users\bob').
+    let pg = convert_copy_to_insert_values(field, SqlDialect::Postgres);
+    assert_eq!(
+        String::from_utf8_lossy(&pg),
+        "('C:\\Users\\bob')",
+        "postgres: COPY backslash not decoded"
+    );
+
+    // MySQL: backslash must be escaped exactly once -> ('C:\\Users\\bob').
+    let my = convert_copy_to_insert_values(field, SqlDialect::MySql);
+    assert_eq!(
+        String::from_utf8_lossy(&my),
+        "('C:\\\\Users\\\\bob')",
+        "mysql: COPY backslash mis-encoded"
+    );
+}
+
+#[test]
+fn copy_newline_escape_decoded_to_real_newline() {
+    // COPY field 'line1\nline2' encodes an embedded newline.
+    let field = b"line1\\nline2";
+    let pg = convert_copy_to_insert_values(field, SqlDialect::Postgres);
+    assert_eq!(
+        pg,
+        b"('line1\nline2')",
+        "postgres: COPY \\n not decoded to a real newline: {:?}",
+        String::from_utf8_lossy(&pg)
+    );
+}
+
+// --- native Postgres INSERT rows are not rewritten (src/transform_common.rs) -
+// sample/shard parse and emit in one dialect, so an INSERT-sourced row is
+// already native and must be passed through, not have \' rewritten to ''.
+
+#[test]
+fn native_postgres_insert_row_not_rewritten() {
+    // ('a\') is a valid native Postgres literal (value = a\).
+    let chunk = vec![(RowFormat::Insert, b"('a\\')".to_vec())];
+    let mut out = Vec::new();
+    write_insert_chunk(&mut out, "\"t\"", &chunk, SqlDialect::Postgres).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("('a\\')"), "native row was rewritten: {s:?}");
+    assert!(
+        !s.contains("('a'')"),
+        "backslash-quote corrupted to doubled quote: {s:?}"
+    );
+}
+
+// --- convert cross-dialect string escapes (src/convert/mod.rs) ---------------
+
+#[test]
+fn convert_mysql_to_mssql_converts_backslash_escape() {
+    // T-SQL has no backslash escapes; MySQL \' must become a doubled '' quote.
+    let mut c = Converter::new(SqlDialect::MySql, SqlDialect::Mssql);
+    let out = c
+        .convert_statement(b"INSERT INTO t VALUES ('It\\'s');")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("'It''s'"),
+        "MySQL escape not converted for MSSQL: {s}"
+    );
+    assert!(
+        !s.contains("\\'"),
+        "backslash escape leaked into T-SQL: {s}"
+    );
+}
+
+#[test]
+fn convert_mysql_to_sqlite_decodes_backslash() {
+    // MySQL literal 'C:\\Users' means C:\Users; under standard strings the
+    // output must contain a single literal backslash, not a doubled one.
+    let mut c = Converter::new(SqlDialect::MySql, SqlDialect::Sqlite);
+    let out = c
+        .convert_statement(b"INSERT INTO t VALUES ('C:\\\\Users');")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("'C:\\Users'"),
+        "backslash escape not decoded: {s}"
+    );
+    assert!(!s.contains("C:\\\\Users"), "double backslash leaked: {s}");
+}
+
+// --- convert COPY parser CRLF (src/convert/copy_to_insert.rs) ----------------
+// A CRLF-terminated COPY block must not produce phantom rows (from a bare \r
+// line or a \.\r terminator) and must not keep the \r in the last column.
+
+#[test]
+fn convert_copy_data_handles_crlf() {
+    let data = b"1\tAlice\r\n2\tBob\r\n\\.\r\n";
+    let rows = parse_copy_data(data);
+    assert_eq!(rows.len(), 2, "phantom rows from CRLF: {rows:?}");
+    match &rows[0][1] {
+        CopyValue::Text(s) => assert_eq!(s, "Alice", "trailing CR retained in last column"),
+        other => panic!("unexpected {other:?}"),
+    }
 }
