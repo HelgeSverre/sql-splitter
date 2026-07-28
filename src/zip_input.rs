@@ -110,9 +110,15 @@ fn locate_sql_member(path: &Path) -> anyhow::Result<(zip::ZipArchive<File>, ZipS
                         entry.name()
                     );
                 }
+                let data_start = entry.data_start().with_context(|| {
+                    format!(
+                        "zip member '{}' in {path:?} has no readable local header",
+                        entry.name()
+                    )
+                })?;
                 ZipSqlMember {
                     name: entry.name().to_string(),
-                    data_start: entry.data_start(),
+                    data_start,
                     compressed_size: entry.compressed_size(),
                     method,
                 }
