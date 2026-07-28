@@ -1523,3 +1523,181 @@ fn single_column_unique_text_is_distinct_by_construction() {
         Some(CheckStatus::Exact)
     );
 }
+
+// Bug-hunt sweep lead (a): the compiler read a sequence PK's start/step with
+// as_i64, which returns None for a string-form value ("1000") and silently fell
+// back to 0. A hierarchy.tree self-FK then referenced keys derived from the
+// wrong (0,1) recipe while the rows were actually numbered 1000.. — dangling.
+const SEQ_STRING_START_TREE: &str = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 3
+tables:
+  categories:
+    rows: { kind: fixed, count: 50 }
+    schema:
+      name: categories
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: parent_id, type: bigint, nullable: true }
+    relationships:
+      - name: category_parent
+        columns: [parent_id]
+        references: { table: categories, columns: [id] }
+    planners:
+      - kind: hierarchy.tree
+        columns: { parent: parent_id }
+        relationship: category_parent
+        root_ratio: 0.15
+        max_depth: 4
+    columns:
+      id: { generator: { kind: sequence, start: "1000" } }
+"#;
+
+#[test]
+fn sequence_string_start_produces_valid_foreign_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(SEQ_STRING_START_TREE);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "ok.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.passed(),
+        "string-form sequence start caused dangling FKs: {:?}",
+        report.failures().collect::<Vec<_>>()
+    );
+}
+
+// Bug-hunt sweep lead (d): the `unique` modifier appended `-N` on collisions
+// without respecting the column's declared length, so values overflowed e.g.
+// a varchar(8).
+const UNIQUE_LEN: &str = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 1
+tables:
+  t:
+    rows: { kind: fixed, count: 5 }
+    schema:
+      name: t
+      columns:
+        - { name: code, type: "varchar(8)", nullable: false }
+    columns:
+      code:
+        generator: { kind: constant, value: "hellowor" }
+        modifiers:
+          - { kind: unique, on_exhaustion: warn }
+"#;
+
+#[test]
+fn unique_modifier_respects_declared_length() {
+    let plan = compile(UNIQUE_LEN);
+    let sql = render(plan);
+    // Every emitted single-quoted code value must fit varchar(8).
+    for value in sql.split('\'').skip(1).step_by(2) {
+        assert!(
+            value.chars().count() <= 8,
+            "unique -N suffix overflowed varchar(8): {value:?} in\n{sql}"
+        );
+    }
+    // Uniqueness must still hold (the suffixes distinguish the rows).
+    assert!(
+        sql.contains("hellow-1"),
+        "expected clamped unique value: {sql}"
+    );
+}
+
+// Bug-hunt sweep lead (b): a family child's FK key domain was sized from the
+// compile-time row estimate, so a grandchild FK could reference child keys that
+// stochastic fan-out never actually generated (dangling).
+fn family_grandchild_model(seed: u64) -> String {
+    format!(
+        r#"
+version: 1
+kind: model
+defaults: {{ inference: schema }}
+seed: {seed}
+tables:
+  orders:
+    rows: {{ kind: fixed, count: 200 }}
+    schema:
+      name: orders
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: subtotal, type: "decimal(18,2)", nullable: false }}
+        - {{ name: tax_total, type: "decimal(18,2)", nullable: false }}
+        - {{ name: grand_total, type: "decimal(18,2)", nullable: false }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+    planners:
+      - kind: commerce.order_family
+        children: order_items
+        relationship: order_items_order
+        columns: {{ subtotal: subtotal, tax: tax_total, total: grand_total }}
+        child_columns: {{ quantity: quantity, unit_price: unit_price, tax: tax_amount, line_total: line_total }}
+        currency_scale: 2
+        rounding: largest_remainder
+        quantity: {{ min: 1, max: 6 }}
+        unit_price: {{ min_minor: 100, max_minor: 90000 }}
+        tax: {{ kind: weighted_choice, rates: [0.0, 0.08, 0.25], weights: [0.1, 0.3, 0.6] }}
+  order_items:
+    rows:
+      kind: relation.children
+      parent: orders
+      count: 0
+      distribution: {{ kind: poisson, mean: 3.0, min: 1.0, max: 12.0 }}
+    schema:
+      name: order_items
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: order_id, type: bigint, nullable: false }}
+        - {{ name: quantity, type: integer, nullable: false }}
+        - {{ name: unit_price, type: "decimal(18,2)", nullable: false }}
+        - {{ name: tax_amount, type: "decimal(18,2)", nullable: false }}
+        - {{ name: line_total, type: "decimal(18,2)", nullable: false }}
+    relationships:
+      - name: order_items_order
+        columns: [order_id]
+        references: {{ table: orders, columns: [id] }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+  item_events:
+    rows: {{ kind: fixed, count: 800 }}
+    schema:
+      name: item_events
+      columns:
+        - {{ name: id, type: bigint, nullable: false, primary_key: true }}
+        - {{ name: item_id, type: bigint, nullable: false }}
+    relationships:
+      - name: item_events_item
+        columns: [item_id]
+        references: {{ table: order_items, columns: [id] }}
+    columns:
+      id: {{ generator: {{ kind: sequence, start: 1 }} }}
+      item_id: {{ generator: {{ kind: relation.foreign_key, relationship: item_events_item }} }}
+"#
+    )
+}
+
+#[test]
+fn family_child_grandchild_fk_has_no_dangling_references() {
+    let dir = tempfile::tempdir().unwrap();
+    // Several seeds: at least one drives actual family-child rows below the
+    // compile-time estimate, which is where the grandchild FK used to dangle.
+    for seed in [1u64, 2, 3, 4, 5, 7, 11] {
+        let plan = compile(&family_grandchild_model(seed));
+        let verifier = GenerationVerifier::new(&plan);
+        let sql = render(plan);
+        let path = write(dir.path(), "ok.sql", &sql);
+        let report = verifier.verify_path(&path).unwrap();
+        assert!(
+            report.passed(),
+            "seed {seed}: grandchild FK dangled: {:?}",
+            report.failures().collect::<Vec<_>>()
+        );
+    }
+}

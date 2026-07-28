@@ -174,6 +174,7 @@ define_diagnostics! {
     ROWS_CYCLE, "GEN-ROWS-CYCLE", "Row-count dependency cycle", Selection, Error, "Parent-derived table row-count rules contain a dependency cycle.";
     ROWS_OBSERVED_MISSING, "GEN-ROWS-OBSERVED-MISSING", "Observed row count is unavailable", Selection, Error, "An observed row-count rule has no attached profile count to resolve.";
     SCHEMA_MISMATCH, "GEN-SCHEMA-MISMATCH", "Override schema assertion does not match", Config, Error, "An override's schema name or create statement disagrees with the base model.";
+    SEQUENCE_OUT_OF_RANGE, "GEN-SEQUENCE-OUT-OF-RANGE", "Sequence start is out of range", Generator, Error, "A sequence generator's start value does not fit the declared integer width of its column.";
     SEQUENCE_ZERO_STEP, "GEN-SEQUENCE-ZERO-STEP", "Sequence step is zero", Generator, Error, "A sequence generator cannot advance because its configured step is zero.";
     SLUG_MAX_LENGTH, "GEN-SLUG-MAX-LENGTH", "Slug max length is invalid", Generator, Error, "A slug generator's max_length is zero or not a positive integer.";
     SLUG_MISSING_SOURCE, "GEN-SLUG-MISSING-SOURCE", "Slug source is missing", Generator, Error, "A slug generator omits the sibling column it should derive from.";

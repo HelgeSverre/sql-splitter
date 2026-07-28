@@ -2312,6 +2312,24 @@ fn tree_root_ratio_out_of_range_is_a_compile_error() {
 }
 
 #[test]
+fn tree_max_depth_beyond_u32_is_a_compile_error() {
+    // 2^32 would silently wrap to 0 under an unchecked `as u32`, producing a
+    // degenerate flat tree that passes --check. It must be rejected instead.
+    let yaml =
+        tree_model(1, 10, "nullable: true", "").replace("max_depth: 4", "max_depth: 4294967296");
+    assert!(compile_err_code(&yaml).contains(&"GEN-TREE-DEPTH".to_string()));
+}
+
+#[test]
+fn tree_max_branching_beyond_u32_is_a_compile_error() {
+    let yaml = tree_model(1, 10, "nullable: true", "").replace(
+        "max_depth: 4",
+        "max_depth: 4\n        max_branching: 4294967296",
+    );
+    assert!(compile_err_code(&yaml).contains(&"GEN-TREE-BRANCHING".to_string()));
+}
+
+#[test]
 fn tree_missing_parent_column_is_a_compile_error() {
     let yaml = tree_model(1, 10, "nullable: true", "").replace("parent: parent_id", "parent: nope");
     assert!(compile_err_code(&yaml).contains(&"GEN-TREE-COLUMN-MISSING".to_string()));
@@ -3150,4 +3168,28 @@ fn file_metadata_ownership_collision_is_a_compile_error() {
         "    columns:\n      file_name:\n        generator: { kind: constant, value: x }\n    planners:",
     );
     assert!(compile_err_code(&yaml).contains(&"GEN-COLUMN-OWNER-CONFLICT".to_string()));
+}
+
+// Bug-hunt sweep lead (e): a sequence whose start does not fit the column's
+// declared integer width must be a compile error, not silently emit values
+// no INT column can hold.
+#[test]
+fn sequence_start_beyond_int_width_is_a_compile_error() {
+    let yaml = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 1
+tables:
+  t:
+    rows: { kind: fixed, count: 3 }
+    schema:
+      name: t
+      primary_key: [id]
+      columns:
+        - { name: id, type: integer, nullable: false, primary_key: true }
+    columns:
+      id: { generator: { kind: sequence, start: 3000000000 } }
+"#;
+    assert!(compile_err_code(yaml).contains(&"GEN-SEQUENCE-OUT-OF-RANGE".to_string()));
 }
