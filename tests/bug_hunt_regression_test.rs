@@ -325,3 +325,76 @@ fn convert_copy_data_handles_crlf() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+// --- convert transforms must not corrupt string data (src/convert/mod.rs) ----
+
+#[test]
+fn convert_mssql_dbo_prefix_kept_inside_string_data() {
+    let mut c = Converter::new(SqlDialect::Mssql, SqlDialect::Postgres);
+    let out = c
+        .convert_statement(b"INSERT INTO [dbo].[t] VALUES ('user dbo.smith');")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("'user dbo.smith'"),
+        "dbo. stripped inside string data: {s}"
+    );
+}
+
+#[test]
+fn convert_mssql_n_prefix_kept_inside_string_data() {
+    let mut c = Converter::new(SqlDialect::Mssql, SqlDialect::Postgres);
+    let out = c
+        .convert_statement(b"INSERT INTO [t] VALUES (N'season N''4');")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out);
+    // The leading N' prefix is converted, but the N inside the data is kept.
+    assert!(
+        s.contains("'season N''4'"),
+        "the N inside the string data was stripped: {s}"
+    );
+}
+
+#[test]
+fn convert_postgres_cast_kept_inside_string_data() {
+    let mut c = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    let out = c
+        .convert_statement(b"INSERT INTO t VALUES ('addr'::text, 'has ::colons here');")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("::text"), "real cast not stripped: {s}");
+    assert!(
+        s.contains("'has ::colons here'"),
+        ":: stripped inside string data: {s}"
+    );
+}
+
+#[test]
+fn convert_auto_increment_case_insensitive_to_sqlite() {
+    let mut c = Converter::new(SqlDialect::MySql, SqlDialect::Sqlite);
+    let out = c
+        .convert_statement(b"CREATE TABLE t (id int auto_increment PRIMARY KEY);")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out).to_lowercase();
+    assert!(
+        !s.contains("auto_increment"),
+        "lowercase auto_increment leaked to sqlite: {s}"
+    );
+}
+
+#[test]
+fn convert_auto_increment_case_insensitive_to_mssql() {
+    let mut c = Converter::new(SqlDialect::MySql, SqlDialect::Mssql);
+    let out = c
+        .convert_statement(b"CREATE TABLE t (id int auto_increment PRIMARY KEY);")
+        .unwrap();
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        !s.to_lowercase().contains("auto_increment"),
+        "lowercase auto_increment leaked to mssql: {s}"
+    );
+    assert!(
+        s.to_uppercase().contains("IDENTITY"),
+        "IDENTITY not emitted: {s}"
+    );
+}

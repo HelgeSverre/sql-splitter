@@ -686,27 +686,26 @@ impl Converter {
                 self.convert_mysql_auto_increment_keyword(stmt)
             }
             (SqlDialect::MySql, SqlDialect::Sqlite) => {
-                // INT AUTO_INCREMENT PRIMARY KEY → INTEGER PRIMARY KEY
-                // The AUTOINCREMENT keyword is optional in SQLite.
-                // Sized variants (BIGINT/MEDIUMINT/SMALLINT/TINYINT) must be
-                // handled before the bare INT replacement — otherwise the
-                // substring match inside e.g. "BIGINT" produces "BIGINTEGER".
-                let mut result = stmt.to_string();
-                for sized in [
-                    "BIGINT AUTO_INCREMENT",
-                    "bigint AUTO_INCREMENT",
-                    "MEDIUMINT AUTO_INCREMENT",
-                    "mediumint AUTO_INCREMENT",
-                    "SMALLINT AUTO_INCREMENT",
-                    "smallint AUTO_INCREMENT",
-                    "TINYINT AUTO_INCREMENT",
-                    "tinyint AUTO_INCREMENT",
-                ] {
-                    result = result.replace(sized, "INTEGER");
-                }
-                let result = result.replace("INT AUTO_INCREMENT", "INTEGER");
-                let result = result.replace("int AUTO_INCREMENT", "INTEGER");
-                result.replace("AUTO_INCREMENT", "")
+                use once_cell::sync::Lazy;
+                use regex::Regex;
+                // `<int type> AUTO_INCREMENT` → INTEGER, then any bare keyword
+                // dropped. Case-insensitive (MySQL dumps commonly lowercase
+                // `auto_increment`) and only outside string literals so a
+                // DEFAULT / value containing the text is left alone. Matching
+                // the whole `…INT AUTO_INCREMENT` unit avoids the "BIGINTEGER"
+                // substring hazard.
+                static RE_SIZED_AI: Lazy<Regex> = Lazy::new(|| {
+                    Regex::new(r"(?i)\b(?:BIG|MEDIUM|SMALL|TINY)?INT\s+AUTO_INCREMENT").unwrap()
+                });
+                // Trailing boundary only: the integer type may already have been
+                // mapped and glued to the keyword (e.g. `INTEGERAUTO_INCREMENT`)
+                // by convert_data_types running first.
+                static RE_BARE_AI: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r"(?i)AUTO_INCREMENT\b").unwrap());
+                map_outside_string_literals(stmt, |seg| {
+                    let seg = RE_SIZED_AI.replace_all(seg, "INTEGER");
+                    RE_BARE_AI.replace_all(&seg, "").into_owned()
+                })
             }
             (SqlDialect::Postgres, SqlDialect::MySql) => {
                 // SERIAL → INT AUTO_INCREMENT
@@ -739,12 +738,25 @@ impl Converter {
             }
             // MSSQL conversions
             (SqlDialect::MySql, SqlDialect::Mssql) => {
-                // AUTO_INCREMENT → IDENTITY(1,1)
-                let result = stmt.replace("BIGINT AUTO_INCREMENT", "BIGINT IDENTITY(1,1)");
-                let result = result.replace("bigint AUTO_INCREMENT", "BIGINT IDENTITY(1,1)");
-                let result = result.replace("INT AUTO_INCREMENT", "INT IDENTITY(1,1)");
-                let result = result.replace("int AUTO_INCREMENT", "INT IDENTITY(1,1)");
-                result.replace("AUTO_INCREMENT", "IDENTITY(1,1)")
+                use once_cell::sync::Lazy;
+                use regex::Regex;
+                // AUTO_INCREMENT → IDENTITY(1,1), keeping the integer type.
+                // Case-insensitive and only outside string literals. BIGINT is
+                // handled before the bare INT rule; `\bINT` won't match the
+                // `INT` inside `BIGINT`.
+                static RE_BIGINT_AI: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r"(?i)\bBIGINT\s+AUTO_INCREMENT").unwrap());
+                static RE_INT_AI: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r"(?i)\bINT\s+AUTO_INCREMENT").unwrap());
+                // Trailing boundary only (the type may already be glued to the
+                // keyword by an earlier type mapping).
+                static RE_BARE_AI: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r"(?i)AUTO_INCREMENT\b").unwrap());
+                map_outside_string_literals(stmt, |seg| {
+                    let seg = RE_BIGINT_AI.replace_all(seg, "BIGINT IDENTITY(1,1)");
+                    let seg = RE_INT_AI.replace_all(&seg, "INT IDENTITY(1,1)");
+                    RE_BARE_AI.replace_all(&seg, "IDENTITY(1,1)").into_owned()
+                })
             }
             (SqlDialect::Mssql, SqlDialect::MySql) => {
                 // IDENTITY(1,1) → AUTO_INCREMENT
@@ -1191,7 +1203,9 @@ impl Converter {
             Regex::new(r"::[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)*").unwrap()
         });
 
-        RE_CAST.replace_all(stmt, "").to_string()
+        // Only outside string literals: a value like '2001:db8::1' or
+        // 'a::b text' must keep its ':: …' rather than have it stripped.
+        map_outside_string_literals(stmt, |seg| RE_CAST.replace_all(seg, "").into_owned())
     }
 
     /// Convert nextval('sequence') to NULL or remove (AUTO_INCREMENT handles it)
@@ -1230,7 +1244,9 @@ impl Converter {
         static RE_SCHEMA: Lazy<Regex> =
             Lazy::new(|| Regex::new(r#"(?i)\b(public|pg_catalog|pg_temp)\s*\.\s*"#).unwrap());
 
-        RE_SCHEMA.replace_all(stmt, "").to_string()
+        // Only outside string literals so a value like 'see public.docs' keeps
+        // its text.
+        map_outside_string_literals(stmt, |seg| RE_SCHEMA.replace_all(seg, "").into_owned())
     }
 
     /// Convert MSSQL GETDATE() to CURRENT_TIMESTAMP
@@ -1281,16 +1297,36 @@ impl Converter {
         RE_NONCLUSTERED.replace_all(&result, "").to_string()
     }
 
-    /// Convert MSSQL N'unicode' strings to regular 'unicode' strings
+    /// Convert MSSQL `N'unicode'` string literals to regular `'unicode'`
+    /// strings by dropping the `N` prefix. Only a genuine prefix — an `N`
+    /// immediately before a string-opening quote and not itself inside a string
+    /// — is converted, so an `N'` sequence appearing inside string data (e.g.
+    /// `'season N''4'`) is left untouched.
     fn convert_mssql_unicode_strings(&self, stmt: &str) -> String {
-        use once_cell::sync::Lazy;
-        use regex::Regex;
-
-        // Match N'...' unicode strings, being careful not to match inside strings
-        // This is a simplified version that handles most cases
-        static RE_UNICODE_STRING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bN'").unwrap());
-
-        RE_UNICODE_STRING.replace_all(stmt, "'").to_string()
+        let bytes = stmt.as_bytes();
+        let mut out = String::with_capacity(stmt.len());
+        let mut i = 0;
+        // Everything in `stmt[..copied]` has already been emitted to `out`.
+        let mut copied = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\'' {
+                // A string literal: skip it whole so its contents are preserved.
+                i = skip_sql_string_literal(bytes, i);
+            } else if matches!(bytes[i], b'N' | b'n')
+                && bytes.get(i + 1) == Some(&b'\'')
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+            {
+                // A genuine `N'` string prefix: emit up to it, drop the `N`, and
+                // resume at the opening quote (copied to the literal-skip path).
+                out.push_str(&stmt[copied..i]);
+                copied = i + 1;
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
+        out.push_str(&stmt[copied..]);
+        out
     }
 
     /// Strip MSSQL schema prefix (dbo., etc.) from table names
@@ -1303,7 +1339,11 @@ impl Converter {
         static RE_MSSQL_SCHEMA: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\[?dbo\]?\s*\.\s*").unwrap());
 
-        RE_MSSQL_SCHEMA.replace_all(stmt, "").to_string()
+        // Only outside string literals so a value like 'user dbo.smith' keeps
+        // its text.
+        map_outside_string_literals(stmt, |seg| {
+            RE_MSSQL_SCHEMA.replace_all(seg, "").into_owned()
+        })
     }
 
     /// Detect unsupported features and add warnings
@@ -1601,4 +1641,48 @@ fn write_header(
     writeln!(writer)?;
 
     Ok(())
+}
+
+/// Advance past a single-quoted SQL string literal starting at `start` (the
+/// opening quote), returning the index just past the closing quote. A doubled
+/// `''` is an escaped quote that keeps the string open. An unterminated literal
+/// consumes to the end. `bytes[start]` must be `'`.
+fn skip_sql_string_literal(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\'') {
+                i += 2; // escaped quote, stay inside the string
+            } else {
+                return i + 1; // closing quote
+            }
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// Apply `f` to every span of `stmt` that lies outside a single-quoted string
+/// literal, copying the literals through verbatim. Used to keep statement-level
+/// rewrites (cast/schema-prefix stripping) from mangling string *data*.
+fn map_outside_string_literals(stmt: &str, f: impl Fn(&str) -> String) -> String {
+    let bytes = stmt.as_bytes();
+    let mut out = String::with_capacity(stmt.len());
+    let mut i = 0;
+    let mut seg_start = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            // Flush the preceding non-string span through `f`.
+            out.push_str(&f(&stmt[seg_start..i]));
+            let lit_end = skip_sql_string_literal(bytes, i);
+            out.push_str(&stmt[i..lit_end]); // literal, verbatim
+            i = lit_end;
+            seg_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&f(&stmt[seg_start..]));
+    out
 }
