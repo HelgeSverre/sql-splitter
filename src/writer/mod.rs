@@ -202,7 +202,7 @@ enum TableSink {
 /// all-dot names prevents that while leaving ordinary table names unchanged.
 fn sanitize_table_filename(table: &str) -> String {
     let last = table
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .find(|s| !s.is_empty())
         .unwrap_or("");
     // A NUL byte would truncate the path at the OS boundary; neutralize it.
