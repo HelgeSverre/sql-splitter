@@ -918,6 +918,55 @@ tables:
 }
 
 #[test]
+fn invalid_model_output_settings_are_compile_errors() {
+    let model = model_from_yaml(
+        r#"
+version: 1
+kind: model
+defaults: { inference: schema }
+source: { dialect: oracle }
+output:
+  dialect: db2
+  batch_size: 4294967295
+tables:
+  users:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: users
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+"#,
+    );
+
+    let error = compiler()
+        .compile(model, CompileOptions::default())
+        .expect_err("invalid output settings must not reach rendering");
+
+    assert_eq!(
+        error
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "GEN-DIALECT-INVALID")
+            .count(),
+        2,
+        "{error}"
+    );
+    assert!(error.has_code("GEN-OUTPUT-BATCH-SIZE"), "{error}");
+}
+
+#[test]
+fn zero_model_output_batch_size_is_a_compile_error() {
+    let mut model = users_model(1);
+    model.output.batch_size = Some(0);
+
+    let error = compiler()
+        .compile(model, CompileOptions::default())
+        .expect_err("zero output batch size must not be silently ignored");
+
+    assert!(error.has_code("GEN-OUTPUT-BATCH-SIZE"), "{error}");
+}
+
+#[test]
 fn child_counts_are_not_scaled_twice() {
     let model = customers_orders_model(1_000, 4_000, 4.0);
     let options = CompileOptions {

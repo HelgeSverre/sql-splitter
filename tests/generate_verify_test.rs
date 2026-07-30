@@ -18,7 +18,7 @@ use sql_splitter::generate::{
 };
 use sql_splitter::parser::SqlDialect;
 use sql_splitter::render::SqlRenderer;
-use sql_splitter::synthetic::SyntheticFile;
+use sql_splitter::synthetic::{OutputMode, SyntheticFile};
 
 fn compile(model_yaml: &str) -> GenerationPlan {
     let model = SyntheticFile::parse_str(model_yaml)
@@ -32,8 +32,18 @@ fn compile(model_yaml: &str) -> GenerationPlan {
 
 /// Render a compiled plan to a MySQL SQL string (consumes the plan).
 fn render(plan: GenerationPlan) -> String {
+    render_mode(plan, OutputMode::SchemaAndData)
+}
+
+fn render_mode(plan: GenerationPlan, mode: OutputMode) -> String {
     let mut buffer = Vec::new();
-    let mut renderer = SqlRenderer::new(&mut buffer, RenderOptions::default());
+    let mut renderer = SqlRenderer::new(
+        &mut buffer,
+        RenderOptions {
+            mode,
+            ..RenderOptions::default()
+        },
+    );
     GenerationEngine::new(plan).run(&mut renderer).unwrap();
     renderer.finish().unwrap();
     String::from_utf8(buffer).unwrap()
@@ -182,6 +192,96 @@ fn corrupt_non_null_fails_the_named_check() {
         replace_once(sql, "(1, 100,", "(1, NULL,")
     });
     assert!(report.failed("non_null:users"), "{:?}", report.checks);
+}
+
+#[test]
+fn corrupt_character_length_fails_the_named_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        rewrite_first_tuple_value(
+            sql,
+            "INSERT INTO `users`",
+            2,
+            "'this-value-is-longer-than-thirty-two-characters'",
+        )
+    });
+    assert!(
+        report.failed("character_length:users.name"),
+        "{:?}",
+        report.checks
+    );
+}
+
+#[test]
+fn corrupt_numeric_widths_fail_the_named_checks() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+tables:
+  metrics:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: metrics
+      columns:
+        - { name: attempts, type: "tinyint unsigned", nullable: false }
+        - { name: latitude, type: "decimal(10,8)", nullable: false }
+    columns:
+      attempts: { generator: { kind: integer, min: 1, max: 2 } }
+      latitude: { generator: { kind: decimal, min: 1, max: 2, scale: 8 } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        let sql = rewrite_first_tuple_value(sql, "INSERT INTO `metrics`", 0, "256");
+        rewrite_first_tuple_value(sql, "INSERT INTO `metrics`", 1, "100.00000000")
+    });
+    assert!(
+        report.failed("integer_range:metrics.attempts"),
+        "{:?}",
+        report.checks
+    );
+    assert!(
+        report.failed("decimal_shape:metrics.latitude"),
+        "{:?}",
+        report.checks
+    );
+}
+
+#[test]
+fn schema_only_verification_requires_nullable_columns_too() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+tables:
+  t:
+    rows: { kind: fixed, count: 0 }
+    schema:
+      name: t
+      columns:
+        - { name: id, type: bigint, nullable: false }
+        - { name: optional_note, type: "varchar(32)", nullable: true }
+        - { name: label, type: "varchar(32)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      optional_note: { generator: { kind: string, min_length: 4, max_length: 4 } }
+      label: { generator: { kind: string, min_length: 4, max_length: 4 } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan).output_mode(OutputMode::SchemaOnly);
+    let sql = render_mode(plan, OutputMode::SchemaOnly);
+    let corrupted = sql
+        .lines()
+        .filter(|line| !line.contains("optional_note"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let path = write(dir.path(), "missing-nullable-column.sql", &corrupted);
+
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(report.failed("expected_ddl"), "{:?}", report.checks);
 }
 
 #[test]
@@ -1009,6 +1109,33 @@ fn sampled_distribution_is_labeled_sampled_not_exact() {
         report.status_of("distribution:users.code"),
         Some(CheckStatus::Sampled),
         "a distribution comparison must be labeled Sampled, never Exact"
+    );
+}
+
+#[test]
+fn schema_only_distribution_is_not_checked_instead_of_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let verifier = GenerationVerifier::new(&plan)
+        .output_mode(OutputMode::SchemaOnly)
+        .expect_distribution(DistributionExpectation {
+            table: "users".into(),
+            column: "code".into(),
+            categories: vec![("100".into(), 0.25)],
+            tolerance: 0.5,
+        });
+    let sql = render_mode(plan, OutputMode::SchemaOnly);
+    let path = write(dir.path(), "schema-only.sql", &sql);
+    let report = verifier.verify_path(&path).unwrap();
+
+    assert!(report.passed(), "{:?}", report.checks);
+    assert_eq!(
+        report.status_of("distribution:users.code"),
+        Some(CheckStatus::NotChecked)
+    );
+    assert!(
+        report.status_of("non_null:users").is_none(),
+        "schema-only output must not claim an exact data-invariant pass"
     );
 }
 

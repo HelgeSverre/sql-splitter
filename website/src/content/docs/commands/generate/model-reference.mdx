@@ -81,7 +81,7 @@ options win; the output block fills in unset CLI choices.
 | `dialect`    | Render target. Precedence is CLI, model, source dialect, then MySQL.         |
 | `mode`       | Emit schema and data, schema only, or data only.                             |
 | `inserts`    | `insert` forces PostgreSQL multi-row inserts; `auto` and `copy` permit COPY. |
-| `batch_size` | Rows per `INSERT` or `COPY` batch. Must be positive to affect rendering.     |
+| `batch_size` | Rows per `INSERT` or `COPY` batch. Must be between 1 and 1,000,000.          |
 
 A deliberately selected cross-dialect target maps types and reports lossy
 conversions. Preserving the source dialect retains original DDL where possible.

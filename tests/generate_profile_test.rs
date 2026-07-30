@@ -1357,6 +1357,160 @@ fn zero_one_integer_infers_boolean() {
     );
 }
 
+#[test]
+fn text_fallback_respects_the_declared_character_limit() {
+    let schema = one_column_schema(
+        "t",
+        portable_column("block_type", "char(2)", SqlTypeFamily::Text),
+    );
+    let result = ModelInference::standard()
+        .infer(
+            &schema,
+            &one_column_profile("t", blank_evidence("block_type", 0), 0),
+        )
+        .unwrap();
+    let generator = result
+        .column_rule("t", "block_type")
+        .and_then(|rule| rule.generator.as_ref())
+        .expect("inferred generator");
+
+    assert_eq!(generator.kind, "string");
+    assert_eq!(generator.args["min_length"].as_u64(), Some(2));
+    assert_eq!(generator.args["max_length"].as_u64(), Some(2));
+}
+
+#[test]
+fn numeric_fallback_respects_integer_width_and_decimal_precision() {
+    let tiny_schema = one_column_schema(
+        "jobs",
+        portable_column("attempts", "tinyint unsigned", SqlTypeFamily::Integer),
+    );
+    let tiny = ModelInference::standard()
+        .infer(
+            &tiny_schema,
+            &one_column_profile("jobs", blank_evidence("attempts", 0), 0),
+        )
+        .unwrap();
+    let tiny_generator = tiny
+        .column_rule("jobs", "attempts")
+        .and_then(|rule| rule.generator.as_ref())
+        .expect("integer fallback");
+    assert_eq!(tiny_generator.args["min"].as_i64(), Some(0));
+    assert_eq!(tiny_generator.args["max"].as_i64(), Some(255));
+
+    let decimal_schema = one_column_schema(
+        "locations",
+        portable_column("latitude", "decimal(10,8)", SqlTypeFamily::Decimal),
+    );
+    let decimal = ModelInference::standard()
+        .infer(
+            &decimal_schema,
+            &one_column_profile("locations", blank_evidence("latitude", 0), 0),
+        )
+        .unwrap();
+    let decimal_generator = decimal
+        .column_rule("locations", "latitude")
+        .and_then(|rule| rule.generator.as_ref())
+        .expect("decimal fallback");
+    assert_eq!(decimal_generator.args["scale"].as_u64(), Some(8));
+    let max = decimal_generator.args["max"]
+        .as_f64()
+        .expect("numeric decimal max");
+    assert!((99.0..=99.999_999_99).contains(&max), "max={max}");
+}
+
+#[test]
+fn inference_detaches_a_foreign_key_whose_parent_is_absent_from_the_dump() {
+    let mut customer_id =
+        portable_column("customer_id", "bigint unsigned", SqlTypeFamily::BigInteger);
+    customer_id.nullable = false;
+    let mut orders = table_with(
+        "orders",
+        vec![
+            pk_col("id", "bigint unsigned", SqlTypeFamily::BigInteger),
+            customer_id,
+        ],
+        vec!["id"],
+        vec![fk("orders_customer_id_foreign", "customer_id", "customers")],
+    );
+    orders.create_statement = Some(
+        "CREATE TABLE `orders` (`id` bigint unsigned NOT NULL, `customer_id` bigint unsigned NOT NULL, CONSTRAINT `orders_customer_id_foreign` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`));".to_string(),
+    );
+    let schema = schema_of(vec![orders]);
+    let result = ModelInference::standard()
+        .infer(&schema, &row_count_profile(&[("orders", 3)]))
+        .expect("partial dump infers");
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == codes::DETACHED_DEPENDENCY.code),
+        "missing parent must produce a detach warning"
+    );
+    let orders = &result.model.tables["orders"];
+    assert!(orders.schema.relationships.is_empty());
+    assert!(orders.relationships.is_empty());
+    assert!(orders.schema.create_statement.is_none());
+    assert!(
+        orders.columns["customer_id"].generator.is_some(),
+        "detached foreign-key column needs a normal generator"
+    );
+
+    let plan = ModelCompiler::standard()
+        .compile(result.model, CompileOptions::default())
+        .expect("inferred partial dump compiles");
+    assert!(plan
+        .table("orders")
+        .expect("orders plan")
+        .relationships
+        .is_empty());
+}
+
+#[test]
+fn bounded_nullable_semantic_text_truncates_before_null_rate() {
+    let mut country = portable_column("countryCode", "varchar(2)", SqlTypeFamily::Text);
+    country.nullable = true;
+    let schema = one_column_schema("locations", country);
+    let mut evidence = blank_evidence("countryCode", 100);
+    evidence.null_count = 50;
+    evidence.null_rate = 0.5;
+    let result = ModelInference::standard()
+        .infer(&schema, &one_column_profile("locations", evidence, 100))
+        .unwrap();
+    let rule = result
+        .column_rule("locations", "countryCode")
+        .expect("inferred column rule");
+
+    assert_eq!(
+        rule.generator
+            .as_ref()
+            .map(|generator| generator.kind.as_str()),
+        Some("address.country")
+    );
+    assert_eq!(
+        rule.modifiers
+            .iter()
+            .map(|modifier| modifier.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["truncate", "null_rate"],
+        "truncation must run while the value is still text"
+    );
+    assert_eq!(rule.modifiers[0].args["max_length"].as_u64(), Some(2));
+
+    let plan = ModelCompiler::standard()
+        .compile(result.model, CompileOptions::default())
+        .expect("bounded nullable semantic model compiles");
+    let mut sink = CollectSink { rows: Vec::new() };
+    GenerationEngine::new(plan)
+        .run(&mut sink)
+        .expect("truncate-before-null generation succeeds");
+    assert!(sink.rows.iter().all(|value| {
+        matches!(value, GeneratedValue::Null)
+            || matches!(value, GeneratedValue::Text(text) if text.chars().count() <= 2)
+    }));
+}
+
 // --- Step 5: emitted model is self-contained --------------------------------
 
 /// The emitted model retains `kind: observed` with the frozen count, sets

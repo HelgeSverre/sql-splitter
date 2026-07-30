@@ -201,11 +201,19 @@ Typical severity: **error** · Category: **generator**
 
 A decimal generator's scale cannot represent its configured range or target type.
 
-## GEN-DETACHED-DEPENDENCY — Optional dependency was detached \{#GEN-DETACHED-DEPENDENCY\}
+## GEN-DETACHED-DEPENDENCY — Dependency was detached \{#GEN-DETACHED-DEPENDENCY\}
 
 Typical severity: **warning** · Category: **selection**
 
-A nullable foreign key points to an excluded table and its rendered constraint was omitted.
+A foreign key points to a table unavailable to the generation run, so its
+rendered constraint was omitted.
+
+## GEN-DIALECT-INVALID — SQL dialect is invalid \{#GEN-DIALECT-INVALID\}
+
+Typical severity: **error** · Category: **config**
+
+A source or output dialect is not one of `mysql`, `postgres`, `sqlite`, or
+`mssql`.
 
 ## GEN-DUPLICATE-COLUMN — Duplicate column name \{#GEN-DUPLICATE-COLUMN\}
 
@@ -668,6 +676,12 @@ An order-family planner uses a removed flat field instead of the parent or child
 Typical severity: **error** · Category: **planner**
 
 A configured line distribution can yield zero lines where the planner requires at least one.
+
+## GEN-OUTPUT-BATCH-SIZE — Output batch size is invalid \{#GEN-OUTPUT-BATCH-SIZE\}
+
+Typical severity: **error** · Category: **config**
+
+A model output batch size is zero or exceeds 1,000,000 rows.
 
 ## GEN-OUTPUT-IO — Generated output could not be written \{#GEN-OUTPUT-IO\}
 

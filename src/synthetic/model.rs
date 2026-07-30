@@ -179,6 +179,10 @@ pub enum InferenceMode {
     Disabled,
 }
 
+/// Upper bound for `output.batch_size`; compilation rejects zero and larger
+/// values so rendered batches stay allocation-bounded.
+pub const MAX_OUTPUT_BATCH_SIZE: u32 = 1_000_000;
+
 /// Dialect and renderer defaults (`output:` in the complete model example).
 ///
 /// A model that omits `output` entirely preserves the source/base dialect
@@ -193,7 +197,9 @@ pub struct OutputModel {
     pub mode: Option<OutputMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inserts: Option<InsertMode>,
+    /// Rows per rendered batch. Compilation accepts `1..=MAX_OUTPUT_BATCH_SIZE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 1000000))]
     pub batch_size: Option<u32>,
 }
 

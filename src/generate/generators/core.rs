@@ -17,7 +17,9 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::model::{GeneratorConfig, ModifierConfig};
-use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
+use crate::synthetic::schema::{
+    declared_character_length, PortableColumn, PortableTable, SqlTypeFamily,
+};
 
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, CompiledModifier,
@@ -1709,19 +1711,6 @@ fn integer_family_bounds(family: &SqlTypeFamily) -> Option<(i128, i128)> {
     }
 }
 
-/// The declared character length of a text type such as `varchar(8)` /
-/// `char(10)` / `nvarchar(255)`. `None` for length-less text types.
-fn declared_char_length(source_type: &str) -> Option<usize> {
-    let open = source_type.find('(')?;
-    let close = source_type[open + 1..].find(')')? + open + 1;
-    source_type[open + 1..close]
-        .split(',')
-        .next()?
-        .trim()
-        .parse::<usize>()
-        .ok()
-}
-
 /// Perturb `value` into a new candidate for the `attempt`-th retry, or `None`
 /// if this value's family has no defined mutation.
 fn mutate_candidate(
@@ -1995,7 +1984,7 @@ impl ModifierFactory for UniqueFactory {
             max_attempts,
             max_tracked,
             on_exhaustion,
-            max_char_len: declared_char_length(&column(context).source_type),
+            max_char_len: declared_character_length(&column(context).source_type),
         }) as Box<dyn CompiledModifier>)
     }
 }

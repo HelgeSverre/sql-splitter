@@ -107,6 +107,7 @@ pub struct OutputOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inserts: Option<InsertMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 1000000))]
     pub batch_size: Option<u32>,
 }
 

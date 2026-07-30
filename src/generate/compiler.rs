@@ -36,9 +36,10 @@ use glob::Pattern;
 use rand::RngExt;
 
 use crate::diagnostic::{DiagnosticBag, Severity, SourceLocation};
+use crate::parser::SqlDialect;
 use crate::synthetic::model::{
     ChildDistribution, InferenceMode, ModifierConfig, PlannerConfig, RelationshipModel, RowsModel,
-    SyntheticModel, TableModel, TableSeed,
+    SyntheticModel, TableModel, TableSeed, MAX_OUTPUT_BATCH_SIZE,
 };
 use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
 
@@ -150,6 +151,41 @@ impl ModelCompiler {
         options: CompileOptions,
     ) -> Result<GenerationPlan, DiagnosticBag> {
         let mut bag = DiagnosticBag::default();
+
+        if let Some(source) = &model.source {
+            if source.dialect.parse::<SqlDialect>().is_err() {
+                bag.error(
+                    crate::diagnostic::codes::DIALECT_INVALID.code,
+                    "source.dialect",
+                    format!(
+                        "unsupported source dialect `{}`; expected mysql, postgres, sqlite, or mssql",
+                        source.dialect
+                    ),
+                );
+            }
+        }
+        if let Some(dialect) = &model.output.dialect {
+            if dialect.parse::<SqlDialect>().is_err() {
+                bag.error(
+                    crate::diagnostic::codes::DIALECT_INVALID.code,
+                    "output.dialect",
+                    format!(
+                        "unsupported output dialect `{dialect}`; expected mysql, postgres, sqlite, or mssql"
+                    ),
+                );
+            }
+        }
+        if let Some(batch_size) = model.output.batch_size {
+            if batch_size == 0 || batch_size > MAX_OUTPUT_BATCH_SIZE {
+                bag.error(
+                    crate::diagnostic::codes::OUTPUT_BATCH_SIZE.code,
+                    "output.batch_size",
+                    format!(
+                        "output batch size must be between 1 and {MAX_OUTPUT_BATCH_SIZE} (got {batch_size})"
+                    ),
+                );
+            }
+        }
 
         if options.scale.is_some() && options.rows.is_some() {
             bag.error(

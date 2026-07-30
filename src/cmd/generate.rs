@@ -30,7 +30,7 @@ use crate::generate::{
 };
 use crate::parser::SqlDialect;
 use crate::profile::ProfileDepth;
-use crate::synthetic::OutputMode;
+use crate::synthetic::{OutputMode, MAX_OUTPUT_BATCH_SIZE};
 
 use super::common::{dash_is_stdout, FILTERING};
 
@@ -347,10 +347,9 @@ impl GenerateArgs {
         }
         // Cap at a generous ceiling: beyond this the multi-row INSERT capacity
         // hint would overflow and the batch buffer preallocation is unbounded.
-        const MAX_BATCH_SIZE: usize = 1_000_000;
-        if self.batch_size > MAX_BATCH_SIZE {
+        if self.batch_size > MAX_OUTPUT_BATCH_SIZE as usize {
             return Err(RequestError::usage(format!(
-                "--batch-size must be at most {MAX_BATCH_SIZE}"
+                "--batch-size must be at most {MAX_OUTPUT_BATCH_SIZE}"
             )));
         }
 

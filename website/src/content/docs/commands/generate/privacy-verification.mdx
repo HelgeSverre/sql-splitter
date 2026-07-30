@@ -77,7 +77,8 @@ two independent filesystem renames cannot be one atomic transaction.
 Where supported, verification checks:
 
 - row counts and row arity;
-- non-null, primary-key, and unique constraints;
+- non-null, character-length, integer-width, decimal precision/scale,
+  primary-key, and unique constraints;
 - ordinary foreign-key membership;
 - planner predicates such as temporal ordering, null/flag coherence, counter
   equations, selected ranges, and simple cross-table sums.
@@ -89,6 +90,10 @@ linear merge pass.
 
 Verification parses the generated SQL. PostgreSQL COPY rows have less exact
 coverage than ordinary INSERT rows.
+
+`--verify` also follows the selected output mode. Data-only output uses the
+compiled model schema to decode rows without requiring emitted DDL. Schema-only
+output audits the DDL and requires that no row data was rendered.
 
 ## Honest coverage gaps
 

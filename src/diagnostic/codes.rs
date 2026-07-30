@@ -58,7 +58,8 @@ define_diagnostics! {
     COUNT_CONTROL_CONFLICT, "GEN-COUNT-CONTROL-CONFLICT", "Global count controls conflict", Selection, Error, "Mutually exclusive global row-count controls were supplied together.";
     DECIMAL_RANGE, "GEN-DECIMAL-RANGE", "Decimal range is invalid", Generator, Error, "A decimal generator's maximum is below its minimum.";
     DECIMAL_SCALE, "GEN-DECIMAL-SCALE", "Decimal scale is invalid", Generator, Error, "A decimal generator's scale cannot represent its configured range or target type.";
-    DETACHED_DEPENDENCY, "GEN-DETACHED-DEPENDENCY", "Optional dependency was detached", Selection, Warning, "A nullable foreign key points to an excluded table and its rendered constraint was omitted.";
+    DETACHED_DEPENDENCY, "GEN-DETACHED-DEPENDENCY", "Dependency was detached", Selection, Warning, "A foreign key points to a table unavailable to the generation run, so its rendered constraint was omitted.";
+    DIALECT_INVALID, "GEN-DIALECT-INVALID", "SQL dialect is invalid", Config, Error, "A source or output dialect is not one of mysql, postgres, sqlite, or mssql.";
     DUPLICATE_COLUMN, "GEN-DUPLICATE-COLUMN", "Duplicate column name", Selection, Error, "A table's schema declares the same column name more than once.";
     EMIT_IO, "GEN-EMIT-IO", "Resolved model could not be written", Rendering, Error, "Writing the resolved model configuration failed.";
     EMIT_SERIALIZE, "GEN-EMIT-SERIALIZE", "Resolved model could not be serialized", Rendering, Error, "The resolved model could not be encoded as YAML.";
@@ -136,6 +137,7 @@ define_diagnostics! {
     ORDER_FAMILY_SCALE, "GEN-ORDER-FAMILY-SCALE", "Order-family currency scale is inconsistent", Planner, Error, "A configured money column does not match the planner's currency scale.";
     ORDER_FAMILY_UNKNOWN_FIELD, "GEN-ORDER-FAMILY-UNKNOWN-FIELD", "Order-family field is unknown", Planner, Error, "An order-family planner uses a removed flat field instead of the parent or child column maps.";
     ORDER_FAMILY_ZERO_LINES, "GEN-ORDER-FAMILY-ZERO-LINES", "Order-family line count is impossible", Planner, Error, "A configured line distribution can yield zero lines where the planner requires at least one.";
+    OUTPUT_BATCH_SIZE, "GEN-OUTPUT-BATCH-SIZE", "Output batch size is invalid", Config, Error, "A model output batch size is zero or exceeds the supported allocation bound.";
     OUTPUT_IO, "GEN-OUTPUT-IO", "Generated output could not be written", Runtime, Error, "Opening, writing, flushing, or publishing the generated SQL output failed.";
     OPERATOR_UNKNOWN_ARGUMENT, "GEN-OPERATOR-UNKNOWN-ARGUMENT", "Operator argument is unknown", Config, Error, "A generator, modifier, or planner configuration contains a key absent from that operator's descriptor.";
     OVERRIDES_NO_BASE, "GEN-OVERRIDES-NO-BASE", "Overrides document has no base model", Config, Error, "An overrides document was supplied without a source dump or other base model.";

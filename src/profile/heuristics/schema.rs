@@ -7,7 +7,9 @@
 //! generator for the column's SQL family, the floor every column is guaranteed.
 
 use super::{generator, generator_with, yaml, Candidate, ColumnContext, Confidence, Precedence};
-use crate::synthetic::schema::SqlTypeFamily;
+use crate::synthetic::schema::{
+    declared_character_length, declared_decimal_shape, declared_integer_bounds, SqlTypeFamily,
+};
 
 /// Propose the schema-justified candidates for a column.
 pub(super) fn candidates(ctx: &ColumnContext<'_>) -> Vec<Candidate> {
@@ -60,11 +62,11 @@ pub(super) fn type_fallback(ctx: &ColumnContext<'_>) -> Candidate {
     let generator = match column.family {
         SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => {
             let (min, max) = numeric_bounds(ctx).unwrap_or((0, 1000));
+            let (min, max) = clamp_integer_bounds(ctx, min, max);
             generator_with("integer", [("min", yaml(min)), ("max", yaml(max))])
         }
         SqlTypeFamily::Decimal => {
-            let scale = ctx.evidence().and_then(|e| e.decimal_scale).unwrap_or(2);
-            let (min, max) = numeric_bounds(ctx).unwrap_or((0, 1000));
+            let (min, max, scale) = decimal_bounds(ctx);
             generator_with(
                 "decimal",
                 [
@@ -93,6 +95,47 @@ pub(super) fn type_fallback(ctx: &ColumnContext<'_>) -> Candidate {
         "type_fallback",
         generator,
     )
+}
+
+fn clamp_integer_bounds(ctx: &ColumnContext<'_>, min: i64, max: i64) -> (i64, i64) {
+    let Some((declared_min, declared_max)) = declared_integer_bounds(&ctx.column().source_type)
+    else {
+        return (min, max);
+    };
+    let declared_min = i64::try_from(declared_min).unwrap_or(i64::MIN);
+    let declared_max = i64::try_from(declared_max).unwrap_or(i64::MAX);
+    let clamped_min = min.clamp(declared_min, declared_max);
+    let clamped_max = max.clamp(declared_min, declared_max);
+    if clamped_min <= clamped_max {
+        (clamped_min, clamped_max)
+    } else {
+        (declared_min, declared_max)
+    }
+}
+
+fn decimal_bounds(ctx: &ColumnContext<'_>) -> (f64, f64, u8) {
+    let evidence = ctx.evidence();
+    let mut min = evidence
+        .and_then(|e| e.numeric)
+        .map_or(0.0, |numeric| numeric.min);
+    let mut max = evidence
+        .and_then(|e| e.numeric)
+        .map_or(1000.0, |numeric| numeric.max);
+    let mut scale = evidence.and_then(|e| e.decimal_scale).unwrap_or(2);
+
+    if let Some((precision, declared_scale)) = declared_decimal_shape(&ctx.column().source_type) {
+        scale = u8::try_from(declared_scale).unwrap_or(u8::MAX);
+        let whole_digits = precision - declared_scale;
+        let limit = 10f64.powi(whole_digits as i32) - 10f64.powi(-(declared_scale as i32));
+        if limit.is_finite() {
+            min = min.max(-limit);
+            max = max.min(limit);
+        }
+    }
+    if min > max {
+        min = max;
+    }
+    (min, max, scale)
 }
 
 /// Whether the column is a declared identity / auto-increment / serial key.
@@ -142,11 +185,18 @@ fn numeric_bounds(ctx: &ColumnContext<'_>) -> Option<(i64, i64)> {
 
 /// Observed `[min, max]` string lengths, defaulting to a small span.
 fn string_lengths(ctx: &ColumnContext<'_>) -> (usize, usize) {
-    match ctx.evidence().and_then(|e| e.string_shape.as_ref()) {
+    let (min, max) = match ctx.evidence().and_then(|e| e.string_shape.as_ref()) {
         Some(shape) => (
             shape.min_len.max(1),
             shape.max_len.max(shape.min_len).max(1),
         ),
         None => (8, 16),
+    };
+    match declared_character_length(&ctx.column().source_type) {
+        Some(limit) => {
+            let min = min.min(limit);
+            (min, max.min(limit).max(min))
+        }
+        None => (min, max),
     }
 }

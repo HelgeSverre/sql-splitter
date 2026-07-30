@@ -13,10 +13,11 @@
 //! Every reported check carries a [`CheckStatus`]:
 //!
 //! * [`CheckStatus::Exact`] — a machine-checkable invariant evaluated on every
-//!   row: row counts, arity, non-null, primary-key/unique uniqueness,
-//!   foreign-key and composite-key membership, planner equations/state
-//!   invariants ([`PlannerPredicate`]s from the compiled planners), and
-//!   cross-table family sums ([`FamilySumCheck`]s).
+//!   row: row counts, arity, non-null, declared character length, integer
+//!   width, decimal precision/scale, primary-key/unique uniqueness, foreign-key
+//!   and composite-key membership, planner equations/state invariants
+//!   ([`PlannerPredicate`]s from the compiled planners), and cross-table family
+//!   sums ([`FamilySumCheck`]s).
 //! * [`CheckStatus::Sampled`] — an approximate distribution comparison against a
 //!   recorded tolerance. A sampled check is **never** relabeled exact.
 //! * [`CheckStatus::NotChecked`] — a capability the verifier could not evaluate
@@ -49,7 +50,11 @@ use crate::parser::mysql_insert::{
 };
 use crate::parser::postgres_copy::{parse_copy_columns, CopyParser};
 use crate::parser::{Parser, ParserEvent, RowFlow, SqlDialect, StatementType};
-use crate::schema::{Schema, SchemaBuilder, TableSchema};
+use crate::schema::{Column, ColumnId, ColumnType, Schema, SchemaBuilder, TableId, TableSchema};
+use crate::synthetic::schema::{
+    declared_character_length, declared_decimal_shape, declared_integer_bounds,
+};
+use crate::synthetic::OutputMode;
 
 use super::output::{ProtectedSpool, SpoolReader, SpooledRow, TempConfig};
 use super::plan::{ColumnOwner, CompiledRelationship, GenerationPlan, PlannedTable};
@@ -172,7 +177,9 @@ pub struct DistributionExpectation {
 /// the rendered file against the already-captured spec.
 pub struct GenerationVerifier {
     spec: PlanSpec,
+    plan_schema: Schema,
     dialect: SqlDialect,
+    output_mode: OutputMode,
     membership_budget: usize,
     temp: TempConfig,
     distributions: Vec<DistributionExpectation>,
@@ -189,7 +196,9 @@ impl GenerationVerifier {
             .unwrap_or(SqlDialect::MySql);
         Self {
             spec: PlanSpec::from_plan(plan),
+            plan_schema: schema_from_plan(plan),
             dialect,
+            output_mode: OutputMode::SchemaAndData,
             membership_budget: DEFAULT_MEMBERSHIP_BUDGET,
             temp: TempConfig::default(),
             distributions: Vec::new(),
@@ -199,6 +208,15 @@ impl GenerationVerifier {
     /// Override the dialect the generated SQL is parsed with.
     pub fn dialect(mut self, dialect: SqlDialect) -> Self {
         self.dialect = dialect;
+        self
+    }
+
+    /// Match verification to the renderer's output mode.
+    ///
+    /// Data-only output uses the compiled plan schema to decode rows because no
+    /// DDL is present. Schema-only output checks DDL and expects no row data.
+    pub fn output_mode(mut self, mode: OutputMode) -> Self {
+        self.output_mode = mode;
         self
     }
 
@@ -227,8 +245,12 @@ impl GenerationVerifier {
     /// twice: once to reconstruct the schema from the emitted DDL, once to
     /// audit rows against the plan.
     pub fn verify_path(&self, path: &Path) -> Result<VerificationReport, GenerateError> {
-        let schema = self.build_schema(path)?;
-        self.audit_rows(path, &schema)
+        if self.output_mode == OutputMode::DataOnly {
+            self.audit_rows(path, &self.plan_schema, false)
+        } else {
+            let schema = self.build_schema(path)?;
+            self.audit_rows(path, &schema, true)
+        }
     }
 
     /// Pass 1: reconstruct the reparsed schema from the file's DDL.
@@ -252,6 +274,7 @@ impl GenerationVerifier {
         &self,
         path: &Path,
         schema: &Schema,
+        expect_ddl: bool,
     ) -> Result<VerificationReport, GenerateError> {
         let mut report = VerificationReport::default();
         let mut audit = Audit::new(
@@ -261,7 +284,9 @@ impl GenerationVerifier {
             self.temp.clone(),
         );
         audit.register_distributions(&self.distributions);
-        audit.check_expected_tables(&mut report);
+        if expect_ddl {
+            audit.check_expected_tables(&mut report);
+        }
 
         let reader = open_reader(path)?;
         let mut parser = Parser::with_dialect(reader, 1 << 20, self.dialect);
@@ -366,9 +391,46 @@ impl GenerationVerifier {
             })
             .map_err(parse_error)?;
 
-        audit.finish(&mut report, &self.distributions)?;
+        audit.finish(&mut report, &self.distributions, self.output_mode)?;
         Ok(report)
     }
+}
+
+/// Build the row-decoding schema used when the renderer intentionally omits
+/// DDL. Verification constraints still come from [`PlanSpec`]; this schema
+/// supplies only stable column identity and value-family parsing.
+fn schema_from_plan(plan: &GenerationPlan) -> Schema {
+    let mut schema = Schema::new();
+    for table in &plan.tables {
+        let mut runtime = TableSchema::new(table.name.clone(), TableId(0));
+        runtime.columns = table
+            .schema
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(ordinal, column)| Column {
+                name: column.name.clone(),
+                col_type: ColumnType::from_sql_type(&column.source_type),
+                source_type: column.source_type.clone(),
+                ordinal: ColumnId(ordinal as u16),
+                is_primary_key: column.primary_key,
+                is_nullable: column.nullable,
+                is_unique: column.unique,
+                default_sql: column.default_sql.clone(),
+                is_generated: column.generated,
+                is_identity: column.identity,
+                collation: column.collation.clone(),
+            })
+            .collect();
+        runtime.primary_key = table
+            .schema
+            .primary_key
+            .iter()
+            .filter_map(|name| runtime.get_column_id(name))
+            .collect();
+        schema.add_table(runtime);
+    }
+    schema
 }
 
 /// The reparsed schema table id plus its per-statement parse context.
@@ -443,6 +505,9 @@ struct PlanSpec {
 struct TableSpec {
     name: String,
     rows: u64,
+    /// Every column declared by the compiled schema, including nullable and
+    /// database-produced columns. Used to audit schema-only output.
+    declared_columns: Vec<String>,
     /// Columns the compiled engine must render on every row. Database-produced
     /// columns are excluded unless a relationship requires the engine to
     /// materialize that parent key.
@@ -454,6 +519,12 @@ struct TableSpec {
     primary_key: Vec<String>,
     /// Uniqueness key groups: the PK plus every UNIQUE constraint / column.
     unique_groups: Vec<Vec<String>>,
+    /// Character limits declared by bounded text columns.
+    character_limits: Vec<(String, usize)>,
+    /// Exact ranges declared by fixed-width integer columns.
+    integer_limits: Vec<(String, i128, i128)>,
+    /// Precision and scale declared by fixed-point decimal columns.
+    decimal_limits: Vec<(String, u32, u32)>,
     /// Foreign-key relationships to parent tables.
     relationships: Vec<RelSpec>,
     /// Planner invariants the table's planners guarantee.
@@ -542,6 +613,39 @@ impl TableSpec {
             .filter(|column| !column.nullable && rendered_columns.contains(&column.name))
             .map(|column| column.name.clone())
             .collect();
+        let declared_columns = table
+            .schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let character_limits = table
+            .schema
+            .columns
+            .iter()
+            .filter_map(|column| {
+                declared_character_length(&column.source_type)
+                    .map(|limit| (column.name.clone(), limit))
+            })
+            .collect();
+        let integer_limits = table
+            .schema
+            .columns
+            .iter()
+            .filter_map(|column| {
+                declared_integer_bounds(&column.source_type)
+                    .map(|(min, max)| (column.name.clone(), min, max))
+            })
+            .collect();
+        let decimal_limits = table
+            .schema
+            .columns
+            .iter()
+            .filter_map(|column| {
+                declared_decimal_shape(&column.source_type)
+                    .map(|(precision, scale)| (column.name.clone(), precision, scale))
+            })
+            .collect();
 
         let relationships = table
             .relationships
@@ -568,10 +672,14 @@ impl TableSpec {
         Self {
             name: table.name.clone(),
             rows: table.rows,
+            declared_columns,
             rendered_columns,
             non_null_columns,
             primary_key: table.schema.primary_key.clone(),
             unique_groups,
+            character_limits,
+            integer_limits,
+            decimal_limits,
             relationships,
             predicates,
             family_child,
@@ -657,6 +765,12 @@ struct TableState {
     undecodable: u64,
     /// Non-null violations per column name.
     null_violations: HashMap<String, u64>,
+    /// Declared character-width violations per column name.
+    character_length_violations: HashMap<String, u64>,
+    /// Fixed-width integer range violations per column name.
+    integer_range_violations: HashMap<String, u64>,
+    /// Fixed-point decimal precision/scale violations per column name.
+    decimal_shape_violations: HashMap<String, u64>,
     /// Arity violations (a row that differs from the plan-derived rendered
     /// column set).
     arity_violations: u64,
@@ -1154,7 +1268,7 @@ impl<'a> Audit<'a> {
                 None => missing_tables.push(table.name.clone()),
                 Some(id) => {
                     if let Some(reparsed) = schema.table(id) {
-                        for col in &table.non_null_columns {
+                        for col in &table.declared_columns {
                             if reparsed.get_column_id(col).is_none() {
                                 missing_columns.push(format!("{}.{}", table.name, col));
                             }
@@ -1203,6 +1317,9 @@ impl<'a> Audit<'a> {
                     rows: 0,
                     undecodable: 0,
                     null_violations: HashMap::new(),
+                    character_length_violations: HashMap::new(),
+                    integer_range_violations: HashMap::new(),
+                    decimal_shape_violations: HashMap::new(),
                     arity_violations: 0,
                     unique_groups,
                     member_groups,
@@ -1300,6 +1417,29 @@ impl<'a> Audit<'a> {
                 null_hits.push(col.clone());
             }
         }
+        let mut character_length_hits: Vec<String> = Vec::new();
+        for (column, limit) in &planned.character_limits {
+            if value_of(column).is_some_and(
+                |value| matches!(value, PkValue::Text(text) if text.chars().count() > *limit),
+            ) {
+                character_length_hits.push(column.clone());
+            }
+        }
+        let mut integer_range_hits: Vec<String> = Vec::new();
+        for (column, min, max) in &planned.integer_limits {
+            if value_of(column)
+                .and_then(int_of)
+                .is_some_and(|value| value < *min || value > *max)
+            {
+                integer_range_hits.push(column.clone());
+            }
+        }
+        let mut decimal_shape_hits: Vec<String> = Vec::new();
+        for (column, precision, scale) in &planned.decimal_limits {
+            if value_of(column).is_some_and(|value| !decimal_fits(value, *precision, *scale)) {
+                decimal_shape_hits.push(column.clone());
+            }
+        }
 
         // Predicate evaluation. A predicate that holds but whose required inputs
         // include a present-but-unparseable value could not actually be
@@ -1376,6 +1516,15 @@ impl<'a> Audit<'a> {
         }
         for name in null_hits {
             *state.null_violations.entry(name).or_insert(0) += 1;
+        }
+        for name in character_length_hits {
+            *state.character_length_violations.entry(name).or_insert(0) += 1;
+        }
+        for name in integer_range_hits {
+            *state.integer_range_violations.entry(name).or_insert(0) += 1;
+        }
+        for name in decimal_shape_hits {
+            *state.decimal_shape_violations.entry(name).or_insert(0) += 1;
         }
         for slug in predicate_hits {
             *state.predicate_failures.entry(slug).or_insert(0) += 1;
@@ -1527,6 +1676,7 @@ impl<'a> Audit<'a> {
         &mut self,
         report: &mut VerificationReport,
         distributions: &[DistributionExpectation],
+        output_mode: OutputMode,
     ) -> Result<(), GenerateError> {
         let foreign_key_failures = self.finalize_indexes()?;
         for (plan_index, planned) in self.spec.tables.iter().enumerate() {
@@ -1545,8 +1695,22 @@ impl<'a> Audit<'a> {
             // non-empty-as-expected. The exact family-sum, arity, non-null, and
             // FK checks still audit that every spooled child is well-formed and
             // sums correctly, so a genuinely broken family cannot slip through.
-            let expected = planned.rows;
-            if planned.family_child {
+            let expected = if output_mode == OutputMode::SchemaOnly {
+                0
+            } else {
+                planned.rows
+            };
+            if output_mode == OutputMode::SchemaOnly {
+                report.record(
+                    format!("row_count:{}", planned.name),
+                    CheckStatus::Exact,
+                    state.rows == 0,
+                    format!(
+                        "schema-only output expected 0 rows, observed {}",
+                        state.rows
+                    ),
+                );
+            } else if planned.family_child {
                 let passed = if expected == 0 {
                     state.rows == 0
                 } else {
@@ -1568,6 +1732,13 @@ impl<'a> Audit<'a> {
                     state.rows == expected,
                     format!("expected {expected} rows, observed {}", state.rows),
                 );
+            }
+
+            // Schema-only verification has no row values on which to evaluate
+            // data invariants. The DDL and zero-row checks above are exact; do
+            // not label absent row evidence as an exact pass.
+            if output_mode == OutputMode::SchemaOnly {
+                continue;
             }
 
             // Renderability (undecodable rows).
@@ -1600,6 +1771,53 @@ impl<'a> Audit<'a> {
                 null_failed == 0,
                 format!("{null_failed} unexpected NULL value(s) in non-nullable columns"),
             );
+
+            // Declared character limits.
+            for (column, limit) in &planned.character_limits {
+                let failed = state
+                    .character_length_violations
+                    .get(column)
+                    .copied()
+                    .unwrap_or(0);
+                report.record(
+                    format!("character_length:{}.{}", planned.name, column),
+                    CheckStatus::Exact,
+                    failed == 0,
+                    format!("{failed} value(s) exceeded the declared {limit}-character limit"),
+                );
+            }
+
+            // Fixed-width integer ranges.
+            for (column, min, max) in &planned.integer_limits {
+                let failed = state
+                    .integer_range_violations
+                    .get(column)
+                    .copied()
+                    .unwrap_or(0);
+                report.record(
+                    format!("integer_range:{}.{}", planned.name, column),
+                    CheckStatus::Exact,
+                    failed == 0,
+                    format!("{failed} value(s) fell outside the declared range {min}..={max}"),
+                );
+            }
+
+            // Fixed-point decimal precision and scale.
+            for (column, precision, scale) in &planned.decimal_limits {
+                let failed = state
+                    .decimal_shape_violations
+                    .get(column)
+                    .copied()
+                    .unwrap_or(0);
+                report.record(
+                    format!("decimal_shape:{}.{}", planned.name, column),
+                    CheckStatus::Exact,
+                    failed == 0,
+                    format!(
+                        "{failed} value(s) exceeded decimal({precision},{scale}) precision or scale"
+                    ),
+                );
+            }
 
             // Uniqueness (PK + unique constraints).
             for group in &state.unique_groups {
@@ -1693,32 +1911,34 @@ impl<'a> Audit<'a> {
         // (`failed > 0`) must fail the check regardless — an inexact row must
         // never mask a real violation. Only when no disagreement is found does
         // `inexact` downgrade the check to `NotChecked` (couldn't fully verify).
-        for family in &mut self.families {
-            let (failed, missing) = family.compare().map_err(family_index_error)?;
-            let (status, detail) = if failed > 0 {
-                (
-                    CheckStatus::Exact,
-                    format!(
-                        "{failed} parent aggregate(s) disagreed with the child sum{}",
-                        if missing { " (missing children)" } else { "" }
-                    ),
-                )
-            } else if family.inexact {
-                (
-                    CheckStatus::NotChecked,
-                    "family sum not evaluated (unparseable money values)".to_string(),
-                )
-            } else {
-                (
-                    CheckStatus::Exact,
-                    "0 parent aggregate(s) disagreed with the child sum".to_string(),
-                )
-            };
-            report.record(family.slug.clone(), status, failed == 0, detail);
+        if output_mode != OutputMode::SchemaOnly {
+            for family in &mut self.families {
+                let (failed, missing) = family.compare().map_err(family_index_error)?;
+                let (status, detail) = if failed > 0 {
+                    (
+                        CheckStatus::Exact,
+                        format!(
+                            "{failed} parent aggregate(s) disagreed with the child sum{}",
+                            if missing { " (missing children)" } else { "" }
+                        ),
+                    )
+                } else if family.inexact {
+                    (
+                        CheckStatus::NotChecked,
+                        "family sum not evaluated (unparseable money values)".to_string(),
+                    )
+                } else {
+                    (
+                        CheckStatus::Exact,
+                        "0 parent aggregate(s) disagreed with the child sum".to_string(),
+                    )
+                };
+                report.record(family.slug.clone(), status, failed == 0, detail);
+            }
         }
 
         // Sampled distributions.
-        self.finish_distributions(report, distributions);
+        self.finish_distributions(report, distributions, output_mode);
         Ok(())
     }
 
@@ -1726,8 +1946,18 @@ impl<'a> Audit<'a> {
         &self,
         report: &mut VerificationReport,
         distributions: &[DistributionExpectation],
+        output_mode: OutputMode,
     ) {
         for expectation in distributions {
+            if output_mode == OutputMode::SchemaOnly {
+                report.record(
+                    format!("distribution:{}.{}", expectation.table, expectation.column),
+                    CheckStatus::NotChecked,
+                    false,
+                    "schema-only output contains no rows to sample".to_string(),
+                );
+                continue;
+            }
             let Some(state) = self.tables.get(&expectation.table) else {
                 report.record(
                     format!("distribution:{}.{}", expectation.table, expectation.column),
@@ -2076,6 +2306,28 @@ fn money_minor(value: &PkValue) -> Option<(i128, u32)> {
         PkValue::Text(s) => parse_decimal(s.trim().trim_matches('\'')),
         PkValue::Null => None,
     }
+}
+
+fn decimal_fits(value: &PkValue, precision: u32, scale: u32) -> bool {
+    // A non-null value that does not parse as a decimal counts as a violation
+    // by design: rendering unparseable text into a decimal column is broken
+    // output, not missing evidence (unlike the `NotChecked` downgrades used
+    // where evidence is genuinely absent).
+    let Some((minor, actual_scale)) = money_minor(value) else {
+        return matches!(value, PkValue::Null);
+    };
+    if actual_scale > scale {
+        return false;
+    }
+    let Some(rescaled) = rescale(minor, actual_scale, scale) else {
+        return false;
+    };
+    let Some(limit) = 10u128.checked_pow(precision) else {
+        // The parser's i128 representation already bounds the value more
+        // tightly than decimal precisions above 38.
+        return true;
+    };
+    rescaled.unsigned_abs() < limit
 }
 
 fn parse_decimal(text: &str) -> Option<(i128, u32)> {

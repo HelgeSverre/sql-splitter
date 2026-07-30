@@ -617,7 +617,9 @@ fn run_verified(
         _ => None,
     };
 
-    let verifier = verify::GenerationVerifier::new(&plan).dialect(render.dialect);
+    let verifier = verify::GenerationVerifier::new(&plan)
+        .dialect(render.dialect)
+        .output_mode(render.mode);
 
     // Render SQL into a protected temp file beside the destination.
     let mut sql_output = AtomicOutput::create(&destination).map_err(|error| {

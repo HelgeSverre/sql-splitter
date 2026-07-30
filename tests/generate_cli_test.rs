@@ -369,6 +369,32 @@ fn verify_generates_audits_and_publishes_to_a_real_file() {
     assert!(published.contains("INSERT INTO"), "{published}");
 }
 
+#[test]
+fn verify_supports_data_only_and_schema_only_output() {
+    let dir = tempfile::tempdir().unwrap();
+    for (mode, expected, forbidden) in [
+        ("--data-only", "INSERT INTO", "CREATE TABLE"),
+        ("--schema-only", "CREATE TABLE", "INSERT INTO"),
+    ] {
+        let output_path = dir.path().join(format!("{}.sql", &mode[2..]));
+        let run = sql_splitter_bin()
+            .args(["generate", "--config", SIMPLE_MODEL, mode, "--verify", "-o"])
+            .arg(&output_path)
+            .output()
+            .expect("failed to run sql-splitter");
+
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{mode} verification failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let sql = fs::read_to_string(output_path).unwrap();
+        assert!(sql.contains(expected), "{mode} output: {sql}");
+        assert!(!sql.contains(forbidden), "{mode} output: {sql}");
+    }
+}
+
 // ===========================================================================
 // Dump-to-model and dump-to-SQL workflows
 // ===========================================================================

@@ -23,6 +23,7 @@ pub use model::{
     ModelDefaults, ModelKind, ModifierConfig, OutputMode, OutputModel, PlannerConfig,
     ProfileInference, ProfileMetadata, RelationshipModel, RelationshipReference, RowsModel,
     SourceModel, SourceValueUse, SyntheticFile, SyntheticModel, TableModel, TableSeed,
+    MAX_OUTPUT_BATCH_SIZE,
 };
 pub use overrides::{
     ColumnRuleOverride, OutputOverride, OverridesKind, PortableTableOverride, RootSeedOverride,

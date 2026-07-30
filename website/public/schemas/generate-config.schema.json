@@ -1355,8 +1355,10 @@
       "type": "object",
       "properties": {
         "batch_size": {
+          "description": "Rows per rendered batch. Compilation accepts `1..=MAX_OUTPUT_BATCH_SIZE`.",
           "type": ["integer", "null"],
-          "minimum": 0
+          "maximum": 1000000,
+          "minimum": 1
         },
         "dialect": {
           "type": ["string", "null"]
@@ -1390,7 +1392,8 @@
       "properties": {
         "batch_size": {
           "type": ["integer", "null"],
-          "minimum": 0
+          "maximum": 1000000,
+          "minimum": 1
         },
         "dialect": {
           "type": ["string", "null"]

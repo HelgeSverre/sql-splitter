@@ -6,6 +6,73 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Return the declared character limit of a bounded SQL text type.
+///
+/// This recognizes the common MySQL, PostgreSQL, SQLite, and MSSQL spellings.
+/// Length-less text types and non-text precision declarations return `None`.
+pub(crate) fn declared_character_length(source_type: &str) -> Option<usize> {
+    let open = source_type.find('(')?;
+    let close = source_type[open + 1..].find(')')? + open + 1;
+    let type_name = source_type[..open]
+        .trim()
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    if !matches!(
+        type_name.as_str(),
+        "char"
+            | "varchar"
+            | "nchar"
+            | "nvarchar"
+            | "character"
+            | "character varying"
+            | "national char"
+            | "national character"
+            | "national character varying"
+            | "bpchar"
+    ) {
+        return None;
+    }
+    source_type[open + 1..close].trim().parse().ok()
+}
+
+/// Return the exact value range of a fixed-width SQL integer type.
+pub(crate) fn declared_integer_bounds(source_type: &str) -> Option<(i128, i128)> {
+    let lower = source_type.trim().to_ascii_lowercase();
+    let type_name = lower.split(['(', ' ', '[']).find(|part| !part.is_empty())?;
+    let unsigned = lower.split_whitespace().any(|part| part == "unsigned");
+    let signed = match type_name {
+        "tinyint" => (i8::MIN as i128, i8::MAX as i128, u8::MAX as i128),
+        "smallint" | "int2" | "smallserial" => {
+            (i16::MIN as i128, i16::MAX as i128, u16::MAX as i128)
+        }
+        "mediumint" => (-8_388_608, 8_388_607, 16_777_215),
+        "int" | "integer" | "int4" | "serial" => {
+            (i32::MIN as i128, i32::MAX as i128, u32::MAX as i128)
+        }
+        "bigint" | "int8" | "bigserial" => (i64::MIN as i128, i64::MAX as i128, u64::MAX as i128),
+        _ => return None,
+    };
+    Some(if unsigned {
+        (0, signed.2)
+    } else {
+        (signed.0, signed.1)
+    })
+}
+
+/// Return `(precision, scale)` for a bounded fixed-point SQL decimal type.
+pub(crate) fn declared_decimal_shape(source_type: &str) -> Option<(u32, u32)> {
+    let open = source_type.find('(')?;
+    let close = source_type[open + 1..].find(')')? + open + 1;
+    let type_name = source_type[..open].trim().to_ascii_lowercase();
+    if !matches!(type_name.as_str(), "decimal" | "numeric" | "dec" | "fixed") {
+        return None;
+    }
+    let mut parts = source_type[open + 1..close].split(',').map(str::trim);
+    let precision = parts.next()?.parse().ok()?;
+    let scale = parts.next().unwrap_or("0").parse().ok()?;
+    (scale <= precision).then_some((precision, scale))
+}
+
 /// Coarse-grained classification of a SQL column type, independent of the
 /// source dialect's exact type name. Generation strategies key off this
 /// instead of re-deriving it from `source_type`.
@@ -419,5 +486,30 @@ mod tests {
         let yaml = "{ name: id, type: bigint, nullable: false, bogus: true }";
         let err = serde_yaml_ng::from_str::<PortableColumn>(yaml).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn declared_character_length_only_accepts_bounded_text_types() {
+        assert_eq!(declared_character_length("varchar(8)"), Some(8));
+        assert_eq!(declared_character_length("VARCHAR(255)"), Some(255));
+        assert_eq!(declared_character_length("character varying(42)"), Some(42));
+        assert_eq!(declared_character_length("nvarchar(12)"), Some(12));
+        assert_eq!(declared_character_length("text"), None);
+        assert_eq!(declared_character_length("decimal(10,2)"), None);
+        assert_eq!(declared_character_length("geometry(4326)"), None);
+    }
+
+    #[test]
+    fn declared_numeric_shapes_capture_width_and_signedness() {
+        assert_eq!(declared_integer_bounds("tinyint unsigned"), Some((0, 255)));
+        assert_eq!(declared_integer_bounds("smallint"), Some((-32_768, 32_767)));
+        assert_eq!(
+            declared_integer_bounds("bigint unsigned"),
+            Some((0, u64::MAX as i128))
+        );
+        assert_eq!(declared_integer_bounds("decimal(10,2)"), None);
+        assert_eq!(declared_decimal_shape("decimal(10,8)"), Some((10, 8)));
+        assert_eq!(declared_decimal_shape("NUMERIC(12)"), Some((12, 0)));
+        assert_eq!(declared_decimal_shape("varchar(12)"), None);
     }
 }

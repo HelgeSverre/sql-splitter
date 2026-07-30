@@ -56,7 +56,8 @@ use crate::synthetic::model::{
     RowsModel, SourceModel, SyntheticModel, TableModel, TableSeed,
 };
 use crate::synthetic::schema::{
-    PortableColumn, PortableRelationship, PortableSchema, PortableTable, SqlTypeFamily,
+    declared_character_length, PortableColumn, PortableRelationship, PortableSchema, PortableTable,
+    SqlTypeFamily,
 };
 
 // --- Precedence & confidence -------------------------------------------------
@@ -364,8 +365,9 @@ impl ModelInference {
                 ));
                 continue;
             };
+            let portable = detach_missing_schema_relationships(schema, portable, &mut warnings);
             let table_model = self.infer_table(
-                portable,
+                &portable,
                 Some(table_evidence),
                 &referenced,
                 &mut decisions,
@@ -382,8 +384,9 @@ impl ModelInference {
             if tables.contains_key(name) {
                 continue;
             }
+            let portable = detach_missing_schema_relationships(schema, portable, &mut warnings);
             let table_model = self.infer_table(
-                portable,
+                &portable,
                 None,
                 &referenced,
                 &mut decisions,
@@ -616,6 +619,47 @@ impl ModelInference {
     }
 }
 
+/// Remove source-schema foreign keys whose parent table is absent from the
+/// parsed dump. Partial dumps commonly retain these constraints even though
+/// they omit the referenced tables. The missing relationship cannot be
+/// generated or rendered, and its columns must receive ordinary generators.
+fn detach_missing_schema_relationships(
+    schema: &PortableSchema,
+    table: &PortableTable,
+    warnings: &mut Vec<Diagnostic>,
+) -> PortableTable {
+    let mut portable = table.clone();
+    let original_len = portable.relationships.len();
+    portable.relationships.retain(|relationship| {
+        // Table lookup follows the codebase's case-insensitive convention
+        // (`Schema::get_table_id`): a `REFERENCES Customers` constraint against
+        // a `customers` table is present, not missing.
+        if schema.tables.contains_key(&relationship.referenced_table)
+            || schema
+                .tables
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case(&relationship.referenced_table))
+        {
+            return true;
+        }
+        warnings.push(Diagnostic::warning(
+            &codes::DETACHED_DEPENDENCY,
+            format!("tables.{}.relationships", table.name),
+            format!(
+                "source relationship `{}` on table `{}` references table `{}`, which is absent from the dump; its foreign key is detached and omitted from the rendered DDL",
+                relationship.name.as_deref().unwrap_or("(unnamed)"),
+                table.name,
+                relationship.referenced_table
+            ),
+        ));
+        false
+    });
+    if portable.relationships.len() != original_len {
+        portable.create_statement = None;
+    }
+    portable
+}
+
 /// Resolve one column's candidates into a rule + decision, applying precedence
 /// and recording rejected alternatives (without values).
 fn resolve_column(
@@ -649,6 +693,9 @@ fn resolve_column(
         .collect();
 
     let mut modifiers = Vec::new();
+    if let Some(modifier) = character_limit_modifier(ctx, &winner) {
+        modifiers.push(modifier);
+    }
     if let Some(modifier) = sparse_modifier(ctx, &winner) {
         modifiers.push(modifier);
     }
@@ -669,6 +716,32 @@ fn resolve_column(
     };
 
     (rule, decision, winner.source_literals)
+}
+
+/// Keep inferred semantic and credential text within a bounded SQL text type.
+///
+/// The plain `string` fallback already receives a schema-capped range. Literal
+/// replay generators carry values accepted by the source database. Other
+/// inferred text generators have variable output lengths and need an explicit
+/// final cap. This modifier precedes `null_rate`, so a nullable value is
+/// truncated before it can become `NULL`.
+fn character_limit_modifier(ctx: &ColumnContext<'_>, winner: &Candidate) -> Option<ModifierConfig> {
+    if ctx.column().family != SqlTypeFamily::Text {
+        return None;
+    }
+    if matches!(
+        winner.generator.kind.as_str(),
+        "string" | "constant" | "weighted_choice" | "observed_sample" | "database_default" | "null"
+    ) {
+        return None;
+    }
+    let max_length = declared_character_length(&ctx.column().source_type)?;
+    Some(ModifierConfig {
+        kind: "truncate".to_string(),
+        args: [("max_length".to_string(), yaml(max_length))]
+            .into_iter()
+            .collect(),
+    })
 }
 
 /// Infer one column's generator from its schema alone — declared name and type,
@@ -753,27 +826,11 @@ fn is_bounded_generator(kind: &str) -> bool {
     )
 }
 
-/// The maximum character length declared by a text type such as `varchar(8)`,
-/// `char(10)` or `nvarchar(255)`. `None` for length-less text types (`text`,
-/// `longtext`, a bare `varchar`), which impose no fixed cap.
-fn declared_char_length(source_type: &str) -> Option<usize> {
-    let open = source_type.find('(')?;
-    let close = source_type[open + 1..].find(')')? + open + 1;
-    // A precision/scale pair (e.g. `decimal(10,2)`) keeps the first number;
-    // text length declarations are a single number anyway.
-    source_type[open + 1..close]
-        .split(',')
-        .next()?
-        .trim()
-        .parse::<usize>()
-        .ok()
-}
-
 /// Whether a text column declared as `source_type` can hold a 36-char UUID
 /// string. Length-less text types have no cap and so always fit.
 fn text_column_fits_uuid(source_type: &str) -> bool {
     const UUID_LEN: usize = 36;
-    declared_char_length(source_type).is_none_or(|n| n >= UUID_LEN)
+    declared_character_length(source_type).is_none_or(|n| n >= UUID_LEN)
 }
 
 /// A high-cardinality generator (kind + args) for a unique `column` whose
@@ -1003,14 +1060,5 @@ mod uuid_length_tests {
             high_cardinality_generator(&text_col("text")).map(|(k, _)| k),
             Some("uuid".to_string())
         );
-    }
-
-    #[test]
-    fn declared_char_length_parses_type_lengths() {
-        assert_eq!(declared_char_length("varchar(8)"), Some(8));
-        assert_eq!(declared_char_length("VARCHAR(255)"), Some(255));
-        assert_eq!(declared_char_length("char(10)"), Some(10));
-        assert_eq!(declared_char_length("text"), None);
-        assert_eq!(declared_char_length("longtext"), None);
     }
 }
