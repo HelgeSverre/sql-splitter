@@ -8,7 +8,8 @@
 
 use super::{generator, generator_with, yaml, Candidate, ColumnContext, Confidence, Precedence};
 use crate::synthetic::schema::{
-    declared_character_length, declared_decimal_shape, declared_integer_bounds, SqlTypeFamily,
+    conservative_integer_generation_bounds, declared_character_length, declared_decimal_shape,
+    SqlTypeFamily,
 };
 
 /// Propose the schema-justified candidates for a column.
@@ -98,7 +99,8 @@ pub(super) fn type_fallback(ctx: &ColumnContext<'_>) -> Candidate {
 }
 
 fn clamp_integer_bounds(ctx: &ColumnContext<'_>, min: i64, max: i64) -> (i64, i64) {
-    let Some((declared_min, declared_max)) = declared_integer_bounds(&ctx.column().source_type)
+    let Some((declared_min, declared_max)) =
+        conservative_integer_generation_bounds(&ctx.column().source_type)
     else {
         return (min, max);
     };

@@ -36,14 +36,18 @@ fn render(plan: GenerationPlan) -> String {
 }
 
 fn render_mode(plan: GenerationPlan, mode: OutputMode) -> String {
-    let mut buffer = Vec::new();
-    let mut renderer = SqlRenderer::new(
-        &mut buffer,
+    render_with_options(
+        plan,
         RenderOptions {
             mode,
             ..RenderOptions::default()
         },
-    );
+    )
+}
+
+fn render_with_options(plan: GenerationPlan, options: RenderOptions) -> String {
+    let mut buffer = Vec::new();
+    let mut renderer = SqlRenderer::new(&mut buffer, options);
     GenerationEngine::new(plan).run(&mut renderer).unwrap();
     renderer.finish().unwrap();
     String::from_utf8(buffer).unwrap()
@@ -246,6 +250,44 @@ tables:
         report.failed("decimal_shape:metrics.latitude"),
         "{:?}",
         report.checks
+    );
+}
+
+#[test]
+fn mssql_tinyint_values_above_signed_tinyint_range_are_valid() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+source: { dialect: mssql }
+tables:
+  metrics:
+    rows: { kind: fixed, count: 2 }
+    schema:
+      name: metrics
+      columns:
+        - { name: attempts, type: tinyint, nullable: false }
+    columns:
+      attempts: { generator: { kind: integer, min: 200, max: 255 } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan).dialect(SqlDialect::Mssql);
+    let sql = render_with_options(
+        plan,
+        RenderOptions {
+            dialect: SqlDialect::Mssql,
+            source_dialect: Some(SqlDialect::Mssql),
+            ..RenderOptions::default()
+        },
+    );
+    let path = write(dir.path(), "mssql-tinyint.sql", &sql);
+
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(report.passed(), "{:?}", report.checks);
+    assert!(
+        report.status_of("integer_range:metrics.attempts").is_none(),
+        "bare tinyint has no dialect-independent exact range"
     );
 }
 

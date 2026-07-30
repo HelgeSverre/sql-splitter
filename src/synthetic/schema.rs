@@ -41,7 +41,10 @@ pub(crate) fn declared_integer_bounds(source_type: &str) -> Option<(i128, i128)>
     let type_name = lower.split(['(', ' ', '[']).find(|part| !part.is_empty())?;
     let unsigned = lower.split_whitespace().any(|part| part == "unsigned");
     let signed = match type_name {
-        "tinyint" => (i8::MIN as i128, i8::MAX as i128, u8::MAX as i128),
+        // Bare TINYINT is signed in MySQL and unsigned in MSSQL. Without the
+        // source dialect there is no exact range to verify.
+        "tinyint" if unsigned => (i8::MIN as i128, i8::MAX as i128, u8::MAX as i128),
+        "tinyint" => return None,
         "smallint" | "int2" | "smallserial" => {
             (i16::MIN as i128, i16::MAX as i128, u16::MAX as i128)
         }
@@ -56,6 +59,16 @@ pub(crate) fn declared_integer_bounds(source_type: &str) -> Option<(i128, i128)>
         (0, signed.2)
     } else {
         (signed.0, signed.1)
+    })
+}
+
+/// Return a range that is safe to generate for every dialect that uses the
+/// declared fixed-width integer spelling.
+pub(crate) fn conservative_integer_generation_bounds(source_type: &str) -> Option<(i128, i128)> {
+    declared_integer_bounds(source_type).or_else(|| {
+        let lower = source_type.trim().to_ascii_lowercase();
+        let type_name = lower.split(['(', ' ', '[']).find(|part| !part.is_empty())?;
+        (type_name == "tinyint").then_some((0, i8::MAX as i128))
     })
 }
 
@@ -502,6 +515,11 @@ mod tests {
     #[test]
     fn declared_numeric_shapes_capture_width_and_signedness() {
         assert_eq!(declared_integer_bounds("tinyint unsigned"), Some((0, 255)));
+        assert_eq!(declared_integer_bounds("tinyint"), None);
+        assert_eq!(
+            conservative_integer_generation_bounds("tinyint"),
+            Some((0, 127))
+        );
         assert_eq!(declared_integer_bounds("smallint"), Some((-32_768, 32_767)));
         assert_eq!(
             declared_integer_bounds("bigint unsigned"),
