@@ -1,0 +1,22 @@
+[package]
+name = "sql-splitter-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_yaml_ng = "0.10"
+sql-splitter = { path = "..", default-features = false }
+
+[[bin]]
+name = "model_yaml"
+path = "fuzz_targets/model_yaml.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

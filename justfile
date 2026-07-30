@@ -54,6 +54,17 @@ verify-realworld:
 generate-smoke: build
     ./scripts/smoke-test-generate.sh
 
+# Fuzz model YAML parsing, compilation, and bounded row generation.
+[group('test')]
+fuzz-model-yaml seconds="60":
+    mkdir -p fuzz/corpus/model_yaml
+    cargo +nightly fuzz run model_yaml fuzz/corpus/model_yaml fuzz/seeds/model_yaml -- -max_len=65536 -max_total_time={{ seconds }} -timeout=5 -rss_limit_mb=2048 -malloc_limit_mb=512 -dict=fuzz/model_yaml.dict
+
+# Remove redundant model YAML corpus entries while preserving coverage.
+[group('test')]
+fuzz-model-yaml-cmin:
+    cargo +nightly fuzz cmin model_yaml fuzz/corpus/model_yaml -- -timeout=5
+
 # Format code (Rust + Markdown)
 [group('lint')]
 fmt:

@@ -1,0 +1,15 @@
+version: 1
+kind: model
+defaults: { inference: schema }
+source: { dialect: oracle }
+output:
+  dialect: db2
+  mode: schema_and_data
+  batch_size: 4294967295
+tables:
+  users:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: users
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }

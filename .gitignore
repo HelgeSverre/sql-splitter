@@ -1,5 +1,11 @@
 # Build artifacts
 /target/
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
+/fuzz/target/
+# cargo-fuzz worker logs written to the repo root by `-jobs=N` runs
+/fuzz-*.log
 
 # Profiling
 *.prof

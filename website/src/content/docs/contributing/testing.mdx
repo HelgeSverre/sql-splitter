@@ -59,6 +59,44 @@ Test against real SQL dumps:
 just verify-realworld
 ```
 
+### Model YAML Fuzzing
+
+The `model_yaml` target mutates complete `generate` model files. It exercises
+UTF-8 and YAML rejection, error formatting, model compilation, bounded row
+generation, and SQL rendering to an I/O sink. The target runs the public
+in-process pipeline. CLI integration tests cover argument parsing and file
+handling.
+
+Install `cargo-fuzz` and the Rust nightly toolchain once:
+
+```bash
+cargo install cargo-fuzz
+rustup toolchain install nightly
+```
+
+Run it for 60 seconds, or pass a longer duration:
+
+```bash
+just fuzz-model-yaml
+just fuzz-model-yaml 600
+```
+
+The run limits each input to 64 KiB, each table to eight rows, each input to
+five seconds, and each process to explicit allocation and resident-memory
+bounds. Minimize the accumulated corpus after a long or parallel run:
+
+```bash
+just fuzz-model-yaml-cmin
+```
+
+Crashing inputs are written to `fuzz/artifacts/model_yaml/`. Reproduce and
+minimize one with:
+
+```bash
+cargo +nightly fuzz run model_yaml fuzz/artifacts/model_yaml/<artifact>
+cargo +nightly fuzz tmin model_yaml fuzz/artifacts/model_yaml/<artifact>
+```
+
 ## Test Fixtures
 
 Located in `tests/fixtures/`:

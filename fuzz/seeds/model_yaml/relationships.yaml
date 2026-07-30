@@ -1,0 +1,44 @@
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 7
+tables:
+  accounts:
+    rows: { kind: fixed, count: 4 }
+    schema:
+      name: accounts
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+  events:
+    rows:
+      kind: relation.children
+      parent: accounts
+      count: 8
+      distribution: { kind: fixed, mean: 2.0, min: 1.0, max: 3.0 }
+    schema:
+      name: events
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: account_id, type: bigint, nullable: false }
+        - { name: payload, type: json, nullable: false }
+      relationships:
+        - name: events_account
+          columns: [account_id]
+          referenced_table: accounts
+          referenced_columns: [id]
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      account_id:
+        generator: { kind: relation.foreign_key, relationship: events_account }
+      payload:
+        generator: { kind: json_value, value: { source: fuzzer } }
+    relationships:
+      - name: events_account
+        columns: [account_id]
+        references: { table: accounts, columns: [id] }

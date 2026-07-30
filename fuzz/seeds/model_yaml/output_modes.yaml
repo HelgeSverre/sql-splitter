@@ -1,0 +1,22 @@
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 9
+output: { mode: data_only, inserts: insert, batch_size: 4 }
+tables:
+  line_items:
+    rows: { kind: fixed, count: 6 }
+    schema:
+      name: line_items
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: sku, type: "varchar(16)", nullable: false }
+        - { name: price, type: "decimal(10,2)", nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      sku:
+        generator: { kind: string, min_length: 4, max_length: 16 }
+      price:
+        generator: { kind: decimal, min: "0.01", max: "9999.99" }

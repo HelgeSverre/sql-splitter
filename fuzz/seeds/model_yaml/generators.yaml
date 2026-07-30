@@ -1,0 +1,29 @@
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 42
+tables:
+  users:
+    rows: { kind: fixed, count: 12 }
+    schema:
+      name: users
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: email, type: "varchar(255)", nullable: false, unique: true }
+        - { name: active, type: boolean, nullable: false }
+        - { name: created_at, type: datetime, nullable: false }
+    columns:
+      id:
+        generator: { kind: sequence, start: 1 }
+      email:
+        generator: { kind: internet.email }
+        modifiers:
+          - { kind: unique, max_attempts: 20, on_exhaustion: error }
+      active:
+        generator: { kind: boolean, probability: 0.8 }
+      created_at:
+        generator:
+          kind: datetime
+          min: "2020-01-01 00:00:00"
+          max: "2030-01-01 00:00:00"
