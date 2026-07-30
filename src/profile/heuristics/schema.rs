@@ -9,7 +9,7 @@
 use super::{generator, generator_with, yaml, Candidate, ColumnContext, Confidence, Precedence};
 use crate::synthetic::schema::{
     conservative_integer_generation_bounds, declared_character_length, declared_decimal_shape,
-    SqlTypeFamily,
+    SqlTypeFamily, MAX_GENERATED_DECIMAL_SCALE,
 };
 
 /// Propose the schema-justified candidates for a column.
@@ -126,16 +126,38 @@ fn decimal_bounds(ctx: &ColumnContext<'_>) -> (f64, f64, u8) {
     let mut scale = evidence.and_then(|e| e.decimal_scale).unwrap_or(2);
 
     if let Some((precision, declared_scale)) = declared_decimal_shape(&ctx.column().source_type) {
-        scale = u8::try_from(declared_scale).unwrap_or(u8::MAX);
+        let generated_scale = declared_scale.min(MAX_GENERATED_DECIMAL_SCALE);
+        scale = generated_scale as u8;
         let whole_digits = precision - declared_scale;
-        let limit = 10f64.powi(whole_digits as i32) - 10f64.powi(-(declared_scale as i32));
-        if limit.is_finite() {
-            min = min.max(-limit);
-            max = max.min(limit);
+        let limit = i32::try_from(whole_digits)
+            .ok()
+            .zip(i32::try_from(generated_scale).ok())
+            .map(|(whole_digits, generated_scale)| {
+                let exclusive_limit = 10f64.powi(whole_digits);
+                let inclusive_limit = exclusive_limit - 10f64.powi(-generated_scale);
+                if inclusive_limit < exclusive_limit {
+                    inclusive_limit
+                } else {
+                    // At large precisions, f64 cannot represent the final
+                    // decimal quantum below the exclusive power-of-ten bound.
+                    exclusive_limit.next_down()
+                }
+            })
+            .filter(|limit| limit.is_finite());
+        if let Some(limit) = limit {
+            let declared_min = -limit;
+            let declared_max = limit;
+            if max < declared_min {
+                min = declared_min;
+                max = declared_min;
+            } else if min > declared_max {
+                min = declared_max;
+                max = declared_max;
+            } else {
+                min = min.max(declared_min);
+                max = max.min(declared_max);
+            }
         }
-    }
-    if min > max {
-        min = max;
     }
     (min, max, scale)
 }

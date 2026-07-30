@@ -439,6 +439,14 @@ pub struct OrderFamilyPlanner {
     unit_price_minor: IntRange,
     /// The child fan-out distribution the per-order line count is drawn from.
     lines: LineDist,
+    /// Optional global limit from `CompileOptions::max_rows`, applied to the
+    /// realized child total rather than only its compile-time estimate.
+    child_row_limit: Option<u64>,
+    /// Number of parent rows that will request a family. Used to reserve the
+    /// distribution's minimum child count for later parents under a cap.
+    parent_rows: u64,
+    /// Child rows already assigned to prior parents.
+    child_rows_generated: u64,
     tax: RateChoice,
     discount: RateChoice,
     /// Fixed shipping charge in minor units (0 when unconfigured).
@@ -758,15 +766,24 @@ impl Iterator for TaxWeights {
 impl OrderFamilyPlanner {
     /// Compute a bounded money summary for the order at `order_index`, seeded by
     /// that index so the result is independent of any spill threshold.
-    fn compute(&self, order_index: u64) -> Result<OrderSummary, GenerateError> {
+    fn compute(&mut self, order_index: u64) -> Result<OrderSummary, GenerateError> {
         let mut rng = self.seed.stream(StreamId::operator(
             self.parent_table.clone(),
             "commerce.order_family",
             format!("family.{order_index}"),
         ));
 
-        let line_count = usize::try_from(self.lines.draw(&mut rng).max(0))
-            .map_err(|_| overflow("order-family line count"))?;
+        let drawn_line_count = self.lines.draw(&mut rng).max(0);
+        let bounded_line_count = self.child_row_limit.map_or(drawn_line_count, |limit| {
+            let remaining = limit.saturating_sub(self.child_rows_generated);
+            let later_parents = self.parent_rows.saturating_sub(order_index + 1);
+            let minimum_per_parent = u64::try_from(self.lines.min).unwrap_or(u64::MAX);
+            let reserved = later_parents.saturating_mul(minimum_per_parent);
+            let available = remaining.saturating_sub(reserved);
+            drawn_line_count.min(i128::from(available))
+        });
+        let line_count =
+            usize::try_from(bounded_line_count).map_err(|_| overflow("order-family line count"))?;
         let line_rng = rng.clone();
 
         // First pass: retain only the aggregate while advancing the original RNG
@@ -815,7 +832,7 @@ impl OrderFamilyPlanner {
             .and_then(|value| value.checked_add(shipping))
             .ok_or_else(|| overflow("order grand total"))?;
 
-        Ok(OrderSummary {
+        let summary = OrderSummary {
             subtotal,
             discount: discount_total,
             tax: tax_total,
@@ -825,7 +842,14 @@ impl OrderFamilyPlanner {
             line_rng,
             discount_plan,
             tax_plan,
-        })
+        };
+        let generated =
+            u64::try_from(line_count).map_err(|_| overflow("realized child row count"))?;
+        self.child_rows_generated = self
+            .child_rows_generated
+            .checked_add(generated)
+            .ok_or_else(|| overflow("realized child row total"))?;
+        Ok(summary)
     }
 
     /// Render a money minor-unit amount for a column of `family`.
@@ -1191,6 +1215,13 @@ fn compile_order_family(
     let quantity = int_range(config.args.get("quantity"), 1, 1);
     let unit_price_minor = unit_price_range(config.args.get("unit_price"), scale);
     let lines = compile_line_range(facts, path, &mut bag);
+    let child_row_limit = facts
+        .and_then(|facts| facts.get("child_row_limit"))
+        .and_then(Value::as_u64);
+    let parent_rows = facts
+        .and_then(|facts| facts.get("parent_rows"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let tax = compile_rate(config.args.get("tax"), "tax", path, &mut bag);
     let discount = compile_rate(config.args.get("discount"), "discount", path, &mut bag);
     let shipping_minor = compile_shipping(config.args.get("shipping"), scale);
@@ -1231,6 +1262,9 @@ fn compile_order_family(
         quantity,
         unit_price_minor,
         lines,
+        child_row_limit,
+        parent_rows,
+        child_rows_generated: 0,
         tax,
         discount,
         shipping_minor,

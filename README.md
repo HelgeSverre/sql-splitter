@@ -553,7 +553,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 | `--rows`                        | Global absolute root row count                                                               | —                     |
 | `--table-rows`                  | Per-table absolute row-count override (`table=count`, repeatable)                            | —                     |
 | `--table-scale`                 | Per-table row-count scale override (`table=factor`, repeatable)                              | —                     |
-| `--max-rows`                    | Cap applied to every table's row count, last                                                 | —                     |
+| `--max-rows`                    | Cap applied last to every table, including family-planner child rows                         | —                     |
 | `--tables`                      | Only generate these tables (comma-separated globs)                                           | all                   |
 | `--exclude`                     | Exclude these tables (comma-separated globs)                                                 | none                  |
 | `--seed`                        | Run root seed, overriding the model's own `seed:`                                            | —                     |

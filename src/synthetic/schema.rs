@@ -6,6 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Largest fixed-point scale supported by the built-in decimal generator.
+pub(crate) const MAX_GENERATED_DECIMAL_SCALE: u32 = 18;
+
 /// Return the declared character limit of a bounded SQL text type.
 ///
 /// This recognizes the common MySQL, PostgreSQL, SQLite, and MSSQL spellings.
@@ -36,15 +39,24 @@ pub(crate) fn declared_character_length(source_type: &str) -> Option<usize> {
 }
 
 /// Return the exact value range of a fixed-width SQL integer type.
-pub(crate) fn declared_integer_bounds(source_type: &str) -> Option<(i128, i128)> {
+///
+/// Bare `tinyint` requires a dialect because MySQL defines it as signed while
+/// MSSQL defines it as unsigned. Explicit `unsigned` declarations are
+/// unambiguous.
+pub(crate) fn declared_integer_bounds(
+    source_type: &str,
+    dialect: Option<SqlDialect>,
+) -> Option<(i128, i128)> {
     let lower = source_type.trim().to_ascii_lowercase();
     let type_name = lower.split(['(', ' ', '[']).find(|part| !part.is_empty())?;
     let unsigned = lower.split_whitespace().any(|part| part == "unsigned");
     let signed = match type_name {
-        // Bare TINYINT is signed in MySQL and unsigned in MSSQL. Without the
-        // source dialect there is no exact range to verify.
         "tinyint" if unsigned => (i8::MIN as i128, i8::MAX as i128, u8::MAX as i128),
-        "tinyint" => return None,
+        "tinyint" => match dialect {
+            Some(SqlDialect::MySql) => (i8::MIN as i128, i8::MAX as i128, u8::MAX as i128),
+            Some(SqlDialect::Mssql) => (0, u8::MAX as i128, u8::MAX as i128),
+            Some(SqlDialect::Postgres | SqlDialect::Sqlite) | None => return None,
+        },
         "smallint" | "int2" | "smallserial" => {
             (i16::MIN as i128, i16::MAX as i128, u16::MAX as i128)
         }
@@ -65,7 +77,7 @@ pub(crate) fn declared_integer_bounds(source_type: &str) -> Option<(i128, i128)>
 /// Return a range that is safe to generate for every dialect that uses the
 /// declared fixed-width integer spelling.
 pub(crate) fn conservative_integer_generation_bounds(source_type: &str) -> Option<(i128, i128)> {
-    declared_integer_bounds(source_type).or_else(|| {
+    declared_integer_bounds(source_type, None).or_else(|| {
         let lower = source_type.trim().to_ascii_lowercase();
         let type_name = lower.split(['(', ' ', '[']).find(|part| !part.is_empty())?;
         (type_name == "tinyint").then_some((0, i8::MAX as i128))
@@ -514,18 +526,32 @@ mod tests {
 
     #[test]
     fn declared_numeric_shapes_capture_width_and_signedness() {
-        assert_eq!(declared_integer_bounds("tinyint unsigned"), Some((0, 255)));
-        assert_eq!(declared_integer_bounds("tinyint"), None);
+        assert_eq!(
+            declared_integer_bounds("tinyint unsigned", None),
+            Some((0, 255))
+        );
+        assert_eq!(
+            declared_integer_bounds("tinyint", Some(SqlDialect::MySql)),
+            Some((-128, 127))
+        );
+        assert_eq!(
+            declared_integer_bounds("tinyint", Some(SqlDialect::Mssql)),
+            Some((0, 255))
+        );
+        assert_eq!(declared_integer_bounds("tinyint", None), None);
         assert_eq!(
             conservative_integer_generation_bounds("tinyint"),
             Some((0, 127))
         );
-        assert_eq!(declared_integer_bounds("smallint"), Some((-32_768, 32_767)));
         assert_eq!(
-            declared_integer_bounds("bigint unsigned"),
+            declared_integer_bounds("smallint", None),
+            Some((-32_768, 32_767))
+        );
+        assert_eq!(
+            declared_integer_bounds("bigint unsigned", None),
             Some((0, u64::MAX as i128))
         );
-        assert_eq!(declared_integer_bounds("decimal(10,2)"), None);
+        assert_eq!(declared_integer_bounds("decimal(10,2)", None), None);
         assert_eq!(declared_decimal_shape("decimal(10,8)"), Some((10, 8)));
         assert_eq!(declared_decimal_shape("NUMERIC(12)"), Some((12, 0)));
         assert_eq!(declared_decimal_shape("varchar(12)"), None);

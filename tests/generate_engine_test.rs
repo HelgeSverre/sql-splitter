@@ -2778,6 +2778,36 @@ fn collect_family_child_rows(family_budget_bytes: u64) -> Vec<Vec<GeneratedValue
 }
 
 #[test]
+fn max_rows_caps_the_realized_family_child_total() {
+    let model = SyntheticFile::parse_str(ORDER_FAMILY_MODEL)
+        .expect("valid model YAML")
+        .into_model()
+        .expect("document is a model");
+    let plan = ModelCompiler::standard()
+        .compile(
+            model,
+            CompileOptions {
+                max_rows: Some(8),
+                ..CompileOptions::default()
+            },
+        )
+        .expect("capped family model compiles");
+    let mut sink = CollectingSink::default();
+    GenerationEngine::new(plan).run(&mut sink).unwrap();
+
+    assert_eq!(sink.rows["orders"].len(), 8);
+    assert_eq!(
+        sink.rows["order_items"].len(),
+        8,
+        "the family planner must honor the global per-table cap"
+    );
+    assert!(
+        sink.rows.values().all(|rows| rows.len() <= 8),
+        "every realized table must stay within max_rows"
+    );
+}
+
+#[test]
 fn family_child_rows_reference_their_producing_parent() {
     // Every order_items.order_id must be a real orders.id in 1..=200.
     let sql = render_family_at_budget(ORDER_FAMILY_MODEL, 1 << 30);

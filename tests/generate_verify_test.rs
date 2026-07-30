@@ -254,6 +254,51 @@ tables:
 }
 
 #[test]
+fn non_integer_text_fails_the_integer_range_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(CORE);
+    let report = verify_corrupted(plan, dir.path(), |sql| {
+        rewrite_first_tuple_value(sql, "INSERT INTO `users`", 1, "'not-an-integer'")
+    });
+    assert!(
+        report.failed("integer_range:users.code"),
+        "{:?}",
+        report.checks
+    );
+}
+
+#[test]
+fn mysql_bare_tinyint_uses_the_signed_range() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+source: { dialect: mysql }
+tables:
+  metrics:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: metrics
+      columns:
+        - { name: attempts, type: tinyint, nullable: false }
+    columns:
+      attempts: { generator: { kind: integer, min: 200, max: 200 } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan);
+    let sql = render(plan);
+    let path = write(dir.path(), "mysql-tinyint.sql", &sql);
+
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(
+        report.failed("integer_range:metrics.attempts"),
+        "{:?}",
+        report.checks
+    );
+}
+
+#[test]
 fn mssql_tinyint_values_above_signed_tinyint_range_are_valid() {
     let model = r#"
 version: 1
@@ -286,8 +331,8 @@ tables:
     let report = verifier.verify_path(&path).unwrap();
     assert!(report.passed(), "{:?}", report.checks);
     assert!(
-        report.status_of("integer_range:metrics.attempts").is_none(),
-        "bare tinyint has no dialect-independent exact range"
+        report.status_of("integer_range:metrics.attempts") == Some(CheckStatus::Exact),
+        "MSSQL tinyint must be verified against its unsigned range"
     );
 }
 
@@ -324,6 +369,99 @@ tables:
 
     let report = verifier.verify_path(&path).unwrap();
     assert!(report.failed("expected_ddl"), "{:?}", report.checks);
+}
+
+#[test]
+fn schema_only_verification_rejects_changed_types_and_constraints() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+tables:
+  parents:
+    rows: { kind: fixed, count: 0 }
+    schema:
+      name: parents
+      primary_key: [id]
+      unique_constraints:
+        - { name: uq_parents_code, columns: [code] }
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: code, type: "varchar(16)", nullable: false, unique: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      code: { generator: { kind: string, min_length: 4, max_length: 4 } }
+  children:
+    rows: { kind: fixed, count: 0 }
+    schema:
+      name: children
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: parent_id, type: bigint, nullable: false }
+      relationships:
+        - name: fk_children_parent
+          columns: [parent_id]
+          referenced_table: parents
+          referenced_columns: [id]
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan).output_mode(OutputMode::SchemaOnly);
+    let sql = render_mode(plan, OutputMode::SchemaOnly);
+    let clean_path = write(dir.path(), "clean-schema.sql", &sql);
+    let clean_report = verifier.verify_path(&clean_path).unwrap();
+    assert!(clean_report.passed(), "{:?}", clean_report.checks);
+
+    let cases = [
+        (
+            "type",
+            replace_once(
+                sql.clone(),
+                "`id` bigint NOT NULL",
+                "`id` varchar(32) NOT NULL",
+            ),
+        ),
+        (
+            "nullability",
+            replace_once(
+                sql.clone(),
+                "`code` varchar(16) NOT NULL",
+                "`code` varchar(16)",
+            ),
+        ),
+        (
+            "primary-key",
+            replace_once(
+                sql.clone(),
+                "PRIMARY KEY (`id`)",
+                "CHECK (`id` IS NOT NULL)",
+            ),
+        ),
+        (
+            "unique",
+            replace_once(sql.clone(), "UNIQUE (`code`)", "CHECK (`code` IS NOT NULL)"),
+        ),
+        (
+            "foreign-key",
+            sql.lines()
+                .filter(|line| !line.contains("FOREIGN KEY"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ];
+
+    for (case, corrupted) in cases {
+        let path = write(dir.path(), &format!("changed-{case}.sql"), &corrupted);
+        let report = verifier.verify_path(&path).unwrap();
+        assert!(
+            report.failed("expected_ddl"),
+            "{case} corruption was not detected: {:?}",
+            report.checks
+        );
+    }
 }
 
 #[test]

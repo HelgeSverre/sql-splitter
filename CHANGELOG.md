@@ -10,13 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`generate` model validation** — compilation now rejects an unsupported `source.dialect` or `output.dialect` (`GEN-DIALECT-INVALID`) and an `output.batch_size` of zero or above 1,000,000 (`GEN-OUTPUT-BATCH-SIZE`). The `--batch-size` CLI flag shares the same bound, and the generated JSON schema encodes the `1..=1_000_000` range for editor validation.
-- **`generate --verify` coverage** — verification now supports `--schema-only` and `--data-only` output: schema-only runs check that no rows were rendered, and checks without row evidence report "not checked" instead of a misleading pass or fail. Rendered values are also checked against declared column limits: character length, integer width, and `decimal(p,s)` shape each fail a named check when generated output violates them.
+- **`generate --verify` coverage** — verification now supports `--schema-only` and `--data-only` output: schema-only runs check that no rows were rendered and that the rendered columns, types, nullability, primary keys, unique constraints, and foreign keys match the compiled model. Checks without row evidence report "not checked" instead of a misleading pass or fail. Rendered values are also checked against declared column limits: character length, integer width, and `decimal(p,s)` shape each fail a named check when generated output violates them.
 - **Partial-dump foreign keys** — a source foreign key whose referenced table is absent from the dump is detached with a `GEN-DETACHED-DEPENDENCY` warning and omitted from the rendered DDL instead of producing a dangling constraint. The detached column falls back to an ordinary generator.
 - **`model_yaml` fuzz target** — a cargo-fuzz harness that mutates complete `generate` model files through YAML parsing, model compilation, and bounded row generation. Run it with `just fuzz-model-yaml`.
 
 ### Fixed
 
 - **`generate` declared-length handling** — the declared character length of a column is no longer mis-parsed from `decimal(10,2)`-style types, and semantic text truncation now applies before `null_rate` so nullable columns stay within their declared length.
+- **`generate` numeric inference and verification** — MySQL and MSSQL now use their dialect-specific bare `tinyint` ranges. Inferred decimal rules cap generated scale at the supported maximum and clamp evidence that lies outside the declared precision. Integer verification now rejects non-integer text instead of treating it as in range.
+- **`generate` row caps** — `--max-rows` now also caps rows emitted by family planners, including `commerce.order_family` child rows.
+- **`generate` inferred foreign keys** — case-insensitive foreign-key table references are normalized to the table name stored in the model, so compilation does not reject valid references that differ only by case.
 
 ## [1.16.1] - 2026-07-28
 

@@ -19,6 +19,7 @@ use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::model::{GeneratorConfig, ModifierConfig};
 use crate::synthetic::schema::{
     declared_character_length, PortableColumn, PortableTable, SqlTypeFamily,
+    MAX_GENERATED_DECIMAL_SCALE,
 };
 
 use crate::generate::registry::{
@@ -1126,7 +1127,7 @@ impl GeneratorFactory for DecimalFactory {
         let mut bag = DiagnosticBag::default();
         let scale = config.args.get("scale").and_then(parse_usize).unwrap_or(2);
         let scale = match u32::try_from(scale) {
-            Ok(scale) if scale <= 18 => scale,
+            Ok(scale) if scale <= MAX_GENERATED_DECIMAL_SCALE => scale,
             _ => {
                 bag.error(
                     crate::diagnostic::codes::DECIMAL_SCALE.code,

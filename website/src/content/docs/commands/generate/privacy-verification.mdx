@@ -93,7 +93,9 @@ coverage than ordinary INSERT rows.
 
 `--verify` also follows the selected output mode. Data-only output uses the
 compiled model schema to decode rows without requiring emitted DDL. Schema-only
-output audits the DDL and requires that no row data was rendered.
+output requires that no row data was rendered. It also compares the rendered
+columns, types, nullability, primary keys, unique constraints, and foreign keys
+with the compiled model.
 
 ## Honest coverage gaps
 

@@ -760,7 +760,7 @@ use sql_splitter::generate::{
 };
 use sql_splitter::generate::{GenerateError, GeneratedValue};
 use sql_splitter::profile::evidence::{
-    BooleanEvidence, CharClasses, StringShapeEvidence, TopKEntry,
+    BooleanEvidence, CharClasses, NumericEvidence, StringShapeEvidence, TopKEntry,
 };
 use sql_splitter::profile::{InferenceOptions, ModelInference};
 use sql_splitter::synthetic::model::RowsModel;
@@ -1417,6 +1417,73 @@ fn numeric_fallback_respects_integer_width_and_decimal_precision() {
         .as_f64()
         .expect("numeric decimal max");
     assert!((99.0..=99.999_999_99).contains(&max), "max={max}");
+
+    let wide_decimal_schema = one_column_schema(
+        "measurements",
+        portable_column("reading", "decimal(38,20)", SqlTypeFamily::Decimal),
+    );
+    let mut wide_decimal = ModelInference::standard()
+        .infer(
+            &wide_decimal_schema,
+            &one_column_profile("measurements", blank_evidence("reading", 0), 0),
+        )
+        .unwrap();
+    let wide_generator = wide_decimal
+        .column_rule("measurements", "reading")
+        .and_then(|rule| rule.generator.as_ref())
+        .expect("wide decimal fallback");
+    assert_eq!(wide_generator.args["scale"].as_u64(), Some(18));
+    assert!(
+        wide_generator.args["max"].as_f64().unwrap() < 1e18,
+        "the inferred maximum must remain below the exclusive integer-digit limit"
+    );
+    wide_decimal
+        .model
+        .tables
+        .get_mut("measurements")
+        .expect("measurements table")
+        .rows = RowsModel::Fixed { count: 32 };
+    let wide_plan = ModelCompiler::standard()
+        .compile(wide_decimal.model, CompileOptions::default())
+        .expect("a valid declared scale above the generator limit still compiles");
+    let mut wide_sink = CollectSink { rows: Vec::new() };
+    GenerationEngine::new(wide_plan)
+        .run(&mut wide_sink)
+        .expect("the capped-scale decimal model generates");
+    let decimal_limit = 10i128.pow(36);
+    assert!(wide_sink.rows.iter().all(|value| {
+        matches!(
+            value,
+            GeneratedValue::Decimal { minor, scale: 18 }
+                if (-decimal_limit..decimal_limit).contains(minor)
+        )
+    }));
+
+    let below_range_schema = one_column_schema(
+        "ratings",
+        portable_column("score", "decimal(3,0)", SqlTypeFamily::Decimal),
+    );
+    let mut below_range_evidence = blank_evidence("score", 0);
+    below_range_evidence.numeric = Some(NumericEvidence {
+        min: -5_000.0,
+        max: -4_000.0,
+        mean: -4_500.0,
+        p50: -4_500.0,
+        p90: -4_100.0,
+        p99: -4_010.0,
+    });
+    let below_range = ModelInference::standard()
+        .infer(
+            &below_range_schema,
+            &one_column_profile("ratings", below_range_evidence, 0),
+        )
+        .unwrap();
+    let below_generator = below_range
+        .column_rule("ratings", "score")
+        .and_then(|rule| rule.generator.as_ref())
+        .expect("below-range decimal fallback");
+    assert_eq!(below_generator.args["min"].as_f64(), Some(-999.0));
+    assert_eq!(below_generator.args["max"].as_f64(), Some(-999.0));
 }
 
 #[test]
@@ -1465,6 +1532,53 @@ fn inference_detaches_a_foreign_key_whose_parent_is_absent_from_the_dump() {
         .expect("orders plan")
         .relationships
         .is_empty());
+}
+
+#[test]
+fn inference_canonicalizes_a_case_insensitive_foreign_key_parent() {
+    let customers = table_with(
+        "customers",
+        vec![pk_col("id", "bigint", SqlTypeFamily::BigInteger)],
+        vec!["id"],
+        vec![],
+    );
+    let orders = table_with(
+        "orders",
+        vec![
+            pk_col("id", "bigint", SqlTypeFamily::BigInteger),
+            portable_column("customer_id", "bigint", SqlTypeFamily::BigInteger),
+        ],
+        vec!["id"],
+        vec![fk("orders_customer", "customer_id", "Customers")],
+    );
+    let schema = schema_of(vec![customers, orders]);
+    let result = ModelInference::standard()
+        .infer(
+            &schema,
+            &row_count_profile(&[("customers", 2), ("orders", 2)]),
+        )
+        .expect("case-insensitive relationship infers");
+
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == codes::DETACHED_DEPENDENCY.code),
+        "a present parent must not be detached"
+    );
+    assert_eq!(
+        result.model.tables["orders"].relationships[0]
+            .references
+            .table,
+        "customers"
+    );
+    assert_eq!(
+        result.model.tables["orders"].schema.relationships[0].referenced_table,
+        "customers"
+    );
+    ModelCompiler::standard()
+        .compile(result.model, CompileOptions::default())
+        .expect("canonicalized relationship compiles");
 }
 
 #[test]

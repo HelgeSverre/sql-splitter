@@ -74,7 +74,19 @@ pub(crate) fn render_create_table(
             + table.check_constraints.len(),
     );
     for column in &table.columns {
-        clauses.push(render_column_def(column, from, to, warnings));
+        let has_single_column_constraint = table.unique_constraints.iter().any(|constraint| {
+            matches!(
+                constraint.columns.as_slice(),
+                [name] if name.eq_ignore_ascii_case(&column.name)
+            )
+        });
+        clauses.push(render_column_def(
+            column,
+            from,
+            to,
+            warnings,
+            column.unique && !has_single_column_constraint,
+        ));
     }
     if !table.primary_key.is_empty() {
         let cols = join_idents(to, &table.primary_key);
@@ -160,11 +172,15 @@ fn render_column_def(
     from: SqlDialect,
     to: SqlDialect,
     warnings: &mut WarningCollector,
+    render_inline_unique: bool,
 ) -> String {
     let mapped_type = map_column_type(&column.source_type, from, to, warnings);
     let mut def = format!("  {} {mapped_type}", quote_ident(to, &column.name),);
     if !column.nullable {
         def.push_str(" NOT NULL");
+    }
+    if render_inline_unique {
+        def.push_str(" UNIQUE");
     }
     if let Some(default_sql) = &column.default_sql {
         let _ = write!(def, " DEFAULT {default_sql}");
@@ -324,9 +340,11 @@ mod tests {
 
     #[test]
     fn renders_unique_check_fk_and_index_clauses() {
+        let mut code = column("code", "VARCHAR(16)", false);
+        code.unique = true;
         let table = PortableTable {
             name: "orders".into(),
-            columns: vec![column("customer_id", "BIGINT", false)],
+            columns: vec![column("customer_id", "BIGINT", false), code],
             primary_key: vec![],
             unique_constraints: vec![PortableUniqueConstraint {
                 name: Some("uq_customer".into()),
@@ -356,6 +374,8 @@ mod tests {
             false,
         );
         assert!(sql.contains("CONSTRAINT \"uq_customer\" UNIQUE (\"customer_id\")"));
+        assert!(sql.contains("\"code\" VARCHAR(16) NOT NULL UNIQUE"));
+        assert!(!sql.contains("\"customer_id\" BIGINT NOT NULL UNIQUE"));
         assert!(sql.contains(
             "ALTER TABLE \"orders\" ADD CONSTRAINT \"fk_customer\" FOREIGN KEY (\"customer_id\") REFERENCES \"customers\" (\"id\");"
         ));

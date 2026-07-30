@@ -294,6 +294,7 @@ impl ModelCompiler {
                 &resolved,
                 &selected,
                 !schema_changed,
+                options.max_rows,
                 &mut bag,
             ));
         }
@@ -559,6 +560,7 @@ impl ModelCompiler {
         resolved: &BTreeMap<String, u64>,
         selected: &BTreeSet<String>,
         preserve_raw: bool,
+        max_rows: Option<u64>,
         bag: &mut DiagnosticBag,
     ) -> PlannedTable {
         let seed = resolve_seed(&table.seed, root_seed);
@@ -648,8 +650,17 @@ impl ModelCompiler {
             }
         }
 
-        let planners =
-            self.compile_planners(model, name, table, compile_seed, family_ctx, resolved, bag);
+        let planners = self.compile_planners(
+            model,
+            name,
+            table,
+            compile_seed,
+            family_ctx,
+            resolved,
+            rows,
+            max_rows,
+            bag,
+        );
         let claims = collect_claims(table, &planners);
 
         let columns: Vec<PlannedColumn> = table
@@ -736,6 +747,8 @@ impl ModelCompiler {
         seed: SeedRoot,
         family_ctx: &FamilyContext,
         resolved: &BTreeMap<String, u64>,
+        parent_rows: u64,
+        max_rows: Option<u64>,
         bag: &mut DiagnosticBag,
     ) -> Vec<PlannerInfo> {
         let relationship_names = relationship_names(table);
@@ -777,11 +790,22 @@ impl ModelCompiler {
                 let is_family = config.args.contains_key("children");
                 let is_cross_table = descriptor.cross_table;
                 let injected;
-                let config = if let Some(facts) = family_ctx.facts.get(&(table_name.to_string(), index)) {
+                let config = if let Some(facts) =
+                    family_ctx.facts.get(&(table_name.to_string(), index))
+                {
                     let mut cloned = config.clone();
+                    let mut facts = facts.clone();
+                    if let (Some(max_rows), serde_yaml_ng::Value::Mapping(mapping)) =
+                        (max_rows, &mut facts)
+                    {
+                        mapping.insert("child_row_limit".into(), max_rows.into());
+                    }
+                    if let serde_yaml_ng::Value::Mapping(mapping) = &mut facts {
+                        mapping.insert("parent_rows".into(), parent_rows.into());
+                    }
                     cloned.args.insert(
                         super::planners::order_family::FAMILY_FACTS_KEY.to_string(),
-                        facts.clone(),
+                        facts,
                     );
                     injected = cloned;
                     &injected

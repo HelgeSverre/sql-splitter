@@ -346,9 +346,12 @@ impl ModelInference {
             .values()
             .flat_map(|table| {
                 table.relationships.iter().flat_map(|fk| {
+                    let referenced_table = canonical_table_name(schema, &fk.referenced_table)
+                        .unwrap_or(&fk.referenced_table)
+                        .to_string();
                     fk.referenced_columns
                         .iter()
-                        .map(move |column| (fk.referenced_table.clone(), column.clone()))
+                        .map(move |column| (referenced_table.clone(), column.clone()))
                 })
             })
             .collect();
@@ -629,35 +632,53 @@ fn detach_missing_schema_relationships(
     warnings: &mut Vec<Diagnostic>,
 ) -> PortableTable {
     let mut portable = table.clone();
-    let original_len = portable.relationships.len();
-    portable.relationships.retain(|relationship| {
-        // Table lookup follows the codebase's case-insensitive convention
-        // (`Schema::get_table_id`): a `REFERENCES Customers` constraint against
-        // a `customers` table is present, not missing.
-        if schema.tables.contains_key(&relationship.referenced_table)
-            || schema
-                .tables
-                .keys()
-                .any(|name| name.eq_ignore_ascii_case(&relationship.referenced_table))
-        {
-            return true;
-        }
-        warnings.push(Diagnostic::warning(
-            &codes::DETACHED_DEPENDENCY,
-            format!("tables.{}.relationships", table.name),
-            format!(
-                "source relationship `{}` on table `{}` references table `{}`, which is absent from the dump; its foreign key is detached and omitted from the rendered DDL",
-                relationship.name.as_deref().unwrap_or("(unnamed)"),
-                table.name,
-                relationship.referenced_table
-            ),
-        ));
-        false
-    });
-    if portable.relationships.len() != original_len {
+    let mut detached = false;
+    portable.relationships = table
+        .relationships
+        .iter()
+        .filter_map(|relationship| {
+            // Table lookup follows the codebase's case-insensitive convention
+            // (`Schema::get_table_id`). Normalize a matching spelling now because
+            // the compiled model uses exact table keys later.
+            if let Some(canonical) =
+                canonical_table_name(schema, &relationship.referenced_table)
+            {
+                let mut relationship = relationship.clone();
+                relationship.referenced_table = canonical.to_string();
+                return Some(relationship);
+            }
+            detached = true;
+            warnings.push(Diagnostic::warning(
+                &codes::DETACHED_DEPENDENCY,
+                format!("tables.{}.relationships", table.name),
+                format!(
+                    "source relationship `{}` on table `{}` references table `{}`, which is absent from the dump; its foreign key is detached and omitted from the rendered DDL",
+                    relationship.name.as_deref().unwrap_or("(unnamed)"),
+                    table.name,
+                    relationship.referenced_table
+                ),
+            ));
+            None
+        })
+        .collect();
+    if detached {
         portable.create_statement = None;
     }
     portable
+}
+
+fn canonical_table_name<'a>(schema: &'a PortableSchema, name: &str) -> Option<&'a str> {
+    schema
+        .tables
+        .get_key_value(name)
+        .map(|(canonical, _)| canonical.as_str())
+        .or_else(|| {
+            schema
+                .tables
+                .keys()
+                .find(|candidate| candidate.eq_ignore_ascii_case(name))
+                .map(String::as_str)
+        })
 }
 
 /// Resolve one column's candidates into a rule + decision, applying precedence

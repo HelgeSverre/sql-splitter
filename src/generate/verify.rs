@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 
+use crate::convert::{map_column_type, WarningCollector};
 use crate::parser::mysql_insert::{
     hash_pk_tuple, parse_insert_tuple, visit_insert_rows_with, InsertRowContext, PkTuple, PkValue,
     RowExtraction,
@@ -179,6 +180,7 @@ pub struct GenerationVerifier {
     spec: PlanSpec,
     plan_schema: Schema,
     dialect: SqlDialect,
+    source_dialect: Option<SqlDialect>,
     output_mode: OutputMode,
     membership_budget: usize,
     temp: TempConfig,
@@ -194,10 +196,13 @@ impl GenerationVerifier {
             .dialect
             .or(plan.input_dialect)
             .unwrap_or(SqlDialect::MySql);
+        let source_dialect = plan.input_dialect;
+        let constraint_dialect = source_dialect.unwrap_or(dialect);
         Self {
-            spec: PlanSpec::from_plan(plan),
+            spec: PlanSpec::from_plan(plan, constraint_dialect),
             plan_schema: schema_from_plan(plan),
             dialect,
+            source_dialect,
             output_mode: OutputMode::SchemaAndData,
             membership_budget: DEFAULT_MEMBERSHIP_BUDGET,
             temp: TempConfig::default(),
@@ -208,6 +213,8 @@ impl GenerationVerifier {
     /// Override the dialect the generated SQL is parsed with.
     pub fn dialect(mut self, dialect: SqlDialect) -> Self {
         self.dialect = dialect;
+        self.spec
+            .resolve_integer_limits(self.source_dialect.unwrap_or(dialect));
         self
     }
 
@@ -280,6 +287,8 @@ impl GenerationVerifier {
         let mut audit = Audit::new(
             &self.spec,
             schema,
+            self.source_dialect.unwrap_or(self.dialect),
+            self.dialect,
             self.membership_budget,
             self.temp.clone(),
         );
@@ -505,9 +514,6 @@ struct PlanSpec {
 struct TableSpec {
     name: String,
     rows: u64,
-    /// Every column declared by the compiled schema, including nullable and
-    /// database-produced columns. Used to audit schema-only output.
-    declared_columns: Vec<String>,
     /// Columns the compiled engine must render on every row. Database-produced
     /// columns are excluded unless a relationship requires the engine to
     /// materialize that parent key.
@@ -519,8 +525,17 @@ struct TableSpec {
     primary_key: Vec<String>,
     /// Uniqueness key groups: the PK plus every UNIQUE constraint / column.
     unique_groups: Vec<Vec<String>>,
+    /// Column declarations used to compare rendered DDL with the plan.
+    ddl_columns: Vec<DdlColumnSpec>,
+    /// UNIQUE groups expected in rendered DDL, excluding the primary key.
+    ddl_unique_groups: Vec<Vec<String>>,
+    /// Foreign keys expected in rendered DDL.
+    ddl_relationships: Vec<RelSpec>,
     /// Character limits declared by bounded text columns.
     character_limits: Vec<(String, usize)>,
+    /// Fixed-width integer declarations, retained so a dialect override can
+    /// resolve ambiguous spellings such as bare `tinyint`.
+    integer_declarations: Vec<(String, String)>,
     /// Exact ranges declared by fixed-width integer columns.
     integer_limits: Vec<(String, i128, i128)>,
     /// Precision and scale declared by fixed-point decimal columns.
@@ -536,7 +551,15 @@ struct TableSpec {
     family_child: bool,
 }
 
+/// One column declaration needed for exact schema comparison.
+struct DdlColumnSpec {
+    name: String,
+    source_type: String,
+    nullable: bool,
+}
+
 /// A child→parent relationship reduced to the names the audit needs.
+#[derive(Clone)]
 struct RelSpec {
     name: Option<String>,
     columns: Vec<String>,
@@ -556,7 +579,7 @@ struct FamilySpec {
 }
 
 impl PlanSpec {
-    fn from_plan(plan: &GenerationPlan) -> Self {
+    fn from_plan(plan: &GenerationPlan, integer_dialect: SqlDialect) -> Self {
         let materialized_parent_keys: HashSet<(String, String)> = plan
             .tables
             .iter()
@@ -572,10 +595,16 @@ impl PlanSpec {
         let tables = plan
             .tables
             .iter()
-            .map(|table| TableSpec::from_table(table, &materialized_parent_keys))
+            .map(|table| TableSpec::from_table(table, &materialized_parent_keys, integer_dialect))
             .collect();
         let families = extract_families(plan);
         Self { tables, families }
+    }
+
+    fn resolve_integer_limits(&mut self, dialect: SqlDialect) {
+        for table in &mut self.tables {
+            table.resolve_integer_limits(dialect);
+        }
     }
 }
 
@@ -583,6 +612,7 @@ impl TableSpec {
     fn from_table(
         table: &PlannedTable,
         materialized_parent_keys: &HashSet<(String, String)>,
+        integer_dialect: SqlDialect,
     ) -> Self {
         let mut unique_groups: Vec<Vec<String>> = Vec::new();
         if !table.schema.primary_key.is_empty() {
@@ -599,6 +629,21 @@ impl TableSpec {
                 unique_groups.push(single);
             }
         }
+        let mut ddl_unique_groups: Vec<Vec<String>> = table
+            .schema
+            .unique_constraints
+            .iter()
+            .map(|constraint| constraint.columns.clone())
+            .collect();
+        for column in table.schema.columns.iter().filter(|column| column.unique) {
+            let group = vec![column.name.clone()];
+            if !ddl_unique_groups
+                .iter()
+                .any(|existing| identifier_groups_equal(existing, &group))
+            {
+                ddl_unique_groups.push(group);
+            }
+        }
 
         let rendered_columns: Vec<String> = table
             .columns
@@ -613,11 +658,15 @@ impl TableSpec {
             .filter(|column| !column.nullable && rendered_columns.contains(&column.name))
             .map(|column| column.name.clone())
             .collect();
-        let declared_columns = table
+        let ddl_columns = table
             .schema
             .columns
             .iter()
-            .map(|column| column.name.clone())
+            .map(|column| DdlColumnSpec {
+                name: column.name.clone(),
+                source_type: column.source_type.clone(),
+                nullable: column.nullable,
+            })
             .collect();
         let character_limits = table
             .schema
@@ -628,15 +677,20 @@ impl TableSpec {
                     .map(|limit| (column.name.clone(), limit))
             })
             .collect();
-        let integer_limits = table
+        let integer_declarations: Vec<(String, String)> = table
             .schema
             .columns
             .iter()
-            .filter_map(|column| {
-                declared_integer_bounds(&column.source_type)
-                    .map(|(min, max)| (column.name.clone(), min, max))
+            .filter(|column| {
+                matches!(
+                    column.family,
+                    crate::synthetic::schema::SqlTypeFamily::Integer
+                        | crate::synthetic::schema::SqlTypeFamily::BigInteger
+                )
             })
+            .map(|column| (column.name.clone(), column.source_type.clone()))
             .collect();
+        let integer_limits = resolve_integer_declarations(&integer_declarations, integer_dialect);
         let decimal_limits = table
             .schema
             .columns
@@ -657,6 +711,17 @@ impl TableSpec {
                 parent_columns: rel.parent_columns.clone(),
             })
             .collect();
+        let ddl_relationships = table
+            .schema
+            .relationships
+            .iter()
+            .map(|relationship| RelSpec {
+                name: relationship.name.clone(),
+                columns: relationship.columns.clone(),
+                parent_table: relationship.referenced_table.clone(),
+                parent_columns: relationship.referenced_columns.clone(),
+            })
+            .collect();
 
         let predicates = table
             .planners
@@ -672,12 +737,15 @@ impl TableSpec {
         Self {
             name: table.name.clone(),
             rows: table.rows,
-            declared_columns,
             rendered_columns,
             non_null_columns,
             primary_key: table.schema.primary_key.clone(),
             unique_groups,
+            ddl_columns,
+            ddl_unique_groups,
+            ddl_relationships,
             character_limits,
+            integer_declarations,
             integer_limits,
             decimal_limits,
             relationships,
@@ -685,6 +753,171 @@ impl TableSpec {
             family_child,
         }
     }
+
+    fn resolve_integer_limits(&mut self, dialect: SqlDialect) {
+        self.integer_limits = resolve_integer_declarations(&self.integer_declarations, dialect);
+    }
+}
+
+fn resolve_integer_declarations(
+    declarations: &[(String, String)],
+    dialect: SqlDialect,
+) -> Vec<(String, i128, i128)> {
+    declarations
+        .iter()
+        .filter_map(|(name, source_type)| {
+            declared_integer_bounds(source_type, Some(dialect))
+                .map(|(min, max)| (name.clone(), min, max))
+        })
+        .collect()
+}
+
+fn compare_table_ddl(
+    planned: &TableSpec,
+    reparsed: &TableSchema,
+    source_dialect: SqlDialect,
+    target_dialect: SqlDialect,
+) -> Vec<String> {
+    let mut mismatches = Vec::new();
+    let mut warnings = WarningCollector::new();
+
+    for expected in &planned.ddl_columns {
+        let Some(actual) = reparsed.get_column(&expected.name) else {
+            mismatches.push(format!("{}.{} is missing", planned.name, expected.name));
+            continue;
+        };
+        let expected_type = map_column_type(
+            &expected.source_type,
+            source_dialect,
+            target_dialect,
+            &mut warnings,
+        );
+        if normalize_sql_type(&actual.source_type) != normalize_sql_type(&expected_type) {
+            mismatches.push(format!(
+                "{}.{} has type `{}` instead of `{expected_type}`",
+                planned.name, expected.name, actual.source_type
+            ));
+        }
+        if actual.is_nullable != expected.nullable {
+            mismatches.push(format!(
+                "{}.{} nullable={} instead of {}",
+                planned.name, expected.name, actual.is_nullable, expected.nullable
+            ));
+        }
+    }
+    for actual in &reparsed.columns {
+        if !planned
+            .ddl_columns
+            .iter()
+            .any(|expected| expected.name.eq_ignore_ascii_case(&actual.name))
+        {
+            mismatches.push(format!("{}.{} is unexpected", planned.name, actual.name));
+        }
+    }
+
+    let actual_primary_key: Vec<String> = reparsed
+        .primary_key
+        .iter()
+        .filter_map(|&id| reparsed.column(id))
+        .map(|column| column.name.clone())
+        .collect();
+    if normalize_identifier_group(&actual_primary_key)
+        != normalize_identifier_group(&planned.primary_key)
+    {
+        mismatches.push(format!(
+            "{} primary key differs from the plan",
+            planned.name
+        ));
+    }
+
+    let mut actual_unique_groups: Vec<Vec<String>> = reparsed
+        .unique_constraints
+        .iter()
+        .map(|constraint| constraint.columns.clone())
+        .collect();
+    for column in reparsed.columns.iter().filter(|column| column.is_unique) {
+        let group = vec![column.name.clone()];
+        if !actual_unique_groups
+            .iter()
+            .any(|existing| identifier_groups_equal(existing, &group))
+        {
+            actual_unique_groups.push(group);
+        }
+    }
+    if normalize_identifier_groups(&actual_unique_groups)
+        != normalize_identifier_groups(&planned.ddl_unique_groups)
+    {
+        mismatches.push(format!(
+            "{} unique constraints differ from the plan",
+            planned.name
+        ));
+    }
+
+    let actual_relationships: Vec<RelSpec> = reparsed
+        .foreign_keys
+        .iter()
+        .map(|relationship| RelSpec {
+            name: relationship.name.clone(),
+            columns: relationship.column_names.clone(),
+            parent_table: relationship.referenced_table.clone(),
+            parent_columns: relationship.referenced_columns.clone(),
+        })
+        .collect();
+    if normalize_relationships(&actual_relationships)
+        != normalize_relationships(&planned.ddl_relationships)
+    {
+        mismatches.push(format!(
+            "{} foreign keys differ from the plan",
+            planned.name
+        ));
+    }
+
+    mismatches
+}
+
+fn normalize_sql_type(source_type: &str) -> String {
+    source_type
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalize_identifier_group(columns: &[String]) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| column.to_ascii_lowercase())
+        .collect()
+}
+
+fn identifier_groups_equal(left: &[String], right: &[String]) -> bool {
+    normalize_identifier_group(left) == normalize_identifier_group(right)
+}
+
+fn normalize_identifier_groups(groups: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut normalized: Vec<Vec<String>> = groups
+        .iter()
+        .map(|group| normalize_identifier_group(group))
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_relationships(relationships: &[RelSpec]) -> Vec<(Vec<String>, String, Vec<String>)> {
+    let mut normalized: Vec<_> = relationships
+        .iter()
+        .map(|relationship| {
+            (
+                normalize_identifier_group(&relationship.columns),
+                relationship.parent_table.to_ascii_lowercase(),
+                normalize_identifier_group(&relationship.parent_columns),
+            )
+        })
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 /// Whether the compiled engine renders `column` on every row.
@@ -1247,14 +1480,16 @@ struct Audit<'a> {
     families: Vec<FamilyAcc>,
     /// Plan tables whose DDL never appeared in the output.
     missing_tables: Vec<String>,
-    /// `table.column` pairs the plan declares but the reparsed DDL lacks.
-    missing_columns: Vec<String>,
+    /// Exact DDL disagreements between the plan and reparsed output.
+    ddl_mismatches: Vec<String>,
 }
 
 impl<'a> Audit<'a> {
     fn new(
         spec: &'a PlanSpec,
         schema: &Schema,
+        source_dialect: SqlDialect,
+        target_dialect: SqlDialect,
         membership_budget: usize,
         temp: TempConfig,
     ) -> Self {
@@ -1262,17 +1497,18 @@ impl<'a> Audit<'a> {
 
         // Expected tables + DDL: every plan table must appear with its columns.
         let mut missing_tables = Vec::new();
-        let mut missing_columns = Vec::new();
+        let mut ddl_mismatches = Vec::new();
         for table in &spec.tables {
             match schema.get_table_id(&table.name) {
                 None => missing_tables.push(table.name.clone()),
                 Some(id) => {
                     if let Some(reparsed) = schema.table(id) {
-                        for col in &table.declared_columns {
-                            if reparsed.get_column_id(col).is_none() {
-                                missing_columns.push(format!("{}.{}", table.name, col));
-                            }
-                        }
+                        ddl_mismatches.extend(compare_table_ddl(
+                            table,
+                            reparsed,
+                            source_dialect,
+                            target_dialect,
+                        ));
                     }
                 }
             }
@@ -1354,7 +1590,7 @@ impl<'a> Audit<'a> {
             tables,
             families,
             missing_tables,
-            missing_columns,
+            ddl_mismatches,
         }
     }
 
@@ -1427,10 +1663,11 @@ impl<'a> Audit<'a> {
         }
         let mut integer_range_hits: Vec<String> = Vec::new();
         for (column, min, max) in &planned.integer_limits {
-            if value_of(column)
-                .and_then(int_of)
-                .is_some_and(|value| value < *min || value > *max)
-            {
+            let violates = match value_of(column) {
+                Some(PkValue::Null) | None => false,
+                Some(value) => int_of(value).is_none_or(|value| value < *min || value > *max),
+            };
+            if violates {
                 integer_range_hits.push(column.clone());
             }
         }
@@ -1612,10 +1849,13 @@ impl<'a> Audit<'a> {
         report.record(
             "expected_ddl".to_string(),
             CheckStatus::Exact,
-            self.missing_columns.is_empty(),
+            self.ddl_mismatches.is_empty(),
             format!(
-                "{} expected column(s) missing from the reparsed DDL",
-                self.missing_columns.len()
+                "{} DDL declaration mismatch(es) in reparsed output{}",
+                self.ddl_mismatches.len(),
+                self.ddl_mismatches
+                    .first()
+                    .map_or(String::new(), |first| format!("; first: {first}"))
             ),
         );
     }
