@@ -397,7 +397,7 @@ fn parse_column_def(def: &str, ordinal: ColumnId) -> Option<(Column, Option<Stri
     let caps = COLUMN_DEF_RE.captures(def)?;
     let whole = caps.get(0)?;
     let name = caps.get(1)?.as_str().to_string();
-    let type_str = caps.get(2)?.as_str().to_string();
+    let type_str = parse_column_type(caps.get(2)?.as_str(), &def[whole.end()..]);
 
     let col_type = ColumnType::from_mysql_type(&type_str);
     let is_nullable = !NOT_NULL_RE.is_match(def);
@@ -424,6 +424,74 @@ fn parse_column_def(def: &str, ordinal: ColumnId) -> Option<(Column, Option<Stri
     };
 
     Some((column, modifiers.inline_check))
+}
+
+/// Extend the first type token captured by [`COLUMN_DEF_RE`] through any
+/// following type words. The DDL tokenizer keeps parameter lists atomic, so
+/// this preserves types such as `DOUBLE PRECISION`, `CHARACTER VARYING(42)`,
+/// and `TIMESTAMP(6) WITH TIME ZONE` without consuming column modifiers.
+fn parse_column_type(first: &str, remainder: &str) -> String {
+    let tokens = tokenize_ddl(remainder);
+    let mut parts = vec![first];
+    for (index, token) in tokens.iter().enumerate() {
+        if starts_column_modifier(&tokens, index) {
+            break;
+        }
+        parts.push(token);
+    }
+    parts.join(" ")
+}
+
+fn starts_column_modifier(tokens: &[String], index: usize) -> bool {
+    let token = tokens[index].to_ascii_uppercase();
+    if token == "CHARACTER"
+        && tokens
+            .get(index + 1)
+            .is_some_and(|next| next.eq_ignore_ascii_case("SET"))
+    {
+        return true;
+    }
+
+    matches!(
+        token.as_str(),
+        "NOT"
+            | "NULL"
+            | "PRIMARY"
+            | "UNIQUE"
+            | "DEFAULT"
+            | "CHECK"
+            | "GENERATED"
+            | "AS"
+            | "AUTO_INCREMENT"
+            | "AUTOINCREMENT"
+            | "AUTO_RANDOM"
+            | "IDENTITY"
+            | "COLLATE"
+            | "CONSTRAINT"
+            | "REFERENCES"
+            | "COMMENT"
+            | "ON"
+            | "BINARY"
+            | "ASCII"
+            | "UNICODE"
+            | "BYTE"
+            | "VISIBLE"
+            | "INVISIBLE"
+            | "COLUMN_FORMAT"
+            | "ENGINE_ATTRIBUTE"
+            | "SECONDARY_ENGINE_ATTRIBUTE"
+            | "STORAGE"
+            | "SRID"
+            | "SPARSE"
+            | "FILESTREAM"
+            | "ROWGUIDCOL"
+            | "HIDDEN"
+            | "MASKED"
+            | "PERSISTED"
+            | "ENCRYPTED"
+            | "COMPRESSION"
+            | "KEY"
+    ) || token.starts_with("IDENTITY(")
 }
 
 /// Modifiers found after a column's name and type: UNIQUE, DEFAULT,
@@ -493,6 +561,17 @@ fn parse_column_modifiers(remainder: &str) -> ColumnModifiers {
                     }
                 }
                 i = j + 2;
+            }
+            "AS" => {
+                if tokens
+                    .get(i + 1)
+                    .is_some_and(|expression| expression.starts_with('('))
+                {
+                    modifiers.is_generated = true;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             "AUTO_INCREMENT" | "AUTOINCREMENT" => {
                 modifiers.is_identity = true;

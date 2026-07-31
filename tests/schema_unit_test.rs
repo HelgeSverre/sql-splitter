@@ -66,13 +66,20 @@ mod mod_tests {
             ColumnType::from_mysql_type("decimal(10,2) unsigned"),
             ColumnType::Decimal
         );
-        // The modifier guard must only strip trailing unsigned/signed/zerofill
-        // words: a genuine multi-word type name is never reduced to its first
-        // token (so `double precision` is not silently treated as `double`).
-        assert!(matches!(
+        // The modifier guard keeps genuine multi-word type names intact, and
+        // the classifier recognizes their full spelling.
+        assert_eq!(
             ColumnType::from_mysql_type("double precision"),
-            ColumnType::Other(_)
-        ));
+            ColumnType::Decimal
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("double precision unsigned"),
+            ColumnType::Decimal
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("interval day to second"),
+            ColumnType::DateTime
+        );
     }
 
     #[test]
@@ -309,6 +316,55 @@ mod ddl_tests {
         assert_eq!(state.default_sql.as_deref(), Some("'active'"));
 
         assert!(table.get_column("slug").unwrap().is_generated);
+    }
+
+    #[test]
+    fn parse_column_preserves_multi_word_types() {
+        let mut builder = SchemaBuilder::new();
+        builder
+            .parse_create_table(
+                "CREATE TABLE metrics (\
+                 score DOUBLE PRECISION NOT NULL, \
+                 label CHARACTER VARYING(42), \
+                 observed_at TIMESTAMP(6) WITH TIME ZONE, \
+                 elapsed INTERVAL DAY TO SECOND, \
+                 nickname VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci, \
+                 secret INT INVISIBLE NOT NULL, \
+                 subtotal DECIMAL(10,2) AS (quantity * price) STORED);",
+            )
+            .unwrap();
+        let schema = builder.build();
+        let table = schema.get_table("metrics").expect("table");
+
+        let score = table.get_column("score").expect("score");
+        assert_eq!(score.source_type, "DOUBLE PRECISION");
+        assert_eq!(score.col_type, ColumnType::Decimal);
+
+        let label = table.get_column("label").expect("label");
+        assert_eq!(label.source_type, "CHARACTER VARYING(42)");
+        assert_eq!(label.col_type, ColumnType::Text);
+
+        let observed_at = table.get_column("observed_at").expect("observed_at");
+        assert_eq!(observed_at.source_type, "TIMESTAMP(6) WITH TIME ZONE");
+        assert_eq!(observed_at.col_type, ColumnType::DateTime);
+
+        let elapsed = table.get_column("elapsed").expect("elapsed");
+        assert_eq!(elapsed.source_type, "INTERVAL DAY TO SECOND");
+        assert_eq!(elapsed.col_type, ColumnType::DateTime);
+
+        let nickname = table.get_column("nickname").expect("nickname");
+        assert_eq!(nickname.source_type, "VARCHAR(20)");
+        assert_eq!(nickname.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+
+        let secret = table.get_column("secret").expect("secret");
+        assert_eq!(secret.source_type, "INT");
+        assert_eq!(secret.col_type, ColumnType::Int);
+        assert!(!secret.is_nullable);
+
+        let subtotal = table.get_column("subtotal").expect("subtotal");
+        assert_eq!(subtotal.source_type, "DECIMAL(10,2)");
+        assert_eq!(subtotal.col_type, ColumnType::Decimal);
+        assert!(subtotal.is_generated);
     }
 
     #[test]

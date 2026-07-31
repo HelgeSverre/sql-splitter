@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`generate` declared-length handling** — the declared character length of a column is no longer mis-parsed from `decimal(10,2)`-style types, and semantic text truncation now applies before `null_rate` so nullable columns stay within their declared length.
+- **`generate` cross-dialect schema verification** — rendered multi-word SQL types such as PostgreSQL `DOUBLE PRECISION` are preserved when verification reparses the output, so valid cross-dialect runs no longer fail with a false type mismatch.
 - **`generate` numeric inference and verification** — MySQL and MSSQL now use their dialect-specific bare `tinyint` ranges. Inferred decimal rules cap generated scale at the supported maximum and clamp evidence that lies outside the declared precision. Integer verification now rejects non-integer text instead of treating it as in range.
 - **`generate` row caps** — `--max-rows` now also caps rows emitted by family planners, including `commerce.order_family` child rows.
 - **`generate` inferred foreign keys** — case-insensitive foreign-key table references are normalized to the table name stored in the model, so compilation does not reject valid references that differ only by case.

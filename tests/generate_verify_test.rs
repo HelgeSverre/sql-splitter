@@ -465,6 +465,44 @@ tables:
 }
 
 #[test]
+fn cross_dialect_multi_word_type_passes_exact_ddl_verification() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+source: { dialect: mysql }
+tables:
+  metrics:
+    rows: { kind: fixed, count: 0 }
+    schema:
+      name: metrics
+      columns:
+        - { name: score, type: double, nullable: false }
+    columns:
+      score: { generator: { kind: decimal, min: 0, max: 1, scale: 2 } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let plan = compile(model);
+    let verifier = GenerationVerifier::new(&plan)
+        .dialect(SqlDialect::Postgres)
+        .output_mode(OutputMode::SchemaOnly);
+    let sql = render_with_options(
+        plan,
+        RenderOptions {
+            dialect: SqlDialect::Postgres,
+            source_dialect: Some(SqlDialect::MySql),
+            mode: OutputMode::SchemaOnly,
+            ..RenderOptions::default()
+        },
+    );
+    assert!(sql.contains("DOUBLE PRECISION"), "{sql}");
+    let path = write(dir.path(), "postgres-schema.sql", &sql);
+
+    let report = verifier.verify_path(&path).unwrap();
+    assert!(report.passed(), "{:?}", report.checks);
+}
+
+#[test]
 fn corrupt_arity_fails_the_named_check() {
     let dir = tempfile::tempdir().unwrap();
     let plan = compile(CORE);

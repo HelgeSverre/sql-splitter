@@ -65,24 +65,19 @@ impl ColumnType {
         let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
 
         // MySQL numeric types can carry `unsigned`/`signed`/`zerofill`
-        // modifiers after the base name. MySQL 8 also omits the display width,
-        // so modern dumps write `bigint unsigned` (no parens). Reduce to the
-        // base name when every trailing word is one of those modifiers, while
-        // preserving genuine multi-word type names like `double precision` and
-        // `timestamp without time zone`.
-        let base_type = match base_type.split_whitespace().next() {
-            Some(first)
-                if base_type
-                    .split_whitespace()
-                    .skip(1)
-                    .all(|word| matches!(word, "unsigned" | "signed" | "zerofill")) =>
-            {
-                first
-            }
-            _ => base_type,
-        };
+        // modifiers after the base name. Remove only those trailing modifiers
+        // so genuine multi-word names such as `double precision` remain
+        // intact.
+        let mut base_words: Vec<_> = base_type.split_whitespace().collect();
+        while base_words
+            .last()
+            .is_some_and(|word| matches!(*word, "unsigned" | "signed" | "zerofill"))
+        {
+            base_words.pop();
+        }
+        let base_type = base_words.join(" ");
 
-        match base_type {
+        match base_type.as_str() {
             // Integer types (all dialects)
             "int" | "integer" | "tinyint" | "smallint" | "mediumint" | "int4" | "int2" => {
                 ColumnType::Int
@@ -91,15 +86,41 @@ impl ColumnType {
             "serial" | "smallserial" => ColumnType::Int,
             "bigint" | "int8" | "bigserial" => ColumnType::BigInt,
             // Text types (all dialects)
-            "char" | "varchar" | "text" | "tinytext" | "mediumtext" | "longtext" | "enum"
-            | "set" | "character" | "nchar" | "nvarchar" | "ntext" => ColumnType::Text,
+            "char"
+            | "varchar"
+            | "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "enum"
+            | "set"
+            | "character"
+            | "character varying"
+            | "char varying"
+            | "national character"
+            | "national character varying"
+            | "national char"
+            | "national char varying"
+            | "nchar"
+            | "nvarchar"
+            | "ntext" => ColumnType::Text,
             // Decimal types (all dialects)
-            "decimal" | "numeric" | "float" | "double" | "real" | "float4" | "float8" | "money" => {
-                ColumnType::Decimal
-            }
+            "decimal" | "numeric" | "float" | "double" | "double precision" | "real" | "float4"
+            | "float8" | "money" => ColumnType::Decimal,
             // Date/time types (all dialects)
-            "date" | "datetime" | "timestamp" | "time" | "year" | "timestamptz" | "timetz"
-            | "interval" => ColumnType::DateTime,
+            "date"
+            | "datetime"
+            | "timestamp"
+            | "time"
+            | "year"
+            | "timestamptz"
+            | "timetz"
+            | "interval"
+            | "timestamp with time zone"
+            | "timestamp without time zone"
+            | "time with time zone"
+            | "time without time zone" => ColumnType::DateTime,
+            interval if interval.starts_with("interval ") => ColumnType::DateTime,
             // Boolean types. A bare BIT is MSSQL's boolean type; retain
             // parameterized bit strings such as MySQL BIT(8) as unknown.
             "bool" | "boolean" => ColumnType::Bool,
