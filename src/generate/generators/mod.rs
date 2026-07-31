@@ -69,12 +69,31 @@ impl GeneratorFactory for ConstantFactory {
     fn compile(
         &self,
         config: &GeneratorConfig,
-        _context: &CompileContext<'_>,
+        context: &CompileContext<'_>,
     ) -> Result<Box<dyn CompiledGenerator>, DiagnosticBag> {
-        let value = config
-            .args
-            .get("value")
-            .map_or(GeneratedValue::Null, yaml_to_value);
+        let value = match config.args.get("value") {
+            Some(value) => {
+                let Some(column) = context.column() else {
+                    let mut bag = DiagnosticBag::default();
+                    bag.error(
+                        crate::diagnostic::codes::CONSTANT_INVALID_VALUE.code,
+                        context.path(),
+                        "constant generator requires a target column",
+                    );
+                    return Err(bag);
+                };
+                core::coerce_value(value, &column.family).map_err(|message| {
+                    let mut bag = DiagnosticBag::default();
+                    bag.error(
+                        crate::diagnostic::codes::CONSTANT_INVALID_VALUE.code,
+                        context.path(),
+                        message,
+                    );
+                    bag
+                })?
+            }
+            None => GeneratedValue::Null,
+        };
         Ok(Box::new(CompiledConstant { value }))
     }
 }
@@ -92,28 +111,5 @@ impl CompiledGenerator for CompiledConstant {
     ) -> Result<(), GenerateError> {
         output.clone_from(&self.value);
         Ok(())
-    }
-}
-
-/// Minimal YAML → [`GeneratedValue`] mapping for the constant exemplar.
-///
-/// Only the scalar shapes a hand-authored `value:` is likely to use are
-/// mapped. Family-aware coercion for decimals with scale, byte literals, and
-/// typed date/time values is outside this constant-specific helper.
-fn yaml_to_value(value: &serde_yaml_ng::Value) -> GeneratedValue {
-    match value {
-        serde_yaml_ng::Value::Null => GeneratedValue::Null,
-        serde_yaml_ng::Value::Bool(b) => GeneratedValue::Boolean(*b),
-        serde_yaml_ng::Value::Number(n) => match n.as_i64() {
-            Some(i) => GeneratedValue::Integer(i128::from(i)),
-            None => GeneratedValue::Text(n.to_string()),
-        },
-        serde_yaml_ng::Value::String(s) => GeneratedValue::Text(s.clone()),
-        other => GeneratedValue::Text(
-            serde_yaml_ng::to_string(other)
-                .unwrap_or_default()
-                .trim_end()
-                .to_string(),
-        ),
     }
 }

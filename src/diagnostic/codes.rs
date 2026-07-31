@@ -45,6 +45,7 @@ define_diagnostics! {
     COLUMN_OWNER_MISSING, "GEN-COLUMN-OWNER-MISSING", "Column has no owner", Selection, Error, "A generated column has no generator, planner, or structural source that can produce its value.";
     COMMERCE_MONEY_RANGE, "GEN-COMMERCE-MONEY-RANGE", "Money range is invalid", Generator, Error, "A commerce money generator has incompatible amount bounds.";
     COMMERCE_MONEY_SCALE, "GEN-COMMERCE-MONEY-SCALE", "Money scale is invalid", Generator, Error, "A commerce money generator requests an unsupported decimal scale.";
+    CONSTANT_INVALID_VALUE, "GEN-CONSTANT-INVALID-VALUE", "Constant value is incompatible", Generator, Error, "A constant value cannot be represented by the target column type.";
     CONFIG_COMPLETE_MODEL, "GEN-CONFIG-COMPLETE-MODEL", "Complete model overrides the profiled base", Config, Warning, "A complete model was supplied with a source dump, so the complete model is authoritative.";
     CONFIG_IO, "GEN-CONFIG-IO", "Configuration file could not be read", Config, Error, "The root configuration or an imported configuration file could not be read.";
     CONFIG_PARSE, "GEN-CONFIG-PARSE", "Configuration YAML is invalid", Config, Error, "A configuration document is not valid YAML or contains a duplicate mapping key.";

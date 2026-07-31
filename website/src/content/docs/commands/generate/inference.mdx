@@ -15,7 +15,8 @@ The CLI exposes `basic` and `full` and defaults to `basic`.
 
 | Capability                                                                    | Basic | Full |
 | ----------------------------------------------------------------------------- | ----- | ---- |
-| Schema, exact row counts, exact null counts                                   | yes   | yes  |
+| Schema and exact row counts                                                   | yes   | yes  |
+| Exact null counts when schema precedes data; otherwise bounded evidence       | yes   | yes  |
 | Distinct estimate, numeric summary, string shape, top values, bounded samples | yes   | yes  |
 | Declared-FK coverage and same-table temporal pair evidence                    | no    | yes  |
 
@@ -30,9 +31,10 @@ capacity; the other bounds stay fixed.
 
 If data arrives before its table DDL, the profiler buffers a bounded replay
 sample and keeps the row count exact. `GEN-PROFILE-SCHEMA-LATE` reports when the
-retained values cannot cover every early row. Rows that cannot be decoded still
-count toward the exact table total and emit `GEN-PROFILE-DECODE-SKIPPED` once per
-affected table.
+retained values cannot cover every early row. In that case, per-column counts,
+null rates, and value evidence apply only to the retained rows. Rows that cannot
+be decoded still count toward the exact table total and emit
+`GEN-PROFILE-DECODE-SKIPPED` once per affected table.
 
 ## Inference precedence
 

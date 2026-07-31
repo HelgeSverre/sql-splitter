@@ -463,27 +463,30 @@ fn full_profile_does_not_retain_credential_source_values() {
 }
 
 /// Every dialect input path (MySQL INSERT, PostgreSQL COPY, SQLite INSERT,
-/// MSSQL bracket/GO INSERT) profiles into the same neutral evidence with exact
-/// row counts.
+/// MSSQL bracket/GO INSERT) profiles into neutral evidence with exact row
+/// counts. Qualified PostgreSQL/MSSQL identities remain qualified.
 #[test]
 fn profiler_reads_all_dialects() {
     let cases = [
-        (MYSQL_FIXTURE, SqlDialect::MySql),
+        (MYSQL_FIXTURE, SqlDialect::MySql, ""),
         (
             "tests/fixtures/generate/production_shape_postgres.sql",
             SqlDialect::Postgres,
+            "public.",
         ),
         (
             "tests/fixtures/generate/production_shape_sqlite.sql",
             SqlDialect::Sqlite,
+            "",
         ),
         (
             "tests/fixtures/generate/production_shape_mssql.sql",
             SqlDialect::Mssql,
+            "dbo.",
         ),
     ];
 
-    for (path, dialect) in cases {
+    for (path, dialect, namespace) in cases {
         let profile = DumpProfiler::builder()
             .depth(ProfileDepth::Full)
             .dialect(dialect)
@@ -491,7 +494,8 @@ fn profiler_reads_all_dialects() {
             .profile_path(Path::new(path))
             .unwrap_or_else(|e| panic!("profiling {path}: {e}"));
 
-        let users = table(&profile, "users");
+        let users_name = format!("{namespace}users");
+        let users = table(&profile, &users_name);
         assert_eq!(users.row_count, Some(6), "{path} users rows");
         assert_eq!(
             column(users, "api_key").null_count,
@@ -503,11 +507,15 @@ fn profiler_reads_all_dialects() {
             "{path} email"
         );
 
-        let orders = table(&profile, "orders");
+        let orders_name = format!("{namespace}orders");
+        let orders = table(&profile, &orders_name);
         assert_eq!(orders.row_count, Some(5), "{path} orders rows");
         // The declared orders -> users FK is fully covered in every fixture.
         assert!(
-            orders.relationships.iter().any(|r| r.to_table == "users"),
+            orders
+                .relationships
+                .iter()
+                .any(|r| r.to_table == users_name),
             "{path} orders -> users FK"
         );
     }
@@ -615,6 +623,17 @@ CREATE TABLE widgets (id INT NOT NULL PRIMARY KEY, label VARCHAR(32) NOT NULL);
         .expect("profile overflowing schema-late dump");
     let gadgets = table(&profile, "gadgets");
     assert_eq!(gadgets.row_count, Some(50), "row count stays exact");
+    let id = column(gadgets, "id");
+    assert_eq!(
+        id.total_count, 10,
+        "column evidence must report only the retained rows, not claim all rows were profiled"
+    );
+    assert_eq!(id.null_count, 0);
+    assert_eq!(gadgets.confidence, 0.2);
+    assert!(
+        id.confidence <= gadgets.confidence,
+        "column confidence must not exceed schema-late coverage"
+    );
     assert!(
         profile
             .warnings
@@ -674,7 +693,7 @@ CREATE TABLE public.notes (body text);
         .build()
         .profile_reader(dump.as_bytes(), SqlDialect::Postgres)
         .expect("profile schema-late single-column COPY");
-    let notes = table(&profile, "notes");
+    let notes = table(&profile, "public.notes");
     assert_eq!(
         notes.row_count,
         Some(3),
@@ -697,9 +716,9 @@ fn profiler_routes_schema_late_copy_by_table() {
         ))
         .expect("profile two-table schema-late COPY dump");
 
-    let alpha = table(&profile, "alpha");
+    let alpha = table(&profile, "public.alpha");
     assert_eq!(alpha.row_count, Some(3), "alpha rows");
-    let beta = table(&profile, "beta");
+    let beta = table(&profile, "public.beta");
     assert_eq!(beta.row_count, Some(2), "beta rows");
 
     // Each table's values landed in the right table: alpha's labels all start

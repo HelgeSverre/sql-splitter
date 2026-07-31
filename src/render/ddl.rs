@@ -17,7 +17,7 @@ use crate::convert::map_column_type;
 use crate::convert::WarningCollector;
 use crate::parser::SqlDialect;
 use crate::synthetic::schema::{PortableColumn, PortableTable};
-use crate::transform_common::quote_ident;
+use crate::transform_common::{quote_ident, quote_identifier};
 
 /// Whether `table`'s raw `create_statement` may be emitted as-is: the render
 /// target must match the dialect the DDL was captured in, and the table must
@@ -31,17 +31,18 @@ pub(crate) fn should_preserve_raw_ddl(
     table.create_statement.is_some() && source_dialect == Some(target_dialect)
 }
 
-/// The table identifier to render: `[dbo].[name]` under MSSQL production
-/// style (see [`crate::render::RenderOptions::mssql_production_style`]),
-/// otherwise the ordinary dialect-quoted identifier. A no-op outside
-/// [`SqlDialect::Mssql`], so a `mssql_production_style` request against a
-/// non-MSSQL render target changes nothing.
+/// The table identifier to render. Every component of a qualified name is
+/// quoted separately, so `public.users` becomes `"public"."users"` rather
+/// than one identifier named `public.users`. MSSQL production style supplies
+/// `[dbo].` only for an unqualified name; an explicit schema remains
+/// authoritative. A production-style request against a non-MSSQL render
+/// target changes nothing.
 pub(crate) fn qualified_table(
     dialect: SqlDialect,
     name: &str,
     mssql_production_style: bool,
 ) -> String {
-    if mssql_production_style && dialect == SqlDialect::Mssql {
+    if mssql_production_style && dialect == SqlDialect::Mssql && !name.contains('.') {
         format!("[dbo].{}", quote_ident(dialect, name))
     } else {
         quote_ident(dialect, name)
@@ -91,7 +92,7 @@ pub(crate) fn render_create_table(
     if !table.primary_key.is_empty() {
         let cols = join_idents(to, &table.primary_key);
         if mssql_production_style {
-            let pk_name = quote_ident(to, &format!("PK_{}", table.name));
+            let pk_name = quote_identifier(to, &format!("PK_{}", table.name));
             clauses.push(format!(
                 "  CONSTRAINT {pk_name} PRIMARY KEY CLUSTERED ({cols})"
             ));
@@ -104,7 +105,7 @@ pub(crate) fn render_create_table(
         match &unique.name {
             Some(name) => clauses.push(format!(
                 "  CONSTRAINT {} UNIQUE ({cols})",
-                quote_ident(to, name)
+                quote_identifier(to, name)
             )),
             None => clauses.push(format!("  UNIQUE ({cols})")),
         }
@@ -113,7 +114,7 @@ pub(crate) fn render_create_table(
         match &check.name {
             Some(name) => clauses.push(format!(
                 "  CONSTRAINT {} CHECK ({})",
-                quote_ident(to, name),
+                quote_identifier(to, name),
                 check.expression
             )),
             None => clauses.push(format!("  CHECK ({})", check.expression)),
@@ -137,7 +138,7 @@ pub(crate) fn render_create_table(
             sql,
             "ALTER TABLE {quoted_table} ADD {}FOREIGN KEY ({}) REFERENCES {} ({});",
             match &relationship.name {
-                Some(name) => format!("CONSTRAINT {} ", quote_ident(to, name)),
+                Some(name) => format!("CONSTRAINT {} ", quote_identifier(to, name)),
                 None => String::new(),
             },
             join_idents(to, &relationship.columns),
@@ -155,7 +156,7 @@ pub(crate) fn render_create_table(
         let _ = writeln!(
             sql,
             "CREATE {kind} {} ON {quoted_table} ({});",
-            quote_ident(to, &index.name),
+            quote_identifier(to, &index.name),
             join_idents(to, &index.columns),
         );
     }
@@ -175,7 +176,7 @@ fn render_column_def(
     render_inline_unique: bool,
 ) -> String {
     let mapped_type = map_column_type(&column.source_type, from, to, warnings);
-    let mut def = format!("  {} {mapped_type}", quote_ident(to, &column.name),);
+    let mut def = format!("  {} {mapped_type}", quote_identifier(to, &column.name),);
     if !column.nullable {
         def.push_str(" NOT NULL");
     }
@@ -208,7 +209,7 @@ fn identity_clause(dialect: SqlDialect) -> &'static str {
 fn join_idents(dialect: SqlDialect, names: &[String]) -> String {
     names
         .iter()
-        .map(|name| quote_ident(dialect, name))
+        .map(|name| quote_identifier(dialect, name))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -336,6 +337,42 @@ mod tests {
         );
         assert!(sql.starts_with("CREATE TABLE \"orders\" (\n"));
         assert!(sql.contains("  PRIMARY KEY (\"id\")"));
+    }
+
+    #[test]
+    fn renders_each_component_of_qualified_table_and_fk_names() {
+        let table = PortableTable {
+            name: "tenant_a.orders".into(),
+            columns: vec![column("customer_id", "BIGINT", false)],
+            primary_key: vec![],
+            unique_constraints: vec![],
+            check_constraints: vec![],
+            indexes: vec![],
+            create_statement: None,
+            relationships: vec![PortableRelationship {
+                name: None,
+                columns: vec!["customer_id".to_string()],
+                referenced_table: "public.customers".to_string(),
+                referenced_columns: vec!["id".to_string()],
+            }],
+        };
+        let mut warnings = WarningCollector::new();
+        let postgres = render_create_table(
+            &table,
+            SqlDialect::Postgres,
+            SqlDialect::Postgres,
+            &mut warnings,
+            false,
+        );
+        assert!(postgres.starts_with("CREATE TABLE \"tenant_a\".\"orders\" (\n"));
+        assert!(postgres.contains("REFERENCES \"public\".\"customers\" (\"id\")"));
+
+        let mssql = qualified_table(SqlDialect::Mssql, "tenant_a.orders", true);
+        assert_eq!(mssql, "[tenant_a].[orders]");
+        assert_eq!(
+            qualified_table(SqlDialect::Postgres, "public.\"user.log\"", false),
+            "\"public\".\"user.log\""
+        );
     }
 
     #[test]

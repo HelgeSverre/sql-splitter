@@ -2364,7 +2364,7 @@ tables:
 
 #[test]
 fn all_default_columns_render_default_values_not_empty_tuple() {
-    // A table whose only column is a database sequence produces all-DEFAULT
+    // A table whose only column has a database default produces all-DEFAULT
     // rows. PostgreSQL rejects `INSERT INTO t () VALUES ()`; emit the
     // `DEFAULT VALUES` form instead.
     let model = r#"
@@ -2378,7 +2378,7 @@ tables:
     schema:
       name: t
       columns:
-        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: id, type: bigint, nullable: false, primary_key: true, default_sql: "nextval('t_id_seq')" }
 "#;
     let insert_sql = render_model_with(model, |options| {
         options.dialect = SqlDialect::Postgres;
@@ -2391,6 +2391,44 @@ tables:
     assert!(
         !insert_sql.contains("() VALUES"),
         "must not emit an empty column/value list: {insert_sql}"
+    );
+
+    let copy_sql = render_model(model, SqlDialect::Postgres);
+    assert!(
+        copy_sql.contains("DEFAULT VALUES"),
+        "all-default PostgreSQL rows must use INSERT DEFAULT VALUES: {copy_sql}"
+    );
+    assert!(
+        !copy_sql.contains("COPY "),
+        "COPY cannot represent an all-default row: {copy_sql}"
+    );
+}
+
+#[test]
+fn constant_values_are_coerced_to_the_target_column_family() {
+    let model = r#"
+version: 1
+kind: model
+defaults: { inference: disabled }
+seed: 1
+tables:
+  labels:
+    rows: { kind: fixed, count: 1 }
+    schema:
+      name: labels
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true, identity: true }
+        - { name: label, type: varchar(16), nullable: false }
+    columns:
+      label: { generator: { kind: constant, value: 42 } }
+"#;
+    let sql = render_model_with(model, |options| {
+        options.dialect = SqlDialect::Postgres;
+        options.no_copy = true;
+    });
+    assert!(
+        sql.contains("'42'"),
+        "a numeric YAML constant must render as text for a text column: {sql}"
     );
 }
 

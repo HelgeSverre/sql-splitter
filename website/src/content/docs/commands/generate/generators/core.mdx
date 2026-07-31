@@ -18,8 +18,9 @@ reported by `GEN-SOURCE-VALUES`.
 generator: { kind: constant, value: active }
 ```
 
-YAML booleans and integers retain their types. Other complex YAML values are
-serialized as text by this minimal coercion layer.
+Constants are coerced to the target column family during compilation. Invalid
+boolean, integer, decimal, and other typed values fail with
+`GEN-CONSTANT-INVALID-VALUE`; values for text columns render as text.
 
 ## `null`
 

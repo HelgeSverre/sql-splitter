@@ -16,7 +16,7 @@ use crate::convert::{ConvertWarning, WarningCollector};
 use crate::generate::{GenerateError, GeneratedRow, GeneratedValue, PlannedTable, RowSink};
 use crate::parser::SqlDialect;
 use crate::synthetic::OutputMode;
-use crate::transform_common::quote_ident;
+use crate::transform_common::quote_identifier;
 
 use super::ddl;
 use super::row_batch::RowBatch;
@@ -373,7 +373,7 @@ impl<W: Write> RowSink for SqlRenderer<W> {
 
     fn write_row(&mut self, table: &PlannedTable, row: &GeneratedRow) -> Result<(), GenerateError> {
         let dialect = self.options.dialect;
-        let (data_enabled, use_copy, needs_classification) = match &self.table {
+        let (data_enabled, mut use_copy, needs_classification) = match &self.table {
             Some(state) => (
                 state.data_enabled,
                 state.use_copy,
@@ -385,6 +385,13 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             return Ok(());
         }
         if needs_classification {
+            // PostgreSQL cannot express an all-default row as `COPY t ()`.
+            // Select the valid `INSERT ... DEFAULT VALUES` path before COPY's
+            // per-column fallback validation runs.
+            use_copy &= row
+                .values
+                .iter()
+                .any(|value| !matches!(value, GeneratedValue::Default));
             let insert_columns = Self::classify_columns(table, row, use_copy)?;
             // An identity column that survives classification (i.e. carries an
             // explicit value rather than rendering `DEFAULT`) needs the
@@ -396,6 +403,7 @@ impl<W: Write> RowSink for SqlRenderer<W> {
             let state = self.table.as_mut().expect("checked above");
             state.insert_columns = Some(insert_columns);
             state.identity_insert = Some(identity_insert);
+            state.use_copy = use_copy;
         }
 
         let state = self.table.as_mut().expect("checked above");
@@ -506,7 +514,7 @@ fn fmt_err(_: fmt::Error) -> GenerateError {
 fn quoted_column_list(dialect: SqlDialect, table: &PlannedTable, indices: &[usize]) -> String {
     indices
         .iter()
-        .map(|&i| quote_ident(dialect, &table.columns[i].schema.name))
+        .map(|&i| quote_identifier(dialect, &table.columns[i].schema.name))
         .collect::<Vec<_>>()
         .join(", ")
 }

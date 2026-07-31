@@ -1683,6 +1683,22 @@ fn compiler_reports_all_independent_ownership_and_type_errors() {
     assert_eq!(err.errors().count(), 2);
 }
 
+#[test]
+fn constant_value_incompatible_with_target_type_is_a_compile_error() {
+    let model = ownership_model(
+        "        - { name: enabled, type: boolean, nullable: false }",
+        "    columns:\n      enabled: { generator: { kind: constant, value: not-a-boolean } }",
+    );
+    let error = compiler()
+        .compile(model, CompileOptions::default())
+        .expect_err("constant values must be checked against their target type");
+    assert!(
+        error.has_code("GEN-CONSTANT-INVALID-VALUE"),
+        "unexpected diagnostics: {:?}",
+        error.diagnostics
+    );
+}
+
 /// A single-table model with an `id` identity primary key (owner-complete in
 /// both inference modes as a hard schema fact) plus the supplied extra column
 /// lines and per-column/planner rules, for the focused ownership cases. Uses

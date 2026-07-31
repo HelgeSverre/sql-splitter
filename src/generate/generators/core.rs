@@ -210,7 +210,7 @@ fn json_from_yaml(value: &serde_yaml_ng::Value) -> Result<String, String> {
 /// Coerce a raw YAML scalar into a [`GeneratedValue`] matching `family`, for
 /// generators that accept literal values in their config (`constant`-style
 /// values, `choice`/`weighted_choice` options, `json_value`'s default).
-fn coerce_value(
+pub(super) fn coerce_value(
     value: &serde_yaml_ng::Value,
     family: &SqlTypeFamily,
 ) -> Result<GeneratedValue, String> {

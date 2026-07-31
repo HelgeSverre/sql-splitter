@@ -460,7 +460,7 @@ impl InsertState {
         Some(Self {
             table_name: name,
             table_id_index: table_id,
-            context: InsertRowContext::from_header(header, table),
+            context: InsertRowContext::from_header(header, table, dialect),
         })
     }
 }

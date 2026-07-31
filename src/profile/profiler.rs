@@ -9,9 +9,9 @@
 //! by the row count.
 //!
 //! # Depths
-//! * [`ProfileDepth::Schema`] reads no values — it counts rows and, per column,
-//!   total/null tallies only (exact), producing the portable schema with no
-//!   value-derived evidence.
+//! * [`ProfileDepth::Schema`] reads no non-null values — it counts rows and,
+//!   per column, total/null tallies when the schema is available, producing
+//!   the portable schema with no value-derived evidence.
 //! * [`ProfileDepth::Basic`] adds the cheap per-column metrics: distinct
 //!   estimate, min/max, quantiles, string shape, length, top-k, and a bounded
 //!   sample.
@@ -20,8 +20,10 @@
 //!   and same-table temporal orderings. Planner-nominated pairs plug in through
 //!   the same [`RelationshipEvidence`] surface.
 //!
-//! Every depth returns the *same* portable schema and the *same* exact row and
-//! null counts; the depths differ only in how much value-derived evidence they
+//! Every depth returns the *same* portable schema and exact table row counts.
+//! Schema-late data that exceeds its bounded replay buffer retains partial
+//! column evidence; the table and column confidence values report that gap.
+//! The depths otherwise differ only in how much value-derived evidence they
 //! attach.
 
 use std::collections::HashSet;
@@ -206,8 +208,8 @@ impl ColumnKind {
     }
 }
 
-/// Per-column accumulator: exact total/null tallies at every depth, plus the
-/// value sketches at [`ProfileDepth::Basic`] and above.
+/// Per-column accumulator: observed total/null tallies at every depth, plus
+/// the value sketches at [`ProfileDepth::Basic`] and above.
 struct ColumnAccum {
     name: String,
     kind: ColumnKind,
@@ -273,6 +275,10 @@ struct TableProfile {
     name: String,
     table_id: TableId,
     row_count: u64,
+    /// Rows that contributed column evidence. This can be below `row_count`
+    /// when schema-late input overflowed the bounded replay buffer or when a
+    /// delivered row could not be decoded.
+    profiled_row_count: u64,
     columns: Vec<ColumnAccum>,
     // Full-depth relationship tracking (empty otherwise).
     pk_hashes: BoundedHashSet,
@@ -415,8 +421,9 @@ impl ProfileRun {
                 let kind = ColumnKind::from_column(col);
                 // A credential-named, string-shaped column never enters the
                 // sketches: its raw values (hashes, tokens, keys) must not be
-                // retained in evidence. The exact total/null counts tracked
-                // separately below are still kept, so null-rate survives.
+                // retained in evidence. The observed total/null counts tracked
+                // separately below are still kept, so the observed null rate
+                // survives.
                 let credential = matches!(kind, ColumnKind::Text | ColumnKind::Json)
                     && crate::profile::heuristics::is_credential_name(&col.name);
                 let sketches = if self.depth == ProfileDepth::Schema || credential {
@@ -483,6 +490,7 @@ impl ProfileRun {
             name: name.to_string(),
             table_id,
             row_count: 0,
+            profiled_row_count: 0,
             columns,
             pk_hashes: BoundedHashSet::new(self.budget.sample_rows),
             fk_candidates,
@@ -548,7 +556,7 @@ impl ProfileRun {
             let table_id = self.tables[table_idx].table_id;
             let schema = self.builder.schema();
             if let Some(table) = schema.table(table_id) {
-                let context = InsertRowContext::from_header(header, table);
+                let context = InsertRowContext::from_header(header, table, self.dialect);
                 self.insert_ctx = Some(InsertCtx { table_idx, context });
             }
         } else {
@@ -713,6 +721,7 @@ impl ProfileRun {
         let cap = self.budget.sample_rows;
         let table = &mut self.tables[table_idx];
         table.row_count += 1;
+        table.profiled_row_count += 1;
 
         for (ord, acc) in table.columns.iter_mut().enumerate().take(ncols) {
             let Some(v) = value(ord) else { continue };
@@ -778,7 +787,7 @@ impl ProfileRun {
                     let parsed = pending.header.as_ref().and_then(|header| {
                         let schema = self.builder.schema();
                         let table = schema.table(table_id)?;
-                        let ctx = InsertRowContext::from_header(header, table);
+                        let ctx = InsertRowContext::from_header(header, table, self.dialect);
                         parse_insert_tuple(bytes, table, &ctx, self.dialect, RowExtraction::Full)
                     });
                     if let Some(parsed) = parsed {
@@ -811,8 +820,8 @@ impl ProfileRun {
                 &codes::PROFILE_SCHEMA_LATE,
                 format!("tables.{}", self.tables[table_idx].name),
                 format!(
-                    "had {} data rows before its DDL; only {} were retained for value profiling \
-                     (counts remain exact)",
+                    "had {} data rows before its DDL; only {} were retained for column profiling \
+                     (the table row count is exact, but column counts and null rates cover retained rows only)",
                     pending.row_count,
                     pending.retained.len()
                 ),
@@ -1058,26 +1067,31 @@ fn parse_decimal(s: &str) -> Option<(i128, u8)> {
 
 /// Finalize one table's accumulated state into neutral evidence.
 fn finish_table(table: TableProfile, relationships: Vec<RelationshipEvidence>) -> TableEvidence {
+    let coverage = if table.row_count == 0 {
+        0.0
+    } else {
+        table.profiled_row_count as f64 / table.row_count as f64
+    };
     let columns = table
         .columns
         .into_iter()
-        .map(finish_column)
+        .map(|column| finish_column(column, coverage))
         .collect::<Vec<_>>();
-    let confidence = if table.row_count > 0 { 1.0 } else { 0.0 };
     TableEvidence {
         table: table.name,
         row_count: Some(table.row_count),
         columns,
         relationships,
-        confidence,
+        confidence: coverage,
     }
 }
 
-fn finish_column(acc: ColumnAccum) -> ColumnEvidence {
+fn finish_column(acc: ColumnAccum, coverage: f64) -> ColumnEvidence {
     match acc.sketches {
         Some(sketches) => {
             let mut ev = sketches.finish();
             ev.name = acc.name;
+            ev.confidence = ev.confidence.min(coverage);
             ev
         }
         None => {
@@ -1106,7 +1120,7 @@ fn finish_column(acc: ColumnAccum) -> ColumnEvidence {
                 top_k: Vec::new(),
                 timestamp_range: None,
                 json_valid_rate: None,
-                confidence: 1.0 - 1.0 / (1.0 + non_null as f64),
+                confidence: (1.0 - 1.0 / (1.0 + non_null as f64)).min(coverage),
             }
         }
     }

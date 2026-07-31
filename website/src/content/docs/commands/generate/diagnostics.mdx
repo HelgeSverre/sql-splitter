@@ -123,6 +123,12 @@ Typical severity: **error** · Category: **generator**
 
 A commerce money generator requests an unsupported decimal scale.
 
+## GEN-CONSTANT-INVALID-VALUE — Constant value is incompatible \{#GEN-CONSTANT-INVALID-VALUE\}
+
+Typical severity: **error** · Category: **generator**
+
+A configured `constant` value cannot be represented by its target column type.
+
 ## GEN-CONFIG-COMPLETE-MODEL — Complete model overrides the profiled base \{#GEN-CONFIG-COMPLETE-MODEL\}
 
 Typical severity: **warning** · Category: **config**
@@ -748,6 +754,8 @@ The profiler counted rows whose values could not all be decoded into column evid
 Typical severity: **warning** · Category: **profiling**
 
 The dump declared a table after more data rows than the bounded late-schema buffer could retain.
+The table row count remains exact, but per-column counts, null rates, and value
+evidence apply only to the retained rows.
 
 ## GEN-PROGRESS-COLUMN-MISSING — Progress column is missing \{#GEN-PROGRESS-COLUMN-MISSING\}
 
