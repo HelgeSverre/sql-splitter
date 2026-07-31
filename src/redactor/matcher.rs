@@ -45,8 +45,11 @@ impl ColumnMatcher {
     fn compile_rule(rule: &Rule) -> anyhow::Result<CompiledRule> {
         let pattern = &rule.column;
 
-        // Check if pattern contains a table qualifier (table.column)
-        let (table_pattern, column_pattern) = if let Some(dot_pos) = pattern.find('.') {
+        // Split at the final dot so a schema-qualified table identity remains
+        // intact: `tenant_a.users.email` targets the `email` column on
+        // `tenant_a.users`, not a fictitious `users.email` column on
+        // `tenant_a`.
+        let (table_pattern, column_pattern) = if let Some(dot_pos) = pattern.rfind('.') {
             let table_part = &pattern[..dot_pos];
             let column_part = &pattern[dot_pos + 1..];
 
@@ -262,6 +265,37 @@ mod tests {
         // Should NOT match other_table.ssn
         let strategy = matcher.get_strategy("other_table", "ssn");
         assert!(matches!(strategy, StrategyKind::Skip));
+    }
+
+    #[test]
+    fn qualified_table_rule_matches_the_complete_table_identity() {
+        let config = RedactConfig {
+            input: std::path::PathBuf::new(),
+            output: None,
+            dialect: crate::parser::SqlDialect::Postgres,
+            rules: vec![Rule {
+                column: "tenant_a.users.email".to_string(),
+                strategy: StrategyKind::Null,
+            }],
+            default_strategy: StrategyKind::Skip,
+            seed: None,
+            locale: "en".to_string(),
+            tables_filter: None,
+            exclude: vec![],
+            strict: false,
+            progress: false,
+            dry_run: false,
+        };
+        let matcher = ColumnMatcher::from_config(&config).unwrap();
+
+        assert!(matches!(
+            matcher.get_strategy("tenant_a.users", "email"),
+            StrategyKind::Null
+        ));
+        assert!(matches!(
+            matcher.get_strategy("tenant_b.users", "email"),
+            StrategyKind::Skip
+        ));
     }
 
     #[test]

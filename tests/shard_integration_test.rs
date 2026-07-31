@@ -40,6 +40,39 @@ INSERT INTO `users` VALUES (1, 'Alice', 1), (2, 'Bob', 1), (3, 'Carol', 2), (4, 
     file
 }
 
+fn tenant_hierarchy_mysql(orphan: bool) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    write!(
+        file,
+        r#"CREATE TABLE `tenants` (
+  `id` int NOT NULL,
+  PRIMARY KEY (`id`)
+);
+INSERT INTO `tenants` VALUES (1), (2);
+
+CREATE TABLE `accounts` (
+  `id` int NOT NULL,
+  `tenant_id` int NOT NULL,
+  PRIMARY KEY (`id`),
+  FOREIGN KEY (`tenant_id`) REFERENCES `tenants` (`id`)
+);
+INSERT INTO `accounts` VALUES (10, 1), (20, 2);
+
+CREATE TABLE `events` (
+  `id` int NOT NULL,
+  `account_id` int NOT NULL,
+  PRIMARY KEY (`id`),
+  FOREIGN KEY (`account_id`) REFERENCES `accounts` (`id`)
+);
+INSERT INTO `events` VALUES (100, 10), (200, 20){};
+"#,
+        if orphan { ", (300, 999)" } else { "" }
+    )
+    .unwrap();
+    file.flush().unwrap();
+    file
+}
+
 #[test]
 fn shard_mysql_selects_only_tenant_rows() {
     let dump = multi_tenant_mysql();
@@ -74,6 +107,45 @@ fn shard_mysql_selects_only_tenant_rows() {
         !content.contains("'Dave'"),
         "Dave (tenant 3) should be excluded"
     );
+}
+
+#[test]
+fn shard_strict_fk_allows_valid_cross_tenant_exclusions() {
+    let dump = tenant_hierarchy_mysql(false);
+    let out_dir = TempDir::new().unwrap();
+    let output = out_dir.path().join("tenant-1.sql");
+
+    let stats = run(ShardConfig {
+        input: dump.path().to_path_buf(),
+        output: Some(output),
+        dialect: SqlDialect::MySql,
+        tenant_column: Some("tenant_id".to_string()),
+        tenant_value: "1".to_string(),
+        strict_fk: true,
+        ..Default::default()
+    })
+    .expect("a valid cross-tenant reference must not fail strict FK validation");
+
+    assert!(stats.total_rows_selected > 0);
+}
+
+#[test]
+fn shard_strict_fk_rejects_source_orphans() {
+    let dump = tenant_hierarchy_mysql(true);
+
+    let error = run(ShardConfig {
+        input: dump.path().to_path_buf(),
+        output: None,
+        dialect: SqlDialect::MySql,
+        tenant_column: Some("tenant_id".to_string()),
+        tenant_value: "1".to_string(),
+        strict_fk: true,
+        dry_run: true,
+        ..Default::default()
+    })
+    .expect_err("a source orphan must fail strict FK validation");
+
+    assert!(error.to_string().contains("FK integrity violation"));
 }
 
 #[test]

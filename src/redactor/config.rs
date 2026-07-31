@@ -55,6 +55,8 @@ impl RedactConfig {
             );
         }
 
+        self.default_strategy.validate()?;
+
         // Validate rules
         for rule in &self.rules {
             rule.validate()?;

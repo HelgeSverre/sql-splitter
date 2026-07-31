@@ -100,6 +100,11 @@ sql-splitter redact dump.sql -o safe.sql \
   --hash "*.email" --exclude audit_logs
 ```
 
+For a schema-qualified dump, use the full table name in `--tables` or
+`--exclude` to avoid applying the filter to the same table name in another
+schema. A rule for one qualified table uses the same final-column form, for
+example `tenant_a.users.email`.
+
 ## Options
 
 | Flag                | Short | Description                                | Default     |
@@ -132,8 +137,10 @@ sql-splitter redact dump.sql -o safe.sql \
 | `fake`     | Generate realistic fake data                                     | Realistic test data                                             |
 | `mask`     | Partial masking                                                  | Credit cards, SSNs                                              |
 | `constant` | Fixed value                                                      | Placeholder values                                              |
-| `shuffle`  | Redistribute values                                              | Preserve distribution                                           |
 | `skip`     | No redaction                                                     | Passthrough                                                     |
+
+`shuffle` rules are rejected. They require a two-pass rewrite and are not safe
+to apply in the current streaming implementation.
 
 ## Column Pattern Matching
 
@@ -317,7 +324,7 @@ sql-splitter convert safe.sql -o postgres.sql --to postgres
 **Solutions:**
 
 1. Validate before running: `--validate` flag
-2. Check strategy spelling: `null`, `hash`, `fake`, `mask`, `constant`, `shuffle`, `skip`
+2. Check strategy spelling: `null`, `hash`, `fake`, `mask`, `constant`, `skip`
 3. Ensure patterns are quoted in YAML: `column: "*.email"` not `column: *.email`
 4. Use `--generate-config` as a starting template
 

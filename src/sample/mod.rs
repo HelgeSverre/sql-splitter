@@ -280,6 +280,18 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
             continue;
         }
 
+        let remaining_capacity = config.max_total_rows.map(|max| {
+            usize::try_from((max as u64).saturating_sub(total_selected)).unwrap_or(usize::MAX)
+        });
+        if remaining_capacity == Some(0) {
+            stats.warnings.push(format!(
+                "Warning: Reached max_total_rows limit ({}) at table '{}'",
+                config.max_total_rows.unwrap_or_default(),
+                table_name
+            ));
+            break;
+        }
+
         // Process table with streaming sampling - rows go directly to temp file
         let result = sample_table_streaming(
             &table_file,
@@ -292,19 +304,8 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
             &cyclic_set,
             &selected_dir,
             &mut rng,
+            remaining_capacity,
         )?;
-
-        // Check max_total_rows guard
-        if let Some(max) = config.max_total_rows {
-            if total_selected + result.rows_selected > max as u64 {
-                let msg = format!(
-                    "Warning: Reached max_total_rows limit ({}) at table '{}'",
-                    max, table_name
-                );
-                stats.warnings.push(msg);
-                break;
-            }
-        }
 
         // Update total count
         total_selected += result.rows_selected;
@@ -339,6 +340,16 @@ pub fn run(config: SampleConfig) -> anyhow::Result<SampleStats> {
             rows_selected: result.rows_selected,
             classification: runtime.classification,
         });
+
+        if let Some(max) = config.max_total_rows {
+            if total_selected >= max as u64 {
+                stats.warnings.push(format!(
+                    "Warning: Reached max_total_rows limit ({}) at table '{}'",
+                    max, table_name
+                ));
+                break;
+            }
+        }
     }
 
     // Calculate totals
@@ -375,7 +386,10 @@ fn determine_classification(
     explicit_roots: &ahash::AHashSet<String>,
 ) -> TableClassification {
     // Check explicit roots first
-    if explicit_roots.contains(&name.to_lowercase()) {
+    if explicit_roots
+        .iter()
+        .any(|pattern| table_name_matches(pattern, name))
+    {
         return TableClassification::Root;
     }
 
@@ -403,13 +417,11 @@ fn should_skip_table(
     yaml_config: &Option<SampleYamlConfig>,
     classification: TableClassification,
 ) -> bool {
-    let name_lower = name.to_lowercase();
-
     // Check exclude list
     if config
         .exclude
         .iter()
-        .any(|e| e.to_lowercase() == name_lower)
+        .any(|pattern| table_name_matches(pattern, name))
     {
         return true;
     }
@@ -423,7 +435,10 @@ fn should_skip_table(
 
     // Check include filter
     if let Some(ref filter) = config.tables_filter {
-        if !filter.iter().any(|f| f.to_lowercase() == name_lower) {
+        if !filter
+            .iter()
+            .any(|pattern| table_name_matches(pattern, name))
+        {
             return true;
         }
     }
@@ -434,6 +449,50 @@ fn should_skip_table(
     }
 
     false
+}
+
+/// Match a configured table name against a parsed name.
+///
+/// Qualified dump names are preserved internally. Existing configuration that
+/// uses an unqualified table name still matches the final name component;
+/// qualified configuration remains an exact match and can disambiguate
+/// schemas.
+fn table_name_matches(pattern: &str, table_name: &str) -> bool {
+    pattern.eq_ignore_ascii_case(table_name)
+        || (!pattern.contains('.')
+            && final_identifier_component(table_name)
+                .is_some_and(|bare_name| pattern.eq_ignore_ascii_case(bare_name)))
+}
+
+/// Return the final identifier component, without treating dots inside quoted
+/// components as qualification separators.
+fn final_identifier_component(name: &str) -> Option<&str> {
+    let bytes = name.as_bytes();
+    let mut quote = None;
+    let mut final_start = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match quote {
+            Some(close) if bytes[index] == close => {
+                if bytes.get(index + 1) == Some(&close) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            Some(_) => {}
+            None => match bytes[index] {
+                b'`' | b'"' => quote = Some(bytes[index]),
+                b'[' => quote = Some(b']'),
+                b'.' => final_start = index + 1,
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+
+    (final_start > 0).then(|| &name[final_start..])
 }
 
 /// Get sample mode for a specific table
@@ -513,6 +572,7 @@ fn sample_table_streaming(
     cyclic_set: &ahash::AHashSet<TableId>,
     selected_dir: &Path,
     rng: &mut StdRng,
+    remaining_capacity: Option<usize>,
 ) -> anyhow::Result<StreamingSampleResult> {
     let mut rows_seen = 0u64;
     let mut rows_selected = 0u64;
@@ -553,7 +613,9 @@ fn sample_table_streaming(
                     }
 
                     // Bernoulli sample
-                    if rng.random::<f64>() < prob {
+                    if rng.random::<f64>() < prob
+                        && remaining_capacity.is_none_or(|max| rows_selected < max as u64)
+                    {
                         if spill.is_none() {
                             spill = Some(RowSpillWriter::create(&temp_path)?);
                         }
@@ -577,8 +639,9 @@ fn sample_table_streaming(
         SampleMode::Rows(n) => {
             // Reservoir sampling: collect eligible row indices in first pass,
             // then write selected rows in second pass
+            let capacity = remaining_capacity.map_or(n, |max| n.min(max));
             let mut reservoir: Reservoir<(u64, Option<u64>)> =
-                Reservoir::new(n, StdRng::from_rng(&mut *rng));
+                Reservoir::new(capacity, StdRng::from_rng(&mut *rng));
 
             // First pass: build reservoir of (row_index, pk_hash)
             for_each_data_row(
@@ -658,12 +721,181 @@ fn sample_table_streaming(
         }
     }
 
+    if config.preserve_relations && has_self_referential_fk(table_schema, table_id) {
+        extend_self_reference_closure(
+            table_file,
+            table_schema,
+            table_id,
+            config,
+            selected_dir,
+            &temp_path,
+            &mut selected_pk_hashes,
+            &mut rows_selected,
+            remaining_capacity,
+        )?;
+    }
+
     Ok(StreamingSampleResult {
         rows_seen,
         rows_selected,
         fk_orphans,
         pk_hashes: selected_pk_hashes,
     })
+}
+
+/// Return true when a table has an FK that references the table itself.
+fn has_self_referential_fk(table_schema: &crate::schema::TableSchema, table_id: TableId) -> bool {
+    table_schema
+        .foreign_keys
+        .iter()
+        .any(|fk| fk.referenced_table_id == Some(table_id))
+}
+
+/// Add selected ancestors for self-referencing FKs.
+///
+/// Self references cannot use the normal parent-table PK set because the
+/// table is still being sampled. The initial sample is retained, then each
+/// pass adds one level of missing selected ancestors to its spill file. This
+/// keeps only selected PK hashes in memory and works when parents appear
+/// after children in the dump.
+#[allow(clippy::too_many_arguments)]
+fn extend_self_reference_closure(
+    table_file: &Path,
+    table_schema: &crate::schema::TableSchema,
+    table_id: TableId,
+    config: &SampleConfig,
+    selected_dir: &Path,
+    temp_path: &Path,
+    selected_pk_hashes: &mut Vec<u64>,
+    rows_selected: &mut u64,
+    remaining_capacity: Option<usize>,
+) -> anyhow::Result<()> {
+    if selected_pk_hashes.is_empty() {
+        return Ok(());
+    }
+
+    let mut included: PkHashSet = selected_pk_hashes.iter().copied().collect();
+    let mut required_parents = PkHashSet::default();
+
+    // Find direct parents for the initially selected rows.
+    for_each_data_row(
+        table_file,
+        table_schema,
+        config.dialect,
+        RowExtraction::PkFk,
+        |row| {
+            if row
+                .pk()
+                .is_some_and(|pk| included.contains(&hash_pk_tuple(pk)))
+            {
+                add_self_referenced_parent_hashes(
+                    &row,
+                    table_schema,
+                    table_id,
+                    &mut required_parents,
+                );
+            }
+            Ok(RowFlow::Continue)
+        },
+    )?;
+
+    let closure_path = temp_path.to_path_buf();
+    let mut pass = 0usize;
+
+    loop {
+        let pending: PkHashSet = required_parents
+            .iter()
+            .filter(|hash| !included.contains(hash))
+            .copied()
+            .collect();
+        if pending.is_empty() {
+            break;
+        }
+
+        let next_path = selected_dir.join(format!("{}.closure-{}.rows", table_schema.name, pass));
+        let mut writer = RowSpillWriter::create(&next_path)?;
+        copy_spill_rows(&closure_path, &mut writer)?;
+        let mut added = 0usize;
+
+        for_each_data_row(
+            table_file,
+            table_schema,
+            config.dialect,
+            RowExtraction::PkFk,
+            |row| {
+                let Some(pk) = row.pk() else {
+                    return Ok(RowFlow::Continue);
+                };
+                let pk_hash = hash_pk_tuple(pk);
+                if !pending.contains(&pk_hash) {
+                    return Ok(RowFlow::Continue);
+                }
+                if remaining_capacity.is_some_and(|max| *rows_selected >= max as u64) {
+                    return Ok(RowFlow::SkipStatement);
+                }
+
+                writer.write_row(row.format(), row.raw())?;
+                included.insert(pk_hash);
+                selected_pk_hashes.push(pk_hash);
+                *rows_selected += 1;
+                added += 1;
+                add_self_referenced_parent_hashes(
+                    &row,
+                    table_schema,
+                    table_id,
+                    &mut required_parents,
+                );
+                Ok(RowFlow::Continue)
+            },
+        )?;
+
+        writer.finish()?;
+        // `rename` replaces an existing destination on Unix but not Windows.
+        // This is an internal spill file, so remove the previous generation
+        // first and keep the closure update portable.
+        fs::remove_file(&closure_path)?;
+        fs::rename(&next_path, &closure_path)?;
+
+        if added == 0 {
+            if config.strict_fk {
+                anyhow::bail!(
+                    "FK integrity violation in table '{}': selected row references missing parent",
+                    table_schema.name
+                );
+            }
+            break;
+        }
+        pass += 1;
+    }
+
+    Ok(())
+}
+
+/// Copy a spill file into an open spill writer without materializing all rows.
+fn copy_spill_rows(path: &Path, writer: &mut RowSpillWriter) -> anyhow::Result<()> {
+    let mut reader = RowSpillReader::open(path)?;
+    while let Some((format, raw)) = reader.next_row()? {
+        writer.write_row(format, &raw)?;
+    }
+    Ok(())
+}
+
+/// Add the parent PKs referenced by this table's self-referencing FKs.
+fn add_self_referenced_parent_hashes(
+    row: &UnifiedRow,
+    table_schema: &crate::schema::TableSchema,
+    table_id: TableId,
+    parent_hashes: &mut PkHashSet,
+) {
+    for (fk_ref, fk_tuple) in row.fk_values() {
+        if table_schema
+            .foreign_keys
+            .get(fk_ref.fk_index as usize)
+            .is_some_and(|fk| fk.referenced_table_id == Some(table_id))
+        {
+            parent_hashes.insert(hash_pk_tuple(fk_tuple));
+        }
+    }
 }
 
 /// Check FK membership for a unified row (works with both INSERT and COPY rows)
@@ -681,6 +913,11 @@ fn check_unified_fk_membership(
     for (fk_ref, fk_tuple) in row.fk_values() {
         if let Some(fk) = table_schema.foreign_keys.get(fk_ref.fk_index as usize) {
             if let Some(parent_id) = fk.referenced_table_id {
+                // A self-referencing table is handled by
+                // `extend_self_reference_closure` after initial sampling.
+                if parent_id == *current_table_id {
+                    continue;
+                }
                 // Skip FK check for cyclic tables
                 if cyclic_set.contains(&parent_id) && cyclic_set.contains(current_table_id) {
                     continue;

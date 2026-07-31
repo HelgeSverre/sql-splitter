@@ -1866,30 +1866,83 @@ INSERT INTO logs VALUES ('New', 'WARN');
     let new_path = create_temp_file(&dir, "new.sql", new_sql);
 
     let output = sql_splitter_cmd()
-        .args(["diff", "--data-only", "--allow-no-pk"])
+        .args(["diff", "--data-only", "--allow-no-pk", "--format", "json"])
         .arg(&old_path)
         .arg(&new_path)
         .output()
         .expect("Failed to run diff");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
+    assert!(output.status.success(), "Diff failed: {stdout}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let logs = &json["data"]["tables"]["logs"];
 
-    assert!(output.status.success(), "Diff failed: {}", combined);
-    // Should detect changes using all columns as key
-    // (Test, INFO) -> doesn't exist in new, so removed
-    // (Debug, DEBUG) -> doesn't exist in new, so removed
-    // (Test Updated, INFO) -> new
-    // (New, WARN) -> new
-    assert!(
-        combined.contains("added")
-            || combined.contains("removed")
-            || combined.contains("+")
-            || combined.contains("-"),
-        "Should detect data changes with --allow-no-pk: {}",
-        combined
-    );
+    // All non-ignored values form the row key, so changing a row produces one
+    // removal and one addition even when total row counts are unchanged.
+    assert_eq!(logs["added_count"], 2);
+    assert_eq!(logs["removed_count"], 2);
+    assert_eq!(logs["modified_count"], 0);
+}
+
+#[test]
+fn test_diff_allow_no_pk_distinguishes_partial_column_lists() {
+    let dir = TempDir::new().unwrap();
+
+    let old_sql = r#"
+CREATE TABLE logs (message VARCHAR(255), level VARCHAR(20));
+INSERT INTO logs (message) VALUES ('same');
+INSERT INTO logs (level) VALUES ('same');
+"#;
+    let new_sql = r#"
+CREATE TABLE logs (message VARCHAR(255), level VARCHAR(20));
+INSERT INTO logs (message) VALUES ('changed');
+INSERT INTO logs (level) VALUES ('same');
+"#;
+
+    let old_path = create_temp_file(&dir, "old.sql", old_sql);
+    let new_path = create_temp_file(&dir, "new.sql", new_sql);
+    let output = sql_splitter_cmd()
+        .args(["diff", "--data-only", "--allow-no-pk", "--format", "json"])
+        .arg(&old_path)
+        .arg(&new_path)
+        .output()
+        .expect("Failed to run diff");
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let logs = &json["data"]["tables"]["logs"];
+    assert_eq!(logs["added_count"], 1);
+    assert_eq!(logs["removed_count"], 1);
+}
+
+#[test]
+fn test_diff_digest_uses_schema_order_for_reordered_insert_columns() {
+    let dir = TempDir::new().unwrap();
+
+    let old_sql = r#"
+CREATE TABLE logs (id INT PRIMARY KEY, message VARCHAR(255), level VARCHAR(20));
+INSERT INTO logs (id, message, level) VALUES (1, 'same', 'INFO');
+"#;
+    let new_sql = r#"
+CREATE TABLE logs (id INT PRIMARY KEY, message VARCHAR(255), level VARCHAR(20));
+INSERT INTO logs (level, id, message) VALUES ('INFO', 1, 'same');
+"#;
+
+    let old_path = create_temp_file(&dir, "old.sql", old_sql);
+    let new_path = create_temp_file(&dir, "new.sql", new_sql);
+    let output = sql_splitter_cmd()
+        .args(["diff", "--data-only", "--format", "json"])
+        .arg(&old_path)
+        .arg(&new_path)
+        .output()
+        .expect("Failed to run diff");
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let logs = &json["data"]["tables"]["logs"];
+    assert_eq!(logs["modified_count"], 0);
+    assert_eq!(logs["added_count"], 0);
+    assert_eq!(logs["removed_count"], 0);
 }
 
 #[test]

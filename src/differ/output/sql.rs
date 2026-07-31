@@ -4,6 +4,7 @@
 
 use crate::differ::DiffResult;
 use crate::parser::SqlDialect;
+use crate::transform_common::{quote_ident, quote_identifier};
 
 /// Format diff result as SQL migration script
 pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
@@ -26,15 +27,6 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
         return output;
     }
 
-    // Quote identifier based on dialect
-    let quote = |name: &str| -> String {
-        match dialect {
-            SqlDialect::MySql => format!("`{}`", name),
-            SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name),
-            SqlDialect::Mssql => format!("[{}]", name),
-        }
-    };
-
     // New tables - use CREATE TABLE statement if available
     for table in &schema.tables_added {
         output.push_str(&format!("-- New table: {}\n", table.name));
@@ -46,21 +38,33 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
             output.push_str("\n\n");
         } else {
             // Generate CREATE TABLE from column info
-            output.push_str(&format!("CREATE TABLE {} (\n", quote(&table.name)));
+            output.push_str(&format!(
+                "CREATE TABLE {} (\n",
+                quote_ident(dialect, &table.name)
+            ));
 
             let col_defs: Vec<String> = table
                 .columns
                 .iter()
                 .map(|col| {
                     let nullable = if col.is_nullable { "" } else { " NOT NULL" };
-                    format!("  {} {}{}", quote(&col.name), col.col_type, nullable)
+                    format!(
+                        "  {} {}{}",
+                        quote_identifier(dialect, &col.name),
+                        col.col_type,
+                        nullable
+                    )
                 })
                 .collect();
 
             output.push_str(&col_defs.join(",\n"));
 
             if !table.primary_key.is_empty() {
-                let pk_cols: Vec<String> = table.primary_key.iter().map(|c| quote(c)).collect();
+                let pk_cols: Vec<String> = table
+                    .primary_key
+                    .iter()
+                    .map(|column| quote_identifier(dialect, column))
+                    .collect();
                 output.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols.join(", ")));
             }
 
@@ -71,7 +75,10 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
     // Removed tables
     for table_name in &schema.tables_removed {
         output.push_str(&format!("-- Removed table: {}\n", table_name));
-        output.push_str(&format!("DROP TABLE IF EXISTS {};\n\n", quote(table_name)));
+        output.push_str(&format!(
+            "DROP TABLE IF EXISTS {};\n\n",
+            quote_ident(dialect, table_name)
+        ));
     }
 
     // Modified tables
@@ -95,8 +102,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
             let nullable = if col.is_nullable { "" } else { " NOT NULL" };
             output.push_str(&format!(
                 "ALTER TABLE {} ADD COLUMN {} {}{};\n",
-                quote(&modification.table_name),
-                quote(&col.name),
+                quote_ident(dialect, &modification.table_name),
+                quote_identifier(dialect, &col.name),
                 col.col_type,
                 nullable
             ));
@@ -106,8 +113,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
         for col in &modification.columns_removed {
             output.push_str(&format!(
                 "ALTER TABLE {} DROP COLUMN {};\n",
-                quote(&modification.table_name),
-                quote(&col.name)
+                quote_ident(dialect, &modification.table_name),
+                quote_identifier(dialect, &col.name)
             ));
         }
 
@@ -124,8 +131,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 SqlDialect::MySql => {
                     output.push_str(&format!(
                         "ALTER TABLE {} MODIFY COLUMN {} {}{};\n",
-                        quote(&modification.table_name),
-                        quote(&change.name),
+                        quote_ident(dialect, &modification.table_name),
+                        quote_identifier(dialect, &change.name),
                         new_type,
                         nullable
                     ));
@@ -135,8 +142,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                     if change.new_type.is_some() {
                         output.push_str(&format!(
                             "ALTER TABLE {} ALTER COLUMN {} TYPE {};\n",
-                            quote(&modification.table_name),
-                            quote(&change.name),
+                            quote_ident(dialect, &modification.table_name),
+                            quote_identifier(dialect, &change.name),
                             new_type
                         ));
                     }
@@ -148,8 +155,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         };
                         output.push_str(&format!(
                             "ALTER TABLE {} ALTER COLUMN {} {};\n",
-                            quote(&modification.table_name),
-                            quote(&change.name),
+                            quote_ident(dialect, &modification.table_name),
+                            quote_identifier(dialect, &change.name),
                             constraint
                         ));
                     }
@@ -163,8 +170,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 SqlDialect::Mssql => {
                     output.push_str(&format!(
                         "ALTER TABLE {} ALTER COLUMN {} {}{};\n",
-                        quote(&modification.table_name),
-                        quote(&change.name),
+                        quote_ident(dialect, &modification.table_name),
+                        quote_identifier(dialect, &change.name),
                         new_type,
                         nullable
                     ));
@@ -174,21 +181,29 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
 
         // Add foreign keys
         for fk in &modification.fks_added {
-            let fk_cols: Vec<String> = fk.columns.iter().map(|c| quote(c)).collect();
-            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| quote(c)).collect();
+            let fk_cols: Vec<String> = fk
+                .columns
+                .iter()
+                .map(|column| quote_identifier(dialect, column))
+                .collect();
+            let ref_cols: Vec<String> = fk
+                .referenced_columns
+                .iter()
+                .map(|column| quote_identifier(dialect, column))
+                .collect();
 
             let constraint_name = fk
                 .name
                 .as_ref()
-                .map(|n| format!("CONSTRAINT {} ", quote(n)))
+                .map(|name| format!("CONSTRAINT {} ", quote_identifier(dialect, name)))
                 .unwrap_or_default();
 
             output.push_str(&format!(
                 "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {}({});\n",
-                quote(&modification.table_name),
+                quote_ident(dialect, &modification.table_name),
                 constraint_name,
                 fk_cols.join(", "),
-                quote(&fk.referenced_table),
+                quote_ident(dialect, &fk.referenced_table),
                 ref_cols.join(", ")
             ));
         }
@@ -200,15 +215,15 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                     SqlDialect::MySql => {
                         output.push_str(&format!(
                             "ALTER TABLE {} DROP FOREIGN KEY {};\n",
-                            quote(&modification.table_name),
-                            quote(name)
+                            quote_ident(dialect, &modification.table_name),
+                            quote_identifier(dialect, name)
                         ));
                     }
                     SqlDialect::Postgres | SqlDialect::Mssql => {
                         output.push_str(&format!(
                             "ALTER TABLE {} DROP CONSTRAINT {};\n",
-                            quote(&modification.table_name),
-                            quote(name)
+                            quote_ident(dialect, &modification.table_name),
+                            quote_identifier(dialect, name)
                         ));
                     }
                     SqlDialect::Sqlite => {
@@ -231,7 +246,11 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
         // Add indexes
         for idx in &modification.indexes_added {
             let unique = if idx.is_unique { "UNIQUE " } else { "" };
-            let idx_cols: Vec<String> = idx.columns.iter().map(|c| quote(c)).collect();
+            let idx_cols: Vec<String> = idx
+                .columns
+                .iter()
+                .map(|column| quote_identifier(dialect, column))
+                .collect();
 
             match dialect {
                 SqlDialect::Postgres => {
@@ -243,8 +262,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                     output.push_str(&format!(
                         "CREATE {}INDEX {} ON {}{}({});\n",
                         unique,
-                        quote(&idx.name),
-                        quote(&modification.table_name),
+                        quote_identifier(dialect, &idx.name),
+                        quote_ident(dialect, &modification.table_name),
                         using,
                         idx_cols.join(", ")
                     ));
@@ -253,8 +272,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                     output.push_str(&format!(
                         "CREATE {}INDEX {} ON {}({});\n",
                         unique,
-                        quote(&idx.name),
-                        quote(&modification.table_name),
+                        quote_identifier(dialect, &idx.name),
+                        quote_ident(dialect, &modification.table_name),
                         idx_cols.join(", ")
                     ));
                 }
@@ -267,18 +286,21 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 SqlDialect::MySql => {
                     output.push_str(&format!(
                         "DROP INDEX {} ON {};\n",
-                        quote(&idx.name),
-                        quote(&modification.table_name)
+                        quote_identifier(dialect, &idx.name),
+                        quote_ident(dialect, &modification.table_name)
                     ));
                 }
                 SqlDialect::Postgres | SqlDialect::Sqlite => {
-                    output.push_str(&format!("DROP INDEX IF EXISTS {};\n", quote(&idx.name)));
+                    output.push_str(&format!(
+                        "DROP INDEX IF EXISTS {};\n",
+                        quote_identifier(dialect, &idx.name)
+                    ));
                 }
                 SqlDialect::Mssql => {
                     output.push_str(&format!(
                         "DROP INDEX {} ON {};\n",
-                        quote(&idx.name),
-                        quote(&modification.table_name)
+                        quote_identifier(dialect, &idx.name),
+                        quote_ident(dialect, &modification.table_name)
                     ));
                 }
             }
@@ -306,15 +328,17 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 SqlDialect::MySql => {
                     output.push_str(&format!(
                         "ALTER TABLE {} DROP PRIMARY KEY;\n",
-                        quote(&modification.table_name)
+                        quote_ident(dialect, &modification.table_name)
                     ));
                     if let Some(ref new_pk_cols) = modification.new_pk {
                         if !new_pk_cols.is_empty() {
-                            let pk_cols: Vec<String> =
-                                new_pk_cols.iter().map(|c| quote(c)).collect();
+                            let pk_cols: Vec<String> = new_pk_cols
+                                .iter()
+                                .map(|column| quote_identifier(dialect, column))
+                                .collect();
                             output.push_str(&format!(
                                 "ALTER TABLE {} ADD PRIMARY KEY ({});\n",
-                                quote(&modification.table_name),
+                                quote_ident(dialect, &modification.table_name),
                                 pk_cols.join(", ")
                             ));
                         }
@@ -323,16 +347,18 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 SqlDialect::Postgres | SqlDialect::Mssql => {
                     output.push_str(&format!(
                         "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}_pkey;\n",
-                        quote(&modification.table_name),
+                        quote_ident(dialect, &modification.table_name),
                         modification.table_name
                     ));
                     if let Some(ref new_pk_cols) = modification.new_pk {
                         if !new_pk_cols.is_empty() {
-                            let pk_cols: Vec<String> =
-                                new_pk_cols.iter().map(|c| quote(c)).collect();
+                            let pk_cols: Vec<String> = new_pk_cols
+                                .iter()
+                                .map(|column| quote_identifier(dialect, column))
+                                .collect();
                             output.push_str(&format!(
                                 "ALTER TABLE {} ADD PRIMARY KEY ({});\n",
-                                quote(&modification.table_name),
+                                quote_ident(dialect, &modification.table_name),
                                 pk_cols.join(", ")
                             ));
                         }

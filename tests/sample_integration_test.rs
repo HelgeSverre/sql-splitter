@@ -337,8 +337,83 @@ fn test_sample_with_max_total_rows() {
 
     let stats = run(config).unwrap();
 
-    // Should hit the limit or have a warning
-    assert!(stats.total_rows_selected <= 100 || !stats.warnings.is_empty());
+    assert!(stats.total_rows_selected <= 50);
+}
+
+#[test]
+fn sample_fills_max_total_rows_without_discarding_a_table() {
+    let input_dir = TempDir::new().unwrap();
+    let dump = input_dir.path().join("two-tables.sql");
+    fs::write(
+        &dump,
+        r#"
+CREATE TABLE alpha (id INT PRIMARY KEY);
+INSERT INTO alpha VALUES (1), (2), (3);
+CREATE TABLE beta (id INT PRIMARY KEY);
+INSERT INTO beta VALUES (4), (5), (6);
+"#,
+    )
+    .unwrap();
+    let output_dir = TempDir::new().unwrap();
+
+    let stats = run(SampleConfig {
+        input: dump,
+        output: Some(output_dir.path().join("sample.sql")),
+        dialect: SqlDialect::MySql,
+        mode: SampleMode::Percent(100),
+        max_total_rows: Some(5),
+        seed: 42,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_eq!(stats.total_rows_selected, 5);
+}
+
+#[test]
+fn sample_preserves_self_referential_ancestors() {
+    let input_dir = TempDir::new().unwrap();
+    let dump = input_dir.path().join("categories.sql");
+    fs::write(
+        &dump,
+        r#"
+CREATE TABLE categories (
+    id INT PRIMARY KEY,
+    parent_id INT NULL,
+    FOREIGN KEY (parent_id) REFERENCES categories(id)
+);
+INSERT INTO categories VALUES (1, NULL), (2, 1), (3, 2);
+"#,
+    )
+    .unwrap();
+    let output_dir = TempDir::new().unwrap();
+    let mut selected_descendant = false;
+    for seed in 0..32 {
+        let output = output_dir.path().join(format!("sample-{seed}.sql"));
+        let stats = run(SampleConfig {
+            input: dump.clone(),
+            output: Some(output.clone()),
+            dialect: SqlDialect::MySql,
+            mode: SampleMode::Rows(1),
+            preserve_relations: true,
+            seed,
+            ..Default::default()
+        })
+        .unwrap();
+        let content = fs::read_to_string(output).unwrap();
+
+        assert!(stats.total_rows_selected >= 1);
+        if content.contains("(3, 2)") {
+            selected_descendant = true;
+            assert!(content.contains("(2, 1)"));
+        }
+        if content.contains("(2, 1)") {
+            selected_descendant = true;
+            assert!(content.contains("(1, NULL)"));
+        }
+    }
+
+    assert!(selected_descendant, "test seeds must select a descendant");
 }
 
 #[test]
@@ -855,7 +930,10 @@ fn test_sample_mssql_with_table_filter() {
         "Should have sampled only one table"
     );
     assert!(
-        stats.table_stats.iter().any(|t| t.name == "users"),
+        stats
+            .table_stats
+            .iter()
+            .any(|t| t.name == "users" || t.name.ends_with(".users")),
         "Should have sampled users table"
     );
 }

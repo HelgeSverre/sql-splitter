@@ -476,6 +476,31 @@ fn test_format_diff_sql_with_removed_table() {
 
     let pg_output = format_diff(&result, DiffOutputFormat::Sql, SqlDialect::Postgres);
     assert!(pg_output.contains("DROP TABLE IF EXISTS \"old_table\""));
+
+    let qualified_result = DiffResult {
+        schema: Some(SchemaDiff {
+            tables_added: vec![],
+            tables_removed: vec!["tenant_a.old_table".to_string()],
+            tables_modified: vec![],
+        }),
+        data: None,
+        warnings: vec![],
+        summary: DiffSummary {
+            tables_added: 0,
+            tables_removed: 1,
+            tables_modified: 0,
+            rows_added: 0,
+            rows_removed: 0,
+            rows_modified: 0,
+            truncated: false,
+        },
+    };
+    let qualified_pg = format_diff(
+        &qualified_result,
+        DiffOutputFormat::Sql,
+        SqlDialect::Postgres,
+    );
+    assert!(qualified_pg.contains("DROP TABLE IF EXISTS \"tenant_a\".\"old_table\""));
 }
 
 #[test]

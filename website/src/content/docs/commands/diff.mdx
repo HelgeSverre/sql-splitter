@@ -78,6 +78,9 @@ sql-splitter diff old.sql new.sql --format json -o diff.json
 # Compare specific tables only
 sql-splitter diff old.sql new.sql --tables users,orders
 
+# A qualified table name selects that schema only
+sql-splitter diff old.sql new.sql --tables tenant_a.users
+
 # Ignore auto-updated timestamp columns
 sql-splitter diff old.sql new.sql --ignore-columns "*.updated_at,*.created_at"
 

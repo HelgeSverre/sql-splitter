@@ -46,6 +46,8 @@ impl ValueRewriter {
         table: &TableSchema,
         strategies: &[StrategyKind],
     ) -> anyhow::Result<(Vec<u8>, u64, u64)> {
+        self.reject_unsupported_strategies(strategies)?;
+
         // Parse the INSERT statement (dialect governs backslash unescaping so
         // non-MySQL strings aren't corrupted on re-serialization, bug #3)
         let mut parser = InsertParser::new(stmt)
@@ -60,7 +62,7 @@ impl ValueRewriter {
 
         // Get the column list (if any) from the statement, locating VALUES as a
         // keyword so a table named like `*values*` doesn't misplace it (bug #2).
-        let column_list = crate::parser::mysql_insert::find_values_keyword_pos(stmt)
+        let column_list = crate::parser::mysql_insert::find_values_keyword_pos(stmt, self.dialect)
             .and_then(|pos| crate::parser::mysql_insert::extract_column_list_before(stmt, pos));
 
         // Build the header: INSERT INTO table_name (columns) VALUES
@@ -68,8 +70,6 @@ impl ValueRewriter {
 
         let mut rows_redacted = 0u64;
         let mut columns_redacted = 0u64;
-        let num_strategies = strategies.len();
-
         for (row_idx, row) in rows.iter().enumerate() {
             if row_idx > 0 {
                 result.extend_from_slice(b",");
@@ -83,12 +83,15 @@ impl ValueRewriter {
                     result.extend_from_slice(b", ");
                 }
 
-                // Get strategy for this column (may be Skip if index out of bounds)
-                let strategy = strategies.get(col_idx).unwrap_or(&StrategyKind::Skip);
+                let strategy = self.strategy_for_value_column(
+                    table,
+                    column_list.as_deref(),
+                    col_idx,
+                    strategies,
+                );
 
                 // Apply redaction
-                let (redacted_sql, was_redacted) =
-                    self.redact_value(value, strategy, col_idx < num_strategies);
+                let (redacted_sql, was_redacted) = self.redact_value(value, strategy);
                 result.extend_from_slice(redacted_sql.as_bytes());
 
                 if was_redacted {
@@ -153,6 +156,8 @@ impl ValueRewriter {
         strategies: &[StrategyKind],
         columns: &[String],
     ) -> anyhow::Result<(Vec<u8>, u64, u64)> {
+        self.reject_unsupported_strategies(strategies)?;
+
         // Parse data rows
         let mut parser = CopyParser::new(data_block)
             .with_schema(table)
@@ -183,7 +188,8 @@ impl ValueRewriter {
                 }
                 first = false;
 
-                let strategy = strategies.get(col_idx).unwrap_or(&StrategyKind::Skip);
+                let strategy =
+                    self.strategy_for_value_column(table, Some(columns), col_idx, strategies);
                 let (redacted, was_redacted) = self.redact_copy_value(value, strategy);
                 result.extend_from_slice(&redacted);
 
@@ -295,7 +301,9 @@ impl ValueRewriter {
 
         // INSERT INTO table_name
         result.extend_from_slice(b"INSERT INTO ");
-        result.extend_from_slice(self.quote_identifier(table_name).as_bytes());
+        result.extend_from_slice(
+            crate::transform_common::quote_ident(self.dialect, table_name).as_bytes(),
+        );
 
         // Optional column list
         if let Some(cols) = columns {
@@ -315,18 +323,55 @@ impl ValueRewriter {
 
     /// Quote an identifier based on dialect
     fn quote_identifier(&self, name: &str) -> String {
-        crate::transform_common::quote_ident(self.dialect, name)
+        crate::transform_common::quote_identifier(self.dialect, name)
+    }
+
+    /// Reject strategies that require a whole-input rewrite before any output
+    /// is emitted. This protects direct library callers in addition to config
+    /// validation performed by the CLI.
+    fn reject_unsupported_strategies(&self, strategies: &[StrategyKind]) -> anyhow::Result<()> {
+        if strategies
+            .iter()
+            .any(|strategy| matches!(strategy, StrategyKind::Shuffle))
+        {
+            anyhow::bail!(
+                "The shuffle redaction strategy is not supported because it requires a two-pass rewrite"
+            );
+        }
+        Ok(())
+    }
+
+    /// Resolve the strategy for a value position to its schema column.
+    ///
+    /// Redaction rules are compiled in schema order. INSERT and COPY statements
+    /// can provide a partial or reordered column list, so value position alone
+    /// is not a valid schema-column index.
+    fn strategy_for_value_column<'a>(
+        &self,
+        table: &TableSchema,
+        column_order: Option<&[String]>,
+        value_index: usize,
+        strategies: &'a [StrategyKind],
+    ) -> &'a StrategyKind {
+        let column_name = column_order
+            .and_then(|columns| columns.get(value_index).map(String::as_str))
+            .or_else(|| {
+                table
+                    .columns
+                    .get(value_index)
+                    .map(|column| column.name.as_str())
+            });
+
+        column_name
+            .and_then(|name| table.get_column_id(name))
+            .and_then(|column_id| strategies.get(column_id.0 as usize))
+            .unwrap_or(&StrategyKind::Skip)
     }
 
     /// Redact a parsed value and format it for SQL output
-    fn redact_value(
-        &mut self,
-        value: &ParsedValue,
-        strategy: &StrategyKind,
-        has_strategy: bool,
-    ) -> (String, bool) {
+    fn redact_value(&mut self, value: &ParsedValue, strategy: &StrategyKind) -> (String, bool) {
         // Skip strategy means no redaction
-        if !has_strategy || matches!(strategy, StrategyKind::Skip) {
+        if matches!(strategy, StrategyKind::Skip) {
             return (self.format_value(value), false);
         }
 
@@ -528,6 +573,24 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_insert_keeps_qualified_table_components_separate() {
+        let mut rewriter = ValueRewriter::new(Some(42), SqlDialect::Postgres, "en".to_string());
+        let schema = create_test_schema();
+        let (result, _, _) = rewriter
+            .rewrite_insert(
+                b"INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'Alice');",
+                "tenant_a.users",
+                &schema,
+                &[StrategyKind::Skip, StrategyKind::Skip, StrategyKind::Skip],
+            )
+            .unwrap();
+
+        assert!(String::from_utf8(result)
+            .unwrap()
+            .starts_with("INSERT INTO \"tenant_a\".\"users\""));
+    }
+
+    #[test]
     fn test_rewrite_insert_mysql() {
         let mut rewriter = ValueRewriter::new(Some(42), SqlDialect::MySql, "en".to_string());
         let schema = create_test_schema();
@@ -552,6 +615,72 @@ mod tests {
         assert!(result_str.contains("VALUES"));
         assert_eq!(rows, 1);
         assert_eq!(cols, 2); // email and name were redacted
+    }
+
+    #[test]
+    fn reordered_insert_columns_use_schema_strategies() {
+        let mut rewriter = ValueRewriter::new(Some(42), SqlDialect::MySql, "en".to_string());
+        let schema = create_test_schema();
+        let stmt = b"INSERT INTO `users` (`name`, `email`, `id`) VALUES ('Alice', 'alice@example.com', 1);";
+        let strategies = vec![StrategyKind::Skip, StrategyKind::Null, StrategyKind::Skip];
+
+        let (result, rows, columns) = rewriter
+            .rewrite_insert(stmt, "users", &schema, &strategies)
+            .unwrap();
+        let result = String::from_utf8(result).unwrap();
+
+        assert!(
+            result.contains("('Alice', NULL, 1)"),
+            "unexpected output: {result}"
+        );
+        assert!(!result.contains("alice@example.com"));
+        assert_eq!(rows, 1);
+        assert_eq!(columns, 1);
+    }
+
+    #[test]
+    fn reordered_copy_columns_use_schema_strategies() {
+        let mut rewriter = ValueRewriter::new(Some(42), SqlDialect::Postgres, "en".to_string());
+        let schema = create_test_schema();
+        let strategies = vec![StrategyKind::Skip, StrategyKind::Null, StrategyKind::Skip];
+
+        let (result, rows, columns) = rewriter
+            .rewrite_copy_data(
+                b"Alice\talice@example.com\t1\n\\.\n",
+                &schema,
+                &strategies,
+                &["name".to_string(), "email".to_string(), "id".to_string()],
+            )
+            .unwrap();
+        let result = String::from_utf8(result).unwrap();
+
+        assert_eq!(result, "Alice\t\\N\t1\n\\.\n");
+        assert_eq!(rows, 1);
+        assert_eq!(columns, 1);
+    }
+
+    #[test]
+    fn shuffle_is_rejected_for_direct_library_calls() {
+        let mut rewriter = ValueRewriter::new(Some(42), SqlDialect::MySql, "en".to_string());
+        let schema = create_test_schema();
+
+        let error = rewriter
+            .rewrite_insert(
+                b"INSERT INTO users VALUES (1, 'alice@example.com', 'Alice');",
+                "users",
+                &schema,
+                &[
+                    StrategyKind::Skip,
+                    StrategyKind::Shuffle,
+                    StrategyKind::Skip,
+                ],
+            )
+            .expect_err("shuffle must not silently preserve a direct caller's source value");
+
+        assert_eq!(
+            error.to_string(),
+            "The shuffle redaction strategy is not supported because it requires a two-pass rewrite"
+        );
     }
 
     #[test]

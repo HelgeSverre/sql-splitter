@@ -14,7 +14,7 @@ use ahash::AHashMap;
 use glob::Pattern;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,15 +121,29 @@ impl TableState {
     }
 }
 
-/// Hash row column values to detect row modifications, excluding ignored
-/// column indices (pass an empty slice to hash every column).
-fn hash_row_digest(values: &[mysql_insert::PkValue], ignore_indices: &[usize]) -> u64 {
+/// Hash a row by schema column identity to detect modifications.
+///
+/// INSERT and COPY can provide reordered or partial column lists, so the
+/// position in `values` is not a stable table column identity. `column_map`
+/// maps each schema column to its position in this specific statement.
+fn hash_row_digest(
+    values: &[mysql_insert::PkValue],
+    column_map: &[Option<usize>],
+    ignore_indices: &[usize],
+) -> u64 {
     let mut hasher = ahash::AHasher::default();
-    for (i, v) in values.iter().enumerate() {
-        if ignore_indices.contains(&i) {
+    for (schema_index, value_index) in column_map.iter().enumerate() {
+        if ignore_indices.contains(&schema_index) {
             continue;
         }
-        hash_pk_value_into(v, &mut hasher);
+        schema_index.hash(&mut hasher);
+        match value_index.and_then(|index| values.get(index)) {
+            Some(value) => {
+                1u8.hash(&mut hasher);
+                hash_pk_value_into(value, &mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
     }
     hasher.finish()
 }
@@ -155,6 +169,15 @@ pub struct DataDiffer {
     ignore_patterns: Vec<Pattern>,
     /// Cache of ignored column indices per table
     ignore_indices_cache: AHashMap<String, Vec<usize>>,
+}
+
+/// Parsed row inputs needed to record one side of a data diff.
+struct RowRecord<'a> {
+    key_values: &'a Option<smallvec::SmallVec<[mysql_insert::PkValue; 2]>>,
+    all_values: &'a [mysql_insert::PkValue],
+    column_map: &'a [Option<usize>],
+    ignore_indices: &'a [usize],
+    uses_all_values_as_key: bool,
 }
 
 impl DataDiffer {
@@ -272,6 +295,36 @@ impl DataDiffer {
         } else {
             Some(pk_values)
         }
+    }
+
+    /// Build a stable row key from every non-ignored schema column that is
+    /// present in the statement. Each value is prefixed with its schema
+    /// column index, so two partial INSERTs that put the same value in
+    /// different columns cannot collide. This is used for tables without a
+    /// primary key when `--allow-no-pk` is enabled.
+    fn extract_all_non_ignored_values(
+        &self,
+        all_values: &[mysql_insert::PkValue],
+        column_map: &[Option<usize>],
+        table_schema: &crate::schema::TableSchema,
+        ignore_indices: &[usize],
+    ) -> smallvec::SmallVec<[mysql_insert::PkValue; 2]> {
+        table_schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !ignore_indices.contains(index))
+            .flat_map(|(index, _)| {
+                column_map
+                    .get(index)
+                    .and_then(|value_index| *value_index)
+                    .and_then(|value_index| all_values.get(value_index))
+                    .cloned()
+                    .map(|value| [mysql_insert::PkValue::BigInt(index as i128), value])
+                    .into_iter()
+                    .flatten()
+            })
+            .collect()
     }
 
     /// Scan a SQL file and accumulate PK/digest state
@@ -437,17 +490,29 @@ impl DataDiffer {
         }
 
         for row in rows {
+            let uses_all_values_as_key = self.options.allow_no_pk && pk_indices.is_empty();
             let effective_pk = if has_override {
                 self.extract_pk_from_values(&row.all_values, &pk_indices)
+            } else if uses_all_values_as_key {
+                Some(self.extract_all_non_ignored_values(
+                    &row.all_values,
+                    &row.column_map,
+                    table_schema,
+                    &ignore_indices,
+                ))
             } else {
                 row.pk
             };
             self.record_row(
                 table_name,
-                &effective_pk,
-                &row.all_values,
+                RowRecord {
+                    key_values: &effective_pk,
+                    all_values: &row.all_values,
+                    column_map: &row.column_map,
+                    ignore_indices: &ignore_indices,
+                    uses_all_values_as_key,
+                },
                 is_old,
-                &ignore_indices,
             );
         }
 
@@ -492,17 +557,29 @@ impl DataDiffer {
         }
 
         for row in rows {
+            let uses_all_values_as_key = self.options.allow_no_pk && pk_indices.is_empty();
             let effective_pk = if has_override {
                 self.extract_pk_from_values(&row.all_values, &pk_indices)
+            } else if uses_all_values_as_key {
+                Some(self.extract_all_non_ignored_values(
+                    &row.all_values,
+                    &row.column_map,
+                    table_schema,
+                    &ignore_indices,
+                ))
             } else {
                 row.pk
             };
             self.record_row(
                 table_name,
-                &effective_pk,
-                &row.all_values,
+                RowRecord {
+                    key_values: &effective_pk,
+                    all_values: &row.all_values,
+                    column_map: &row.column_map,
+                    ignore_indices: &ignore_indices,
+                    uses_all_values_as_key,
+                },
                 is_old,
-                &ignore_indices,
             );
         }
 
@@ -510,14 +587,7 @@ impl DataDiffer {
     }
 
     /// Record a row in the appropriate state map
-    fn record_row(
-        &mut self,
-        table_name: &str,
-        pk: &Option<smallvec::SmallVec<[mysql_insert::PkValue; 2]>>,
-        all_values: &[mysql_insert::PkValue],
-        is_old: bool,
-        ignore_indices: &[usize],
-    ) {
+    fn record_row(&mut self, table_name: &str, row: RowRecord<'_>, is_old: bool) {
         if self.global_truncated {
             // Still count rows but don't track PKs
             let state = if is_old {
@@ -588,10 +658,16 @@ impl DataDiffer {
         }
 
         // Record PK and digest
-        if let Some(ref pk_values) = pk {
+        if let Some(pk_values) = row.key_values {
             if let Some(ref mut map) = state.pk_to_digest {
                 let pk_hash = hash_pk_values(pk_values);
-                let row_digest = hash_row_digest(all_values, ignore_indices);
+                let row_digest = if row.uses_all_values_as_key {
+                    // The key already contains every non-ignored logical
+                    // column, including reordered INSERT/COPY column lists.
+                    pk_hash
+                } else {
+                    hash_row_digest(row.all_values, row.column_map, row.ignore_indices)
+                };
                 let was_new = map.insert(pk_hash, row_digest).is_none();
                 if was_new {
                     self.total_pk_entries += 1;
@@ -711,5 +787,123 @@ impl DataDiffer {
         }
 
         (DataDiff { tables }, self.warnings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DataDiffOptions, DataDiffer};
+    use crate::parser::SqlDialect;
+    use crate::schema::{Column, ColumnId, ColumnType, TableId, TableSchema};
+
+    fn logs_schema() -> TableSchema {
+        TableSchema {
+            name: "logs".to_string(),
+            id: TableId(0),
+            columns: vec![
+                Column {
+                    name: "message".to_string(),
+                    col_type: ColumnType::Text,
+                    source_type: "VARCHAR(255)".to_string(),
+                    ordinal: ColumnId(0),
+                    is_primary_key: false,
+                    is_nullable: true,
+                    is_unique: false,
+                    default_sql: None,
+                    is_generated: false,
+                    is_identity: false,
+                    collation: None,
+                },
+                Column {
+                    name: "level".to_string(),
+                    col_type: ColumnType::Text,
+                    source_type: "VARCHAR(20)".to_string(),
+                    ordinal: ColumnId(1),
+                    is_primary_key: false,
+                    is_nullable: true,
+                    is_unique: false,
+                    default_sql: None,
+                    is_generated: false,
+                    is_identity: false,
+                    collation: None,
+                },
+            ],
+            primary_key: Vec::new(),
+            foreign_keys: Vec::new(),
+            unique_constraints: Vec::new(),
+            check_constraints: Vec::new(),
+            indexes: Vec::new(),
+            create_statement: None,
+        }
+    }
+
+    #[test]
+    fn allow_no_pk_uses_all_values_as_the_row_key() {
+        let mut differ = DataDiffer::new(DataDiffOptions {
+            allow_no_pk: true,
+            ..Default::default()
+        });
+        let schema = logs_schema();
+
+        differ
+            .process_insert_statement(
+                b"INSERT INTO logs VALUES ('Test', 'INFO'), ('Debug', 'DEBUG');",
+                "logs",
+                &schema,
+                true,
+                SqlDialect::MySql,
+            )
+            .unwrap();
+        differ
+            .process_insert_statement(
+                b"INSERT INTO logs VALUES ('Test Updated', 'INFO'), ('New', 'WARN');",
+                "logs",
+                &schema,
+                false,
+                SqlDialect::MySql,
+            )
+            .unwrap();
+
+        let (diff, warnings) = differ.compute_diff();
+        let logs = &diff.tables["logs"];
+        assert!(warnings.is_empty());
+        assert_eq!(logs.added_count, 2);
+        assert_eq!(logs.removed_count, 2);
+        assert_eq!(logs.modified_count, 0);
+    }
+
+    #[test]
+    fn allow_no_pk_respects_ignored_columns_with_reordered_insert_columns() {
+        let mut differ = DataDiffer::new(DataDiffOptions {
+            allow_no_pk: true,
+            ignore_columns: vec!["logs.level".to_string()],
+            ..Default::default()
+        });
+        let schema = logs_schema();
+
+        differ
+            .process_insert_statement(
+                b"INSERT INTO logs (level, message) VALUES ('INFO', 'unchanged');",
+                "logs",
+                &schema,
+                true,
+                SqlDialect::MySql,
+            )
+            .unwrap();
+        differ
+            .process_insert_statement(
+                b"INSERT INTO logs (level, message) VALUES ('WARN', 'unchanged');",
+                "logs",
+                &schema,
+                false,
+                SqlDialect::MySql,
+            )
+            .unwrap();
+
+        let (diff, _) = differ.compute_diff();
+        let logs = &diff.tables["logs"];
+        assert_eq!(logs.added_count, 0);
+        assert_eq!(logs.removed_count, 0);
+        assert_eq!(logs.modified_count, 0);
     }
 }

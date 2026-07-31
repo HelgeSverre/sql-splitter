@@ -93,7 +93,9 @@ impl StrategyKind {
                 }
                 Ok(())
             }
-            StrategyKind::Shuffle => Ok(()),
+            StrategyKind::Shuffle => anyhow::bail!(
+                "The shuffle redaction strategy is not supported because it requires a two-pass rewrite"
+            ),
             StrategyKind::Fake { generator } => {
                 if !is_valid_generator(generator) {
                     anyhow::bail!("Unknown fake generator: {}. Use: email, name, first_name, last_name, phone, address, city, zip, company, ip, uuid, date, etc.", generator);
@@ -148,6 +150,23 @@ fn is_valid_generator(name: &str) -> bool {
             | "word"
             | "ssn"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StrategyKind;
+
+    #[test]
+    fn shuffle_is_rejected_until_two_pass_rewriting_is_available() {
+        let error = StrategyKind::Shuffle
+            .validate()
+            .expect_err("shuffle must not silently preserve source values");
+
+        assert_eq!(
+            error.to_string(),
+            "The shuffle redaction strategy is not supported because it requires a two-pass rewrite"
+        );
+    }
 }
 
 /// Value representation for redaction

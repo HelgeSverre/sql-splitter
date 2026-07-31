@@ -116,6 +116,9 @@ struct TableRuntime {
     name: String,
     /// Primary key set for FK membership checks
     pk_set: PkSet,
+    /// All primary keys present in the source, indexed only for strict FK
+    /// validation so cross-tenant exclusions are not reported as orphans.
+    source_pk_set: Option<PkSet>,
     /// Rows seen count
     rows_seen: u64,
     /// Rows selected count
@@ -213,6 +216,7 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
             TableRuntime {
                 name: table.name.clone(),
                 pk_set: PkSet::default(),
+                source_pk_set: config.strict_fk.then(PkSet::default),
                 rows_seen: 0,
                 rows_selected: 0,
                 skip,
@@ -222,6 +226,10 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
                 selected_temp_path: None,
             },
         );
+    }
+
+    if config.strict_fk {
+        index_source_primary_keys(&graph, &tables_dir, config.dialect, &mut runtimes)?;
     }
 
     // Create directory for selected row temp files
@@ -296,7 +304,7 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
         let mut spill: Option<RowSpillWriter> = None;
 
         let mut rows_seen = 0u64;
-        let mut fk_orphans = 0u64;
+        let fk_orphans = 0u64;
         let mut rows_selected = 0u64;
 
         for_each_data_row(
@@ -306,6 +314,13 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
             RowExtraction::Full,
             |row| {
                 rows_seen += 1;
+
+                if config.strict_fk && has_source_fk_orphan(&row, table_schema, &runtimes) {
+                    anyhow::bail!(
+                        "FK integrity violation in table '{}': row references missing parent",
+                        table_name
+                    );
+                }
 
                 let should_include = include_all
                     || should_include_row(
@@ -320,9 +335,6 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
                     );
 
                 if !should_include {
-                    if classification == ShardTableClassification::TenantDependent {
-                        fk_orphans += 1;
-                    }
                     return Ok(RowFlow::Continue);
                 }
 
@@ -401,6 +413,71 @@ pub fn run(config: ShardConfig) -> anyhow::Result<ShardStats> {
     write_output(&config, &graph, &all_tables, &runtimes, &tables_dir, &stats)?;
 
     Ok(stats)
+}
+
+/// Index every source primary key for strict-FK validation.
+///
+/// The normal sharding path stores only selected parent keys. In strict mode,
+/// that is not enough to distinguish a malformed source reference from a valid
+/// parent that belongs to another tenant and is intentionally excluded.
+fn index_source_primary_keys(
+    graph: &SchemaGraph,
+    tables_dir: &Path,
+    dialect: SqlDialect,
+    runtimes: &mut AHashMap<TableId, TableRuntime>,
+) -> anyhow::Result<()> {
+    for table_schema in graph.schema.iter() {
+        let table_file = tables_dir.join(format!("{}.sql", table_schema.name));
+        if !table_file.exists() {
+            continue;
+        }
+
+        let mut source_pk_set = PkSet::default();
+        for_each_data_row(
+            &table_file,
+            table_schema,
+            dialect,
+            RowExtraction::PkFk,
+            |row| {
+                if let Some(pk) = row.pk() {
+                    source_pk_set.insert(pk.clone());
+                }
+                Ok(RowFlow::Continue)
+            },
+        )?;
+
+        if let Some(runtime) = runtimes.get_mut(&table_schema.id) {
+            runtime.source_pk_set = Some(source_pk_set);
+        }
+    }
+
+    Ok(())
+}
+
+/// Check whether a row references a parent PK absent from the source dump.
+///
+/// A missing selected parent is not an orphan here: it may be a valid
+/// cross-tenant reference that sharding excludes by design.
+fn has_source_fk_orphan(
+    row: &UnifiedRow,
+    table_schema: &TableSchema,
+    runtimes: &AHashMap<TableId, TableRuntime>,
+) -> bool {
+    row.fk_values().iter().any(|(fk_ref, fk_tuple)| {
+        let Some(fk) = table_schema.foreign_keys.get(fk_ref.fk_index as usize) else {
+            return false;
+        };
+        let Some(parent_id) = fk.referenced_table_id else {
+            return false;
+        };
+        let Some(parent_runtime) = runtimes.get(&parent_id) else {
+            return false;
+        };
+        parent_runtime
+            .source_pk_set
+            .as_ref()
+            .is_some_and(|source_keys| !source_keys.contains(fk_tuple))
+    })
 }
 
 /// Detect tenant column from config or by scanning schema

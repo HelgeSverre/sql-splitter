@@ -74,6 +74,10 @@ rules:
   - column: "*.ssn*"
 ```
 
+For a schema-qualified table, put the complete table identity before the
+final column separator. For example, `tenant_a.users.email` targets the
+`email` column in `tenant_a.users`.
+
 Each rule takes a single glob pattern. To match multiple patterns, use one rule per pattern:
 
 ```yaml
@@ -192,14 +196,8 @@ Examples:
 
 #### shuffle
 
-Redistribute values within column:
-
-```yaml
-- column: "*.salary"
-  strategy: shuffle
-```
-
-Preserves distribution but breaks correlation with other columns.
+`shuffle` configuration is rejected. Correct shuffling requires a two-pass
+rewrite so the output never retains the original value at its source row.
 
 #### skip
 
@@ -260,9 +258,6 @@ rules:
   - column: "*.credit_card"
     strategy: mask
     pattern: "****-****-****-XXXX"
-  - column: "*.salary"
-    strategy: shuffle
-
   # Addresses
   - column: "*.address"
     strategy: fake
