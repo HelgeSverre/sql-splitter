@@ -17,25 +17,42 @@ impl HashStrategy {
 
     /// Hash a string value
     fn hash_value(&self, value: &str) -> String {
-        if self.preserve_domain && value.contains('@') {
+        if self.preserve_domain {
             // Email: preserve domain
             if let Some((local, domain)) = value.rsplit_once('@') {
-                let hash = self.compute_hash(local);
-                return format!("{}@{}", &hash[..8], domain);
+                let mut result = String::with_capacity(8 + 1 + domain.len());
+                Self::write_hash_prefix(local, 8, &mut result);
+                result.push('@');
+                result.push_str(domain);
+                return result;
             }
         }
 
         // Regular hash: take first 16 chars of hex
-        let hash = self.compute_hash(value);
-        hash[..16].to_string()
+        let mut result = String::with_capacity(16);
+        Self::write_hash_prefix(value, 16, &mut result);
+        result
     }
 
-    /// Compute SHA256 hash and return hex string
-    fn compute_hash(&self, value: &str) -> String {
+    /// Hash `value` and append the requested leading hexadecimal digits.
+    ///
+    /// Redaction only exposes 8 or 16 hex digits. Encoding all 64 digits and
+    /// then slicing them allocates and writes bytes that the caller discards.
+    fn write_hash_prefix(value: &str, digits: usize, output: &mut String) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
-        let result = hasher.finalize();
-        hex::encode(result)
+        let digest = hasher.finalize();
+        let initial_len = output.len();
+
+        for byte in digest.iter().take(digits.div_ceil(2)) {
+            output.push(HEX[(byte >> 4) as usize] as char);
+            if output.len() - initial_len == digits {
+                break;
+            }
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
     }
 }
 
@@ -72,7 +89,7 @@ mod tests {
         let result = strategy.apply(&RedactValue::String("secret".to_string()), &mut rng);
         match result {
             RedactValue::String(s) => {
-                assert_eq!(s.len(), 16);
+                assert_eq!(s, "2bb80d537b1da3e3");
                 // Hash is deterministic
                 let result2 = strategy.apply(&RedactValue::String("secret".to_string()), &mut rng);
                 match result2 {
@@ -95,8 +112,7 @@ mod tests {
         );
         match result {
             RedactValue::String(s) => {
-                assert!(s.ends_with("@example.com"));
-                assert!(s.len() > "@example.com".len());
+                assert_eq!(s, "30f69670@example.com");
             }
             _ => panic!("Expected String"),
         }
