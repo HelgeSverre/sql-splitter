@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-07-31
+
 ### Added
 
 - **`generate` model validation** — compilation now rejects an unsupported `source.dialect` or `output.dialect` (`GEN-DIALECT-INVALID`) and an `output.batch_size` of zero or above 1,000,000 (`GEN-OUTPUT-BATCH-SIZE`). The `--batch-size` CLI flag shares the same bound, and the generated JSON schema encodes the `1..=1_000_000` range for editor validation.
@@ -21,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`generate` numeric inference and verification** — MySQL and MSSQL now use their dialect-specific bare `tinyint` ranges. Inferred decimal rules cap generated scale at the supported maximum and clamp evidence that lies outside the declared precision. Integer verification now rejects non-integer text instead of treating it as in range.
 - **`generate` row caps** — `--max-rows` now also caps rows emitted by family planners, including `commerce.order_family` child rows.
 - **`generate` inferred foreign keys** — case-insensitive foreign-key table references are normalized to the table name stored in the model, so compilation does not reject valid references that differ only by case.
+- **Qualified SQL object names** — schema-qualified table and foreign-key identities now remain distinct across parsing, schema analysis, transforms, graphing, rendering, and output. SQL Server `dbo` names and PostgreSQL `COPY` statements no longer collide with same-named objects in another schema.
+- **`order` SQL Server output** — ordered dumps restore `GO` batch separators, so SQL Server statements remain executable after ordering. PostgreSQL COPY headers now stay paired with their data blocks.
+- **COPY conversion and DuckDB import** — PostgreSQL COPY conversion uses the selected target dialect’s identifier quoting, and comments before DDL no longer cause primary-key definitions to be missed. DuckDB retries a rejected multi-row COPY insert one row at a time, so malformed values or foreign-key failures no longer discard valid adjacent rows; SQL Server `dbo` inserts map to DuckDB’s default schema.
+- **Relational transforms** — `diff`, `redact`, `sample`, and `shard` preserve qualified names and foreign-key relationships more consistently. Sampling now enforces `max_total_rows` without exceeding it and includes required ancestors for self-referencing foreign keys.
+- **Archive integrity** — ZIP input verifies member CRCs and rejects corrupt payloads instead of processing incomplete data.
 
 ## [1.16.1] - 2026-07-28
 

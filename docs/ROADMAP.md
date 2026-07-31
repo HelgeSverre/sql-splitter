@@ -1,8 +1,8 @@
 # sql-splitter Roadmap
 
-**Version**: 1.15.0 (current)
-**Last Updated**: 2026-07-16
-**Revision**: 4.0 — synthetic data generation promoted from a fixture utility to a product feature
+**Version**: 1.17.0 (current)
+**Last Updated**: 2026-07-31
+**Revision**: 4.1 — synthetic data generation released as a product feature
 
 This roadmap outlines the feature development plan with dependency-aware ordering and version milestones.
 
@@ -40,12 +40,15 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 - ✅ `.zip` dump input (single `.sql` member, all input commands); `--io-strategy` auto-tuning for HDDs/slow media
 
+**Shipped (v1.17.0):**
+
+- ✅ `generate` — Production-shaped synthetic SQL from dumps, schemas, or YAML models
+
 **Next:**
 
-- vNext: Generate — Production-shaped synthetic SQL from dumps, schemas, or YAML models (implemented; documented at <https://sql-splitter.dev/commands/generate/>)
-- v1.17.0: Enum Conversion — Proper PG↔MySQL enum type conversion
-- v1.18.0: Migrate — Schema migration generation
-- v1.19.0: DBML — Import/export DBML schema definitions
+- v1.18.0: Enum Conversion — Proper PG↔MySQL enum type conversion
+- v1.19.0: Migrate — Schema migration generation
+- v1.20.0: DBML — Import/export DBML schema definitions
 
 **Future (v2.x):**
 
@@ -632,7 +635,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### v1.18.0 — Migration Generation
+### v1.19.0 — Migration Generation
 
 **Theme**: Schema evolution tracking
 
@@ -656,7 +659,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### v1.19.0 — DBML Import/Export
+### v1.20.0 — DBML Import/Export
 
 **Theme**: Schema documentation and interoperability
 
@@ -693,7 +696,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### v1.17.0 — Enum Type Conversion
+### v1.18.0 — Enum Type Conversion
 
 **Target**: 2-3 weeks  
 **Theme**: Proper bidirectional enum conversion between PostgreSQL and MySQL
@@ -866,9 +869,10 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 | Version | Features                                                          | Status  |
 | ------- | ----------------------------------------------------------------- | ------- |
 | v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current |
-| v1.17.0 | Enum Conversion                                                   | Planned |
-| v1.18.0 | Migrate                                | Planned     |
-| v1.19.0 | DBML                                   | Planned     |
+| v1.17.0 | Synthetic data generation (`generate`)                            | ✅ Released |
+| v1.18.0 | Enum Conversion                                                   | Planned |
+| v1.19.0 | Migrate                                | Planned     |
+| v1.20.0 | DBML                                   | Planned     |
 | v2.0.0  | Parallel                               | Planned     |
 | v2.1.0  | Infer                                  | Planned     |
 
@@ -965,20 +969,24 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
     - Central-directory locate + streamed deflate (no new deps)
     - Single-`.sql`-member policy; clear errors for multi-member/encrypted
 
-18. 🟡 **v1.17.0 — Enum Conversion** — Planned
+18. ✅ **v1.17.0 — Synthetic Data Generation** — Released
+    - Production-shaped synthetic SQL from dumps, schemas, or YAML models
+    - Bounded profiling, reusable YAML models, deterministic generation, and verification
+
+19. 🟡 **v1.18.0 — Enum Conversion** — Planned
     - Proper PG↔MySQL enum type conversion
     - PostgreSQL CREATE TYPE ... AS ENUM → MySQL inline ENUM()
     - MySQL inline ENUM() → PostgreSQL CREATE TYPE
     - Registry-based state tracking for streaming
     - Strip ::type casts in DML statements
 
-19. 🟡 **v1.18.0 — Migrate** — Planned
+20. 🟡 **v1.19.0 — Migrate** — Planned
     - Schema migration generation from diff
     - ALTER TABLE, CREATE INDEX statements
     - Rollback script generation
     - Breaking change detection
 
-20. 🟡 **v1.19.0 — DBML Import/Export** — Planned
+21. 🟡 **v1.20.0 — DBML Import/Export** — Planned
     - Export SQL schemas to DBML format
     - Import DBML to SQL DDL (all 4 dialects)
     - Extends `graph` command (export) and `convert` command (import)
@@ -1030,16 +1038,16 @@ tests/
 
 ---
 
-## Ecosystem Integrations (v1.20+)
+## Ecosystem Integrations (v1.21+)
 
 Strategic integrations beyond core CLI features. See [Integration Roadmap Master](INTEGRATION_ROADMAP_MASTER.md) for full analysis.
 
 | Version | Integration            | Theme                             | Effort |
 | ------- | ---------------------- | --------------------------------- | ------ |
-| v1.20.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge | 12h    |
-| v1.21.0 | **Great Expectations** | Auto-generate data quality suites | 16h    |
-| v1.22.0 | **Atlas**              | SQL dump → HCL schema-as-code     | 20h    |
-| v1.23.0 | **dbt**                | Bootstrap dbt projects from dumps | 28h    |
+| v1.21.0 | **Parquet Export**     | DuckDB → Parquet/data lake bridge | 12h    |
+| v1.22.0 | **Great Expectations** | Auto-generate data quality suites | 16h    |
+| v1.23.0 | **Atlas**              | SQL dump → HCL schema-as-code     | 20h    |
+| v1.24.0 | **dbt**                | Bootstrap dbt projects from dumps | 28h    |
 
 These follow the core roadmap (v1.16–v2.1) and require user demand validation before committing.
 
@@ -1057,16 +1065,16 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ### Upcoming Feature Designs
 
-- [Enum Conversion](features/ENUM_CONVERSION.md) — v1.17.0
-- [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.18.0
-- [DBML Support](features/DBML_SUPPORT.md) — v1.19.0
+- [Enum Conversion](features/ENUM_CONVERSION.md) — v1.18.0
+- [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.19.0
+- [DBML Support](features/DBML_SUPPORT.md) — v1.20.0
 
-### Ecosystem Integration Designs (v1.18+)
+### Ecosystem Integration Designs (v1.21+)
 
-- [DuckDB Deep Dive](features/DUCKDB_INTEGRATION_DEEP_DIVE.md) — Parquet export (v1.19.0)
-- [Great Expectations Deep Dive](features/GREAT_EXPECTATIONS_INTEGRATION_DEEP_DIVE.md) — v1.19.0
-- [Atlas Deep Dive](features/ATLAS_INTEGRATION_DEEP_DIVE.md) — v1.20.0
-- [dbt Deep Dive](features/DBT_INTEGRATION_DEEP_DIVE.md) — v1.21.0
+- [DuckDB Deep Dive](features/DUCKDB_INTEGRATION_DEEP_DIVE.md) — Parquet export (v1.21.0)
+- [Great Expectations Deep Dive](features/GREAT_EXPECTATIONS_INTEGRATION_DEEP_DIVE.md) — v1.22.0
+- [Atlas Deep Dive](features/ATLAS_INTEGRATION_DEEP_DIVE.md) — v1.23.0
+- [dbt Deep Dive](features/DBT_INTEGRATION_DEEP_DIVE.md) — v1.24.0
 
 ### Completed Feature Designs (moved to archived after implementation)
 

@@ -700,27 +700,27 @@ pub async fn deploy_to_supabase(
 
 > Note: this section was renumbered on 2026-05-07 to match the updated master roadmap.
 > The DuckDB query engine shipped in v1.12.0; v1.13.x was used for maintenance releases;
-> core features Enum/Migrate/DBML occupy v1.14–v1.16. Integrations follow at v1.17+.
+> core features Enum/Migrate/DBML now occupy v1.18–v1.20. Integrations follow at v1.21+.
 
 ### ✅ v1.12.0 — DuckDB Query Engine (SHIPPED)
 
 - DuckDB integration as embedded library (16h, completed)
 - See [DUCKDB_INTEGRATION_DEEP_DIVE.md](features/DUCKDB_INTEGRATION_DEEP_DIVE.md)
 
-### v1.17 — Parquet Export
+### v1.21 — Parquet Export
 
 - **Parquet export** (12h) — Bridge to modern data stack, extends DuckDB query engine
 
-### v1.18 — Data Quality
+### v1.22 — Data Quality
 
 - **Great Expectations integration** (16h) — Bootstrap testing
 
-### v1.19 — Schema Management
+### v1.23 — Schema Management
 
 - **Atlas HCL export** (20h) — Schema-as-code
 - **Liquibase changelog generation** (24h) — Migration tool integration
 
-### v1.20 — dbt Integration
+### v1.24 — dbt Integration
 
 - **dbt project generation** (28h) — Data transformation
 
@@ -739,7 +739,7 @@ pub async fn deploy_to_supabase(
 
 **Under 20h effort, huge value:**
 
-1. **Parquet export** (12h, planned v1.17.0)
+1. **Parquet export** (12h, planned v1.21.0)
    - Bridge SQL → data lakes
    - Extends already-shipped DuckDB query engine
    - Pandas/Spark/DuckDB compatible
@@ -800,10 +800,10 @@ sql-splitter query dump.sql "SELECT COUNT(*) FROM users"
 
 **Top 5 integrations for maximum impact:**
 
-1. ✅ **DuckDB** — Query analytics on dumps (shipped v1.12.0; Parquet export remaining at v1.17.0)
-2. **Atlas/Liquibase** — Schema management workflows (planned v1.19.0)
-3. **dbt** — Bootstrap data transformation projects (planned v1.20.0)
-4. **Great Expectations** — Data quality testing (planned v1.18.0)
+1. ✅ **DuckDB** — Query analytics on dumps (shipped v1.12.0; Parquet export remaining at v1.21.0)
+2. **Atlas/Liquibase** — Schema management workflows (planned v1.23.0)
+3. **dbt** — Bootstrap data transformation projects (planned v1.24.0)
+4. **Great Expectations** — Data quality testing (planned v1.22.0)
 5. **GitHub Actions** — CI/CD automation (future)
 
 These integrations position sql-splitter as the **Swiss Army knife that plays well with others** rather than trying to replace every tool in the ecosystem.
