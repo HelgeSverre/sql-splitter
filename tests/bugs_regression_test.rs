@@ -68,12 +68,13 @@ fn bug3_mysql_backslash_still_escaped() {
     }
 }
 
-// Bug #4: CREATE INDEX strips schema qualifier like CREATE TABLE does.
+// CREATE INDEX preserves the schema qualifier so same-named tables remain
+// distinct when a dump contains multiple schemas.
 #[test]
-fn bug4_create_index_strips_schema() {
+fn bug4_create_index_preserves_schema() {
     let stmt = b"CREATE INDEX idx_a ON public.users USING btree (col);";
     let (_, table) = Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Postgres);
-    assert_eq!(table, "users");
+    assert_eq!(table, "public.users");
 }
 
 // Bug #5: a ';' inside a block comment does not split the statement.

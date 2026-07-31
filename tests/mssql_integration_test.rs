@@ -95,7 +95,7 @@ fn test_mssql_parse_create_table() {
         Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Mssql);
 
     assert_eq!(stmt_type, StatementType::CreateTable);
-    assert_eq!(table_name, "users");
+    assert_eq!(table_name, "dbo.users");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn test_mssql_parse_insert() {
         Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Mssql);
 
     assert_eq!(stmt_type, StatementType::Insert);
-    assert_eq!(table_name, "users");
+    assert_eq!(table_name, "dbo.users");
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn test_mssql_parse_create_nonclustered_index() {
         Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Mssql);
 
     assert_eq!(stmt_type, StatementType::CreateIndex);
-    assert_eq!(table_name, "users");
+    assert_eq!(table_name, "dbo.users");
 }
 
 #[test]
@@ -142,15 +142,15 @@ fn test_mssql_split_simple() {
         .unwrap();
 
     assert_eq!(stats.tables_found, 2);
-    assert!(stats.table_names.contains(&"users".to_string()));
-    assert!(stats.table_names.contains(&"orders".to_string()));
+    assert!(stats.table_names.contains(&"dbo.users".to_string()));
+    assert!(stats.table_names.contains(&"dbo.orders".to_string()));
 
     // Verify output files exist
-    assert!(output_dir.join("users.sql").exists());
-    assert!(output_dir.join("orders.sql").exists());
+    assert!(output_dir.join("dbo.users.sql").exists());
+    assert!(output_dir.join("dbo.orders.sql").exists());
 
     // Verify content has semicolons (added for MSSQL)
-    let users_content = fs::read_to_string(output_dir.join("users.sql")).unwrap();
+    let users_content = fs::read_to_string(output_dir.join("dbo.users.sql")).unwrap();
     assert!(users_content.contains("CREATE TABLE"));
     assert!(users_content.contains("INSERT INTO"));
 }
@@ -166,10 +166,10 @@ fn test_mssql_split_edge_cases() {
         .unwrap();
 
     assert!(stats.tables_found >= 2);
-    assert!(stats.table_names.contains(&"products".to_string()));
+    assert!(stats.table_names.contains(&"dbo.products".to_string()));
 
-    // Verify products.sql has Unicode strings
-    let products_content = fs::read_to_string(output_dir.join("products.sql")).unwrap();
+    // Verify dbo.products.sql has Unicode strings
+    let products_content = fs::read_to_string(output_dir.join("dbo.products.sql")).unwrap();
     assert!(products_content.contains("日本語"));
 }
 
@@ -219,7 +219,7 @@ fn test_mssql_bulk_insert_classification() {
         Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Mssql);
 
     assert_eq!(stmt_type, StatementType::Insert);
-    assert_eq!(table_name, "data");
+    assert_eq!(table_name, "dbo.data");
 }
 
 #[test]
@@ -264,10 +264,13 @@ GO
 fn test_mssql_schema_qualified_names() {
     let stmts = [
         (b"CREATE TABLE [users] ([id] INT)".as_slice(), "users"),
-        (b"CREATE TABLE [dbo].[users] ([id] INT)".as_slice(), "users"),
+        (
+            b"CREATE TABLE [dbo].[users] ([id] INT)".as_slice(),
+            "dbo.users",
+        ),
         (
             b"CREATE TABLE [mydb].[dbo].[users] ([id] INT)".as_slice(),
-            "users",
+            "mydb.dbo.users",
         ),
     ];
 
@@ -300,7 +303,7 @@ fn test_mssql_schema_pk_parsing_clustered() {
     builder.parse_create_table(stmt);
     let schema = builder.build();
 
-    let table = schema.get_table("users").expect("Table should exist");
+    let table = schema.get_table("dbo.users").expect("Table should exist");
     assert_eq!(table.primary_key.len(), 1, "Should have 1 PK column");
 
     let pk_col = table
@@ -325,7 +328,9 @@ fn test_mssql_schema_composite_pk() {
     builder.parse_create_table(stmt);
     let schema = builder.build();
 
-    let table = schema.get_table("order_items").expect("Table should exist");
+    let table = schema
+        .get_table("dbo.order_items")
+        .expect("Table should exist");
     assert_eq!(table.primary_key.len(), 2, "Should have 2 PK columns");
 
     let pk_col1 = table
@@ -361,13 +366,13 @@ fn test_mssql_schema_fk_parsing() {
     let schema = builder.build();
 
     let orders = schema
-        .get_table("orders")
+        .get_table("dbo.orders")
         .expect("Orders table should exist");
     assert_eq!(orders.foreign_keys.len(), 1, "Should have 1 FK");
 
     let fk = &orders.foreign_keys[0];
     assert_eq!(fk.name.as_deref(), Some("FK_orders_users"));
-    assert_eq!(fk.referenced_table, "users");
+    assert_eq!(fk.referenced_table, "dbo.users");
     assert_eq!(fk.column_names, vec!["user_id"]);
     assert_eq!(fk.referenced_columns, vec!["id"]);
 }
@@ -394,7 +399,7 @@ fn test_mssql_schema_index_parsing() {
     let schema = builder.build();
 
     let products = schema
-        .get_table("products")
+        .get_table("dbo.products")
         .expect("Products table should exist");
     // Note: PK constraint may be parsed as an index too, so check for at least 2 user-created indexes
     assert!(
@@ -439,7 +444,7 @@ fn test_mssql_insert_row_parsing() {
     let mut builder = SchemaBuilder::new();
     builder.parse_create_table(create_stmt);
     let schema = builder.build();
-    let table = schema.get_table("orders").expect("Table should exist");
+    let table = schema.get_table("dbo.orders").expect("Table should exist");
 
     let rows = parse_mysql_insert_rows(insert_stmt, table).expect("Should parse rows");
     assert_eq!(rows.len(), 1, "Should parse 1 row");
@@ -465,7 +470,9 @@ fn test_mssql_insert_unicode_strings() {
     let mut builder = SchemaBuilder::new();
     builder.parse_create_table(create_stmt);
     let schema = builder.build();
-    let table = schema.get_table("products").expect("Table should exist");
+    let table = schema
+        .get_table("dbo.products")
+        .expect("Table should exist");
 
     let rows = parse_mysql_insert_rows(insert_stmt, table).expect("Should parse rows");
     assert_eq!(rows.len(), 1, "Should parse 1 row");
@@ -495,7 +502,7 @@ fn test_mssql_insert_column_mapping() {
     let mut builder = SchemaBuilder::new();
     builder.parse_create_table(create_stmt);
     let schema = builder.build();
-    let table = schema.get_table("orders").expect("Table should exist");
+    let table = schema.get_table("dbo.orders").expect("Table should exist");
 
     let rows = parse_mysql_insert_rows(insert_stmt, table).expect("Should parse rows");
     assert_eq!(rows.len(), 1, "Should parse 1 row");
@@ -581,12 +588,12 @@ fn test_mssql_shard_command() {
     assert!(stats.tables_processed > 0, "Should process some tables");
 
     // Tenant 1 should have users and orders
-    let users_stats = stats.table_stats.iter().find(|t| t.name == "users");
+    let users_stats = stats.table_stats.iter().find(|t| t.name == "dbo.users");
     assert!(users_stats.is_some(), "Should have users table stats");
     let users = users_stats.unwrap();
     assert_eq!(users.rows_selected, 2, "Should select 2 users for tenant 1");
 
-    let orders_stats = stats.table_stats.iter().find(|t| t.name == "orders");
+    let orders_stats = stats.table_stats.iter().find(|t| t.name == "dbo.orders");
     assert!(orders_stats.is_some(), "Should have orders table stats");
     let orders = orders_stats.unwrap();
     assert_eq!(

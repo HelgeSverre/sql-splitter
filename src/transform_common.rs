@@ -141,7 +141,7 @@ where
             first_in_statement,
         } => {
             if first_in_statement || insert_ctx.is_none() {
-                insert_ctx = Some(InsertRowContext::from_header(header, table_schema));
+                insert_ctx = Some(InsertRowContext::from_header(header, table_schema, dialect));
             }
             let ctx = insert_ctx.as_ref().expect("insert_ctx set above");
             match parse_insert_tuple(row, table_schema, ctx, dialect, extraction) {
@@ -320,13 +320,90 @@ pub fn build_schema_graph(tables_dir: &Path, dialect: SqlDialect) -> anyhow::Res
     Ok(SchemaGraph::from_schema(builder.build()))
 }
 
-/// Quote an identifier for the given dialect.
+/// Quote a possibly schema-qualified table identifier for the given dialect.
 pub fn quote_ident(dialect: SqlDialect, name: &str) -> String {
+    // Table identities are canonical dotted names. Quote each identifier part
+    // separately: quoting `tenant.users` as one identifier changes it from a
+    // schema-qualified table reference into a table literally named
+    // `tenant.users`.
+    split_qualified_identifier(name)
+        .unwrap_or_else(|| vec![name.to_string()])
+        .iter()
+        .map(|part| quote_identifier_part(dialect, part))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Quote exactly one identifier component for the given dialect.
+///
+/// Use this for column, index, and constraint names. In contrast to
+/// [`quote_ident`], dots are literal characters here rather than schema
+/// separators.
+pub fn quote_identifier(dialect: SqlDialect, name: &str) -> String {
+    quote_identifier_part(dialect, name)
+}
+
+/// Split the dotted table identity while preserving a quoted component that
+/// contains a literal dot, such as `public."user.log"`.
+fn split_qualified_identifier(name: &str) -> Option<Vec<String>> {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    let mut parts = Vec::new();
+
+    while i < bytes.len() {
+        let mut part = Vec::new();
+        if bytes[i] == b'"' {
+            i += 1;
+            let mut terminated = false;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if bytes.get(i + 1) == Some(&b'"') {
+                        part.push(b'"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    terminated = true;
+                    break;
+                }
+                part.push(bytes[i]);
+                i += 1;
+            }
+            if !terminated {
+                return None;
+            }
+        } else {
+            while i < bytes.len() && bytes[i] != b'.' {
+                part.push(bytes[i]);
+                i += 1;
+            }
+        }
+
+        if part.is_empty() {
+            return None;
+        }
+        parts.push(String::from_utf8_lossy(&part).into_owned());
+
+        if i == bytes.len() {
+            return Some(parts);
+        }
+        if bytes[i] != b'.' {
+            return None;
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn quote_identifier_part(dialect: SqlDialect, name: &str) -> String {
     // Double any occurrence of the closing delimiter so an identifier can never
     // terminate its own quoting early (malformed / injectable SQL otherwise).
     match dialect {
         SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
-        SqlDialect::Postgres | SqlDialect::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
+        SqlDialect::Postgres | SqlDialect::Sqlite => {
+            format!("\"{}\"", name.replace('"', "\"\""))
+        }
         SqlDialect::Mssql => format!("[{}]", name.replace(']', "]]")),
     }
 }
@@ -587,6 +664,23 @@ mod tests {
     }
 
     #[test]
+    fn quote_ident_keeps_qualified_table_parts_separate() {
+        assert_eq!(
+            quote_ident(SqlDialect::Postgres, "tenant_a.users"),
+            "\"tenant_a\".\"users\""
+        );
+        assert_eq!(
+            quote_ident(SqlDialect::MySql, "tenant_a.users"),
+            "`tenant_a`.`users`"
+        );
+        assert_eq!(quote_ident(SqlDialect::Mssql, "dbo.users"), "[dbo].[users]");
+        assert_eq!(
+            quote_ident(SqlDialect::Postgres, "public.\"user.log\""),
+            "\"public\".\"user.log\""
+        );
+    }
+
+    #[test]
     fn quote_ident_escapes_the_closing_delimiter() {
         // A delimiter character inside an identifier must be doubled so it cannot
         // terminate the quoted identifier early (malformed / injectable SQL).
@@ -594,6 +688,14 @@ mod tests {
         assert_eq!(quote_ident(SqlDialect::Postgres, "a\"b"), "\"a\"\"b\"");
         assert_eq!(quote_ident(SqlDialect::Sqlite, "a\"b"), "\"a\"\"b\"");
         assert_eq!(quote_ident(SqlDialect::Mssql, "a]b"), "[a]]b]");
+    }
+
+    #[test]
+    fn quote_identifier_keeps_literal_dots_in_one_component() {
+        assert_eq!(
+            quote_identifier(SqlDialect::Postgres, "settings.theme"),
+            "\"settings.theme\""
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ The command performs a two-pass operation:
    - Header statements (SET, comments) come first
    - Tables ordered so parents come before children
    - For each table: CREATE TABLE → ALTER TABLE/CREATE INDEX → INSERT statements
+   - SQL Server output writes a `GO` batch separator after each parsed statement
 
 **What gets reordered:**
 

@@ -90,6 +90,9 @@ sql-splitter split dump.sql -o dump.zip
 # Split specific tables only
 sql-splitter split dump.sql --tables users,posts,orders
 
+# Select one schema-qualified table without merging it with namesakes
+sql-splitter split postgres_dump.sql --dialect postgres --tables tenant_a.users
+
 # Schema only (CREATE TABLE, indexes, etc.)
 sql-splitter split dump.sql -o schema/ --schema-only
 
@@ -528,8 +531,10 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 - `hash`: SHA256 hash (deterministic, preserves FK relationships)
 - `mask`: Partial masking with pattern (`*`=asterisk, `X`=keep, `#`=random digit)
 - `fake`: Generate realistic fake data (25+ generators)
-- `shuffle`: Redistribute values within column (preserves distribution)
 - `skip`: No redaction (passthrough)
+
+`shuffle` rules are rejected. They require a two-pass rewrite to avoid emitting
+the original values, which is not implemented yet.
 
 **Fake data generators:**
 

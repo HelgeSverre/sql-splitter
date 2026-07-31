@@ -55,6 +55,10 @@ sql-splitter split dump.sql --compress zstd --output tables/   # <table>.sql.zst
 sql-splitter split dump.sql --output dump.tar.gz               # single archive (.tgz/.tar.zst/.tar.bz2/.tar.xz/.tar/.zip)
 ```
 
+Schema-qualified table names are kept distinct. Use the complete identity in
+a table filter when the dump contains multiple schemas, for example
+`--tables tenant_a.users`.
+
 ### merge
 
 Merge per-table files back into a single dump.

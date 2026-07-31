@@ -327,8 +327,8 @@ fn test_splitter_mssql_dialect() {
     let stats = splitter.split().unwrap();
 
     assert_eq!(stats.tables_found, 2);
-    assert!(output_dir.join("users.sql").exists());
-    assert!(output_dir.join("orders.sql").exists());
+    assert!(output_dir.join("dbo.users.sql").exists());
+    assert!(output_dir.join("dbo.orders.sql").exists());
 }
 
 // =============================================================================

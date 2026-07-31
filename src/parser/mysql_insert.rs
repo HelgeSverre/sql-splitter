@@ -168,20 +168,54 @@ pub(crate) enum HeaderScan {
 /// `VALUES` is matched as a keyword (word-boundaried, not inside a quoted
 /// identifier or string literal), so tables like `product_values` or
 /// `` `order values` `` are not mistaken for the clause (bug #2).
-pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
+///
+///
+/// MySQL permits `#` line comments, while MSSQL uses `#name` for temporary
+/// tables. Callers that parse a non-MySQL statement must provide its dialect
+/// so a temporary table name is not mistaken for a comment.
+pub(crate) fn scan_insert_header(stmt: &[u8], dialect: SqlDialect) -> HeaderScan {
     let mut in_single = false;
     let mut in_double = false;
     let mut in_backtick = false;
     let mut in_bracket = false;
+    let mut in_line_comment = false;
+    let mut block_comment_depth = 0u32;
     let mut i = 0;
 
     while i < stmt.len() {
         let b = stmt[i];
 
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if block_comment_depth > 0 {
+            match (b, stmt.get(i + 1)) {
+                (b'/', Some(b'*')) => {
+                    block_comment_depth += 1;
+                    i += 2;
+                }
+                (b'*', Some(b'/')) => {
+                    block_comment_depth -= 1;
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+
         if in_single {
-            // Only need to find the end of the string; treat '' as an escaped
-            // quote so we don't exit early. Backslash handling is irrelevant
-            // here because string literals only ever follow VALUES.
+            // A VALUES-less INSERT ... SELECT can contain string literals in
+            // its SELECT expression, so both doubled and backslash-escaped
+            // quotes must stay inside the literal while looking for the
+            // statement terminator.
+            if b == b'\\' && i + 1 < stmt.len() {
+                i += 2;
+                continue;
+            }
             if b == b'\'' {
                 if stmt.get(i + 1) == Some(&b'\'') {
                     i += 2;
@@ -194,6 +228,10 @@ pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
         }
         if in_double {
             if b == b'"' {
+                if stmt.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
                 in_double = false;
             }
             i += 1;
@@ -201,6 +239,10 @@ pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
         }
         if in_backtick {
             if b == b'`' {
+                if stmt.get(i + 1) == Some(&b'`') {
+                    i += 2;
+                    continue;
+                }
                 in_backtick = false;
             }
             i += 1;
@@ -208,6 +250,10 @@ pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
         }
         if in_bracket {
             if b == b']' {
+                if stmt.get(i + 1) == Some(&b']') {
+                    i += 2;
+                    continue;
+                }
                 in_bracket = false;
             }
             i += 1;
@@ -215,6 +261,21 @@ pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
         }
 
         match b {
+            b'#' if dialect == SqlDialect::MySql => {
+                in_line_comment = true;
+                i += 1;
+                continue;
+            }
+            b'-' if stmt.get(i + 1) == Some(&b'-') => {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            b'/' if stmt.get(i + 1) == Some(&b'*') => {
+                block_comment_depth = 1;
+                i += 2;
+                continue;
+            }
             b'\'' => {
                 in_single = true;
                 i += 1;
@@ -258,10 +319,10 @@ pub(crate) fn scan_insert_header(stmt: &[u8]) -> HeaderScan {
 }
 
 /// Byte offset just past the `VALUES` keyword within a single INSERT statement,
-/// or `None` for a VALUES-less INSERT. Thin wrapper over [`scan_insert_header`]
-/// for callers that already hold one complete statement.
-pub(crate) fn find_values_keyword_pos(stmt: &[u8]) -> Option<usize> {
-    match scan_insert_header(stmt) {
+/// or `None` for a VALUES-less INSERT. The dialect distinguishes MySQL `#`
+/// comments from MSSQL temporary table names.
+pub(crate) fn find_values_keyword_pos(stmt: &[u8], dialect: SqlDialect) -> Option<usize> {
+    match scan_insert_header(stmt, dialect) {
         HeaderScan::Values(pos) => Some(pos),
         HeaderScan::NoValues(_) | HeaderScan::Incomplete => None,
     }
@@ -534,7 +595,7 @@ impl<'a> InsertParser<'a> {
 
     /// Find the VALUES keyword and return position after it
     fn find_values_keyword(&self) -> anyhow::Result<usize> {
-        find_values_keyword_pos(self.stmt)
+        find_values_keyword_pos(self.stmt, self.dialect)
             .ok_or_else(|| anyhow::anyhow!("INSERT statement missing VALUES keyword"))
     }
 
@@ -990,8 +1051,8 @@ impl InsertRowContext {
     /// Build the context from an INSERT header (the statement bytes up to and
     /// including the `VALUES` keyword) and the table schema, exactly as the
     /// full-statement parser would.
-    pub fn from_header(header: &[u8], schema: &TableSchema) -> Self {
-        let values_pos = find_values_keyword_pos(header).unwrap_or(header.len());
+    pub fn from_header(header: &[u8], schema: &TableSchema, dialect: SqlDialect) -> Self {
+        let values_pos = find_values_keyword_pos(header, dialect).unwrap_or(header.len());
         let column_order: Vec<Option<ColumnId>> =
             match extract_column_list_before(header, values_pos) {
                 Some(cols) => cols.iter().map(|n| schema.get_column_id(n)).collect(),
@@ -1060,6 +1121,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn header_scan_ignores_values_and_semicolons_in_comments() {
+        let select = b"INSERT INTO archive SELECT id /* VALUES; */ FROM source;";
+        assert!(matches!(
+            scan_insert_header(select, SqlDialect::MySql),
+            HeaderScan::NoValues(pos) if pos == select.len()
+        ));
+
+        let mysql_comment = b"INSERT INTO archive SELECT id # VALUES;\nFROM source;";
+        assert!(matches!(
+            scan_insert_header(mysql_comment, SqlDialect::MySql),
+            HeaderScan::NoValues(pos) if pos == mysql_comment.len()
+        ));
+
+        let values = b"INSERT INTO archive /* VALUES */ (id) VALUES (1);";
+        let expected = values
+            .windows(6)
+            .rposition(|word| word.eq_ignore_ascii_case(b"VALUES"))
+            .unwrap()
+            + 6;
+        assert!(matches!(
+            scan_insert_header(values, SqlDialect::MySql),
+            HeaderScan::Values(pos) if pos == expected
+        ));
+    }
+
+    #[test]
+    fn header_scan_keeps_mssql_temporary_table_names_out_of_comment_mode() {
+        let stmt = b"INSERT INTO #daily_users (id) VALUES (1);";
+        assert!(matches!(
+            scan_insert_header(stmt, SqlDialect::Mssql),
+            HeaderScan::Values(_)
+        ));
+    }
+
+    #[test]
     fn test_parse_insert_for_bulk_simple() {
         let sql = b"INSERT INTO users VALUES (1, 'Alice')";
         let result = parse_insert_for_bulk(sql, SqlDialect::MySql).unwrap();
@@ -1085,7 +1181,7 @@ mod tests {
         let sql =
             b"INSERT INTO [dbo].[users] ([email], [name]) VALUES (N'alice@example.com', N'Alice')";
         let result = parse_insert_for_bulk(sql, SqlDialect::Mssql).unwrap();
-        assert_eq!(result.table, "users");
+        assert_eq!(result.table, "dbo.users");
         assert_eq!(
             result.columns,
             Some(vec!["email".to_string(), "name".to_string()])
@@ -1128,8 +1224,8 @@ pub fn parse_insert_for_bulk(stmt: &[u8], dialect: SqlDialect) -> anyhow::Result
 
     // Locate VALUES as a keyword (not a substring) so tables/columns containing
     // "values" don't shift parsing (bug #2), then extract the column list.
-    let columns =
-        find_values_keyword_pos(stmt).and_then(|pos| extract_column_list_before(stmt, pos));
+    let columns = find_values_keyword_pos(stmt, dialect)
+        .and_then(|pos| extract_column_list_before(stmt, pos));
 
     // Parse rows using the existing parser
     let mut parser = InsertParser::new(stmt).with_dialect(dialect);

@@ -77,6 +77,14 @@ sql-splitter split dump.sql -o schema/ --schema-only
 sql-splitter split dump.sql -o data/ --data-only --tables users
 ```
 
+Schema-qualified table names remain distinct. For a dump with both
+`tenant_a.users` and `tenant_b.users`, use the full name in `--tables` to
+select one table.
+
+```bash
+sql-splitter split postgres_dump.sql --dialect postgres --tables tenant_a.users -o subset/
+```
+
 ### Compressed Input
 
 ```bash

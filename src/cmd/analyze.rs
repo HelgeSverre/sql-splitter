@@ -427,9 +427,24 @@ fn print_stats(stats: &[crate::analyzer::TableStats]) {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        let prefix: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{prefix}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_string;
+
+    #[test]
+    fn truncates_unicode_table_names_without_panicking() {
+        let name = "表".repeat(50);
+        let truncated = truncate_string(&name, 40);
+
+        assert_eq!(truncated.chars().count(), 40);
+        assert!(truncated.ends_with("..."));
     }
 }

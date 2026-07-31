@@ -306,11 +306,11 @@ mod parse_statement_tests {
 
     #[test]
     fn test_create_table_schema_qualified() {
-        // Schema-qualified names extract just the table name (not the schema)
+        // Schema-qualified names retain the full table identity.
         let stmt = b"CREATE TABLE db.users (id INT);";
         let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
         assert_eq!(typ, StatementType::CreateTable);
-        assert_eq!(name, "users");
+        assert_eq!(name, "db.users");
     }
 
     #[test]
@@ -358,11 +358,11 @@ mod parse_statement_tests {
 
     #[test]
     fn test_insert_schema_qualified() {
-        // Schema-qualified names extract just the table name (not the schema)
+        // Schema-qualified names retain the full table identity.
         let stmt = b"INSERT INTO db.posts VALUES (1);";
         let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
         assert_eq!(typ, StatementType::Insert);
-        assert_eq!(name, "posts");
+        assert_eq!(name, "db.posts");
     }
 
     #[test]
@@ -423,11 +423,11 @@ mod parse_statement_tests {
 
     #[test]
     fn test_alter_table_schema_qualified() {
-        // Schema-qualified names extract just the table name (not the schema)
+        // Schema-qualified names retain the full table identity.
         let stmt = b"ALTER TABLE db.orders ADD COLUMN status INT;";
         let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
         assert_eq!(typ, StatementType::AlterTable);
-        assert_eq!(name, "orders");
+        assert_eq!(name, "db.orders");
     }
 
     // B.5 DROP TABLE variations
@@ -444,11 +444,11 @@ mod parse_statement_tests {
 
     #[test]
     fn test_drop_table_schema_qualified() {
-        // Schema-qualified names extract just the table name (not the schema)
+        // Schema-qualified names retain the full table identity.
         let stmt = b"DROP TABLE db.temp_data;";
         let (typ, name) = Parser::<&[u8]>::parse_statement(stmt);
         assert_eq!(typ, StatementType::DropTable);
-        assert_eq!(name, "temp_data");
+        assert_eq!(name, "db.temp_data");
     }
 
     // B.6 Unknown and malformed statements
@@ -731,7 +731,7 @@ CREATE TABLE test (id INT);
             Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Postgres);
 
         assert_eq!(typ, StatementType::CreateTable);
-        assert_eq!(name, "users");
+        assert_eq!(name, "public.users");
     }
 
     #[test]
@@ -779,7 +779,7 @@ CREATE TABLE test (id INT);
             Parser::<&[u8]>::parse_statement_with_dialect(&stmt, SqlDialect::Postgres);
 
         assert_eq!(typ, StatementType::Insert);
-        assert_eq!(name, "users");
+        assert_eq!(name, "public.users");
     }
 
     #[test]

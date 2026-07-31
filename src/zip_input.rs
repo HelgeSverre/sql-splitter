@@ -19,7 +19,7 @@
 
 use anyhow::{bail, Context};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Location and encoding of the single `.sql` member inside a zip archive,
@@ -29,7 +29,76 @@ struct ZipSqlMember {
     name: String,
     data_start: u64,
     compressed_size: u64,
+    uncompressed_size: u64,
+    crc32: u32,
     method: zip::CompressionMethod,
+}
+
+/// Streaming ZIP member integrity checker.
+///
+/// `ZipArchive::by_index_raw` is intentionally used while locating the
+/// member, but raw reads bypass the ZIP crate's usual CRC validation. Keep the
+/// output streaming and verify both CRC32 and the advertised uncompressed size
+/// when the consumer reaches EOF.
+struct ZipMemberIntegrityReader<R> {
+    inner: R,
+    name: String,
+    expected_crc32: u32,
+    expected_size: u64,
+    hasher: crc32fast::Hasher,
+    bytes_read: u64,
+    verified: bool,
+}
+
+impl<R> ZipMemberIntegrityReader<R> {
+    fn new(inner: R, name: String, expected_crc32: u32, expected_size: u64) -> Self {
+        Self {
+            inner,
+            name,
+            expected_crc32,
+            expected_size,
+            hasher: crc32fast::Hasher::new(),
+            bytes_read: 0,
+            verified: false,
+        }
+    }
+
+    fn verify(&mut self) -> io::Result<()> {
+        if self.verified {
+            return Ok(());
+        }
+
+        if self.bytes_read == self.expected_size
+            && self.hasher.clone().finalize() == self.expected_crc32
+        {
+            self.verified = true;
+            return Ok(());
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "zip member '{}' failed integrity verification (CRC32 or uncompressed size mismatch)",
+                self.name
+            ),
+        ))
+    }
+}
+
+impl<R: Read> Read for ZipMemberIntegrityReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        if count == 0 {
+            if !buf.is_empty() {
+                self.verify()?;
+            }
+            return Ok(0);
+        }
+
+        self.hasher.update(&buf[..count]);
+        self.bytes_read += count as u64;
+        Ok(count)
+    }
 }
 
 /// Ignore well-known junk that archivers/OSes add: macOS resource-fork
@@ -120,6 +189,8 @@ fn locate_sql_member(path: &Path) -> anyhow::Result<(zip::ZipArchive<File>, ZipS
                     name: entry.name().to_string(),
                     data_start,
                     compressed_size: entry.compressed_size(),
+                    uncompressed_size: entry.size(),
+                    crc32: entry.crc32(),
                     method,
                 }
             };
@@ -178,12 +249,19 @@ pub(crate) fn open_zip_member(
     // archive (central directory, next entry, ...).
     let bounded: Box<dyn Read> = Box::new(inner.take(member.compressed_size));
 
-    Ok(match member.method {
+    let decoded: Box<dyn Read> = match member.method {
         zip::CompressionMethod::Stored => bounded,
         zip::CompressionMethod::Deflated => Box::new(flate2::read::DeflateDecoder::new(bounded)),
         // locate_sql_member() already rejected every other method.
         _ => unreachable!("unsupported zip compression method should have been rejected earlier"),
-    })
+    };
+
+    Ok(Box::new(ZipMemberIntegrityReader::new(
+        decoded,
+        member.name,
+        member.crc32,
+        member.uncompressed_size,
+    )))
 }
 
 #[cfg(test)]
@@ -336,5 +414,27 @@ mod tests {
             reader.read_to_end(&mut buf).unwrap();
             assert_eq!(buf, b"SELECT 42;", "method={method:?}");
         }
+    }
+
+    #[test]
+    fn rejects_corrupt_member_data_with_crc_error() {
+        let dir = write_zip(&[(
+            "dump.sql",
+            b"SELECT original_data;",
+            zip::CompressionMethod::Stored,
+        )]);
+        let path = dir.path().join("input.zip");
+        let (_, member) = locate_sql_member(&path).unwrap();
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(member.data_start + 7)).unwrap();
+        file.write_all(b"X").unwrap();
+        file.flush().unwrap();
+
+        let mut reader = open_zip_member(&path, None).unwrap();
+        let mut contents = Vec::new();
+        let err = reader.read_to_end(&mut contents).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("integrity verification"));
     }
 }

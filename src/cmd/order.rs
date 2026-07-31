@@ -132,6 +132,7 @@ pub fn run(args: OrderArgs) -> Result<ExitCode> {
 
     write_ordered_output(
         writer,
+        sql_dialect,
         &ordered_tables,
         &table_statements,
         &other_statements,
@@ -175,10 +176,28 @@ fn collect_statements(
         other_table_statements: AHashMap::new(),
     };
     let mut other_statements: Vec<String> = Vec::new();
+    // `read_statement` emits PostgreSQL COPY headers and their data blocks as
+    // separate statements. Keep the block with its header so reordering never
+    // puts COPY rows before the command that consumes them.
+    let mut pending_copy_table: Option<String> = None;
 
     while let Some(stmt) = parser.read_statement()? {
         let stmt_str = String::from_utf8_lossy(&stmt).to_string();
         let (stmt_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+
+        if crate::copy_data::is_copy_data_block(&stmt) {
+            if let Some(table_name) = pending_copy_table.take() {
+                if let Some(copy_statement) = collected
+                    .insert_statements
+                    .get_mut(&table_name)
+                    .and_then(|statements| statements.last_mut())
+                {
+                    copy_statement.push_str(&stmt_str);
+                    continue;
+                }
+            }
+        }
+        pending_copy_table = None;
 
         // Feed DDL into the schema builder (no-op for other statement types)
         builder.ingest(stmt_type, &stmt_str);
@@ -212,11 +231,13 @@ fn collect_statements(
             }
             StatementType::Insert | StatementType::Copy => {
                 if !table_name.is_empty() {
+                    let copy_table = (stmt_type == StatementType::Copy).then(|| table_name.clone());
                     collected
                         .insert_statements
                         .entry(table_name)
                         .or_default()
                         .push(stmt_str);
+                    pending_copy_table = copy_table;
                 }
             }
             _ => {
@@ -232,14 +253,15 @@ fn collect_statements(
 
 /// Write statements in topological order
 fn write_ordered_output(
-    mut writer: Box<dyn Write>,
+    mut writer: impl Write,
+    dialect: crate::parser::SqlDialect,
     ordered_tables: &[String],
     table_statements: &CollectedStatements,
     other_statements: &[String],
 ) -> Result<()> {
     // Write header/other statements first
     for stmt in other_statements {
-        writeln!(writer, "{}", stmt)?;
+        write_statement(&mut writer, stmt, dialect)?;
     }
 
     if !other_statements.is_empty() {
@@ -250,14 +272,14 @@ fn write_ordered_output(
     for table in ordered_tables {
         // CREATE TABLE
         if let Some(create) = table_statements.create_statements.get(table) {
-            writeln!(writer, "{}", create)?;
+            write_statement(&mut writer, create, dialect)?;
             writeln!(writer)?;
         }
 
         // ALTER TABLE, CREATE INDEX, etc.
         if let Some(others) = table_statements.other_table_statements.get(table) {
             for stmt in others {
-                writeln!(writer, "{}", stmt)?;
+                write_statement(&mut writer, stmt, dialect)?;
             }
             if !others.is_empty() {
                 writeln!(writer)?;
@@ -267,7 +289,7 @@ fn write_ordered_output(
         // INSERT statements
         if let Some(inserts) = table_statements.insert_statements.get(table) {
             for stmt in inserts {
-                writeln!(writer, "{}", stmt)?;
+                write_statement(&mut writer, stmt, dialect)?;
             }
             if !inserts.is_empty() {
                 writeln!(writer)?;
@@ -277,4 +299,76 @@ fn write_ordered_output(
 
     writer.flush()?;
     Ok(())
+}
+
+/// Write one parsed statement, restoring SQL Server batch separators that the
+/// parser consumes while reading the source dump.
+fn write_statement(
+    writer: &mut dyn Write,
+    statement: &str,
+    dialect: crate::parser::SqlDialect,
+) -> Result<()> {
+    writeln!(writer, "{statement}")?;
+    if dialect == crate::parser::SqlDialect::Mssql {
+        writeln!(writer, "GO")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mssql_output_restores_go_batch_separators() -> Result<()> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generate/production_shape_mssql.sql");
+        let (graph, statements, other_statements) =
+            collect_statements(&fixture, crate::parser::SqlDialect::Mssql)?;
+        let table_order = graph
+            .topo_sort()
+            .order
+            .iter()
+            .filter_map(|id| graph.table_name(*id).map(str::to_owned))
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+
+        write_ordered_output(
+            &mut output,
+            crate::parser::SqlDialect::Mssql,
+            &table_order,
+            &statements,
+            &other_statements,
+        )?;
+
+        let mut parser = Parser::with_dialect(
+            output.as_slice(),
+            64 * 1024,
+            crate::parser::SqlDialect::Mssql,
+        );
+        let mut table_statements = Vec::new();
+        while let Some(statement) = parser.read_statement()? {
+            let (statement_type, table_name) = Parser::<&[u8]>::parse_statement_with_dialect(
+                &statement,
+                crate::parser::SqlDialect::Mssql,
+            );
+            if matches!(
+                statement_type,
+                StatementType::CreateTable | StatementType::Insert
+            ) {
+                table_statements.push((statement_type, table_name));
+            }
+        }
+
+        assert_eq!(
+            table_statements,
+            vec![
+                (StatementType::CreateTable, "dbo.users".to_string()),
+                (StatementType::Insert, "dbo.users".to_string()),
+                (StatementType::CreateTable, "dbo.orders".to_string()),
+                (StatementType::Insert, "dbo.orders".to_string()),
+            ]
+        );
+        Ok(())
+    }
 }

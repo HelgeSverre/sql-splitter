@@ -14,7 +14,7 @@ pub const SMALL_BUFFER_SIZE: usize = 64 * 1024;
 pub const MEDIUM_BUFFER_SIZE: usize = 256 * 1024;
 
 /// SQL dialect for parser behavior
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SqlDialect {
     /// MySQL/MariaDB mysqldump format (backtick quoting, backslash escapes)
     #[default]
@@ -350,9 +350,13 @@ static CREATE_INDEX_RE: Lazy<Regex> =
 
 // MSSQL CREATE INDEX: extracts table from ON [schema].[table] or ON [table]
 // Matches: ON [table], ON [dbo].[table], ON [db].[dbo].[table]
-// Captures the last bracketed or unbracketed identifier before (
-static CREATE_INDEX_MSSQL_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)ON\s+(?:\[?[^\[\]\s]+\]?\s*\.\s*)*\[([^\[\]]+)\]").unwrap());
+// Captures the complete table reference before `(`.
+static CREATE_INDEX_MSSQL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)ON\s+((?:(?:\[(?:[^\]]|\]\])*\]|[^\s.()]+)\s*\.\s*)*(?:\[(?:[^\]]|\]\])*\]|[^\s.()]+))",
+    )
+    .unwrap()
+});
 
 static ALTER_TABLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)ALTER\s+TABLE\s+`?([^\s`;]+)`?").unwrap());
@@ -360,10 +364,6 @@ static ALTER_TABLE_RE: Lazy<Regex> =
 static DROP_TABLE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[`"]?([^\s`"`;]+)[`"]?"#).unwrap()
 });
-
-// PostgreSQL COPY statement regex
-static COPY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)^\s*COPY\s+(?:ONLY\s+)?[`"]?([^\s`"(]+)[`"]?"#).unwrap());
 
 // More flexible table name regex that handles:
 // - Backticks: `table`
@@ -1065,39 +1065,7 @@ impl<R: Read> Parser<R> {
 
     /// Check if statement is a PostgreSQL COPY FROM stdin
     fn is_copy_from_stdin(&self, stmt: &[u8]) -> bool {
-        // Strip leading comments (pg_dump adds -- comments before COPY statements)
-        let stmt = strip_leading_comments_and_whitespace(stmt);
-        if stmt.len() < 17 {
-            // Minimum: "COPY x FROM STDIN" = 17 chars
-            return false;
-        }
-
-        // Check prefix with stack-allocated buffer (avoid heap allocation)
-        let mut prefix = [0u8; 5];
-        for (i, &b) in stmt.iter().take(5).enumerate() {
-            prefix[i] = b.to_ascii_uppercase();
-        }
-        if &prefix != b"COPY " {
-            return false;
-        }
-
-        // Search for "FROM STDIN" case-insensitively without allocating
-        // Look within first 500 bytes (typical COPY statements are shorter)
-        let search_len = stmt.len().min(500);
-        if search_len >= 10 {
-            // Inclusive upper bound so a "FROM STDIN" ending exactly at the
-            // window edge isn't missed.
-            for i in 0..=(search_len - 10) {
-                if stmt[i..i + 10]
-                    .iter()
-                    .zip(b"FROM STDIN".iter())
-                    .all(|(&a, &b)| a.to_ascii_uppercase() == b)
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        has_postgres_copy_stdin_source(stmt)
     }
 
     /// Read PostgreSQL COPY data block until we see the terminator line (\.).
@@ -1182,10 +1150,12 @@ impl<R: Read> Parser<R> {
             };
             if self.in_copy_data {
                 self.in_copy_data = false;
-                if on_event(ParserEvent::CopyStart(&stmt))? == RowFlow::Stop {
-                    return Ok(());
-                }
-                if self.visit_copy_data(&mut on_event)? == RowFlow::Stop {
+                let skip_rows = match on_event(ParserEvent::CopyStart(&stmt))? {
+                    RowFlow::Continue => false,
+                    RowFlow::SkipStatement => true,
+                    RowFlow::Stop => return Ok(()),
+                };
+                if self.visit_copy_data(&mut on_event, skip_rows)? == RowFlow::Stop {
                     return Ok(());
                 }
             } else if on_event(ParserEvent::Statement(&stmt))? == RowFlow::Stop {
@@ -1231,7 +1201,7 @@ impl<R: Read> Parser<R> {
             let stripped_len =
                 strip_leading_comments_and_whitespace(&self.buf[self.buf_pos..]).len();
             let start = self.buf.len() - stripped_len;
-            match mysql_insert::scan_insert_header(&self.buf[start..]) {
+            match mysql_insert::scan_insert_header(&self.buf[start..], self.dialect) {
                 mysql_insert::HeaderScan::Values(vp) => {
                     let values_abs = start + vp;
                     break (self.buf[start..values_abs].to_vec(), values_abs);
@@ -1361,7 +1331,11 @@ impl<R: Read> Parser<R> {
 
     /// Stream a COPY data block (positioned just past the header's `;`) as
     /// [`ParserEvent::CopyRow`]s followed by [`ParserEvent::CopyEnd`].
-    fn visit_copy_data<F>(&mut self, on_event: &mut F) -> anyhow::Result<RowFlow>
+    fn visit_copy_data<F>(
+        &mut self,
+        on_event: &mut F,
+        initially_skipping: bool,
+    ) -> anyhow::Result<RowFlow>
     where
         F: FnMut(ParserEvent<'_>) -> anyhow::Result<RowFlow>,
     {
@@ -1382,7 +1356,7 @@ impl<R: Read> Parser<R> {
         }
 
         let mut ls = self.buf_pos;
-        let mut skipping = false;
+        let mut skipping = initially_skipping;
 
         loop {
             let nl = loop {
@@ -1660,13 +1634,8 @@ impl<R: Read> Parser<R> {
 
         // PostgreSQL COPY statement
         if upper_prefix.starts_with(b"COPY ") {
-            if let Some(caps) = COPY_RE.captures(stmt) {
-                if let Some(m) = caps.get(1) {
-                    let name = String::from_utf8_lossy(m.as_bytes()).into_owned();
-                    // Handle schema.table - extract just the table name
-                    let table_name = name.split('.').next_back().unwrap_or(&name).to_string();
-                    return (StatementType::Copy, table_name);
-                }
+            if let Some(name) = extract_table_name_flexible(stmt, 4, dialect) {
+                return (StatementType::Copy, name);
             }
         }
 
@@ -1709,22 +1678,18 @@ impl<R: Read> Parser<R> {
             if dialect == SqlDialect::Mssql {
                 if let Some(caps) = CREATE_INDEX_MSSQL_RE.captures(stmt) {
                     if let Some(m) = caps.get(1) {
-                        return (
-                            StatementType::CreateIndex,
-                            String::from_utf8_lossy(m.as_bytes()).into_owned(),
-                        );
+                        if let Some(name) = extract_table_name_flexible(m.as_bytes(), 0, dialect) {
+                            return (StatementType::CreateIndex, name);
+                        }
                     }
                 }
             }
             // Fall back to generic regex for MySQL/PostgreSQL/SQLite
             if let Some(caps) = CREATE_INDEX_RE.captures(stmt) {
                 if let Some(m) = caps.get(1) {
-                    let name = String::from_utf8_lossy(m.as_bytes());
-                    // Strip schema qualifier (public.users -> users) so indexes
-                    // group under the same key as their CREATE TABLE, which also
-                    // strips the schema.
-                    let table_name = name.split('.').next_back().unwrap_or(&name).to_string();
-                    return (StatementType::CreateIndex, table_name);
+                    if let Some(name) = extract_table_name_flexible(m.as_bytes(), 0, dialect) {
+                        return (StatementType::CreateIndex, name);
+                    }
                 }
             }
         }
@@ -1844,10 +1809,128 @@ pub(crate) fn strip_leading_comments_and_whitespace(mut data: &[u8]) -> &[u8] {
     data
 }
 
+/// Return whether `stmt` is a PostgreSQL `COPY ... FROM STDIN` command.
+///
+/// This deliberately recognizes source tokens rather than searching bytes. A
+/// quoted identifier, a string literal, a comment, or a parenthesized COPY
+/// query can contain `FROM STDIN` without opening a data block.
+fn has_postgres_copy_stdin_source(stmt: &[u8]) -> bool {
+    let stmt = strip_leading_comments_and_whitespace(stmt);
+    let mut i = 0;
+    let mut paren_depth = 0u32;
+    let mut saw_copy = false;
+    let mut expecting_stdin = false;
+
+    while i < stmt.len() {
+        let byte = stmt[i];
+
+        if is_whitespace(byte) {
+            i += 1;
+            continue;
+        }
+
+        if byte == b'-' && stmt.get(i + 1) == Some(&b'-') {
+            i += 2;
+            while i < stmt.len() && stmt[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if byte == b'/' && stmt.get(i + 1) == Some(&b'*') {
+            i += 2;
+            let mut comment_depth = 1u32;
+            while i < stmt.len() && comment_depth > 0 {
+                match (stmt[i], stmt.get(i + 1)) {
+                    (b'/', Some(b'*')) => {
+                        comment_depth += 1;
+                        i += 2;
+                    }
+                    (b'*', Some(b'/')) => {
+                        comment_depth -= 1;
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            continue;
+        }
+
+        if matches!(byte, b'\'' | b'\"' | b'`' | b'[') {
+            let close = if byte == b'[' { b']' } else { byte };
+            i += 1;
+            while i < stmt.len() {
+                if stmt[i] == b'\\' && close == b'\'' && i + 1 < stmt.len() {
+                    i += 2;
+                    continue;
+                }
+                if stmt[i] == close {
+                    if stmt.get(i + 1) == Some(&close) {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            expecting_stdin = false;
+            continue;
+        }
+
+        match byte {
+            b'(' => {
+                paren_depth = paren_depth.saturating_add(1);
+                expecting_stdin = false;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                expecting_stdin = false;
+                i += 1;
+                continue;
+            }
+            b';' => return false,
+            _ => {}
+        }
+
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = i;
+            i += 1;
+            while i < stmt.len() && is_word_byte(stmt[i]) {
+                i += 1;
+            }
+            let word = &stmt[start..i];
+
+            if !saw_copy {
+                if !word.eq_ignore_ascii_case(b"COPY") {
+                    return false;
+                }
+                saw_copy = true;
+                continue;
+            }
+
+            if paren_depth == 0 {
+                if expecting_stdin {
+                    return word.eq_ignore_ascii_case(b"STDIN");
+                }
+                expecting_stdin = word.eq_ignore_ascii_case(b"FROM");
+            }
+            continue;
+        }
+
+        expecting_stdin = false;
+        i += 1;
+    }
+
+    false
+}
+
 /// Extract table name with support for:
 /// - IF NOT EXISTS
 /// - ONLY (PostgreSQL)
-/// - Schema-qualified names (schema.table)
+/// - Schema-qualified names (`schema.table` is retained)
 /// - Both backtick and double-quote quoting
 #[inline]
 pub(crate) fn extract_table_name_flexible(
@@ -1950,12 +2033,15 @@ pub(crate) fn extract_table_name_flexible(
                     }
                     let name = &stmt[start..i];
                     // For MSSQL, unescape ]] to ]
-                    let name_str = if dialect == SqlDialect::Mssql {
-                        String::from_utf8_lossy(name).replace("]]", "]")
-                    } else {
-                        String::from_utf8_lossy(name).into_owned()
+                    let name_str = match quote_char {
+                        Some(b'[') if dialect == SqlDialect::Mssql => {
+                            String::from_utf8_lossy(name).replace("]]", "]")
+                        }
+                        Some(b'"') => String::from_utf8_lossy(name).replace("\"\"", "\""),
+                        Some(b'`') => String::from_utf8_lossy(name).replace("``", "`"),
+                        _ => String::from_utf8_lossy(name).into_owned(),
                     };
-                    parts.push(name_str);
+                    parts.push(canonicalize_qualified_part(name_str, quote_char.is_some()));
                     i += 1; // Skip closing quote
                     break;
                 }
@@ -1967,6 +2053,14 @@ pub(crate) fn extract_table_name_flexible(
                 break;
             }
             i += 1;
+        }
+
+        // An unquoted terminal component can run to the end of a captured
+        // table reference (for example `dbo.users` extracted from CREATE
+        // INDEX), where the delimiter branch above never gets a chance to
+        // push it.
+        if quote_char.is_none() && i == stmt.len() && i > start {
+            parts.push(String::from_utf8_lossy(&stmt[start..i]).into_owned());
         }
 
         // If at end of quoted name without finding close quote, bail
@@ -1990,13 +2084,27 @@ pub(crate) fn extract_table_name_flexible(
         }
     }
 
-    // Return the last part (table name), not the schema
-    parts.pop()
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("."))
+    }
 }
 
 #[inline]
 fn is_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Preserve a quoted identifier component that contains a dot. The schema and
+/// output layers use dots as table-reference separators, so retaining quote
+/// boundaries prevents `public."user.log"` from becoming three components.
+fn canonicalize_qualified_part(part: String, was_quoted: bool) -> String {
+    if was_quoted && part.contains('.') {
+        format!("\"{}\"", part.replace('"', "\"\""))
+    } else {
+        part
+    }
 }
 
 /// True if `b` can be part of a SQL identifier (letters, digits, `_`). Used to
@@ -2036,5 +2144,133 @@ pub fn determine_buffer_size(file_size: u64) -> usize {
         MEDIUM_BUFFER_SIZE
     } else {
         SMALL_BUFFER_SIZE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_source_detection_ignores_quoted_and_literal_text() {
+        for stmt in [
+            b"COPY \"FROM STDIN\" TO STDOUT;".as_slice(),
+            b"COPY report TO 'FROM STDIN';".as_slice(),
+            b"COPY (SELECT 'FROM STDIN') TO STDOUT;".as_slice(),
+            b"COPY report /* FROM STDIN */ TO STDOUT;".as_slice(),
+        ] {
+            assert!(
+                !has_postgres_copy_stdin_source(stmt),
+                "unexpected COPY data mode for {stmt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_source_detection_accepts_comments_between_source_tokens() {
+        let stmt = b"COPY report (id) /* source */ FROM /* terminal */ STDIN;";
+        assert!(has_postgres_copy_stdin_source(stmt));
+    }
+
+    #[test]
+    fn copy_start_skip_statement_skips_rows_and_reaches_following_statement() {
+        let sql = b"COPY report (id) FROM STDIN;\n1\n2\n\\.\nSELECT 42;";
+        let mut parser = Parser::with_dialect(&sql[..], 8, SqlDialect::Postgres);
+        let mut events = Vec::new();
+
+        parser
+            .visit_events(|event| match event {
+                ParserEvent::CopyStart(_) => {
+                    events.push("start");
+                    Ok(RowFlow::SkipStatement)
+                }
+                ParserEvent::CopyRow(_) => {
+                    events.push("row");
+                    Ok(RowFlow::Continue)
+                }
+                ParserEvent::CopyEnd => {
+                    events.push("end");
+                    Ok(RowFlow::Continue)
+                }
+                ParserEvent::Statement(stmt) => {
+                    assert_eq!(stmt, b"SELECT 42;");
+                    events.push("statement");
+                    Ok(RowFlow::Continue)
+                }
+                ParserEvent::InsertRow { .. } => unreachable!("unexpected INSERT event"),
+            })
+            .unwrap();
+
+        assert_eq!(events, ["start", "end", "statement"]);
+    }
+
+    #[test]
+    fn parser_retains_qualified_copy_names() {
+        let cases = [
+            (
+                b"COPY public.users (id) FROM STDIN;".as_slice(),
+                "public.users",
+            ),
+            (
+                b"COPY \"tenant_a\".\"users\" (id) FROM STDIN;".as_slice(),
+                "tenant_a.users",
+            ),
+            (
+                b"COPY public.\"user.log\" (id) FROM STDIN;".as_slice(),
+                "public.\"user.log\"",
+            ),
+        ];
+
+        for (stmt, expected) in cases {
+            let (kind, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Postgres);
+            assert_eq!(kind, StatementType::Copy);
+            assert_eq!(name, expected);
+        }
+    }
+
+    #[test]
+    fn parser_retains_qualified_mssql_index_names() {
+        for stmt in [
+            b"CREATE INDEX users_email_idx ON [dbo].[users] ([email]);".as_slice(),
+            b"CREATE INDEX users_email_idx ON dbo.users (email);".as_slice(),
+        ] {
+            let (kind, name) =
+                Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::Mssql);
+            assert_eq!(kind, StatementType::CreateIndex);
+            assert_eq!(name, "dbo.users");
+        }
+    }
+
+    #[test]
+    fn parser_normalizes_quoted_qualified_generic_index_names() {
+        let (kind, name) = Parser::<&[u8]>::parse_statement_with_dialect(
+            b"CREATE INDEX users_email_idx ON \"tenant_a\".\"users\" (email);",
+            SqlDialect::Postgres,
+        );
+        assert_eq!(kind, StatementType::CreateIndex);
+        assert_eq!(name, "tenant_a.users");
+    }
+
+    #[test]
+    fn parser_streams_mssql_temporary_table_insert_rows() {
+        let sql = b"INSERT INTO #daily_users (id) VALUES (1), (2);";
+        let mut parser = Parser::with_dialect(&sql[..], 8, SqlDialect::Mssql);
+        let mut rows = 0;
+
+        parser
+            .visit_events(|event| match event {
+                ParserEvent::InsertRow { .. } => {
+                    rows += 1;
+                    Ok(RowFlow::Continue)
+                }
+                ParserEvent::Statement(_) | ParserEvent::CopyStart(_) | ParserEvent::CopyEnd => {
+                    Ok(RowFlow::Continue)
+                }
+                ParserEvent::CopyRow(_) => unreachable!("unexpected COPY row"),
+            })
+            .unwrap();
+
+        assert_eq!(rows, 2);
     }
 }

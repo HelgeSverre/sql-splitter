@@ -126,7 +126,7 @@ mod copy_tests {
         let (stmt_type, table_name) =
             Parser::<&[u8]>::parse_statement_with_dialect(&stmt1, SqlDialect::Postgres);
         assert_eq!(stmt_type, StatementType::Copy);
-        assert_eq!(table_name, "table_001");
+        assert_eq!(table_name, "public.table_001");
 
         // Second statement should be the data block
         let stmt2 = parser.read_statement().unwrap().unwrap();

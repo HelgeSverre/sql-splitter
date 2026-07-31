@@ -15,17 +15,29 @@ use regex::Regex;
 /// Regex to extract table name from CREATE TABLE
 /// Supports: `table` (MySQL), "table" (PostgreSQL), [table] (MSSQL), table (SQLite/unquoted), schema.table
 static CREATE_TABLE_NAME_RE: Lazy<Regex> = Lazy::new(|| {
-    // Match table name with various quoting styles including MSSQL brackets
-    // Pattern handles: schema.table, [schema].[table], `schema`.`table`, "schema"."table"
-    Regex::new(r#"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s(]+)[\]`"]?"#)
-        .unwrap()
+    Regex::new(
+        r#"(?ix)
+        CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?
+        (
+            (?:(?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)\s*\.\s*)*
+            (?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)
+        )
+        "#,
+    )
+    .unwrap()
 });
 
 /// Regex to extract table name from ALTER TABLE
 /// Supports: `table` (MySQL), "table" (PostgreSQL), [table] (MSSQL), table (SQLite/unquoted), schema.table
 static ALTER_TABLE_NAME_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s]+)[\]`"]?"#,
+        r#"(?ix)
+        ALTER\s+TABLE\s+(?:ONLY\s+)?
+        (
+            (?:(?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)\s*\.\s*)*
+            (?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)
+        )
+        "#,
     )
     .unwrap()
 });
@@ -51,7 +63,14 @@ static INLINE_PRIMARY_KEY_RE: Lazy<Regex> =
 /// Supports: `name` (MySQL), "name" (PostgreSQL), [name] (MSSQL), name (unquoted)
 static FOREIGN_KEY_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:CONSTRAINT\s+[\[`"]?([^\[\]`"\s]+)[\]`"]?\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?([^\[\]`"\s(]+)[\]`"]?\s*\(([^)]+)\)"#,
+        r#"(?ix)
+        (?:CONSTRAINT\s+[\[`"]?([^\[\]`"\s]+)[\]`"]?\s+)?
+        FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+
+        (
+            (?:(?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)\s*\.\s*)*
+            (?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)
+        )\s*\(([^)]+)\)
+        "#,
     )
     .unwrap()
 });
@@ -71,7 +90,14 @@ static INLINE_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
 /// Supports MSSQL bracket quoting and schema prefixes
 static CREATE_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)CREATE\s+(UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[\[`"]?(\w+)[\]`"]?\s+ON\s+(?:[\[\]`"\w]+\s*\.\s*)*[\[`"]?(\w+)[\]`"]?\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)"#,
+        r#"(?ix)
+        CREATE\s+(UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+
+        (?:IF\s+NOT\s+EXISTS\s+)?[\[`"]?(\w+)[\]`"]?\s+ON\s+
+        (
+            (?:(?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)\s*\.\s*)*
+            (?:\[(?:[^\]]|\]\])*\]|`(?:[^`]|``)*`|"(?:[^"]|"")*"|[^\s().,;]+)
+        )\s*(?:USING\s+(\w+)\s*)?\(([^)]+)\)
+        "#,
     )
     .unwrap()
 });
@@ -102,7 +128,7 @@ impl SchemaBuilder {
         let mut table = TableSchema::new(table_name, TableId(0));
         table.create_statement = Some(stmt.to_string());
 
-        // Extract the body between first ( and last )
+        // Extract the body after the CREATE TABLE identifier.
         let body = extract_table_body(stmt)?;
 
         // Parse columns and constraints
@@ -140,7 +166,7 @@ impl SchemaBuilder {
 
         let is_unique = caps.get(1).is_some();
         let index_name = caps.get(2)?.as_str().to_string();
-        let table_name = caps.get(3)?.as_str().to_string();
+        let table_name = normalize_qualified_identifier(caps.get(3)?.as_str())?;
         let index_type = caps.get(4).map(|m| m.as_str().to_uppercase());
         let columns_str = caps.get(5)?.as_str();
         let columns = parse_column_list(columns_str);
@@ -176,7 +202,7 @@ pub fn extract_create_table_name(stmt: &str) -> Option<String> {
     CREATE_TABLE_NAME_RE
         .captures(stmt)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .and_then(|m| normalize_qualified_identifier(m.as_str()))
 }
 
 /// Extract table name from ALTER TABLE statement
@@ -184,18 +210,139 @@ pub fn extract_alter_table_name(stmt: &str) -> Option<String> {
     ALTER_TABLE_NAME_RE
         .captures(stmt)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .and_then(|m| normalize_qualified_identifier(m.as_str()))
 }
 
-/// Extract the body of a CREATE TABLE statement (between first ( and matching ))
+/// Normalize a SQL table reference into a dotted, unquoted identity.
+///
+/// The schema graph uses this representation consistently for DDL, INSERT,
+/// and COPY routing, so `tenant_a.users` and `tenant_b.users` remain distinct.
+fn normalize_qualified_identifier(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut parts = Vec::new();
+
+    loop {
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+
+        let (quote, close) = match bytes[i] {
+            b'`' => (Some(b'`'), b'`'),
+            b'"' => (Some(b'"'), b'"'),
+            b'[' => (Some(b'['), b']'),
+            _ => (None, 0),
+        };
+        if quote.is_some() {
+            i += 1;
+        }
+
+        let mut part = Vec::new();
+        let mut terminated = quote.is_none();
+        while i < bytes.len() {
+            let byte = bytes[i];
+            if let Some(open) = quote {
+                if byte == close {
+                    if bytes.get(i + 1) == Some(&close) {
+                        part.push(close);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    terminated = true;
+                    break;
+                }
+                // A backtick doubled inside an identifier and a doubled double
+                // quote both use the same close-byte escape handled above.
+                debug_assert!(open == b'`' || open == b'"' || open == b'[');
+                part.push(byte);
+                i += 1;
+            } else if byte == b'.' || byte.is_ascii_whitespace() {
+                break;
+            } else {
+                part.push(byte);
+                i += 1;
+            }
+        }
+
+        if !terminated || part.is_empty() {
+            return None;
+        }
+        parts.push(canonicalize_qualified_part(
+            String::from_utf8_lossy(&part).into_owned(),
+            quote.is_some(),
+        ));
+
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'.') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+
+    (!parts.is_empty()).then(|| parts.join("."))
+}
+
+/// Preserve a quoted table-reference component containing a dot. The dotted
+/// schema identity uses unquoted dots as separators, so this marker lets the
+/// writer reconstruct `public."user.log"` without changing its meaning.
+fn canonicalize_qualified_part(part: String, was_quoted: bool) -> String {
+    if was_quoted && part.contains('.') {
+        format!("\"{}\"", part.replace('"', "\"\""))
+    } else {
+        part
+    }
+}
+
+/// Extract the body of a CREATE TABLE statement.
+///
+/// Start after the matched table name rather than at the first opening
+/// parenthesis in the statement. Dump comments commonly precede DDL and can
+/// themselves contain parentheses, for example `NVARCHAR(MAX)`.
 fn extract_table_body(stmt: &str) -> Option<String> {
     let bytes = stmt.as_bytes();
-    let mut depth = 0;
-    let mut start = None;
+    let mut open = CREATE_TABLE_NAME_RE.find(stmt)?.end();
+
+    loop {
+        while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+            open += 1;
+        }
+
+        if bytes.get(open..open + 2) == Some(b"--") {
+            open = bytes[open + 2..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(bytes.len(), |offset| open + 2 + offset + 1);
+            continue;
+        }
+
+        if bytes.get(open..open + 2) == Some(b"/*") {
+            let end = bytes[open + 2..]
+                .windows(2)
+                .position(|window| window == b"*/")?;
+            open += end + 4;
+            continue;
+        }
+
+        break;
+    }
+
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+
+    let start = open + 1;
+    let mut depth = 1i32;
     let mut in_string = false;
     let mut escape_next = false;
 
-    for (i, &b) in bytes.iter().enumerate() {
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
         if escape_next {
             escape_next = false;
             continue;
@@ -216,16 +363,11 @@ fn extract_table_body(stmt: &str) -> Option<String> {
         }
 
         if b == b'(' {
-            if depth == 0 {
-                start = Some(i + 1);
-            }
             depth += 1;
         } else if b == b')' {
             depth -= 1;
             if depth == 0 {
-                if let Some(s) = start {
-                    return Some(stmt[s..i].to_string());
-                }
+                return Some(stmt[start..i].to_string());
             }
         }
     }
@@ -767,7 +909,7 @@ fn parse_foreign_keys(stmt: &str) -> Vec<ForeignKey> {
             .unwrap_or_default();
         let ref_table = caps
             .get(3)
-            .map(|m| m.as_str().to_string())
+            .and_then(|m| normalize_qualified_identifier(m.as_str()))
             .unwrap_or_default();
         let ref_cols = caps
             .get(4)
@@ -802,4 +944,76 @@ pub fn parse_column_list(s: &str) -> Vec<String> {
         })
         .filter(|c| !c.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_qualified_table_names_in_schema() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE tenant_a.users (id INT PRIMARY KEY);");
+        builder.parse_create_table("CREATE TABLE tenant_b.users (id INT PRIMARY KEY);");
+        let schema = builder.build();
+
+        assert_eq!(schema.len(), 2);
+        assert!(schema.get_table("tenant_a.users").is_some());
+        assert!(schema.get_table("tenant_b.users").is_some());
+    }
+
+    #[test]
+    fn resolves_qualified_foreign_keys_and_indexes() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE \"tenant_a\".\"parents\" (id INT PRIMARY KEY);");
+        builder.parse_create_table(
+            "CREATE TABLE \"tenant_a\".\"children\" (\
+                id INT PRIMARY KEY, parent_id INT, \
+                FOREIGN KEY (parent_id) REFERENCES \"tenant_a\".\"parents\" (id)\
+            );",
+        );
+        builder.parse_create_index(
+            "CREATE INDEX children_parent_idx ON \"tenant_a\".\"children\" (parent_id);",
+        );
+        let schema = builder.build();
+
+        let parent = schema.get_table_id("tenant_a.parents").unwrap();
+        let child = schema.get_table("tenant_a.children").unwrap();
+        assert_eq!(child.foreign_keys[0].referenced_table, "tenant_a.parents");
+        assert_eq!(child.foreign_keys[0].referenced_table_id, Some(parent));
+        assert_eq!(child.indexes[0].name, "children_parent_idx");
+    }
+
+    #[test]
+    fn extracts_quoted_qualified_table_names() {
+        assert_eq!(
+            extract_create_table_name("CREATE TABLE \"tenant_a\".\"users\" (id INT);"),
+            Some("tenant_a.users".to_string())
+        );
+        assert_eq!(
+            extract_alter_table_name("ALTER TABLE [tenant_a].[users] ADD COLUMN email TEXT;"),
+            Some("tenant_a.users".to_string())
+        );
+        assert_eq!(
+            extract_create_table_name("CREATE TABLE public.\"user.log\" (id INT);"),
+            Some("public.\"user.log\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_ddl_after_parenthesized_leading_comment() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table(
+            "-- Converted type: NVARCHAR(MAX)\n\
+             CREATE TABLE users (\n\
+               id INTEGER NOT NULL,\n\
+               PRIMARY KEY (id)\n\
+             );",
+        );
+
+        let schema = builder.build();
+        let users = schema.get_table("users").expect("users table");
+        assert_eq!(users.primary_key.len(), 1);
+        assert_eq!(users.columns[0].name, "id");
+    }
 }

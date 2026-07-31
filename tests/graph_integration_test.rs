@@ -297,6 +297,40 @@ fn test_order_output_file() {
     assert!(content.contains("CREATE TABLE"));
 }
 
+#[test]
+fn test_order_keeps_postgres_copy_data_with_its_header() {
+    let dir = TempDir::new().unwrap();
+    let dump = dir.path().join("copy.sql");
+    let output = dir.path().join("ordered.sql");
+    fs::write(
+        &dump,
+        "CREATE TABLE copy_test (id INT PRIMARY KEY, name TEXT);\n\
+         COPY copy_test (id, name) FROM stdin;\n\
+         1\tAlice\n\
+         \\.\n",
+    )
+    .unwrap();
+
+    let status = Command::new(get_binary_path())
+        .args([
+            "order",
+            dump.to_str().unwrap(),
+            "--dialect",
+            "postgres",
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let content = fs::read_to_string(output).unwrap();
+    let copy_pos = content.find("COPY copy_test").unwrap();
+    let row_pos = content.find("1\tAlice").unwrap();
+    let terminator_pos = content.find("\\.").unwrap();
+    assert!(copy_pos < row_pos && row_pos < terminator_pos, "{content}");
+}
+
 // =============================================================================
 // Dialect-Specific Graph Tests
 // =============================================================================
@@ -553,7 +587,7 @@ fn test_graph_mssql_dot_output() {
 
     let content = fs::read_to_string(&output).unwrap();
     assert!(content.contains("digraph ERD"));
-    assert!(content.contains("orders:user_id -> users:id"));
+    assert!(content.contains("\"dbo.orders\":user_id -> \"dbo.users\":id"));
     assert!(content.contains("🔑 PK")); // Primary key markers
 }
 
