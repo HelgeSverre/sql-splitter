@@ -9,8 +9,15 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Maximum rows per INSERT statement (for readability and transaction size)
-const MAX_ROWS_PER_INSERT: usize = 1000;
+use crate::parser::SqlDialect;
+use crate::transform_common::quote_identifier;
+
+/// Maximum rows per INSERT statement (for readability and transaction size).
+///
+/// The DuckDB loader uses the same limit for its fast COPY path, then retries
+/// a failed chunk one row at a time so one malformed value does not discard
+/// unrelated rows from a dump.
+pub(crate) const MAX_ROWS_PER_INSERT: usize = 1000;
 
 /// Result of parsing a COPY header
 #[derive(Debug, Clone)]
@@ -95,36 +102,46 @@ fn strip_leading_comments(stmt: &str) -> String {
 pub fn copy_to_inserts(
     header: &CopyHeader,
     data: &[u8],
-    target_dialect: crate::parser::SqlDialect,
+    target_dialect: SqlDialect,
 ) -> Vec<Vec<u8>> {
-    let mut inserts = Vec::new();
     let rows = parse_copy_data(data);
 
     if rows.is_empty() {
-        return inserts;
+        return Vec::new();
     }
 
-    // Build INSERT prefix
-    let quote_char = match target_dialect {
-        crate::parser::SqlDialect::MySql => '`',
-        _ => '"',
-    };
+    rows.chunks(MAX_ROWS_PER_INSERT)
+        .map(|chunk| copy_rows_to_insert(header, chunk, target_dialect))
+        .collect()
+}
+
+/// Convert one non-empty sequence of parsed COPY rows to a single INSERT.
+///
+/// This is crate-visible so the DuckDB loader can retry a rejected multi-row
+/// insert one row at a time without reparsing or changing SQL escaping.
+pub(crate) fn copy_rows_to_insert(
+    header: &CopyHeader,
+    rows: &[Vec<CopyValue>],
+    target_dialect: SqlDialect,
+) -> Vec<u8> {
+    debug_assert!(!rows.is_empty());
 
     let table_ref = if let Some(ref schema) = header.schema {
-        if target_dialect == crate::parser::SqlDialect::MySql {
+        if target_dialect == SqlDialect::MySql {
             // MySQL: just use table name without schema
-            format!("{}{}{}", quote_char, header.table, quote_char)
+            quote_identifier(target_dialect, &header.table)
         } else if schema == "public" || schema == "pg_catalog" {
             // Common PostgreSQL schemas - strip for DuckDB compatibility
-            format!("{}{}{}", quote_char, header.table, quote_char)
+            quote_identifier(target_dialect, &header.table)
         } else {
             format!(
-                "{}{}{}.{}{}{}",
-                quote_char, schema, quote_char, quote_char, header.table, quote_char
+                "{}.{}",
+                quote_identifier(target_dialect, schema),
+                quote_identifier(target_dialect, &header.table)
             )
         }
     } else {
-        format!("{}{}{}", quote_char, header.table, quote_char)
+        quote_identifier(target_dialect, &header.table)
     };
 
     let columns_str = if header.columns.is_empty() {
@@ -133,36 +150,31 @@ pub fn copy_to_inserts(
         let cols: Vec<String> = header
             .columns
             .iter()
-            .map(|c| format!("{}{}{}", quote_char, c, quote_char))
+            .map(|column| quote_identifier(target_dialect, column))
             .collect();
         format!(" ({})", cols.join(", "))
     };
 
-    // Generate batched INSERTs
-    for chunk in rows.chunks(MAX_ROWS_PER_INSERT) {
-        let mut insert = format!("INSERT INTO {}{} VALUES\n", table_ref, columns_str);
+    let mut insert = format!("INSERT INTO {}{} VALUES\n", table_ref, columns_str);
 
-        for (i, row) in chunk.iter().enumerate() {
-            if i > 0 {
-                insert.push_str(",\n");
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            insert.push_str(",\n");
+        }
+        insert.push('(');
+
+        for (j, value) in row.iter().enumerate() {
+            if j > 0 {
+                insert.push_str(", ");
             }
-            insert.push('(');
-
-            for (j, value) in row.iter().enumerate() {
-                if j > 0 {
-                    insert.push_str(", ");
-                }
-                insert.push_str(&format_value(value, target_dialect));
-            }
-
-            insert.push(')');
+            insert.push_str(&format_value(value, target_dialect));
         }
 
-        insert.push(';');
-        inserts.push(insert.into_bytes());
+        insert.push(')');
     }
 
-    inserts
+    insert.push(';');
+    insert.into_bytes()
 }
 
 /// A parsed value from COPY data

@@ -115,6 +115,62 @@ INSERT INTO products (id, name, price) VALUES (2, 'Gadget', 49.99);
 }
 
 #[test]
+fn test_postgres_copy_keeps_valid_rows_after_rejected_rows() {
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Postgres),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    let stats = engine
+        .import_dump(std::path::Path::new(
+            "tests/fixtures/generate/production_shape_postgres.sql",
+        ))
+        .unwrap();
+
+    // The fixture intentionally contains malformed JSON and child rows that
+    // reference it. Each rejected row must not discard the valid rows in its
+    // COPY block or make later tables look missing.
+    assert_eq!(stats.tables_created, 3);
+    assert_eq!(stats.rows_inserted, 13);
+    assert!(!stats
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Table orders does not exist")));
+
+    for (table, expected_rows) in [("users", "5"), ("orders", "4"), ("order_items", "4")] {
+        let result = engine
+            .query(&format!("SELECT COUNT(*) FROM {table}"))
+            .unwrap();
+        assert_eq!(result.rows[0][0], expected_rows, "{table} row count");
+    }
+}
+
+#[test]
+fn test_mssql_qualified_inserts_use_duckdb_default_schema() {
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+
+    let stats = engine
+        .import_dump(std::path::Path::new(
+            "tests/fixtures/generate/production_shape_mssql.sql",
+        ))
+        .unwrap();
+
+    assert_eq!(stats.tables_created, 2);
+    assert_eq!(stats.rows_inserted, 11);
+    for (table, expected_rows) in [("users", "6"), ("orders", "5")] {
+        let result = engine
+            .query(&format!("SELECT COUNT(*) FROM {table}"))
+            .unwrap();
+        assert_eq!(result.rows[0][0], expected_rows, "{table} row count");
+    }
+}
+
+#[test]
 fn test_simple_query() {
     let (_temp_dir, dump_path) = create_test_dump(simple_mysql_dump());
 
@@ -3583,7 +3639,7 @@ GO
 fn test_mssql_table_filter() {
     let config = QueryConfig {
         dialect: Some(sql_splitter::parser::SqlDialect::Mssql),
-        tables: Some(vec!["users".to_string()]),
+        tables: Some(vec!["dbo.users".to_string()]),
         ..Default::default()
     };
     let mut engine = QueryEngine::new(&config).unwrap();

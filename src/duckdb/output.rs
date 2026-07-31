@@ -81,12 +81,12 @@ impl QueryResultFormatter {
         }
 
         // Calculate column widths
-        let mut widths: Vec<usize> = result.columns.iter().map(|c| c.len()).collect();
+        let mut widths: Vec<usize> = result.columns.iter().map(|c| c.chars().count()).collect();
 
         for row in &result.rows {
             for (i, val) in row.iter().enumerate() {
                 if i < widths.len() {
-                    widths[i] = widths[i].max(val.len());
+                    widths[i] = widths[i].max(val.chars().count());
                 }
             }
         }
@@ -159,10 +159,11 @@ impl QueryResultFormatter {
 
     /// Truncate a string to a maximum length
     fn truncate(s: &str, max_len: usize) -> String {
-        if s.len() <= max_len {
+        if s.chars().count() <= max_len {
             s.to_string()
         } else {
-            format!("{}…", &s[..max_len - 1])
+            let prefix: String = s.chars().take(max_len.saturating_sub(1)).collect();
+            format!("{prefix}…")
         }
     }
 
@@ -316,6 +317,17 @@ mod tests {
         assert!(output.contains("Alice"));
         assert!(output.contains("Bob"));
         assert!(output.contains("2 rows"));
+    }
+
+    #[test]
+    fn table_output_truncates_unicode_without_panicking() {
+        let mut result = sample_result();
+        result.rows = vec![vec!["あ".repeat(51), "値".to_string(), "1".to_string()]];
+
+        let output = QueryResultFormatter::format(&result, OutputFormat::Table);
+
+        assert!(output.contains("あ"));
+        assert!(output.contains('…'));
     }
 
     #[test]

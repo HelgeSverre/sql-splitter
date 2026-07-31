@@ -4,7 +4,8 @@
 //! public `convert_statement` interface.
 
 use sql_splitter::convert::Converter;
-use sql_splitter::parser::SqlDialect;
+use sql_splitter::parser::{mysql_insert, SqlDialect};
+use sql_splitter::schema::SchemaBuilder;
 
 #[test]
 fn test_backticks_to_double_quotes() {
@@ -65,6 +66,44 @@ fn test_strip_engine_clause() {
 
     assert!(!output_str.contains("ENGINE"));
     assert!(output_str.contains("CREATE TABLE"));
+}
+
+#[test]
+fn test_mssql_bracketed_copy_inserts_keep_pk_and_fk_values_aligned() {
+    let mut builder = SchemaBuilder::new();
+    builder.parse_create_table(
+        "CREATE TABLE users (\
+            id integer NOT NULL, \
+            metadata NVARCHAR(MAX), \
+            PRIMARY KEY (id)\
+        );",
+    );
+    builder.parse_create_table(
+        "CREATE TABLE orders (id integer PRIMARY KEY, user_id integer, FOREIGN KEY (user_id) REFERENCES users (id));",
+    );
+    let schema = builder.build();
+    let users = schema.get_table("users").expect("users schema");
+    let orders = schema.get_table("orders").expect("orders schema");
+
+    let parent_rows = mysql_insert::parse_insert_rows(
+        b"INSERT INTO [users] ([id]) VALUES ('1');",
+        users,
+        SqlDialect::Mssql,
+    )
+    .expect("parse users row");
+    let child_rows = mysql_insert::parse_insert_rows(
+        b"INSERT INTO [orders] ([id], [user_id]) VALUES ('1', '1');",
+        orders,
+        SqlDialect::Mssql,
+    )
+    .expect("parse orders row");
+
+    assert_eq!(parent_rows.len(), 1);
+    assert_eq!(child_rows.len(), 1);
+    assert_eq!(
+        parent_rows[0].pk.as_ref(),
+        Some(&child_rows[0].fk_values[0].1)
+    );
 }
 
 #[test]
@@ -899,6 +938,23 @@ mod copy_to_insert_tests {
         let inserts = copy_to_inserts(&header, data, SqlDialect::Postgres);
         let sql = String::from_utf8_lossy(&inserts[0]);
         assert!(sql.contains("\"myschema\".\"users\""));
+    }
+
+    #[test]
+    fn test_copy_to_insert_mssql_uses_bracketed_identifiers() {
+        let header = CopyHeader {
+            schema: Some("public".to_string()),
+            table: "users".to_string(),
+            columns: vec!["id".to_string(), "name".to_string()],
+        };
+        let data = b"1\tAlice\n\\.";
+
+        let inserts = copy_to_inserts(&header, data, SqlDialect::Mssql);
+        let sql = String::from_utf8_lossy(&inserts[0]);
+
+        assert!(sql.contains("INSERT INTO [users]"));
+        assert!(sql.contains("([id], [name])"));
+        assert!(!sql.contains("\"users\""));
     }
 
     #[test]

@@ -3,7 +3,10 @@
 use super::batch::{flush_batch, BatchManager, MAX_ROWS_PER_BATCH};
 use super::types::TypeConverter;
 use super::{ImportStats, QueryConfig};
-use crate::convert::copy_to_insert::{copy_to_inserts, parse_copy_header, CopyHeader};
+use crate::convert::copy_to_insert::{
+    copy_rows_to_insert, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
+    MAX_ROWS_PER_INSERT,
+};
 use crate::parser::{
     detect_dialect_from_file, parse_insert_for_bulk, Parser, SqlDialect, StatementType,
 };
@@ -179,19 +182,8 @@ impl<'a> DumpLoader<'a> {
                 // Fall through to normal statement handling
             }
 
-            let (mut stmt_type, table_name) =
+            let (stmt_type, table_name) =
                 Parser::<&[u8]>::parse_statement_with_dialect(stmt.as_bytes(), dialect);
-
-            // For Postgres, check if statement contains COPY ... FROM stdin (may be after comments)
-            if dialect == SqlDialect::Postgres && stmt_type == StatementType::Unknown {
-                let upper = stmt.to_uppercase();
-                if let Some(copy_pos) = upper.find("COPY ") {
-                    let after_copy = &upper[copy_pos..];
-                    if after_copy.contains("FROM STDIN") {
-                        stmt_type = StatementType::Copy;
-                    }
-                }
-            }
 
             // Filter tables if specified
             if let Some(ref tables) = self.config.tables {
@@ -322,37 +314,93 @@ impl<'a> DumpLoader<'a> {
             return;
         }
 
-        let inserts = copy_to_inserts(header, batch_data, SqlDialect::Postgres);
-        for insert in inserts {
+        let rows = parse_copy_data(batch_data);
+        for chunk in rows.chunks(MAX_ROWS_PER_INSERT) {
+            let insert = copy_rows_to_insert(header, chunk, SqlDialect::Postgres);
             let insert_sql = String::from_utf8_lossy(&insert);
             match self.conn.execute(&insert_sql, []) {
                 Ok(_) => {
-                    stats.rows_inserted += Self::count_insert_rows(&insert_sql);
+                    stats.rows_inserted += chunk.len() as u64;
                 }
                 Err(e) => {
-                    let err_str = e.to_string();
                     // If table doesn't exist, mark it and skip future inserts
-                    if err_str.contains("does not exist") {
-                        failed_tables.insert(header.table.clone());
-                        if stats.warnings.len() < 100 {
-                            stats.warnings.push(format!(
-                                "Table {} does not exist, skipping COPY data",
-                                header.table
-                            ));
-                        }
+                    if Self::is_missing_table_error(&e) {
+                        Self::mark_missing_copy_table(header, stats, failed_tables);
                         return; // Skip rest of batch
                     }
-                    // Limit warnings to avoid memory bloat on large failures
-                    if stats.warnings.len() < 100 {
-                        stats.warnings.push(format!(
-                            "Failed to insert COPY data for {}: {}",
-                            header.table, e
-                        ));
+
+                    // A multi-row INSERT is atomic in DuckDB. Retry a failed
+                    // chunk row by row so a malformed value or rejected child
+                    // row does not discard the valid rows beside it.
+                    if chunk.len() > 1 {
+                        self.process_copy_rows(header, chunk, stats, failed_tables);
+                    } else {
+                        Self::record_copy_insert_error(header, &e, stats);
                     }
-                    stats.statements_skipped += 1;
                 }
             }
         }
+    }
+
+    fn process_copy_rows(
+        &self,
+        header: &CopyHeader,
+        rows: &[Vec<CopyValue>],
+        stats: &mut ImportStats,
+        failed_tables: &mut std::collections::HashSet<String>,
+    ) {
+        for row in rows {
+            let insert =
+                copy_rows_to_insert(header, std::slice::from_ref(row), SqlDialect::Postgres);
+            let insert_sql = String::from_utf8_lossy(&insert);
+
+            match self.conn.execute(&insert_sql, []) {
+                Ok(_) => stats.rows_inserted += 1,
+                Err(e) if Self::is_missing_table_error(&e) => {
+                    Self::mark_missing_copy_table(header, stats, failed_tables);
+                    return;
+                }
+                Err(e) => Self::record_copy_insert_error(header, &e, stats),
+            }
+        }
+    }
+
+    /// DuckDB reports FK violations with "does not exist" in the message, so
+    /// only a catalog missing-table error may disable later COPY batches.
+    fn is_missing_table_error(error: &duckdb::Error) -> bool {
+        matches!(
+            error,
+            duckdb::Error::DuckDBFailure(_, Some(message))
+                if message.starts_with("Catalog Error: Table with name ")
+        )
+    }
+
+    fn mark_missing_copy_table(
+        header: &CopyHeader,
+        stats: &mut ImportStats,
+        failed_tables: &mut std::collections::HashSet<String>,
+    ) {
+        failed_tables.insert(header.table.clone());
+        if stats.warnings.len() < 100 {
+            stats.warnings.push(format!(
+                "Table {} does not exist, skipping COPY data",
+                header.table
+            ));
+        }
+    }
+
+    fn record_copy_insert_error(
+        header: &CopyHeader,
+        error: &duckdb::Error,
+        stats: &mut ImportStats,
+    ) {
+        if stats.warnings.len() < 100 {
+            stats.warnings.push(format!(
+                "Failed to insert COPY data for {}: {}",
+                header.table, error
+            ));
+        }
+        stats.statements_skipped += 1;
     }
 
     /// Check if a table exists in DuckDB
@@ -409,9 +457,13 @@ impl<'a> DumpLoader<'a> {
         };
 
         // Queue the rows
-        if let Some(mut batch) =
-            batch_mgr.queue_insert(&parsed.table, parsed.columns, parsed.rows, duckdb_sql)
-        {
+        if let Some(mut batch) = batch_mgr.queue_insert(
+            &parsed.table,
+            parsed.columns,
+            parsed.rows,
+            duckdb_sql,
+            dialect,
+        ) {
             // Batch is ready to flush
             if let Err(e) = flush_batch(self.conn, &mut batch, stats, failed_tables) {
                 if stats.warnings.len() < 100 {

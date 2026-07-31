@@ -3,7 +3,8 @@
 //! This module provides efficient batched insertion of rows into DuckDB
 //! using the Appender API instead of individual INSERT statement execution.
 
-use crate::parser::ParsedValue;
+use crate::parser::{ParsedValue, SqlDialect};
+use crate::transform_common::quote_ident;
 use ahash::AHashMap;
 use anyhow::Result;
 use duckdb::Connection;
@@ -18,6 +19,9 @@ pub const MAX_ROWS_PER_BATCH: usize = 10_000;
 pub struct InsertBatch {
     /// Target table name
     pub table: String,
+    /// Source SQL dialect, used to map source-default schemas to DuckDB's
+    /// default schema in generated batch inserts.
+    pub dialect: SqlDialect,
     /// Column list if explicitly specified
     pub columns: Option<Vec<String>>,
     /// Accumulated rows (each row is a Vec of ParsedValue)
@@ -30,9 +34,10 @@ pub struct InsertBatch {
 
 impl InsertBatch {
     /// Create a new batch for a table
-    pub fn new(table: String, columns: Option<Vec<String>>) -> Self {
+    pub fn new(table: String, columns: Option<Vec<String>>, dialect: SqlDialect) -> Self {
         Self {
             table,
+            dialect,
             columns,
             rows: Vec::new(),
             statements: Vec::new(),
@@ -53,10 +58,11 @@ impl InsertBatch {
     }
 }
 
-/// Batch key: (table_name, column_layout)
+/// Batch key: (table_name, column_layout, source dialect).
 /// Using Option<Vec<String>> for columns allows distinguishing between
-/// different column orderings for the same table.
-type BatchKey = (String, Option<Vec<String>>);
+/// different column orderings for the same table. The source dialect is part
+/// of the key because it determines the DuckDB table-name mapping.
+type BatchKey = (String, Option<Vec<String>>, SqlDialect);
 
 /// Manages batched INSERT operations for multiple tables
 pub struct BatchManager {
@@ -82,14 +88,15 @@ impl BatchManager {
         columns: Option<Vec<String>>,
         rows: Vec<Vec<ParsedValue>>,
         original_sql: String,
+        dialect: SqlDialect,
     ) -> Option<InsertBatch> {
         let row_count = rows.len();
-        let key = (table.to_string(), columns.clone());
+        let key = (table.to_string(), columns.clone(), dialect);
 
         let batch = self
             .batches
             .entry(key)
-            .or_insert_with(|| InsertBatch::new(table.to_string(), columns));
+            .or_insert_with(|| InsertBatch::new(table.to_string(), columns, dialect));
 
         batch.rows.extend(rows);
         batch.statements.push(original_sql);
@@ -98,7 +105,7 @@ impl BatchManager {
         // Check if we need to flush
         if batch.rows.len() >= self.max_rows_per_batch {
             // Take the batch out and return it
-            let key = (table.to_string(), batch.columns.clone());
+            let key = (table.to_string(), batch.columns.clone(), dialect);
             self.batches.remove(&key)
         } else {
             None
@@ -171,12 +178,26 @@ fn generate_batch_insert(
     table: &str,
     columns: &Option<Vec<String>>,
     rows: &[Vec<ParsedValue>],
+    dialect: SqlDialect,
 ) -> String {
     if rows.is_empty() {
         return String::new();
     }
 
-    let mut sql = format!("INSERT INTO \"{}\"", table);
+    // DuckDB loads PostgreSQL's `public` and SQL Server's standard system
+    // schemas into its default schema. Match the DDL and direct-INSERT paths.
+    let duckdb_table = match dialect {
+        SqlDialect::Postgres => table.strip_prefix("public.").unwrap_or(table),
+        SqlDialect::Mssql => ["dbo.", "master.", "tempdb.", "model.", "msdb."]
+            .iter()
+            .find_map(|prefix| table.strip_prefix(prefix))
+            .unwrap_or(table),
+        SqlDialect::MySql | SqlDialect::Sqlite => table,
+    };
+    let mut sql = format!(
+        "INSERT INTO {}",
+        quote_ident(SqlDialect::Postgres, duckdb_table)
+    );
 
     // Add column list if specified
     if let Some(cols) = columns {
@@ -260,7 +281,7 @@ fn try_batch_insert(
     stats: &mut ImportStats,
 ) -> Result<bool> {
     // Generate a single batched INSERT statement
-    let batch_sql = generate_batch_insert(&batch.table, &batch.columns, &batch.rows);
+    let batch_sql = generate_batch_insert(&batch.table, &batch.columns, &batch.rows, batch.dialect);
     if batch_sql.is_empty() {
         return Ok(true);
     }
@@ -273,14 +294,23 @@ fn try_batch_insert(
             Ok(true)
         }
         Err(e) => {
-            let err_str = e.to_string();
             // Check if it's a "table not found" error
-            if err_str.contains("does not exist") || err_str.contains("not found") {
+            if is_missing_table_error(&e) {
                 return Ok(false);
             }
             Err(e.into())
         }
     }
+}
+
+/// FK violations also say that a key "does not exist", so only a catalog
+/// missing-table error can tell the loader to skip future rows for a table.
+fn is_missing_table_error(error: &duckdb::Error) -> bool {
+    matches!(
+        error,
+        duckdb::Error::DuckDBFailure(_, Some(message))
+            if message.starts_with("Catalog Error: Table with name ")
+    )
 }
 
 /// Fallback: execute original SQL statements one by one
@@ -356,6 +386,7 @@ mod tests {
             None,
             rows,
             "INSERT INTO users VALUES (1, 'test')".to_string(),
+            SqlDialect::MySql,
         );
         assert!(result.is_none()); // Not ready yet
         assert!(mgr.has_pending());
@@ -368,8 +399,8 @@ mod tests {
         let rows1 = vec![vec![ParsedValue::Integer(1)]];
         let rows2 = vec![vec![ParsedValue::Integer(2)], vec![ParsedValue::Integer(3)]];
 
-        mgr.queue_insert("test", None, rows1, "SQL1".to_string());
-        let result = mgr.queue_insert("test", None, rows2, "SQL2".to_string());
+        mgr.queue_insert("test", None, rows1, "SQL1".to_string(), SqlDialect::MySql);
+        let result = mgr.queue_insert("test", None, rows2, "SQL2".to_string(), SqlDialect::MySql);
 
         assert!(result.is_some());
         let batch = result.unwrap();
@@ -403,7 +434,7 @@ mod tests {
             ],
         ];
         let columns = Some(vec!["name".to_string(), "id".to_string()]);
-        let sql = generate_batch_insert("users", &columns, &rows);
+        let sql = generate_batch_insert("users", &columns, &rows, SqlDialect::MySql);
         assert!(sql.contains("INSERT INTO \"users\" (\"name\", \"id\") VALUES"));
         assert!(sql.contains("'alice'"));
         assert!(sql.contains("'bob'"));
@@ -417,7 +448,31 @@ mod tests {
                 value: "test".to_string(),
             },
         ]];
-        let sql = generate_batch_insert("test", &None, &rows);
+        let sql = generate_batch_insert("test", &None, &rows, SqlDialect::MySql);
         assert_eq!(sql, "INSERT INTO \"test\" VALUES\n(1, 'test');");
+    }
+
+    #[test]
+    fn batch_insert_quotes_qualified_table_components_separately() {
+        let rows = vec![vec![ParsedValue::Integer(1)]];
+        let sql = generate_batch_insert("tenant_a.users", &None, &rows, SqlDialect::Postgres);
+
+        assert_eq!(sql, "INSERT INTO \"tenant_a\".\"users\" VALUES\n(1);");
+    }
+
+    #[test]
+    fn batch_insert_maps_postgres_public_to_duckdb_default_schema() {
+        let rows = vec![vec![ParsedValue::Integer(1)]];
+        let sql = generate_batch_insert("public.users", &None, &rows, SqlDialect::Postgres);
+
+        assert_eq!(sql, "INSERT INTO \"users\" VALUES\n(1);");
+    }
+
+    #[test]
+    fn batch_insert_maps_mssql_dbo_to_duckdb_default_schema() {
+        let rows = vec![vec![ParsedValue::Integer(1)]];
+        let sql = generate_batch_insert("dbo.users", &None, &rows, SqlDialect::Mssql);
+
+        assert_eq!(sql, "INSERT INTO \"users\" VALUES\n(1);");
     }
 }
