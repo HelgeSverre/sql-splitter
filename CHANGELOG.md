@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-08-01
+
 ### Fixed
 
 - **Unbounded `VARCHAR` for targets that require a length** — PostgreSQL and SQLite both allow a `VARCHAR` / `CHARACTER VARYING` declared without a width; MySQL and SQL Server do not, and they failed differently. MySQL rejected the statement outright (`ERROR 1064`), while SQL Server silently read it as `VARCHAR(1)` and then failed the first row that did not fit (`Msg 2628`). Every such declaration is now given an explicit `VARCHAR(255)`, applied per target rather than per dialect pair, so `postgres→mysql`, `postgres→mssql`, `sqlite→mysql`, `sqlite→mssql` and `mssql→mysql` are all covered. The long spellings (`CHARACTER VARYING`, `CHAR VARYING`, `NATIONAL CHARACTER VARYING`) are recognized — `pg_dump` emits `character varying`, never `varchar`. Declarations that already carry a width are untouched, as are conversions toward PostgreSQL and SQLite, which accept an unbounded declaration. The narrowing records a `LossyConversion` warning.
