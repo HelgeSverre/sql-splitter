@@ -265,6 +265,13 @@ impl TypeMapper {
         // UUID → VARCHAR(36)
         result = RE_UUID.replace_all(&result, "VARCHAR(36)").to_string();
 
+        // PostgreSQL permits an unbounded VARCHAR, while MySQL requires a
+        // length. TEXT preserves the unbounded string semantics without
+        // inventing a limit. Sized VARCHAR declarations remain unchanged.
+        result = RE_BARE_VARCHAR
+            .replace_all(&result, "TEXT${tail}")
+            .to_string();
+
         result
     }
 
@@ -718,6 +725,12 @@ static RE_MEDIUMTEXT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bMEDIUMTEXT\b
 static RE_TINYTEXT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTINYTEXT\b").unwrap());
 static RE_VARCHAR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bVARCHAR\s*\(\s*\d+\s*\)").unwrap());
+static RE_BARE_VARCHAR: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\bVARCHAR\b(?P<tail>\s*(?:,|\)|NOT\b|NULL\b|DEFAULT\b|COLLATE\b|CONSTRAINT\b|PRIMARY\b|UNIQUE\b|REFERENCES\b|CHECK\b|$))",
+    )
+    .unwrap()
+});
 static RE_CHAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bCHAR\s*\(\s*\d+\s*\)").unwrap());
 
 static RE_LONGBLOB: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bLONGBLOB\b").unwrap());
@@ -824,6 +837,27 @@ mod map_column_type_tests {
             &mut warnings,
         );
         assert_eq!(mapped, "BIGINT");
+    }
+
+    #[test]
+    fn postgres_unbounded_varchar_maps_to_mysql_text() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "varchar",
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert_eq!(mapped, "TEXT");
+        assert!(!warnings.has_warnings());
+
+        let sized = map_column_type(
+            "varchar(255)",
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            &mut warnings,
+        );
+        assert_eq!(sized, "varchar(255)");
     }
 
     #[test]

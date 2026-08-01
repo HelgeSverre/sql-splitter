@@ -31,6 +31,18 @@ fn test_double_quotes_to_backticks() {
 }
 
 #[test]
+fn test_postgres_unbounded_varchar_to_mysql_text() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    let input = b"CREATE TABLE \"profiles\" (\"summary\" VARCHAR, \"label\" VARCHAR(64));";
+
+    let output = converter.convert_statement(input).unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    assert!(output.contains("`summary` TEXT"));
+    assert!(output.contains("`label` VARCHAR(64)"));
+}
+
+#[test]
 fn test_mysql_escapes_to_standard() {
     // Test through convert_statement on INSERT
     let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
