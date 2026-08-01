@@ -10,7 +10,7 @@
 
 use crate::parser::SqlDialect;
 use once_cell::sync::Lazy;
-use regex::Regex;
+use regex::{Captures, Regex};
 
 use super::warnings::{ConvertWarning, WarningCollector};
 
@@ -71,6 +71,13 @@ fn is_narrowed_by_conversion(source_type: &str, to: SqlDialect) -> bool {
     {
         return true;
     }
+    // An unbounded VARCHAR holds up to 1GB in PostgreSQL and is unlimited in
+    // SQLite, but MySQL and SQL Server both require a width and have no
+    // unbounded alternative legal in every position, so it maps to
+    // VARCHAR(255) — anything longer is truncated at load time.
+    if is_unbounded_varchar(source_type) && matches!(to, SqlDialect::MySql | SqlDialect::Mssql) {
+        return true;
+    }
     // Exact fixed-point (DECIMAL/NUMERIC) becomes a binary float (REAL) on
     // SQLite, silently losing precision.
     if (lower.contains("decimal") || lower.contains("numeric")) && to == SqlDialect::Sqlite {
@@ -88,12 +95,68 @@ fn is_narrowed_by_conversion(source_type: &str, to: SqlDialect) -> bool {
     false
 }
 
+/// Whether `source_type` is a variable-length string type declared without a
+/// length (`VARCHAR`, `CHARACTER VARYING`, …) — the form PostgreSQL allows and
+/// MySQL does not.
+fn is_unbounded_varchar(source_type: &str) -> bool {
+    RE_VARCHAR_DECL
+        .captures(source_type)
+        .is_some_and(|caps| caps.name("len").is_none())
+}
+
+/// Give every length-less VARCHAR declaration an explicit width, for targets
+/// that cannot store one without.
+///
+/// 255 rather than an unbounded type because every unbounded alternative is
+/// invalid in some position a column can occupy: MySQL `TEXT` cannot carry a
+/// DEFAULT (ERROR 1101) or be a key without a prefix length (ERROR 1170), and
+/// SQL Server `VARCHAR(MAX)` cannot be an index key at all. pg_dump emits
+/// PRIMARY KEY and UNIQUE as separate ALTER statements, so the column
+/// definition alone never reveals whether a key is coming — only a width valid
+/// everywhere is safe. It also matches the ENUM and UUID rules alongside it.
+///
+/// Declarations that already carry a length are left exactly as they are, as is
+/// a `::` cast: those are removed wholesale by `strip_postgres_casts`, which
+/// matches bare identifiers and would leave a dangling `(255)` behind.
+///
+/// ponytail: fixed 255 truncates longer values (`map_column_type` records a
+/// LossyConversion for it); a configurable width is the upgrade path.
+fn size_unbounded_varchar(stmt: &str) -> String {
+    RE_VARCHAR_DECL
+        .replace_all(stmt, |caps: &Captures| {
+            if caps.name("cast").is_some() || caps.name("len").is_some() {
+                caps[0].to_string()
+            } else {
+                "VARCHAR(255)".to_string()
+            }
+        })
+        .to_string()
+}
+
 /// Type mapper for converting between dialects
 pub struct TypeMapper;
 
 impl TypeMapper {
     /// Convert all data types in a statement
     pub fn convert(stmt: &str, from: SqlDialect, to: SqlDialect) -> String {
+        let converted = Self::convert_dialect_pair(stmt, from, to);
+        if from == to {
+            return converted;
+        }
+
+        // MySQL and SQL Server both require an explicit length on VARCHAR, and
+        // they fail differently: MySQL rejects a bare declaration with ERROR
+        // 1064, while SQL Server quietly reads it as VARCHAR(1) and then throws
+        // Msg 2628 on the first row that does not fit. Applied per target rather
+        // than per dialect pair because every source that permits an unbounded
+        // declaration — PostgreSQL and SQLite — reaches both of them.
+        match to {
+            SqlDialect::MySql | SqlDialect::Mssql => size_unbounded_varchar(&converted),
+            _ => converted,
+        }
+    }
+
+    fn convert_dialect_pair(stmt: &str, from: SqlDialect, to: SqlDialect) -> String {
         match (from, to) {
             (SqlDialect::MySql, SqlDialect::Postgres) => Self::mysql_to_postgres(stmt),
             (SqlDialect::MySql, SqlDialect::Sqlite) => Self::mysql_to_sqlite(stmt),
@@ -264,13 +327,6 @@ impl TypeMapper {
 
         // UUID → VARCHAR(36)
         result = RE_UUID.replace_all(&result, "VARCHAR(36)").to_string();
-
-        // PostgreSQL permits an unbounded VARCHAR, while MySQL requires a
-        // length. TEXT preserves the unbounded string semantics without
-        // inventing a limit. Sized VARCHAR declarations remain unchanged.
-        result = RE_BARE_VARCHAR
-            .replace_all(&result, "TEXT${tail}")
-            .to_string();
 
         result
     }
@@ -725,9 +781,19 @@ static RE_MEDIUMTEXT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bMEDIUMTEXT\b
 static RE_TINYTEXT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTINYTEXT\b").unwrap());
 static RE_VARCHAR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bVARCHAR\s*\(\s*\d+\s*\)").unwrap());
-static RE_BARE_VARCHAR: Lazy<Regex> = Lazy::new(|| {
+/// A PostgreSQL variable-length string declaration in any of its spellings,
+/// with the length (if declared) captured as `len` and a leading `::` cast
+/// marker captured as `cast`.
+///
+/// `pg_dump` writes `character varying`, never `varchar`, so the long spellings
+/// are the ones that actually turn up in real dumps. Matching the optional
+/// `::` prefix is what keeps the rewrite out of a cast such as
+/// `DEFAULT 'active'::character varying`: those are removed wholesale later by
+/// `strip_postgres_casts`, which matches bare identifiers and would leave a
+/// dangling `(255)` behind if the type inside it had been rewritten.
+static RE_VARCHAR_DECL: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)\bVARCHAR\b(?P<tail>\s*(?:,|\)|NOT\b|NULL\b|DEFAULT\b|COLLATE\b|CONSTRAINT\b|PRIMARY\b|UNIQUE\b|REFERENCES\b|CHECK\b|$))",
+        r"(?i)(?P<cast>::\s*)?\b(?:VARCHAR|(?:NATIONAL\s+)?(?:CHARACTER|CHAR)\s+VARYING)(?P<len>\s*\(\s*\d+\s*\))?",
     )
     .unwrap()
 });
@@ -840,24 +906,46 @@ mod map_column_type_tests {
     }
 
     #[test]
-    fn postgres_unbounded_varchar_maps_to_mysql_text() {
-        let mut warnings = WarningCollector::new();
-        let mapped = map_column_type(
+    fn postgres_unbounded_varchar_maps_to_a_sized_mysql_varchar() {
+        for source in [
             "varchar",
-            SqlDialect::Postgres,
-            SqlDialect::MySql,
-            &mut warnings,
-        );
-        assert_eq!(mapped, "TEXT");
-        assert!(!warnings.has_warnings());
+            "VARCHAR",
+            "character varying",
+            "CHARACTER VARYING",
+            "char varying",
+        ] {
+            let mut warnings = WarningCollector::new();
+            let mapped = map_column_type(
+                source,
+                SqlDialect::Postgres,
+                SqlDialect::MySql,
+                &mut warnings,
+            );
+            assert_eq!(mapped, "VARCHAR(255)", "source: {source}");
+            // PostgreSQL stores up to 1GB in an unbounded VARCHAR, so pinning it
+            // to 255 truncates: callers surfacing warnings (and --strict) must
+            // see this rather than discover it at load time.
+            assert!(warnings.has_warnings(), "source: {source}");
+            assert!(matches!(
+                warnings.warnings()[0],
+                ConvertWarning::LossyConversion { .. }
+            ));
+        }
+    }
 
-        let sized = map_column_type(
-            "varchar(255)",
-            SqlDialect::Postgres,
-            SqlDialect::MySql,
-            &mut warnings,
-        );
-        assert_eq!(sized, "varchar(255)");
+    #[test]
+    fn postgres_sized_varchar_is_already_valid_mysql_and_is_left_alone() {
+        for source in ["varchar(255)", "character varying(120)", "VARCHAR (64)"] {
+            let mut warnings = WarningCollector::new();
+            let mapped = map_column_type(
+                source,
+                SqlDialect::Postgres,
+                SqlDialect::MySql,
+                &mut warnings,
+            );
+            assert_eq!(mapped, source, "source: {source}");
+            assert!(!warnings.has_warnings(), "source: {source}");
+        }
     }
 
     #[test]

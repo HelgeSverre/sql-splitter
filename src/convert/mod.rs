@@ -20,6 +20,7 @@ pub use copy_to_insert::{
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::splitter::{open_input, open_input_with_progress};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -88,6 +89,44 @@ pub struct Converter {
     strict: bool,
     /// Pending COPY header for data block processing
     pending_copy_header: Option<CopyHeader>,
+    /// Converted `CREATE TABLE` text, keyed by [`table_key`]. Only retained when
+    /// the target needs to re-declare a column later (MySQL's `MODIFY COLUMN`
+    /// takes a full definition), so this holds DDL for the schema and never row
+    /// data.
+    created_tables: HashMap<String, String>,
+    /// Statements that only become valid once the rest of the dump has been
+    /// applied; drained by [`Converter::take_deferred_statements`].
+    deferred: Vec<String>,
+}
+
+/// Normalise a table name for lookup: unquoted, unqualified, lowercased, so
+/// `public."Posts"` and `` `posts` `` resolve to the same entry.
+fn table_key(name: &str) -> String {
+    name.rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
+        .to_lowercase()
+}
+
+/// The type `column` was declared with in a converted `CREATE TABLE`, e.g.
+/// `"integer"` for `  id integer NOT NULL,`.
+///
+/// Anchored on the column-list delimiter (`(` or `,`) rather than start-of-line,
+/// so it reads a definition whether the DDL is formatted one column per line or
+/// collapsed onto one. Captures a single word plus an optional length: callers
+/// re-declare integer columns, and a greedier pattern would swallow the
+/// trailing `NOT NULL`. A key clause such as `PRIMARY KEY (id)` cannot match,
+/// since a type has to follow the name.
+fn declared_column_type(create_table: &str, column: &str) -> Option<String> {
+    use regex::Regex;
+
+    let pattern = format!(
+        r#"(?i)[(,]\s*[`"\[]?{}[`"\]]?\s+(?P<type>[A-Za-z]+(?:\s*\(\s*\d+\s*\))?)"#,
+        regex::escape(column)
+    );
+    let captures = Regex::new(&pattern).ok()?.captures(create_table)?;
+    Some(captures.name("type")?.as_str().trim().to_string())
 }
 
 impl Converter {
@@ -98,7 +137,16 @@ impl Converter {
             warnings: WarningCollector::new(),
             strict: false,
             pending_copy_header: None,
+            created_tables: HashMap::new(),
+            deferred: Vec::new(),
         }
+    }
+
+    /// Statements held back until the whole dump has been applied, in the order
+    /// they were queued. Callers must append these to the output after the last
+    /// converted statement; draining leaves the converter reusable.
+    pub fn take_deferred_statements(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.deferred)
     }
 
     pub fn with_strict(mut self, strict: bool) -> Self {
@@ -203,6 +251,16 @@ impl Converter {
         // Convert UNIQUE KEY ... USING BTREE table constraints
         result = self.convert_unique_key_constraint(&result);
 
+        // MySQL is the only target that has to re-declare a column after the
+        // fact (to restore AUTO_INCREMENT), and that needs the column's
+        // converted type. Retained only for that target so no other conversion
+        // pays for the bookkeeping.
+        if self.to == SqlDialect::MySql {
+            if let Some(name) = table_name {
+                self.created_tables.insert(table_key(name), result.clone());
+            }
+        }
+
         Ok(result.into_bytes())
     }
 
@@ -278,6 +336,27 @@ impl Converter {
         let stmt_str = String::from_utf8_lossy(stmt);
         let mut result = stmt_str.to_string();
 
+        // pg_dump expands `serial` into a plain integer column plus a separate
+        // `ALTER COLUMN ... SET DEFAULT nextval(...)`. Removing just the
+        // `DEFAULT nextval(...)` would leave a dangling `ALTER COLUMN id SET`,
+        // so the statement never survives as-is. MySQL can restore the
+        // auto-increment separately; every other target loses it.
+        if self.from == SqlDialect::Postgres
+            && self.to != SqlDialect::Postgres
+            && self.is_sequence_default_alter(&result)
+        {
+            if let Some(restored) = self.defer_mysql_auto_increment(&result) {
+                self.deferred.push(restored);
+                return Ok(Vec::new());
+            }
+            let preview = self.strip_leading_sql_comments(&result);
+            self.warnings.add(ConvertWarning::SkippedStatement {
+                reason: "sequence-backed column default has no equivalent".to_string(),
+                statement_preview: preview.trim().chars().take(60).collect(),
+            });
+            return Ok(Vec::new());
+        }
+
         result = self.convert_identifiers(&result);
         result = self.convert_data_types(&result);
 
@@ -287,9 +366,82 @@ impl Converter {
             result = self.convert_nextval(&result);
             result = self.convert_default_now(&result);
             result = self.strip_schema_prefix(&result);
+            result = self.strip_postgres_only(&result);
+        }
+
+        // SQLite's ALTER TABLE understands only RENAME / ADD COLUMN /
+        // DROP COLUMN, so a constraint attached after the table exists has to be
+        // re-expressed as an index or dropped. Runs last: the rewrite reads the
+        // table name out of the statement, which the steps above normalise.
+        if self.to == SqlDialect::Sqlite {
+            if let Some(rewritten) = self.rewrite_add_constraint_for_sqlite(&result) {
+                return Ok(rewritten.into_bytes());
+            }
         }
 
         Ok(result.into_bytes())
+    }
+
+    /// Re-express an `ALTER TABLE ... ADD CONSTRAINT` for SQLite, which has no
+    /// such statement.
+    ///
+    /// `UNIQUE` and `PRIMARY KEY` become a unique index — SQLite enforces the
+    /// same guarantee, though a re-expressed primary key is no longer a rowid
+    /// alias and, unlike a real primary key, does not itself imply NOT NULL.
+    /// A foreign key or check constraint cannot be attached to an existing
+    /// SQLite table by any syntax, so it is dropped with a warning.
+    ///
+    /// Returns `None` for the ALTER forms SQLite already accepts (`ADD COLUMN`,
+    /// `RENAME`, `DROP COLUMN`), which pass through untouched.
+    fn rewrite_add_constraint_for_sqlite(&mut self, stmt: &str) -> Option<String> {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_ADD_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r"(?is)^\s*ALTER\s+TABLE\s+(?P<table>\S+)\s+ADD\s+CONSTRAINT\s+(?P<name>[^\s(]+)\s+(?P<kind>UNIQUE|PRIMARY\s+KEY|FOREIGN\s+KEY|CHECK)\b(?P<rest>.*)$",
+            )
+            .unwrap()
+        });
+        static RE_LEADING_COLUMNS: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?s)^\s*\(([^)]*)\)").unwrap());
+
+        // pg_dump prefixes each statement with a comment banner; the constraint
+        // itself is what has to be matched.
+        let body = self.strip_leading_sql_comments(stmt);
+        let caps = RE_ADD_CONSTRAINT.captures(&body)?;
+        let kind = caps["kind"]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let kind = kind.to_uppercase();
+
+        if kind == "UNIQUE" || kind == "PRIMARY KEY" {
+            if let Some(columns) = RE_LEADING_COLUMNS.captures(&caps["rest"]) {
+                if kind == "PRIMARY KEY" {
+                    self.warnings.add(ConvertWarning::UnsupportedFeature {
+                        feature: format!("PRIMARY KEY added to existing table {}", &caps["table"]),
+                        suggestion: Some(
+                            "re-expressed as a UNIQUE INDEX; SQLite only accepts a \
+                             primary key inside CREATE TABLE"
+                                .to_string(),
+                        ),
+                    });
+                }
+                return Some(format!(
+                    "CREATE UNIQUE INDEX {} ON {} ({});",
+                    &caps["name"],
+                    &caps["table"],
+                    columns[1].trim()
+                ));
+            }
+        }
+
+        self.warnings.add(ConvertWarning::SkippedStatement {
+            reason: format!("SQLite cannot add a {kind} constraint to an existing table"),
+            statement_preview: body.trim().chars().take(60).collect(),
+        });
+        Some(String::new())
     }
 
     /// Convert DROP TABLE statement
@@ -354,6 +506,16 @@ impl Converter {
         if self.from == SqlDialect::Postgres
             && self.to != SqlDialect::Postgres
             && self.is_postgres_session_command(&result)
+        {
+            return Ok(Vec::new()); // Skip
+        }
+        // psql meta-commands are client directives, not SQL. pg_dump 16.6+ wraps
+        // its output in `\restrict` / `\unrestrict`; fed to the mysql client,
+        // `\u` is read as its "use database" shorthand and the import dies with
+        // ERROR 1049.
+        if self.from == SqlDialect::Postgres
+            && self.to != SqlDialect::Postgres
+            && self.is_psql_meta_command(trimmed)
         {
             return Ok(Vec::new()); // Skip
         }
@@ -1221,6 +1383,90 @@ impl Converter {
         RE_NEXTVAL.replace_all(stmt, "").to_string()
     }
 
+    /// Rebuild a PostgreSQL sequence-backed default as a MySQL AUTO_INCREMENT
+    /// column, returned as a statement to emit once the dump is fully applied.
+    ///
+    /// MySQL rejects an AUTO_INCREMENT column that is not a key, and pg_dump
+    /// emits the primary key after the table data, so this cannot be applied in
+    /// place — it has to run last. `MODIFY COLUMN` also takes a full column
+    /// definition, so the type is read back from the `CREATE TABLE` this
+    /// converter already emitted.
+    ///
+    /// Returns `None` when the target is not MySQL, when the table was never
+    /// seen, or when the column's type does not read as an integer — in every
+    /// one of those cases the caller drops the statement with a warning rather
+    /// than emit a half-formed `MODIFY`.
+    fn defer_mysql_auto_increment(&self, stmt: &str) -> Option<String> {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_SEQUENCE_TARGET: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r"(?is)\bALTER\s+TABLE\s+(?:ONLY\s+)?(?P<table>\S+)\s+ALTER\s+COLUMN\s+(?P<column>[^\s]+)\s+SET\s+DEFAULT\s+nextval",
+            )
+            .unwrap()
+        });
+
+        if self.to != SqlDialect::MySql {
+            return None;
+        }
+
+        let caps = RE_SEQUENCE_TARGET.captures(stmt)?;
+        let table = table_key(&caps["table"]);
+        let column = caps["column"].trim_matches(|c| c == '"' || c == '`');
+        let create_table = self.created_tables.get(&table)?;
+        let column_type = declared_column_type(create_table, column)?;
+
+        // A sequence always backs an integer column. Anything else means the
+        // type was misread, and a wrong MODIFY would rewrite the column.
+        if !matches!(
+            column_type.to_uppercase().as_str(),
+            "INT" | "INTEGER" | "BIGINT" | "SMALLINT" | "MEDIUMINT" | "TINYINT"
+        ) {
+            return None;
+        }
+
+        Some(format!(
+            "ALTER TABLE `{table}` MODIFY COLUMN `{column}` {column_type} NOT NULL AUTO_INCREMENT;"
+        ))
+    }
+
+    /// Strip PostgreSQL's `ONLY` inheritance qualifier from `ALTER TABLE ONLY t`.
+    /// pg_dump attaches every constraint and column default that way, and no
+    /// other engine accepts the keyword.
+    fn strip_postgres_only(&self, stmt: &str) -> String {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_ALTER_ONLY: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\b(ALTER\s+TABLE)\s+ONLY\s+").unwrap());
+
+        RE_ALTER_ONLY.replace_all(stmt, "$1 ").to_string()
+    }
+
+    /// Whether an `ALTER TABLE` exists only to attach a sequence-backed default
+    /// (`ALTER COLUMN x SET DEFAULT nextval(...)`) — pg_dump's expansion of a
+    /// `serial` column.
+    fn is_sequence_default_alter(&self, stmt: &str) -> bool {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+
+        static RE_SEQUENCE_DEFAULT: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?is)\bALTER\s+COLUMN\b.*?\bSET\s+DEFAULT\s+nextval\s*\(").unwrap()
+        });
+
+        RE_SEQUENCE_DEFAULT.is_match(stmt)
+    }
+
+    /// Whether the statement is a psql client meta-command rather than SQL.
+    /// `\.` is excluded: it terminates a COPY data block and belongs to the
+    /// COPY path.
+    fn is_psql_meta_command(&self, stmt: &str) -> bool {
+        let stripped = self.strip_leading_sql_comments(stmt);
+        let trimmed = stripped.trim_start();
+        trimmed.starts_with('\\') && !trimmed.starts_with("\\.")
+    }
+
     /// Convert DEFAULT now() to DEFAULT CURRENT_TIMESTAMP
     fn convert_default_now(&self, stmt: &str) -> String {
         use once_cell::sync::Lazy;
@@ -1595,6 +1841,17 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
                 stats.warnings.push(warning);
                 stats.statements_skipped += 1;
             }
+        }
+    }
+
+    // Statements that only become valid once everything else has been applied
+    // (a MySQL AUTO_INCREMENT column has to be a key first, and pg_dump adds the
+    // primary key after the data).
+    for statement in converter.take_deferred_statements() {
+        stats.statements_converted += 1;
+        if !config.dry_run {
+            writer.write_all(statement.as_bytes())?;
+            writer.write_all(b"\n")?;
         }
     }
 

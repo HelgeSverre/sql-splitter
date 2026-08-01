@@ -30,16 +30,371 @@ fn test_double_quotes_to_backticks() {
     assert_eq!(converter.double_quotes_to_backticks("\"users\""), "`users`");
 }
 
+/// MySQL requires a length on VARCHAR, so any unbounded string type surviving
+/// into the output is a statement MySQL rejects with ERROR 1064. Asserting this
+/// over the *whole* converted statement — not just the column under test — is
+/// what catches spellings and positions no individual case thought to cover.
+fn assert_no_unbounded_string_type(output: &str, input: &str) {
+    let upper = output.to_uppercase();
+    for keyword in ["VARCHAR", "VARYING"] {
+        let mut search_from = 0;
+        while let Some(offset) = upper[search_from..].find(keyword) {
+            let after = search_from + offset + keyword.len();
+            assert!(
+                upper[after..].trim_start().starts_with('('),
+                "unbounded {keyword} left in output\n  input:  {input}\n  output: {output}"
+            );
+            search_from = after;
+        }
+    }
+}
+
+/// Every shape below was executed against a real MySQL 8 server. The unbounded
+/// forms are rejected there (1064 for a bare `VARCHAR`, 1101 for a `TEXT` with a
+/// DEFAULT, 1170 for a `TEXT` in a key), `VARCHAR(255)` is accepted in every
+/// position, and MySQL already understands the sized `CHARACTER VARYING(n)`
+/// spellings as VARCHAR synonyms — so those must survive untouched.
 #[test]
-fn test_postgres_unbounded_varchar_to_mysql_text() {
+fn test_postgres_unbounded_varchar_becomes_a_sized_mysql_varchar() {
+    let cases: &[(&str, &str)] = &[
+        // Spellings of an unbounded column. pg_dump emits `character varying`,
+        // never `varchar`, so that spelling is the common real-world input.
+        ("CREATE TABLE \"t\" (\"a\" VARCHAR);", "`a` VARCHAR(255)"),
+        ("CREATE TABLE \"t\" (\"a\" varchar);", "`a` VARCHAR(255)"),
+        (
+            "CREATE TABLE \"t\" (\"a\" character varying);",
+            "`a` VARCHAR(255)",
+        ),
+        (
+            "CREATE TABLE \"t\" (\"a\" CHARACTER VARYING);",
+            "`a` VARCHAR(255)",
+        ),
+        (
+            "CREATE TABLE \"t\" (\"a\" char varying);",
+            "`a` VARCHAR(255)",
+        ),
+        // Positions where MySQL rejects an unbounded TEXT outright.
+        (
+            "CREATE TABLE \"t\" (\"a\" varchar PRIMARY KEY);",
+            "`a` VARCHAR(255) PRIMARY KEY",
+        ),
+        (
+            "CREATE TABLE \"t\" (\"a\" varchar UNIQUE NOT NULL);",
+            "`a` VARCHAR(255) UNIQUE NOT NULL",
+        ),
+        (
+            "CREATE TABLE \"t\" (\"a\" varchar DEFAULT 'x');",
+            "`a` VARCHAR(255) DEFAULT 'x'",
+        ),
+        (
+            "CREATE TABLE \"t\" (\"a\" varchar REFERENCES \"o\"(\"id\"));",
+            "`a` VARCHAR(255) REFERENCES",
+        ),
+        // Statement-final position: no trailing column-list token to anchor on.
+        (
+            "ALTER TABLE \"t\" ADD COLUMN \"a\" varchar;",
+            "`a` VARCHAR(255)",
+        ),
+        (
+            "ALTER TABLE \"t\" ADD COLUMN \"a\" character varying;",
+            "`a` VARCHAR(255)",
+        ),
+        // A pg_dump default carries a redundant cast to the column's own type;
+        // the cast is stripped, and rewriting inside it must not corrupt it.
+        (
+            "CREATE TABLE \"t\" (\"a\" character varying DEFAULT 'active'::character varying);",
+            "`a` VARCHAR(255) DEFAULT 'active'",
+        ),
+        // Sized declarations are already valid MySQL and must not be rewritten.
+        ("CREATE TABLE \"t\" (\"a\" varchar(64));", "`a` varchar(64)"),
+        (
+            "CREATE TABLE \"t\" (\"a\" character varying(120));",
+            "`a` character varying(120)",
+        ),
+        (
+            "CREATE TABLE \"t\" (\"a\" VARCHAR (64));",
+            "`a` VARCHAR (64)",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        let output = converter.convert_statement(input.as_bytes()).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(
+            output.contains(expected),
+            "input:    {input}\n  expected: {expected}\n  got:      {output}"
+        );
+        assert_no_unbounded_string_type(&output, input);
+    }
+}
+
+/// MySQL and SQL Server both require an explicit length on VARCHAR, and they
+/// fail differently: MySQL rejects a bare declaration outright with ERROR 1064,
+/// while SQL Server silently reads it as `VARCHAR(1)` — verified on SQL Server
+/// 2022, where `sys.columns` reports `max_length: 1` and inserting `'u1'` dies
+/// with Msg 2628 "Truncated value: 'u'". Every source dialect that permits an
+/// unbounded declaration reaches both targets, so this is a property of the
+/// target, not of any one dialect pair.
+#[test]
+fn test_unbounded_varchar_is_sized_for_every_target_that_requires_a_length() {
+    let input = "CREATE TABLE \"t\" (\"a\" VARCHAR, \"b\" character varying, \"c\" VARCHAR(64));";
+
+    for from in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for to in [SqlDialect::MySql, SqlDialect::Mssql] {
+            let mut converter = Converter::new(from, to);
+            let output = converter.convert_statement(input.as_bytes()).unwrap();
+            let output = String::from_utf8(output).unwrap();
+
+            assert_no_unbounded_string_type(&output, &format!("{from:?} -> {to:?}"));
+            assert!(
+                output.contains("VARCHAR(64)"),
+                "{from:?} -> {to:?}: a sized declaration was rewritten: {output}"
+            );
+        }
+    }
+}
+
+/// PostgreSQL and SQLite both accept an unbounded VARCHAR, so converting toward
+/// them must not invent a width the source never declared.
+#[test]
+fn test_unbounded_varchar_is_left_alone_for_targets_that_accept_it() {
+    let input = "CREATE TABLE \"t\" (\"a\" VARCHAR);";
+
+    for (from, to) in [
+        (SqlDialect::Sqlite, SqlDialect::Postgres),
+        (SqlDialect::Mssql, SqlDialect::Postgres),
+        (SqlDialect::Postgres, SqlDialect::Sqlite),
+    ] {
+        let mut converter = Converter::new(from, to);
+        let output = converter.convert_statement(input.as_bytes()).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(
+            !output.contains("VARCHAR(255)"),
+            "{from:?} -> {to:?}: invented a width: {output}"
+        );
+    }
+}
+
+fn convert_pg_to_mysql(input: &str) -> String {
     let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
-    let input = b"CREATE TABLE \"profiles\" (\"summary\" VARCHAR, \"label\" VARCHAR(64));";
+    let output = converter.convert_statement(input.as_bytes()).unwrap();
+    String::from_utf8(output).unwrap()
+}
 
-    let output = converter.convert_statement(input).unwrap();
-    let output = String::from_utf8(output).unwrap();
+/// `pg_dump` attaches every constraint and column default with `ALTER TABLE
+/// ONLY` — PostgreSQL inheritance syntax MySQL has no equivalent for. Leaving
+/// `ONLY` in place fails with ERROR 1064 against a real MySQL 8 server, which
+/// takes down every primary key, unique key and foreign key in the dump.
+#[test]
+fn test_postgres_alter_table_only_drops_the_only_keyword() {
+    let cases = [
+        "ALTER TABLE ONLY public.accounts\n    ADD CONSTRAINT accounts_pkey PRIMARY KEY (code);",
+        "ALTER TABLE ONLY public.accounts\n    ADD CONSTRAINT accounts_email_key UNIQUE (email);",
+        "ALTER TABLE ONLY public.posts\n    ADD CONSTRAINT posts_author_fkey FOREIGN KEY (author) REFERENCES public.accounts(code);",
+        "alter table only accounts add constraint c check (code <> '');",
+    ];
 
-    assert!(output.contains("`summary` TEXT"));
-    assert!(output.contains("`label` VARCHAR(64)"));
+    for input in cases {
+        let output = convert_pg_to_mysql(input);
+        assert!(
+            !output.to_uppercase().contains("ONLY"),
+            "ONLY survived\n  input:  {input}\n  output: {output}"
+        );
+        assert!(
+            output.to_uppercase().contains("ALTER TABLE"),
+            "statement was lost entirely\n  input:  {input}\n  output: {output}"
+        );
+    }
+}
+
+/// `pg_dump` expands `serial` into a plain integer column plus a separate
+/// `ALTER COLUMN ... SET DEFAULT nextval(...)`. Stripping just the `DEFAULT
+/// nextval(...)` leaves a dangling `ALTER COLUMN id SET`, which is ERROR 1064;
+/// the sequence has no MySQL equivalent, so the statement has to go entirely.
+#[test]
+fn test_postgres_sequence_default_statement_is_dropped_whole() {
+    let dropped = [
+        "ALTER TABLE ONLY public.posts ALTER COLUMN id SET DEFAULT nextval('public.posts_id_seq'::regclass);",
+        "ALTER TABLE posts ALTER COLUMN id SET DEFAULT nextval('posts_id_seq');",
+    ];
+    for input in dropped {
+        let output = convert_pg_to_mysql(input);
+        assert!(
+            output.trim().is_empty(),
+            "expected the statement to be dropped\n  input:  {input}\n  output: {output}"
+        );
+    }
+
+    // A literal default is valid MySQL and must survive: only the sequence
+    // form is meaningless on the target.
+    let output = convert_pg_to_mysql("ALTER TABLE posts ALTER COLUMN status SET DEFAULT 'draft';");
+    assert!(
+        output.contains("SET DEFAULT 'draft'"),
+        "a literal default was dropped: {output}"
+    );
+}
+
+/// `pg_dump` 16.6+/17.2+ wrap their output in `\restrict` / `\unrestrict` psql
+/// meta-commands. These are not SQL; fed to the mysql client, `\u` is read as
+/// its "use database" shorthand and the import dies with ERROR 1049.
+#[test]
+fn test_psql_meta_commands_are_dropped() {
+    for input in [
+        "\\restrict 4xICTE3Zgyh1Ancqkg5YGdhBzdL1FOdL2KI0k0V7QpCVzDtjlONbtyZx2fWZO1R",
+        "\\unrestrict 4xICTE3Zgyh1Ancqkg5YGdhBzdL1FOdL2KI0k0V7QpCVzDtjlONbtyZx2fWZO1R",
+        "\\connect app",
+    ] {
+        let output = convert_pg_to_mysql(input);
+        assert!(
+            output.trim().is_empty(),
+            "psql meta-command survived\n  input:  {input}\n  output: {output}"
+        );
+    }
+}
+
+/// pg_dump expands `serial` into a plain integer column plus a separate
+/// sequence-backed default, so a naive conversion silently drops the
+/// auto-increment and every later `INSERT` without an explicit id fails. MySQL
+/// can restore it with `MODIFY COLUMN`, but only once the column is a key —
+/// MySQL rejects an AUTO_INCREMENT column that is not one, and pg_dump emits
+/// the primary key after the data — so it has to be deferred to the end.
+#[test]
+fn test_postgres_serial_becomes_mysql_auto_increment() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TABLE public.posts (id integer NOT NULL, body text);")
+        .unwrap();
+
+    let inline = converter
+        .convert_statement(
+            b"ALTER TABLE ONLY public.posts ALTER COLUMN id SET DEFAULT nextval('public.posts_id_seq'::regclass);",
+        )
+        .unwrap();
+    assert!(
+        inline.is_empty(),
+        "the sequence default must not be emitted inline"
+    );
+
+    let deferred = converter.take_deferred_statements();
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(
+        deferred[0],
+        "ALTER TABLE `posts` MODIFY COLUMN `id` integer NOT NULL AUTO_INCREMENT;"
+    );
+}
+
+/// Without a matching CREATE TABLE there is no column type to re-declare, so the
+/// converter must fall back to dropping the statement rather than emitting a
+/// half-formed MODIFY.
+#[test]
+fn test_sequence_default_without_a_known_table_is_only_dropped() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    let output = converter
+        .convert_statement(
+            b"ALTER TABLE ONLY public.ghost ALTER COLUMN id SET DEFAULT nextval('public.ghost_id_seq'::regclass);",
+        )
+        .unwrap();
+
+    assert!(output.is_empty());
+    assert!(converter.take_deferred_statements().is_empty());
+    assert!(!converter.warnings().is_empty());
+}
+
+/// SQLite and MSSQL have their own identity syntax and no MODIFY COLUMN, so the
+/// MySQL reconstruction must not leak into them.
+#[test]
+fn test_sequence_default_is_not_reconstructed_for_other_targets() {
+    for to in [SqlDialect::Sqlite, SqlDialect::Mssql] {
+        let mut converter = Converter::new(SqlDialect::Postgres, to);
+        converter
+            .convert_statement(b"CREATE TABLE public.posts (id integer NOT NULL);")
+            .unwrap();
+        converter
+            .convert_statement(
+                b"ALTER TABLE ONLY public.posts ALTER COLUMN id SET DEFAULT nextval('public.posts_id_seq'::regclass);",
+            )
+            .unwrap();
+        assert!(
+            converter.take_deferred_statements().is_empty(),
+            "{to:?} must not get a MySQL MODIFY COLUMN"
+        );
+    }
+}
+
+fn convert_pg_to_sqlite(input: &str) -> String {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::Sqlite);
+    let output = converter.convert_statement(input.as_bytes()).unwrap();
+    String::from_utf8(output).unwrap()
+}
+
+/// SQLite's ALTER TABLE understands only RENAME / ADD COLUMN / DROP COLUMN —
+/// `ADD CONSTRAINT` is a syntax error there, verified against the sqlite3 CLI.
+/// UNIQUE and PRIMARY KEY are re-expressed as a unique index, which SQLite
+/// enforces identically; a foreign key cannot be attached to an existing table
+/// by any syntax, so it has to be dropped.
+#[test]
+fn test_alter_table_add_constraint_is_reexpressed_for_sqlite() {
+    let unique = convert_pg_to_sqlite(
+        "ALTER TABLE ONLY public.accounts\n    ADD CONSTRAINT accounts_email_key UNIQUE (email);",
+    );
+    assert!(
+        unique.contains("CREATE UNIQUE INDEX accounts_email_key ON accounts (email)"),
+        "{unique}"
+    );
+    assert!(
+        !unique.to_uppercase().contains("ADD CONSTRAINT"),
+        "{unique}"
+    );
+
+    let pk = convert_pg_to_sqlite(
+        "ALTER TABLE ONLY public.accounts\n    ADD CONSTRAINT accounts_pkey PRIMARY KEY (code);",
+    );
+    assert!(
+        pk.contains("CREATE UNIQUE INDEX accounts_pkey ON accounts (code)"),
+        "{pk}"
+    );
+
+    let multi = convert_pg_to_sqlite("ALTER TABLE t ADD CONSTRAINT t_ab_key UNIQUE (a, b);");
+    assert!(multi.contains("ON t (a, b)"), "{multi}");
+
+    // Statements SQLite already accepts must pass through untouched.
+    let add_col = convert_pg_to_sqlite("ALTER TABLE accounts ADD COLUMN nickname varchar;");
+    assert!(add_col.to_uppercase().contains("ADD COLUMN"), "{add_col}");
+}
+
+/// Dropping a foreign key removes a data-integrity guarantee, so it must never
+/// happen silently.
+#[test]
+fn test_sqlite_foreign_key_constraint_is_dropped_with_a_warning() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::Sqlite);
+    let output = converter
+        .convert_statement(
+            b"ALTER TABLE ONLY public.posts\n    ADD CONSTRAINT posts_author_fkey FOREIGN KEY (author) REFERENCES public.accounts(code);",
+        )
+        .unwrap();
+
+    assert!(String::from_utf8(output).unwrap().trim().is_empty());
+    assert!(
+        !converter.warnings().is_empty(),
+        "dropping a foreign key must warn"
+    );
+}
+
+/// MySQL and MSSQL both support `ADD CONSTRAINT`, so the SQLite rewrite must not
+/// leak into their output.
+#[test]
+fn test_add_constraint_survives_for_targets_that_support_it() {
+    let mysql = convert_pg_to_mysql(
+        "ALTER TABLE ONLY public.accounts\n    ADD CONSTRAINT accounts_pkey PRIMARY KEY (code);",
+    );
+    assert!(mysql.to_uppercase().contains("ADD CONSTRAINT"), "{mysql}");
+    assert!(
+        !mysql.to_uppercase().contains("CREATE UNIQUE INDEX"),
+        "{mysql}"
+    );
 }
 
 #[test]
