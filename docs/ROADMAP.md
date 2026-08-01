@@ -746,6 +746,53 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
+### `convert --rebuild` — Table Rebuild for Post-Hoc Constraints
+
+**Target**: 1-2 weeks
+**Theme**: Preserve constraints that SQLite and MSSQL cannot attach to an existing table
+
+| Feature                            | Effort | Status     | Notes                                  |
+| ---------------------------------- | ------ | ---------- | -------------------------------------- |
+| **`--rebuild` flag**               | 1h     | 🟡 Planned | Opt-in; default stays warn-and-document |
+| **Deferred rebuild emission**      | 3h     | 🟡 Planned | Reuses `take_deferred_statements`      |
+| **SQLite rebuild**                 | 8h     | 🟡 Planned |                                        |
+| ├─ Buffer converted CREATE TABLE   | 2h     |            | Already retained in `created_tables`   |
+| ├─ Fold ALTER constraints into DDL | 3h     |            | PK + FK back into the column list      |
+| └─ Emit copy/drop/rename block     | 3h     |            | Wrapped in a transaction               |
+| **MSSQL IDENTITY rebuild**         | 6h     | 🟡 Planned | MSSQL cannot ALTER a column to IDENTITY |
+| **Testing**                        | 6h     | 🟡 Planned | Round-trip against real engines        |
+
+**Total: ~24h**
+
+**Why**: `pg_dump` emits primary keys, unique keys, foreign keys and sequence
+defaults as separate `ALTER TABLE` statements *after* `CREATE TABLE`. MySQL
+applies all of them in place (`ADD CONSTRAINT`, `MODIFY COLUMN`), so it is
+already lossless. SQLite and MSSQL cannot, and the only faithful route is the
+standard rebuild recipe: create a new table with the full definition, copy the
+rows, drop the original, rename.
+
+**Current Behavior (lossy, warned):**
+
+- SQLite: `ADD CONSTRAINT ... FOREIGN KEY` dropped — no SQLite syntax exists ❌
+- SQLite: `ADD CONSTRAINT ... PRIMARY KEY` → `CREATE UNIQUE INDEX`; enforces
+  uniqueness but is not a rowid alias and does not imply NOT NULL ⚠️
+- SQLite / MSSQL: `serial` → no auto-increment / IDENTITY ❌
+
+**New Behavior (opt-in):**
+
+- `--rebuild` emits a transactional rebuild per affected table, restoring real
+  primary keys, foreign keys and identity columns ✅
+- Without the flag, behaviour is unchanged: convert, warn, and fail under
+  `--strict`
+
+**Key Decisions:**
+
+- Opt-in, never default: a rebuild moves data (`DROP TABLE` + `RENAME`), which
+  is too invasive to do silently
+- MySQL is unaffected — it already applies every constraint in place
+
+---
+
 ### v2.0.0 — Parallel Processing
 
 **Theme**: Multi-threaded performance
