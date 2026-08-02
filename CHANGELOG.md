@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.1] - 2026-08-02
+
+### Changed
+
+- **Dependency updates** — jsonschema 0.46.5 → 0.49.2, clap_complete 4.6.5 → 4.6.8, libc 0.2.186 → 0.2.189, serde 1.0.228 → 1.0.229, serde_json 1.0.150 → 1.0.151 (#82, #83, #84, #85, #86).
+
 ## [1.18.0] - 2026-08-01
 
 ### Fixed
