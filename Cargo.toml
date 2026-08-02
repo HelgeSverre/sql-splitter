@@ -81,7 +81,7 @@ libc = "0.2"
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
-jsonschema = "0.46"
+jsonschema = "0.49"
 
 # Unix-only test support: set the umask and inspect file modes to prove the
 # protected-output permission guarantees.
