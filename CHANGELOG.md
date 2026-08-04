@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.2] - 2026-08-04
+
+### Added
+
+- **`--help` points AI agents at the LLM docs** — `--help` is the first thing a coding agent runs against an unfamiliar CLI, and the footer said nothing about the LLM-readable documentation the project already publishes. When an agent is detected, `--help` appends a pointer to `llms.txt`, `llms-small.txt`, and `llms-full.txt`, plus a note that most commands accept `--json`. Human output is unchanged. Detection is a best-effort scan of the variables agents export into the commands they run (`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `OPENCODE`, `AMP_CURRENT_THREAD_ID`, `CLINE_ACTIVE`, the generic `AI_AGENT` / `AGENT`, and others) — there is no `CI=true` equivalent for agents yet. `SQL_SPLITTER_AGENT=0` suppresses the note, `SQL_SPLITTER_AGENT=1` forces it (#87).
+
 ## [1.18.1] - 2026-08-02
 
 ### Changed
