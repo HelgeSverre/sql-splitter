@@ -56,6 +56,10 @@ jobs:
           fi
           platform="${{ matrix.platform }}"
           echo "slug=${platform//\//-}" >> "$GITHUB_OUTPUT"
+          # A Docker ref must be lowercase and the owner is "HelgeSverre".
+          # metadata-action lowercases for us in `merge`; the raw ref below doesn't.
+          owner="${{ github.repository_owner }}"
+          echo "owner=${owner,,}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -95,7 +99,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           # Push the same untagged image to both registries; `merge` applies the
           # tags. Quoting keeps the comma-separated name list inside one CSV field.
-          outputs: type=image,"name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sql-splitter,ghcr.io/${{ github.repository_owner }}/sql-splitter",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,"name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sql-splitter,ghcr.io/${{ steps.ref.outputs.owner }}/sql-splitter",push-by-digest=true,name-canonical=true,push=true
           # Scope the cache per arch so the two runners don't overwrite each other.
           cache-from: type=gha,scope=${{ steps.ref.outputs.slug }}
           cache-to: type=gha,mode=max,scope=${{ steps.ref.outputs.slug }}
