@@ -1,3 +1,4 @@
+mod agent;
 pub(crate) mod analyze;
 mod common;
 pub(crate) mod convert;
@@ -21,7 +22,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
+pub(crate) const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
   Split a dump into per-table files:
     sql-splitter split dump.sql -o tables/
 
@@ -39,6 +40,29 @@ const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
   Documentation: https://github.com/helgesverre/sql-splitter
   Enable completions: sql-splitter completions <shell>";
 
+/// Deliberately unstyled, unlike [`AFTER_HELP`]: an agent reads this from a
+/// pipe, where the ANSI escapes are just noise in its context.
+const AGENT_HELP: &str = "Notes for AI agents:
+  Documentation in LLM-readable form (read this before composing commands):
+    https://sql-splitter.dev/llms.txt        index of the doc set
+    https://sql-splitter.dev/llms-small.txt  abridged, covers every command
+    https://sql-splitter.dev/llms-full.txt   complete documentation
+
+  Most commands accept --json for machine-readable output, and
+  'sql-splitter <command> --help' is the authoritative flag list.
+
+  Set SQL_SPLITTER_AGENT=0 to suppress this note.";
+
+/// `after_help` is built per invocation so an AI agent reading `--help` gets
+/// pointed at the LLM doc set, while human output stays unchanged.
+fn after_help() -> String {
+    if agent::is_agent() {
+        format!("{AFTER_HELP}\n\n{AGENT_HELP}")
+    } else {
+        AFTER_HELP.to_string()
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "sql-splitter")]
 #[command(author = "Helge Sverre <helge.sverre@gmail.com>")]
@@ -46,7 +70,7 @@ const AFTER_HELP: &str = "\x1b[1mCommon workflows:\x1b[0m
 #[command(
     about = "High-performance CLI for splitting, merging, converting, and analyzing SQL dump files"
 )]
-#[command(after_help = AFTER_HELP)]
+#[command(after_help = after_help())]
 #[command(arg_required_else_help = true)]
 #[command(max_term_width = 100)]
 pub struct Cli {

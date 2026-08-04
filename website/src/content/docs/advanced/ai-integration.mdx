@@ -21,6 +21,31 @@ This provides:
 
 AI agents can fetch this file to understand sql-splitter's capabilities.
 
+## Agent Detection
+
+`sql-splitter --help` detects when it is being run by a coding agent and appends
+a pointer to the files above, so an agent finds them without being told:
+
+```
+Notes for AI agents:
+  Documentation in LLM-readable form (read this before composing commands):
+    https://sql-splitter.dev/llms.txt        index of the doc set
+    ...
+```
+
+Detection reads the environment variables agents set in the commands they run —
+`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `OPENCODE`,
+`AMP_CURRENT_THREAD_ID`, `CLINE_ACTIVE`, and the generic `AI_AGENT` / `AGENT`,
+among others. Nothing else in the output changes, and human invocations are
+unaffected.
+
+Override it with `SQL_SPLITTER_AGENT`:
+
+```bash
+SQL_SPLITTER_AGENT=0 sql-splitter --help  # never show the note
+SQL_SPLITTER_AGENT=1 sql-splitter --help  # always show it
+```
+
 ## Agent Skills
 
 sql-splitter provides an [Agent Skill](https://agentskills.io) for coding assistants.
