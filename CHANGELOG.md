@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-08-04
+
+### Fixed
+
+- **`query` was unusably slow on large dumps** — it scanned at ~1.6 MB/s while every other command managed ~1300 MB/s, so a 4.3 GB MySQL dump never finished: killed at 12 minutes, and that was with `--tables` already scoped to a 1.46 MB table. The cause was a second statement splitter. The DuckDB loader carried its own `StatementReader`, a character-by-character scan that decoded UTF-8 and re-evaluated the dialect guards for every character; profiling put 7166 of 7176 samples inside that one function, ~842 of them doing nothing but UTF-8 decode, while DuckDB's worker threads sat idle. `Parser::read_statement` already did the same job with memchr and already handled PostgreSQL `COPY`, MSSQL `GO` batching and MySQL/PostgreSQL quoting — `split`, `redact`, `diff`, `validate` and `order` all used it, and `query` was the only holdout. It now uses it too, and the duplicate is deleted. On a 4286 MB production dump, a `COUNT(*)` went from never finishing to 3.1 s, putting `query` within 2% of `analyze` — the read-path ceiling. Directly measured on slices of that dump: 398× faster at 32 MB, 518× at 128 MB. Loading rows into DuckDB is unchanged and is now the dominant cost of a `query` run (#88).
+- **COPY data was matched by a heuristic rather than by structure** — the loader guessed whether a line inside a PostgreSQL `COPY` block was data or SQL by inspecting its first characters, so a data row whose first column began with `INSERT INTO ...` could be dispatched as a statement. Block boundaries now come from the parser itself via the new `Parser::in_copy_data()`, which also fixes a `COPY` for a missing or `--tables`-filtered table leaking its rows into the next statement, and stops a file-source `COPY ... FROM '/x.csv'` (which has no data block) from swallowing the statement after it (#88).
+
+### Changed
+
+- **A `COPY` block is buffered whole during `query` import** — previously it accumulated in a 10,000-row window. This matches what every other command already does, and DuckDB is still fed in fixed-size chunks, but peak memory for a `query` on a PostgreSQL dump is now set by its largest `COPY` block (#88).
+
 ## [1.18.2] - 2026-08-04
 
 ### Added
