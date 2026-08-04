@@ -15,7 +15,9 @@ use std::path::Path;
 pub fn generate(output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
 
-    let cmd = Cli::command();
+    // Pin the human footer: man pages are committed artifacts and must not vary
+    // with the agent-detection hint that `--help` adds at runtime.
+    let cmd = Cli::command().after_help(crate::cmd::AFTER_HELP);
 
     let man = Man::new(cmd.clone());
     let mut buffer = Vec::new();
