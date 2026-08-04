@@ -4,7 +4,14 @@ name: Docker
 #
 # Triggers:
 #   - push to a version tag (v*): builds that tag
-#   - workflow_dispatch with `tag` input: builds the given ref (used to backfill old releases)
+#   - workflow_dispatch with `tag` input: builds the given ref (used to backfill
+#     old releases, or to re-publish a tag whose build was cancelled)
+#
+# Each architecture builds on a runner of its own architecture and pushes an
+# untagged image by digest; the `merge` job then stitches those digests into one
+# multi-arch manifest per registry. Previously a single runner built both arches
+# with QEMU, which meant compiling Rust + DuckDB under emulation for arm64 and
+# took ~3h per release (v1.18.1 took 3h55m). Native runners do it in minutes.
 #
 # Required secrets:
 #   - DOCKERHUB_USERNAME: Docker Hub account (e.g. helgesverre)
@@ -16,13 +23,6 @@ on:
   push:
     tags:
       - 'v*'
-  pull_request:
-    paths:
-      - 'Dockerfile'
-      - '.dockerignore'
-      - '.github/workflows/docker.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
   workflow_dispatch:
     inputs:
       tag:
@@ -36,24 +36,26 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Resolve ref to build
         id: ref
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "ref=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            # PR validation: build the PR head, don't push
-            echo "ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
           else
             echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "push=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "push=true" >> "$GITHUB_OUTPUT"
-          fi
+          platform="${{ matrix.platform }}"
+          echo "slug=${platform//\//-}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -69,21 +71,79 @@ jobs:
           git fetch origin main --depth=1
           git checkout origin/main -- Dockerfile .dockerignore
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        if: steps.ref.outputs.push == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GHCR
-        if: steps.ref.outputs.push == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # Push the same untagged image to both registries; `merge` applies the
+          # tags. Quoting keeps the comma-separated name list inside one CSV field.
+          outputs: type=image,"name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sql-splitter,ghcr.io/${{ github.repository_owner }}/sql-splitter",push-by-digest=true,name-canonical=true,push=true
+          # Scope the cache per arch so the two runners don't overwrite each other.
+          cache-from: type=gha,scope=${{ steps.ref.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.ref.outputs.slug }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.ref.outputs.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -92,7 +152,6 @@ jobs:
 
       - name: Compute image metadata
         id: meta
-        if: steps.ref.outputs.push == 'true'
         uses: docker/metadata-action@v6
         with:
           images: |
@@ -106,14 +165,19 @@ jobs:
             type=semver,pattern={{major}},value=${{ steps.ref.outputs.ref }}
             type=raw,value=${{ steps.ref.outputs.ref }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          # PR validation builds amd64 only to keep CI quick; tag/dispatch publishes multi-arch.
-          platforms: ${{ steps.ref.outputs.push == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          push: ${{ steps.ref.outputs.push == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        # Sources are read from Docker Hub; the arch images were pushed to both
+        # registries above, so imagetools only has to write the manifest lists.
+        run: |
+          # SC2046 is deliberate: both substitutions must word-split, into
+          # `-t <tag>` pairs and into one argument per digest.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sql-splitter@sha256:%s ' *)
+
+      - name: Inspect published manifest
+        run: |
+          docker buildx imagetools inspect \
+            "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sql-splitter:${{ steps.ref.outputs.ref }}"
