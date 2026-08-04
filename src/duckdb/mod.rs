@@ -134,6 +134,15 @@ impl QueryEngine {
             let temp_path = temp_dir.join(format!("sql-splitter-{}.duckdb", std::process::id()));
             let conn = Connection::open(&temp_path)
                 .context("Failed to create disk-based DuckDB database")?;
+            // An import is one long run of writes, and every statement
+            // autocommits. At the 16MB default the WAL crosses the threshold
+            // constantly, so each commit checkpoints row groups back to disk --
+            // profiling a 620MB table put ~45% of samples in
+            // execute -> Commit -> CreateCheckpoint. Raising the threshold lets
+            // the import write once; the caller checkpoints explicitly when it
+            // wants the file durable.
+            conn.execute("SET checkpoint_threshold = '1GB'", [])
+                .context("Failed to raise checkpoint threshold")?;
             (conn, Some(temp_path))
         } else {
             let conn = Connection::open_in_memory()
