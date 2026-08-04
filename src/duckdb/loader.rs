@@ -82,7 +82,12 @@ impl<'a> DumpLoader<'a> {
 
         // Parse and load statements. `Parser` does its own buffering, sized the
         // same way every other command sizes it.
-        self.load_statements(reader, determine_buffer_size(file_size), dialect, &mut stats)?;
+        self.load_statements(
+            reader,
+            determine_buffer_size(file_size),
+            dialect,
+            &mut stats,
+        )?;
 
         if let Some(pb) = progress_bar {
             pb.finish_with_message("Import complete");
@@ -425,7 +430,6 @@ impl<'a> DumpLoader<'a> {
 
         true
     }
-
 
     /// Convert a CREATE TABLE statement to DuckDB-compatible SQL
     fn convert_create_table(&self, stmt: &str, dialect: SqlDialect) -> Result<String> {
