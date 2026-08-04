@@ -563,6 +563,15 @@ impl<R: Read> Parser<R> {
         self.peak_buffered
     }
 
+    /// True when the statement just returned by [`read_statement`](Self::read_statement)
+    /// was a `COPY ... FROM stdin;` header, meaning the *next* call returns that
+    /// block's data rather than a statement. Lets a caller pair a header with its
+    /// data block off the parser's own state instead of re-deriving the rule and
+    /// risking a desync on edge cases like `FROM STDIN WITH (FORMAT csv)`.
+    pub fn in_copy_data(&self) -> bool {
+        self.in_copy_data
+    }
+
     /// Drop the already-returned prefix `buf[..keep_from]` and append the next
     /// `fill_buf` chunk. Returns `(bytes_removed_from_front, got_more_data)`.
     /// Callers subtract `bytes_removed_from_front` from their scan indices.
