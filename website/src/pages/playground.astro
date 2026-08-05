@@ -138,7 +138,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
       <!-- Workbench -->
       <template x-if="summary">
-        <div class="pg-ide">
+        <div
+          class="pg-ide"
+          x-bind:class="{ resizing: resizing }"
+          x-bind:style="'--pg-sidebar-w:' + sidebarWidth + 'px'"
+        >
           <aside class="pg-sidebar" aria-label="Tables" x-on:keydown="onTableKeydown($event)">
             <div class="pg-sidebar-title">Tables</div>
             <template x-for="(table, index) in summary.tables" x-bind:key="table.name">
@@ -161,6 +165,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
               </button>
             </template>
           </aside>
+
+          <div
+            class="pg-resizer"
+            title="Drag to resize — double-click to reset"
+            x-on:pointerdown="startResize($event)"
+            x-on:dblclick="resetSidebar()"
+          >
+          </div>
 
           <section class="pg-main">
             <div class="pg-tabs" x-on:keydown="onTabKeydown($event)">
@@ -622,11 +634,17 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     error: null as string | null,
     perfWarning: null as string | null,
     analyzeProgress: null as number | null,
+    sidebarWidth: 240,
+    resizing: false,
 
     worker: null as Worker | null,
     requestId: 0,
 
     init() {
+      const stored = Number(localStorage.getItem('pg-sidebar-width'));
+      if (Number.isFinite(stored) && stored > 0) {
+        this.sidebarWidth = Math.min(520, Math.max(170, stored));
+      }
       this.spawnWorker();
       for (const prop of ['rows', 'seed', 'outDialect', 'outMode']) {
         this.$watch(prop, () => {
@@ -920,6 +938,35 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         dialect: this.outDialect || null,
         mode: this.outMode,
       });
+    },
+
+    startResize(event: PointerEvent) {
+      event.preventDefault();
+      const handle = event.currentTarget as HTMLElement;
+      const ide = handle.closest('.pg-ide') as HTMLElement | null;
+      if (!ide) return;
+      const left = ide.getBoundingClientRect().left;
+      this.resizing = true;
+      handle.setPointerCapture(event.pointerId);
+
+      const onMove = (e: PointerEvent) => {
+        this.sidebarWidth = Math.min(520, Math.max(170, Math.round(e.clientX - left)));
+      };
+      const onUp = () => {
+        this.resizing = false;
+        localStorage.setItem('pg-sidebar-width', String(this.sidebarWidth));
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onUp);
+        handle.removeEventListener('pointercancel', onUp);
+      };
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onUp);
+      handle.addEventListener('pointercancel', onUp);
+    },
+
+    resetSidebar() {
+      this.sidebarWidth = 240;
+      localStorage.setItem('pg-sidebar-width', '240');
     },
 
     copySql(event: Event) {
@@ -1276,13 +1323,41 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
   .pg-ide {
     display: grid;
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: var(--pg-sidebar-w, 240px) 5px 1fr;
     flex: 1;
     min-height: 0;
   }
 
+  .pg-ide.resizing {
+    user-select: none;
+    cursor: col-resize;
+  }
+
+  .pg-resizer {
+    position: relative;
+    cursor: col-resize;
+    touch-action: none;
+  }
+
+  .pg-resizer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 2px;
+    width: 1px;
+    background: var(--color-border);
+    transition: background-color 0.15s;
+  }
+
+  .pg-resizer:hover::before,
+  .pg-ide.resizing .pg-resizer::before {
+    left: 1px;
+    width: 3px;
+    background: var(--color-accent);
+  }
+
   .pg-sidebar {
-    border-right: 1px solid var(--color-border);
     padding: var(--space-sm) 0;
     display: flex;
     flex-direction: column;
@@ -1784,8 +1859,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       grid-template-rows: auto 1fr;
     }
 
+    .pg-resizer {
+      display: none;
+    }
+
     .pg-sidebar {
-      border-right: none;
       border-bottom: 1px solid var(--color-border);
       max-height: 160px;
     }
