@@ -102,10 +102,16 @@ pub fn extract_column_name_before(stmt: &str, enum_offset: usize) -> Option<Stri
             return Some(prefix[i..end].to_string());
         }
     }
-    // Bare identifier (alphanumeric + underscore)
+    // Bare identifier (alphanumeric + underscore, including non-ASCII).
+    // MySQL/PG allow non-ASCII characters in unquoted identifiers.
     let end = i;
-    while i > 0 && (prefix_bytes[i - 1].is_ascii_alphanumeric() || prefix_bytes[i - 1] == b'_') {
-        i -= 1;
+    while i > 0 {
+        let b = prefix_bytes[i - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80 {
+            i -= 1;
+        } else {
+            break;
+        }
     }
     if i < end {
         return Some(prefix[i..end].to_string());

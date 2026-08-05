@@ -13,6 +13,7 @@ use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
 use super::warnings::{ConvertWarning, WarningCollector};
+use super::enum_aware_pair;
 
 /// Map a single column's `source_type` from `from` to `to`, reusing the same
 /// regex-driven rules [`TypeMapper::convert`] applies to a whole statement.
@@ -61,12 +62,7 @@ pub(crate) fn map_column_type(
 fn is_narrowed_by_conversion(source_type: &str, from: SqlDialect, to: SqlDialect) -> bool {
     let lower = source_type.to_lowercase();
     if lower.contains("enum(") || lower.contains("set(") {
-        let is_enum_aware = matches!(
-            (from, to),
-            (SqlDialect::Postgres, SqlDialect::MySql)
-                | (SqlDialect::MySql, SqlDialect::Postgres)
-        );
-        return !is_enum_aware;
+        return !enum_aware_pair(from, to);
     }
     if lower.contains("json") && matches!(to, SqlDialect::Sqlite | SqlDialect::Mssql) {
         return true;
@@ -821,8 +817,12 @@ static RE_TIME: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTIME\s*(\(\s*\d+\s
 
 static RE_JSON: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bJSON\b").unwrap());
 
-static RE_ENUM: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bENUM\s*\([^)]+\)").unwrap());
-static RE_SET: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bSET\s*\([^)]+\)").unwrap());
+static RE_ENUM: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\bENUM\s*\([^)]*(?:\([^)]*\)[^)]*)*\)").unwrap()
+});
+static RE_SET: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\bSET\s*\([^)]*(?:\([^)]*\)[^)]*)*\)").unwrap()
+});
 
 static RE_UNSIGNED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+UNSIGNED\b").unwrap());
 static RE_ZEROFILL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+ZEROFILL\b").unwrap());

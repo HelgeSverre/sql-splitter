@@ -83,6 +83,31 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_column_type_parsing_enum() {
+        assert_eq!(
+            ColumnType::from_mysql_type("ENUM('a','b','c')"),
+            ColumnType::Enum(vec!["a".into(), "b".into(), "c".into()])
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("enum('active','inactive')"),
+            ColumnType::Enum(vec!["active".into(), "inactive".into()])
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("ENUM('it''s','ok')"),
+            ColumnType::Enum(vec!["it's".into(), "ok".into()])
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("ENUM('✅','❌')"),
+            ColumnType::Enum(vec!["✅".into(), "❌".into()])
+        );
+        assert_eq!(
+            ColumnType::from_mysql_type("ENUM()"),
+            ColumnType::Enum(vec![])
+        );
+    }
+
+    /// Regression for index parsing with complex column defaults.
+    #[test]
     fn test_schema_table_lookup() {
         let mut schema = Schema::new();
         let table = TableSchema::new("users".to_string(), TableId(0));
