@@ -249,9 +249,10 @@ impl Converter {
                     format!("ENUM({})", labels.iter().map(|l| format!("'{}'", l)).collect::<Vec<_>>().join(","))
                 });
 
+            let quoted_type = pg_quote_ident(&pg_type_name);
             result.replace_range(
                 *offset..offset + full_enum_text.len(),
-                &pg_type_name,
+                &quoted_type,
             );
 
             if self.enum_registry.mark_emitted(&pg_type_name) {
@@ -259,8 +260,20 @@ impl Converter {
                     .iter()
                     .map(|l| format!("'{}'", l.replace('\'', "''")))
                     .collect();
+
+                if pg_type_name.len() > 63 {
+                    self.warnings.add(ConvertWarning::UnsupportedFeature {
+                        feature: format!(
+                            "PG type name `{pg_type_name}` exceeds 63-byte NAMEDATALEN limit"
+                        ),
+                        suggestion: Some(
+                            "Shorten the table or column name to avoid identifier truncation"
+                                .to_string(),
+                        ),
+                    });
+                }
                 self.pending_enum_types.push(format!(
-                    "CREATE TYPE {pg_type_name} AS ENUM ({});",
+                    "CREATE TYPE {quoted_type} AS ENUM ({});",
                     quoted_labels.join(", ")
                 ));
             }
@@ -328,6 +341,14 @@ impl Converter {
 
         // Detect unsupported features BEFORE conversion (so we see original types)
         self.detect_unsupported_features(&result, table_name)?;
+
+        // Strip PG casts and schema prefixes BEFORE enum rewriting so that
+        // DEFAULT 'x'::order_status is cleaned to DEFAULT 'x' before the
+        // type name is replaced with inline ENUM(...).
+        if self.is_enum_aware() && self.from == SqlDialect::Postgres {
+            result = self.strip_postgres_casts(&result);
+            result = self.strip_schema_prefix(&result);
+        }
 
         // Enum-aware rewriting: register/replace enum types before type mapper runs
         if self.is_enum_aware() {
@@ -491,6 +512,17 @@ impl Converter {
                 statement_preview: preview.trim().chars().take(60).collect(),
             });
             return Ok(Vec::new());
+        }
+
+        // Strip PG casts and schema prefixes BEFORE enum rewriting for PG→MySQL
+        if self.is_enum_aware() && self.from == SqlDialect::Postgres {
+            result = self.strip_postgres_casts(&result);
+            result = self.strip_schema_prefix(&result);
+        }
+
+        // Enum-aware rewriting for ALTER TABLE ... MODIFY COLUMN
+        if self.is_enum_aware() {
+            result = self.rewrite_enum_table_ddl(&result, None);
         }
 
         result = self.convert_identifiers(&result);
@@ -660,15 +692,41 @@ impl Converter {
         if self.is_enum_aware() && self.from == SqlDialect::Postgres {
             if let Some(name) = enum_parser::pg_create_enum_name(trimmed) {
                 if let Some(labels) = enum_parser::pg_create_enum_labels(trimmed) {
-                    let normalized = EnumRegistry::normalize_type_name(&name);
                     self.enum_registry
-                        .register_pg_enum(&normalized, labels);
+                        .register_pg_enum(&name, labels);
                 }
                 return Ok(Vec::new()); // CREATE TYPE is not emitted for MySQL
             }
-            if let Some((_value, _position)) = enum_parser::pg_add_enum_value(trimmed) {
-                // ALTER TYPE ADD VALUE: update registry (simplified: skip for now)
-                // Warn on late modification if type already used
+            if let Some((value, position)) = enum_parser::pg_add_enum_value(trimmed) {
+                // ALTER TYPE ADD VALUE: update registry so subsequent
+                // CREATE TABLE columns get the full label list.
+                if let Some(type_name) = enum_parser::pg_alter_enum_name(trimmed) {
+                    let existing = self
+                        .enum_registry
+                        .get_pg_enum(&type_name)
+                        .map(|labels| labels.to_vec());
+                    if let Some(mut labels) = existing {
+                        match position {
+                            Some((before, true)) => {
+                                if let Some(pos) = labels.iter().position(|l| *l == before) {
+                                    labels.insert(pos + 1, value);
+                                } else {
+                                    labels.push(value);
+                                }
+                            }
+                            Some((before, false)) => {
+                                if let Some(pos) = labels.iter().position(|l| *l == before) {
+                                    labels.insert(pos, value);
+                                } else {
+                                    labels.push(value);
+                                }
+                            }
+                            None => labels.push(value),
+                        }
+                        self.enum_registry
+                            .register_pg_enum(&type_name, labels);
+                    }
+                }
                 return Ok(Vec::new());
             }
         }
@@ -2088,30 +2146,30 @@ fn skip_sql_string_literal(bytes: &[u8], start: usize) -> usize {
 
 /// Find the full `ENUM('a','b',...)` text starting at `offset` in `stmt`.
 /// Handles nested parentheses in label values and quoted strings.
+/// Uses byte-level indexing to avoid UTF-8 boundary panics.
 fn find_full_enum_match(stmt: &str, offset: usize) -> Option<String> {
     let rest = &stmt[offset..];
-    if rest.len() < 6 || !rest.to_uppercase().starts_with("ENUM(") {
+    if rest.len() < 6 || !rest[..5].eq_ignore_ascii_case("ENUM(") {
         return None;
     }
-    let after_enum = &rest[5..];
+    let after_enum = &rest.as_bytes()[5..]; // skip past "ENUM("
     let mut depth = 1u32;
-    let mut i = 0;
-    let chars: Vec<char> = after_enum.chars().collect();
-    while i < chars.len() && depth > 0 {
-        match chars[i] {
-            '(' => {
+    let mut i = 0usize;
+    while i < after_enum.len() && depth > 0 {
+        match after_enum[i] {
+            b'(' => {
                 depth += 1;
                 i += 1;
             }
-            ')' => {
+            b')' => {
                 depth -= 1;
                 i += 1;
             }
-            '\'' => {
+            b'\'' => {
                 i += 1;
-                while i < chars.len() {
-                    if chars[i] == '\'' {
-                        if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                while i < after_enum.len() {
+                    if after_enum[i] == b'\'' {
+                        if i + 1 < after_enum.len() && after_enum[i + 1] == b'\'' {
                             i += 2;
                             continue;
                         }
@@ -2126,6 +2184,20 @@ fn find_full_enum_match(stmt: &str, offset: usize) -> Option<String> {
     }
     let end = 5 + i;
     Some(rest[..end].to_string())
+}
+
+fn pg_quote_ident(name: &str) -> String {
+    // If the name needs quoting (non-lowercase, special chars, or starts with digit),
+    // wrap in double quotes. Otherwise return as-is for readability.
+    let needs_quoting = name.chars().any(|c| {
+        !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }) || name.is_empty()
+        || name.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if needs_quoting {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    } else {
+        name.to_string()
+    }
 }
 
 /// Apply `f` to every span of `stmt` that lies outside a single-quoted string

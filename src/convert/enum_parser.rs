@@ -12,7 +12,7 @@ static RE_PG_CREATE_ENUM: Lazy<Regex> = Lazy::new(|| {
 
 static RE_PG_ALTER_ENUM: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)ALTER\s+TYPE\s+(?:(?:\w+)\.)?(?P<name>\w+)\s+ADD\s+VALUE\s+'(?P<value>(?:[^']|'')*)'\s*(?:(?P<position>BEFORE|AFTER)\s+'(?P<existing>(?:[^']|'')*)')?",
+        r"(?i)ALTER\s+TYPE\s+(?:(?P<schema>\w+)\.)?(?P<name>\w+)\s+ADD\s+VALUE\s+'(?P<value>(?:[^']|'')*)'\s*(?:(?P<position>BEFORE|AFTER)\s+'(?P<existing>(?:[^']|'')*)')?",
     )
     .unwrap()
 });
@@ -22,11 +22,13 @@ static RE_MYSQL_INLINE_ENUM: Lazy<Regex> =
 
 pub fn pg_create_enum_name(stmt: &str) -> Option<String> {
     RE_PG_CREATE_ENUM.captures(stmt).map(|caps| {
-        caps.name("name")
-            .unwrap()
-            .as_str()
-            .trim_matches('"')
-            .to_string()
+        let name = caps.name("name").unwrap().as_str().trim_matches('"');
+        // Preserve schema prefix to avoid collisions across schemas
+        if let Some(schema) = caps.name("schema") {
+            format!("{}.{}", schema.as_str().trim_matches('"'), name)
+        } else {
+            name.to_string()
+        }
     })
 }
 
@@ -45,6 +47,12 @@ pub fn pg_add_enum_value(stmt: &str) -> Option<(String, Option<(String, bool)>)>
             (existing, is_after)
         });
         (value, position)
+    })
+}
+
+pub fn pg_alter_enum_name(stmt: &str) -> Option<String> {
+    RE_PG_ALTER_ENUM.captures(stmt).map(|caps| {
+        caps.name("name").unwrap().as_str().to_string()
     })
 }
 
@@ -173,7 +181,7 @@ mod tests {
         assert_eq!(result, Some("mood".to_string()));
 
         let result = pg_create_enum_name("CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy');");
-        assert_eq!(result, Some("mood".to_string()));
+        assert_eq!(result, Some("public.mood".to_string()));
 
         let result = pg_create_enum_name("CREATE TABLE foo (id int);");
         assert_eq!(result, None);
