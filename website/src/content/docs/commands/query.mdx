@@ -101,20 +101,20 @@ sql-splitter query dump.sql "SELECT * FROM orders" --tables orders,users
 
 ## Options
 
-| Flag             | Short | Description                                             | Default     |
-| ---------------- | ----- | ------------------------------------------------------- | ----------- |
-| `--format`       | `-f`  | Output format: `table`, `json`, `jsonl`, `csv`, `tsv`   | `table`     |
-| `--output`       | `-o`  | Write output to file                                    | stdout      |
-| `--dialect`      | `-d`  | SQL dialect                                             | auto-detect |
-| `--interactive`  | `-i`  | Start interactive REPL                                  | false       |
-| `--disk`         |       | Force disk-based storage (auto-enabled for large dumps) | false       |
-| `--cache`        |       | Cache imported database for faster repeated queries     | false       |
-| `--tables`       |       | Only import specific tables (comma-separated)           | all         |
-| `--memory-limit` |       | DuckDB memory limit (e.g., "4GB")                       | -           |
-| `--timing`       |       | Show query execution time                               | false       |
+| Flag             | Short | Description                                             | Default          |
+| ---------------- | ----- | ------------------------------------------------------- | ---------------- |
+| `--format`       | `-f`  | Output format: `table`, `json`, `jsonl`, `csv`, `tsv`   | `table`          |
+| `--output`       | `-o`  | Write output to file                                    | stdout           |
+| `--dialect`      | `-d`  | SQL dialect                                             | auto-detect      |
+| `--interactive`  | `-i`  | Start interactive REPL                                  | false            |
+| `--disk`         |       | Force disk-based storage (auto-enabled for large dumps) | false            |
+| `--cache`        |       | Cache imported database for faster repeated queries     | false            |
+| `--tables`       |       | Only import specific tables (comma-separated)           | all              |
+| `--memory-limit` |       | DuckDB memory limit (e.g., "4GB")                       | -                |
+| `--timing`       |       | Show query execution time                               | false            |
 | `--progress`     |       | Show import progress                                    | on in a terminal |
-| `--list-cache`   |       | List cached databases                                   | -           |
-| `--clear-cache`  |       | Clear all cached databases                              | -           |
+| `--list-cache`   |       | List cached databases                                   | -                |
+| `--clear-cache`  |       | Clear all cached databases                              | -                |
 
 **Note:** Use `--format json` or `--format jsonl` for JSON output (not `--json`).
 
