@@ -756,10 +756,10 @@ impl Converter {
         let upper = stripped.to_uppercase();
 
         // Let CREATE TYPE / ALTER TYPE through when target understands enums
-        if self.is_enum_aware() {
-            if upper.starts_with("CREATE TYPE") || upper.starts_with("ALTER TYPE") {
-                return false;
-            }
+        if self.is_enum_aware()
+            && (upper.starts_with("CREATE TYPE") || upper.starts_with("ALTER TYPE"))
+        {
+            return false;
         }
 
         // These PostgreSQL features have no MySQL/SQLite equivalent
