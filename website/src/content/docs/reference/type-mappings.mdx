@@ -74,13 +74,44 @@ The `BOOL`/`BOOLEAN` aliases are not rewritten—only the literal `TINYINT(1)` f
 
 ## Special Types
 
-### ENUM (MySQL)
+### ENUM
 
-MySQL ENUMs are converted to:
+ENUM semantics are preserved bidirectionally between MySQL and PostgreSQL.
+Conversions to SQLite and MSSQL degrade to string types since neither dialect
+supports native ENUM columns.
 
-- **PostgreSQL**: `VARCHAR(255)` (a warning suggests adding a CHECK constraint manually)
-- **SQLite**: `TEXT`
-- **MSSQL**: `NVARCHAR(255)`
+**MySQL → PostgreSQL**
+
+Inline `ENUM('a','b')` is converted to a named type plus a typed column reference:
+
+```sql
+-- generated before the table
+CREATE TYPE enum__{table}__{column} AS ENUM ('a', 'b');
+
+-- column definition uses the type
+{column} enum__{table}__{column}
+```
+
+**PostgreSQL → MySQL**
+
+`CREATE TYPE ... AS ENUM` definitions are inlined per column:
+
+```sql
+-- CREATE TYPE my_type AS ENUM ('a', 'b');  becomes:
+{column} ENUM('a','b')
+```
+
+**MySQL → SQLite**
+
+`ENUM` converts to `TEXT`. SQLite has no native enum type.
+
+**MySQL → MSSQL**
+
+`ENUM` converts to `NVARCHAR(255)`. MSSQL has no native enum type.
+
+The `--enum-naming` flag controls the generated type name strategy:
+- `per-column` (default): `enum__{table}__{column}`
+- `dedupe`: Reuses identical enum types across columns that share the same values
 
 ### UUID (PostgreSQL)
 

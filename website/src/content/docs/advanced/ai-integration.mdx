@@ -122,8 +122,8 @@ sql-splitter validate mysql_dump.sql --strict
 sql-splitter convert mysql_dump.sql --to postgres -o postgres_dump.sql --progress
 sql-splitter validate postgres_dump.sql --dialect postgres --strict
 
-Result: Conversion complete. 2 warnings about ENUM types
-that were converted to VARCHAR.
+Result: Conversion complete. ENUM types were automatically
+converted between MySQL and PostgreSQL.
 ```
 
 ### "Create a safe dev dataset"

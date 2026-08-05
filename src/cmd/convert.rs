@@ -48,6 +48,11 @@ pub struct ConvertArgs {
     /// Stop on first error (for glob patterns)
     #[arg(long, help_heading = BEHAVIOR)]
     fail_fast: bool,
+
+    /// Enum type naming strategy for MySQL→PostgreSQL conversion
+    /// (per-column: one type per table+column, dedupe: reuse identical types)
+    #[arg(long, default_value = "per-column", help_heading = BEHAVIOR)]
+    enum_naming: String,
 }
 
 /// JSON output for single file convert
@@ -125,6 +130,7 @@ pub fn run(args: ConvertArgs) -> anyhow::Result<ExitCode> {
         json,
         dry_run,
         fail_fast,
+        enum_naming,
     } = args;
     let output = super::common::dash_is_stdout(output);
     let expanded = expand_file_pattern(&file)?;
@@ -139,6 +145,7 @@ pub fn run(args: ConvertArgs) -> anyhow::Result<ExitCode> {
             progress,
             dry_run,
             json,
+            enum_naming,
         )
     } else {
         let output_dir = match output {
@@ -160,6 +167,7 @@ pub fn run(args: ConvertArgs) -> anyhow::Result<ExitCode> {
             dry_run,
             fail_fast,
             json,
+            enum_naming,
         )
     }
 }
@@ -174,6 +182,7 @@ fn run_single(
     progress: bool,
     dry_run: bool,
     json: bool,
+    enum_naming: String,
 ) -> anyhow::Result<ExitCode> {
     let from = if let Some(d) = from_dialect.clone() {
         Some(
@@ -196,6 +205,7 @@ fn run_single(
         dry_run,
         progress: progress && !json,
         strict,
+        enum_naming,
     };
 
     let stats = convert::run(config)?;
@@ -244,6 +254,7 @@ fn run_multi(
     dry_run: bool,
     fail_fast: bool,
     json: bool,
+    enum_naming: String,
 ) -> anyhow::Result<ExitCode> {
     let total = files.len();
 
@@ -329,6 +340,7 @@ fn run_multi(
                 dry_run,
                 progress: false,
                 strict,
+                enum_naming: enum_naming.clone(),
             };
 
             match convert::run(config) {

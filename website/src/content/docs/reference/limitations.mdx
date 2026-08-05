@@ -57,7 +57,8 @@ Detection confidence is advisory: commands proceed even on a low-confidence gues
 Conversion is string-based rewriting, not AST transformation. It is deliberately lossy for constructs the target dialect lacks; every drop or rewrite is reported as a warning (deduplicated per feature, capped at 100).
 
 - **Skipped**: session commands (`SET NAMES`, `SET ANSI_NULLS`, `LOCK TABLES`, `PRAGMA`, ...), and PostgreSQL-only DDL (`CREATE FUNCTION`/`TYPE`/`DOMAIN`/`SEQUENCE`/`EXTENSION`/`TRIGGER`, `COMMENT ON`, `GRANT`) — each with a warning.
-- **Rewritten lossily**: MySQL `ENUM(...)` and `SET(...)` become `VARCHAR(255)`/`TEXT` (constraint semantics lost); `UNSIGNED` and `ZEROFILL` are removed; inline `COMMENT` clauses are stripped for PostgreSQL targets.
+- **Rewritten lossily**: MySQL `SET(...)` becomes `TEXT` (constraint semantics lost); `UNSIGNED` and `ZEROFILL` are removed; inline `COMMENT` clauses are stripped for PostgreSQL targets.
+- **ENUM conversion**: MySQL ↔ PostgreSQL `ENUM` is semantic-preserving (MySQL ENUM → PostgreSQL `CREATE TYPE` + typed column, PostgreSQL ENUM → MySQL inline `ENUM`). Lossy for SQLite (`ENUM` → `TEXT`) and MSSQL (`ENUM` → `NVARCHAR(255)`).
 - **Warned but left as-is**: PostgreSQL array types (`integer[]`) and `INHERITS` — no equivalent is generated.
 - **Not detectable**: SQLite auto-increment (`INTEGER PRIMARY KEY`) passes through unchanged when converting _from_ SQLite; MSSQL `TIMESTAMP` (rowversion) is only converted when written as `[TIMESTAMP]`.
 - `COPY` blocks are converted to multi-row `INSERT`s (1000 rows per statement) for non-PostgreSQL targets.

@@ -51,6 +51,8 @@ pub struct ConvertConfig {
     pub progress: bool,
     /// Strict mode (fail on any unsupported feature)
     pub strict: bool,
+    /// Enum naming strategy for MySQL→PostgreSQL conversion
+    pub enum_naming: String,
 }
 
 impl Default for ConvertConfig {
@@ -63,6 +65,7 @@ impl Default for ConvertConfig {
             dry_run: false,
             progress: false,
             strict: false,
+            enum_naming: "per-column".to_string(),
         }
     }
 }
@@ -1923,7 +1926,12 @@ pub fn run(config: ConvertConfig) -> anyhow::Result<ConvertStats> {
     };
 
     // Create converter
-    let mut converter = Converter::new(from_dialect, config.to_dialect).with_strict(config.strict);
+    let mut converter = Converter::new(from_dialect, config.to_dialect)
+        .with_strict(config.strict)
+        .with_enum_naming(match config.enum_naming.as_str() {
+            "dedupe" => EnumNamingStrategy::Dedupe,
+            _ => EnumNamingStrategy::PerColumn,
+        });
 
     // Open input, transparently handling any supported compression format
     // (including zip archives), with optional progress tracking.

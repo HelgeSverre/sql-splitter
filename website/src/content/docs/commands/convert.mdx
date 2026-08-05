@@ -85,8 +85,9 @@ sql-splitter convert pg_dump.sql --to sqlite | sqlite3 dev.db
 | `--strict`    |       | Fail on any unsupported feature                        | false       |
 | `--progress`  | `-p`  | Show progress bar                                      | false       |
 | `--dry-run`   |       | Preview without writing files                          | false       |
-| `--fail-fast` |       | Stop on first error (for glob patterns)                | false       |
-| `--json`      |       | Output results as JSON                                 | false       |
+| `--fail-fast`    |       | Stop on first error (for glob patterns)                | false       |
+| `--enum-naming`  |       | MySQL→PG enum naming: `per-column` or `dedupe`         | per-column  |
+| `--json`         |       | Output results as JSON                                 | false       |
 
 ## Supported Conversions
 
@@ -136,9 +137,10 @@ The conversion **continues successfully** even when encountering unsupported fea
 
 These types are converted to the closest equivalent, with a warning:
 
-| Feature                     | Converted To                                             | Notes                                                            |
-| --------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------- |
-| MySQL `ENUM('a','b','c')`   | `VARCHAR(255)` (PostgreSQL/MSSQL) or `TEXT` (SQLite)     | Enum values are lost; consider adding CHECK constraints manually |
+| Feature                     | Converted To                                                       | Notes                                                                    |
+| --------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| MySQL `ENUM('a','b','c')`   | `CREATE TYPE enum__{t}__{c} AS ENUM` (PostgreSQL), `TEXT` (SQLite), `NVARCHAR(255)` (MSSQL) | Semantic-preserving for PostgreSQL → MySQL; `--enum-naming` flag available |
+| PostgreSQL `CREATE TYPE`    | Inline `ENUM('a','b','c')` per column (MySQL)                      | Enum types converted from registry; SQLite/MSSQL fall back to string      |
 | PostgreSQL arrays (`INT[]`) | `JSON` (MySQL), `TEXT` (SQLite), `NVARCHAR(MAX)` (MSSQL) | Data format preserved as JSON string                             |
 
 ### Features that are skipped entirely

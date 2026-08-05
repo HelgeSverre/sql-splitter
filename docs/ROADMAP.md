@@ -703,28 +703,28 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 | Feature                          | Effort | Status     | Notes                            |
 | -------------------------------- | ------ | ---------- | -------------------------------- |
-| **Enum Registry**                | 2h     | 🟡 Planned | State tracking across statements |
-| **PG → MySQL**                   | 12h    | 🟡 Planned |                                  |
+| **Enum Registry**                | 2h     | ✅ Done    | State tracking across statements |
+| **PG → MySQL**                   | 12h    | ✅ Done    |                                  |
 | ├─ Parse CREATE TYPE ... AS ENUM | 3h     |            | Extract type definitions         |
 | ├─ Parse ALTER TYPE ADD VALUE    | 2h     |            | Update registry                  |
 | ├─ Rewrite CREATE TABLE columns  | 3h     |            | Type ref → inline ENUM           |
 | ├─ Strip ::type casts in DML     | 2h     |            | Remove enum casts                |
 | └─ Handle unknown types          | 2h     |            | VARCHAR fallback + warning       |
-| **MySQL → PG**                   | 10h    | 🟡 Planned |                                  |
+| **MySQL → PG**                   | 10h    | ✅ Done    |                                  |
 | ├─ Parse inline ENUM()           | 2h     |            | Extract from columns             |
 | ├─ Generate CREATE TYPE          | 3h     |            | Deterministic naming             |
 | ├─ Multi-statement output        | 3h     |            | One input → many outputs         |
 | └─ Deduplication (optional)      | 2h     |            | Signature-based reuse            |
-| **Testing**                      | 6h     | 🟡 Planned | Unit + integration tests         |
+| **Testing**                      | 6h     | ✅ Done    | Unit + integration tests         |
 
 **Total: ~30h**
 
-**Current Behavior (lossy):**
+**Previous Behavior (pre-v1.18):**
 
 - MySQL → PostgreSQL: `ENUM('a','b')` → `VARCHAR(255)` ❌
 - PostgreSQL → MySQL: `CREATE TYPE` skipped, columns become VARCHAR ❌
 
-**New Behavior (semantic-preserving):**
+**Current Behavior (v1.18+):**
 
 - MySQL → PostgreSQL: `ENUM('a','b')` → `CREATE TYPE enum__table__col AS ENUM ('a','b')` ✅
 - PostgreSQL → MySQL: `CREATE TYPE t AS ENUM (...)` → inline `ENUM(...)` per column ✅
