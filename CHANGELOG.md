@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`query --cache` served whichever cache existed for the dump, whatever it contained** — the cache key hashed only the dump's path, size and mtime, so a cache built with `--tables order_items` was silently handed to a query requesting six tables: `SHOW TABLES` showed one table, joins against the rest failed or returned partial data. The `--tables` selection (lowercased, sorted, deduped — matching the loader's case-insensitive filter) and `--dialect` are now part of the key, so each selection gets its own cache slot and they coexist; asking for a different set re-imports and says why: `Note: existing cache covers {order_items}; requested {order_items, orders, …} - re-importing`. Existing caches use the old key scheme and re-import once after upgrading; `--clear-cache` reclaims the orphaned files (#94).
+- **An interrupted `--cache` import destroyed the previous good cache** — the index entry was replaced *before* any data was copied, the index was rewritten in place, and the database was built directly at its final path. A kill mid-copy could truncate `index.json` and leave a partial `.duckdb` whose fresh mtime made it *valid* on the next run — a corrupt database served silently. The cache is now staged as `<key>.duckdb.partial` and renamed into place only when complete, the index is written via temp-file-and-rename and only after the data commit, and validity is simply "the file exists" — nothing incomplete can ever appear at a servable path. A corrupt `index.json` now warns and rebuilds instead of permanently disabling every cache operation, and `--clear-cache` sweeps the directory itself (data, WAL and partial files) so it works even without an index. The entry's recorded cache size was also read before the file existed — permanently 0.0 MB in `--list-cache` — and is now measured after the commit (#94).
+
+### Changed
+
+- **Import progress shows by default in a terminal** — a cache miss on a multi-gigabyte dump meant minutes of silence unless you had guessed `--progress` up front, which is backwards for the runs that need it most. When stderr is a TTY the progress display is on; piped and scripted runs are unchanged. `--list-cache` now names the tables each cache contains instead of just counting them, so verifying coverage no longer takes a `SHOW TABLES` round-trip, and `SQL_SPLITTER_CACHE_DIR` overrides the cache location. `query --help` documents the cache key, its location, and the 2GB auto-`--disk` threshold (#94).
+
 ## [1.20.0] - 2026-08-05
 
 ### Fixed

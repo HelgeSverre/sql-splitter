@@ -433,8 +433,8 @@ fn test_cache_manager_creation() {
 fn test_cache_key_computation() {
     let (_temp_dir, dump_path) = create_test_dump("SELECT 1;");
 
-    let key1 = CacheManager::compute_cache_key(&dump_path).unwrap();
-    let key2 = CacheManager::compute_cache_key(&dump_path).unwrap();
+    let key1 = CacheManager::compute_cache_key(&dump_path, None, None).unwrap();
+    let key2 = CacheManager::compute_cache_key(&dump_path, None, None).unwrap();
 
     assert_eq!(key1, key2);
     assert_eq!(key1.len(), 32); // 16 bytes hex encoded
@@ -446,11 +446,11 @@ fn test_cache_key_changes_with_content() {
     let test_file = temp_dir.path().join("test.sql");
 
     fs::write(&test_file, "SELECT 1;").unwrap();
-    let key1 = CacheManager::compute_cache_key(&test_file).unwrap();
+    let key1 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
 
     // Modify file with different size
     fs::write(&test_file, "SELECT 2; -- extra content").unwrap();
-    let key2 = CacheManager::compute_cache_key(&test_file).unwrap();
+    let key2 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
 
     assert_ne!(key1, key2);
 }
@@ -472,7 +472,9 @@ fn test_cache_has_valid_cache_when_missing() {
     let test_file = temp_dir.path().join("test.sql");
     fs::write(&test_file, "SELECT 1;").unwrap();
 
-    assert!(!cache_manager.has_valid_cache(&test_file).unwrap());
+    assert!(!cache_manager
+        .has_valid_cache(&test_file, None, None)
+        .unwrap());
 }
 
 #[test]
@@ -490,6 +492,163 @@ fn test_cache_total_size_empty() {
     let cache_manager = CacheManager::with_dir(temp_dir.path().to_path_buf()).unwrap();
 
     assert_eq!(cache_manager.total_size().unwrap(), 0);
+}
+
+// =============================================================================
+// CLI cache behavior tests (issue #94)
+// =============================================================================
+
+/// Run `sql-splitter query` as a subprocess with an isolated cache directory.
+fn run_query_cli(cache_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_sql-splitter"))
+        .arg("query")
+        .args(args)
+        .env("SQL_SPLITTER_CACHE_DIR", cache_dir)
+        .output()
+        .expect("failed to run sql-splitter")
+}
+
+#[test]
+fn test_cli_cache_is_keyed_on_tables() {
+    let (_dump_dir, dump_path) = create_test_dump(simple_mysql_dump());
+    let cache_dir = TempDir::new().unwrap();
+    let dump = dump_path.to_str().unwrap();
+
+    // Import only `users`
+    let out = run_query_cli(
+        cache_dir.path(),
+        &[dump, "SHOW TABLES", "--cache", "--tables", "users"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Importing"));
+
+    // Same table set hits the cache
+    let out = run_query_cli(
+        cache_dir.path(),
+        &[dump, "SHOW TABLES", "--cache", "--tables", "users"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Using cached database"));
+
+    // A wider table set must NOT be served the narrow cache: re-import with a note
+    let out = run_query_cli(
+        cache_dir.path(),
+        &[dump, "SHOW TABLES", "--cache", "--tables", "users,orders"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Importing"),
+        "expected re-import, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("existing cache covers {users}"),
+        "missing coverage note: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("users") && stdout.contains("orders"),
+        "missing tables: {stdout}"
+    );
+
+    // Both caches coexist and --list-cache shows table names
+    let out = run_query_cli(cache_dir.path(), &["--list-cache"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[users]"), "{stdout}");
+    assert!(
+        stdout.contains("[orders, users]") || stdout.contains("[users, orders]"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn test_cli_corrupt_index_recovers_and_cache_still_hits() {
+    let (_dump_dir, dump_path) = create_test_dump(simple_mysql_dump());
+    let cache_dir = TempDir::new().unwrap();
+    let dump = dump_path.to_str().unwrap();
+
+    let out = run_query_cli(
+        cache_dir.path(),
+        &[dump, "SELECT 1", "--cache", "--tables", "users"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    fs::write(cache_dir.path().join("index.json"), "{broken json").unwrap();
+
+    // --list-cache warns instead of hard-erroring
+    let out = run_query_cli(cache_dir.path(), &["--list-cache"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("corrupt"));
+
+    // Lookup is file-based, so the cache still hits despite the lost index
+    let out = run_query_cli(
+        cache_dir.path(),
+        &[dump, "SELECT 1", "--cache", "--tables", "users"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Using cached database"));
+}
+
+#[test]
+fn test_cli_leftover_partial_is_ignored_and_swept() {
+    let (_dump_dir, dump_path) = create_test_dump(simple_mysql_dump());
+    let cache_dir = TempDir::new().unwrap();
+    let dump = dump_path.to_str().unwrap();
+
+    // Plant a garbage partial at the key an import would use (simulates a prior kill)
+    let key = CacheManager::compute_cache_key(&dump_path, None, None).unwrap();
+    let manager = CacheManager::with_dir(cache_dir.path().to_path_buf()).unwrap();
+    fs::write(manager.partial_path(&key), b"garbage from interrupted run").unwrap();
+
+    let out = run_query_cli(cache_dir.path(), &[dump, "SELECT 1", "--cache"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(manager.cache_path(&key).exists());
+    assert!(!manager.partial_path(&key).exists());
+
+    // --clear-cache sweeps everything, including stray partials
+    fs::write(cache_dir.path().join("stray.duckdb.partial"), b"junk").unwrap();
+    let out = run_query_cli(cache_dir.path(), &["--clear-cache"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let leftovers: Vec<_> = fs::read_dir(cache_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "index.json")
+        .collect();
+    assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
 }
 
 // =============================================================================

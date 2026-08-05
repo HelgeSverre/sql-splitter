@@ -37,7 +37,9 @@ The command parses your SQL dump, imports the schema and data into an in-memory 
 | Linux   | `~/.cache/sql-splitter/duckdb/`                                                                    |
 | Windows | `%LOCALAPPDATA%\sql-splitter\duckdb\` (e.g., `C:\Users\<user>\AppData\Local\sql-splitter\duckdb\`) |
 
-Cache files are named `<hash>.duckdb` where the hash is based on the dump file's path, size, and modification time. If the source dump changes, a new cache is created automatically.
+Set the `SQL_SPLITTER_CACHE_DIR` environment variable to override the cache location.
+
+Cache files are named `<hash>.duckdb` where the hash covers the dump file's path, size, and modification time, plus the `--tables` selection and `--dialect`. Each table selection gets its own cache, so a cache built with `--tables users` and a full-dump cache coexist. If the source dump changes, a new cache is created automatically and caches of the old version are cleaned up.
 
 ## Usage
 
@@ -110,7 +112,7 @@ sql-splitter query dump.sql "SELECT * FROM orders" --tables orders,users
 | `--tables`       |       | Only import specific tables (comma-separated)           | all         |
 | `--memory-limit` |       | DuckDB memory limit (e.g., "4GB")                       | -           |
 | `--timing`       |       | Show query execution time                               | false       |
-| `--progress`     |       | Show import progress                                    | false       |
+| `--progress`     |       | Show import progress                                    | on in a terminal |
 | `--list-cache`   |       | List cached databases                                   | -           |
 | `--clear-cache`  |       | Clear all cached databases                              | -           |
 
@@ -180,14 +182,20 @@ sql-splitter query dump.sql "SELECT * FROM users WHERE active = 1" --cache
 Manage cache:
 
 ```bash
-# List cached databases (shows path, size, source file)
+# List cached databases (shows source file, contained tables, size)
 sql-splitter query --list-cache
 
 # Clear all caches (reclaims disk space)
 sql-splitter query --clear-cache
 ```
 
-The cache is automatically invalidated when the source dump file changes (based on file size and modification time). To manually clear space, delete files from the cache directory (see [How It Works](#how-it-works) for paths).
+The cache key covers the dump file (path, size, modification time), the `--tables` selection, and `--dialect` — changing any of these triggers a re-import. When an existing cache of the same dump covers a different table set, the re-import says so:
+
+```
+Note: existing cache covers {users}; requested {users, orders} - re-importing
+```
+
+Cache writes are atomic: an interrupted import never corrupts or removes previously cached databases. To manually clear space, run `--clear-cache` or delete files from the cache directory (see [How It Works](#how-it-works) for paths).
 
 ## Large Files
 

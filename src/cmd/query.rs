@@ -10,7 +10,7 @@ use clap::Args;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 /// Query SQL dump files using DuckDB's analytical engine
@@ -21,7 +21,12 @@ use std::path::{Path, PathBuf};
   sql-splitter query dump.sql \"SELECT * FROM users LIMIT 10\" -o results.csv -f csv
   sql-splitter query dump.sql --interactive
   sql-splitter query huge.sql \"SELECT ...\" --disk
-  sql-splitter query dump.sql \"SELECT ...\" --cache")]
+  sql-splitter query dump.sql \"SELECT ...\" --cache
+
+Caching: --cache stores the imported database under the user cache directory
+(override with SQL_SPLITTER_CACHE_DIR), keyed on the dump file's path, size,
+mtime, the --tables selection, and --dialect. A change to any of these triggers
+a re-import. Inspect with --list-cache, wipe with --clear-cache.")]
 pub struct QueryArgs {
     /// SQL dump file to query
     #[arg(value_name = "INPUT", required_unless_present_any = ["clear_cache", "list_cache"])]
@@ -43,11 +48,11 @@ pub struct QueryArgs {
     #[arg(short, long, value_name = "DIALECT")]
     pub dialect: Option<String>,
 
-    /// Use disk-based temp storage (for large dumps >2GB)
+    /// Use disk-based temp storage (auto-enabled for dumps >2GB)
     #[arg(long)]
     pub disk: bool,
 
-    /// Cache imported data for repeated queries
+    /// Cache imported data for repeated queries (keyed on file + --tables + --dialect)
     #[arg(long)]
     pub cache: bool,
 
@@ -128,7 +133,7 @@ pub fn run(args: QueryArgs) -> Result<()> {
         cache_enabled: args.cache,
         tables: args.tables,
         memory_limit: args.memory_limit,
-        progress: args.progress || args.interactive,
+        progress: args.progress || args.interactive || std::io::stderr().is_terminal(),
     };
 
     // Try to use cache if enabled
@@ -162,7 +167,7 @@ pub fn run(args: QueryArgs) -> Result<()> {
 
         // Save to cache if enabled
         if args.cache {
-            save_to_cache(&new_engine, &input, tables_created, rows_inserted)?;
+            save_to_cache(&new_engine, &input, &config, rows_inserted)?;
         }
 
         engine = Some(new_engine);
@@ -206,45 +211,92 @@ pub fn run(args: QueryArgs) -> Result<()> {
 fn try_load_from_cache(dump_path: &Path, config: &QueryConfig) -> Result<Option<QueryEngine>> {
     let cache_manager = CacheManager::new()?;
 
-    if let Some(cache_path) = cache_manager.get_cache(dump_path)? {
+    if let Some(cache_path) =
+        cache_manager.get_cache(dump_path, config.tables.as_deref(), config.dialect)?
+    {
         eprintln!("Using cached database: {}", cache_path.display());
         let engine = QueryEngine::from_cache(&cache_path, config)?;
         return Ok(Some(engine));
     }
 
+    print_cache_coverage_note(&cache_manager, dump_path, config.tables.as_deref());
     Ok(None)
 }
 
-/// Save the current database to cache
+/// On a cache miss, explain what existing caches of this dump cover so a
+/// re-import isn't silent. Best-effort: the index is advisory only.
+fn print_cache_coverage_note(
+    cache_manager: &CacheManager,
+    dump_path: &Path,
+    requested: Option<&[String]>,
+) {
+    let Ok(canonical) = dump_path.canonicalize() else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(&canonical) else {
+        return;
+    };
+    let mtime = metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let Ok(entries) = cache_manager.list_entries() else {
+        return;
+    };
+
+    let dump_path_str = canonical.display().to_string();
+    let requested_str = match requested {
+        Some(tables) => format!("{{{}}}", tables.join(", ")),
+        None => "all tables".to_string(),
+    };
+    for entry in entries.iter().filter(|e| {
+        e.dump_path == dump_path_str && e.dump_size == metadata.len() && e.dump_mtime == mtime
+    }) {
+        let covers = match &entry.tables {
+            Some(tables) => format!("{{{}}}", tables.join(", ")),
+            None => "unknown tables (cache from an older version)".to_string(),
+        };
+        eprintln!(
+            "Note: existing cache covers {}; requested {} - re-importing",
+            covers, requested_str
+        );
+    }
+}
+
+/// Save the current database to cache: build a staged `.partial` copy, then
+/// atomically commit it. An interrupt or error leaves existing caches intact.
 fn save_to_cache(
     engine: &QueryEngine,
     dump_path: &Path,
-    table_count: usize,
+    config: &QueryConfig,
     row_count: u64,
 ) -> Result<()> {
     let cache_manager = CacheManager::new()?;
-    let cache_path = cache_manager.create_cache(dump_path, table_count, row_count)?;
+    let cache_key =
+        CacheManager::compute_cache_key(dump_path, config.tables.as_deref(), config.dialect)?;
 
-    // Copy database to cache location
-    // DuckDB supports EXPORT DATABASE but for caching we use ATTACH and copy
+    // Remove any staged file left behind by a previous interrupted run
+    cache_manager.discard_partial(&cache_key)?;
+    let partial_path = cache_manager.partial_path(&cache_key);
+
     engine
         .connection()
         .execute("CHECKPOINT", [])
         .context("Failed to checkpoint database")?;
 
-    // For in-memory databases, we need to export
-    // Try to attach and copy to the cache database
     engine
         .connection()
         .execute(
-            &format!("ATTACH '{}' AS cache_db", cache_path.display()),
+            &format!("ATTACH '{}' AS cache_db", partial_path.display()),
             [],
         )
         .context("Failed to attach cache database")?;
 
-    // Copy all tables
+    // Copy all tables into the staged database
     let tables = engine.list_tables()?;
-    for table in tables {
+    let copy_result: Result<()> = tables.iter().try_for_each(|table| {
         engine
             .connection()
             .execute(
@@ -254,13 +306,22 @@ fn save_to_cache(
                 ),
                 [],
             )
-            .with_context(|| format!("Failed to copy table {} to cache", table))?;
-    }
-    engine
+            .map(|_| ())
+            .with_context(|| format!("Failed to copy table {} to cache", table))
+    });
+    // Detach even after a copy failure; it checkpoints the staged DB's WAL
+    let detach_result = engine
         .connection()
         .execute("DETACH cache_db", [])
-        .context("Failed to detach cache database")?;
+        .map(|_| ())
+        .context("Failed to detach cache database");
 
+    if let Err(e) = copy_result.and(detach_result) {
+        let _ = cache_manager.discard_partial(&cache_key);
+        return Err(e);
+    }
+
+    let cache_path = cache_manager.commit_cache(dump_path, &cache_key, tables, row_count)?;
     eprintln!("Cached database to: {}", cache_path.display());
     Ok(())
 }
@@ -291,10 +352,14 @@ fn list_cache() -> Result<()> {
         let cache_size_mb = entry.cache_size as f64 / (1024.0 * 1024.0);
         let dump_size_mb = entry.dump_size as f64 / (1024.0 * 1024.0);
 
+        let tables_str = match &entry.tables {
+            Some(tables) => format!(" [{}]", tables.join(", ")),
+            None => " (names unknown - old cache)".to_string(),
+        };
         println!("  {}", entry.dump_path);
         println!(
-            "    Tables: {}, Rows: {}, Cache: {:.1} MB (Dump: {:.1} MB)",
-            entry.table_count, entry.row_count, cache_size_mb, dump_size_mb
+            "    Tables: {}{}, Rows: {}, Cache: {:.1} MB (Dump: {:.1} MB)",
+            entry.table_count, tables_str, entry.row_count, cache_size_mb, dump_size_mb
         );
         println!("    Key: {}", entry.cache_key);
         println!();

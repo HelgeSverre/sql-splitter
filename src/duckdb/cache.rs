@@ -1,7 +1,12 @@
 //! Cache manager for persistent DuckDB databases.
 //!
 //! Caches imported SQL dumps as DuckDB database files for fast repeated queries.
+//! Cache identity is (canonical path, size, mtime, --tables set, dialect), so
+//! different table selections of the same dump get separate cache slots. Writes
+//! are atomic: data is staged in a `.partial` file and renamed into place, and
+//! the index is only updated after the data file is committed.
 
+use crate::parser::SqlDialect;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -11,9 +16,9 @@ use std::time::SystemTime;
 /// Cache entry metadata
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CacheEntry {
-    /// Original dump file path
+    /// Canonical path of the original dump file
     pub dump_path: String,
-    /// SHA256 hash of (path + size + mtime)
+    /// SHA256 hash of (path + size + mtime + tables + dialect)
     pub cache_key: String,
     /// Size of original dump file
     pub dump_size: u64,
@@ -27,6 +32,9 @@ pub struct CacheEntry {
     pub table_count: usize,
     /// Total rows in the cache
     pub row_count: u64,
+    /// Tables contained in the cache (None = entry from an older version)
+    #[serde(default)]
+    pub tables: Option<Vec<String>>,
 }
 
 /// Cache index containing all cache entries
@@ -38,6 +46,36 @@ pub struct CacheIndex {
 /// Manager for cached DuckDB databases
 pub struct CacheManager {
     cache_dir: PathBuf,
+}
+
+/// DuckDB names its write-ahead log by appending `.wal` to the database path.
+fn wal_path(db_path: &Path) -> PathBuf {
+    let mut os = db_path.as_os_str().to_os_string();
+    os.push(".wal");
+    PathBuf::from(os)
+}
+
+fn mtime_secs(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Normalize a table selection for cache-key hashing: lowercased (matching the
+/// loader's case-insensitive filter), sorted, deduped. `None` means all tables.
+fn normalize_tables(tables: Option<&[String]>) -> String {
+    match tables {
+        None => "all".to_string(),
+        Some(tables) => {
+            let mut names: Vec<String> = tables.iter().map(|t| t.to_ascii_lowercase()).collect();
+            names.sort();
+            names.dedup();
+            names.join(",")
+        }
+    }
 }
 
 impl CacheManager {
@@ -54,8 +92,12 @@ impl CacheManager {
         Ok(Self { cache_dir })
     }
 
-    /// Get the default cache directory
+    /// Get the default cache directory (`SQL_SPLITTER_CACHE_DIR` overrides)
     pub fn default_cache_dir() -> Result<PathBuf> {
+        if let Some(dir) = std::env::var_os("SQL_SPLITTER_CACHE_DIR").filter(|d| !d.is_empty()) {
+            return Ok(PathBuf::from(dir));
+        }
+
         let cache_base = dirs::cache_dir()
             .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
             .context("Could not determine cache directory")?;
@@ -63,8 +105,12 @@ impl CacheManager {
         Ok(cache_base.join("sql-splitter").join("duckdb"))
     }
 
-    /// Compute the cache key for a dump file
-    pub fn compute_cache_key(dump_path: &Path) -> Result<String> {
+    /// Compute the cache key for a dump file and import configuration
+    pub fn compute_cache_key(
+        dump_path: &Path,
+        tables: Option<&[String]>,
+        dialect: Option<SqlDialect>,
+    ) -> Result<String> {
         let canonical = dump_path
             .canonicalize()
             .with_context(|| format!("Failed to canonicalize path: {}", dump_path.display()))?;
@@ -72,14 +118,15 @@ impl CacheManager {
         let metadata = fs::metadata(&canonical)
             .with_context(|| format!("Failed to read metadata: {}", dump_path.display()))?;
 
-        let mtime = metadata
-            .modified()
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let key_input = format!("{}:{}:{}", canonical.display(), metadata.len(), mtime);
+        let dialect = dialect.map_or_else(|| "auto".to_string(), |d| d.to_string());
+        let key_input = format!(
+            "{}:{}:{}:{}:{}",
+            canonical.display(),
+            metadata.len(),
+            mtime_secs(&metadata),
+            normalize_tables(tables),
+            dialect
+        );
 
         let mut hasher = Sha256::new();
         hasher.update(key_input.as_bytes());
@@ -93,98 +140,134 @@ impl CacheManager {
         self.cache_dir.join(format!("{}.duckdb", cache_key))
     }
 
-    /// Check if a valid cache exists for a dump file
-    pub fn has_valid_cache(&self, dump_path: &Path) -> Result<bool> {
-        let cache_key = Self::compute_cache_key(dump_path)?;
-        let cache_path = self.cache_path(&cache_key);
+    /// Get the staging path where a cache is built before being committed
+    pub fn partial_path(&self, cache_key: &str) -> PathBuf {
+        self.cache_dir.join(format!("{}.duckdb.partial", cache_key))
+    }
 
-        if !cache_path.exists() {
-            return Ok(false);
-        }
-
-        // Check if cache is newer than dump
-        let dump_mtime = fs::metadata(dump_path)?
-            .modified()
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        let cache_mtime = fs::metadata(&cache_path)?
-            .modified()
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-
-        Ok(cache_mtime > dump_mtime)
+    /// Check if a valid cache exists for a dump file and import configuration.
+    ///
+    /// Existence is sufficient: the key encodes the dump's size and mtime, and
+    /// files only appear at the final path via atomic rename of a complete copy.
+    pub fn has_valid_cache(
+        &self,
+        dump_path: &Path,
+        tables: Option<&[String]>,
+        dialect: Option<SqlDialect>,
+    ) -> Result<bool> {
+        let cache_key = Self::compute_cache_key(dump_path, tables, dialect)?;
+        Ok(self.cache_path(&cache_key).exists())
     }
 
     /// Get the cache path for a dump file, if a valid cache exists
-    pub fn get_cache(&self, dump_path: &Path) -> Result<Option<PathBuf>> {
-        if self.has_valid_cache(dump_path)? {
-            let cache_key = Self::compute_cache_key(dump_path)?;
+    pub fn get_cache(
+        &self,
+        dump_path: &Path,
+        tables: Option<&[String]>,
+        dialect: Option<SqlDialect>,
+    ) -> Result<Option<PathBuf>> {
+        if self.has_valid_cache(dump_path, tables, dialect)? {
+            let cache_key = Self::compute_cache_key(dump_path, tables, dialect)?;
             Ok(Some(self.cache_path(&cache_key)))
         } else {
             Ok(None)
         }
     }
 
-    /// Create a new cache entry for a dump file
-    pub fn create_cache(
-        &self,
-        dump_path: &Path,
-        table_count: usize,
-        row_count: u64,
-    ) -> Result<PathBuf> {
-        let cache_key = Self::compute_cache_key(dump_path)?;
-        let cache_path = self.cache_path(&cache_key);
-
-        // Update index
-        self.update_index(dump_path, &cache_key, table_count, row_count)?;
-
-        Ok(cache_path)
+    /// Remove a staged partial cache file (leftover from an interrupted run)
+    pub fn discard_partial(&self, cache_key: &str) -> Result<()> {
+        let partial = self.partial_path(cache_key);
+        if partial.exists() {
+            fs::remove_file(&partial).context("Failed to remove partial cache file")?;
+        }
+        let wal = wal_path(&partial);
+        if wal.exists() {
+            fs::remove_file(&wal)?;
+        }
+        Ok(())
     }
 
-    /// Update the cache index
-    fn update_index(
+    /// Commit a fully-written partial cache file: atomically move it into place
+    /// and update the index. The previous cache and index are untouched if this
+    /// (or anything before it) fails.
+    pub fn commit_cache(
         &self,
         dump_path: &Path,
         cache_key: &str,
-        table_count: usize,
+        tables: Vec<String>,
         row_count: u64,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
+        let partial = self.partial_path(cache_key);
+        let cache_path = self.cache_path(cache_key);
+
+        if !partial.exists() {
+            anyhow::bail!("No staged cache file to commit: {}", partial.display());
+        }
+
+        // rename() does not overwrite on Windows; clear the destination first
+        if cache_path.exists() {
+            fs::remove_file(&cache_path).context("Failed to remove old cache file")?;
+        }
+        let old_wal = wal_path(&cache_path);
+        if old_wal.exists() {
+            let _ = fs::remove_file(&old_wal);
+        }
+
+        fs::rename(&partial, &cache_path).context("Failed to move cache file into place")?;
+        let partial_wal = wal_path(&partial);
+        if partial_wal.exists() {
+            let _ = fs::remove_file(&partial_wal);
+        }
+
+        let canonical = dump_path
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize path: {}", dump_path.display()))?;
+        let metadata = fs::metadata(&canonical)?;
+        let dump_mtime = mtime_secs(&metadata);
+        let dump_path_str = canonical.display().to_string();
+
         let mut index = self.load_index()?;
 
-        let metadata = fs::metadata(dump_path)?;
-        let dump_mtime = metadata
-            .modified()
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Garbage-collect caches of older versions of this dump file
+        let stale_keys: Vec<String> = index
+            .entries
+            .iter()
+            .filter(|e| {
+                e.dump_path == dump_path_str
+                    && (e.dump_size != metadata.len() || e.dump_mtime != dump_mtime)
+            })
+            .map(|e| e.cache_key.clone())
+            .collect();
+        for key in &stale_keys {
+            let path = self.cache_path(key);
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(wal_path(&path));
+        }
+        index
+            .entries
+            .retain(|e| e.cache_key != cache_key && !stale_keys.contains(&e.cache_key));
 
-        let cache_path = self.cache_path(cache_key);
-        let cache_size = fs::metadata(&cache_path).map(|m| m.len()).unwrap_or(0);
-
-        let entry = CacheEntry {
-            dump_path: dump_path.display().to_string(),
+        index.entries.push(CacheEntry {
+            dump_path: dump_path_str,
             cache_key: cache_key.to_string(),
             dump_size: metadata.len(),
             dump_mtime,
-            cache_size,
+            cache_size: fs::metadata(&cache_path).map(|m| m.len()).unwrap_or(0),
             created_at: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            table_count,
+            table_count: tables.len(),
             row_count,
-        };
-
-        // Remove old entry for this dump path
-        index
-            .entries
-            .retain(|e| e.dump_path != dump_path.display().to_string());
-        index.entries.push(entry);
+            tables: Some(tables),
+        });
 
         self.save_index(&index)?;
-        Ok(())
+        Ok(cache_path)
     }
 
-    /// Load the cache index
+    /// Load the cache index. A corrupt index is treated as empty (with a
+    /// warning) so one bad write can't permanently brick cache operations.
     pub fn load_index(&self) -> Result<CacheIndex> {
         let index_path = self.cache_dir.join("index.json");
 
@@ -193,15 +276,24 @@ impl CacheManager {
         }
 
         let content = fs::read_to_string(&index_path).context("Failed to read cache index")?;
-        serde_json::from_str(&content).context("Failed to parse cache index")
+        Ok(serde_json::from_str(&content).unwrap_or_else(|e| {
+            eprintln!(
+                "Warning: cache index {} is corrupt ({}); treating it as empty",
+                index_path.display(),
+                e
+            );
+            CacheIndex::default()
+        }))
     }
 
-    /// Save the cache index
+    /// Save the cache index atomically (write to temp file, then rename)
     fn save_index(&self, index: &CacheIndex) -> Result<()> {
         let index_path = self.cache_dir.join("index.json");
+        let tmp_path = self.cache_dir.join("index.json.tmp");
         let content =
             serde_json::to_string_pretty(index).context("Failed to serialize cache index")?;
-        fs::write(&index_path, content).context("Failed to write cache index")?;
+        fs::write(&tmp_path, content).context("Failed to write cache index")?;
+        fs::rename(&tmp_path, &index_path).context("Failed to replace cache index")?;
         Ok(())
     }
 
@@ -219,11 +311,12 @@ impl CacheManager {
             fs::remove_file(&cache_path).context("Failed to remove cache file")?;
         }
 
-        // Also remove WAL file if it exists
-        let wal_path = cache_path.with_extension("duckdb.wal");
-        if wal_path.exists() {
-            fs::remove_file(&wal_path)?;
+        // Also remove WAL and staged partial files if they exist
+        let wal = wal_path(&cache_path);
+        if wal.exists() {
+            fs::remove_file(&wal)?;
         }
+        self.discard_partial(cache_key)?;
 
         // Update index
         let mut index = self.load_index()?;
@@ -233,15 +326,28 @@ impl CacheManager {
         Ok(())
     }
 
-    /// Clear all cached databases
+    /// Clear all cached databases.
+    ///
+    /// Sweeps the whole cache directory (data files, WAL files, staged
+    /// partials) rather than trusting the index, so it also recovers from a
+    /// lost/corrupt index and collects files written by older versions.
+    /// Returns the number of cached databases removed.
     pub fn clear_all(&self) -> Result<usize> {
-        let entries = self.list_entries()?;
-        let count = entries.len();
+        let mut count = 0;
 
-        for entry in entries {
-            self.remove_cache(&entry.cache_key)?;
+        for entry in fs::read_dir(&self.cache_dir).context("Failed to read cache directory")? {
+            let path = entry?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.ends_with(".duckdb") {
+                count += 1;
+            }
+            if name.ends_with(".duckdb") || name.ends_with(".wal") || name.ends_with(".partial") {
+                fs::remove_file(&path)
+                    .with_context(|| format!("Failed to remove {}", path.display()))?;
+            }
         }
 
+        self.save_index(&CacheIndex::default())?;
         Ok(count)
     }
 
@@ -268,14 +374,18 @@ mod tests {
         (cache_manager, temp_dir)
     }
 
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn test_cache_key_computation() {
         let temp_dir = TempDir::new().unwrap();
         let test_file = temp_dir.path().join("test.sql");
         fs::write(&test_file, "SELECT 1;").unwrap();
 
-        let key1 = CacheManager::compute_cache_key(&test_file).unwrap();
-        let key2 = CacheManager::compute_cache_key(&test_file).unwrap();
+        let key1 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        let key2 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
 
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32); // 16 bytes hex encoded
@@ -287,14 +397,64 @@ mod tests {
         let test_file = temp_dir.path().join("test.sql");
 
         fs::write(&test_file, "SELECT 1;").unwrap();
-        let key1 = CacheManager::compute_cache_key(&test_file).unwrap();
+        let key1 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
 
         // Modify the file with different size (which is always captured, unlike mtime)
         fs::write(&test_file, "SELECT 2; -- with extra content to change size").unwrap();
-        let key2 = CacheManager::compute_cache_key(&test_file).unwrap();
+        let key2 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
 
         // Key should be different because size changed
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_key_includes_tables() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let all = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        let users =
+            CacheManager::compute_cache_key(&test_file, Some(&strings(&["users"])), None).unwrap();
+        let both =
+            CacheManager::compute_cache_key(&test_file, Some(&strings(&["users", "orders"])), None)
+                .unwrap();
+
+        assert_ne!(all, users);
+        assert_ne!(all, both);
+        assert_ne!(users, both);
+    }
+
+    #[test]
+    fn test_cache_key_normalizes_tables() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let messy = CacheManager::compute_cache_key(
+            &test_file,
+            Some(&strings(&["Orders", "users", "USERS"])),
+            None,
+        )
+        .unwrap();
+        let clean =
+            CacheManager::compute_cache_key(&test_file, Some(&strings(&["orders", "users"])), None)
+                .unwrap();
+
+        assert_eq!(messy, clean);
+    }
+
+    #[test]
+    fn test_cache_key_includes_dialect() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let auto = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        let mysql =
+            CacheManager::compute_cache_key(&test_file, None, Some(SqlDialect::MySql)).unwrap();
+
+        assert_ne!(auto, mysql);
     }
 
     #[test]
@@ -310,7 +470,167 @@ mod tests {
         let test_file = temp_dir.path().join("test.sql");
         fs::write(&test_file, "SELECT 1;").unwrap();
 
-        assert!(!cache_manager.has_valid_cache(&test_file).unwrap());
+        assert!(!cache_manager
+            .has_valid_cache(&test_file, None, None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_partial_is_not_a_valid_cache() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let key = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        fs::write(cache_manager.partial_path(&key), b"garbage").unwrap();
+
+        assert!(!cache_manager
+            .has_valid_cache(&test_file, None, None)
+            .unwrap());
+        assert!(cache_manager
+            .get_cache(&test_file, None, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_commit_cache_renames_and_records_size() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let key = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        fs::write(cache_manager.partial_path(&key), b"fake database contents").unwrap();
+
+        let cache_path = cache_manager
+            .commit_cache(&test_file, &key, strings(&["users"]), 42)
+            .unwrap();
+
+        assert!(cache_path.exists());
+        assert!(!cache_manager.partial_path(&key).exists());
+
+        let entries = cache_manager.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].cache_size > 0);
+        assert_eq!(entries[0].tables, Some(strings(&["users"])));
+        assert_eq!(entries[0].table_count, 1);
+        assert_eq!(entries[0].row_count, 42);
+    }
+
+    #[test]
+    fn test_commit_without_partial_leaves_index_intact() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let key = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        fs::write(cache_manager.partial_path(&key), b"data").unwrap();
+        cache_manager
+            .commit_cache(&test_file, &key, strings(&["users"]), 1)
+            .unwrap();
+
+        // Committing a key with no staged file must fail without touching the index
+        let result = cache_manager.commit_cache(&test_file, "deadbeef", strings(&["x"]), 1);
+        assert!(result.is_err());
+        assert_eq!(cache_manager.list_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_two_table_sets_coexist() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let key1 =
+            CacheManager::compute_cache_key(&test_file, Some(&strings(&["users"])), None).unwrap();
+        let key2 = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        assert_ne!(key1, key2);
+
+        fs::write(cache_manager.partial_path(&key1), b"one").unwrap();
+        cache_manager
+            .commit_cache(&test_file, &key1, strings(&["users"]), 1)
+            .unwrap();
+        fs::write(cache_manager.partial_path(&key2), b"two").unwrap();
+        cache_manager
+            .commit_cache(&test_file, &key2, strings(&["users", "orders"]), 2)
+            .unwrap();
+
+        assert!(cache_manager.cache_path(&key1).exists());
+        assert!(cache_manager.cache_path(&key2).exists());
+        assert_eq!(cache_manager.list_entries().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_gc_deletes_caches_of_changed_dump() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+
+        let old_key = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        fs::write(cache_manager.partial_path(&old_key), b"v1").unwrap();
+        cache_manager
+            .commit_cache(&test_file, &old_key, strings(&["users"]), 1)
+            .unwrap();
+
+        // Change the dump (size change guarantees a new key)
+        fs::write(&test_file, "SELECT 2; -- different size now").unwrap();
+        let new_key = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        assert_ne!(old_key, new_key);
+        fs::write(cache_manager.partial_path(&new_key), b"v2").unwrap();
+        cache_manager
+            .commit_cache(&test_file, &new_key, strings(&["users"]), 2)
+            .unwrap();
+
+        assert!(!cache_manager.cache_path(&old_key).exists());
+        let entries = cache_manager.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cache_key, new_key);
+    }
+
+    #[test]
+    fn test_corrupt_index_recovers_as_empty() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        fs::write(temp_dir.path().join("index.json"), "{broken json").unwrap();
+
+        let index = cache_manager.load_index().unwrap();
+        assert!(index.entries.is_empty());
+
+        // And a subsequent commit works normally
+        let test_file = temp_dir.path().join("test.sql");
+        fs::write(&test_file, "SELECT 1;").unwrap();
+        let key = CacheManager::compute_cache_key(&test_file, None, None).unwrap();
+        fs::write(cache_manager.partial_path(&key), b"data").unwrap();
+        cache_manager
+            .commit_cache(&test_file, &key, strings(&["users"]), 1)
+            .unwrap();
+        assert_eq!(cache_manager.list_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_index_old_format_parses_with_unknown_tables() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        let old_entry = r#"{"entries":[{"dump_path":"/tmp/a.sql","cache_key":"abc","dump_size":1,"dump_mtime":2,"cache_size":3,"created_at":4,"table_count":5,"row_count":6}]}"#;
+        fs::write(temp_dir.path().join("index.json"), old_entry).unwrap();
+
+        let entries = cache_manager.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tables, None);
+    }
+
+    #[test]
+    fn test_clear_all_sweeps_directory() {
+        let (cache_manager, temp_dir) = setup_test_cache();
+        fs::write(temp_dir.path().join("aa.duckdb"), b"x").unwrap();
+        fs::write(temp_dir.path().join("aa.duckdb.wal"), b"x").unwrap();
+        fs::write(temp_dir.path().join("bb.duckdb.partial"), b"x").unwrap();
+        fs::write(temp_dir.path().join("index.json"), "{broken").unwrap();
+
+        let count = cache_manager.clear_all().unwrap();
+        assert_eq!(count, 1);
+        assert!(!temp_dir.path().join("aa.duckdb").exists());
+        assert!(!temp_dir.path().join("aa.duckdb.wal").exists());
+        assert!(!temp_dir.path().join("bb.duckdb.partial").exists());
+        assert!(cache_manager.list_entries().unwrap().is_empty());
     }
 
     #[test]
