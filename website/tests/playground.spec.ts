@@ -8,8 +8,8 @@ test("playground analyzes an example dump and generates synthetic SQL", async ({
 }) => {
   await page.goto("/playground/");
 
-  await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
+  await page.getByTestId("examples-menu").click();
+  await page.getByTestId("example-saas-mysql").click();
 
   // The real profiler found the fixture's tables
   const sidebar = page.locator(".pg-sidebar");
@@ -38,8 +38,8 @@ test("model tab, cross-dialect output, and warnings tab work", async ({
 }) => {
   await page.goto("/playground/");
 
-  await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
+  await page.getByTestId("examples-menu").click();
+  await page.getByTestId("example-saas-mysql").click();
   const sidebar = page.locator(".pg-sidebar");
   await expect(sidebar.getByRole("button", { name: /^users/ })).toBeVisible({
     timeout: 20000,
@@ -72,7 +72,8 @@ test("model tab, cross-dialect output, and warnings tab work", async ({
   await expect(page.locator(".pg-model")).toContainText("kind: model");
 
   // Cross-dialect: mysql source rendered as mssql emits GO batches
-  await page.locator('select[x-model="outDialect"]').selectOption("mssql");
+  await page.getByTestId("out-dialect-menu").click();
+  await page.getByTestId("out-dialect-mssql").click();
   await page.locator(".pg-btn-primary").click();
   await expect(page.locator(".pg-sql")).toContainText("GO", {
     timeout: 30000,
@@ -87,15 +88,15 @@ test("every example loads and analyzes through the real pipeline", async ({
   page,
 }) => {
   const examples = [
-    { label: /^SaaS · Postgres/i, chip: /postgres/ },
-    { label: /^Dealership · MySQL/i, chip: /mysql/ },
-    { label: /^Ledger · MSSQL/i, chip: /mssql/ },
-    { label: /^CMS · SQLite/i, chip: /sqlite/ },
+    { testId: "example-saas-postgres", chip: /postgres/ },
+    { testId: "example-dealership-mysql", chip: /mysql/ },
+    { testId: "example-ledger-mssql", chip: /mssql/ },
+    { testId: "example-cms-sqlite", chip: /sqlite/ },
   ];
   await page.goto("/playground/");
   for (const example of examples) {
-    await page.getByRole("button", { name: /examples/i }).click();
-    await page.getByRole("button", { name: example.label }).click();
+    await page.getByTestId("examples-menu").click();
+    await page.getByTestId(example.testId).click();
     await expect(
       page.locator(".pg-sidebar .pg-table-item").first(),
     ).toBeVisible({ timeout: 30000 });
