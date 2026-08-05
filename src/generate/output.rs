@@ -771,6 +771,7 @@ fn sync_parent_dir(path: &Path) -> io::Result<()> {
 /// support fsync-ing a directory" (safe to ignore) rather than a real I/O
 /// failure. `ENOTSUP`/`EOPNOTSUPP` map to `Unsupported` and `EINVAL` to
 /// `InvalidInput`; anything else (notably `EIO`) is a genuine durability error.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn is_ignorable_dir_sync_error(err: &io::Error) -> bool {
     matches!(
         err.kind(),

@@ -213,6 +213,22 @@ website: website-install
 _website-deps:
     cd website && ( [ -d node_modules ] && [ -f bun.lock ] || bun install )
 
+# Build the browser-playground WASM module and refresh the committed artifact
+# in website/public/wasm/. Re-run (and commit the result) whenever the wasm
+# crate or src/{parser,schema,profile,synthetic,generate,render} change;
+# website-deploy depends on this as a backstop. Vercel never builds Rust —
+# it serves the committed artifact.
+[group('website')]
+wasm: _website-deps
+    rustup target add wasm32-unknown-unknown
+    RUSTFLAGS='--cfg getrandom_backend="wasm_js"' CARGO_PROFILE_RELEASE_OPT_LEVEL=z \
+      wasm-pack build crates/sql-splitter-wasm --release --target web --no-pack \
+      --out-dir {{ justfile_directory() }}/website/public/wasm
+    rm -f website/public/wasm/.gitignore
+    command -v wasm-opt >/dev/null && wasm-opt -Oz website/public/wasm/sql_splitter_wasm_bg.wasm -o website/public/wasm/sql_splitter_wasm_bg.wasm || echo "wasm-opt not installed; skipping extra size pass"
+    cd website && bunx prettier --write "public/wasm/*.js" "public/wasm/*.ts" --log-level warn
+    ls -lh website/public/wasm/*.wasm
+
 # Build website for production
 [group('website')]
 website-build: _website-deps
@@ -246,7 +262,7 @@ website-validate-schemas: _website-deps
 
 # Deploy website to Vercel (production) — refreshes schemas, lints, validates, and builds first; aborts if any step fails
 [group('website')]
-website-deploy: schemas website-lint website-validate-schemas website-build
+website-deploy: schemas wasm website-lint website-validate-schemas website-build
     sql_splitter_version="$(just version)"; cd website && vc --prod --build-env "SQL_SPLITTER_VERSION=$sql_splitter_version"
 
 # Clean website build artifacts and caches

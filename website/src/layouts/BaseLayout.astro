@@ -4,7 +4,7 @@ interface Props {
   description?: string;
 }
 
-const { title, description = 'High-performance SQL dump toolkit. Split, merge, convert, validate, sample, shard, diff, redact, and query SQL files at ~1 GB/s.' } = Astro.props;
+const { title, description = 'High-performance SQL dump toolkit. Split, merge, convert, validate, sample, shard, diff, redact, query, and generate synthetic data from SQL files at ~1 GB/s.' } = Astro.props;
 ---
 
 <!DOCTYPE html>
@@ -86,6 +86,7 @@ const { title, description = 'High-performance SQL dump toolkit. Split, merge, c
       --cmd-graph: #7ee787;
       --cmd-order: #79c0ff;
       --cmd-query: #d2a8ff;
+      --cmd-generate: #e3b341;
 
       --syn-comment: #6e7681;
 
@@ -125,6 +126,7 @@ const { title, description = 'High-performance SQL dump toolkit. Split, merge, c
       --cmd-graph: #116329;
       --cmd-order: #0550ae;
       --cmd-query: #8250df;
+      --cmd-generate: #9a6700;
 
       --syn-comment: #6e7681;
     }
@@ -173,6 +175,7 @@ const { title, description = 'High-performance SQL dump toolkit. Split, merge, c
       </a>
       <div class="nav-links">
         <a href="/getting-started/">Docs</a>
+        <a href="/playground/">Playground</a>
         <a href="https://github.com/helgesverre/sql-splitter" target="_blank">GitHub</a>
         <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

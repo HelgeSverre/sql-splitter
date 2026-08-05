@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Browser playground at sql-splitter.dev/playground** — drop a real SQL dump on the page and the actual `generate` pipeline (parser, profiler, inference, generators) runs in the browser via WebAssembly: an analyze-style summary of tables, observed value shapes, and inferred generators, then synthetic INSERTs modeled on the dump. Nothing is uploaded — profiling and generation are local, which is the point: it demonstrates that `generate` models data without needing to see it leave the machine. The wasm module is a thin `crates/sql-splitter-wasm` wrapper over the existing library pipeline; the only main-crate change is that `dirs` and `rustyline` are now optional dependencies of the `duckdb-query` feature (they were the last non-optional native-only dependencies blocking a `--no-default-features` wasm build). `generate` also joins the homepage command grid, which had stopped at 12 commands.
+
 ## [1.21.0] - 2026-08-05
 
 ### Fixed
