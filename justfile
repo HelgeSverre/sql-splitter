@@ -213,6 +213,47 @@ website: website-install
 _website-deps:
     cd website && ( [ -d node_modules ] && [ -f bun.lock ] || bun install )
 
+# Build the browser-playground WASM module and refresh the committed artifact
+# in website/public/wasm/. Re-run (and commit the result) whenever the wasm
+# crate or src/{parser,schema,profile,synthetic,generate,render} change;
+# website-deploy depends on this as a backstop. Vercel never builds Rust —
+# it serves the committed artifact.
+[group('website')]
+wasm: _website-deps
+    rustup target add wasm32-unknown-unknown
+    RUSTFLAGS='--cfg getrandom_backend="wasm_js"' CARGO_PROFILE_RELEASE_OPT_LEVEL=z \
+      wasm-pack build crates/sql-splitter-wasm --release --target web --no-pack \
+      --out-dir {{ justfile_directory() }}/website/public/wasm
+    rm -f website/public/wasm/.gitignore
+    command -v wasm-opt >/dev/null && wasm-opt -Oz website/public/wasm/sql_splitter_wasm_bg.wasm -o website/public/wasm/sql_splitter_wasm_bg.wasm || echo "wasm-opt not installed; skipping extra size pass"
+    cd website && bunx prettier --write "public/wasm/*.js" "public/wasm/*.ts" --log-level warn
+    ls -lh website/public/wasm/*.wasm
+
+# Regenerate the playground example dumps from the stress fixtures. Mostly
+# deterministic under each model's own seed (everything.yaml's import_jobs pins
+# `seed: null` by design). For everything.yaml, --rows/--scale break the
+# row-count rules; --max-rows must stay >= 200 (categories needs >= 5 children
+# per each of 40 tenants) and order_items requires exactly 4 x orders, hence
+# the orders pin.
+[group('website')]
+playground-examples:
+    cargo run --release -- generate -c tests/fixtures/generate/stress/everything.yaml \
+      --dialect mysql --max-rows 200 --table-rows orders=50 \
+      -o website/public/playground/saas-mysql.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/everything.yaml \
+      --dialect postgres --max-rows 200 --table-rows orders=50 \
+      -o website/public/playground/saas-postgres.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/car_dealership.yaml \
+      --dialect mysql --max-rows 150 \
+      -o website/public/playground/dealership-mysql.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/banking_ledger.yaml \
+      --dialect mssql --max-rows 150 \
+      -o website/public/playground/ledger-mssql.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/cms_kitchensink.yaml \
+      --dialect sqlite --max-rows 150 \
+      -o website/public/playground/cms-sqlite.sql
+    ls -lh website/public/playground/*.sql
+
 # Build website for production
 [group('website')]
 website-build: _website-deps
@@ -246,7 +287,7 @@ website-validate-schemas: _website-deps
 
 # Deploy website to Vercel (production) — refreshes schemas, lints, validates, and builds first; aborts if any step fails
 [group('website')]
-website-deploy: schemas website-lint website-validate-schemas website-build
+website-deploy: schemas wasm website-lint website-validate-schemas website-build
     sql_splitter_version="$(just version)"; cd website && vc --prod --build-env "SQL_SPLITTER_VERSION=$sql_splitter_version"
 
 # Clean website build artifacts and caches

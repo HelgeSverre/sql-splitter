@@ -1,0 +1,1794 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="Playground — sql-splitter"
+  description="Generate synthetic data from your SQL dump, entirely in your browser. Your dump never leaves your machine."
+>
+  <div class="playground" x-data="playground" x-cloak>
+    <div class="pg-topbar">
+      <div class="pg-title-group">
+        <div class="pg-file-info">
+          <template x-if="fileName">
+            <span>
+              <span class="pg-file-name" x-text="fileName"></span>
+              <span
+                class="pg-chip"
+                x-text="summary ? summary.dialect + (summary.dialectDetected ? ' · detected' : '') : dialect"
+              ></span>
+            </span>
+          </template>
+          <template x-if="!fileName">
+            <span class="pg-muted">No dump loaded</span>
+          </template>
+        </div>
+      </div>
+      <div class="pg-topbar-actions">
+        <label class="pg-select-label">
+          Dialect
+          <select x-model="dialect">
+            <option value="auto">auto-detect</option>
+            <option value="mysql">mysql</option>
+            <option value="postgres">postgres</option>
+            <option value="sqlite">sqlite</option>
+            <option value="mssql">mssql</option>
+          </select>
+        </label>
+        <button class="pg-btn" x-on:click="$refs.fileInput.click()">Open file</button>
+        <input
+          type="file"
+          accept=".sql,.txt,.dump"
+          x-ref="fileInput"
+          hidden
+          x-on:change="openFile($event.target.files[0]); $event.target.value = ''"
+        />
+        <div class="pg-examples" x-data="{ open: false }" x-on:click.outside="open = false">
+          <button class="pg-btn" x-on:click="open = !open">Examples &#9662;</button>
+          <div class="pg-examples-menu" x-show="open" x-on:click="open = false">
+            <button x-on:click="loadExample('saas-mysql.sql')">SaaS &middot; MySQL</button>
+            <button x-on:click="loadExample('saas-postgres.sql')">SaaS &middot; Postgres</button>
+            <button x-on:click="loadExample('dealership-mysql.sql')"
+              >Dealership &middot; MySQL</button
+            >
+            <button x-on:click="loadExample('ledger-mssql.sql')">Ledger &middot; MSSQL</button>
+            <button x-on:click="loadExample('cms-sqlite.sql', 'sqlite')"
+              >CMS &middot; SQLite</button
+            >
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      class="pg-workbench"
+      x-on:dragover.prevent="dragging = true"
+      x-on:dragleave.prevent="dragging = false"
+      x-on:drop.prevent="dragging = false; openFile($event.dataTransfer.files[0])"
+      x-bind:class="{ dragging: dragging }"
+    >
+      <!-- Empty state -->
+      <template x-if="!summary && state !== 'analyzing'">
+        <div class="pg-empty-wrap">
+          <div class="pg-banner pg-error" x-show="error">
+            <span x-text="error"></span>
+            <button class="pg-dismiss" x-on:click="error = null" aria-label="Dismiss">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+              >
+            </button>
+          </div>
+          <div class="pg-banner pg-warn" x-show="perfWarning">
+            <span x-text="perfWarning"></span>
+            <button class="pg-dismiss" x-on:click="perfWarning = null" aria-label="Dismiss">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+              >
+            </button>
+          </div>
+          <div class="pg-empty">
+            <div class="pg-drop-icon">&#8681;</div>
+            <p class="pg-drop-title">Drop a .sql dump anywhere on this panel</p>
+            <p class="pg-muted">
+              or <a href="#" x-on:click.prevent="$refs.fileInput.click()">browse for a file</a>, or
+              try an example above
+            </p>
+            <p class="pg-drop-note pg-muted">
+              MySQL, PostgreSQL, SQLite, and MSSQL dumps. Compressed files aren't supported in the
+              browser — decompress first, or use the CLI.
+            </p>
+          </div>
+        </div>
+      </template>
+
+      <!-- Busy state -->
+      <template x-if="state === 'analyzing'">
+        <div class="pg-empty">
+          <template x-if="analyzeProgress === null">
+            <div class="pg-spinner"></div>
+          </template>
+          <template x-if="analyzeProgress !== null">
+            <div class="pg-progress-group">
+              <div class="pg-progress">
+                <div
+                  class="pg-progress-fill"
+                  x-bind:style="'width:' + Math.round((analyzeProgress ?? 0) * 100) + '%'"
+                >
+                </div>
+              </div>
+              <span
+                class="pg-muted pg-progress-label"
+                x-text="Math.round((analyzeProgress ?? 0) * 100) + '%'"></span>
+            </div>
+          </template>
+          <p class="pg-drop-title">Analyzing dump&hellip;</p>
+          <p class="pg-muted">Profiling tables, observing value shapes, inferring generators</p>
+        </div>
+      </template>
+
+      <!-- Workbench -->
+      <template x-if="summary">
+        <div class="pg-ide">
+          <aside class="pg-sidebar" aria-label="Tables" x-on:keydown="onTableKeydown($event)">
+            <div class="pg-sidebar-title">Tables</div>
+            <template x-for="(table, index) in summary.tables" x-bind:key="table.name">
+              <button
+                class="pg-table-item"
+                x-bind:class="{ selected: selectedTable === table.name }"
+                x-bind:aria-pressed="selectedTable === table.name"
+                x-bind:tabindex="selectedTable === table.name || (!selectedTable && index === 0) ? 0 : -1"
+                x-on:click="selectedTable = table.name; tab = 'analysis'"
+              >
+                <span
+                  class="pg-table-name"
+                  x-text="table.name"
+                  x-bind:title="table.name"
+                ></span>
+                <span
+                  class="pg-table-rows"
+                  x-text="table.rowCount === null ? 'schema' : table.rowCount + ' rows'"
+                ></span>
+              </button>
+            </template>
+          </aside>
+
+          <section class="pg-main">
+            <div class="pg-tabs" x-on:keydown="onTabKeydown($event)">
+              <button
+                x-bind:class="{ active: tab === 'analysis' }"
+                x-bind:aria-pressed="tab === 'analysis'"
+                x-on:click="switchTab('analysis')">Analysis</button
+              >
+              <button
+                x-bind:class="{ active: tab === 'model' }"
+                x-bind:aria-pressed="tab === 'model'"
+                x-on:click="switchTab('model')"
+                >Model</button
+              >
+              <button
+                x-bind:class="{ active: tab === 'sql' }"
+                x-bind:aria-pressed="tab === 'sql'"
+                x-on:click="switchTab('sql')"
+                x-bind:disabled="!sql && state !== 'generating'">Generated SQL</button
+              >
+              <button
+                x-bind:class="{ active: tab === 'warnings' }"
+                x-bind:aria-pressed="tab === 'warnings'"
+                x-on:click="switchTab('warnings')"
+              >
+                Warnings
+                <span class="pg-tab-badge" x-show="warningCount > 0" x-text="warningCount"></span>
+              </button>
+            </div>
+
+            <div class="pg-tab-body">
+              <!-- Overlaid banners: never obscure the tabs or sidebar, never shift layout -->
+              <div class="pg-overlays">
+                <div class="pg-banner pg-error" x-show="error">
+                  <span x-text="error"></span>
+                  <button class="pg-dismiss" x-on:click="error = null" aria-label="Dismiss">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      ><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+                    >
+                  </button>
+                </div>
+                <div class="pg-banner pg-warn" x-show="perfWarning">
+                  <span x-text="perfWarning"></span>
+                  <button class="pg-dismiss" x-on:click="perfWarning = null" aria-label="Dismiss">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      ><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+                    >
+                  </button>
+                </div>
+              </div>
+
+              <div class="pg-tab-content" x-show="tab === 'analysis'">
+              <template x-if="currentTable">
+                <div>
+                  <div class="pg-table-header">
+                    <h2 x-text="currentTable.name"></h2>
+                    <span
+                      class="pg-muted"
+                      x-text="currentTable.rowCount === null ? 'no rows observed — schema-only inference' : currentTable.rowCount + ' rows observed'"
+                    ></span>
+                  </div>
+                  <template x-for="fk in currentTable.foreignKeys">
+                    <p class="pg-fk">
+                      <span x-text="fk.columns.join(', ')"></span> &rarr;
+                      <span x-text="fk.referencedTable"></span>(<span
+                        x-text="fk.referencedColumns.join(', ')"></span
+                      >)
+                    </p>
+                  </template>
+                  <table class="pg-columns">
+                    <thead>
+                      <tr>
+                        <th>Column</th><th>Type</th><th>Nulls</th><th>Distinct</th>
+                        <th>Generator</th><th>Confidence</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="col in currentTable.columns" x-bind:key="col.name">
+                        <tr>
+                          <td class="pg-col-name">
+                            <span x-text="col.name"></span>
+                            <span class="pg-pk" x-show="col.primaryKey" title="primary key"
+                              >PK</span
+                            >
+                          </td>
+                          <td class="pg-mono" x-text="col.sqlType"></td>
+                          <td
+                            x-text="col.nullRate === null ? '—' : Math.round(col.nullRate * 100) + '%'"
+                          ></td>
+                          <td
+                            x-text="col.distinctEstimate === null ? '—' : Math.round(col.distinctEstimate)"
+                          ></td>
+                          <td>
+                            <span class="pg-mono" x-text="col.generator ?? '—'"></span>
+                            <span
+                              class="pg-semantic"
+                              x-show="col.semantic"
+                              x-text="col.semantic"></span>
+                          </td>
+                          <td>
+                            <span
+                              class="pg-confidence"
+                              x-show="col.confidence"
+                              x-bind:data-level="col.confidence"
+                              x-bind:title="col.reason"
+                            >
+                              <span class="dot"></span><span x-text="col.confidence"></span>
+                            </span>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
+            </div>
+
+            <div class="pg-tab-content pg-model" x-show="tab === 'model'">
+              <div class="pg-model-actions">
+                <div class="pg-seg">
+                  <button
+                    x-bind:class="{ active: modelView === 'tree' }"
+                    x-on:click="modelView = 'tree'">Tree</button
+                  >
+                  <button
+                    x-bind:class="{ active: modelView === 'raw' }"
+                    x-on:click="modelView = 'raw'">Raw</button
+                  >
+                </div>
+                <code>sql-splitter generate -c model.yaml -o synthetic.sql</code>
+                <span class="pg-actions-spacer"></span>
+                <button
+                  class="pg-btn"
+                  x-show="modelTree && modelView === 'tree'"
+                  x-on:click="setTreeExpansion(false)">Collapse all</button
+                >
+                <button
+                  class="pg-btn"
+                  x-show="modelTree && modelView === 'tree'"
+                  x-on:click="setTreeExpansion(true)">Expand all</button
+                >
+                <button class="pg-btn" x-show="modelYamlText" x-on:click="copyModel($event)"
+                  >Copy</button
+                >
+                <button class="pg-btn" x-show="modelYamlText" x-on:click="downloadModel()"
+                  >Download model.yaml</button
+                >
+              </div>
+              <template x-if="modelLoading">
+                <div class="pg-empty"><div class="pg-spinner"></div></div>
+              </template>
+              <template x-if="modelTree && !modelLoading && modelView === 'tree'">
+                <div class="pg-tree" x-html="treeHtml" x-on:click="onTreeClick($event)"></div>
+              </template>
+              <template x-if="modelHtml && !modelLoading && modelView === 'raw'">
+                <div class="pg-code pg-model-code" x-html="modelHtml"></div>
+              </template>
+              <template x-if="modelYamlText && !modelHtml && !modelLoading && modelView === 'raw'">
+                <pre tabindex="0"><code x-text="modelYamlText"></code></pre>
+              </template>
+            </div>
+
+            <div class="pg-tab-content pg-sql" x-show="tab === 'sql'">
+              <template x-if="state === 'generating'">
+                <div class="pg-empty">
+                  <div class="pg-spinner"></div>
+                  <p class="pg-drop-title">Generating&hellip;</p>
+                </div>
+              </template>
+              <template x-if="sql && state !== 'generating'">
+                <div>
+                  <p
+                    class="pg-muted pg-sql-note"
+                    x-show="sqlTruncatedNote"
+                    x-text="sqlTruncatedNote"></p>
+                  <template x-if="sqlHtml">
+                    <div class="pg-code" x-html="sqlHtml"></div>
+                  </template>
+                  <template x-if="!sqlHtml">
+                    <pre tabindex="0"><code x-text="displaySql"></code></pre>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <div class="pg-tab-content pg-warnings" x-show="tab === 'warnings'">
+              <template x-if="warningCount === 0">
+                <p class="pg-muted">No warnings.</p>
+              </template>
+              <section x-show="summary && summary.warnings.length > 0">
+                <h3>From analysis</h3>
+                <template x-for="w in summary.warnings">
+                  <article class="pg-warning" x-bind:data-severity="w.severity">
+                    <header>
+                      <span class="pg-sev" x-text="w.severity"></span>
+                      <template x-if="w.documentationUrl">
+                        <a
+                          class="pg-wcode"
+                          x-bind:href="w.documentationUrl"
+                          target="_blank"
+                          rel="noopener"
+                          x-text="w.code"></a>
+                      </template>
+                      <template x-if="!w.documentationUrl">
+                        <span class="pg-wcode" x-text="w.code"></span>
+                      </template>
+                      <span class="pg-wpath pg-mono" x-text="w.path"></span>
+                    </header>
+                    <p x-text="w.message"></p>
+                    <p class="pg-muted pg-whelp" x-show="w.help" x-text="w.help"></p>
+                    <details class="pg-wexplain" x-show="w.definition">
+                      <summary>What is this?</summary>
+                      <p><strong x-text="w.definition?.title"></strong></p>
+                      <p x-text="w.definition?.summary"></p>
+                      <p class="pg-muted">
+                        Category: <span x-text="w.definition?.category"></span> &middot; Typical
+                        severity: <span x-text="w.definition?.typicalSeverity"></span>
+                      </p>
+                    </details>
+                  </article>
+                </template>
+              </section>
+              <section x-show="renderWarnings.length > 0">
+                <h3>From last generation</h3>
+                <template x-for="w in renderWarnings">
+                  <article class="pg-warning" x-bind:data-severity="w.severity">
+                    <header>
+                      <span class="pg-sev" x-text="w.severity"></span>
+                      <template x-if="w.documentationUrl">
+                        <a
+                          class="pg-wcode"
+                          x-bind:href="w.documentationUrl"
+                          target="_blank"
+                          rel="noopener"
+                          x-text="w.code"></a>
+                      </template>
+                      <template x-if="!w.documentationUrl">
+                        <span class="pg-wcode" x-text="w.code"></span>
+                      </template>
+                      <span class="pg-wpath pg-mono" x-text="w.path"></span>
+                    </header>
+                    <p x-text="w.message"></p>
+                    <p class="pg-muted pg-whelp" x-show="w.help" x-text="w.help"></p>
+                    <details class="pg-wexplain" x-show="w.definition">
+                      <summary>What is this?</summary>
+                      <p><strong x-text="w.definition?.title"></strong></p>
+                      <p x-text="w.definition?.summary"></p>
+                      <p class="pg-muted">
+                        Category: <span x-text="w.definition?.category"></span> &middot; Typical
+                        severity: <span x-text="w.definition?.typicalSeverity"></span>
+                      </p>
+                    </details>
+                  </article>
+                </template>
+              </section>
+              </div>
+            </div>
+          </section>
+        </div>
+      </template>
+    </div>
+
+    <div class="pg-bottombar" x-show="summary">
+      <label>
+        Rows per root table
+        <input type="number" min="1" x-model.number="rows" />
+      </label>
+      <label>
+        Seed
+        <input type="number" min="0" x-model.number="seed" />
+      </label>
+      <label>
+        Output dialect
+        <select x-model="outDialect">
+          <option value="" x-text="summary ? 'same as source (' + summary.dialect + ')' : 'same as source'"></option>
+          <option value="mysql">mysql</option>
+          <option value="postgres">postgres</option>
+          <option value="sqlite">sqlite</option>
+          <option value="mssql">mssql</option>
+        </select>
+      </label>
+      <label>
+        Output
+        <select x-model="outMode">
+          <option value="schema_and_data">schema + data</option>
+          <option value="schema_only">schema only</option>
+          <option value="data_only">data only</option>
+        </select>
+      </label>
+      <button
+        class="pg-btn pg-btn-primary"
+        x-on:click="generate()"
+        x-bind:disabled="state === 'generating' || state === 'analyzing'"
+      >
+        &#9654; Generate
+      </button>
+      <span class="pg-muted pg-rows-note" x-show="rows > 100000">
+        Large row counts can take a while and produce a very large script in browser memory.
+      </span>
+      <span class="pg-bottombar-spacer"></span>
+      <button class="pg-btn" x-show="sql" x-on:click="copySql($event)">Copy</button>
+      <button class="pg-btn" x-show="sql" x-on:click="downloadSql()">Download .sql</button>
+    </div>
+  </div>
+</BaseLayout>
+
+<script>
+  import Alpine from 'alpinejs';
+  import type { HighlighterCore } from 'shiki/core';
+
+  interface ColumnInfo {
+    name: string;
+    sqlType: string;
+    nullable: boolean;
+    primaryKey: boolean;
+    nullRate: number | null;
+    distinctEstimate: number | null;
+    generator: string | null;
+    semantic: string | null;
+    confidence: string | null;
+    reason: string | null;
+  }
+
+  interface TableInfo {
+    name: string;
+    rowCount: number | null;
+    foreignKeys: {
+      columns: string[];
+      referencedTable: string;
+      referencedColumns: string[];
+    }[];
+    columns: ColumnInfo[];
+  }
+
+  interface WarningInfo {
+    code: string;
+    severity: string;
+    path: string;
+    message: string;
+    help?: string;
+    documentationUrl?: string;
+    definition?: {
+      title: string;
+      category: string;
+      typicalSeverity: string;
+      summary: string;
+    };
+  }
+
+  interface Summary {
+    dialect: string;
+    dialectDetected: boolean;
+    tables: TableInfo[];
+    warnings: WarningInfo[];
+  }
+
+  type WorkerReply =
+    | { id: number; type: 'status'; stage: string; progress?: number }
+    | { id: number; type: 'analyzed'; summary: Summary }
+    | { id: number; type: 'generated'; sql: string; renderWarnings: WarningInfo[] }
+    | { id: number; type: 'model'; yaml: string; model: unknown }
+    | { id: number; type: 'error'; message: string; fatal: boolean };
+
+  const MAGIC = [
+    { bytes: [0x1f, 0x8b], name: 'gzip' },
+    { bytes: [0x50, 0x4b], name: 'zip' },
+    { bytes: [0x42, 0x5a, 0x68], name: 'bzip2' },
+    { bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a], name: 'xz' },
+    { bytes: [0x28, 0xb5, 0x2f, 0xfd], name: 'zstd' },
+  ];
+  const SOFT_WARN_BYTES = 100 * 1024 * 1024;
+  const DISPLAY_CAP = 1024 * 1024;
+  const HIGHLIGHT_CAP = 256 * 1024;
+
+  let highlighterPromise: Promise<HighlighterCore> | null = null;
+  async function getHighlighter(): Promise<HighlighterCore> {
+    highlighterPromise ??= (async () => {
+      const [{ createHighlighterCore }, { createJavaScriptRegexEngine }] = await Promise.all([
+        import('shiki/core'),
+        import('shiki/engine/javascript'),
+      ]);
+      return createHighlighterCore({
+        themes: [import('@shikijs/themes/github-dark'), import('@shikijs/themes/github-light')],
+        langs: [import('@shikijs/langs/sql'), import('@shikijs/langs/yaml')],
+        engine: createJavaScriptRegexEngine(),
+      });
+    })();
+    return highlighterPromise;
+  }
+
+  async function highlight(code: string, lang: 'sql' | 'yaml'): Promise<string | null> {
+    try {
+      const highlighter = await getHighlighter();
+      return highlighter.codeToHtml(code, {
+        lang,
+        themes: { light: 'github-light', dark: 'github-dark' },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  function downloadBlob(text: string, filename: string, mime: string) {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function flashCopied(event: Event) {
+    const btn = event.target as HTMLButtonElement;
+    const original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => (btn.textContent = original), 1500);
+  }
+
+  Alpine.data('playground', () => ({
+    state: 'empty' as 'empty' | 'analyzing' | 'ready' | 'generating',
+    dragging: false,
+    fileName: null as string | null,
+    dialect: 'auto',
+    summary: null as Summary | null,
+    selectedTable: null as string | null,
+    tab: 'analysis' as 'analysis' | 'model' | 'sql' | 'warnings',
+    rows: 100,
+    seed: 42,
+    outDialect: '',
+    outMode: 'schema_and_data',
+    sql: null as string | null,
+    sqlHtml: null as string | null,
+    renderWarnings: [] as WarningInfo[],
+    modelYamlText: null as string | null,
+    modelHtml: null as string | null,
+    modelKey: null as string | null,
+    modelLoading: false,
+    error: null as string | null,
+    perfWarning: null as string | null,
+    analyzeProgress: null as number | null,
+
+    worker: null as Worker | null,
+    requestId: 0,
+
+    init() {
+      this.spawnWorker();
+      for (const prop of ['rows', 'seed', 'outDialect', 'outMode']) {
+        this.$watch(prop, () => {
+          if (this.tab === 'model') this.ensureModel();
+        });
+      }
+    },
+
+    spawnWorker() {
+      if (this.worker) this.worker.terminate();
+      this.worker = new Worker('/wasm/worker.js', { type: 'module' });
+      this.worker.onmessage = (event: MessageEvent<WorkerReply>) =>
+        this.onWorkerMessage(event.data);
+      this.worker.onerror = () => {
+        this.state = this.summary ? 'ready' : 'empty';
+        this.error = 'The WebAssembly worker failed to load.';
+      };
+    },
+
+    onWorkerMessage(msg: WorkerReply) {
+      if (msg.id !== this.requestId) return; // stale reply from a superseded request
+      if (msg.type === 'status') {
+        if (msg.stage === 'analyzing' && typeof msg.progress === 'number') {
+          this.analyzeProgress = msg.progress;
+        }
+      } else if (msg.type === 'analyzed') {
+        this.summary = msg.summary;
+        this.selectedTable = msg.summary.tables[0]?.name ?? null;
+        this.tab = 'analysis';
+        this.sql = null;
+        this.sqlHtml = null;
+        this.renderWarnings = [];
+        this.modelYamlText = null;
+        this.modelHtml = null;
+        this.modelKey = null;
+        this.modelTree = null;
+        this.treeHtml = '';
+        this.analyzeProgress = null;
+        this.state = 'ready';
+      } else if (msg.type === 'generated') {
+        this.sql = msg.sql;
+        this.renderWarnings = msg.renderWarnings ?? [];
+        this.tab = 'sql';
+        this.state = 'ready';
+        this.highlightSql();
+      } else if (msg.type === 'model') {
+        this.modelYamlText = msg.yaml;
+        this.modelTree = msg.model;
+        this.treeExpanded = {};
+        this.treeDefaultDepth = 2;
+        this.renderTreeHtml();
+        this.modelLoading = false;
+        this.highlightModel();
+      } else if (msg.type === 'error') {
+        this.error = msg.message;
+        this.modelLoading = false;
+        this.analyzeProgress = null;
+        if (msg.fatal) {
+          this.spawnWorker();
+          this.summary = null;
+          this.fileName = null;
+          this.state = 'empty';
+        } else {
+          this.state = this.summary ? 'ready' : 'empty';
+        }
+      }
+    },
+
+    get currentTable() {
+      return this.summary?.tables.find((t: TableInfo) => t.name === this.selectedTable) ?? null;
+    },
+
+    get warningCount() {
+      return (this.summary?.warnings.length ?? 0) + this.renderWarnings.length;
+    },
+
+    get displaySql() {
+      if (!this.sql) return '';
+      return this.sql.length > DISPLAY_CAP ? this.sql.slice(0, DISPLAY_CAP) : this.sql;
+    },
+
+    get sqlTruncatedNote() {
+      if (!this.sql || this.sql.length <= DISPLAY_CAP) return null;
+      const totalMb = (this.sql.length / (1024 * 1024)).toFixed(1);
+      return `Showing the first 1 MB of ${totalMb} MB — Download gets the full script.`;
+    },
+
+    get modelRequestKey() {
+      return `${this.rows}:${this.seed}:${this.outDialect}:${this.outMode}`;
+    },
+
+    switchTab(tab: 'analysis' | 'model' | 'sql' | 'warnings') {
+      this.tab = tab;
+      if (tab === 'model') this.ensureModel();
+    },
+
+    // Roving focus for a list of buttons: arrows move focus, Enter/Space still
+    // activate natively. Returns false when the key isn't ours to handle.
+    moveFocus(event: KeyboardEvent, selector: string, prevKey: string, nextKey: string) {
+      if (!['Home', 'End', prevKey, nextKey].includes(event.key)) return false;
+      const items = [
+        ...(event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(selector),
+      ].filter((el) => !el.hasAttribute('disabled'));
+      if (items.length === 0) return false;
+      const at = items.indexOf(document.activeElement as HTMLElement);
+      if (at === -1 && event.key !== 'Home' && event.key !== 'End') return false;
+      event.preventDefault();
+      const to =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? items.length - 1
+            : event.key === nextKey
+              ? (at + 1) % items.length
+              : (at - 1 + items.length) % items.length;
+      items[to].focus();
+      return true;
+    },
+
+    onTableKeydown(event: KeyboardEvent) {
+      this.moveFocus(event, '.pg-table-item', 'ArrowUp', 'ArrowDown');
+    },
+
+    onTabKeydown(event: KeyboardEvent) {
+      this.moveFocus(event, 'button', 'ArrowLeft', 'ArrowRight');
+    },
+
+    ensureModel() {
+      if (!this.summary || this.state === 'analyzing') return;
+      if (this.modelYamlText && this.modelKey === this.modelRequestKey) return;
+      this.modelKey = this.modelRequestKey;
+      this.modelLoading = true;
+      // Reuses the current request id: a model reply must not be treated as
+      // stale by an unrelated generate, and a new analyze still supersedes it.
+      this.worker?.postMessage({
+        id: this.requestId,
+        type: 'model',
+        rows: this.rows || 100,
+        seed: this.seed || 0,
+        dialect: this.outDialect || null,
+        mode: this.outMode,
+      });
+    },
+
+    async highlightSql() {
+      this.sqlHtml = null;
+      const text = this.displaySql;
+      if (!text || text.length > HIGHLIGHT_CAP) return;
+      const generation = this.requestId;
+      const html = await highlight(text, 'sql');
+      if (generation === this.requestId) this.sqlHtml = html;
+    },
+
+    async highlightModel() {
+      this.modelHtml = null;
+      if (!this.modelYamlText) return;
+      const key = this.modelKey;
+      const html = await highlight(this.modelYamlText, 'yaml');
+      if (key === this.modelKey) this.modelHtml = html;
+    },
+
+    // --- Model tree: an AST-explorer-style view of the resolved model.
+    // --- Rows toggle on click; collapsed nodes show child counts.
+
+    modelTree: null as unknown,
+    modelView: 'tree' as 'tree' | 'raw',
+    treeHtml: '',
+    treeExpanded: {} as Record<string, boolean>,
+    treeDefaultDepth: 2,
+
+    isExpanded(path: string, depth: number) {
+      return this.treeExpanded[path] ?? depth < this.treeDefaultDepth;
+    },
+
+    renderTreeHtml() {
+      this.treeHtml =
+        this.modelTree === null ? '' : this.renderNode(this.modelTree, '$', 0, null);
+    },
+
+    renderNode(value: unknown, path: string, depth: number, key: string | null): string {
+      const keyHtml = key === null ? '' : `<span class="pg-t-key">${escapeHtml(key)}</span>`;
+      const sep = key === null ? '' : '<span class="pg-t-sep">: </span>';
+
+      if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+        const entries = Array.isArray(value)
+          ? value.map((v, i) => [String(i), v] as const)
+          : Object.entries(value as Record<string, unknown>);
+        const isArray = Array.isArray(value);
+        const badge = isArray ? `[${entries.length}]` : `{${entries.length}}`;
+        if (entries.length === 0) {
+          return `<div class="pg-t-row pg-t-leaf">${keyHtml}${sep}<span class="pg-t-badge">${isArray ? '[]' : '{}'}</span></div>`;
+        }
+        const open = this.isExpanded(path, depth);
+        const chevron =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"></path></svg>';
+        let html = `<div class="pg-t-row pg-t-toggle${open ? ' open' : ''}" data-path="${escapeHtml(path)}">`;
+        html += `<span class="pg-t-chevron">${chevron}</span>${keyHtml}${sep}`;
+        if (!open) html += `<span class="pg-t-badge">${badge}</span>`;
+        html += '</div>';
+        if (open) {
+          html += '<div class="pg-t-children">';
+          for (const [childKey, childValue] of entries) {
+            html += this.renderNode(childValue, `${path}.${childKey}`, depth + 1, childKey);
+          }
+          html += '</div>';
+        }
+        return html;
+      }
+
+      let valueHtml: string;
+      if (typeof value === 'string') {
+        const shown = value.length > 120 ? value.slice(0, 120) + '\u2026' : value;
+        valueHtml = `<span class="pg-t-string" title="${escapeHtml(value.slice(0, 500))}">"${escapeHtml(shown)}"</span>`;
+      } else if (typeof value === 'number') {
+        valueHtml = `<span class="pg-t-number">${value}</span>`;
+      } else if (typeof value === 'boolean') {
+        valueHtml = `<span class="pg-t-bool">${value}</span>`;
+      } else {
+        valueHtml = '<span class="pg-t-null">null</span>';
+      }
+      return `<div class="pg-t-row pg-t-leaf"><span class="pg-t-chevron-spacer"></span>${keyHtml}${sep}${valueHtml}</div>`;
+    },
+
+    onTreeClick(event: Event) {
+      const row = (event.target as Element).closest('.pg-t-toggle');
+      if (!row) return;
+      const path = row.getAttribute('data-path');
+      if (!path) return;
+      const depth = path.split('.').length - 1;
+      this.treeExpanded[path] = !this.isExpanded(path, depth);
+      this.renderTreeHtml();
+    },
+
+    setTreeExpansion(expanded: boolean) {
+      this.treeExpanded = {};
+      this.treeDefaultDepth = expanded ? Number.MAX_SAFE_INTEGER : 1;
+      this.renderTreeHtml();
+    },
+
+    async openFile(file: File | null | undefined) {
+      if (!file) return;
+      this.error = null;
+      this.perfWarning = null;
+
+      const buffer = await file.arrayBuffer();
+      const head = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
+      const compressed = MAGIC.find((m) => m.bytes.every((b, i) => head[i] === b));
+      if (compressed) {
+        this.error = `This looks like a ${compressed.name} archive. Compressed dumps aren't supported in the browser — decompress it first, or use the CLI (which reads them natively).`;
+        return;
+      }
+      if (file.size >= SOFT_WARN_BYTES) {
+        const mb = Math.round(file.size / (1024 * 1024));
+        this.perfWarning = `${mb} MB dump — analysis runs locally and may take a while, briefly using roughly twice the file size in memory. Leave the tab open.`;
+      }
+
+      this.fileName = file.name;
+      this.analyze(buffer);
+    },
+
+    async loadExample(name: string, forceDialect?: string) {
+      this.error = null;
+      this.perfWarning = null;
+      const response = await fetch(`/playground/${name}`);
+      const buffer = await response.arrayBuffer();
+      this.fileName = name;
+      this.analyze(buffer, forceDialect);
+    },
+
+    analyze(buffer: ArrayBuffer, forceDialect?: string) {
+      this.state = 'analyzing';
+      this.summary = null;
+      this.sql = null;
+      this.sqlHtml = null;
+      this.analyzeProgress = null;
+      const id = ++this.requestId;
+      const dialect = forceDialect ?? (this.dialect === 'auto' ? null : this.dialect);
+      this.worker?.postMessage({ id, type: 'analyze', buffer, dialect }, [buffer]);
+    },
+
+    generate() {
+      if (!this.summary) return;
+      this.error = null;
+      this.state = 'generating';
+      this.tab = 'sql';
+      const id = ++this.requestId;
+      this.worker?.postMessage({
+        id,
+        type: 'generate',
+        rows: this.rows || 100,
+        seed: this.seed || 0,
+        dialect: this.outDialect || null,
+        mode: this.outMode,
+      });
+    },
+
+    copySql(event: Event) {
+      if (!this.sql) return;
+      navigator.clipboard.writeText(this.sql).then(() => flashCopied(event));
+    },
+
+    copyModel(event: Event) {
+      if (!this.modelYamlText) return;
+      navigator.clipboard.writeText(this.modelYamlText).then(() => flashCopied(event));
+    },
+
+    downloadSql() {
+      if (!this.sql) return;
+      downloadBlob(this.sql, 'synthetic.sql', 'application/sql');
+    },
+
+    downloadModel() {
+      if (!this.modelYamlText) return;
+      downloadBlob(this.modelYamlText, 'model.yaml', 'application/yaml');
+    },
+  }));
+
+  Alpine.start();
+</script>
+
+<style>
+  [x-cloak] {
+    display: none !important;
+  }
+
+  /* App mode: the page never scrolls; panels scroll internally */
+  :global(body:has(.playground)) {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  :global(body:has(.playground) main) {
+    flex: 1;
+    min-height: 0;
+    max-width: none;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    display: flex;
+  }
+
+  :global(body:has(.playground) footer) {
+    display: none;
+  }
+
+  .playground {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  .pg-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    padding: var(--space-xs) var(--space-sm);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .pg-title-group {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm);
+    min-width: 0;
+  }
+
+  .pg-file-name {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+  }
+
+  /* Badges: fixed height + flex centering instead of line-height, so the text
+     is optically centered regardless of font metrics or descenders. */
+  .pg-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 1.4rem;
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    line-height: 1;
+    padding: 0 0.5rem;
+    margin-left: 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--color-border) 90%, transparent);
+    border-radius: 999px;
+    color: var(--cmd-generate);
+    vertical-align: middle;
+  }
+
+  .pg-topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+
+  .pg-select-label {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  select,
+  input[type='number'] {
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0.35rem 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+  }
+
+  input[type='number'] {
+    width: 6.5rem;
+  }
+
+  .pg-btn {
+    background: var(--color-bg);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0.4rem 0.85rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition:
+      border-color 0.15s,
+      color 0.15s,
+      background-color 0.15s;
+  }
+
+  .pg-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .pg-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .pg-btn-primary {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .pg-btn-primary:hover {
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+    color: #fff;
+  }
+
+  .pg-examples {
+    position: relative;
+  }
+
+  .pg-examples-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    min-width: 260px;
+    z-index: 40;
+    overflow: hidden;
+  }
+
+  .pg-examples-menu button {
+    background: none;
+    border: none;
+    color: var(--color-text);
+    text-align: left;
+    padding: 0.5rem 0.85rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .pg-examples-menu button:hover {
+    background: var(--color-bg);
+    color: var(--color-accent);
+  }
+
+  .pg-workbench {
+    position: relative;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .pg-workbench.dragging {
+    outline: 2px dashed var(--color-accent);
+    outline-offset: -8px;
+  }
+
+  .pg-tab-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pg-empty-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pg-overlays {
+    position: absolute;
+    inset: 0 0 auto 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pg-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    padding: var(--space-xs) var(--space-sm);
+    font-size: 0.875rem;
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .pg-error {
+    color: var(--cmd-redact);
+    border-left: 3px solid var(--cmd-redact);
+  }
+
+  .pg-warn {
+    color: var(--cmd-diff);
+    border-left: 3px solid var(--cmd-diff);
+  }
+
+  .pg-dismiss {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: inherit;
+    cursor: pointer;
+    padding: 0.2rem;
+    margin-top: 1px;
+  }
+
+  .pg-dismiss svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .pg-dismiss:hover {
+    background: var(--color-bg);
+  }
+
+  .pg-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: var(--space-xl) var(--space-md);
+    gap: var(--space-xs);
+  }
+
+  .pg-drop-icon {
+    font-size: 2.5rem;
+    color: var(--color-accent);
+  }
+
+  .pg-drop-title {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+  }
+
+  .pg-drop-note {
+    font-size: 0.85rem;
+    max-width: 55ch;
+  }
+
+  .pg-muted {
+    color: var(--color-text-muted);
+  }
+
+  .pg-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: pg-spin 0.8s linear infinite;
+  }
+
+  .pg-progress-group {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    width: min(360px, 80%);
+  }
+
+  .pg-progress {
+    flex: 1;
+    height: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .pg-progress-fill {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.15s linear;
+  }
+
+  .pg-progress-label {
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    min-width: 3ch;
+    text-align: right;
+  }
+
+  @keyframes pg-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .pg-ide {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .pg-sidebar {
+    border-right: 1px solid var(--color-border);
+    padding: var(--space-sm) 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    min-height: 0;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+
+  .pg-sidebar-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-muted);
+    padding: 0 var(--space-sm) var(--space-xs);
+  }
+
+  .pg-table-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-xs);
+    background: none;
+    border: none;
+    border-left: 2px solid transparent;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    padding: 0.35rem var(--space-sm);
+    cursor: pointer;
+    text-align: left;
+    min-width: 0;
+  }
+
+  .pg-table-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pg-table-item:hover {
+    color: var(--color-accent);
+  }
+
+  /* Edge-to-edge rows/tabs: inset the ring so it isn't clipped by the
+     scroll container or overlapped by neighbours. */
+  .pg-table-item:focus-visible,
+  .pg-tabs button:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .pg-table-item.selected {
+    border-left-color: var(--color-accent);
+    background: var(--color-surface);
+    color: var(--color-accent);
+  }
+
+  .pg-table-rows {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .pg-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .pg-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .pg-tabs button {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    padding: 0.6rem var(--space-sm);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .pg-tabs button.active {
+    color: var(--color-text);
+    border-bottom-color: var(--color-accent);
+  }
+
+  .pg-tabs button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .pg-tab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 1.25rem;
+    min-width: 1.25rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    background: var(--cmd-diff);
+    color: var(--color-bg);
+    border-radius: 999px;
+    padding: 0 0.4rem;
+  }
+
+  .pg-tab-content {
+    padding: var(--space-sm);
+    overflow: auto;
+    flex: 1;
+    min-height: 0;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+
+  .pg-table-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xs);
+  }
+
+  .pg-table-header h2 {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+  }
+
+  .pg-fk {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+  }
+
+  .pg-columns {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+
+  .pg-columns th {
+    text-align: left;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .pg-columns td {
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: top;
+  }
+
+  .pg-col-name {
+    font-family: var(--font-mono);
+  }
+
+  .pg-mono {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+
+  .pg-pk {
+    display: inline-flex;
+    align-items: center;
+    height: 1.1rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--cmd-generate);
+    border: 1px solid color-mix(in srgb, var(--cmd-generate) 90%, transparent);
+    border-radius: 3px;
+    padding: 0 0.25rem;
+    margin-left: 0.35rem;
+    vertical-align: middle;
+  }
+
+  .pg-semantic {
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
+    font-size: 0.7rem;
+    line-height: 1;
+    padding: 0 0.4rem;
+    margin-left: 0.35rem;
+    border-radius: 999px;
+    background: var(--color-surface);
+    border: 1px solid color-mix(in srgb, var(--color-border) 90%, transparent);
+    color: var(--cmd-sample);
+    vertical-align: middle;
+  }
+
+  .pg-confidence {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .pg-confidence .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+  }
+
+  .pg-confidence[data-level='high'] .dot,
+  .pg-confidence[data-level='certain'] .dot {
+    background: var(--cmd-analyze);
+  }
+
+  .pg-confidence[data-level='medium'] .dot {
+    background: var(--cmd-diff);
+  }
+
+  .pg-sql pre,
+  .pg-model pre,
+  .pg-code :global(pre) {
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-sm);
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
+
+  /* Shiki dual themes: light colors are inline, dark come from CSS vars */
+  :global([data-theme='dark']) .pg-code :global(.shiki),
+  :global([data-theme='dark']) .pg-code :global(.shiki span) {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+
+  /* Model tree (AST-explorer style) */
+  .pg-tree {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.7;
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-xs) var(--space-sm);
+  }
+
+  .pg-tree :global(.pg-t-row) {
+    display: flex;
+    align-items: baseline;
+    white-space: nowrap;
+    border-radius: 4px;
+    padding: 0 0.25rem;
+  }
+
+  .pg-tree :global(.pg-t-toggle) {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .pg-tree :global(.pg-t-toggle:hover) {
+    background: var(--color-surface);
+  }
+
+  .pg-tree :global(.pg-t-chevron),
+  .pg-tree :global(.pg-t-chevron-spacer) {
+    display: inline-flex;
+    align-items: center;
+    width: 14px;
+    height: 14px;
+    margin-right: 0.3rem;
+    flex-shrink: 0;
+    align-self: center;
+    color: var(--color-text-muted);
+  }
+
+  .pg-tree :global(.pg-t-chevron svg) {
+    width: 12px;
+    height: 12px;
+    transition: transform 0.12s ease;
+  }
+
+  .pg-tree :global(.pg-t-toggle.open .pg-t-chevron svg) {
+    transform: rotate(90deg);
+  }
+
+  .pg-tree :global(.pg-t-children) {
+    margin-left: 6px;
+    padding-left: 14px;
+    border-left: 1px solid var(--color-border);
+  }
+
+  .pg-tree :global(.pg-t-key) {
+    color: var(--color-accent);
+  }
+
+  .pg-tree :global(.pg-t-sep) {
+    color: var(--color-text-muted);
+    white-space: pre;
+  }
+
+  .pg-tree :global(.pg-t-badge) {
+    color: var(--color-text-muted);
+    margin-left: 0.35rem;
+  }
+
+  .pg-tree :global(.pg-t-string) {
+    color: var(--cmd-analyze);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pg-tree :global(.pg-t-number) {
+    color: var(--cmd-order);
+  }
+
+  .pg-tree :global(.pg-t-bool) {
+    color: var(--cmd-merge);
+  }
+
+  .pg-tree :global(.pg-t-null) {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .pg-seg {
+    display: inline-flex;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .pg-seg button {
+    background: var(--color-bg);
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+  }
+
+  .pg-seg button.active {
+    background: var(--color-surface);
+    color: var(--color-text);
+  }
+
+  .pg-sql-note {
+    font-size: 0.8rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  .pg-model-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-xs);
+    font-size: 0.85rem;
+  }
+
+  .pg-actions-spacer {
+    flex: 1;
+  }
+
+  .pg-warnings section {
+    margin-bottom: var(--space-md);
+  }
+
+  .pg-warnings h3 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+  }
+
+  .pg-warning {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-xs) var(--space-sm);
+    margin-bottom: var(--space-xs);
+    font-size: 0.875rem;
+  }
+
+  .pg-warning header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    margin-bottom: 0.25rem;
+    flex-wrap: wrap;
+  }
+
+  .pg-sev {
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-radius: 3px;
+    /* letter-spacing adds a trailing gap after the last glyph; trim it from the
+       right padding so the caps sit optically centred, not pushed left */
+    padding: 0 calc(0.4rem - 0.05em) 0 0.4rem;
+    color: var(--color-bg);
+    background: var(--color-text-muted);
+  }
+
+  .pg-warning[data-severity='error'] .pg-sev {
+    background: var(--cmd-redact);
+  }
+
+  .pg-warning[data-severity='warning'] .pg-sev {
+    background: var(--cmd-diff);
+  }
+
+  .pg-warning[data-severity='advisory'] .pg-sev {
+    background: var(--cmd-sample);
+  }
+
+  .pg-wcode {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+
+  .pg-wpath {
+    color: var(--color-text-muted);
+  }
+
+  .pg-whelp {
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+  }
+
+  .pg-wexplain {
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+  }
+
+  .pg-wexplain summary {
+    cursor: pointer;
+    color: var(--color-accent);
+  }
+
+  .pg-wexplain p {
+    margin-top: 0.35rem;
+  }
+
+  .pg-bottombar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    padding: var(--space-xs) var(--space-sm);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+
+  .pg-bottombar label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+
+  .pg-bottombar-spacer {
+    flex: 1;
+  }
+
+  .pg-rows-note {
+    font-size: 0.8rem;
+    max-width: 40ch;
+  }
+
+  @media (max-width: 768px) {
+    .pg-ide {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto 1fr;
+    }
+
+    .pg-sidebar {
+      border-right: none;
+      border-bottom: 1px solid var(--color-border);
+      max-height: 160px;
+    }
+  }
+</style>

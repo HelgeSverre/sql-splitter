@@ -36,6 +36,14 @@
   /* Sizes */
   --sl-content-width: 48rem;
   --sl-sidebar-width: 18rem;
+  /* Match the BaseLayout nav (--nav-height); Starlight bumps this to 4rem >=50em */
+  --sl-nav-height: 3.5rem;
+}
+
+/* Same brand selection tint as the landing page and playground */
+::selection {
+  background: color-mix(in srgb, var(--sl-color-accent) 35%, transparent);
+  color: var(--sl-color-white);
 }
 
 /* Light theme */

@@ -1,0 +1,4 @@
+# Scope bun's test runner to the bun:test suites in src/.
+# tests/ holds Playwright specs, run via `bun run test` (playwright test).
+[test]
+root = "src"

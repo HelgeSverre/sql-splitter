@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/sql-splitter-wasm"]
 exclude = ["fuzz"]
 resolver = "2"
 
@@ -32,7 +32,7 @@ path = "src/main.rs"
 
 [features]
 default = ["duckdb-query", "compression", "archive"]
-duckdb-query = ["dep:duckdb", "compression"]
+duckdb-query = ["dep:duckdb", "dep:dirs", "dep:rustyline", "compression"]
 compression = ["dep:flate2", "dep:bzip2", "dep:xz2", "dep:zstd"]
 archive = ["compression", "dep:tar", "dep:zip", "dep:crc32fast"]
 man-pages = ["dep:clap_mangen"]
@@ -67,8 +67,8 @@ fake = { version = "5", features = ["derive"] }
 sha2 = "0.11"
 hex = "0.4"
 duckdb = { version = "1.10503", features = ["bundled"], optional = true }
-dirs = "6"
-rustyline = "17"
+dirs = { version = "6", optional = true }
+rustyline = { version = "17", optional = true }
 schemars = "1"
 clap_mangen = { version = "0.3", optional = true }
 

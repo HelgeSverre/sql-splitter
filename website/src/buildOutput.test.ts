@@ -151,3 +151,32 @@ test("the website schema mirror matches the authoritative schemas", () => {
     );
   }
 });
+
+test("the playground ships with its wasm artifacts", () => {
+  expect(existsSync(join(dist, "playground", "index.html"))).toBe(true);
+  expect(existsSync(join(dist, "wasm", "sql_splitter_wasm_bg.wasm"))).toBe(
+    true,
+  );
+  expect(existsSync(join(dist, "wasm", "sql_splitter_wasm.js"))).toBe(true);
+  expect(existsSync(join(dist, "wasm", "worker.js"))).toBe(true);
+  for (const example of [
+    "saas-mysql.sql",
+    "saas-postgres.sql",
+    "dealership-mysql.sql",
+    "ledger-mssql.sql",
+    "cms-sqlite.sql",
+  ]) {
+    expect(existsSync(join(dist, "playground", example))).toBe(true);
+  }
+
+  const html = readFileSync(join(dist, "playground", "index.html"), "utf8");
+  expect(html).toContain("never leaves your machine");
+});
+
+test("the homepage advertises 13 commands including generate", () => {
+  const html = readFileSync(join(dist, "index.html"), "utf8");
+
+  expect(html).toContain("13 Powerful Commands");
+  expect(html).toContain('data-cmd="generate"');
+  expect(html).toContain('href="/playground/"');
+});
