@@ -46,6 +46,7 @@ fn run_convert_tests(case: &'static super::cases::TestCase) {
             dry_run: false,
             progress: false,
             strict: false,
+            enum_naming: "per-column".to_string(),
         };
 
         match run(config) {
@@ -183,6 +184,7 @@ fn all_convert_tests() {
                 dry_run: false,
                 progress: false,
                 strict: false,
+                enum_naming: "per-column".to_string(),
             };
 
             match run(config) {

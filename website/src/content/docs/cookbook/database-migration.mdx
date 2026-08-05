@@ -59,10 +59,12 @@ Not all features convert perfectly. Common warnings:
 
 ### ENUM Types
 
-MySQL ENUMs don't exist in PostgreSQL. Options:
+Enum conversion between MySQL and PostgreSQL is now fully automatic. `sql-splitter convert` handles both directions:
 
-1. Convert to `VARCHAR(255)` (automatic)
-2. Create custom TYPE (manual)
+- MySQL inline `ENUM()` → PostgreSQL `CREATE TYPE ... AS ENUM` with automatic type creation and inline enum rewriting in DML
+- PostgreSQL `CREATE TYPE ... AS ENUM` → MySQL inline `ENUM()`
+- Use `--enum-naming` to control the naming scheme for generated PostgreSQL types
+- Unknown enum-like columns fall back to `VARCHAR` with a warning
 
 ### Auto-Increment
 

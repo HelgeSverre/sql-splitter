@@ -29,6 +29,27 @@ All core features have been released:
 | v1.15.0 | Output compression (`--compress`), archive output (tar.\*/zip), 2.4–4.4× split speedup | Released |
 | v1.16.0 | Zip input (all commands), adaptive `--io-strategy` for slow devices                    | Released |
 | v1.17.0 | Synthetic data generation (`generate`)                                                 | Released |
+| v1.18.0 | Enum Type Conversion                                                                   | Released |
+
+## Released in v1.18.0
+
+### `convert` — Enum Type Conversion
+
+Bidirectional enum conversion between PostgreSQL and MySQL replaces the previous lossy VARCHAR fallback with real type preservation:
+
+```bash
+sql-splitter convert mysql_dump.sql --to postgres -o pg.sql
+sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
+```
+
+**Features:**
+
+- PostgreSQL `CREATE TYPE ... AS ENUM` → MySQL inline `ENUM()`
+- MySQL inline `ENUM()` → PostgreSQL `CREATE TYPE` with `--enum-naming` flag for deterministic naming
+- DML `INSERT` statements rewriiten with inline ENUM values
+- `::type` casts stripped from DML statements during conversion
+- `VARCHAR` fallback with a warning for unknown types
+- Streaming-safe registry-based type tracking across statements
 
 ## Released in v1.17.0
 
@@ -87,18 +108,6 @@ sql-splitter split dump.sql -o tables/ --io-strategy hdd    # pin it
   hash tests)
 
 ## Upcoming Features
-
-### v1.18.0 — Enum Type Conversion
-
-Proper bidirectional enum conversion between PostgreSQL and MySQL. Today, `ENUM('a','b')` converts lossily to `VARCHAR(255)` — this replaces that with real type conversion:
-
-**Features:**
-
-- PostgreSQL `CREATE TYPE ... AS ENUM` → MySQL inline `ENUM()`
-- MySQL inline `ENUM()` → PostgreSQL `CREATE TYPE` (deterministic naming)
-- Registry-based type tracking across statements (streaming-safe)
-- Strip `::type` casts in DML statements
-- `VARCHAR` fallback with a warning for unknown types
 
 ### v1.19.0 — Migration Generation
 
