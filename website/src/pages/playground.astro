@@ -543,7 +543,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     { bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a], name: 'xz' },
     { bytes: [0x28, 0xb5, 0x2f, 0xfd], name: 'zstd' },
   ];
-  const SOFT_WARN_BYTES = 100 * 1024 * 1024;
+  const SOFT_WARN_BYTES = 500 * 1024 * 1024;
   const DISPLAY_CAP = 1024 * 1024;
   const HIGHLIGHT_CAP = 256 * 1024;
 
@@ -871,8 +871,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.error = null;
       this.perfWarning = null;
 
-      const buffer = await file.arrayBuffer();
-      const head = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
+      const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
       const compressed = MAGIC.find((m) => m.bytes.every((b, i) => head[i] === b));
       if (compressed) {
         this.error = `This looks like a ${compressed.name} archive. Compressed dumps aren't supported in the browser — decompress it first, or use the CLI (which reads them natively).`;
@@ -880,23 +879,23 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       }
       if (file.size >= SOFT_WARN_BYTES) {
         const mb = Math.round(file.size / (1024 * 1024));
-        this.perfWarning = `${mb} MB dump — analysis runs locally and may take a while, briefly using roughly twice the file size in memory. Leave the tab open.`;
+        this.perfWarning = `${mb} MB dump — analysis streams from disk in a single pass; a very large dump just takes a while. Leave the tab open.`;
       }
 
       this.fileName = file.name;
-      this.analyze(buffer);
+      this.analyze(file);
     },
 
     async loadExample(name: string, forceDialect?: string) {
       this.error = null;
       this.perfWarning = null;
       const response = await fetch(`/playground/${name}`);
-      const buffer = await response.arrayBuffer();
+      const blob = await response.blob();
       this.fileName = name;
-      this.analyze(buffer, forceDialect);
+      this.analyze(blob, forceDialect);
     },
 
-    analyze(buffer: ArrayBuffer, forceDialect?: string) {
+    analyze(blob: Blob, forceDialect?: string) {
       this.state = 'analyzing';
       this.summary = null;
       this.sql = null;
@@ -904,7 +903,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.analyzeProgress = null;
       const id = ++this.requestId;
       const dialect = forceDialect ?? (this.dialect === 'auto' ? null : this.dialect);
-      this.worker?.postMessage({ id, type: 'analyze', buffer, dialect }, [buffer]);
+      this.worker?.postMessage({ id, type: 'analyze', blob, dialect });
     },
 
     generate() {

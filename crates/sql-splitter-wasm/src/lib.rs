@@ -23,23 +23,35 @@ use wasm_bindgen::prelude::*;
 /// Fixed profiler seed: profiling evidence should not vary between visits.
 const PROFILE_SEED: u64 = 42;
 
-/// A `Read` over the dump bytes that reports profiling progress as the parser
-/// consumes it. Reports are throttled to >= 1% (or 64KB, whichever is larger)
-/// steps so the callback overhead stays negligible, with a final `1.0` at EOF.
-struct ProgressReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-    last_reported: usize,
-    min_step: usize,
+/// Parser buffer for streamed (blob-backed) profiling. Each parser refill is
+/// one `read()`; 1MB keeps the per-read overhead negligible against the
+/// chunk-cache refills underneath.
+const STREAM_PARSER_BUFFER: usize = 1024 * 1024;
+
+/// How much of the blob one JS chunk fetch materializes. This — not the file
+/// size — bounds ingestion memory: one chunk resident in wasm, one transient
+/// on the JS side while it is copied in.
+const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Wraps a reader with progress reporting against a known total. Reports are
+/// throttled to >= 1% (or 64KB, whichever is larger) steps so the callback
+/// overhead stays negligible, with a final `1.0` at EOF.
+struct ProgressReader<'a, R> {
+    inner: R,
+    total: u64,
+    pos: u64,
+    last_reported: u64,
+    min_step: u64,
     done: bool,
     callback: &'a mut dyn FnMut(f64),
 }
 
-impl<'a> ProgressReader<'a> {
-    fn new(data: &'a [u8], callback: &'a mut dyn FnMut(f64)) -> Self {
-        let min_step = (data.len() / 100).max(64 * 1024);
+impl<'a, R: std::io::Read> ProgressReader<'a, R> {
+    fn new(inner: R, total: u64, callback: &'a mut dyn FnMut(f64)) -> Self {
+        let min_step = (total / 100).max(64 * 1024);
         ProgressReader {
-            data,
+            inner,
+            total,
             pos: 0,
             last_reported: 0,
             min_step,
@@ -49,12 +61,10 @@ impl<'a> ProgressReader<'a> {
     }
 }
 
-impl std::io::Read for ProgressReader<'_> {
+impl<R: std::io::Read> std::io::Read for ProgressReader<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let remaining = &self.data[self.pos..];
-        let n = remaining.len().min(buf.len());
-        buf[..n].copy_from_slice(&remaining[..n]);
-        self.pos += n;
+        let n = self.inner.read(buf)?;
+        self.pos += n as u64;
 
         if n == 0 {
             if !self.done {
@@ -63,8 +73,57 @@ impl std::io::Read for ProgressReader<'_> {
             }
         } else if self.pos - self.last_reported >= self.min_step {
             self.last_reported = self.pos;
-            (self.callback)(self.pos as f64 / self.data.len().max(1) as f64);
+            (self.callback)(self.pos as f64 / self.total.max(1) as f64);
         }
+        Ok(n)
+    }
+}
+
+/// A `Read` over an external random-access source, pulled in aligned chunks.
+/// The fetch closure returns the bytes for `[start, end)`; only one chunk is
+/// resident at a time. Target-independent so native tests cover it; the JS
+/// (`FileReaderSync`) adapter lives in [`PlaygroundSession::from_blob`].
+struct ChunkCache<F: FnMut(u64, u64) -> Result<Vec<u8>, String>> {
+    fetch: F,
+    total: u64,
+    pos: u64,
+    chunk: Vec<u8>,
+    chunk_start: u64,
+}
+
+impl<F: FnMut(u64, u64) -> Result<Vec<u8>, String>> ChunkCache<F> {
+    fn new(fetch: F, total: u64) -> Self {
+        ChunkCache {
+            fetch,
+            total,
+            pos: 0,
+            chunk: Vec::new(),
+            chunk_start: 0,
+        }
+    }
+}
+
+impl<F: FnMut(u64, u64) -> Result<Vec<u8>, String>> std::io::Read for ChunkCache<F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.total {
+            return Ok(0);
+        }
+        let chunk_end = self.chunk_start + self.chunk.len() as u64;
+        if self.pos < self.chunk_start || self.pos >= chunk_end {
+            let start = self.pos;
+            let end = (start + CHUNK_BYTES).min(self.total);
+            self.chunk = (self.fetch)(start, end)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            self.chunk_start = start;
+            if self.chunk.is_empty() {
+                return Ok(0);
+            }
+        }
+        let offset = (self.pos - self.chunk_start) as usize;
+        let available = &self.chunk[offset..];
+        let n = available.len().min(buf.len());
+        buf[..n].copy_from_slice(&available[..n]);
+        self.pos += n as u64;
         Ok(n)
     }
 }
@@ -72,6 +131,15 @@ impl std::io::Read for ProgressReader<'_> {
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
+}
+
+/// Adapt an optional JS callback into the `FnMut(f64)` the readers take.
+fn js_progress(on_progress: &Option<js_sys::Function>) -> impl FnMut(f64) + '_ {
+    move |fraction: f64| {
+        if let Some(f) = on_progress {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_f64(fraction));
+        }
+    }
 }
 
 /// One analyzed dump: profile once, generate any number of times.
@@ -97,17 +165,59 @@ impl PlaygroundSession {
         dialect: Option<String>,
         on_progress: Option<js_sys::Function>,
     ) -> Result<PlaygroundSession, JsError> {
-        let mut report = |fraction: f64| {
-            if let Some(f) = &on_progress {
-                let _ = f.call1(&JsValue::NULL, &JsValue::from_f64(fraction));
-            }
-        };
+        let mut report = js_progress(&on_progress);
         let progress: Option<&mut dyn FnMut(f64)> = if on_progress.is_some() {
             Some(&mut report)
         } else {
             None
         };
         Self::try_new(dump, dialect, progress).map_err(|e| JsError::new(&e))
+    }
+
+    /// Profile a dump streamed from a blob-backed chunk source. `read_chunk`
+    /// is `(start, end) -> Uint8Array` (the worker backs it with
+    /// `FileReaderSync` over `blob.slice`), so ingestion memory is one chunk,
+    /// not the file.
+    #[wasm_bindgen(js_name = fromBlob)]
+    pub fn from_blob(
+        read_chunk: js_sys::Function,
+        size: f64,
+        dialect: Option<String>,
+        on_progress: Option<js_sys::Function>,
+    ) -> Result<PlaygroundSession, JsError> {
+        let total = size as u64;
+        let mut fetch = |start: u64, end: u64| -> Result<Vec<u8>, String> {
+            let result = read_chunk
+                .call2(
+                    &JsValue::NULL,
+                    &JsValue::from_f64(start as f64),
+                    &JsValue::from_f64(end as f64),
+                )
+                .map_err(|_| "chunk read failed".to_string())?;
+            let array = js_sys::Uint8Array::from(result);
+            Ok(array.to_vec())
+        };
+
+        let (dialect, dialect_detected) = match dialect.filter(|d| !d.is_empty() && d != "auto") {
+            Some(name) => (
+                name.parse::<SqlDialect>().map_err(|e| JsError::new(&e))?,
+                false,
+            ),
+            None => {
+                let header = fetch(0, 8192.min(total)).map_err(|e| JsError::new(&e))?;
+                (detect_dialect(&header).dialect, true)
+            }
+        };
+
+        let mut report = js_progress(&on_progress);
+        let reader = ProgressReader::new(ChunkCache::new(&mut fetch, total), total, &mut report);
+        let profile = DumpProfiler::builder()
+            .seed(PROFILE_SEED)
+            .build()
+            .profile_reader_sized(reader, dialect, STREAM_PARSER_BUFFER)
+            .map_err(|e| JsError::new(&format!("Failed to profile dump: {e}")))?;
+
+        Self::from_profile(dialect, dialect_detected, profile).map_err(|e| JsError::new(&e))
     }
 
     /// The analyze summary as a JSON string (see `Summary` for the shape).
@@ -172,11 +282,22 @@ impl PlaygroundSession {
 
         let profiler = DumpProfiler::builder().seed(PROFILE_SEED).build();
         let profile = match progress {
-            Some(callback) => profiler.profile_reader(ProgressReader::new(dump, callback), dialect),
+            Some(callback) => profiler.profile_reader(
+                ProgressReader::new(dump, dump.len() as u64, callback),
+                dialect,
+            ),
             None => profiler.profile_reader(dump, dialect),
         }
         .map_err(|e| format!("Failed to profile dump: {e}"))?;
 
+        Self::from_profile(dialect, dialect_detected, profile)
+    }
+
+    fn from_profile(
+        dialect: SqlDialect,
+        dialect_detected: bool,
+        profile: DumpProfile,
+    ) -> Result<PlaygroundSession, String> {
         let inference = ModelInference::standard()
             .infer(&profile.schema, &profile)
             .map_err(|e| format!("No tables found — is this a SQL dump? ({e})"))?;
@@ -622,6 +743,33 @@ mod tests {
 
         let sql = session.generate_sql(10, 1, None, None).unwrap();
         assert!(sql.contains("INSERT INTO"));
+    }
+
+    #[test]
+    fn chunk_cache_reproduces_source_across_read_sizes() {
+        let source: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let mut fetches = 0usize;
+        let total = source.len() as u64;
+        let mut counting_fetch = |start: u64, end: u64| -> Result<Vec<u8>, String> {
+            fetches += 1;
+            Ok(source[start as usize..end as usize].to_vec())
+        };
+        let mut reader = ChunkCache::new(&mut counting_fetch, total);
+
+        use std::io::Read;
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 7_919]; // deliberately unaligned read size
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(out, source);
+        drop(reader);
+        // 100KB source with 8MB chunks: a single fetch serves everything.
+        assert_eq!(fetches, 1);
     }
 
     #[test]

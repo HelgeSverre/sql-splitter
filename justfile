@@ -221,11 +221,12 @@ _website-deps:
 [group('website')]
 wasm: _website-deps
     rustup target add wasm32-unknown-unknown
-    RUSTFLAGS='--cfg getrandom_backend="wasm_js"' CARGO_PROFILE_RELEASE_OPT_LEVEL=z \
+    RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C target-feature=+simd128' \
+      CARGO_PROFILE_RELEASE_OPT_LEVEL=3 \
       wasm-pack build crates/sql-splitter-wasm --release --target web --no-pack \
       --out-dir {{ justfile_directory() }}/website/public/wasm
     rm -f website/public/wasm/.gitignore
-    command -v wasm-opt >/dev/null && wasm-opt -Oz website/public/wasm/sql_splitter_wasm_bg.wasm -o website/public/wasm/sql_splitter_wasm_bg.wasm || echo "wasm-opt not installed; skipping extra size pass"
+    command -v wasm-opt >/dev/null && wasm-opt -O3 website/public/wasm/sql_splitter_wasm_bg.wasm -o website/public/wasm/sql_splitter_wasm_bg.wasm || echo "wasm-opt not installed; skipping extra size pass"
     cd website && bunx prettier --write "public/wasm/*.js" "public/wasm/*.ts" --log-level warn
     ls -lh website/public/wasm/*.wasm
 
