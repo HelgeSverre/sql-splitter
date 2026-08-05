@@ -214,10 +214,10 @@ _website-deps:
     cd website && ( [ -d node_modules ] && [ -f bun.lock ] || bun install )
 
 # Build the browser-playground WASM module and refresh the committed artifact
-# in website/public/wasm/. Re-run (and commit the result) whenever the wasm
-# crate or src/{parser,schema,profile,synthetic,generate,render} change;
-# website-deploy depends on this as a backstop. Vercel never builds Rust —
-# it serves the committed artifact.
+# in website/public/wasm/. Every website recipe (build, dev, deploy) depends
+# on this, so a stale playground can never ship — commit the refreshed
+# artifact when it changes, because Vercel never builds Rust and serves the
+# committed file. Requires wasm-pack (cargo install wasm-pack).
 [group('website')]
 wasm: _website-deps
     rustup target add wasm32-unknown-unknown
@@ -256,12 +256,12 @@ playground-examples:
 
 # Build website for production
 [group('website')]
-website-build: _website-deps
+website-build: _website-deps wasm
     cd website && bun run build
 
 # Start development server with hot reload
 [group('website')]
-website-dev: _website-deps
+website-dev: _website-deps wasm
     cd website && bun run dev
 
 # Preview production build locally (builds first)

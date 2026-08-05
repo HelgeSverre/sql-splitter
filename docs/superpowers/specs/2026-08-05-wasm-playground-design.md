@@ -30,8 +30,8 @@ modeled on their dump. Privacy is the hook: the dump never leaves the machine.
   Vercel's builder has no Rust toolchain. `just wasm` rebuilds it (wasm-pack,
   `--cfg getrandom_backend="wasm_js"`, opt-level=z, bundled wasm-opt disabled —
   binaryen 117 rejects modern rustc output; a system wasm-opt is used when
-  installed). `website-deploy` depends on `wasm`; `website-dev`/`website-build`
-  deliberately don't.
+  installed). every website recipe (`website-build`, `website-dev`,
+  `website-deploy`) depends on `wasm`, so a stale playground can never ship.
 - **UI:** Alpine.js (this page only — the rest of the site stays vanilla),
   full-width IDE-style workbench: table sidebar, Analysis / Generated SQL tabs,
   bottom action bar (rows-per-root-table, seed, Generate, Copy, Download).
