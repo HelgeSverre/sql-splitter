@@ -23,6 +23,52 @@ use wasm_bindgen::prelude::*;
 /// Fixed profiler seed: profiling evidence should not vary between visits.
 const PROFILE_SEED: u64 = 42;
 
+/// A `Read` over the dump bytes that reports profiling progress as the parser
+/// consumes it. Reports are throttled to >= 1% (or 64KB, whichever is larger)
+/// steps so the callback overhead stays negligible, with a final `1.0` at EOF.
+struct ProgressReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    last_reported: usize,
+    min_step: usize,
+    done: bool,
+    callback: &'a mut dyn FnMut(f64),
+}
+
+impl<'a> ProgressReader<'a> {
+    fn new(data: &'a [u8], callback: &'a mut dyn FnMut(f64)) -> Self {
+        let min_step = (data.len() / 100).max(64 * 1024);
+        ProgressReader {
+            data,
+            pos: 0,
+            last_reported: 0,
+            min_step,
+            done: false,
+            callback,
+        }
+    }
+}
+
+impl std::io::Read for ProgressReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = &self.data[self.pos..];
+        let n = remaining.len().min(buf.len());
+        buf[..n].copy_from_slice(&remaining[..n]);
+        self.pos += n;
+
+        if n == 0 {
+            if !self.done {
+                self.done = true;
+                (self.callback)(1.0);
+            }
+        } else if self.pos - self.last_reported >= self.min_step {
+            self.last_reported = self.pos;
+            (self.callback)(self.pos as f64 / self.data.len().max(1) as f64);
+        }
+        Ok(n)
+    }
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
@@ -43,10 +89,25 @@ impl PlaygroundSession {
     /// Profile a dump and infer a generation model from it.
     ///
     /// `dialect` is `"mysql" | "postgres" | "sqlite" | "mssql"`, or `None` to
-    /// sniff the first 8KB.
+    /// sniff the first 8KB. `on_progress`, when given, is called with a
+    /// `0.0..=1.0` fraction as the profiler consumes the dump.
     #[wasm_bindgen(constructor)]
-    pub fn new(dump: &[u8], dialect: Option<String>) -> Result<PlaygroundSession, JsError> {
-        Self::try_new(dump, dialect).map_err(|e| JsError::new(&e))
+    pub fn new(
+        dump: &[u8],
+        dialect: Option<String>,
+        on_progress: Option<js_sys::Function>,
+    ) -> Result<PlaygroundSession, JsError> {
+        let mut report = |fraction: f64| {
+            if let Some(f) = &on_progress {
+                let _ = f.call1(&JsValue::NULL, &JsValue::from_f64(fraction));
+            }
+        };
+        let progress: Option<&mut dyn FnMut(f64)> = if on_progress.is_some() {
+            Some(&mut report)
+        } else {
+            None
+        };
+        Self::try_new(dump, dialect, progress).map_err(|e| JsError::new(&e))
     }
 
     /// The analyze summary as a JSON string (see `Summary` for the shape).
@@ -95,7 +156,11 @@ impl PlaygroundSession {
 // Core logic with plain `String` errors: `JsError` can only be constructed on
 // wasm targets, and native `cargo test` exercises these paths directly.
 impl PlaygroundSession {
-    fn try_new(dump: &[u8], dialect: Option<String>) -> Result<PlaygroundSession, String> {
+    fn try_new(
+        dump: &[u8],
+        dialect: Option<String>,
+        progress: Option<&mut dyn FnMut(f64)>,
+    ) -> Result<PlaygroundSession, String> {
         let (dialect, dialect_detected) = match dialect.filter(|d| !d.is_empty() && d != "auto") {
             Some(name) => (name.parse::<SqlDialect>()?, false),
             None => {
@@ -104,11 +169,12 @@ impl PlaygroundSession {
             }
         };
 
-        let profile = DumpProfiler::builder()
-            .seed(PROFILE_SEED)
-            .build()
-            .profile_reader(dump, dialect)
-            .map_err(|e| format!("Failed to profile dump: {e}"))?;
+        let profiler = DumpProfiler::builder().seed(PROFILE_SEED).build();
+        let profile = match progress {
+            Some(callback) => profiler.profile_reader(ProgressReader::new(dump, callback), dialect),
+            None => profiler.profile_reader(dump, dialect),
+        }
+        .map_err(|e| format!("Failed to profile dump: {e}"))?;
 
         let inference = ModelInference::standard()
             .infer(&profile.schema, &profile)
@@ -423,7 +489,7 @@ mod tests {
     #[test]
     fn mysql_fixture_summary_and_generate() {
         let dump = fixture("production_shape.sql");
-        let mut session = PlaygroundSession::try_new(&dump, None).unwrap();
+        let mut session = PlaygroundSession::try_new(&dump, None, None).unwrap();
 
         let summary: serde_json::Value =
             serde_json::from_str(&session.summary_json().unwrap()).unwrap();
@@ -459,7 +525,7 @@ mod tests {
     #[test]
     fn generate_cross_dialect_and_modes() {
         let dump = fixture("production_shape.sql");
-        let mut session = PlaygroundSession::try_new(&dump, None).unwrap();
+        let mut session = PlaygroundSession::try_new(&dump, None, None).unwrap();
 
         let mssql = session
             .generate_sql(10, 1, Some("mssql".into()), None)
@@ -493,7 +559,7 @@ mod tests {
     #[test]
     fn model_yaml_is_deterministic_and_frozen() {
         let dump = fixture("production_shape.sql");
-        let session = PlaygroundSession::try_new(&dump, None).unwrap();
+        let session = PlaygroundSession::try_new(&dump, None, None).unwrap();
 
         let yaml = session.model_yaml_impl(50, 7, None, None).unwrap();
         assert_eq!(yaml, session.model_yaml_impl(50, 7, None, None).unwrap());
@@ -510,7 +576,7 @@ mod tests {
     #[test]
     fn postgres_fixture_autodetects_and_profiles_copy() {
         let dump = fixture("production_shape_postgres.sql");
-        let session = PlaygroundSession::try_new(&dump, None).unwrap();
+        let session = PlaygroundSession::try_new(&dump, None, None).unwrap();
 
         let summary: serde_json::Value =
             serde_json::from_str(&session.summary_json().unwrap()).unwrap();
@@ -527,7 +593,7 @@ mod tests {
     #[test]
     fn schema_only_dump_generates() {
         let dump = b"CREATE TABLE t (id INT PRIMARY KEY, label VARCHAR(50));";
-        let mut session = PlaygroundSession::try_new(dump, Some("mysql".into())).unwrap();
+        let mut session = PlaygroundSession::try_new(dump, Some("mysql".into()), None).unwrap();
 
         let summary: serde_json::Value =
             serde_json::from_str(&session.summary_json().unwrap()).unwrap();
@@ -539,15 +605,28 @@ mod tests {
     }
 
     #[test]
+    fn progress_callback_reports_monotonic_fractions() {
+        let dump = fixture("production_shape.sql");
+        let mut fractions: Vec<f64> = Vec::new();
+        let mut callback = |f: f64| fractions.push(f);
+        PlaygroundSession::try_new(&dump, None, Some(&mut callback)).unwrap();
+
+        assert!(!fractions.is_empty());
+        assert!(fractions.iter().all(|f| (0.0..=1.0).contains(f)));
+        assert!(fractions.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(*fractions.last().unwrap(), 1.0);
+    }
+
+    #[test]
     fn garbage_input_errors_without_panic() {
-        let result = PlaygroundSession::try_new(&[0xFF, 0xFE, 0x00, 0x42], None);
+        let result = PlaygroundSession::try_new(&[0xFF, 0xFE, 0x00, 0x42], None, None);
         assert!(result.is_err());
     }
 
     #[test]
     fn zero_rows_rejected() {
         let dump = b"CREATE TABLE t (id INT PRIMARY KEY);";
-        let mut session = PlaygroundSession::try_new(dump, Some("mysql".into())).unwrap();
+        let mut session = PlaygroundSession::try_new(dump, Some("mysql".into()), None).unwrap();
         assert!(session.generate_sql(0, 1, None, None).is_err());
     }
 }

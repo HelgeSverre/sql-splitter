@@ -111,7 +111,23 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <!-- Busy state -->
       <template x-if="state === 'analyzing'">
         <div class="pg-empty">
-          <div class="pg-spinner"></div>
+          <template x-if="analyzeProgress === null">
+            <div class="pg-spinner"></div>
+          </template>
+          <template x-if="analyzeProgress !== null">
+            <div class="pg-progress-group">
+              <div class="pg-progress">
+                <div
+                  class="pg-progress-fill"
+                  x-bind:style="'width:' + Math.round((analyzeProgress ?? 0) * 100) + '%'"
+                >
+                </div>
+              </div>
+              <span
+                class="pg-muted pg-progress-label"
+                x-text="Math.round((analyzeProgress ?? 0) * 100) + '%'"></span>
+            </div>
+          </template>
           <p class="pg-drop-title">Analyzing dump&hellip;</p>
           <p class="pg-muted">Profiling tables, observing value shapes, inferring generators</p>
         </div>
@@ -479,7 +495,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   type WorkerReply =
-    | { id: number; type: 'status'; stage: string }
+    | { id: number; type: 'status'; stage: string; progress?: number }
     | { id: number; type: 'analyzed'; summary: Summary }
     | { id: number; type: 'generated'; sql: string; renderWarnings: WarningInfo[] }
     | { id: number; type: 'model'; yaml: string }
@@ -562,6 +578,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     modelLoading: false,
     error: null as string | null,
     perfWarning: null as string | null,
+    analyzeProgress: null as number | null,
 
     worker: null as Worker | null,
     requestId: 0,
@@ -588,7 +605,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
     onWorkerMessage(msg: WorkerReply) {
       if (msg.id !== this.requestId) return; // stale reply from a superseded request
-      if (msg.type === 'analyzed') {
+      if (msg.type === 'status') {
+        if (msg.stage === 'analyzing' && typeof msg.progress === 'number') {
+          this.analyzeProgress = msg.progress;
+        }
+      } else if (msg.type === 'analyzed') {
         this.summary = msg.summary;
         this.selectedTable = msg.summary.tables[0]?.name ?? null;
         this.tab = 'analysis';
@@ -598,6 +619,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         this.modelYamlText = null;
         this.modelHtml = null;
         this.modelKey = null;
+        this.analyzeProgress = null;
         this.state = 'ready';
       } else if (msg.type === 'generated') {
         this.sql = msg.sql;
@@ -612,6 +634,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       } else if (msg.type === 'error') {
         this.error = msg.message;
         this.modelLoading = false;
+        this.analyzeProgress = null;
         if (msg.fatal) {
           this.spawnWorker();
           this.summary = null;
@@ -720,6 +743,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.summary = null;
       this.sql = null;
       this.sqlHtml = null;
+      this.analyzeProgress = null;
       const id = ++this.requestId;
       const dialect = this.dialect === 'auto' ? null : this.dialect;
       this.worker?.postMessage({ id, type: 'analyze', buffer, dialect }, [buffer]);
@@ -1050,6 +1074,35 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     border-top-color: var(--color-accent);
     border-radius: 50%;
     animation: pg-spin 0.8s linear infinite;
+  }
+
+  .pg-progress-group {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    width: min(360px, 80%);
+  }
+
+  .pg-progress {
+    flex: 1;
+    height: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .pg-progress-fill {
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.15s linear;
+  }
+
+  .pg-progress-label {
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    min-width: 3ch;
+    text-align: right;
   }
 
   @keyframes pg-spin {

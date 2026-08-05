@@ -24,9 +24,14 @@ export class PlaygroundSession {
    * Profile a dump and infer a generation model from it.
    *
    * `dialect` is `"mysql" | "postgres" | "sqlite" | "mssql"`, or `None` to
-   * sniff the first 8KB.
+   * sniff the first 8KB. `on_progress`, when given, is called with a
+   * `0.0..=1.0` fraction as the profiler consumes the dump.
    */
-  constructor(dump: Uint8Array, dialect?: string | null);
+  constructor(
+    dump: Uint8Array,
+    dialect?: string | null,
+    on_progress?: Function | null,
+  );
   /**
    * The analyze summary as a JSON string (see `Summary` for the shape).
    */
@@ -80,11 +85,12 @@ export interface InitOutput {
     c: number,
     d: number,
     e: number,
+    f: number,
   ) => void;
   readonly playgroundsession_summary: (a: number, b: number) => void;
   readonly start: () => void;
-  readonly __wbindgen_export: (a: number, b: number, c: number) => void;
-  readonly __wbindgen_export2: (a: number) => void;
+  readonly __wbindgen_export: (a: number) => void;
+  readonly __wbindgen_export2: (a: number, b: number, c: number) => void;
   readonly __wbindgen_export3: (a: number, b: number) => number;
   readonly __wbindgen_export4: (
     a: number,

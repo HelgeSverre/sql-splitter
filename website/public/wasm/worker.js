@@ -16,7 +16,17 @@ self.onmessage = async (event) => {
         session = null;
       }
       const bytes = new Uint8Array(event.data.buffer);
-      session = new PlaygroundSession(bytes, event.data.dialect ?? undefined);
+      session = new PlaygroundSession(
+        bytes,
+        event.data.dialect ?? undefined,
+        (progress) =>
+          self.postMessage({
+            id,
+            type: "status",
+            stage: "analyzing",
+            progress,
+          }),
+      );
       const summary = JSON.parse(session.summary());
       self.postMessage({ id, type: "analyzed", summary });
     } else if (type === "generate") {

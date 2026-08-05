@@ -57,7 +57,7 @@ function handleError(f, args) {
   try {
     return f.apply(this, args);
   } catch (e) {
-    wasm.__wbindgen_export2(addHeapObject(e));
+    wasm.__wbindgen_export(addHeapObject(e));
   }
 }
 
@@ -237,7 +237,7 @@ export class PlaygroundSession {
       return getStringFromWasm0(ptr3, len3);
     } finally {
       wasm.__wbindgen_add_to_stack_pointer(16);
-      wasm.__wbindgen_export(deferred4_0, deferred4_1, 1);
+      wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
     }
   }
   /**
@@ -267,18 +267,20 @@ export class PlaygroundSession {
       return getStringFromWasm0(ptr1, len1);
     } finally {
       wasm.__wbindgen_add_to_stack_pointer(16);
-      wasm.__wbindgen_export(deferred2_0, deferred2_1, 1);
+      wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
     }
   }
   /**
    * Profile a dump and infer a generation model from it.
    *
    * `dialect` is `"mysql" | "postgres" | "sqlite" | "mssql"`, or `None` to
-   * sniff the first 8KB.
+   * sniff the first 8KB. `on_progress`, when given, is called with a
+   * `0.0..=1.0` fraction as the profiler consumes the dump.
    * @param {Uint8Array} dump
    * @param {string | null} [dialect]
+   * @param {Function | null} [on_progress]
    */
-  constructor(dump, dialect) {
+  constructor(dump, dialect, on_progress) {
     try {
       const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
       const ptr0 = passArray8ToWasm0(dump, wasm.__wbindgen_export3);
@@ -291,7 +293,14 @@ export class PlaygroundSession {
             wasm.__wbindgen_export4,
           );
       var len1 = WASM_VECTOR_LEN;
-      wasm.playgroundsession_new(retptr, ptr0, len0, ptr1, len1);
+      wasm.playgroundsession_new(
+        retptr,
+        ptr0,
+        len0,
+        ptr1,
+        len1,
+        isLikeNone(on_progress) ? 0 : addHeapObject(on_progress),
+      );
       var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
       var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
       var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -331,7 +340,7 @@ export class PlaygroundSession {
       return getStringFromWasm0(ptr1, len1);
     } finally {
       wasm.__wbindgen_add_to_stack_pointer(16);
-      wasm.__wbindgen_export(deferred2_0, deferred2_1, 1);
+      wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
     }
   }
   /**
@@ -392,7 +401,7 @@ export class PlaygroundSession {
       return getStringFromWasm0(ptr3, len3);
     } finally {
       wasm.__wbindgen_add_to_stack_pointer(16);
-      wasm.__wbindgen_export(deferred4_0, deferred4_1, 1);
+      wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
     }
   }
 }
@@ -452,6 +461,12 @@ function __wbg_get_imports() {
   imports.wbg.__wbg___wbindgen_throw_dd24417ed36fc46e = function (arg0, arg1) {
     throw new Error(getStringFromWasm0(arg0, arg1));
   };
+  imports.wbg.__wbg_call_3020136f7a2d6e44 = function () {
+    return handleError(function (arg0, arg1, arg2) {
+      const ret = getObject(arg0).call(getObject(arg1), getObject(arg2));
+      return addHeapObject(ret);
+    }, arguments);
+  };
   imports.wbg.__wbg_error_7534b8e9a36f1ab4 = function (arg0, arg1) {
     let deferred0_0;
     let deferred0_1;
@@ -460,7 +475,7 @@ function __wbg_get_imports() {
       deferred0_1 = arg1;
       console.error(getStringFromWasm0(arg0, arg1));
     } finally {
-      wasm.__wbindgen_export(deferred0_0, deferred0_1, 1);
+      wasm.__wbindgen_export2(deferred0_0, deferred0_1, 1);
     }
   };
   imports.wbg.__wbg_getRandomValues_1c61fac11405ffdc = function () {
@@ -487,6 +502,11 @@ function __wbg_get_imports() {
     const len1 = WASM_VECTOR_LEN;
     getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
     getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+  };
+  imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function (arg0) {
+    // Cast intrinsic for `F64 -> Externref`.
+    const ret = arg0;
+    return addHeapObject(ret);
   };
   imports.wbg.__wbindgen_object_drop_ref = function (arg0) {
     takeObject(arg0);
