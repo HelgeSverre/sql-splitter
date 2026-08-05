@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-08-05
+
 ### Fixed
 
 - **`query --cache` served whichever cache existed for the dump, whatever it contained** — the cache key hashed only the dump's path, size and mtime, so a cache built with `--tables order_items` was silently handed to a query requesting six tables: `SHOW TABLES` showed one table, joins against the rest failed or returned partial data. The `--tables` selection (lowercased, sorted, deduped — matching the loader's case-insensitive filter) and `--dialect` are now part of the key, so each selection gets its own cache slot and they coexist; asking for a different set re-imports and says why: `Note: existing cache covers {order_items}; requested {order_items, orders, …} - re-importing`. Existing caches use the old key scheme and re-import once after upgrading; `--clear-cache` reclaims the orphaned files (#94).
