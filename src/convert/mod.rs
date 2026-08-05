@@ -205,28 +205,18 @@ impl Converter {
                 .map(|l| format!("'{}'", l.replace('\'', "''")))
                 .collect();
             let inline_enum = format!("ENUM({})", quoted_labels.join(","));
+            // Match the type name as a standalone word. The word-boundary
+            // anchors prevent substring matches (e.g. "status" won't match
+            // inside "status_type"). Only match unqualified: schema-qualified
+            // forms are stripped earlier by strip_schema_prefix.
+            let unqualified = type_name.rsplit('.').next().unwrap_or(type_name);
             let pattern = regex::Regex::new(&format!(
                 r"(?i)\b{}\b",
-                regex::escape(type_name)
+                regex::escape(unqualified)
             ))
             .ok();
             if let Some(re) = pattern {
-                let before = result.clone();
                 result = re.replace_all(&result, inline_enum.as_str()).to_string();
-                if result != before && type_name.contains('.') {
-                    if let Some(unqualified) = type_name.rsplit('.').next() {
-                        let unqualified_re = regex::Regex::new(&format!(
-                            r"(?i)\b{}\b",
-                            regex::escape(unqualified)
-                        ))
-                        .ok();
-                        if let Some(re2) = unqualified_re {
-                            result = re2
-                                .replace_all(&result, inline_enum.as_str())
-                                .to_string();
-                        }
-                    }
-                }
             }
         }
         result
@@ -248,9 +238,11 @@ impl Converter {
         let mut result = stmt.to_string();
 
         for (offset, labels) in enum_matches.iter().rev() {
+            let column = enum_parser::extract_column_name_before(&result, *offset)
+                .unwrap_or_else(|| "col".to_string());
             let pg_type_name = self
                 .enum_registry
-                .get_or_create_pg_type_for_signature(table, "column", labels);
+                .get_or_create_pg_type_for_signature(table, &column, labels);
 
             let full_enum_text =
                 find_full_enum_match(&result, *offset).unwrap_or_else(|| {

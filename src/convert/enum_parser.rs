@@ -58,6 +58,53 @@ pub fn mysql_inline_enum_labels(stmt: &str) -> Vec<(usize, Vec<String>)> {
     results
 }
 
+/// Extract the column name immediately preceding `offset` in a CREATE TABLE
+/// statement body. Looks backward from `offset` to find a backtick-quoted,
+/// double-quoted, or bare identifier.
+pub fn extract_column_name_before(stmt: &str, enum_offset: usize) -> Option<String> {
+    let prefix = &stmt[..enum_offset];
+    let prefix_bytes = prefix.as_bytes();
+    let mut i = prefix_bytes.len();
+    // Skip whitespace
+    while i > 0 && prefix_bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    // Check for backtick-quoted identifier
+    if prefix_bytes[i - 1] == b'`' {
+        let end = i - 1;
+        i -= 1;
+        while i > 0 && prefix_bytes[i - 1] != b'`' {
+            i -= 1;
+        }
+        if i > 0 && prefix_bytes[i - 1] == b'`' {
+            return Some(prefix[i..end].to_string());
+        }
+    }
+    // Check for double-quoted identifier
+    if prefix_bytes[i - 1] == b'"' {
+        let end = i - 1;
+        i -= 1;
+        while i > 0 && prefix_bytes[i - 1] != b'"' {
+            i -= 1;
+        }
+        if i > 0 && prefix_bytes[i - 1] == b'"' {
+            return Some(prefix[i..end].to_string());
+        }
+    }
+    // Bare identifier (alphanumeric + underscore)
+    let end = i;
+    while i > 0 && (prefix_bytes[i - 1].is_ascii_alphanumeric() || prefix_bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    if i < end {
+        return Some(prefix[i..end].to_string());
+    }
+    None
+}
+
 pub fn parse_enum_labels(labels_str: &str) -> Vec<String> {
     let chars: Vec<char> = labels_str.chars().collect();
     let n = chars.len();

@@ -1402,4 +1402,44 @@ fn test_enum_narrows_to_varchar_cross_dialect() {
         !output_str.contains("VARCHAR(255)"),
         "MySQL→Postgres enum should not become VARCHAR: {output_str}"
     );
+    assert!(
+        output_str.contains("enum__t__kind"),
+        "should use actual column name; got: {output_str}"
+    );
+}
+
+#[test]
+fn test_mysql_to_pg_enum_uses_actual_column_names() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let input = b"CREATE TABLE t (prio ENUM('low','med') NOT NULL, kind ENUM('a','b'));";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+    assert!(
+        output_str.contains("enum__t__prio"),
+        "first column name wrong: {output_str}"
+    );
+    assert!(
+        output_str.contains("enum__t__kind"),
+        "second column name wrong: {output_str}"
+    );
+    assert!(
+        !output_str.contains("enum__t__col"),
+        "should not use 'col' as column name: {output_str}"
+    );
+}
+
+#[test]
+fn test_mysql_to_pg_enum_backtick_quoted_columns() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let input = b"CREATE TABLE `users` (\n  `status` ENUM('active','inactive') NOT NULL\n);";
+    let output = converter.convert_statement(input).unwrap();
+    let output_str = String::from_utf8_lossy(&output);
+    assert!(
+        output_str.contains("enum__users__status"),
+        "should extract backtick-quoted column name: {output_str}"
+    );
+    assert!(
+        !output_str.contains("VARCHAR(255)"),
+        "backtick enum should not become VARCHAR: {output_str}"
+    );
 }
