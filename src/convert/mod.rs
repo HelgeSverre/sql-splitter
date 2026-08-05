@@ -139,6 +139,14 @@ fn declared_column_type(create_table: &str, column: &str) -> Option<String> {
     Some(captures.name("type")?.as_str().trim().to_string())
 }
 
+/// Whether converting between these two dialects preserves enum semantics.
+pub(crate) fn enum_aware_pair(from: SqlDialect, to: SqlDialect) -> bool {
+    matches!(
+        (from, to),
+        (SqlDialect::Postgres, SqlDialect::MySql) | (SqlDialect::MySql, SqlDialect::Postgres)
+    )
+}
+
 impl Converter {
     pub fn new(from: SqlDialect, to: SqlDialect) -> Self {
         Self {
@@ -167,7 +175,6 @@ impl Converter {
         self
     }
 
-    #[allow(dead_code)]
     pub fn with_enum_naming(mut self, naming: EnumNamingStrategy) -> Self {
         self.enum_naming = naming;
         self.enum_registry = EnumRegistry::with_naming(naming);
@@ -282,12 +289,8 @@ impl Converter {
         result
     }
 
-    fn is_enum_aware(&self) -> bool {
-        matches!(
-            (self.from, self.to),
-            (SqlDialect::Postgres, SqlDialect::MySql)
-                | (SqlDialect::MySql, SqlDialect::Postgres)
-        )
+    pub(crate) fn is_enum_aware(&self) -> bool {
+        enum_aware_pair(self.from, self.to)
     }
 
     /// Check if we have a pending COPY header (waiting for data block)

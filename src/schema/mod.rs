@@ -166,36 +166,34 @@ fn parse_enum_values(type_str: &str) -> Vec<String> {
     };
     let inner = &type_str[open + 1..close];
     let mut values = Vec::new();
-    let bytes = inner.as_bytes();
+    let chars: Vec<char> = inner.chars().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b',') {
+    while i < chars.len() {
+        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
             i += 1;
         }
-        if i >= bytes.len() {
+        if i >= chars.len() {
             break;
         }
-        if bytes[i] == b'\'' {
-            i += 1; // skip opening quote
+        if chars[i] == '\'' {
+            i += 1;
             let mut val = String::new();
-            while i < bytes.len() {
-                if bytes[i] == b'\'' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+            while i < chars.len() {
+                if chars[i] == '\'' {
+                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
                         val.push('\'');
                         i += 2;
                     } else {
-                        i += 1; // skip closing quote
+                        i += 1;
                         break;
                     }
                 } else {
-                    val.push(bytes[i] as char);
+                    val.push(chars[i]);
                     i += 1;
                 }
             }
             values.push(val);
         } else {
-            // Non-quoted token (should not normally happen for ENUM values,
-            // but skip it gracefully)
             i += 1;
         }
     }

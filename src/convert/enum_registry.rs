@@ -81,7 +81,24 @@ impl EnumRegistry {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = DefaultHasher::new();
                     signature.hash(&mut hasher);
-                    let name = format!("{base}_{:x}", hasher.finish());
+                    let mut name = format!("{base}_{:x}", hasher.finish());
+                    // Guard against hash collisions: if the generated name
+                    // already exists with different labels, append a counter.
+                    if let Some(existing_sig) =
+                        self.enum_signatures
+                            .iter()
+                            .find(|(_, n)| **n == name)
+                            .map(|(s, _)| s)
+                    {
+                        if existing_sig != &signature {
+                            for n in 2u32.. {
+                                name = format!("{base}_{:x}_{n}", hasher.finish());
+                                if !self.enum_signatures.values().any(|v| v == &name) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     self.enum_signatures.insert(signature, name.clone());
                     return name;
                 }
