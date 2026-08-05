@@ -159,7 +159,15 @@ test("the playground ships with its wasm artifacts", () => {
   );
   expect(existsSync(join(dist, "wasm", "sql_splitter_wasm.js"))).toBe(true);
   expect(existsSync(join(dist, "wasm", "worker.js"))).toBe(true);
-  expect(existsSync(join(dist, "playground", "example-mysql.sql"))).toBe(true);
+  for (const example of [
+    "saas-mysql.sql",
+    "saas-postgres.sql",
+    "dealership-mysql.sql",
+    "ledger-mssql.sql",
+    "cms-sqlite.sql",
+  ]) {
+    expect(existsSync(join(dist, "playground", example))).toBe(true);
+  }
 
   const html = readFileSync(join(dist, "playground", "index.html"), "utf8");
   expect(html).toContain("never leaves your machine");

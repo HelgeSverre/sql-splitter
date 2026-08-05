@@ -46,12 +46,15 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         <div class="pg-examples" x-data="{ open: false }" x-on:click.outside="open = false">
           <button class="pg-btn" x-on:click="open = !open">Examples &#9662;</button>
           <div class="pg-examples-menu" x-show="open" x-on:click="open = false">
-            <button x-on:click="loadExample('example-mysql.sql')">
-              MySQL — multi-tenant SaaS
-            </button>
-            <button x-on:click="loadExample('example-postgres.sql')">
-              PostgreSQL — multi-tenant SaaS (COPY)
-            </button>
+            <button x-on:click="loadExample('saas-mysql.sql')">SaaS &middot; MySQL</button>
+            <button x-on:click="loadExample('saas-postgres.sql')">SaaS &middot; Postgres</button>
+            <button x-on:click="loadExample('dealership-mysql.sql')"
+              >Dealership &middot; MySQL</button
+            >
+            <button x-on:click="loadExample('ledger-mssql.sql')">Ledger &middot; MSSQL</button>
+            <button x-on:click="loadExample('cms-sqlite.sql', 'sqlite')"
+              >CMS &middot; SQLite</button
+            >
           </div>
         </div>
       </div>
@@ -144,7 +147,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                 x-bind:class="{ selected: selectedTable === table.name }"
                 x-on:click="selectedTable = table.name; tab = 'analysis'"
               >
-                <span class="pg-table-name" x-text="table.name"></span>
+                <span
+                  class="pg-table-name"
+                  x-text="table.name"
+                  x-bind:title="table.name"
+                ></span>
                 <span
                   class="pg-table-rows"
                   x-text="table.rowCount === null ? 'schema' : table.rowCount + ' rows'"
@@ -843,23 +850,23 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.analyze(buffer);
     },
 
-    async loadExample(name: string) {
+    async loadExample(name: string, forceDialect?: string) {
       this.error = null;
       this.perfWarning = null;
       const response = await fetch(`/playground/${name}`);
       const buffer = await response.arrayBuffer();
       this.fileName = name;
-      this.analyze(buffer);
+      this.analyze(buffer, forceDialect);
     },
 
-    analyze(buffer: ArrayBuffer) {
+    analyze(buffer: ArrayBuffer, forceDialect?: string) {
       this.state = 'analyzing';
       this.summary = null;
       this.sql = null;
       this.sqlHtml = null;
       this.analyzeProgress = null;
       const id = ++this.requestId;
-      const dialect = this.dialect === 'auto' ? null : this.dialect;
+      const dialect = forceDialect ?? (this.dialect === 'auto' ? null : this.dialect);
       this.worker?.postMessage({ id, type: 'analyze', buffer, dialect }, [buffer]);
     },
 
@@ -1241,6 +1248,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     overflow-y: auto;
     min-height: 0;
     scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
   }
 
   .pg-sidebar-title {
@@ -1265,6 +1274,15 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     padding: 0.35rem var(--space-sm);
     cursor: pointer;
     text-align: left;
+    min-width: 0;
+  }
+
+  .pg-table-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .pg-table-item:hover {
@@ -1281,6 +1299,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     font-size: 0.75rem;
     color: var(--color-text-muted);
     white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .pg-main {
@@ -1335,6 +1354,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     flex: 1;
     min-height: 0;
     scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
   }
 
   .pg-table-header {
@@ -1441,6 +1462,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     border-radius: var(--radius);
     padding: var(--space-sm);
     overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
     font-family: var(--font-mono);
     font-size: 0.8rem;
     line-height: 1.5;

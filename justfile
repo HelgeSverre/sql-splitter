@@ -229,20 +229,29 @@ wasm: _website-deps
     cd website && bunx prettier --write "public/wasm/*.js" "public/wasm/*.ts" --log-level warn
     ls -lh website/public/wasm/*.wasm
 
-# Regenerate the playground example dumps from the "everything" stress fixture
-# (17 tables, all planners, an FK cycle). Deterministic under the model's own
-# seed EXCEPT import_jobs, which the fixture pins to `seed: null` by design.
-# --rows/--scale break this fixture's row-count rules; --max-rows must stay
-# >= 200 (categories needs >= 5 children per each of 40 tenants) and
-# order_items requires exactly 4 x orders, hence the orders pin.
+# Regenerate the playground example dumps from the stress fixtures. Mostly
+# deterministic under each model's own seed (everything.yaml's import_jobs pins
+# `seed: null` by design). For everything.yaml, --rows/--scale break the
+# row-count rules; --max-rows must stay >= 200 (categories needs >= 5 children
+# per each of 40 tenants) and order_items requires exactly 4 x orders, hence
+# the orders pin.
 [group('website')]
 playground-examples:
     cargo run --release -- generate -c tests/fixtures/generate/stress/everything.yaml \
       --dialect mysql --max-rows 200 --table-rows orders=50 \
-      -o website/public/playground/example-mysql.sql
+      -o website/public/playground/saas-mysql.sql
     cargo run --release -- generate -c tests/fixtures/generate/stress/everything.yaml \
       --dialect postgres --max-rows 200 --table-rows orders=50 \
-      -o website/public/playground/example-postgres.sql
+      -o website/public/playground/saas-postgres.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/car_dealership.yaml \
+      --dialect mysql --max-rows 150 \
+      -o website/public/playground/dealership-mysql.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/banking_ledger.yaml \
+      --dialect mssql --max-rows 150 \
+      -o website/public/playground/ledger-mssql.sql
+    cargo run --release -- generate -c tests/fixtures/generate/stress/cms_kitchensink.yaml \
+      --dialect sqlite --max-rows 150 \
+      -o website/public/playground/cms-sqlite.sql
     ls -lh website/public/playground/*.sql
 
 # Build website for production

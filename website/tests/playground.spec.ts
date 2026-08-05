@@ -9,7 +9,7 @@ test("playground analyzes an example dump and generates synthetic SQL", async ({
   await page.goto("/playground/");
 
   await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /mysql — multi-tenant/i }).click();
+  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
 
   // The real profiler found the fixture's tables
   const sidebar = page.locator(".pg-sidebar");
@@ -39,7 +39,7 @@ test("model tab, cross-dialect output, and warnings tab work", async ({
   await page.goto("/playground/");
 
   await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /mysql — multi-tenant/i }).click();
+  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
   const sidebar = page.locator(".pg-sidebar");
   await expect(sidebar.getByRole("button", { name: /^users/ })).toBeVisible({
     timeout: 20000,
@@ -61,6 +61,31 @@ test("model tab, cross-dialect output, and warnings tab work", async ({
   // Warnings tab renders structured entries
   await page.getByRole("button", { name: /warnings/i }).click();
   await expect(page.locator(".pg-warnings")).toBeVisible();
+});
+
+test("every example loads and analyzes through the real pipeline", async ({
+  page,
+}) => {
+  const examples = [
+    { label: /^SaaS · Postgres/i, chip: /postgres/ },
+    { label: /^Dealership · MySQL/i, chip: /mysql/ },
+    { label: /^Ledger · MSSQL/i, chip: /mssql/ },
+    { label: /^CMS · SQLite/i, chip: /sqlite/ },
+  ];
+  await page.goto("/playground/");
+  for (const example of examples) {
+    await page.getByRole("button", { name: /examples/i }).click();
+    await page.getByRole("button", { name: example.label }).click();
+    await expect(
+      page.locator(".pg-sidebar .pg-table-item").first(),
+    ).toBeVisible({ timeout: 30000 });
+    await expect(page.locator(".pg-chip")).toContainText(example.chip, {
+      timeout: 5000,
+    });
+    expect(
+      await page.locator(".pg-sidebar .pg-table-item").count(),
+    ).toBeGreaterThan(3);
+  }
 });
 
 test("playground rejects compressed uploads with a helpful message", async ({
