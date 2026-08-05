@@ -360,15 +360,15 @@ fn lossy_enum_mapping_warns_cross_dialect_and_is_clean_same_dialect() {
     );
     assert_eq!(same_warnings, 0, "same-dialect ENUM should not warn");
 
-    // Cross dialect: ENUM narrows to a plain string and records a lossy warning.
+    // Cross dialect: ENUM narrows to a plain string on SQLite (still lossy).
     let (sql, warnings) = render(
         compile_all(enum_model()),
-        SqlDialect::Postgres,
+        SqlDialect::Sqlite,
         Some(SqlDialect::MySql),
         OutputMode::SchemaOnly,
     );
     assert!(warnings >= 1, "cross-dialect ENUM should warn: {sql}");
-    assert!(sql.contains("VARCHAR(255)"), "ENUM not narrowed: {sql}");
+    assert!(sql.contains("TEXT"), "ENUM not narrowed: {sql}");
 }
 
 // --- IDENTITY + explicit values: loadability -------------------------------

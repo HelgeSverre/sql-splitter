@@ -46,6 +46,7 @@ static CONSTANT_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
         SqlTypeFamily::Integer,
         SqlTypeFamily::BigInteger,
         SqlTypeFamily::Decimal,
+        SqlTypeFamily::Enum,
         SqlTypeFamily::Boolean,
         SqlTypeFamily::Text,
         SqlTypeFamily::Bytes,

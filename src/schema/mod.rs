@@ -43,6 +43,8 @@ pub enum ColumnType {
     Int,
     /// Big integer types: BIGINT
     BigInt,
+    /// Enum types with their ordered member values
+    Enum(Vec<String>),
     /// Text types: CHAR, VARCHAR, TEXT, etc.
     Text,
     /// UUID types (detected by column name or type)
@@ -85,6 +87,7 @@ impl ColumnType {
             // Auto-increment integer types (PostgreSQL)
             "serial" | "smallserial" => ColumnType::Int,
             "bigint" | "int8" | "bigserial" => ColumnType::BigInt,
+            "enum" => ColumnType::Enum(parse_enum_values(type_str)),
             // Text types (all dialects)
             "char"
             | "varchar"
@@ -92,7 +95,6 @@ impl ColumnType {
             | "tinytext"
             | "mediumtext"
             | "longtext"
-            | "enum"
             | "set"
             | "character"
             | "character varying"
@@ -147,6 +149,57 @@ impl ColumnType {
     pub fn from_mysql_type(type_str: &str) -> Self {
         Self::from_sql_type(type_str)
     }
+}
+
+/// Parse a type string like `"ENUM('a','b','c')"` into the ordered list of
+/// member values. Returns an empty `Vec` when the type string is just `"enum"`
+/// with no `(…)` or when parsing fails.
+fn parse_enum_values(type_str: &str) -> Vec<String> {
+    let lower = type_str.to_lowercase();
+    let open = match lower.find('(') {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let close = match lower.rfind(')') {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let inner = &type_str[open + 1..close];
+    let mut values = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'\'' {
+            i += 1; // skip opening quote
+            let mut val = String::new();
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        val.push('\'');
+                        i += 2;
+                    } else {
+                        i += 1; // skip closing quote
+                        break;
+                    }
+                } else {
+                    val.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            values.push(val);
+        } else {
+            // Non-quoted token (should not normally happen for ENUM values,
+            // but skip it gracefully)
+            i += 1;
+        }
+    }
+    values
 }
 
 /// Column definition within a table

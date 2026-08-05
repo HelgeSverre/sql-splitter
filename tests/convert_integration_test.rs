@@ -254,14 +254,15 @@ CREATE TABLE `users` (
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        result.contains("VARCHAR(255)"),
-        "ENUM should become VARCHAR(255)"
+        result.contains("CREATE TYPE"),
+        "Should emit CREATE TYPE for ENUM"
     );
-    assert!(!result.contains("ENUM("), "Should not have ENUM");
     assert!(
-        stderr.contains("ENUM") || stderr.contains("Unsupported"),
-        "Should warn about ENUM"
+        !result.contains("VARCHAR(255)"),
+        "ENUM should not become VARCHAR(255) when converting MySQL→Postgres"
     );
+    let has_enum_warning = stderr.contains("ENUM") || stderr.contains("Unsupported");
+    assert!(!has_enum_warning, "Should not warn about ENUM for MySQL→Postgres: {stderr}");
 }
 
 #[test]
