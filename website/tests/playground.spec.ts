@@ -122,3 +122,39 @@ test("playground rejects compressed uploads with a helpful message", async ({
 
   await expect(page.locator(".pg-error")).toContainText("gzip");
 });
+
+test("sidebar resizes by dragging and persists across reloads", async ({
+  page,
+}) => {
+  await page.goto("/playground/");
+  await page.getByRole("button", { name: /examples/i }).click();
+  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
+  const sidebar = page.locator(".pg-sidebar");
+  await expect(sidebar).toBeVisible({ timeout: 20000 });
+
+  const before = (await sidebar.boundingBox())!.width;
+  expect(Math.round(before)).toBe(240);
+
+  const handle = (await page.locator(".pg-resizer").boundingBox())!;
+  await page.mouse.move(handle.x + 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 122, handle.y + handle.height / 2, {
+    steps: 5,
+  });
+  await page.mouse.up();
+
+  const widened = (await sidebar.boundingBox())!.width;
+  expect(widened).toBeGreaterThan(340);
+  expect(widened).toBeLessThan(400);
+
+  // Persists across a reload
+  await page.reload();
+  await page.getByRole("button", { name: /examples/i }).click();
+  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
+  await expect(sidebar).toBeVisible({ timeout: 20000 });
+  expect((await sidebar.boundingBox())!.width).toBeCloseTo(widened, 0);
+
+  // Double-click resets
+  await page.locator(".pg-resizer").dblclick();
+  expect(Math.round((await sidebar.boundingBox())!.width)).toBe(240);
+});
