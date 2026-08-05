@@ -25,16 +25,32 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         </div>
       </div>
       <div class="pg-topbar-actions">
-        <label class="pg-select-label">
-          Dialect
-          <select x-model="dialect">
-            <option value="auto">auto-detect</option>
-            <option value="mysql">mysql</option>
-            <option value="postgres">postgres</option>
-            <option value="sqlite">sqlite</option>
-            <option value="mssql">mssql</option>
-          </select>
-        </label>
+        <div
+          class="pg-menu"
+          x-data="{ open: false }"
+          x-on:click.outside="open = false"
+          x-on:keydown.escape.window="open = false"
+        >
+          <button
+            class="pg-btn"
+            data-testid="dialect-menu"
+            x-on:click="open = !open"
+            aria-haspopup="menu"
+            x-bind:aria-expanded="open"
+          >
+            Dialect: <span x-text="labelFor(sourceDialects, dialect)"></span> &#9662;
+          </button>
+          <div class="pg-menu-panel" x-show="open" x-on:click="open = false" role="menu">
+            <template x-for="opt in sourceDialects" :key="opt.value">
+              <button
+                role="menuitemradio"
+                x-bind:data-testid="'dialect-' + opt.value"
+                x-bind:aria-checked="dialect === opt.value"
+                x-on:click="setDialect(opt.value)"
+                x-text="opt.label"></button>
+            </template>
+          </div>
+        </div>
         <button class="pg-btn" x-on:click="$refs.fileInput.click()">Open file</button>
         <input
           type="file"
@@ -43,17 +59,49 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           hidden
           x-on:change="openFile($event.target.files[0]); $event.target.value = ''"
         />
-        <div class="pg-examples" x-data="{ open: false }" x-on:click.outside="open = false">
-          <button class="pg-btn" x-on:click="open = !open">Examples &#9662;</button>
-          <div class="pg-examples-menu" x-show="open" x-on:click="open = false">
-            <button x-on:click="loadExample('saas-mysql.sql')">SaaS &middot; MySQL</button>
-            <button x-on:click="loadExample('saas-postgres.sql')">SaaS &middot; Postgres</button>
-            <button x-on:click="loadExample('dealership-mysql.sql')"
-              >Dealership &middot; MySQL</button
+        <div
+          class="pg-menu"
+          x-data="{ open: false }"
+          x-on:click.outside="open = false"
+          x-on:keydown.escape.window="open = false"
+        >
+          <button
+            class="pg-btn"
+            data-testid="examples-menu"
+            x-on:click="open = !open"
+            aria-haspopup="menu"
+            x-bind:aria-expanded="open">Examples &#9662;</button
+          >
+          <div
+            class="pg-menu-panel wide"
+            x-show="open"
+            x-on:click="open = false"
+            role="menu"
+          >
+            <button
+              role="menuitem"
+              data-testid="example-saas-mysql"
+              x-on:click="loadExample('saas-mysql.sql')">SaaS &middot; MySQL</button
             >
-            <button x-on:click="loadExample('ledger-mssql.sql')">Ledger &middot; MSSQL</button>
-            <button x-on:click="loadExample('cms-sqlite.sql', 'sqlite')"
-              >CMS &middot; SQLite</button
+            <button
+              role="menuitem"
+              data-testid="example-saas-postgres"
+              x-on:click="loadExample('saas-postgres.sql')">SaaS &middot; Postgres</button
+            >
+            <button
+              role="menuitem"
+              data-testid="example-dealership-mysql"
+              x-on:click="loadExample('dealership-mysql.sql')">Dealership &middot; MySQL</button
+            >
+            <button
+              role="menuitem"
+              data-testid="example-ledger-mssql"
+              x-on:click="loadExample('ledger-mssql.sql')">Ledger &middot; MSSQL</button
+            >
+            <button
+              role="menuitem"
+              data-testid="example-cms-sqlite"
+              x-on:click="loadExample('cms-sqlite.sql', 'sqlite')">CMS &middot; SQLite</button
             >
           </div>
         </div>
@@ -444,24 +492,58 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         Seed
         <input type="number" min="0" x-model.number="seed" />
       </label>
-      <label>
-        Output dialect
-        <select x-model="outDialect">
-          <option value="" x-text="summary ? 'same as source (' + summary.dialect + ')' : 'same as source'"></option>
-          <option value="mysql">mysql</option>
-          <option value="postgres">postgres</option>
-          <option value="sqlite">sqlite</option>
-          <option value="mssql">mssql</option>
-        </select>
-      </label>
-      <label>
-        Output
-        <select x-model="outMode">
-          <option value="schema_and_data">schema + data</option>
-          <option value="schema_only">schema only</option>
-          <option value="data_only">data only</option>
-        </select>
-      </label>
+      <div
+        class="pg-menu up"
+        x-data="{ open: false }"
+        x-on:click.outside="open = false"
+        x-on:keydown.escape.window="open = false"
+      >
+        <button
+          class="pg-btn"
+          data-testid="out-dialect-menu"
+          x-on:click="open = !open"
+          aria-haspopup="menu"
+          x-bind:aria-expanded="open"
+        >
+          Output dialect: <span x-text="labelFor(outDialectOptions, outDialect)"></span> &#9662;
+        </button>
+        <div class="pg-menu-panel" x-show="open" x-on:click="open = false" role="menu">
+          <template x-for="opt in outDialectOptions" :key="opt.value">
+            <button
+              role="menuitemradio"
+              x-bind:data-testid="'out-dialect-' + (opt.value || 'same')"
+              x-bind:aria-checked="outDialect === opt.value"
+              x-on:click="outDialect = opt.value"
+              x-text="opt.label"></button>
+          </template>
+        </div>
+      </div>
+      <div
+        class="pg-menu up"
+        x-data="{ open: false }"
+        x-on:click.outside="open = false"
+        x-on:keydown.escape.window="open = false"
+      >
+        <button
+          class="pg-btn"
+          data-testid="out-mode-menu"
+          x-on:click="open = !open"
+          aria-haspopup="menu"
+          x-bind:aria-expanded="open"
+        >
+          Output: <span x-text="labelFor(outModes, outMode)"></span> &#9662;
+        </button>
+        <div class="pg-menu-panel" x-show="open" x-on:click="open = false" role="menu">
+          <template x-for="opt in outModes" :key="opt.value">
+            <button
+              role="menuitemradio"
+              x-bind:data-testid="'out-mode-' + opt.value"
+              x-bind:aria-checked="outMode === opt.value"
+              x-on:click="outMode = opt.value"
+              x-text="opt.label"></button>
+          </template>
+        </div>
+      </div>
       <button
         class="pg-btn pg-btn-primary"
         x-on:click="generate()"
@@ -547,6 +629,21 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   const DISPLAY_CAP = 1024 * 1024;
   const HIGHLIGHT_CAP = 256 * 1024;
 
+  interface MenuOption {
+    value: string;
+    label: string;
+  }
+  const DIALECTS: MenuOption[] = ['mysql', 'postgres', 'sqlite', 'mssql'].map((d) => ({
+    value: d,
+    label: d,
+  }));
+  const SOURCE_DIALECTS: MenuOption[] = [{ value: 'auto', label: 'auto-detect' }, ...DIALECTS];
+  const OUT_MODES: MenuOption[] = [
+    { value: 'schema_and_data', label: 'schema + data' },
+    { value: 'schema_only', label: 'schema only' },
+    { value: 'data_only', label: 'data only' },
+  ];
+
   let highlighterPromise: Promise<HighlighterCore> | null = null;
   async function getHighlighter(): Promise<HighlighterCore> {
     highlighterPromise ??= (async () => {
@@ -625,6 +722,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
     worker: null as Worker | null,
     requestId: 0,
+    lastBlob: null as Blob | null,
 
     init() {
       this.spawnWorker();
@@ -693,6 +791,23 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           this.state = this.summary ? 'ready' : 'empty';
         }
       }
+    },
+
+    get sourceDialects() {
+      return SOURCE_DIALECTS;
+    },
+
+    get outModes() {
+      return OUT_MODES;
+    },
+
+    get outDialectOptions(): MenuOption[] {
+      const same = this.summary ? `same as source (${this.summary.dialect})` : 'same as source';
+      return [{ value: '', label: same }, ...DIALECTS];
+    },
+
+    labelFor(options: MenuOption[], value: string) {
+      return options.find((o) => o.value === value)?.label ?? value;
     },
 
     get currentTable() {
@@ -886,23 +1001,33 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.analyze(file);
     },
 
-    async loadExample(name: string, forceDialect?: string) {
+    async loadExample(name: string, dialect?: string) {
       this.error = null;
       this.perfWarning = null;
       const response = await fetch(`/playground/${name}`);
       const blob = await response.blob();
       this.fileName = name;
-      this.analyze(blob, forceDialect);
+      if (dialect) this.dialect = dialect;
+      this.analyze(blob);
     },
 
-    analyze(blob: Blob, forceDialect?: string) {
+    setDialect(value: string) {
+      if (value === this.dialect) return;
+      this.dialect = value;
+      // The dump is re-read from the retained handle so the new dialect applies
+      // immediately, instead of silently waiting for the next file to be opened.
+      if (this.lastBlob) this.analyze(this.lastBlob);
+    },
+
+    analyze(blob: Blob) {
+      this.lastBlob = blob;
       this.state = 'analyzing';
       this.summary = null;
       this.sql = null;
       this.sqlHtml = null;
       this.analyzeProgress = null;
       const id = ++this.requestId;
-      const dialect = forceDialect ?? (this.dialect === 'auto' ? null : this.dialect);
+      const dialect = this.dialect === 'auto' ? null : this.dialect;
       this.worker?.postMessage({ id, type: 'analyze', blob, dialect });
     },
 
@@ -1027,15 +1152,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     gap: var(--space-xs);
   }
 
-  .pg-select-label {
-    font-size: 0.85rem;
-    color: var(--color-text-muted);
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-
-  select,
   input[type='number'] {
     background: var(--color-bg);
     color: var(--color-text);
@@ -1044,9 +1160,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     padding: 0.35rem 0.5rem;
     font-family: var(--font-mono);
     font-size: 0.85rem;
-  }
-
-  input[type='number'] {
     width: 6.5rem;
   }
 
@@ -1087,11 +1200,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     color: #fff;
   }
 
-  .pg-examples {
+  /* ponytail: click + Escape only, no arrow-key roving focus. Items are real
+     buttons in a display:none panel, so Tab reaches them when open — the floor
+     the native <select> set. Add roving focus if a menu grows past ~8 items. */
+  .pg-menu {
     position: relative;
   }
 
-  .pg-examples-menu {
+  .pg-menu-panel {
     position: absolute;
     right: 0;
     top: calc(100% + 4px);
@@ -1100,24 +1216,49 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     border-radius: var(--radius);
     display: flex;
     flex-direction: column;
-    min-width: 260px;
+    min-width: 10rem;
     z-index: 40;
     overflow: hidden;
   }
 
-  .pg-examples-menu button {
+  .pg-menu-panel.wide {
+    min-width: 260px;
+  }
+
+  /* Bottombar menus sit at the bottom of the viewport, so they open upward. */
+  .pg-menu.up .pg-menu-panel {
+    top: auto;
+    bottom: calc(100% + 4px);
+  }
+
+  .pg-menu-panel button {
     background: none;
     border: none;
     color: var(--color-text);
     text-align: left;
-    padding: 0.5rem 0.85rem;
+    padding: 0.5rem 0.85rem 0.5rem 1.75rem;
     font-size: 0.85rem;
     cursor: pointer;
+    white-space: nowrap;
   }
 
-  .pg-examples-menu button:hover {
+  .pg-menu-panel.wide button {
+    padding-left: 0.85rem;
+  }
+
+  .pg-menu-panel button:hover {
     background: var(--color-bg);
     color: var(--color-accent);
+  }
+
+  .pg-menu-panel button[aria-checked='true'] {
+    color: var(--color-accent);
+  }
+
+  .pg-menu-panel button[aria-checked='true']::before {
+    content: '\2713';
+    margin-left: -0.9rem;
+    margin-right: 0.25rem;
   }
 
   .pg-workbench {
