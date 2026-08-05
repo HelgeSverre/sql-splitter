@@ -98,6 +98,18 @@ impl DumpProfiler {
         self.run(reader, dialect, SMALL_BUFFER_SIZE)
     }
 
+    /// [`Self::profile_reader`] with an explicit parser buffer size, for
+    /// callers that know the input is large (the file-path variant scales its
+    /// buffer with file size; a plain reader has no size to scale from).
+    pub fn profile_reader_sized<R: Read>(
+        &self,
+        reader: R,
+        dialect: SqlDialect,
+        buffer_size: usize,
+    ) -> anyhow::Result<DumpProfile> {
+        self.run(reader, dialect, buffer_size)
+    }
+
     fn run<R: Read>(
         &self,
         reader: R,

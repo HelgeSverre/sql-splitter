@@ -2,6 +2,14 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_playgroundsession_free: (a: number, b: number) => void;
+export const playgroundsession_fromBlob: (
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  e: number,
+  f: number,
+) => void;
 export const playgroundsession_generate: (
   a: number,
   b: number,

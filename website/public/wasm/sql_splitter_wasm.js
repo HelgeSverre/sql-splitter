@@ -170,6 +170,13 @@ const PlaygroundSessionFinalization =
  * One analyzed dump: profile once, generate any number of times.
  */
 export class PlaygroundSession {
+  static __wrap(ptr) {
+    ptr = ptr >>> 0;
+    const obj = Object.create(PlaygroundSession.prototype);
+    obj.__wbg_ptr = ptr;
+    PlaygroundSessionFinalization.register(obj, obj.__wbg_ptr, obj);
+    return obj;
+  }
   __destroy_into_raw() {
     const ptr = this.__wbg_ptr;
     this.__wbg_ptr = 0;
@@ -345,6 +352,47 @@ export class PlaygroundSession {
     }
   }
   /**
+   * Profile a dump streamed from a blob-backed chunk source. `read_chunk`
+   * is `(start, end) -> Uint8Array` (the worker backs it with
+   * `FileReaderSync` over `blob.slice`), so ingestion memory is one chunk,
+   * not the file.
+   * @param {Function} read_chunk
+   * @param {number} size
+   * @param {string | null} [dialect]
+   * @param {Function | null} [on_progress]
+   * @returns {PlaygroundSession}
+   */
+  static fromBlob(read_chunk, size, dialect, on_progress) {
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      var ptr0 = isLikeNone(dialect)
+        ? 0
+        : passStringToWasm0(
+            dialect,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len0 = WASM_VECTOR_LEN;
+      wasm.playgroundsession_fromBlob(
+        retptr,
+        addHeapObject(read_chunk),
+        size,
+        ptr0,
+        len0,
+        isLikeNone(on_progress) ? 0 : addHeapObject(on_progress),
+      );
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+      if (r2) {
+        throw takeObject(r1);
+      }
+      return PlaygroundSession.__wrap(r0);
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+  }
+  /**
    * The resolved model for the current inference, as JSON:
    * `{ "yaml": <the exact --emit-config document>, "model": <the same
    * document as a JSON tree for interactive exploration> }`. Row counts
@@ -468,6 +516,16 @@ function __wbg_get_imports() {
       return addHeapObject(ret);
     }, arguments);
   };
+  imports.wbg.__wbg_call_c8baa5c5e72d274e = function () {
+    return handleError(function (arg0, arg1, arg2, arg3) {
+      const ret = getObject(arg0).call(
+        getObject(arg1),
+        getObject(arg2),
+        getObject(arg3),
+      );
+      return addHeapObject(ret);
+    }, arguments);
+  };
   imports.wbg.__wbg_error_7534b8e9a36f1ab4 = function (arg0, arg1) {
     let deferred0_0;
     let deferred0_1;
@@ -489,9 +547,23 @@ function __wbg_get_imports() {
       globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
     }, arguments);
   };
+  imports.wbg.__wbg_length_22ac23eaec9d8053 = function (arg0) {
+    const ret = getObject(arg0).length;
+    return ret;
+  };
   imports.wbg.__wbg_new_8a6f238a6ece86ea = function () {
     const ret = new Error();
     return addHeapObject(ret);
+  };
+  imports.wbg.__wbg_prototypesetcall_dfe9b766cdc1f1fd = function (
+    arg0,
+    arg1,
+    arg2,
+  ) {
+    Uint8Array.prototype.set.call(
+      getArrayU8FromWasm0(arg0, arg1),
+      getObject(arg2),
+    );
   };
   imports.wbg.__wbg_stack_0ed75d68575b0f3c = function (arg0, arg1) {
     const ret = getObject(arg1).stack;

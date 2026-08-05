@@ -38,8 +38,11 @@ modeled on their dump. Privacy is the hook: the dump never leaves the machine.
   A hand-written module worker (`public/wasm/worker.js`) keeps profiling off
   the main thread; a wasm trap (`fatal`) makes the page respawn the worker.
 - **No arbitrary limits** (user decision): no file-size or row-count caps.
-  Perf warnings instead: ≥100 MB files warn about time/memory (~2× file size
-  peak), >100k rows warns about output size. Compressed uploads are rejected
+  Analysis streams from the disk-backed Blob via `FileReaderSync` in 8 MB
+  chunks (`ChunkCache` in the wasm crate), so ingestion memory is one chunk,
+  not the file; ≥500 MB files get a time warning, >100k rows warns about
+  output size. The wasm build uses `simd128` + opt-level 3 (~1.4x native
+  profiling time). Compressed uploads are rejected
   by magic-byte sniff with a pointer to the CLI.
 
 ## Verification

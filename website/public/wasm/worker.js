@@ -15,9 +15,15 @@ self.onmessage = async (event) => {
         session.free();
         session = null;
       }
-      const bytes = new Uint8Array(event.data.buffer);
-      session = new PlaygroundSession(
-        bytes,
+      // The blob is a disk-backed handle; FileReaderSync pulls it in chunks,
+      // so ingestion memory is one chunk — never the whole file.
+      const { blob } = event.data;
+      const reader = new FileReaderSync();
+      const readChunk = (start, end) =>
+        new Uint8Array(reader.readAsArrayBuffer(blob.slice(start, end)));
+      session = PlaygroundSession.fromBlob(
+        readChunk,
+        blob.size,
         event.data.dialect ?? undefined,
         (progress) =>
           self.postMessage({

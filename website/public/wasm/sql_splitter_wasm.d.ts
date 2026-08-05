@@ -38,6 +38,18 @@ export class PlaygroundSession {
     mode?: string | null,
   ): string;
   /**
+   * Profile a dump streamed from a blob-backed chunk source. `read_chunk`
+   * is `(start, end) -> Uint8Array` (the worker backs it with
+   * `FileReaderSync` over `blob.slice`), so ingestion memory is one chunk,
+   * not the file.
+   */
+  static fromBlob(
+    read_chunk: Function,
+    size: number,
+    dialect?: string | null,
+    on_progress?: Function | null,
+  ): PlaygroundSession;
+  /**
    * The resolved model for the current inference, as JSON:
    * `{ "yaml": <the exact --emit-config document>, "model": <the same
    * document as a JSON tree for interactive exploration> }`. Row counts
@@ -59,6 +71,14 @@ export type InitInput =
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_playgroundsession_free: (a: number, b: number) => void;
+  readonly playgroundsession_fromBlob: (
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+  ) => void;
   readonly playgroundsession_generate: (
     a: number,
     b: number,
