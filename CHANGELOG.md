@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-08-05
+
+### Fixed
+
+- **`0x…` hex literals were lost or silently corrupted on `query` import** — `ParsedValue::Hex` carries the literal as written, `0x` prefix included, and three separate paths misread it. The direct-execution path handed `0x30` to DuckDB unchanged, which rejects the syntax, so *every row in that statement* was dropped with a `Parser Error: syntax error at or near "x30"` warning. The batched path hex-encoded the literal's own ASCII, turning `0x30` into `x'30783330'` — no warning, just wrong bytes. Both now decode the literal to the bytes it denotes, including MySQL's left-padding of an odd digit count (`0xABC` is `0x0A 0xBC`). On one real WordPress dump this recovered 2,995 rows that had been missing from `wp_wfConfig` and `wp_wfFileMods` (#93).
+- **A row containing the word "select" pushed its whole statement onto the slow path** — the check for clauses the bulk loader cannot honour (`SELECT`, `IGNORE`, `REPLACE`, `ON DUPLICATE KEY`, `ON CONFLICT`, `RETURNING`) uppercased the entire INSERT and searched all of it, row data included. A single URL or description containing "select" made the statement look like `INSERT … SELECT`; on one production table that was 78% of all statements. Only the statement head and tail can carry such a clause, so only those are examined now, which also stops copying every statement — ~225KB each in that dump — just to run the search (#93).
+- **`query` reported fewer rows than it imported** — the direct-execution path estimated its row count by re-parsing the SQL it had just generated, undercounting by 126 rows on one dump. Rows are now counted where they are known exactly (#93).
+
+### Changed
+
+- **`query` imports rows through DuckDB's Appender instead of generated SQL** — the loader serialized parsed values back into a multi-megabyte `INSERT` statement that DuckDB then parsed again, which profiling showed to be roughly 75% of import time. Values are handed to the Appender directly. Because the Appender binds positionally across every column of the target table, a batch is only eligible when its column list matches the catalog exactly; anything else — an unknown table, a mismatched or short column list, or a decimal/expression value that DuckDB must parse into the column's own type — still goes through SQL. Appends run inside a transaction, so a cast failure part-way through rolls back rather than leaving half a batch behind. Combined with the clause-filter fix, importing a 620MB table from a 4.3GB dump went from 32.9s to 9.1s; neither change is worth much alone (#93).
+- **A disk-backed import no longer checkpoints continuously** — a dump over 2GB (or an explicit `--disk`) opens a file-backed database, every statement autocommits, and DuckDB's default 16MB checkpoint threshold meant each commit wrote row groups back to disk. Profiling put ~45% of samples in that one chain. The threshold is raised for the duration of the import; `query` already checkpoints explicitly when it wants the file durable (#92).
+
 ## [1.19.0] - 2026-08-04
 
 ### Fixed
