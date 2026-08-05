@@ -5,17 +5,6 @@ export class PlaygroundSession {
   free(): void;
   [Symbol.dispose](): void;
   /**
-   * The resolved `kind: model` YAML document for the current inference —
-   * the same document the CLI emits with `--emit-config`, with row counts
-   * frozen, inference disabled, and the seed pinned.
-   */
-  modelYaml(
-    rows: number,
-    seed: number,
-    dialect?: string | null,
-    mode?: string | null,
-  ): string;
-  /**
    * Warnings raised by the most recent `generate` call (compile
    * diagnostics + cross-dialect conversion losses), as a JSON array.
    */
@@ -48,6 +37,18 @@ export class PlaygroundSession {
     dialect?: string | null,
     mode?: string | null,
   ): string;
+  /**
+   * The resolved model for the current inference, as JSON:
+   * `{ "yaml": <the exact --emit-config document>, "model": <the same
+   * document as a JSON tree for interactive exploration> }`. Row counts
+   * are frozen, inference disabled, and the seed pinned in both.
+   */
+  modelDoc(
+    rows: number,
+    seed: number,
+    dialect?: string | null,
+    mode?: string | null,
+  ): string;
 }
 
 export function start(): void;
@@ -69,7 +70,7 @@ export interface InitOutput {
     h: number,
   ) => void;
   readonly playgroundsession_lastRenderWarnings: (a: number, b: number) => void;
-  readonly playgroundsession_modelYaml: (
+  readonly playgroundsession_modelDoc: (
     a: number,
     b: number,
     c: number,

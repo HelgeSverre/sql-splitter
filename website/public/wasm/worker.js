@@ -44,13 +44,10 @@ self.onmessage = async (event) => {
     } else if (type === "model") {
       if (!session) throw new Error("No dump analyzed yet");
       const { rows, seed, dialect, mode } = event.data;
-      const yaml = session.modelYaml(
-        rows,
-        seed,
-        dialect ?? undefined,
-        mode ?? undefined,
+      const doc = JSON.parse(
+        session.modelDoc(rows, seed, dialect ?? undefined, mode ?? undefined),
       );
-      self.postMessage({ id, type: "model", yaml });
+      self.postMessage({ id, type: "model", yaml: doc.yaml, model: doc.model });
     }
   } catch (err) {
     // A WebAssembly trap (panic under panic=abort) leaves the instance's

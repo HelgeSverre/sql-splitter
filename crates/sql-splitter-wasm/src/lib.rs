@@ -10,8 +10,8 @@ use sql_splitter::diagnostic::{
     codes, Diagnostic, DiagnosticBag, DiagnosticCategory, Severity, TypicalSeverity,
 };
 use sql_splitter::generate::{
-    merge_render_warnings, resolved_model_yaml, CompileOptions, GenerationEngine, GenerationPlan,
-    ModelCompiler, RenderOptions, SqlRenderer,
+    merge_render_warnings, resolved_model, resolved_model_yaml, CompileOptions, GenerationEngine,
+    GenerationPlan, ModelCompiler, RenderOptions, SqlRenderer,
 };
 use sql_splitter::parser::{detect_dialect, SqlDialect};
 use sql_splitter::profile::{
@@ -137,18 +137,19 @@ impl PlaygroundSession {
         serde_json::to_string(&self.render_warnings).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// The resolved `kind: model` YAML document for the current inference —
-    /// the same document the CLI emits with `--emit-config`, with row counts
-    /// frozen, inference disabled, and the seed pinned.
-    #[wasm_bindgen(js_name = modelYaml)]
-    pub fn model_yaml(
+    /// The resolved model for the current inference, as JSON:
+    /// `{ "yaml": <the exact --emit-config document>, "model": <the same
+    /// document as a JSON tree for interactive exploration> }`. Row counts
+    /// are frozen, inference disabled, and the seed pinned in both.
+    #[wasm_bindgen(js_name = modelDoc)]
+    pub fn model_doc(
         &self,
         rows: u32,
         seed: u32,
         dialect: Option<String>,
         mode: Option<String>,
     ) -> Result<String, JsError> {
-        self.model_yaml_impl(rows, seed, dialect, mode)
+        self.model_doc_impl(rows, seed, dialect, mode)
             .map_err(|e| JsError::new(&e))
     }
 }
@@ -268,7 +269,7 @@ impl PlaygroundSession {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    fn model_yaml_impl(
+    fn model_doc_impl(
         &self,
         rows: u32,
         seed: u32,
@@ -282,7 +283,17 @@ impl PlaygroundSession {
         model.output.dialect = Some(out_dialect.to_string());
         model.output.mode = Some(mode);
 
-        resolved_model_yaml(&model, &plan, Some(u64::from(seed))).map_err(|e| e.to_string())
+        let yaml =
+            resolved_model_yaml(&model, &plan, Some(u64::from(seed))).map_err(|e| e.to_string())?;
+        let tree = serde_json::to_value(resolved_model(&model, &plan, Some(u64::from(seed))))
+            .map_err(|e| e.to_string())?;
+
+        #[derive(Serialize)]
+        struct ModelDoc {
+            yaml: String,
+            model: serde_json::Value,
+        }
+        serde_json::to_string(&ModelDoc { yaml, model: tree }).map_err(|e| e.to_string())
     }
 }
 
@@ -557,20 +568,29 @@ mod tests {
     }
 
     #[test]
-    fn model_yaml_is_deterministic_and_frozen() {
+    fn model_doc_is_deterministic_and_frozen() {
         let dump = fixture("production_shape.sql");
         let session = PlaygroundSession::try_new(&dump, None, None).unwrap();
 
-        let yaml = session.model_yaml_impl(50, 7, None, None).unwrap();
-        assert_eq!(yaml, session.model_yaml_impl(50, 7, None, None).unwrap());
+        let raw = session.model_doc_impl(50, 7, None, None).unwrap();
+        assert_eq!(raw, session.model_doc_impl(50, 7, None, None).unwrap());
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let yaml = doc["yaml"].as_str().unwrap();
         assert!(yaml.contains("kind: model"));
         assert!(yaml.contains("seed: 7"));
         assert!(yaml.contains("inference: disabled"));
 
-        let pg = session
-            .model_yaml_impl(50, 7, Some("postgres".into()), None)
+        assert_eq!(doc["model"]["kind"], "model");
+        assert_eq!(doc["model"]["seed"], 7);
+        assert!(doc["model"]["tables"].is_object());
+        assert!(doc["model"]["tables"]["users"].is_object());
+
+        let raw_pg = session
+            .model_doc_impl(50, 7, Some("postgres".into()), None)
             .unwrap();
-        assert!(pg.contains("dialect: postgres"));
+        let doc_pg: serde_json::Value = serde_json::from_str(&raw_pg).unwrap();
+        assert_eq!(doc_pg["model"]["output"]["dialect"], "postgres");
     }
 
     #[test]

@@ -16,7 +16,7 @@ export const playgroundsession_lastRenderWarnings: (
   a: number,
   b: number,
 ) => void;
-export const playgroundsession_modelYaml: (
+export const playgroundsession_modelDoc: (
   a: number,
   b: number,
   c: number,

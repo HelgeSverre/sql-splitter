@@ -63,6 +63,29 @@ const { title, description = 'High-performance SQL dump toolkit. Split, merge, c
       scroll-padding-top: calc(var(--nav-height) + 1.5rem);
     }
 
+    ::selection {
+      background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+      color: var(--color-text);
+    }
+
+    /* :focus-visible only, so pointer users never see a ring but keyboard
+       users always do. Outlines follow border-radius in modern browsers. */
+    :focus-visible {
+      outline: 2px solid var(--color-accent);
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
     :root {
       color-scheme: dark;
       --nav-height: 3.5rem;

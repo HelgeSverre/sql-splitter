@@ -40,6 +40,12 @@
   --sl-nav-height: 3.5rem;
 }
 
+/* Same brand selection tint as the landing page and playground */
+::selection {
+  background: color-mix(in srgb, var(--sl-color-accent) 35%, transparent);
+  color: var(--sl-color-white);
+}
+
 /* Light theme */
 :root[data-theme="light"] {
   --sl-color-bg: #ffffff;

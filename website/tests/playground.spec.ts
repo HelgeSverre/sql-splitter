@@ -45,11 +45,31 @@ test("model tab, cross-dialect output, and warnings tab work", async ({
     timeout: 20000,
   });
 
-  // Model tab shows the resolved kind:model YAML
+  // Model tab defaults to the tree explorer, open to depth 2: the tables
+  // node is expanded and table names are visible
   await page.getByRole("button", { name: "Model" }).click();
-  await expect(page.locator(".pg-model")).toContainText("kind: model", {
+  await expect(page.locator(".pg-tree .pg-t-toggle").first()).toBeVisible({
     timeout: 30000,
   });
+  const tablesRow = page.locator('.pg-t-toggle[data-path="$.tables"]');
+  await expect(tablesRow).toBeVisible();
+  await expect(
+    page.locator('.pg-t-toggle[data-path="$.tables.users"]'),
+  ).toBeVisible();
+  // Collapsing the tables node hides its children and shows a count badge
+  await tablesRow.click();
+  await expect(
+    page.locator('.pg-t-toggle[data-path="$.tables.users"]'),
+  ).toBeHidden();
+  await expect(tablesRow.locator(".pg-t-badge")).toContainText("{");
+  // And expanding again brings them back
+  await tablesRow.click();
+  await expect(
+    page.locator('.pg-t-toggle[data-path="$.tables.users"]'),
+  ).toBeVisible();
+  // Raw view still shows the exact YAML document
+  await page.getByRole("button", { name: "Raw", exact: true }).click();
+  await expect(page.locator(".pg-model")).toContainText("kind: model");
 
   // Cross-dialect: mysql source rendered as mssql emits GO batches
   await page.locator('select[x-model="outDialect"]').selectOption("mssql");

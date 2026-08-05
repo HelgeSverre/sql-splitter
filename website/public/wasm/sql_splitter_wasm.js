@@ -181,66 +181,6 @@ export class PlaygroundSession {
     wasm.__wbg_playgroundsession_free(ptr, 0);
   }
   /**
-   * The resolved `kind: model` YAML document for the current inference —
-   * the same document the CLI emits with `--emit-config`, with row counts
-   * frozen, inference disabled, and the seed pinned.
-   * @param {number} rows
-   * @param {number} seed
-   * @param {string | null} [dialect]
-   * @param {string | null} [mode]
-   * @returns {string}
-   */
-  modelYaml(rows, seed, dialect, mode) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-      var ptr0 = isLikeNone(dialect)
-        ? 0
-        : passStringToWasm0(
-            dialect,
-            wasm.__wbindgen_export3,
-            wasm.__wbindgen_export4,
-          );
-      var len0 = WASM_VECTOR_LEN;
-      var ptr1 = isLikeNone(mode)
-        ? 0
-        : passStringToWasm0(
-            mode,
-            wasm.__wbindgen_export3,
-            wasm.__wbindgen_export4,
-          );
-      var len1 = WASM_VECTOR_LEN;
-      wasm.playgroundsession_modelYaml(
-        retptr,
-        this.__wbg_ptr,
-        rows,
-        seed,
-        ptr0,
-        len0,
-        ptr1,
-        len1,
-      );
-      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-      var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-      var ptr3 = r0;
-      var len3 = r1;
-      if (r3) {
-        ptr3 = 0;
-        len3 = 0;
-        throw takeObject(r2);
-      }
-      deferred4_0 = ptr3;
-      deferred4_1 = len3;
-      return getStringFromWasm0(ptr3, len3);
-    } finally {
-      wasm.__wbindgen_add_to_stack_pointer(16);
-      wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-  }
-  /**
    * Warnings raised by the most recent `generate` call (compile
    * diagnostics + cross-dialect conversion losses), as a JSON array.
    * @returns {string}
@@ -376,6 +316,67 @@ export class PlaygroundSession {
           );
       var len1 = WASM_VECTOR_LEN;
       wasm.playgroundsession_generate(
+        retptr,
+        this.__wbg_ptr,
+        rows,
+        seed,
+        ptr0,
+        len0,
+        ptr1,
+        len1,
+      );
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+      var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+      var ptr3 = r0;
+      var len3 = r1;
+      if (r3) {
+        ptr3 = 0;
+        len3 = 0;
+        throw takeObject(r2);
+      }
+      deferred4_0 = ptr3;
+      deferred4_1 = len3;
+      return getStringFromWasm0(ptr3, len3);
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+      wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+  }
+  /**
+   * The resolved model for the current inference, as JSON:
+   * `{ "yaml": <the exact --emit-config document>, "model": <the same
+   * document as a JSON tree for interactive exploration> }`. Row counts
+   * are frozen, inference disabled, and the seed pinned in both.
+   * @param {number} rows
+   * @param {number} seed
+   * @param {string | null} [dialect]
+   * @param {string | null} [mode]
+   * @returns {string}
+   */
+  modelDoc(rows, seed, dialect, mode) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      var ptr0 = isLikeNone(dialect)
+        ? 0
+        : passStringToWasm0(
+            dialect,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len0 = WASM_VECTOR_LEN;
+      var ptr1 = isLikeNone(mode)
+        ? 0
+        : passStringToWasm0(
+            mode,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len1 = WASM_VECTOR_LEN;
+      wasm.playgroundsession_modelDoc(
         retptr,
         this.__wbg_ptr,
         rows,

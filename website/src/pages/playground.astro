@@ -139,12 +139,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <!-- Workbench -->
       <template x-if="summary">
         <div class="pg-ide">
-          <aside class="pg-sidebar">
+          <aside class="pg-sidebar" aria-label="Tables" x-on:keydown="onTableKeydown($event)">
             <div class="pg-sidebar-title">Tables</div>
-            <template x-for="table in summary.tables" x-bind:key="table.name">
+            <template x-for="(table, index) in summary.tables" x-bind:key="table.name">
               <button
                 class="pg-table-item"
                 x-bind:class="{ selected: selectedTable === table.name }"
+                x-bind:aria-pressed="selectedTable === table.name"
+                x-bind:tabindex="selectedTable === table.name || (!selectedTable && index === 0) ? 0 : -1"
                 x-on:click="selectedTable = table.name; tab = 'analysis'"
               >
                 <span
@@ -161,21 +163,27 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           </aside>
 
           <section class="pg-main">
-            <div class="pg-tabs">
+            <div class="pg-tabs" x-on:keydown="onTabKeydown($event)">
               <button
                 x-bind:class="{ active: tab === 'analysis' }"
+                x-bind:aria-pressed="tab === 'analysis'"
                 x-on:click="switchTab('analysis')">Analysis</button
               >
-              <button x-bind:class="{ active: tab === 'model' }" x-on:click="switchTab('model')"
+              <button
+                x-bind:class="{ active: tab === 'model' }"
+                x-bind:aria-pressed="tab === 'model'"
+                x-on:click="switchTab('model')"
                 >Model</button
               >
               <button
                 x-bind:class="{ active: tab === 'sql' }"
+                x-bind:aria-pressed="tab === 'sql'"
                 x-on:click="switchTab('sql')"
                 x-bind:disabled="!sql && state !== 'generating'">Generated SQL</button
               >
               <button
                 x-bind:class="{ active: tab === 'warnings' }"
+                x-bind:aria-pressed="tab === 'warnings'"
                 x-on:click="switchTab('warnings')"
               >
                 Warnings
@@ -284,16 +292,27 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
             <div class="pg-tab-content pg-model" x-show="tab === 'model'">
               <div class="pg-model-actions">
-                <span class="pg-muted">
-                  The resolved model — reproduce this exact run with the CLI:
-                </span>
+                <div class="pg-seg">
+                  <button
+                    x-bind:class="{ active: modelView === 'tree' }"
+                    x-on:click="modelView = 'tree'">Tree</button
+                  >
+                  <button
+                    x-bind:class="{ active: modelView === 'raw' }"
+                    x-on:click="modelView = 'raw'">Raw</button
+                  >
+                </div>
                 <code>sql-splitter generate -c model.yaml -o synthetic.sql</code>
                 <span class="pg-actions-spacer"></span>
-                <button class="pg-btn" x-show="modelHtml" x-on:click="setAllFolds(true)"
-                  >Collapse all</button
+                <button
+                  class="pg-btn"
+                  x-show="modelTree && modelView === 'tree'"
+                  x-on:click="setTreeExpansion(false)">Collapse all</button
                 >
-                <button class="pg-btn" x-show="modelHtml" x-on:click="setAllFolds(false)"
-                  >Expand all</button
+                <button
+                  class="pg-btn"
+                  x-show="modelTree && modelView === 'tree'"
+                  x-on:click="setTreeExpansion(true)">Expand all</button
                 >
                 <button class="pg-btn" x-show="modelYamlText" x-on:click="copyModel($event)"
                   >Copy</button
@@ -305,17 +324,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
               <template x-if="modelLoading">
                 <div class="pg-empty"><div class="pg-spinner"></div></div>
               </template>
-              <template x-if="modelHtml && !modelLoading">
-                <div
-                  class="pg-code pg-model-code"
-                  x-ref="modelCode"
-                  x-html="modelHtml"
-                  x-on:click="onFoldClick($event)"
-                >
-                </div>
+              <template x-if="modelTree && !modelLoading && modelView === 'tree'">
+                <div class="pg-tree" x-html="treeHtml" x-on:click="onTreeClick($event)"></div>
               </template>
-              <template x-if="modelYamlText && !modelHtml && !modelLoading">
-                <pre><code x-text="modelYamlText"></code></pre>
+              <template x-if="modelHtml && !modelLoading && modelView === 'raw'">
+                <div class="pg-code pg-model-code" x-html="modelHtml"></div>
+              </template>
+              <template x-if="modelYamlText && !modelHtml && !modelLoading && modelView === 'raw'">
+                <pre tabindex="0"><code x-text="modelYamlText"></code></pre>
               </template>
             </div>
 
@@ -336,7 +352,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                     <div class="pg-code" x-html="sqlHtml"></div>
                   </template>
                   <template x-if="!sqlHtml">
-                    <pre><code x-text="displaySql"></code></pre>
+                    <pre tabindex="0"><code x-text="displaySql"></code></pre>
                   </template>
                 </div>
               </template>
@@ -517,7 +533,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     | { id: number; type: 'status'; stage: string; progress?: number }
     | { id: number; type: 'analyzed'; summary: Summary }
     | { id: number; type: 'generated'; sql: string; renderWarnings: WarningInfo[] }
-    | { id: number; type: 'model'; yaml: string }
+    | { id: number; type: 'model'; yaml: string; model: unknown }
     | { id: number; type: 'error'; message: string; fatal: boolean };
 
   const MAGIC = [
@@ -567,6 +583,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   function flashCopied(event: Event) {
@@ -638,6 +662,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         this.modelYamlText = null;
         this.modelHtml = null;
         this.modelKey = null;
+        this.modelTree = null;
+        this.treeHtml = '';
         this.analyzeProgress = null;
         this.state = 'ready';
       } else if (msg.type === 'generated') {
@@ -648,6 +674,10 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         this.highlightSql();
       } else if (msg.type === 'model') {
         this.modelYamlText = msg.yaml;
+        this.modelTree = msg.model;
+        this.treeExpanded = {};
+        this.treeDefaultDepth = 2;
+        this.renderTreeHtml();
         this.modelLoading = false;
         this.highlightModel();
       } else if (msg.type === 'error') {
@@ -693,6 +723,37 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       if (tab === 'model') this.ensureModel();
     },
 
+    // Roving focus for a list of buttons: arrows move focus, Enter/Space still
+    // activate natively. Returns false when the key isn't ours to handle.
+    moveFocus(event: KeyboardEvent, selector: string, prevKey: string, nextKey: string) {
+      if (!['Home', 'End', prevKey, nextKey].includes(event.key)) return false;
+      const items = [
+        ...(event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(selector),
+      ].filter((el) => !el.hasAttribute('disabled'));
+      if (items.length === 0) return false;
+      const at = items.indexOf(document.activeElement as HTMLElement);
+      if (at === -1 && event.key !== 'Home' && event.key !== 'End') return false;
+      event.preventDefault();
+      const to =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? items.length - 1
+            : event.key === nextKey
+              ? (at + 1) % items.length
+              : (at - 1 + items.length) % items.length;
+      items[to].focus();
+      return true;
+    },
+
+    onTableKeydown(event: KeyboardEvent) {
+      this.moveFocus(event, '.pg-table-item', 'ArrowUp', 'ArrowDown');
+    },
+
+    onTabKeydown(event: KeyboardEvent) {
+      this.moveFocus(event, 'button', 'ArrowLeft', 'ArrowRight');
+    },
+
     ensureModel() {
       if (!this.summary || this.state === 'analyzing') return;
       if (this.modelYamlText && this.modelKey === this.modelRequestKey) return;
@@ -724,109 +785,85 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       if (!this.modelYamlText) return;
       const key = this.modelKey;
       const html = await highlight(this.modelYamlText, 'yaml');
-      if (key !== this.modelKey) return;
-      this.modelHtml = html;
-      if (html) {
-        await this.$nextTick();
-        this.setupFolds();
-      }
+      if (key === this.modelKey) this.modelHtml = html;
     },
 
-    // --- YAML folding: ranges come from the raw text's indentation, toggles
-    // --- are grafted onto Shiki's per-line spans.
+    // --- Model tree: an AST-explorer-style view of the resolved model.
+    // --- Rows toggle on click; collapsed nodes show child counts.
 
-    modelFolds: [] as { start: number; end: number }[],
-    collapsedFolds: [] as number[],
+    modelTree: null as unknown,
+    modelView: 'tree' as 'tree' | 'raw',
+    treeHtml: '',
+    treeExpanded: {} as Record<string, boolean>,
+    treeDefaultDepth: 2,
 
-    setupFolds() {
-      const container = this.$refs.modelCode as HTMLElement | undefined;
-      const code = container?.querySelector('code');
-      if (!code || !this.modelYamlText) return;
+    isExpanded(path: string, depth: number) {
+      return this.treeExpanded[path] ?? depth < this.treeDefaultDepth;
+    },
 
-      const rawLines = this.modelYamlText.split('\n');
-      const indentOf = (line: string) =>
-        line.trim() === '' ? null : (line.match(/^ */)?.[0].length ?? 0);
+    renderTreeHtml() {
+      this.treeHtml =
+        this.modelTree === null ? '' : this.renderNode(this.modelTree, '$', 0, null);
+    },
 
-      this.modelFolds = [];
-      this.collapsedFolds = [];
-      for (let i = 0; i < rawLines.length; i++) {
-        const indent = indentOf(rawLines[i]);
-        if (indent === null) continue;
-        let end = i;
-        for (let j = i + 1; j < rawLines.length; j++) {
-          const childIndent = indentOf(rawLines[j]);
-          if (childIndent === null) continue;
-          if (childIndent <= indent) break;
-          end = j;
+    renderNode(value: unknown, path: string, depth: number, key: string | null): string {
+      const keyHtml = key === null ? '' : `<span class="pg-t-key">${escapeHtml(key)}</span>`;
+      const sep = key === null ? '' : '<span class="pg-t-sep">: </span>';
+
+      if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+        const entries = Array.isArray(value)
+          ? value.map((v, i) => [String(i), v] as const)
+          : Object.entries(value as Record<string, unknown>);
+        const isArray = Array.isArray(value);
+        const badge = isArray ? `[${entries.length}]` : `{${entries.length}}`;
+        if (entries.length === 0) {
+          return `<div class="pg-t-row pg-t-leaf">${keyHtml}${sep}<span class="pg-t-badge">${isArray ? '[]' : '{}'}</span></div>`;
         }
-        if (end > i) this.modelFolds.push({ start: i, end });
-      }
-
-      // Shiki separates line spans with newline text nodes; make each line a
-      // block so hiding a span hides its whole visual row.
-      for (const node of Array.from(code.childNodes)) {
-        if (node.nodeType === Node.TEXT_NODE) node.remove();
-      }
-
-      const foldStarts = new Set(this.modelFolds.map((f) => f.start));
-      code.querySelectorAll('.line').forEach((line, index) => {
-        line.setAttribute('data-line', String(index));
-        if (foldStarts.has(index)) {
-          const btn = document.createElement('button');
-          btn.className = 'pg-fold';
-          btn.setAttribute('data-fold', String(index));
-          btn.setAttribute('aria-label', 'Toggle fold');
-          btn.innerHTML =
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"></path></svg>';
-          line.prepend(btn);
-        } else {
-          const spacer = document.createElement('span');
-          spacer.className = 'pg-fold-spacer';
-          line.prepend(spacer);
+        const open = this.isExpanded(path, depth);
+        const chevron =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"></path></svg>';
+        let html = `<div class="pg-t-row pg-t-toggle${open ? ' open' : ''}" data-path="${escapeHtml(path)}">`;
+        html += `<span class="pg-t-chevron">${chevron}</span>${keyHtml}${sep}`;
+        if (!open) html += `<span class="pg-t-badge">${badge}</span>`;
+        html += '</div>';
+        if (open) {
+          html += '<div class="pg-t-children">';
+          for (const [childKey, childValue] of entries) {
+            html += this.renderNode(childValue, `${path}.${childKey}`, depth + 1, childKey);
+          }
+          html += '</div>';
         }
-      });
-    },
-
-    onFoldClick(event: Event) {
-      const btn = (event.target as Element).closest('.pg-fold');
-      if (!btn) return;
-      const index = Number(btn.getAttribute('data-fold'));
-      const at = this.collapsedFolds.indexOf(index);
-      if (at >= 0) this.collapsedFolds.splice(at, 1);
-      else this.collapsedFolds.push(index);
-      this.applyFolds();
-    },
-
-    setAllFolds(collapsed: boolean) {
-      this.collapsedFolds = collapsed ? this.modelFolds.map((f) => f.start) : [];
-      this.applyFolds();
-    },
-
-    applyFolds() {
-      const container = this.$refs.modelCode as HTMLElement | undefined;
-      const code = container?.querySelector('code');
-      if (!code) return;
-
-      const collapsed = new Set(this.collapsedFolds);
-      const hidden = new Set<number>();
-      for (const fold of this.modelFolds) {
-        if (!collapsed.has(fold.start)) continue;
-        for (let i = fold.start + 1; i <= fold.end; i++) hidden.add(i);
+        return html;
       }
 
-      code.querySelectorAll('.line').forEach((line) => {
-        const index = Number(line.getAttribute('data-line'));
-        line.classList.toggle('pg-line-hidden', hidden.has(index));
-        // A folded start line shows an ellipsis; a start hidden by an outer
-        // collapsed fold keeps its own state for when the outer one reopens.
-        line.classList.toggle(
-          'pg-line-folded',
-          collapsed.has(index) && !hidden.has(index),
-        );
-      });
-      code.querySelectorAll('.pg-fold').forEach((btn) => {
-        btn.classList.toggle('collapsed', collapsed.has(Number(btn.getAttribute('data-fold'))));
-      });
+      let valueHtml: string;
+      if (typeof value === 'string') {
+        const shown = value.length > 120 ? value.slice(0, 120) + '\u2026' : value;
+        valueHtml = `<span class="pg-t-string" title="${escapeHtml(value.slice(0, 500))}">"${escapeHtml(shown)}"</span>`;
+      } else if (typeof value === 'number') {
+        valueHtml = `<span class="pg-t-number">${value}</span>`;
+      } else if (typeof value === 'boolean') {
+        valueHtml = `<span class="pg-t-bool">${value}</span>`;
+      } else {
+        valueHtml = '<span class="pg-t-null">null</span>';
+      }
+      return `<div class="pg-t-row pg-t-leaf"><span class="pg-t-chevron-spacer"></span>${keyHtml}${sep}${valueHtml}</div>`;
+    },
+
+    onTreeClick(event: Event) {
+      const row = (event.target as Element).closest('.pg-t-toggle');
+      if (!row) return;
+      const path = row.getAttribute('data-path');
+      if (!path) return;
+      const depth = path.split('.').length - 1;
+      this.treeExpanded[path] = !this.isExpanded(path, depth);
+      this.renderTreeHtml();
+    },
+
+    setTreeExpansion(expanded: boolean) {
+      this.treeExpanded = {};
+      this.treeDefaultDepth = expanded ? Number.MAX_SAFE_INTEGER : 1;
+      this.renderTreeHtml();
     },
 
     async openFile(file: File | null | undefined) {
@@ -968,15 +1005,21 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     font-size: 0.9rem;
   }
 
+  /* Badges: fixed height + flex centering instead of line-height, so the text
+     is optically centered regardless of font metrics or descenders. */
   .pg-chip {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    height: 1.4rem;
     font-size: 0.75rem;
     font-family: var(--font-mono);
-    padding: 0.1rem 0.5rem;
+    line-height: 1;
+    padding: 0 0.5rem;
     margin-left: 0.5rem;
-    border: 1px solid var(--color-border);
+    border: 1px solid color-mix(in srgb, var(--color-border) 90%, transparent);
     border-radius: 999px;
     color: var(--cmd-generate);
+    vertical-align: middle;
   }
 
   .pg-topbar-actions {
@@ -1289,6 +1332,13 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     color: var(--color-accent);
   }
 
+  /* Edge-to-edge rows/tabs: inset the ring so it isn't clipped by the
+     scroll container or overlapped by neighbours. */
+  .pg-table-item:focus-visible,
+  .pg-tabs button:focus-visible {
+    outline-offset: -2px;
+  }
+
   .pg-table-item.selected {
     border-left-color: var(--color-accent);
     background: var(--color-surface);
@@ -1339,13 +1389,18 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-tab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 1.25rem;
+    min-width: 1.25rem;
     font-size: 0.7rem;
     font-weight: 700;
+    line-height: 1;
     background: var(--cmd-diff);
     color: var(--color-bg);
     border-radius: 999px;
     padding: 0 0.4rem;
-    line-height: 1.4;
   }
 
   .pg-tab-content {
@@ -1409,10 +1464,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-pk {
+    display: inline-flex;
+    align-items: center;
+    height: 1.1rem;
     font-size: 0.65rem;
     font-weight: 700;
+    line-height: 1;
     color: var(--cmd-generate);
-    border: 1px solid var(--cmd-generate);
+    border: 1px solid color-mix(in srgb, var(--cmd-generate) 90%, transparent);
     border-radius: 3px;
     padding: 0 0.25rem;
     margin-left: 0.35rem;
@@ -1420,14 +1479,18 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-semantic {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
     font-size: 0.7rem;
-    padding: 0.05rem 0.4rem;
+    line-height: 1;
+    padding: 0 0.4rem;
     margin-left: 0.35rem;
     border-radius: 999px;
     background: var(--color-surface);
-    border: 1px solid var(--color-border);
+    border: 1px solid color-mix(in srgb, var(--color-border) 90%, transparent);
     color: var(--cmd-sample);
+    vertical-align: middle;
   }
 
   .pg-confidence {
@@ -1476,53 +1539,114 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     background-color: var(--shiki-dark-bg) !important;
   }
 
-  /* YAML folding in the model view */
-  .pg-model-code :global(.line) {
-    display: block;
+  /* Model tree (AST-explorer style) */
+  .pg-tree {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.7;
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-xs) var(--space-sm);
   }
 
-  .pg-model-code :global(.pg-line-hidden) {
-    display: none !important;
+  .pg-tree :global(.pg-t-row) {
+    display: flex;
+    align-items: baseline;
+    white-space: nowrap;
+    border-radius: 4px;
+    padding: 0 0.25rem;
   }
 
-  .pg-model-code :global(.pg-line-folded)::after {
-    content: ' \2026';
-    color: var(--color-text-muted);
-  }
-
-  .pg-model-code :global(.pg-fold),
-  .pg-model-code :global(.pg-fold-spacer) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    margin-right: 0.35rem;
-    vertical-align: middle;
+  .pg-tree :global(.pg-t-toggle) {
+    cursor: pointer;
     user-select: none;
   }
 
-  .pg-model-code :global(.pg-fold) {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--color-text-muted);
-    cursor: pointer;
+  .pg-tree :global(.pg-t-toggle:hover) {
+    background: var(--color-surface);
   }
 
-  .pg-model-code :global(.pg-fold svg) {
+  .pg-tree :global(.pg-t-chevron),
+  .pg-tree :global(.pg-t-chevron-spacer) {
+    display: inline-flex;
+    align-items: center;
     width: 14px;
     height: 14px;
-    transform: rotate(90deg);
+    margin-right: 0.3rem;
+    flex-shrink: 0;
+    align-self: center;
+    color: var(--color-text-muted);
+  }
+
+  .pg-tree :global(.pg-t-chevron svg) {
+    width: 12px;
+    height: 12px;
     transition: transform 0.12s ease;
   }
 
-  .pg-model-code :global(.pg-fold.collapsed svg) {
-    transform: rotate(0deg);
+  .pg-tree :global(.pg-t-toggle.open .pg-t-chevron svg) {
+    transform: rotate(90deg);
   }
 
-  .pg-model-code :global(.pg-fold:hover) {
+  .pg-tree :global(.pg-t-children) {
+    margin-left: 6px;
+    padding-left: 14px;
+    border-left: 1px solid var(--color-border);
+  }
+
+  .pg-tree :global(.pg-t-key) {
     color: var(--color-accent);
+  }
+
+  .pg-tree :global(.pg-t-sep) {
+    color: var(--color-text-muted);
+    white-space: pre;
+  }
+
+  .pg-tree :global(.pg-t-badge) {
+    color: var(--color-text-muted);
+    margin-left: 0.35rem;
+  }
+
+  .pg-tree :global(.pg-t-string) {
+    color: var(--cmd-analyze);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pg-tree :global(.pg-t-number) {
+    color: var(--cmd-order);
+  }
+
+  .pg-tree :global(.pg-t-bool) {
+    color: var(--cmd-merge);
+  }
+
+  .pg-tree :global(.pg-t-null) {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .pg-seg {
+    display: inline-flex;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .pg-seg button {
+    background: var(--color-bg);
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+  }
+
+  .pg-seg button.active {
+    background: var(--color-surface);
+    color: var(--color-text);
   }
 
   .pg-sql-note {
@@ -1572,12 +1696,18 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-sev {
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
     font-size: 0.7rem;
     font-weight: 700;
+    line-height: 1;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     border-radius: 3px;
-    padding: 0.05rem 0.4rem;
+    /* letter-spacing adds a trailing gap after the last glyph; trim it from the
+       right padding so the caps sit optically centred, not pushed left */
+    padding: 0 calc(0.4rem - 0.05em) 0 0.4rem;
     color: var(--color-bg);
     background: var(--color-text-muted);
   }

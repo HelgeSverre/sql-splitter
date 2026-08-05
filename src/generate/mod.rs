@@ -863,6 +863,21 @@ pub fn resolved_model_yaml(
     plan: &GenerationPlan,
     explicit_seed: Option<u64>,
 ) -> Result<String, GenerateError> {
+    let emit = resolved_model(model, plan, explicit_seed);
+    serde_yaml_ng::to_string(&emit).map_err(|error| {
+        GenerateError::diagnostic(&codes::EMIT_SERIALIZE, "emit_config", error.to_string())
+    })
+}
+
+/// Resolve `model` against a compiled `plan`: drop excluded tables/profiles,
+/// carry the compiler's normalized schemas and active relationships, freeze
+/// row counts, disable inference, and pin the seed. The result is the
+/// self-contained document [`resolved_model_yaml`] serializes.
+pub fn resolved_model(
+    model: &SyntheticModel,
+    plan: &GenerationPlan,
+    explicit_seed: Option<u64>,
+) -> SyntheticModel {
     let mut emit = model.clone();
 
     let resolved: BTreeMap<String, u64> = plan
@@ -903,9 +918,7 @@ pub fn resolved_model_yaml(
     emit.defaults.inference = InferenceMode::Disabled;
     emit.seed = explicit_seed;
 
-    serde_yaml_ng::to_string(&emit).map_err(|error| {
-        GenerateError::diagnostic(&codes::EMIT_SERIALIZE, "emit_config", error.to_string())
-    })
+    emit
 }
 
 fn stage_model(
