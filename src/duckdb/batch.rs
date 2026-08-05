@@ -155,9 +155,11 @@ fn format_value_for_sql(value: &ParsedValue) -> String {
             format!("'{}'", escaped)
         }
         ParsedValue::Hex(bytes) => {
-            // Convert to hex string for DuckDB
-            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            format!("x'{}'", hex)
+            // `ParsedValue::Hex` carries the literal as written, `0x` prefix
+            // included, so the digits are already hex -- re-encoding the bytes
+            // would hex-encode the ASCII characters and turn 0x30 into
+            // x'30783330'.
+            format!("x'{}'", hex_digits(bytes))
         }
         ParsedValue::Other(raw) => {
             let s = String::from_utf8_lossy(raw);
@@ -250,6 +252,29 @@ pub fn flush_batch(
         return Ok(());
     }
 
+    // Fastest path: hand the parsed values straight to DuckDB's Appender. The
+    // batched-INSERT path below has to serialize every value back into SQL text
+    // that DuckDB then re-parses -- profiling put ~75% of import time in
+    // duckdb::ClientContext::CreatePreparedStatement doing exactly that. The
+    // Appender skips the parser entirely. It is not always applicable, so it
+    // reports false and leaves the batch untouched when it bails.
+    match try_appender_insert(conn, batch, stats) {
+        Ok(true) => {
+            batch.clear();
+            return Ok(());
+        }
+        Ok(false) => {} // not eligible, fall through to SQL
+        Err(e) => {
+            // The append was rolled back, so falling through cannot double-insert.
+            if stats.warnings.len() < 100 {
+                stats.warnings.push(format!(
+                    "Appender failed for {}, using SQL: {}",
+                    batch.table, e
+                ));
+            }
+        }
+    }
+
     // Try the fast path with batched INSERT
     match try_batch_insert(conn, batch, stats) {
         Ok(true) => {
@@ -269,6 +294,152 @@ pub fn flush_batch(
             fallback_execute(conn, batch, stats)?;
             batch.clear();
             Ok(())
+        }
+    }
+}
+
+/// Map the DuckDB table name the way the SQL path does, so both agree on which
+/// table a batch targets.
+fn duckdb_table_name(table: &str, dialect: SqlDialect) -> &str {
+    match dialect {
+        SqlDialect::Postgres => table.strip_prefix("public.").unwrap_or(table),
+        SqlDialect::Mssql => ["dbo.", "master.", "tempdb.", "model.", "msdb."]
+            .iter()
+            .find_map(|prefix| table.strip_prefix(prefix))
+            .unwrap_or(table),
+        SqlDialect::MySql | SqlDialect::Sqlite => table,
+    }
+}
+
+/// Convert a parsed value for the Appender. `Other` holds raw bytes for
+/// decimals, floats and expressions like `NOW()`; binding those as text would
+/// either lose exactness or be flatly wrong, so those batches take the SQL path
+/// where DuckDB parses them into the column's own type.
+fn appender_value(v: &ParsedValue) -> Option<duckdb::types::Value> {
+    use duckdb::types::Value as V;
+    Some(match v {
+        ParsedValue::Null => V::Null,
+        ParsedValue::Integer(i) => V::BigInt(*i),
+        ParsedValue::BigInteger(i) => V::HugeInt(*i),
+        ParsedValue::String { value } => V::Text(value.clone()),
+        ParsedValue::Hex(b) => V::Blob(decode_hex_literal(b)?),
+        ParsedValue::Other(_) => return None,
+    })
+}
+
+/// The hex digits of a `0xABCD` literal, without the prefix.
+fn hex_digits(raw: &[u8]) -> std::borrow::Cow<'_, str> {
+    let digits = raw
+        .strip_prefix(b"0x")
+        .or_else(|| raw.strip_prefix(b"0X"))
+        .unwrap_or(raw);
+    String::from_utf8_lossy(digits)
+}
+
+/// Decode a `0xABCD` literal into the bytes it denotes. MySQL left-pads an odd
+/// digit count, so `0xABC` is the two bytes `0x0A 0xBC`.
+fn decode_hex_literal(raw: &[u8]) -> Option<Vec<u8>> {
+    let digits = hex_digits(raw);
+    let d = digits.as_bytes();
+    if d.is_empty() || !d.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(d.len().div_ceil(2));
+    let mut idx = 0;
+    if d.len() % 2 == 1 {
+        out.push((d[0] as char).to_digit(16)? as u8);
+        idx = 1;
+    }
+    while idx < d.len() {
+        let hi = (d[idx] as char).to_digit(16)? as u8;
+        let lo = (d[idx + 1] as char).to_digit(16)? as u8;
+        out.push((hi << 4) | lo);
+        idx += 2;
+    }
+    Some(out)
+}
+
+/// Append a batch with DuckDB's Appender, bypassing SQL parsing entirely.
+///
+/// `Ok(false)` means the batch is not eligible and nothing was written, so the
+/// caller should use the SQL path. `Err` means the append failed *and was rolled
+/// back*, so the caller can also fall through without double-inserting.
+///
+/// Eligibility is deliberately strict. The Appender binds positionally across
+/// every column of the table, so a batch whose column list differs from the
+/// table's own order -- or omits a column -- would silently write values into
+/// the wrong columns. That is worse than being slow, so anything short of an
+/// exact match declines.
+fn try_appender_insert(
+    conn: &Connection,
+    batch: &InsertBatch,
+    stats: &mut ImportStats,
+) -> Result<bool> {
+    let table = duckdb_table_name(&batch.table, batch.dialect);
+
+    // The table's real column order, straight from the catalog.
+    let mut stmt = conn.prepare(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_name = ? ORDER BY ordinal_position",
+    )?;
+    let table_cols: Vec<String> = stmt
+        .query_map([table], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    if table_cols.is_empty() {
+        return Ok(false); // unknown table; let the SQL path produce the error
+    }
+
+    // An explicit column list must match the catalog exactly, in order.
+    if let Some(cols) = &batch.columns {
+        if cols.len() != table_cols.len()
+            || !cols
+                .iter()
+                .zip(&table_cols)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return Ok(false);
+        }
+    }
+
+    // Every row must be full width and hold only bindable values.
+    let width = table_cols.len();
+    let mut values: Vec<duckdb::types::Value> = Vec::with_capacity(batch.rows.len() * width);
+    for row in &batch.rows {
+        if row.len() != width {
+            return Ok(false);
+        }
+        for v in row {
+            match appender_value(v) {
+                Some(val) => values.push(val),
+                None => return Ok(false),
+            }
+        }
+    }
+
+    // Wrap in a transaction so a type-cast failure part-way through leaves no
+    // partially appended rows behind for the SQL fallback to duplicate.
+    conn.execute_batch("BEGIN TRANSACTION")?;
+    let appended = (|| -> duckdb::Result<()> {
+        let mut app = conn.appender(table)?;
+        let mut refs: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(width);
+        for chunk in values.chunks(width) {
+            refs.clear();
+            refs.extend(chunk.iter().map(|v| v as &dyn duckdb::ToSql));
+            app.append_row(refs.as_slice())?;
+        }
+        app.flush()
+    })();
+
+    match appended {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            stats.insert_statements += batch.statements.len();
+            stats.rows_inserted += batch.rows.len() as u64;
+            Ok(true)
+        }
+        Err(e) => {
+            conn.execute_batch("ROLLBACK")?;
+            Err(e.into())
         }
     }
 }
@@ -369,6 +540,25 @@ fn count_insert_rows(sql: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_literal_decodes_to_the_bytes_it_denotes() {
+        // `ParsedValue::Hex` keeps the `0x` prefix, so a naive re-encode of the
+        // payload turns 0x30 into the four ASCII bytes "0x30".
+        assert_eq!(decode_hex_literal(b"0x30").unwrap(), vec![0x30]);
+        assert_eq!(decode_hex_literal(b"0x623a303b").unwrap(), b"b:0;".to_vec());
+        assert_eq!(decode_hex_literal(b"0XFF").unwrap(), vec![0xff]);
+        // MySQL left-pads an odd digit count: 0xABC is 0x0A 0xBC.
+        assert_eq!(decode_hex_literal(b"0xABC").unwrap(), vec![0x0a, 0xbc]);
+        assert!(decode_hex_literal(b"0x").is_none());
+        assert!(decode_hex_literal(b"0xZZ").is_none());
+    }
+
+    #[test]
+    fn hex_literal_renders_as_sql_blob_without_double_encoding() {
+        let v = ParsedValue::Hex(b"0x623a303b".to_vec());
+        assert_eq!(format_value_for_sql(&v), "x'623a303b'");
+    }
 
     #[test]
     fn test_batch_manager_queue() {

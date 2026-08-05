@@ -368,6 +368,57 @@ impl<'a> DumpLoader<'a> {
         }
     }
 
+    /// Does this INSERT carry a clause the bulk path cannot honour?
+    ///
+    /// Only the statement's head (before `VALUES`) and its tail can hold one --
+    /// everything between is row data. The previous check uppercased the whole
+    /// statement and searched all of it, so a row containing the word "select"
+    /// in a URL or a description looked like `INSERT ... SELECT`. On a real
+    /// dump that pushed 78% of one table onto the slow per-statement path, and
+    /// it copied every statement (~225KB here) just to do the search.
+    ///
+    /// A statement with no `VALUES` is `INSERT ... SELECT` or something equally
+    /// unsupported, so it declines.
+    fn has_unsupported_insert_clause(stmt: &str) -> bool {
+        const HEAD_SCAN_LIMIT: usize = 64 * 1024;
+        // Generous next to a multi-megabyte statement, and far past any real
+        // ON DUPLICATE KEY UPDATE / ON CONFLICT / RETURNING clause.
+        const TAIL_SCAN: usize = 8 * 1024;
+
+        let bytes = stmt.as_bytes();
+        let head_window = &bytes[..bytes.len().min(HEAD_SCAN_LIMIT)];
+
+        let values_end = match memchr::memmem::find_iter(head_window, b"VALUES")
+            .chain(memchr::memmem::find_iter(head_window, b"values"))
+            .min()
+        {
+            Some(p) => p + b"VALUES".len(),
+            None => {
+                // Mixed case such as `Values` is rare; confirm on an uppercased
+                // copy of the window before declining outright.
+                let up = head_window.to_ascii_uppercase();
+                match memchr::memmem::find(&up, b"VALUES") {
+                    Some(p) => p + b"VALUES".len(),
+                    None => return true,
+                }
+            }
+        };
+
+        let head = bytes[..values_end].to_ascii_uppercase();
+        if [&b"REPLACE"[..], b"IGNORE", b"SELECT"]
+            .iter()
+            .any(|kw| memchr::memmem::find(&head, kw).is_some())
+        {
+            return true;
+        }
+
+        let tail_start = bytes.len().saturating_sub(TAIL_SCAN).max(values_end);
+        let tail = bytes[tail_start..].to_ascii_uppercase();
+        [&b"ON DUPLICATE KEY"[..], b"ON CONFLICT", b"RETURNING"]
+            .iter()
+            .any(|kw| memchr::memmem::find(&tail, kw).is_some())
+    }
+
     /// Try to queue an INSERT statement for bulk loading via Appender API.
     /// Returns true if successfully queued, false if fallback to direct execution is needed.
     fn try_queue_for_bulk(
@@ -378,15 +429,8 @@ impl<'a> DumpLoader<'a> {
         stats: &mut ImportStats,
         failed_tables: &mut std::collections::HashSet<String>,
     ) -> bool {
-        // Quick filter: skip statements with complex clauses that Appender can't handle
-        let upper = stmt.to_uppercase();
-        if upper.contains("ON DUPLICATE KEY")
-            || upper.contains("ON CONFLICT")
-            || upper.contains("REPLACE")
-            || upper.contains("IGNORE")
-            || upper.contains("RETURNING")
-            || upper.contains("SELECT")
-        {
+        // Skip statements carrying clauses the bulk path cannot honour.
+        if Self::has_unsupported_insert_clause(stmt) {
             return false;
         }
 
@@ -922,6 +966,48 @@ impl<'a> DumpLoader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_clause_check_ignores_row_data() {
+        // The whole point: a value that merely contains a keyword is data, not
+        // a clause. Searching the entire statement put 78% of a real table on
+        // the slow path because rows held URLs containing "select".
+        assert!(!DumpLoader::has_unsupported_insert_clause(
+            "INSERT INTO `t` (`a`) VALUES ('https://x.test/?q=select'),('replace me'),('ignore')"
+        ));
+        assert!(!DumpLoader::has_unsupported_insert_clause(
+            "INSERT INTO `t` VALUES (1,'plain')"
+        ));
+    }
+
+    #[test]
+    fn unsupported_clause_check_still_catches_real_clauses() {
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "INSERT IGNORE INTO `t` VALUES (1)"
+        ));
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "REPLACE INTO `t` VALUES (1)"
+        ));
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "INSERT INTO `t` SELECT * FROM `u`"
+        ));
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "INSERT INTO `t` VALUES (1) ON DUPLICATE KEY UPDATE `a` = 2"
+        ));
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "INSERT INTO `t` VALUES (1) ON CONFLICT DO NOTHING"
+        ));
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "INSERT INTO `t` VALUES (1) RETURNING `id`"
+        ));
+        // Lowercase and mixed-case spellings must be caught too.
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "insert into `t` values (1) on duplicate key update `a` = 2"
+        ));
+        assert!(DumpLoader::has_unsupported_insert_clause(
+            "Insert Into `t` Values (1) Returning `id`"
+        ));
+    }
 
     #[test]
     fn test_count_insert_rows() {
