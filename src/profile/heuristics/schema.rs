@@ -82,7 +82,7 @@ pub(super) fn type_fallback(ctx: &ColumnContext<'_>) -> Candidate {
         SqlTypeFamily::Json => generator("json_value"),
         SqlTypeFamily::Uuid => generator("uuid"),
         SqlTypeFamily::Bytes => generator("bytes"),
-        SqlTypeFamily::Text | SqlTypeFamily::Other => {
+        SqlTypeFamily::Text | SqlTypeFamily::Other | SqlTypeFamily::Enum => {
             let (min, max) = string_lengths(ctx);
             generator_with(
                 "string",

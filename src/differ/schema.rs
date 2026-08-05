@@ -74,6 +74,7 @@ fn format_column_type(ct: &ColumnType) -> String {
     match ct {
         ColumnType::Int => "INT".to_string(),
         ColumnType::BigInt => "BIGINT".to_string(),
+        ColumnType::Enum(values) => format!("ENUM('{}')", values.join("','")),
         ColumnType::Text => "TEXT".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
         ColumnType::Decimal => "DECIMAL".to_string(),

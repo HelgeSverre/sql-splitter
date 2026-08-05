@@ -888,8 +888,8 @@ fn an_invalid_model_exits_with_failure_code_not_usage_code() {
 // Lossy cross-dialect warnings are surfaced and strict-promoted
 // ===========================================================================
 
-/// A model whose MySQL `ENUM` column narrows to a plain string on any other
-/// dialect — a genuinely lossy cross-dialect conversion.
+/// A model whose MySQL `ENUM` column narrows to a plain string on SQLite —
+/// a genuinely lossy cross-dialect conversion where ENUM has no equivalent.
 const LOSSY_ENUM_MODEL: &str = r#"
 version: 1
 kind: model
@@ -917,25 +917,22 @@ fn lossy_cross_dialect_conversion_warns_on_a_normal_run() {
     let out = dir.path().join("out.sql");
     fs::write(&model, LOSSY_ENUM_MODEL).unwrap();
 
-    // Render the MySQL-source model to PostgreSQL: ENUM -> VARCHAR(255) is lossy.
+    // Render the MySQL-source model to SQLite: ENUM -> TEXT is lossy.
     let run = sql_splitter_bin()
         .args(["generate", "--config"])
         .arg(&model)
-        .args(["--dialect", "postgres", "-o"])
+        .args(["--dialect", "sqlite", "-o"])
         .arg(&out)
         .output()
         .expect("failed to run sql-splitter");
 
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert_eq!(run.status.code(), Some(0), "stderr: {stderr}");
-    // The lossy conversion is no longer silent: it reaches the report diagnostics
-    // and is printed (previously `renderer.warnings()` was dropped entirely).
     assert!(
         stderr.contains("GEN-LOSSY-TYPE"),
         "lossy warning not surfaced; stderr: {stderr}"
     );
-    // The narrowed type is what actually landed in the DDL.
-    assert!(fs::read_to_string(&out).unwrap().contains("VARCHAR(255)"));
+    assert!(fs::read_to_string(&out).unwrap().contains("TEXT"));
 }
 
 #[test]
@@ -952,7 +949,7 @@ fn lossy_cross_dialect_conversion_fails_under_strict() {
     let run = sql_splitter_bin()
         .args(["generate", "--config"])
         .arg(&model)
-        .args(["--dialect", "postgres", "--strict", "--emit-config"])
+        .args(["--dialect", "sqlite", "--strict", "--emit-config"])
         .arg(&emitted)
         .arg("-o")
         .arg(&out)
@@ -979,7 +976,7 @@ fn strict_render_warning_writes_no_sql_to_stdout() {
     let run = sql_splitter_bin()
         .args(["generate", "--config"])
         .arg(&model)
-        .args(["--dialect", "postgres", "--strict"])
+        .args(["--dialect", "sqlite", "--strict"])
         .output()
         .expect("failed to run sql-splitter");
 

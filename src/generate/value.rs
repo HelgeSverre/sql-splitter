@@ -121,7 +121,10 @@ impl GeneratedValue {
             GeneratedValue::Decimal { .. } => matches!(family, SqlTypeFamily::Decimal),
             GeneratedValue::Text(_) => matches!(
                 family,
-                SqlTypeFamily::Text | SqlTypeFamily::Uuid | SqlTypeFamily::Other
+                SqlTypeFamily::Text
+                    | SqlTypeFamily::Uuid
+                    | SqlTypeFamily::Other
+                    | SqlTypeFamily::Enum
             ),
             GeneratedValue::Bytes(_) => matches!(family, SqlTypeFamily::Bytes),
             GeneratedValue::DateTime(_) => matches!(family, SqlTypeFamily::DateTime),

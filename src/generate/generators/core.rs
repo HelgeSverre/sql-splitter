@@ -234,7 +234,7 @@ pub(super) fn coerce_value(
         SqlTypeFamily::Bytes => Ok(GeneratedValue::Bytes(display_yaml(value).into_bytes())),
         SqlTypeFamily::Json => json_from_yaml(value).map(GeneratedValue::Json),
         SqlTypeFamily::DateTime => Ok(GeneratedValue::DateTime(display_yaml(value))),
-        SqlTypeFamily::Text | SqlTypeFamily::Uuid | SqlTypeFamily::Other => {
+        SqlTypeFamily::Text | SqlTypeFamily::Uuid | SqlTypeFamily::Other | SqlTypeFamily::Enum => {
             Ok(GeneratedValue::Text(display_yaml(value)))
         }
     }
@@ -246,6 +246,7 @@ const ALL_FAMILIES: &[SqlTypeFamily] = &[
     SqlTypeFamily::Integer,
     SqlTypeFamily::BigInteger,
     SqlTypeFamily::Decimal,
+    SqlTypeFamily::Enum,
     SqlTypeFamily::Boolean,
     SqlTypeFamily::Text,
     SqlTypeFamily::Bytes,
@@ -1696,6 +1697,7 @@ fn family_supports_widening(family: &SqlTypeFamily) -> bool {
         SqlTypeFamily::Integer
             | SqlTypeFamily::BigInteger
             | SqlTypeFamily::Decimal
+            | SqlTypeFamily::Enum
             | SqlTypeFamily::Text
             | SqlTypeFamily::Bytes
             | SqlTypeFamily::Uuid

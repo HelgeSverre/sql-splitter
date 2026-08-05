@@ -329,6 +329,7 @@ fn format_column_type(col_type: &ColumnType) -> String {
     match col_type {
         ColumnType::Int => "INT".to_string(),
         ColumnType::BigInt => "BIGINT".to_string(),
+        ColumnType::Enum(_) => "ENUM".to_string(),
         ColumnType::Text => "VARCHAR".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
         ColumnType::Decimal => "DECIMAL".to_string(),
