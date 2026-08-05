@@ -282,6 +282,12 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                 </span>
                 <code>sql-splitter generate -c model.yaml -o synthetic.sql</code>
                 <span class="pg-actions-spacer"></span>
+                <button class="pg-btn" x-show="modelHtml" x-on:click="setAllFolds(true)"
+                  >Collapse all</button
+                >
+                <button class="pg-btn" x-show="modelHtml" x-on:click="setAllFolds(false)"
+                  >Expand all</button
+                >
                 <button class="pg-btn" x-show="modelYamlText" x-on:click="copyModel($event)"
                   >Copy</button
                 >
@@ -293,7 +299,13 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                 <div class="pg-empty"><div class="pg-spinner"></div></div>
               </template>
               <template x-if="modelHtml && !modelLoading">
-                <div class="pg-code" x-html="modelHtml"></div>
+                <div
+                  class="pg-code pg-model-code"
+                  x-ref="modelCode"
+                  x-html="modelHtml"
+                  x-on:click="onFoldClick($event)"
+                >
+                </div>
               </template>
               <template x-if="modelYamlText && !modelHtml && !modelLoading">
                 <pre><code x-text="modelYamlText"></code></pre>
@@ -705,7 +717,109 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       if (!this.modelYamlText) return;
       const key = this.modelKey;
       const html = await highlight(this.modelYamlText, 'yaml');
-      if (key === this.modelKey) this.modelHtml = html;
+      if (key !== this.modelKey) return;
+      this.modelHtml = html;
+      if (html) {
+        await this.$nextTick();
+        this.setupFolds();
+      }
+    },
+
+    // --- YAML folding: ranges come from the raw text's indentation, toggles
+    // --- are grafted onto Shiki's per-line spans.
+
+    modelFolds: [] as { start: number; end: number }[],
+    collapsedFolds: [] as number[],
+
+    setupFolds() {
+      const container = this.$refs.modelCode as HTMLElement | undefined;
+      const code = container?.querySelector('code');
+      if (!code || !this.modelYamlText) return;
+
+      const rawLines = this.modelYamlText.split('\n');
+      const indentOf = (line: string) =>
+        line.trim() === '' ? null : (line.match(/^ */)?.[0].length ?? 0);
+
+      this.modelFolds = [];
+      this.collapsedFolds = [];
+      for (let i = 0; i < rawLines.length; i++) {
+        const indent = indentOf(rawLines[i]);
+        if (indent === null) continue;
+        let end = i;
+        for (let j = i + 1; j < rawLines.length; j++) {
+          const childIndent = indentOf(rawLines[j]);
+          if (childIndent === null) continue;
+          if (childIndent <= indent) break;
+          end = j;
+        }
+        if (end > i) this.modelFolds.push({ start: i, end });
+      }
+
+      // Shiki separates line spans with newline text nodes; make each line a
+      // block so hiding a span hides its whole visual row.
+      for (const node of Array.from(code.childNodes)) {
+        if (node.nodeType === Node.TEXT_NODE) node.remove();
+      }
+
+      const foldStarts = new Set(this.modelFolds.map((f) => f.start));
+      code.querySelectorAll('.line').forEach((line, index) => {
+        line.setAttribute('data-line', String(index));
+        if (foldStarts.has(index)) {
+          const btn = document.createElement('button');
+          btn.className = 'pg-fold';
+          btn.setAttribute('data-fold', String(index));
+          btn.setAttribute('aria-label', 'Toggle fold');
+          btn.innerHTML =
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"></path></svg>';
+          line.prepend(btn);
+        } else {
+          const spacer = document.createElement('span');
+          spacer.className = 'pg-fold-spacer';
+          line.prepend(spacer);
+        }
+      });
+    },
+
+    onFoldClick(event: Event) {
+      const btn = (event.target as Element).closest('.pg-fold');
+      if (!btn) return;
+      const index = Number(btn.getAttribute('data-fold'));
+      const at = this.collapsedFolds.indexOf(index);
+      if (at >= 0) this.collapsedFolds.splice(at, 1);
+      else this.collapsedFolds.push(index);
+      this.applyFolds();
+    },
+
+    setAllFolds(collapsed: boolean) {
+      this.collapsedFolds = collapsed ? this.modelFolds.map((f) => f.start) : [];
+      this.applyFolds();
+    },
+
+    applyFolds() {
+      const container = this.$refs.modelCode as HTMLElement | undefined;
+      const code = container?.querySelector('code');
+      if (!code) return;
+
+      const collapsed = new Set(this.collapsedFolds);
+      const hidden = new Set<number>();
+      for (const fold of this.modelFolds) {
+        if (!collapsed.has(fold.start)) continue;
+        for (let i = fold.start + 1; i <= fold.end; i++) hidden.add(i);
+      }
+
+      code.querySelectorAll('.line').forEach((line) => {
+        const index = Number(line.getAttribute('data-line'));
+        line.classList.toggle('pg-line-hidden', hidden.has(index));
+        // A folded start line shows an ellipsis; a start hidden by an outer
+        // collapsed fold keeps its own state for when the outer one reopens.
+        line.classList.toggle(
+          'pg-line-folded',
+          collapsed.has(index) && !hidden.has(index),
+        );
+      });
+      code.querySelectorAll('.pg-fold').forEach((btn) => {
+        btn.classList.toggle('collapsed', collapsed.has(Number(btn.getAttribute('data-fold'))));
+      });
     },
 
     async openFile(file: File | null | undefined) {
@@ -1337,6 +1451,55 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   :global([data-theme='dark']) .pg-code :global(.shiki span) {
     color: var(--shiki-dark) !important;
     background-color: var(--shiki-dark-bg) !important;
+  }
+
+  /* YAML folding in the model view */
+  .pg-model-code :global(.line) {
+    display: block;
+  }
+
+  .pg-model-code :global(.pg-line-hidden) {
+    display: none !important;
+  }
+
+  .pg-model-code :global(.pg-line-folded)::after {
+    content: ' \2026';
+    color: var(--color-text-muted);
+  }
+
+  .pg-model-code :global(.pg-fold),
+  .pg-model-code :global(.pg-fold-spacer) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-right: 0.35rem;
+    vertical-align: middle;
+    user-select: none;
+  }
+
+  .pg-model-code :global(.pg-fold) {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }
+
+  .pg-model-code :global(.pg-fold svg) {
+    width: 14px;
+    height: 14px;
+    transform: rotate(90deg);
+    transition: transform 0.12s ease;
+  }
+
+  .pg-model-code :global(.pg-fold.collapsed svg) {
+    transform: rotate(0deg);
+  }
+
+  .pg-model-code :global(.pg-fold:hover) {
+    color: var(--color-accent);
   }
 
   .pg-sql-note {
