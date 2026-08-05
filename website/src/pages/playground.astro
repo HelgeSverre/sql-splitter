@@ -9,7 +9,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   <div class="playground" x-data="playground" x-cloak>
     <div class="pg-topbar">
       <div class="pg-title-group">
-        <h1>Playground</h1>
         <div class="pg-file-info">
           <template x-if="fileName">
             <span>
@@ -378,13 +377,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <button class="pg-btn" x-show="sql" x-on:click="copySql($event)">Copy</button>
       <button class="pg-btn" x-show="sql" x-on:click="downloadSql()">Download .sql</button>
     </div>
-
-    <p class="pg-privacy-strip">
-      <span class="lock">&#128274;</span>
-      Your dump never leaves your machine — parsing, profiling, and generation run entirely in your
-      browser via WebAssembly. This is the real <a href="/commands/generate/">sql-splitter generate</a>
-      engine; for multi-GB dumps and scheduled jobs, <a href="/getting-started/">install the CLI</a>.
-    </p>
   </div>
 </BaseLayout>
 
@@ -744,7 +736,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     max-width: none;
     width: 100%;
     margin: 0;
-    padding: var(--space-sm) var(--space-md);
+    padding: 0;
     display: flex;
   }
 
@@ -757,7 +749,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-rows: auto 1fr auto auto;
+    grid-template-rows: auto 1fr auto;
   }
 
   .pg-topbar {
@@ -768,8 +760,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     flex-wrap: wrap;
     padding: var(--space-xs) var(--space-sm);
     background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius) var(--radius) 0 0;
+    border-bottom: 1px solid var(--color-border);
   }
 
   .pg-title-group {
@@ -777,12 +768,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     align-items: baseline;
     gap: var(--space-sm);
     min-width: 0;
-  }
-
-  .pg-title-group h1 {
-    font-family: var(--font-display);
-    font-size: 1.05rem;
-    white-space: nowrap;
   }
 
   .pg-file-name {
@@ -903,8 +888,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   .pg-workbench {
     position: relative;
     min-height: 0;
-    border: 1px solid var(--color-border);
-    border-top: none;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1330,9 +1313,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     gap: var(--space-sm);
     flex-wrap: wrap;
     padding: var(--space-xs) var(--space-sm);
-    border: 1px solid var(--color-border);
-    border-top: none;
-    border-radius: 0 0 var(--radius) var(--radius);
+    border-top: 1px solid var(--color-border);
     background: var(--color-surface);
   }
 
@@ -1351,17 +1332,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   .pg-rows-note {
     font-size: 0.8rem;
     max-width: 40ch;
-  }
-
-  .pg-privacy-strip {
-    font-size: 0.8rem;
-    color: var(--color-text-muted);
-    padding: var(--space-xs) 0 0;
-    text-align: center;
-  }
-
-  .pg-privacy-strip .lock {
-    margin-right: 0.25rem;
   }
 
   @media (max-width: 768px) {
