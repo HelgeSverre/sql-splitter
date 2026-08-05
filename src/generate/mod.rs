@@ -858,12 +858,7 @@ fn source_error(error: impl std::fmt::Display) -> GenerateError {
 /// was explicitly seeded — an unseeded run emits no seed so reloading it is
 /// intentionally fresh. Inference already omits raw samples, so the emitted
 /// model carries only bounded, non-literal `profiles` metadata.
-/// Build the resolved, self-contained `--emit-config` YAML for `model`/`plan`.
-///
-/// Freezes each table's resolved row count, pins `inference: disabled`, and
-/// records the seed only for an explicitly-seeded run. Shared by normal and
-/// verified atomic publication paths.
-fn resolved_model_yaml(
+pub fn resolved_model_yaml(
     model: &SyntheticModel,
     plan: &GenerationPlan,
     explicit_seed: Option<u64>,
@@ -1150,7 +1145,7 @@ fn resolve_render_options(
 /// entries with stable `GEN-*` codes, so both the CLI's `write_diagnostics` and
 /// its `--strict` `warnings_are_fatal` gate see a lossy cross-dialect conversion
 /// (which would otherwise be silently dropped on the render pass).
-fn merge_render_warnings(diagnostics: &mut DiagnosticBag, warnings: &[ConvertWarning]) {
+pub fn merge_render_warnings(diagnostics: &mut DiagnosticBag, warnings: &[ConvertWarning]) {
     for warning in warnings {
         let code = match warning {
             ConvertWarning::LossyConversion { .. } => crate::diagnostic::codes::LOSSY_TYPE.code,

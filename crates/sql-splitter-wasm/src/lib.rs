@@ -6,13 +6,18 @@
 //! the browser runs the same code the CLI does.
 
 use serde::Serialize;
+use sql_splitter::diagnostic::{
+    codes, Diagnostic, DiagnosticBag, DiagnosticCategory, Severity, TypicalSeverity,
+};
 use sql_splitter::generate::{
-    CompileOptions, GenerationEngine, ModelCompiler, RenderOptions, SqlRenderer,
+    merge_render_warnings, resolved_model_yaml, CompileOptions, GenerationEngine, GenerationPlan,
+    ModelCompiler, RenderOptions, SqlRenderer,
 };
 use sql_splitter::parser::{detect_dialect, SqlDialect};
 use sql_splitter::profile::{
     Confidence, DumpProfile, DumpProfiler, InferenceResult, ModelInference,
 };
+use sql_splitter::synthetic::OutputMode;
 use wasm_bindgen::prelude::*;
 
 /// Fixed profiler seed: profiling evidence should not vary between visits.
@@ -30,6 +35,7 @@ pub struct PlaygroundSession {
     dialect_detected: bool,
     profile: DumpProfile,
     inference: InferenceResult,
+    render_warnings: Vec<WarningEntry>,
 }
 
 #[wasm_bindgen]
@@ -50,9 +56,39 @@ impl PlaygroundSession {
 
     /// Render synthetic SQL. `rows` is the row count for root tables (children
     /// derive their counts from relationships); `seed` makes output
-    /// deterministic — same dump + rows + seed → identical SQL.
-    pub fn generate(&self, rows: u32, seed: u32) -> Result<String, JsError> {
-        self.generate_sql(rows, seed).map_err(|e| JsError::new(&e))
+    /// deterministic. `dialect` selects the output dialect (default: the
+    /// source dialect); `mode` is `schema_and_data | schema_only | data_only`.
+    pub fn generate(
+        &mut self,
+        rows: u32,
+        seed: u32,
+        dialect: Option<String>,
+        mode: Option<String>,
+    ) -> Result<String, JsError> {
+        self.generate_sql(rows, seed, dialect, mode)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Warnings raised by the most recent `generate` call (compile
+    /// diagnostics + cross-dialect conversion losses), as a JSON array.
+    #[wasm_bindgen(js_name = lastRenderWarnings)]
+    pub fn last_render_warnings(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.render_warnings).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// The resolved `kind: model` YAML document for the current inference —
+    /// the same document the CLI emits with `--emit-config`, with row counts
+    /// frozen, inference disabled, and the seed pinned.
+    #[wasm_bindgen(js_name = modelYaml)]
+    pub fn model_yaml(
+        &self,
+        rows: u32,
+        seed: u32,
+        dialect: Option<String>,
+        mode: Option<String>,
+    ) -> Result<String, JsError> {
+        self.model_yaml_impl(rows, seed, dialect, mode)
+            .map_err(|e| JsError::new(&e))
     }
 }
 
@@ -83,6 +119,7 @@ impl PlaygroundSession {
             dialect_detected,
             profile,
             inference,
+            render_warnings: Vec::new(),
         })
     }
 
@@ -90,12 +127,33 @@ impl PlaygroundSession {
         serde_json::to_string(&self.build_summary()).map_err(|e| e.to_string())
     }
 
-    fn generate_sql(&self, rows: u32, seed: u32) -> Result<String, String> {
+    fn parse_output_options(
+        &self,
+        dialect: Option<String>,
+        mode: Option<String>,
+    ) -> Result<(SqlDialect, OutputMode), String> {
+        let dialect = match dialect.filter(|d| !d.is_empty()) {
+            Some(name) => name.parse::<SqlDialect>()?,
+            None => self.dialect,
+        };
+        let mode = match mode.as_deref().filter(|m| !m.is_empty()) {
+            None | Some("schema_and_data") => OutputMode::SchemaAndData,
+            Some("schema_only") => OutputMode::SchemaOnly,
+            Some("data_only") => OutputMode::DataOnly,
+            Some(other) => {
+                return Err(format!(
+                    "Unknown output mode: {other}. Valid options: schema_and_data, schema_only, data_only"
+                ))
+            }
+        };
+        Ok((dialect, mode))
+    }
+
+    fn compile_plan(&self, rows: u32, seed: u32) -> Result<GenerationPlan, String> {
         if rows == 0 {
             return Err("rows must be at least 1".to_string());
         }
-
-        let plan = ModelCompiler::standard()
+        ModelCompiler::standard()
             .compile(
                 self.inference.model.clone(),
                 CompileOptions {
@@ -104,22 +162,61 @@ impl PlaygroundSession {
                     ..Default::default()
                 },
             )
-            .map_err(|bag| bag.to_string())?;
+            .map_err(|bag| bag.to_string())
+    }
+
+    fn generate_sql(
+        &mut self,
+        rows: u32,
+        seed: u32,
+        dialect: Option<String>,
+        mode: Option<String>,
+    ) -> Result<String, String> {
+        let (out_dialect, mode) = self.parse_output_options(dialect, mode)?;
+        let plan = self.compile_plan(rows, seed)?;
+        let plan_diagnostics = plan.diagnostics.clone();
 
         let mut renderer = SqlRenderer::new(
             Vec::new(),
             RenderOptions {
-                dialect: self.dialect,
+                dialect: out_dialect,
                 source_dialect: Some(self.dialect),
+                mode,
                 ..Default::default()
             },
         );
         GenerationEngine::new(plan)
             .run(&mut renderer)
             .map_err(|e| e.to_string())?;
-        let bytes = renderer.finish().map_err(|e| e.to_string())?;
 
+        let convert_warnings = renderer.warnings().to_vec();
+        let mut bag = DiagnosticBag::default();
+        merge_render_warnings(&mut bag, &convert_warnings);
+        self.render_warnings = plan_diagnostics
+            .iter()
+            .chain(bag.diagnostics.iter())
+            .map(warning_entry)
+            .collect();
+
+        let bytes = renderer.finish().map_err(|e| e.to_string())?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn model_yaml_impl(
+        &self,
+        rows: u32,
+        seed: u32,
+        dialect: Option<String>,
+        mode: Option<String>,
+    ) -> Result<String, String> {
+        let (out_dialect, mode) = self.parse_output_options(dialect, mode)?;
+        let plan = self.compile_plan(rows, seed)?;
+
+        let mut model = self.inference.model.clone();
+        model.output.dialect = Some(out_dialect.to_string());
+        model.output.mode = Some(mode);
+
+        resolved_model_yaml(&model, &plan, Some(u64::from(seed))).map_err(|e| e.to_string())
     }
 }
 
@@ -135,7 +232,7 @@ struct Summary {
     dialect: String,
     dialect_detected: bool,
     tables: Vec<TableSummary>,
-    warnings: Vec<String>,
+    warnings: Vec<WarningEntry>,
 }
 
 #[derive(Serialize)]
@@ -168,6 +265,49 @@ struct ColumnSummary {
     semantic: Option<String>,
     confidence: Option<&'static str>,
     reason: Option<String>,
+}
+
+/// One diagnostic, enriched with its registry definition for the explain UI.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WarningEntry {
+    code: String,
+    severity: Severity,
+    path: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    definition: Option<DefinitionEntry>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DefinitionEntry {
+    title: &'static str,
+    category: DiagnosticCategory,
+    typical_severity: TypicalSeverity,
+    summary: &'static str,
+}
+
+fn warning_entry(diagnostic: &Diagnostic) -> WarningEntry {
+    let definition = codes::find(&diagnostic.code).map(|def| DefinitionEntry {
+        title: def.title,
+        category: def.category,
+        typical_severity: def.typical_severity,
+        summary: def.summary,
+    });
+    WarningEntry {
+        code: diagnostic.code.clone(),
+        severity: diagnostic.severity,
+        path: diagnostic.path.clone(),
+        message: diagnostic.message.clone(),
+        help: diagnostic.help.clone(),
+        documentation_url: diagnostic.documentation_url(),
+        definition,
+    }
 }
 
 fn confidence_label(confidence: Confidence) -> &'static str {
@@ -204,7 +344,7 @@ impl PlaygroundSession {
             .warnings
             .iter()
             .chain(self.inference.warnings.iter())
-            .map(|d| d.to_string())
+            .map(warning_entry)
             .collect();
 
         Summary {
@@ -283,7 +423,7 @@ mod tests {
     #[test]
     fn mysql_fixture_summary_and_generate() {
         let dump = fixture("production_shape.sql");
-        let session = PlaygroundSession::try_new(&dump, None).unwrap();
+        let mut session = PlaygroundSession::try_new(&dump, None).unwrap();
 
         let summary: serde_json::Value =
             serde_json::from_str(&session.summary_json().unwrap()).unwrap();
@@ -301,12 +441,70 @@ mod tests {
             .unwrap();
         assert!(email["generator"].is_string());
 
-        let sql = session.generate_sql(50, 7).unwrap();
+        // Warnings are structured entries now
+        for warning in summary["warnings"].as_array().unwrap() {
+            assert!(warning["code"].is_string());
+            assert!(warning["severity"].is_string());
+            assert!(warning["message"].is_string());
+        }
+
+        let sql = session.generate_sql(50, 7, None, None).unwrap();
         assert!(sql.contains("INSERT INTO"));
         // Determinism: same inputs, same output
-        assert_eq!(sql, session.generate_sql(50, 7).unwrap());
+        assert_eq!(sql, session.generate_sql(50, 7, None, None).unwrap());
         // Different seed, different output
-        assert_ne!(sql, session.generate_sql(50, 8).unwrap());
+        assert_ne!(sql, session.generate_sql(50, 8, None, None).unwrap());
+    }
+
+    #[test]
+    fn generate_cross_dialect_and_modes() {
+        let dump = fixture("production_shape.sql");
+        let mut session = PlaygroundSession::try_new(&dump, None).unwrap();
+
+        let mssql = session
+            .generate_sql(10, 1, Some("mssql".into()), None)
+            .unwrap();
+        assert!(mssql.contains("GO"));
+        let warnings: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&session.render_warnings).unwrap())
+                .unwrap();
+        assert!(warnings.is_array());
+
+        let schema_only = session
+            .generate_sql(10, 1, None, Some("schema_only".into()))
+            .unwrap();
+        assert!(schema_only.contains("CREATE TABLE"));
+        assert!(!schema_only.contains("INSERT INTO"));
+
+        let data_only = session
+            .generate_sql(10, 1, None, Some("data_only".into()))
+            .unwrap();
+        assert!(data_only.contains("INSERT INTO"));
+        assert!(!data_only.contains("CREATE TABLE"));
+
+        assert!(session
+            .generate_sql(10, 1, Some("oracle".into()), None)
+            .is_err());
+        assert!(session
+            .generate_sql(10, 1, None, Some("bogus".into()))
+            .is_err());
+    }
+
+    #[test]
+    fn model_yaml_is_deterministic_and_frozen() {
+        let dump = fixture("production_shape.sql");
+        let session = PlaygroundSession::try_new(&dump, None).unwrap();
+
+        let yaml = session.model_yaml_impl(50, 7, None, None).unwrap();
+        assert_eq!(yaml, session.model_yaml_impl(50, 7, None, None).unwrap());
+        assert!(yaml.contains("kind: model"));
+        assert!(yaml.contains("seed: 7"));
+        assert!(yaml.contains("inference: disabled"));
+
+        let pg = session
+            .model_yaml_impl(50, 7, Some("postgres".into()), None)
+            .unwrap();
+        assert!(pg.contains("dialect: postgres"));
     }
 
     #[test]
@@ -329,14 +527,14 @@ mod tests {
     #[test]
     fn schema_only_dump_generates() {
         let dump = b"CREATE TABLE t (id INT PRIMARY KEY, label VARCHAR(50));";
-        let session = PlaygroundSession::try_new(dump, Some("mysql".into())).unwrap();
+        let mut session = PlaygroundSession::try_new(dump, Some("mysql".into())).unwrap();
 
         let summary: serde_json::Value =
             serde_json::from_str(&session.summary_json().unwrap()).unwrap();
         assert_eq!(summary["dialectDetected"], false);
         assert_eq!(summary["tables"][0]["rowCount"], 0);
 
-        let sql = session.generate_sql(10, 1).unwrap();
+        let sql = session.generate_sql(10, 1, None, None).unwrap();
         assert!(sql.contains("INSERT INTO"));
     }
 
@@ -349,7 +547,7 @@ mod tests {
     #[test]
     fn zero_rows_rejected() {
         let dump = b"CREATE TABLE t (id INT PRIMARY KEY);";
-        let session = PlaygroundSession::try_new(dump, Some("mysql".into())).unwrap();
-        assert!(session.generate_sql(0, 1).is_err());
+        let mut session = PlaygroundSession::try_new(dump, Some("mysql".into())).unwrap();
+        assert!(session.generate_sql(0, 1, None, None).is_err());
     }
 }

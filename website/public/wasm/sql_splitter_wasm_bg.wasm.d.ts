@@ -7,6 +7,24 @@ export const playgroundsession_generate: (
   b: number,
   c: number,
   d: number,
+  e: number,
+  f: number,
+  g: number,
+  h: number,
+) => void;
+export const playgroundsession_lastRenderWarnings: (
+  a: number,
+  b: number,
+) => void;
+export const playgroundsession_modelYaml: (
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  e: number,
+  f: number,
+  g: number,
+  h: number,
 ) => void;
 export const playgroundsession_new: (
   a: number,

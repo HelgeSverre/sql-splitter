@@ -7,27 +7,23 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   description="Generate synthetic data from your SQL dump, entirely in your browser. Your dump never leaves your machine."
 >
   <div class="playground" x-data="playground" x-cloak>
-    <header class="pg-header">
-      <h1>Synthetic data playground</h1>
-      <p class="pg-privacy">
-        <span class="lock">&#128274;</span>
-        Your dump never leaves your machine — parsing, profiling, and generation run
-        entirely in your browser via WebAssembly. No uploads, no network requests
-        after page load (check DevTools).
-      </p>
-    </header>
-
     <div class="pg-topbar">
-      <div class="pg-file-info">
-        <template x-if="fileName">
-          <span>
-            <span class="pg-file-name" x-text="fileName"></span>
-            <span class="pg-chip" x-text="summary ? summary.dialect + (summary.dialectDetected ? ' · detected' : '') : dialect"></span>
-          </span>
-        </template>
-        <template x-if="!fileName">
-          <span class="pg-muted">No dump loaded</span>
-        </template>
+      <div class="pg-title-group">
+        <h1>Playground</h1>
+        <div class="pg-file-info">
+          <template x-if="fileName">
+            <span>
+              <span class="pg-file-name" x-text="fileName"></span>
+              <span
+                class="pg-chip"
+                x-text="summary ? summary.dialect + (summary.dialectDetected ? ' · detected' : '') : dialect"
+              ></span>
+            </span>
+          </template>
+          <template x-if="!fileName">
+            <span class="pg-muted">No dump loaded</span>
+          </template>
+        </div>
       </div>
       <div class="pg-topbar-actions">
         <label class="pg-select-label">
@@ -41,26 +37,47 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           </select>
         </label>
         <button class="pg-btn" x-on:click="$refs.fileInput.click()">Open file</button>
-        <input type="file" accept=".sql,.txt,.dump" x-ref="fileInput" hidden
-               x-on:change="openFile($event.target.files[0]); $event.target.value = ''" />
+        <input
+          type="file"
+          accept=".sql,.txt,.dump"
+          x-ref="fileInput"
+          hidden
+          x-on:change="openFile($event.target.files[0]); $event.target.value = ''"
+        />
         <div class="pg-examples" x-data="{ open: false }" x-on:click.outside="open = false">
           <button class="pg-btn" x-on:click="open = !open">Examples &#9662;</button>
           <div class="pg-examples-menu" x-show="open" x-on:click="open = false">
-            <button x-on:click="loadExample('example-mysql.sql')">MySQL — web shop</button>
-            <button x-on:click="loadExample('example-postgres.sql')">PostgreSQL — COPY format</button>
+            <button x-on:click="loadExample('example-mysql.sql')">
+              MySQL — multi-tenant SaaS
+            </button>
+            <button x-on:click="loadExample('example-postgres.sql')">
+              PostgreSQL — multi-tenant SaaS (COPY)
+            </button>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="pg-banner pg-error" x-show="error" x-text="error"></div>
-    <div class="pg-banner pg-warn" x-show="perfWarning" x-text="perfWarning"></div>
-
-    <div class="pg-workbench"
-         x-on:dragover.prevent="dragging = true"
-         x-on:dragleave.prevent="dragging = false"
-         x-on:drop.prevent="dragging = false; openFile($event.dataTransfer.files[0])"
-         x-bind:class="{ dragging: dragging }">
+    <div
+      class="pg-workbench"
+      x-on:dragover.prevent="dragging = true"
+      x-on:dragleave.prevent="dragging = false"
+      x-on:drop.prevent="dragging = false; openFile($event.dataTransfer.files[0])"
+      x-bind:class="{ dragging: dragging }"
+    >
+      <!-- Overlaid banners: appearing/disappearing never shifts the layout -->
+      <div class="pg-overlays">
+        <div class="pg-banner pg-error" x-show="error">
+          <span x-text="error"></span>
+          <button class="pg-dismiss" x-on:click="error = null" aria-label="Dismiss">&times;</button>
+        </div>
+        <div class="pg-banner pg-warn" x-show="perfWarning">
+          <span x-text="perfWarning"></span>
+          <button class="pg-dismiss" x-on:click="perfWarning = null" aria-label="Dismiss">
+            &times;
+          </button>
+        </div>
+      </div>
 
       <!-- Empty state -->
       <template x-if="!summary && state !== 'analyzing'">
@@ -68,12 +85,12 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           <div class="pg-drop-icon">&#8681;</div>
           <p class="pg-drop-title">Drop a .sql dump anywhere on this panel</p>
           <p class="pg-muted">
-            or <a href="#" x-on:click.prevent="$refs.fileInput.click()">browse for a file</a>,
-            or try an example above
+            or <a href="#" x-on:click.prevent="$refs.fileInput.click()">browse for a file</a>, or
+            try an example above
           </p>
           <p class="pg-drop-note pg-muted">
-            MySQL, PostgreSQL, SQLite, and MSSQL dumps. Compressed files aren't
-            supported in the browser — decompress first, or use the CLI.
+            MySQL, PostgreSQL, SQLite, and MSSQL dumps. Compressed files aren't supported in the
+            browser — decompress first, or use the CLI.
           </p>
         </div>
       </template>
@@ -93,31 +110,41 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           <aside class="pg-sidebar">
             <div class="pg-sidebar-title">Tables</div>
             <template x-for="table in summary.tables" x-bind:key="table.name">
-              <button class="pg-table-item"
-                      x-bind:class="{ selected: selectedTable === table.name }"
-                      x-on:click="selectedTable = table.name; tab = 'analysis'">
+              <button
+                class="pg-table-item"
+                x-bind:class="{ selected: selectedTable === table.name }"
+                x-on:click="selectedTable = table.name; tab = 'analysis'"
+              >
                 <span class="pg-table-name" x-text="table.name"></span>
-                <span class="pg-table-rows"
-                      x-text="table.rowCount === null ? 'schema' : table.rowCount + ' rows'"></span>
+                <span
+                  class="pg-table-rows"
+                  x-text="table.rowCount === null ? 'schema' : table.rowCount + ' rows'"
+                ></span>
               </button>
             </template>
-            <div class="pg-sidebar-warnings" x-show="summary.warnings.length > 0">
-              <details>
-                <summary x-text="'&#9888; ' + summary.warnings.length + ' warning' + (summary.warnings.length === 1 ? '' : 's')"></summary>
-                <ul>
-                  <template x-for="w in summary.warnings">
-                    <li x-text="w"></li>
-                  </template>
-                </ul>
-              </details>
-            </div>
           </aside>
 
           <section class="pg-main">
             <div class="pg-tabs">
-              <button x-bind:class="{ active: tab === 'analysis' }" x-on:click="tab = 'analysis'">Analysis</button>
-              <button x-bind:class="{ active: tab === 'sql' }" x-on:click="tab = 'sql'"
-                      x-bind:disabled="!sql && state !== 'generating'">Generated SQL</button>
+              <button
+                x-bind:class="{ active: tab === 'analysis' }"
+                x-on:click="switchTab('analysis')">Analysis</button
+              >
+              <button x-bind:class="{ active: tab === 'model' }" x-on:click="switchTab('model')"
+                >Model</button
+              >
+              <button
+                x-bind:class="{ active: tab === 'sql' }"
+                x-on:click="switchTab('sql')"
+                x-bind:disabled="!sql && state !== 'generating'">Generated SQL</button
+              >
+              <button
+                x-bind:class="{ active: tab === 'warnings' }"
+                x-on:click="switchTab('warnings')"
+              >
+                Warnings
+                <span class="pg-tab-badge" x-show="warningCount > 0" x-text="warningCount"></span>
+              </button>
             </div>
 
             <div class="pg-tab-content" x-show="tab === 'analysis'">
@@ -125,13 +152,17 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                 <div>
                   <div class="pg-table-header">
                     <h2 x-text="currentTable.name"></h2>
-                    <span class="pg-muted"
-                          x-text="currentTable.rowCount === null ? 'no rows observed — schema-only inference' : currentTable.rowCount + ' rows observed'"></span>
+                    <span
+                      class="pg-muted"
+                      x-text="currentTable.rowCount === null ? 'no rows observed — schema-only inference' : currentTable.rowCount + ' rows observed'"
+                    ></span>
                   </div>
                   <template x-for="fk in currentTable.foreignKeys">
                     <p class="pg-fk">
                       <span x-text="fk.columns.join(', ')"></span> &rarr;
-                      <span x-text="fk.referencedTable"></span>(<span x-text="fk.referencedColumns.join(', ')"></span>)
+                      <span x-text="fk.referencedTable"></span>(<span
+                        x-text="fk.referencedColumns.join(', ')"></span
+                      >)
                     </p>
                   </template>
                   <table class="pg-columns">
@@ -146,19 +177,31 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                         <tr>
                           <td class="pg-col-name">
                             <span x-text="col.name"></span>
-                            <span class="pg-pk" x-show="col.primaryKey" title="primary key">PK</span>
+                            <span class="pg-pk" x-show="col.primaryKey" title="primary key"
+                              >PK</span
+                            >
                           </td>
                           <td class="pg-mono" x-text="col.sqlType"></td>
-                          <td x-text="col.nullRate === null ? '—' : Math.round(col.nullRate * 100) + '%'"></td>
-                          <td x-text="col.distinctEstimate === null ? '—' : Math.round(col.distinctEstimate)"></td>
+                          <td
+                            x-text="col.nullRate === null ? '—' : Math.round(col.nullRate * 100) + '%'"
+                          ></td>
+                          <td
+                            x-text="col.distinctEstimate === null ? '—' : Math.round(col.distinctEstimate)"
+                          ></td>
                           <td>
                             <span class="pg-mono" x-text="col.generator ?? '—'"></span>
-                            <span class="pg-semantic" x-show="col.semantic" x-text="col.semantic"></span>
+                            <span
+                              class="pg-semantic"
+                              x-show="col.semantic"
+                              x-text="col.semantic"></span>
                           </td>
                           <td>
-                            <span class="pg-confidence" x-show="col.confidence"
-                                  x-bind:data-level="col.confidence"
-                                  x-bind:title="col.reason">
+                            <span
+                              class="pg-confidence"
+                              x-show="col.confidence"
+                              x-bind:data-level="col.confidence"
+                              x-bind:title="col.reason"
+                            >
                               <span class="dot"></span><span x-text="col.confidence"></span>
                             </span>
                           </td>
@@ -167,6 +210,31 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                     </tbody>
                   </table>
                 </div>
+              </template>
+            </div>
+
+            <div class="pg-tab-content pg-model" x-show="tab === 'model'">
+              <div class="pg-model-actions">
+                <span class="pg-muted">
+                  The resolved model — reproduce this exact run with the CLI:
+                </span>
+                <code>sql-splitter generate -c model.yaml -o synthetic.sql</code>
+                <span class="pg-actions-spacer"></span>
+                <button class="pg-btn" x-show="modelYamlText" x-on:click="copyModel($event)"
+                  >Copy</button
+                >
+                <button class="pg-btn" x-show="modelYamlText" x-on:click="downloadModel()"
+                  >Download model.yaml</button
+                >
+              </div>
+              <template x-if="modelLoading">
+                <div class="pg-empty"><div class="pg-spinner"></div></div>
+              </template>
+              <template x-if="modelHtml && !modelLoading">
+                <div class="pg-code" x-html="modelHtml"></div>
+              </template>
+              <template x-if="modelYamlText && !modelHtml && !modelLoading">
+                <pre><code x-text="modelYamlText"></code></pre>
               </template>
             </div>
 
@@ -179,10 +247,90 @@ import BaseLayout from '../layouts/BaseLayout.astro';
               </template>
               <template x-if="sql && state !== 'generating'">
                 <div>
-                  <p class="pg-muted pg-sql-note" x-show="sqlTruncatedNote" x-text="sqlTruncatedNote"></p>
-                  <pre><code x-text="displaySql"></code></pre>
+                  <p
+                    class="pg-muted pg-sql-note"
+                    x-show="sqlTruncatedNote"
+                    x-text="sqlTruncatedNote"></p>
+                  <template x-if="sqlHtml">
+                    <div class="pg-code" x-html="sqlHtml"></div>
+                  </template>
+                  <template x-if="!sqlHtml">
+                    <pre><code x-text="displaySql"></code></pre>
+                  </template>
                 </div>
               </template>
+            </div>
+
+            <div class="pg-tab-content pg-warnings" x-show="tab === 'warnings'">
+              <template x-if="warningCount === 0">
+                <p class="pg-muted">No warnings.</p>
+              </template>
+              <section x-show="summary && summary.warnings.length > 0">
+                <h3>From analysis</h3>
+                <template x-for="w in summary.warnings">
+                  <article class="pg-warning" x-bind:data-severity="w.severity">
+                    <header>
+                      <span class="pg-sev" x-text="w.severity"></span>
+                      <template x-if="w.documentationUrl">
+                        <a
+                          class="pg-wcode"
+                          x-bind:href="w.documentationUrl"
+                          target="_blank"
+                          rel="noopener"
+                          x-text="w.code"></a>
+                      </template>
+                      <template x-if="!w.documentationUrl">
+                        <span class="pg-wcode" x-text="w.code"></span>
+                      </template>
+                      <span class="pg-wpath pg-mono" x-text="w.path"></span>
+                    </header>
+                    <p x-text="w.message"></p>
+                    <p class="pg-muted pg-whelp" x-show="w.help" x-text="w.help"></p>
+                    <details class="pg-wexplain" x-show="w.definition">
+                      <summary>What is this?</summary>
+                      <p><strong x-text="w.definition?.title"></strong></p>
+                      <p x-text="w.definition?.summary"></p>
+                      <p class="pg-muted">
+                        Category: <span x-text="w.definition?.category"></span> &middot; Typical
+                        severity: <span x-text="w.definition?.typicalSeverity"></span>
+                      </p>
+                    </details>
+                  </article>
+                </template>
+              </section>
+              <section x-show="renderWarnings.length > 0">
+                <h3>From last generation</h3>
+                <template x-for="w in renderWarnings">
+                  <article class="pg-warning" x-bind:data-severity="w.severity">
+                    <header>
+                      <span class="pg-sev" x-text="w.severity"></span>
+                      <template x-if="w.documentationUrl">
+                        <a
+                          class="pg-wcode"
+                          x-bind:href="w.documentationUrl"
+                          target="_blank"
+                          rel="noopener"
+                          x-text="w.code"></a>
+                      </template>
+                      <template x-if="!w.documentationUrl">
+                        <span class="pg-wcode" x-text="w.code"></span>
+                      </template>
+                      <span class="pg-wpath pg-mono" x-text="w.path"></span>
+                    </header>
+                    <p x-text="w.message"></p>
+                    <p class="pg-muted pg-whelp" x-show="w.help" x-text="w.help"></p>
+                    <details class="pg-wexplain" x-show="w.definition">
+                      <summary>What is this?</summary>
+                      <p><strong x-text="w.definition?.title"></strong></p>
+                      <p x-text="w.definition?.summary"></p>
+                      <p class="pg-muted">
+                        Category: <span x-text="w.definition?.category"></span> &middot; Typical
+                        severity: <span x-text="w.definition?.typicalSeverity"></span>
+                      </p>
+                    </details>
+                  </article>
+                </template>
+              </section>
             </div>
           </section>
         </div>
@@ -198,9 +346,29 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         Seed
         <input type="number" min="0" x-model.number="seed" />
       </label>
-      <button class="pg-btn pg-btn-primary"
-              x-on:click="generate()"
-              x-bind:disabled="state === 'generating' || state === 'analyzing'">
+      <label>
+        Output dialect
+        <select x-model="outDialect">
+          <option value="" x-text="summary ? 'same as source (' + summary.dialect + ')' : 'same as source'"></option>
+          <option value="mysql">mysql</option>
+          <option value="postgres">postgres</option>
+          <option value="sqlite">sqlite</option>
+          <option value="mssql">mssql</option>
+        </select>
+      </label>
+      <label>
+        Output
+        <select x-model="outMode">
+          <option value="schema_and_data">schema + data</option>
+          <option value="schema_only">schema only</option>
+          <option value="data_only">data only</option>
+        </select>
+      </label>
+      <button
+        class="pg-btn pg-btn-primary"
+        x-on:click="generate()"
+        x-bind:disabled="state === 'generating' || state === 'analyzing'"
+      >
         &#9654; Generate
       </button>
       <span class="pg-muted pg-rows-note" x-show="rows > 100000">
@@ -211,17 +379,18 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <button class="pg-btn" x-show="sql" x-on:click="downloadSql()">Download .sql</button>
     </div>
 
-    <p class="pg-footer-note">
-      This is the real <a href="/commands/generate/">sql-splitter generate</a> engine
-      compiled to WebAssembly — the same profiler, inference, and generators the CLI
-      runs on your machine. For multi-GB dumps, scheduled jobs, or model config files,
-      <a href="/getting-started/">install the CLI</a>.
+    <p class="pg-privacy-strip">
+      <span class="lock">&#128274;</span>
+      Your dump never leaves your machine — parsing, profiling, and generation run entirely in your
+      browser via WebAssembly. This is the real <a href="/commands/generate/">sql-splitter generate</a>
+      engine; for multi-GB dumps and scheduled jobs, <a href="/getting-started/">install the CLI</a>.
     </p>
   </div>
 </BaseLayout>
 
 <script>
   import Alpine from 'alpinejs';
+  import type { HighlighterCore } from 'shiki/core';
 
   interface ColumnInfo {
     name: string;
@@ -247,17 +416,33 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     columns: ColumnInfo[];
   }
 
+  interface WarningInfo {
+    code: string;
+    severity: string;
+    path: string;
+    message: string;
+    help?: string;
+    documentationUrl?: string;
+    definition?: {
+      title: string;
+      category: string;
+      typicalSeverity: string;
+      summary: string;
+    };
+  }
+
   interface Summary {
     dialect: string;
     dialectDetected: boolean;
     tables: TableInfo[];
-    warnings: string[];
+    warnings: WarningInfo[];
   }
 
   type WorkerReply =
     | { id: number; type: 'status'; stage: string }
     | { id: number; type: 'analyzed'; summary: Summary }
-    | { id: number; type: 'generated'; sql: string }
+    | { id: number; type: 'generated'; sql: string; renderWarnings: WarningInfo[] }
+    | { id: number; type: 'model'; yaml: string }
     | { id: number; type: 'error'; message: string; fatal: boolean };
 
   const MAGIC = [
@@ -269,6 +454,52 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   ];
   const SOFT_WARN_BYTES = 100 * 1024 * 1024;
   const DISPLAY_CAP = 1024 * 1024;
+  const HIGHLIGHT_CAP = 256 * 1024;
+
+  let highlighterPromise: Promise<HighlighterCore> | null = null;
+  async function getHighlighter(): Promise<HighlighterCore> {
+    highlighterPromise ??= (async () => {
+      const [{ createHighlighterCore }, { createJavaScriptRegexEngine }] = await Promise.all([
+        import('shiki/core'),
+        import('shiki/engine/javascript'),
+      ]);
+      return createHighlighterCore({
+        themes: [import('@shikijs/themes/github-dark'), import('@shikijs/themes/github-light')],
+        langs: [import('@shikijs/langs/sql'), import('@shikijs/langs/yaml')],
+        engine: createJavaScriptRegexEngine(),
+      });
+    })();
+    return highlighterPromise;
+  }
+
+  async function highlight(code: string, lang: 'sql' | 'yaml'): Promise<string | null> {
+    try {
+      const highlighter = await getHighlighter();
+      return highlighter.codeToHtml(code, {
+        lang,
+        themes: { light: 'github-light', dark: 'github-dark' },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  function downloadBlob(text: string, filename: string, mime: string) {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function flashCopied(event: Event) {
+    const btn = event.target as HTMLButtonElement;
+    const original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => (btn.textContent = original), 1500);
+  }
 
   Alpine.data('playground', () => ({
     state: 'empty' as 'empty' | 'analyzing' | 'ready' | 'generating',
@@ -277,10 +508,18 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     dialect: 'auto',
     summary: null as Summary | null,
     selectedTable: null as string | null,
-    tab: 'analysis' as 'analysis' | 'sql',
+    tab: 'analysis' as 'analysis' | 'model' | 'sql' | 'warnings',
     rows: 100,
     seed: 42,
+    outDialect: '',
+    outMode: 'schema_and_data',
     sql: null as string | null,
+    sqlHtml: null as string | null,
+    renderWarnings: [] as WarningInfo[],
+    modelYamlText: null as string | null,
+    modelHtml: null as string | null,
+    modelKey: null as string | null,
+    modelLoading: false,
     error: null as string | null,
     perfWarning: null as string | null,
 
@@ -289,6 +528,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
     init() {
       this.spawnWorker();
+      for (const prop of ['rows', 'seed', 'outDialect', 'outMode']) {
+        this.$watch(prop, () => {
+          if (this.tab === 'model') this.ensureModel();
+        });
+      }
     },
 
     spawnWorker() {
@@ -309,13 +553,25 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         this.selectedTable = msg.summary.tables[0]?.name ?? null;
         this.tab = 'analysis';
         this.sql = null;
+        this.sqlHtml = null;
+        this.renderWarnings = [];
+        this.modelYamlText = null;
+        this.modelHtml = null;
+        this.modelKey = null;
         this.state = 'ready';
       } else if (msg.type === 'generated') {
         this.sql = msg.sql;
+        this.renderWarnings = msg.renderWarnings ?? [];
         this.tab = 'sql';
         this.state = 'ready';
+        this.highlightSql();
+      } else if (msg.type === 'model') {
+        this.modelYamlText = msg.yaml;
+        this.modelLoading = false;
+        this.highlightModel();
       } else if (msg.type === 'error') {
         this.error = msg.message;
+        this.modelLoading = false;
         if (msg.fatal) {
           this.spawnWorker();
           this.summary = null;
@@ -331,6 +587,10 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       return this.summary?.tables.find((t: TableInfo) => t.name === this.selectedTable) ?? null;
     },
 
+    get warningCount() {
+      return (this.summary?.warnings.length ?? 0) + this.renderWarnings.length;
+    },
+
     get displaySql() {
       if (!this.sql) return '';
       return this.sql.length > DISPLAY_CAP ? this.sql.slice(0, DISPLAY_CAP) : this.sql;
@@ -340,6 +600,49 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       if (!this.sql || this.sql.length <= DISPLAY_CAP) return null;
       const totalMb = (this.sql.length / (1024 * 1024)).toFixed(1);
       return `Showing the first 1 MB of ${totalMb} MB — Download gets the full script.`;
+    },
+
+    get modelRequestKey() {
+      return `${this.rows}:${this.seed}:${this.outDialect}:${this.outMode}`;
+    },
+
+    switchTab(tab: 'analysis' | 'model' | 'sql' | 'warnings') {
+      this.tab = tab;
+      if (tab === 'model') this.ensureModel();
+    },
+
+    ensureModel() {
+      if (!this.summary || this.state === 'analyzing') return;
+      if (this.modelYamlText && this.modelKey === this.modelRequestKey) return;
+      this.modelKey = this.modelRequestKey;
+      this.modelLoading = true;
+      // Reuses the current request id: a model reply must not be treated as
+      // stale by an unrelated generate, and a new analyze still supersedes it.
+      this.worker?.postMessage({
+        id: this.requestId,
+        type: 'model',
+        rows: this.rows || 100,
+        seed: this.seed || 0,
+        dialect: this.outDialect || null,
+        mode: this.outMode,
+      });
+    },
+
+    async highlightSql() {
+      this.sqlHtml = null;
+      const text = this.displaySql;
+      if (!text || text.length > HIGHLIGHT_CAP) return;
+      const generation = this.requestId;
+      const html = await highlight(text, 'sql');
+      if (generation === this.requestId) this.sqlHtml = html;
+    },
+
+    async highlightModel() {
+      this.modelHtml = null;
+      if (!this.modelYamlText) return;
+      const key = this.modelKey;
+      const html = await highlight(this.modelYamlText, 'yaml');
+      if (key === this.modelKey) this.modelHtml = html;
     },
 
     async openFile(file: File | null | undefined) {
@@ -376,6 +679,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.state = 'analyzing';
       this.summary = null;
       this.sql = null;
+      this.sqlHtml = null;
       const id = ++this.requestId;
       const dialect = this.dialect === 'auto' ? null : this.dialect;
       this.worker?.postMessage({ id, type: 'analyze', buffer, dialect }, [buffer]);
@@ -387,28 +691,34 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       this.state = 'generating';
       this.tab = 'sql';
       const id = ++this.requestId;
-      this.worker?.postMessage({ id, type: 'generate', rows: this.rows || 100, seed: this.seed || 0 });
+      this.worker?.postMessage({
+        id,
+        type: 'generate',
+        rows: this.rows || 100,
+        seed: this.seed || 0,
+        dialect: this.outDialect || null,
+        mode: this.outMode,
+      });
     },
 
     copySql(event: Event) {
       if (!this.sql) return;
-      navigator.clipboard.writeText(this.sql).then(() => {
-        const btn = event.target as HTMLButtonElement;
-        const original = btn.textContent;
-        btn.textContent = 'Copied!';
-        setTimeout(() => (btn.textContent = original), 1500);
-      });
+      navigator.clipboard.writeText(this.sql).then(() => flashCopied(event));
+    },
+
+    copyModel(event: Event) {
+      if (!this.modelYamlText) return;
+      navigator.clipboard.writeText(this.modelYamlText).then(() => flashCopied(event));
     },
 
     downloadSql() {
       if (!this.sql) return;
-      const blob = new Blob([this.sql], { type: 'application/sql' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'synthetic.sql';
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(this.sql, 'synthetic.sql', 'application/sql');
+    },
+
+    downloadModel() {
+      if (!this.modelYamlText) return;
+      downloadBlob(this.modelYamlText, 'model.yaml', 'application/yaml');
     },
   }));
 
@@ -420,25 +730,34 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     display: none !important;
   }
 
-  /* Full-width workbench: break out of BaseLayout's 780px column */
-  :global(main:has(.playground)) {
-    max-width: 1500px;
+  /* App mode: the page never scrolls; panels scroll internally */
+  :global(body:has(.playground)) {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
-  .pg-header h1 {
-    font-family: var(--font-display);
-    font-size: 1.75rem;
-    margin-bottom: var(--space-xs);
+  :global(body:has(.playground) main) {
+    flex: 1;
+    min-height: 0;
+    max-width: none;
+    width: 100%;
+    margin: 0;
+    padding: var(--space-sm) var(--space-md);
+    display: flex;
   }
 
-  .pg-privacy {
-    color: var(--color-text-muted);
-    max-width: 70ch;
-    margin-bottom: var(--space-md);
+  :global(body:has(.playground) footer) {
+    display: none;
   }
 
-  .pg-privacy .lock {
-    margin-right: 0.25rem;
+  .playground {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto 1fr auto auto;
   }
 
   .pg-topbar {
@@ -451,6 +770,19 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .pg-title-group {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm);
+    min-width: 0;
+  }
+
+  .pg-title-group h1 {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    white-space: nowrap;
   }
 
   .pg-file-name {
@@ -506,12 +838,15 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     padding: 0.4rem 0.85rem;
     font-size: 0.85rem;
     cursor: pointer;
-    transition: border-color 0.15s, color 0.15s;
+    transition:
+      border-color 0.15s,
+      color 0.15s,
+      background-color 0.15s;
   }
 
   .pg-btn:hover {
-    border-color: var(--cmd-generate);
-    color: var(--cmd-generate);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   .pg-btn:disabled {
@@ -520,15 +855,16 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-btn-primary {
-    background: var(--cmd-generate);
-    border-color: var(--cmd-generate);
-    color: var(--color-bg);
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: #fff;
     font-weight: 600;
   }
 
   .pg-btn-primary:hover {
-    color: var(--color-bg);
-    opacity: 0.9;
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+    color: #fff;
   }
 
   .pg-examples {
@@ -544,8 +880,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     border-radius: var(--radius);
     display: flex;
     flex-direction: column;
-    min-width: 220px;
-    z-index: 20;
+    min-width: 260px;
+    z-index: 40;
     overflow: hidden;
   }
 
@@ -561,14 +897,41 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
   .pg-examples-menu button:hover {
     background: var(--color-bg);
-    color: var(--cmd-generate);
+    color: var(--color-accent);
+  }
+
+  .pg-workbench {
+    position: relative;
+    min-height: 0;
+    border: 1px solid var(--color-border);
+    border-top: none;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .pg-workbench.dragging {
+    outline: 2px dashed var(--color-accent);
+    outline-offset: -8px;
+  }
+
+  .pg-overlays {
+    position: absolute;
+    inset: 0 0 auto 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
   }
 
   .pg-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-sm);
     padding: var(--space-xs) var(--space-sm);
-    border: 1px solid var(--color-border);
-    border-top: none;
     font-size: 0.875rem;
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
   }
 
   .pg-error {
@@ -581,17 +944,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     border-left: 3px solid var(--cmd-diff);
   }
 
-  .pg-workbench {
-    border: 1px solid var(--color-border);
-    border-top: none;
-    min-height: 62vh;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .pg-workbench.dragging {
-    outline: 2px dashed var(--cmd-generate);
-    outline-offset: -8px;
+  .pg-dismiss {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.25rem;
   }
 
   .pg-empty {
@@ -607,7 +967,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
   .pg-drop-icon {
     font-size: 2.5rem;
-    color: var(--cmd-generate);
+    color: var(--color-accent);
   }
 
   .pg-drop-title {
@@ -628,7 +988,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     width: 28px;
     height: 28px;
     border: 3px solid var(--color-border);
-    border-top-color: var(--cmd-generate);
+    border-top-color: var(--color-accent);
     border-radius: 50%;
     animation: pg-spin 0.8s linear infinite;
   }
@@ -653,6 +1013,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     flex-direction: column;
     gap: 2px;
     overflow-y: auto;
+    min-height: 0;
+    scrollbar-gutter: stable;
   }
 
   .pg-sidebar-title {
@@ -680,13 +1042,13 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-table-item:hover {
-    color: var(--cmd-generate);
+    color: var(--color-accent);
   }
 
   .pg-table-item.selected {
-    border-left-color: var(--cmd-generate);
+    border-left-color: var(--color-accent);
     background: var(--color-surface);
-    color: var(--cmd-generate);
+    color: var(--color-accent);
   }
 
   .pg-table-rows {
@@ -695,36 +1057,17 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     white-space: nowrap;
   }
 
-  .pg-sidebar-warnings {
-    margin-top: auto;
-    padding: var(--space-xs) var(--space-sm) 0;
-    font-size: 0.8rem;
-    color: var(--cmd-diff);
-  }
-
-  .pg-sidebar-warnings summary {
-    cursor: pointer;
-  }
-
-  .pg-sidebar-warnings ul {
-    list-style: none;
-    color: var(--color-text-muted);
-    font-size: 0.75rem;
-    margin-top: var(--space-xs);
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
   .pg-main {
     display: flex;
     flex-direction: column;
     min-width: 0;
+    min-height: 0;
   }
 
   .pg-tabs {
     display: flex;
     border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
   }
 
   .pg-tabs button {
@@ -735,11 +1078,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     font-size: 0.9rem;
     padding: 0.6rem var(--space-sm);
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
   }
 
   .pg-tabs button.active {
     color: var(--color-text);
-    border-bottom-color: var(--cmd-generate);
+    border-bottom-color: var(--color-accent);
   }
 
   .pg-tabs button:disabled {
@@ -747,11 +1093,22 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     cursor: not-allowed;
   }
 
+  .pg-tab-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    background: var(--cmd-diff);
+    color: var(--color-bg);
+    border-radius: 999px;
+    padding: 0 0.4rem;
+    line-height: 1.4;
+  }
+
   .pg-tab-content {
     padding: var(--space-sm);
     overflow: auto;
     flex: 1;
     min-height: 0;
+    scrollbar-gutter: stable;
   }
 
   .pg-table-header {
@@ -850,7 +1207,9 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     background: var(--cmd-diff);
   }
 
-  .pg-sql pre {
+  .pg-sql pre,
+  .pg-model pre,
+  .pg-code :global(pre) {
     background: var(--color-code-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
@@ -859,12 +1218,110 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     font-family: var(--font-mono);
     font-size: 0.8rem;
     line-height: 1.5;
-    max-height: 60vh;
+  }
+
+  /* Shiki dual themes: light colors are inline, dark come from CSS vars */
+  :global([data-theme='dark']) .pg-code :global(.shiki),
+  :global([data-theme='dark']) .pg-code :global(.shiki span) {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
   }
 
   .pg-sql-note {
     font-size: 0.8rem;
     margin-bottom: var(--space-xs);
+  }
+
+  .pg-model-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-xs);
+    font-size: 0.85rem;
+  }
+
+  .pg-actions-spacer {
+    flex: 1;
+  }
+
+  .pg-warnings section {
+    margin-bottom: var(--space-md);
+  }
+
+  .pg-warnings h3 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xs);
+  }
+
+  .pg-warning {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-xs) var(--space-sm);
+    margin-bottom: var(--space-xs);
+    font-size: 0.875rem;
+  }
+
+  .pg-warning header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    margin-bottom: 0.25rem;
+    flex-wrap: wrap;
+  }
+
+  .pg-sev {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-radius: 3px;
+    padding: 0.05rem 0.4rem;
+    color: var(--color-bg);
+    background: var(--color-text-muted);
+  }
+
+  .pg-warning[data-severity='error'] .pg-sev {
+    background: var(--cmd-redact);
+  }
+
+  .pg-warning[data-severity='warning'] .pg-sev {
+    background: var(--cmd-diff);
+  }
+
+  .pg-warning[data-severity='advisory'] .pg-sev {
+    background: var(--cmd-sample);
+  }
+
+  .pg-wcode {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+
+  .pg-wpath {
+    color: var(--color-text-muted);
+  }
+
+  .pg-whelp {
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+  }
+
+  .pg-wexplain {
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+  }
+
+  .pg-wexplain summary {
+    cursor: pointer;
+    color: var(--color-accent);
+  }
+
+  .pg-wexplain p {
+    margin-top: 0.35rem;
   }
 
   .pg-bottombar {
@@ -896,22 +1353,27 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     max-width: 40ch;
   }
 
-  .pg-footer-note {
-    margin-top: var(--space-md);
-    font-size: 0.875rem;
+  .pg-privacy-strip {
+    font-size: 0.8rem;
     color: var(--color-text-muted);
-    max-width: 80ch;
+    padding: var(--space-xs) 0 0;
+    text-align: center;
+  }
+
+  .pg-privacy-strip .lock {
+    margin-right: 0.25rem;
   }
 
   @media (max-width: 768px) {
     .pg-ide {
       grid-template-columns: 1fr;
+      grid-template-rows: auto 1fr;
     }
 
     .pg-sidebar {
       border-right: none;
       border-bottom: 1px solid var(--color-border);
-      max-height: 200px;
+      max-height: 160px;
     }
   }
 </style>

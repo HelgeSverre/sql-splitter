@@ -181,6 +181,96 @@ export class PlaygroundSession {
     wasm.__wbg_playgroundsession_free(ptr, 0);
   }
   /**
+   * The resolved `kind: model` YAML document for the current inference —
+   * the same document the CLI emits with `--emit-config`, with row counts
+   * frozen, inference disabled, and the seed pinned.
+   * @param {number} rows
+   * @param {number} seed
+   * @param {string | null} [dialect]
+   * @param {string | null} [mode]
+   * @returns {string}
+   */
+  modelYaml(rows, seed, dialect, mode) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      var ptr0 = isLikeNone(dialect)
+        ? 0
+        : passStringToWasm0(
+            dialect,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len0 = WASM_VECTOR_LEN;
+      var ptr1 = isLikeNone(mode)
+        ? 0
+        : passStringToWasm0(
+            mode,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len1 = WASM_VECTOR_LEN;
+      wasm.playgroundsession_modelYaml(
+        retptr,
+        this.__wbg_ptr,
+        rows,
+        seed,
+        ptr0,
+        len0,
+        ptr1,
+        len1,
+      );
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+      var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+      var ptr3 = r0;
+      var len3 = r1;
+      if (r3) {
+        ptr3 = 0;
+        len3 = 0;
+        throw takeObject(r2);
+      }
+      deferred4_0 = ptr3;
+      deferred4_1 = len3;
+      return getStringFromWasm0(ptr3, len3);
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+      wasm.__wbindgen_export(deferred4_0, deferred4_1, 1);
+    }
+  }
+  /**
+   * Warnings raised by the most recent `generate` call (compile
+   * diagnostics + cross-dialect conversion losses), as a JSON array.
+   * @returns {string}
+   */
+  lastRenderWarnings() {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      wasm.playgroundsession_lastRenderWarnings(retptr, this.__wbg_ptr);
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+      var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+      var ptr1 = r0;
+      var len1 = r1;
+      if (r3) {
+        ptr1 = 0;
+        len1 = 0;
+        throw takeObject(r2);
+      }
+      deferred2_0 = ptr1;
+      deferred2_1 = len1;
+      return getStringFromWasm0(ptr1, len1);
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+      wasm.__wbindgen_export(deferred2_0, deferred2_1, 1);
+    }
+  }
+  /**
    * Profile a dump and infer a generation model from it.
    *
    * `dialect` is `"mysql" | "postgres" | "sqlite" | "mssql"`, or `None` to
@@ -247,34 +337,62 @@ export class PlaygroundSession {
   /**
    * Render synthetic SQL. `rows` is the row count for root tables (children
    * derive their counts from relationships); `seed` makes output
-   * deterministic — same dump + rows + seed → identical SQL.
+   * deterministic. `dialect` selects the output dialect (default: the
+   * source dialect); `mode` is `schema_and_data | schema_only | data_only`.
    * @param {number} rows
    * @param {number} seed
+   * @param {string | null} [dialect]
+   * @param {string | null} [mode]
    * @returns {string}
    */
-  generate(rows, seed) {
-    let deferred2_0;
-    let deferred2_1;
+  generate(rows, seed, dialect, mode) {
+    let deferred4_0;
+    let deferred4_1;
     try {
       const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-      wasm.playgroundsession_generate(retptr, this.__wbg_ptr, rows, seed);
+      var ptr0 = isLikeNone(dialect)
+        ? 0
+        : passStringToWasm0(
+            dialect,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len0 = WASM_VECTOR_LEN;
+      var ptr1 = isLikeNone(mode)
+        ? 0
+        : passStringToWasm0(
+            mode,
+            wasm.__wbindgen_export3,
+            wasm.__wbindgen_export4,
+          );
+      var len1 = WASM_VECTOR_LEN;
+      wasm.playgroundsession_generate(
+        retptr,
+        this.__wbg_ptr,
+        rows,
+        seed,
+        ptr0,
+        len0,
+        ptr1,
+        len1,
+      );
       var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
       var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
       var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
       var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-      var ptr1 = r0;
-      var len1 = r1;
+      var ptr3 = r0;
+      var len3 = r1;
       if (r3) {
-        ptr1 = 0;
-        len1 = 0;
+        ptr3 = 0;
+        len3 = 0;
         throw takeObject(r2);
       }
-      deferred2_0 = ptr1;
-      deferred2_1 = len1;
-      return getStringFromWasm0(ptr1, len1);
+      deferred4_0 = ptr3;
+      deferred4_1 = len3;
+      return getStringFromWasm0(ptr3, len3);
     } finally {
       wasm.__wbindgen_add_to_stack_pointer(16);
-      wasm.__wbindgen_export(deferred2_0, deferred2_1, 1);
+      wasm.__wbindgen_export(deferred4_0, deferred4_1, 1);
     }
   }
 }

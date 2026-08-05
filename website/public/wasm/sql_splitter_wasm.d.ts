@@ -5,6 +5,22 @@ export class PlaygroundSession {
   free(): void;
   [Symbol.dispose](): void;
   /**
+   * The resolved `kind: model` YAML document for the current inference —
+   * the same document the CLI emits with `--emit-config`, with row counts
+   * frozen, inference disabled, and the seed pinned.
+   */
+  modelYaml(
+    rows: number,
+    seed: number,
+    dialect?: string | null,
+    mode?: string | null,
+  ): string;
+  /**
+   * Warnings raised by the most recent `generate` call (compile
+   * diagnostics + cross-dialect conversion losses), as a JSON array.
+   */
+  lastRenderWarnings(): string;
+  /**
    * Profile a dump and infer a generation model from it.
    *
    * `dialect` is `"mysql" | "postgres" | "sqlite" | "mssql"`, or `None` to
@@ -18,9 +34,15 @@ export class PlaygroundSession {
   /**
    * Render synthetic SQL. `rows` is the row count for root tables (children
    * derive their counts from relationships); `seed` makes output
-   * deterministic — same dump + rows + seed → identical SQL.
+   * deterministic. `dialect` selects the output dialect (default: the
+   * source dialect); `mode` is `schema_and_data | schema_only | data_only`.
    */
-  generate(rows: number, seed: number): string;
+  generate(
+    rows: number,
+    seed: number,
+    dialect?: string | null,
+    mode?: string | null,
+  ): string;
 }
 
 export function start(): void;
@@ -36,6 +58,21 @@ export interface InitOutput {
     b: number,
     c: number,
     d: number,
+    e: number,
+    f: number,
+    g: number,
+    h: number,
+  ) => void;
+  readonly playgroundsession_lastRenderWarnings: (a: number, b: number) => void;
+  readonly playgroundsession_modelYaml: (
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+    g: number,
+    h: number,
   ) => void;
   readonly playgroundsession_new: (
     a: number,

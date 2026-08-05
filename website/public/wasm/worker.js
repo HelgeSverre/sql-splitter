@@ -22,8 +22,25 @@ self.onmessage = async (event) => {
     } else if (type === "generate") {
       if (!session) throw new Error("No dump analyzed yet");
       self.postMessage({ id, type: "status", stage: "generating" });
-      const sql = session.generate(event.data.rows, event.data.seed);
-      self.postMessage({ id, type: "generated", sql });
+      const { rows, seed, dialect, mode } = event.data;
+      const sql = session.generate(
+        rows,
+        seed,
+        dialect ?? undefined,
+        mode ?? undefined,
+      );
+      const renderWarnings = JSON.parse(session.lastRenderWarnings());
+      self.postMessage({ id, type: "generated", sql, renderWarnings });
+    } else if (type === "model") {
+      if (!session) throw new Error("No dump analyzed yet");
+      const { rows, seed, dialect, mode } = event.data;
+      const yaml = session.modelYaml(
+        rows,
+        seed,
+        dialect ?? undefined,
+        mode ?? undefined,
+      );
+      self.postMessage({ id, type: "model", yaml });
     }
   } catch (err) {
     // A WebAssembly trap (panic under panic=abort) leaves the instance's

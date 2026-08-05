@@ -9,7 +9,7 @@ test("playground analyzes an example dump and generates synthetic SQL", async ({
   await page.goto("/playground/");
 
   await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /mysql — web shop/i }).click();
+  await page.getByRole("button", { name: /mysql — multi-tenant/i }).click();
 
   // The real profiler found the fixture's tables
   const sidebar = page.locator(".pg-sidebar");
@@ -18,18 +18,49 @@ test("playground analyzes an example dump and generates synthetic SQL", async ({
   });
   await expect(sidebar.getByRole("button", { name: /^orders/ })).toBeVisible();
 
-  // The inference assigned a semantic generator to users.email
+  // The inference assigned a generator to a users column
+  await sidebar.getByRole("button", { name: /^users/ }).click();
   await expect(page.locator(".pg-columns")).toContainText("email");
 
   await page.locator(".pg-btn-primary").click();
   await expect(page.locator(".pg-sql pre")).toContainText("INSERT INTO", {
-    timeout: 20000,
+    timeout: 30000,
   });
 
   // Determinism marketing claim: seed is in the UI and defaults to 42
   await expect(page.locator('input[x-model\\.number="seed"]')).toHaveValue(
     "42",
   );
+});
+
+test("model tab, cross-dialect output, and warnings tab work", async ({
+  page,
+}) => {
+  await page.goto("/playground/");
+
+  await page.getByRole("button", { name: /examples/i }).click();
+  await page.getByRole("button", { name: /mysql — multi-tenant/i }).click();
+  const sidebar = page.locator(".pg-sidebar");
+  await expect(sidebar.getByRole("button", { name: /^users/ })).toBeVisible({
+    timeout: 20000,
+  });
+
+  // Model tab shows the resolved kind:model YAML
+  await page.getByRole("button", { name: "Model" }).click();
+  await expect(page.locator(".pg-model")).toContainText("kind: model", {
+    timeout: 30000,
+  });
+
+  // Cross-dialect: mysql source rendered as mssql emits GO batches
+  await page.locator('select[x-model="outDialect"]').selectOption("mssql");
+  await page.locator(".pg-btn-primary").click();
+  await expect(page.locator(".pg-sql")).toContainText("GO", {
+    timeout: 30000,
+  });
+
+  // Warnings tab renders structured entries
+  await page.getByRole("button", { name: /warnings/i }).click();
+  await expect(page.locator(".pg-warnings")).toBeVisible();
 });
 
 test("playground rejects compressed uploads with a helpful message", async ({

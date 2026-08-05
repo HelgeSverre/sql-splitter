@@ -30,6 +30,7 @@
     "react-dom": "^18.3.1",
     "satori": "^0.19.3",
     "sharp": "^0.34.5",
+    "shiki": "^4.3.1",
     "starlight-github-alerts": "^0.4.0",
     "starlight-links-validator": "^0.25.2",
     "starlight-llms-txt": "^0.11.0"
