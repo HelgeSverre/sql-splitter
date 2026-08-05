@@ -13,22 +13,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EnumNamingStrategy {
     /// Generate one PostgreSQL type per table+column combination.
     /// Deterministic, no semantic coupling between unrelated columns.
+    #[default]
     PerColumn,
     /// Reuse PostgreSQL types when two columns share identical enum labels,
     /// even across different tables.
     Dedupe,
 }
 
-impl Default for EnumNamingStrategy {
-    fn default() -> Self {
-        Self::PerColumn
-    }
-}
-
+#[derive(Default)]
 pub struct EnumRegistry {
     /// PostgreSQL enum definitions: type_name → ordered labels
     pg_enums_by_name: HashMap<String, Vec<String>>,
@@ -46,12 +42,7 @@ pub struct EnumRegistry {
 
 impl EnumRegistry {
     pub fn new() -> Self {
-        Self {
-            pg_enums_by_name: HashMap::new(),
-            enum_signatures: HashMap::new(),
-            emitted_pg_types: HashSet::new(),
-            naming: EnumNamingStrategy::default(),
-        }
+        Self::default()
     }
 
     pub fn with_naming(naming: EnumNamingStrategy) -> Self {
