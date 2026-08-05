@@ -103,9 +103,13 @@ test("every example loads and analyzes through the real pipeline", async ({
     await expect(page.locator(".pg-chip")).toContainText(example.chip, {
       timeout: 5000,
     });
-    expect(
-      await page.locator(".pg-sidebar .pg-table-item").count(),
-    ).toBeGreaterThan(3);
+    // Retries: the chip falls back to the pending dialect while analysis is
+    // still running, so it can match before the sidebar has re-rendered.
+    await expect
+      .poll(() => page.locator(".pg-sidebar .pg-table-item").count(), {
+        timeout: 30000,
+      })
+      .toBeGreaterThan(3);
   }
 });
 
@@ -128,8 +132,8 @@ test("sidebar resizes by dragging and persists across reloads", async ({
   page,
 }) => {
   await page.goto("/playground/");
-  await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
+  await page.getByTestId("examples-menu").click();
+  await page.getByTestId("example-saas-mysql").click();
   const sidebar = page.locator(".pg-sidebar");
   await expect(sidebar).toBeVisible({ timeout: 20000 });
 
@@ -150,8 +154,8 @@ test("sidebar resizes by dragging and persists across reloads", async ({
 
   // Persists across a reload
   await page.reload();
-  await page.getByRole("button", { name: /examples/i }).click();
-  await page.getByRole("button", { name: /^SaaS · MySQL/i }).click();
+  await page.getByTestId("examples-menu").click();
+  await page.getByTestId("example-saas-mysql").click();
   await expect(sidebar).toBeVisible({ timeout: 20000 });
   expect((await sidebar.boundingBox())!.width).toBeCloseTo(widened, 0);
 
