@@ -64,33 +64,47 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       x-on:drop.prevent="dragging = false; openFile($event.dataTransfer.files[0])"
       x-bind:class="{ dragging: dragging }"
     >
-      <!-- Overlaid banners: appearing/disappearing never shifts the layout -->
-      <div class="pg-overlays">
-        <div class="pg-banner pg-error" x-show="error">
-          <span x-text="error"></span>
-          <button class="pg-dismiss" x-on:click="error = null" aria-label="Dismiss">&times;</button>
-        </div>
-        <div class="pg-banner pg-warn" x-show="perfWarning">
-          <span x-text="perfWarning"></span>
-          <button class="pg-dismiss" x-on:click="perfWarning = null" aria-label="Dismiss">
-            &times;
-          </button>
-        </div>
-      </div>
-
       <!-- Empty state -->
       <template x-if="!summary && state !== 'analyzing'">
-        <div class="pg-empty">
-          <div class="pg-drop-icon">&#8681;</div>
-          <p class="pg-drop-title">Drop a .sql dump anywhere on this panel</p>
-          <p class="pg-muted">
-            or <a href="#" x-on:click.prevent="$refs.fileInput.click()">browse for a file</a>, or
-            try an example above
-          </p>
-          <p class="pg-drop-note pg-muted">
-            MySQL, PostgreSQL, SQLite, and MSSQL dumps. Compressed files aren't supported in the
-            browser — decompress first, or use the CLI.
-          </p>
+        <div class="pg-empty-wrap">
+          <div class="pg-banner pg-error" x-show="error">
+            <span x-text="error"></span>
+            <button class="pg-dismiss" x-on:click="error = null" aria-label="Dismiss">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+              >
+            </button>
+          </div>
+          <div class="pg-banner pg-warn" x-show="perfWarning">
+            <span x-text="perfWarning"></span>
+            <button class="pg-dismiss" x-on:click="perfWarning = null" aria-label="Dismiss">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+              >
+            </button>
+          </div>
+          <div class="pg-empty">
+            <div class="pg-drop-icon">&#8681;</div>
+            <p class="pg-drop-title">Drop a .sql dump anywhere on this panel</p>
+            <p class="pg-muted">
+              or <a href="#" x-on:click.prevent="$refs.fileInput.click()">browse for a file</a>, or
+              try an example above
+            </p>
+            <p class="pg-drop-note pg-muted">
+              MySQL, PostgreSQL, SQLite, and MSSQL dumps. Compressed files aren't supported in the
+              browser — decompress first, or use the CLI.
+            </p>
+          </div>
         </div>
       </template>
 
@@ -146,7 +160,40 @@ import BaseLayout from '../layouts/BaseLayout.astro';
               </button>
             </div>
 
-            <div class="pg-tab-content" x-show="tab === 'analysis'">
+            <div class="pg-tab-body">
+              <!-- Overlaid banners: never obscure the tabs or sidebar, never shift layout -->
+              <div class="pg-overlays">
+                <div class="pg-banner pg-error" x-show="error">
+                  <span x-text="error"></span>
+                  <button class="pg-dismiss" x-on:click="error = null" aria-label="Dismiss">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      ><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+                    >
+                  </button>
+                </div>
+                <div class="pg-banner pg-warn" x-show="perfWarning">
+                  <span x-text="perfWarning"></span>
+                  <button class="pg-dismiss" x-on:click="perfWarning = null" aria-label="Dismiss">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      ><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg
+                    >
+                  </button>
+                </div>
+              </div>
+
+              <div class="pg-tab-content" x-show="tab === 'analysis'">
               <template x-if="currentTable">
                 <div>
                   <div class="pg-table-header">
@@ -330,6 +377,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
                   </article>
                 </template>
               </section>
+              </div>
             </div>
           </section>
         </div>
@@ -898,6 +946,21 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     outline-offset: -8px;
   }
 
+  .pg-tab-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pg-empty-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   .pg-overlays {
     position: absolute;
     inset: 0 0 auto 0;
@@ -928,13 +991,26 @@ import BaseLayout from '../layouts/BaseLayout.astro';
   }
 
   .pg-dismiss {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
     background: none;
     border: none;
+    border-radius: 4px;
     color: inherit;
-    font-size: 1.1rem;
-    line-height: 1;
     cursor: pointer;
-    padding: 0 0.25rem;
+    padding: 0.2rem;
+    margin-top: 1px;
+  }
+
+  .pg-dismiss svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .pg-dismiss:hover {
+    background: var(--color-bg);
   }
 
   .pg-empty {
