@@ -36,15 +36,15 @@ existing guarantees.
 
 ### 5.2.2 Synchronous vs. Async: The Fork in the Road
 
-|                        | Synchronous Drivers                                                                     | Async with Tokio Bridge                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Crates**             | `mysql` (v25), `postgres` (v0.19)                                                       | `mysql_async` (v0.35), `tokio-postgres` (v0.7)                                                           |
-| **Runtime**            | None needed                                                                             | Tokio `rt-multi-thread` added as dependency                                                              |
-| **Connection pooling** | `r2d2_postgres` for PG; `mysql` crate has no native pool                                | `mysql_async::Pool`, `tokio-postgres` deadpool/bb8                                                       |
-| **Streaming**          | `mysql::Conn::exec_iter()` — row-by-row; `postgres::Client::copy_out()` — COPY protocol | `mysql_async::Conn::exec_iter()` — async row iterator; `tokio_postgres::Client::copy_out()` — async COPY |
-| **TLS**                | Both support native TLS + custom CA certs                                               | Both support native TLS with async handshake                                                             |
-| **Fit with codebase**  | Matches existing sync architecture                                                      | Requires `tokio::runtime::Runtime::block_on()` at the boundary                                           |
-| **Risk**               | Lower — no async/sync impedance mismatch                                                | Medium — mixing sync parser with async DB I/O needs careful boundary design                              |
+|                        | Synchronous Drivers                                                                                      | Async with Tokio Bridge                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **Crates**             | `mysql` (v25), `postgres` (v0.19)                                                                        | `mysql_async` (v0.35), `tokio-postgres` (v0.7)                                                            |
+| **Runtime**            | None needed                                                                                              | Tokio `rt-multi-thread` added as dependency                                                               |
+| **Connection pooling** | `r2d2_postgres` for PG; `mysql` crate has no native pool                                                 | `mysql_async::Pool`, `tokio-postgres` deadpool/bb8                                                        |
+| **Streaming**          | `mysql::Conn::query_iter()` — row-by-row (text protocol); `postgres::Client::copy_out()` — COPY protocol | `mysql_async::Conn::query_iter()` — async row iterator; `tokio_postgres::Client::copy_out()` — async COPY |
+| **TLS**                | Both support native TLS + custom CA certs                                                                | Both support native TLS with async handshake                                                              |
+| **Fit with codebase**  | Matches existing sync architecture                                                                       | Requires `tokio::runtime::Runtime::block_on()` at the boundary                                            |
+| **Risk**               | Lower — no async/sync impedance mismatch                                                                 | Medium — mixing sync parser with async DB I/O needs careful boundary design                               |
 
 **Recommendation: Option A — Synchronous drivers.**
 
@@ -135,14 +135,15 @@ impl DbSource for MySqlSource {
         &mut self,
         table: &str,
     ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>> {
-        // mysql::Conn::exec_iter() streams rows one at a time from the
-        // server. The driver fetches in chunks internally (configurable
-        // via OptsBuilder), but yields individual rows.
+        // mysql::Conn::query_iter() streams rows using the text protocol.
+        // Text protocol returns human-readable text — identical to what
+        // mysqldump produces. Avoids binary protocol edge cases with
+        // BIT/ENUM/SET types and server-side prepared statement exhaustion.
         //
         // We batch them into RowBatch(10_000 rows) to avoid trait call
         // overhead per row.
         let query = format!("SELECT * FROM `{}`", table);
-        let mut result = self.conn.exec_iter(&query)?;
+        let mut result = self.conn.query_iter(&query)?;
 
         let columns: Vec<String> = result
             .columns()
@@ -244,51 +245,21 @@ impl DbSource for PostgresSource {
 
 For PlanetScale sources, direct database connections are unreliable for bulk
 data extraction because VTGate is not designed for long-running `SELECT *`
-queries. The design pattern is a subprocess wrapper that mirrors the database
-source trait but delegates to `pscale database dump`:
+queries. The core executor never invokes `pscale` as a subprocess (see
+`05-review-findings.md` §7.6 for the architecture decision).
 
-```rust
-struct PlanetScaleSource {
-    database: String,
-    branch: String,
-    organization: Option<String>,
-    work_dir: PathBuf,
-}
+Instead, PlanetScale data comes from mydumper dump files produced by
+`pscale database dump`. The dump step is a pre-condition, documented in the
+migration runbook, but not automated by sql-splitter:
 
-impl DbSource for PlanetScaleSource {
-    fn extract_schema(&mut self) -> Result<Schema> {
-        // Option A: Direct connection via VTGate for information_schema
-        // (fast, reliable for metadata). The pscale CLI can provide
-        // connection credentials: `pscale branch connect-info <db> <branch>`.
-        //
-        // Option B: Run pscale database dump, then parse only the
-        // -schema.sql files. Slower (full dump) but doesn't require a live
-        // connection during analysis.
-        todo!()
-    }
-
-    fn stream_table_rows(
-        &mut self,
-        table: &str,
-    ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>> {
-        // Run `pscale database dump <db> <branch> --tables <table>
-        //   --output <work_dir>` as a subprocess.
-        // Parse the resulting .sql files through the existing parser.
-        // This is the file path — sql-splitter already does this.
-        //
-        // The subprocess wrapper handles:
-        // - Checking pscale CLI is installed (pre-flight check)
-        // - Authenticating (pscale service token from env var)
-        // - Progress reporting (parse pscale output for progress lines)
-        // - Timeout and retry (dump can take hours for large databases)
-        // - Cleanup (delete work_dir after migration)
-        //
-        // The output files are in mydumper format (per-table .sql files),
-        // which sql-splitter's existing parser reads natively.
-        todo!()
-    }
-}
+```bash
+# Run before invoking sql-splitter:
+pscale database dump <DATABASE> <BRANCH> --output /path/to/dump/
 ```
+
+sql-splitter reads the resulting per-table `.sql` files through the existing
+file-based parser — the same path as any other file source. This keeps the
+executor's dependency surface clean.
 
 ### 5.2.7 Integrating with the Existing Pipeline
 
@@ -307,7 +278,8 @@ Add an `InputSource` enum to the splitter:
 enum InputSource {
     File(PathBuf),
     Database(Box<dyn DbSource>),
-    PlanetScale(PlanetScaleSource),
+    // PlanetScale: data comes from mydumper dump files (File variant),
+    // not from a live database connection. See §5.2.6.
 }
 
 // In splitter:
@@ -317,17 +289,14 @@ match input_source {
     }
     InputSource::Database(db) => {
         let schema = db.extract_schema()?;
-        for table in schema.tables() {
-            let rows = db.stream_table_rows(table.name)?;
+        for table in schema.iter() {
+            let rows = db.stream_table_rows(&table.name)?;
             for batch in rows {
                 for row in batch.rows {
                     emit(ParserEvent::InsertRow { table, row });
                 }
             }
         }
-    }
-    InputSource::PlanetScale(ps) => {
-        // delegate to pscale subprocess, then read the resulting files
     }
 }
 ```

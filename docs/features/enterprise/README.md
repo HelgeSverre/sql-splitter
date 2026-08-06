@@ -129,3 +129,19 @@ The design documents in this directory are based on:
   Shopify 400TB+ CDC; GitHub 1200+ host MySQL 8.0 upgrade)
 - Direct verification of sql-splitter source code references (100% accuracy
   confirmed across all file paths and line numbers)
+
+## Gap Assignment
+
+The capability audit (`02-capability-audit.md`) identifies 8 gaps. Here is
+where each is addressed in the implementation plan:
+
+| Gap                           | Phase          | Rationale                                                              |
+| ----------------------------- | -------------- | ---------------------------------------------------------------------- |
+| 1 (Live DB connection)        | Phase 0–1      | Foundation — `DbSource` trait, MySQL + PG schema extraction            |
+| 2 (Migration plan generation) | Phase 1        | Foundation — `MigrationPlan` from `SchemaDiff`, hazard annotations     |
+| 3 (Data verification)         | Phase 4        | Depends on live import working first                                   |
+| 4 (PlanetScale validation)    | Phase 1        | Schema analysis — low effort, high value. Extends existing `Validator` |
+| 5 (Risk assessment)           | Phase 1        | Analysis layer on existing data — `RiskAssessment` struct              |
+| 6 (Runbook generation)        | Phase 4        | Template rendering from structured plan output                         |
+| 7 (Stored proc cataloging)    | Phase 2        | Needed for cross-dialect migration — catalog what needs to be re-added |
+| 8 (Middleware pipeline)       | Already exists | stdin/stdout support is built in; documented as design pattern         |

@@ -20,21 +20,19 @@
         ┌──────────────────────┼──────────────────────┐
         ▼                      ▼                      ▼
    ┌──────────┐    ┌────────────────────┐    ┌──────────────┐
-   │ Phase 0  │    │ Phase 1            │    │ Phase 2      │
-   │ Extract  │───▶│ Generate Plan      │───▶│ Execute Plan  │
-   │ Schemas  │    │ (dry-run default)  │    │ (--execute)   │
+   │ Extract  │    │ Generate Plan      │    │ Execute DDL  │
+   │ Schemas  │───▶│ (dry-run default)  │───▶│ (--execute)  │
    └──────────┘    └────────────────────┘    └──────┬───────┘
                                                     │
                                         ┌───────────┴───────────┐
                                         ▼                       ▼
                                    ┌──────────┐         ┌──────────────┐
-                                   │ Phase 3  │         │ Phase 4      │
-                                   │ Migrate  │────────▶│ Verify       │
-                                   │ Data     │         │ (--verify)   │
+                                   │ Migrate  │         │ Verify       │
+                                   │ Data     │────────▶│ (--verify)   │
                                    └──────────┘         └──────────────┘
 ```
 
-### Phase 0: Schema Extraction
+### Schema Extraction (Phase 0 in implementation plan)
 
 ```
 source_schema = DbSource::extract_schema(source)
@@ -51,7 +49,7 @@ For PlanetScale sources: `pscale database dump` → read mydumper output →
 `Schema::from_sql_file()`. Schema extraction from PlanetScale is metadata-only
 (information_schema via VTGate) or uses the dump files.
 
-### Phase 1: Plan Generation (always runs)
+### Plan Generation (always runs)
 
 ```rust
 let diff = compare_schemas(&source_schema, &target_schema, &config);
@@ -81,7 +79,7 @@ Output formats:
 | `text`           | Human-readable with color-coded additions/removals            |
 | `runbook`        | Markdown runbook for customer-facing documentation            |
 
-### Phase 2: DDL Execution (`--execute`)
+### DDL Execution (`--execute`)
 
 For each phase, in FK dependency order (`SchemaGraph::processing_order()`):
 
@@ -110,7 +108,7 @@ re-running the migration after a failure is safe:
 | DROP CONSTRAINT | `ALTER TABLE ... DROP FOREIGN KEY` (check exists first)     | `ALTER TABLE ... DROP CONSTRAINT IF EXISTS`         |
 | CREATE FK       | Check `information_schema.KEY_COLUMN_USAGE` first           | Same                                                |
 
-### Phase 3: Data Migration (`--execute`)
+### Data Migration (`--execute`)
 
 For each table, in FK dependency order:
 
@@ -155,7 +153,7 @@ the `ON DUPLICATE KEY UPDATE` form uses the target's column names. The
 Batch size: 1000 rows per INSERT (configurable via `--batch-size`, matching
 the existing `generate --batch-size` convention).
 
-### Phase 4: Verification (`--verify`)
+### Verification (`--verify`)
 
 ```rust
 for table in plan.migrated_tables() {
@@ -1740,9 +1738,13 @@ Execution:
   --parallel <N>              Import data using N parallel connections (default: 1)
   --chunk-column <COL>        Chunk large tables by this column (mandatory for PlanetScale sources)
   --chunk-size <N>            Target rows per chunk (default: 100000)
+  --chunk-time <SECS>         Adaptive chunk sizing: auto-tune chunk size to hit this query time target
+  --copy-mode <MODE>          client|direct (default: client). Direct uses INSERT INTO target SELECT * FROM source when same DB type on same server
   --staging-strategy <MODE>   direct|rename-safe|copy-then-drop (default: direct)
   --binlog-handling <MODE>    log|session-off|purge|warn-only (MySQL target only, default: warn-only)
   --sql-mode-override         Temporarily remove strict sql_mode on target during import
+  --neon-disable-suspend      Disable Neon scale-to-zero during migration (requires Neon API access)
+  --parallel-indexes <N>      Create indexes in parallel after data import (default: 1, sequential)
   --no-idempotent             Disable PK-targeted INSERT dedup (unsafe for re-runs)
   --strict-insert             Use plain INSERT without dedup (fail fast on first error)
   --tables <LIST>             Only migrate these tables (comma-separated globs)
@@ -1755,8 +1757,9 @@ Output:
   --format <FORMAT>           plan|sql|text|json|runbook (default: plan)
 
 Verification:
-  --verify <MODE>             checksum|rowcount|all (default: none)
-  --verify-sample <N>         Sample N rows per table for row-level diff
+  --verify <MODE>             checksum|rowcount|all (default: none). checksum uses SHA-256 stream hashing; rowcount compares COUNT(*) per table
+  --verify-sample <N>         When a checksum mismatch is found, sample N rows per mismatched table for detailed row-level diff
+  --verify-checksum-algorithm <ALGO> sha256|xxh3 (default: sha256). xxh3 is 5-10× faster for large datasets
 
 Logging:
   --log-level <LEVEL>         error|warn|info|debug|trace (default: info)
@@ -1773,5 +1776,4 @@ Development:
   --explain                   Explain plan generation decisions
   --pause-on-error            Stop on first error with interactive prompt
   --diff-only                 Run schema extraction + plan only
-  --profile <PATH>            Write performance profile (flamegraph data)
 ```
