@@ -11,9 +11,9 @@
 //! known PostgreSQL enum so that casts like `'active'::order_status` can be
 //! stripped correctly — the cast is removed and the literal is left bare.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum EnumNamingStrategy {
     /// Generate one PostgreSQL type per table+column combination.
     /// Deterministic, no semantic coupling between unrelated columns.
@@ -33,11 +33,14 @@ pub struct EnumRegistry {
     /// Used for deduplication when converting MySQL → PostgreSQL
     enum_signatures: HashMap<String, String>,
 
-    /// Track which CREATE TYPE statements have been emitted
-    emitted_pg_types: HashSet<String>,
+    /// Track which CREATE TYPE statements have been emitted, with their labels.
+    emitted_pg_types: HashMap<String, Vec<String>>,
 
     /// Naming strategy for generated PG types
     naming: EnumNamingStrategy,
+
+    /// Bumped on every registration so callers can cache derived state.
+    generation: u64,
 }
 
 impl EnumRegistry {
@@ -49,13 +52,19 @@ impl EnumRegistry {
         Self {
             pg_enums_by_name: HashMap::new(),
             enum_signatures: HashMap::new(),
-            emitted_pg_types: HashSet::new(),
+            emitted_pg_types: HashMap::new(),
             naming,
+            generation: 0,
         }
     }
 
     pub fn register_pg_enum(&mut self, name: &str, labels: Vec<String>) {
         self.pg_enums_by_name.insert(name.to_string(), labels);
+        self.generation += 1;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn get_pg_enum(&self, name: &str) -> Option<&[String]> {
@@ -68,7 +77,10 @@ impl EnumRegistry {
         column: &str,
         labels: &[String],
     ) -> String {
-        let signature = labels.join(",");
+        let table = sanitize_ident(table);
+        let column = sanitize_ident(column);
+        let signature: Vec<String> = labels.iter().map(|l| l.replace('\0', "")).collect();
+        let signature = signature.join("\0");
 
         match self.naming {
             EnumNamingStrategy::Dedupe => {
@@ -77,27 +89,12 @@ impl EnumRegistry {
                 }
                 let base = format!("enum__{table}__{column}");
                 if self.enum_signatures.values().any(|name| *name == base) {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    signature.hash(&mut hasher);
-                    let mut name = format!("{base}_{:x}", hasher.finish());
-                    // Guard against hash collisions: if the generated name
-                    // already exists with different labels, append a counter.
-                    if let Some(existing_sig) =
-                        self.enum_signatures
-                            .iter()
-                            .find(|(_, n)| **n == name)
-                            .map(|(s, _)| s)
-                    {
-                        if existing_sig != &signature {
-                            for n in 2u32.. {
-                                name = format!("{base}_{:x}_{n}", hasher.finish());
-                                if !self.enum_signatures.values().any(|v| v == &name) {
-                                    break;
-                                }
-                            }
+                    let mut name = format!("{base}_2");
+                    for n in 3u32.. {
+                        if !self.enum_signatures.values().any(|v| v == &name) {
+                            break;
                         }
+                        name = format!("{base}_{n}");
                     }
                     self.enum_signatures.insert(signature, name.clone());
                     return name;
@@ -109,8 +106,16 @@ impl EnumRegistry {
         }
     }
 
-    pub fn mark_emitted(&mut self, name: &str) -> bool {
-        self.emitted_pg_types.insert(name.to_string())
+    /// Record that a CREATE TYPE was emitted. Returns the labels it was
+    /// previously emitted with, or `None` on first emission. Callers use the
+    /// return value to detect label drift (e.g. ALTER TABLE MODIFY).
+    pub fn mark_emitted(&mut self, name: &str, labels: &[String]) -> Option<Vec<String>> {
+        self.emitted_pg_types
+            .insert(name.to_string(), labels.to_vec())
+    }
+
+    pub fn emitted_labels(&self, name: &str) -> Option<&[String]> {
+        self.emitted_pg_types.get(name).map(|v| v.as_slice())
     }
 
     pub fn is_known_pg_enum_type(&self, type_name: &str) -> bool {
@@ -121,6 +126,23 @@ impl EnumRegistry {
     pub fn pg_enum_labels_for_type(&self, type_name: &str) -> Option<&[String]> {
         let normalized = Self::normalize_type_name(type_name);
         self.pg_enums_by_name.get(&normalized).map(|v| v.as_slice())
+    }
+
+    /// Find the registered key that matches `name` (possibly
+    /// differently-qualified). Exact match is tried first; otherwise
+    /// returns the first key whose unqualified name matches.
+    pub fn resolve_pg_enum_key(&self, name: &str) -> Option<String> {
+        if self.pg_enums_by_name.contains_key(name) {
+            return Some(name.to_string());
+        }
+        let unq = Self::normalize_type_name(name);
+        let mut candidates: Vec<&String> = self
+            .pg_enums_by_name
+            .keys()
+            .filter(|k| Self::normalize_type_name(k) == unq)
+            .collect();
+        candidates.sort();
+        candidates.first().map(|k| (*k).clone())
     }
 
     /// Iterate over all registered PG enum type definitions.
@@ -137,6 +159,25 @@ impl EnumRegistry {
             .trim_matches(']')
             .to_string()
     }
+}
+
+fn sanitize_ident(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+            out.push(c);
+        } else if c.is_ascii_uppercase() {
+            out.push(c.to_ascii_lowercase());
+        } else if c.is_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("col");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -190,8 +231,9 @@ mod tests {
     #[test]
     fn test_mark_emitted() {
         let mut registry = EnumRegistry::new();
-        assert!(registry.mark_emitted("order_status"));
-        assert!(!registry.mark_emitted("order_status"));
+        let labels = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(registry.mark_emitted("order_status", &labels), None);
+        assert_eq!(registry.mark_emitted("order_status", &labels), Some(labels));
     }
 
     #[test]
@@ -227,6 +269,29 @@ mod tests {
         assert_eq!(
             EnumRegistry::normalize_type_name("public.order_status"),
             "order_status"
+        );
+    }
+
+    #[test]
+    fn dedupe_collision_uses_deterministic_counter_not_hash() {
+        let mut reg = EnumRegistry::with_naming(EnumNamingStrategy::Dedupe);
+        let first = reg.get_or_create_pg_type_for_signature("t", "s", &["a".into()]);
+        let second = reg.get_or_create_pg_type_for_signature("t", "s", &["b".into()]);
+        let third = reg.get_or_create_pg_type_for_signature("t", "s", &["c".into()]);
+        assert_eq!(first, "enum__t__s");
+        assert_eq!(second, "enum__t__s_2");
+        assert_eq!(third, "enum__t__s_3");
+    }
+
+    #[test]
+    fn dedupe_signature_is_injective_for_labels_containing_commas() {
+        let mut reg = EnumRegistry::with_naming(EnumNamingStrategy::Dedupe);
+        let first = reg.get_or_create_pg_type_for_signature("t1", "a", &["a,b".into(), "c".into()]);
+        let second =
+            reg.get_or_create_pg_type_for_signature("t2", "b", &["a".into(), "b,c".into()]);
+        assert_ne!(
+            first, second,
+            "labels [\"a,b\",\"c\"] and [\"a\",\"b,c\"] must not share a type"
         );
     }
 }

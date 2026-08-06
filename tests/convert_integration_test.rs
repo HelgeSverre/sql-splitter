@@ -262,7 +262,10 @@ CREATE TABLE `users` (
         "ENUM should not become VARCHAR(255) when converting MySQL→Postgres"
     );
     let has_enum_warning = stderr.contains("ENUM") || stderr.contains("Unsupported");
-    assert!(!has_enum_warning, "Should not warn about ENUM for MySQL→Postgres: {stderr}");
+    assert!(
+        !has_enum_warning,
+        "Should not warn about ENUM for MySQL→Postgres: {stderr}"
+    );
 }
 
 #[test]

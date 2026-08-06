@@ -1,6 +1,6 @@
 //! Convert command CLI handler.
 
-use crate::convert::{self, ConvertConfig, ConvertStats};
+use crate::convert::{self, ConvertConfig, ConvertStats, EnumNamingStrategy};
 use crate::parser::SqlDialect;
 use clap::{Args, ValueHint};
 use schemars::JsonSchema;
@@ -51,8 +51,8 @@ pub struct ConvertArgs {
 
     /// Enum type naming strategy for MySQL→PostgreSQL conversion
     /// (per-column: one type per table+column, dedupe: reuse identical types)
-    #[arg(long, default_value = "per-column", help_heading = BEHAVIOR)]
-    enum_naming: String,
+    #[arg(long, value_enum, default_value_t = EnumNamingStrategy::PerColumn, help_heading = BEHAVIOR)]
+    enum_naming: EnumNamingStrategy,
 }
 
 /// JSON output for single file convert
@@ -182,7 +182,7 @@ fn run_single(
     progress: bool,
     dry_run: bool,
     json: bool,
-    enum_naming: String,
+    enum_naming: EnumNamingStrategy,
 ) -> anyhow::Result<ExitCode> {
     let from = if let Some(d) = from_dialect.clone() {
         Some(
@@ -254,7 +254,7 @@ fn run_multi(
     dry_run: bool,
     fail_fast: bool,
     json: bool,
-    enum_naming: String,
+    enum_naming: EnumNamingStrategy,
 ) -> anyhow::Result<ExitCode> {
     let total = files.len();
 
@@ -340,7 +340,7 @@ fn run_multi(
                 dry_run,
                 progress: false,
                 strict,
-                enum_naming: enum_naming.clone(),
+                enum_naming,
             };
 
             match convert::run(config) {

@@ -3,7 +3,7 @@
 //! Tests that sql-splitter can convert between MySQL, PostgreSQL, and SQLite.
 
 use super::{Fixture, TEST_CASES};
-use sql_splitter::convert::{run, ConvertConfig};
+use sql_splitter::convert::{run, ConvertConfig, EnumNamingStrategy};
 use sql_splitter::parser::SqlDialect;
 
 /// Run convert tests for a single test case - converts to all other dialects
@@ -46,7 +46,7 @@ fn run_convert_tests(case: &'static super::cases::TestCase) {
             dry_run: false,
             progress: false,
             strict: false,
-            enum_naming: "per-column".to_string(),
+            enum_naming: EnumNamingStrategy::PerColumn,
         };
 
         match run(config) {
@@ -184,7 +184,7 @@ fn all_convert_tests() {
                 dry_run: false,
                 progress: false,
                 strict: false,
-                enum_naming: "per-column".to_string(),
+                enum_naming: EnumNamingStrategy::PerColumn,
             };
 
             match run(config) {

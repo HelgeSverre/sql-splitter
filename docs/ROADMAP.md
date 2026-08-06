@@ -46,9 +46,9 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 **Next:**
 
-- v1.18.0: Enum Conversion — Proper PG↔MySQL enum type conversion
-- v1.19.0: Migrate — Schema migration generation
-- v1.20.0: DBML — Import/export DBML schema definitions
+- Enum Conversion — Proper PG↔MySQL enum type conversion
+- Migrate — Schema migration generation
+- DBML — Import/export DBML schema definitions
 
 **Future (v2.x):**
 
@@ -635,7 +635,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### v1.19.0 — Migration Generation
+### Migration Generation (planned)
 
 **Theme**: Schema evolution tracking
 
@@ -659,7 +659,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### v1.20.0 — DBML Import/Export
+### DBML Import/Export (planned)
 
 **Theme**: Schema documentation and interoperability
 
@@ -696,35 +696,35 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### v1.18.0 — Enum Type Conversion
+### Enum Type Conversion (implemented, unreleased)
 
 **Target**: 2-3 weeks  
 **Theme**: Proper bidirectional enum conversion between PostgreSQL and MySQL
 
-| Feature                          | Effort | Status     | Notes                            |
-| -------------------------------- | ------ | ---------- | -------------------------------- |
-| **Enum Registry**                | 2h     | ✅ Done    | State tracking across statements |
-| **PG → MySQL**                   | 12h    | ✅ Done    |                                  |
-| ├─ Parse CREATE TYPE ... AS ENUM | 3h     |            | Extract type definitions         |
-| ├─ Parse ALTER TYPE ADD VALUE    | 2h     |            | Update registry                  |
-| ├─ Rewrite CREATE TABLE columns  | 3h     |            | Type ref → inline ENUM           |
-| ├─ Strip ::type casts in DML     | 2h     |            | Remove enum casts                |
-| └─ Handle unknown types          | 2h     |            | VARCHAR fallback + warning       |
-| **MySQL → PG**                   | 10h    | ✅ Done    |                                  |
-| ├─ Parse inline ENUM()           | 2h     |            | Extract from columns             |
-| ├─ Generate CREATE TYPE          | 3h     |            | Deterministic naming             |
-| ├─ Multi-statement output        | 3h     |            | One input → many outputs         |
-| └─ Deduplication (optional)      | 2h     |            | Signature-based reuse            |
-| **Testing**                      | 6h     | ✅ Done    | Unit + integration tests         |
+| Feature                          | Effort | Status  | Notes                            |
+| -------------------------------- | ------ | ------- | -------------------------------- |
+| **Enum Registry**                | 2h     | ✅ Done | State tracking across statements |
+| **PG → MySQL**                   | 12h    | ✅ Done |                                  |
+| ├─ Parse CREATE TYPE ... AS ENUM | 3h     |         | Extract type definitions         |
+| ├─ Parse ALTER TYPE ADD VALUE    | 2h     |         | Update registry                  |
+| ├─ Rewrite CREATE TABLE columns  | 3h     |         | Type ref → inline ENUM           |
+| ├─ Strip ::type casts in DML     | 2h     |         | Remove enum casts                |
+| └─ Handle unknown types          | 2h     |         | VARCHAR fallback + warning       |
+| **MySQL → PG**                   | 10h    | ✅ Done |                                  |
+| ├─ Parse inline ENUM()           | 2h     |         | Extract from columns             |
+| ├─ Generate CREATE TYPE          | 3h     |         | Deterministic naming             |
+| ├─ Multi-statement output        | 3h     |         | One input → many outputs         |
+| └─ Deduplication (optional)      | 2h     |         | Signature-based reuse            |
+| **Testing**                      | 6h     | ✅ Done | Unit + integration tests         |
 
 **Total: ~30h**
 
-**Previous Behavior (pre-v1.18):**
+**Previous Behavior (before enum conversion):**
 
 - MySQL → PostgreSQL: `ENUM('a','b')` → `VARCHAR(255)` ❌
 - PostgreSQL → MySQL: `CREATE TYPE` skipped, columns become VARCHAR ❌
 
-**Current Behavior (v1.18+):**
+**Current Behavior (with enum conversion):**
 
 - MySQL → PostgreSQL: `ENUM('a','b')` → `CREATE TYPE enum__table__col AS ENUM ('a','b')` ✅
 - PostgreSQL → MySQL: `CREATE TYPE t AS ENUM (...)` → inline `ENUM(...)` per column ✅
@@ -917,7 +917,7 @@ rows, drop the original, rename.
 | ------- | ----------------------------------------------------------------- | ----------- |
 | v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current     |
 | v1.17.0 | Synthetic data generation (`generate`)                            | ✅ Released |
-| v1.18.0 | Enum Conversion                                                   | Planned     |
+| v1.18.0 | Enum Conversion                                                   | Implemented (unreleased) |
 | v1.19.0 | Migrate                                                           | Planned     |
 | v1.20.0 | DBML                                                              | Planned     |
 | v2.0.0  | Parallel                                                          | Planned     |
@@ -1020,20 +1020,20 @@ rows, drop the original, rename.
     - Production-shaped synthetic SQL from dumps, schemas, or YAML models
     - Bounded profiling, reusable YAML models, deterministic generation, and verification
 
-19. 🟡 **v1.18.0 — Enum Conversion** — Planned
+19. ✅ **Enum Conversion (implemented, unreleased)** — Implemented (unreleased)
     - Proper PG↔MySQL enum type conversion
     - PostgreSQL CREATE TYPE ... AS ENUM → MySQL inline ENUM()
     - MySQL inline ENUM() → PostgreSQL CREATE TYPE
     - Registry-based state tracking for streaming
     - Strip ::type casts in DML statements
 
-20. 🟡 **v1.19.0 — Migrate** — Planned
+20. 🟡 **Migrate (planned)** — Planned
     - Schema migration generation from diff
     - ALTER TABLE, CREATE INDEX statements
     - Rollback script generation
     - Breaking change detection
 
-21. 🟡 **v1.20.0 — DBML Import/Export** — Planned
+21. 🟡 **DBML Import/Export (planned)** — Planned
     - Export SQL schemas to DBML format
     - Import DBML to SQL DDL (all 4 dialects)
     - Extends `graph` command (export) and `convert` command (import)
@@ -1112,9 +1112,9 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ### Upcoming Feature Designs
 
-- [Enum Conversion](features/ENUM_CONVERSION.md) — v1.18.0
-- [Migrate Feature](features/MIGRATE_FEATURE.md) — v1.19.0
-- [DBML Support](features/DBML_SUPPORT.md) — v1.20.0
+- [Enum Conversion](features/ENUM_CONVERSION.md) — implemented, unreleased
+- [Migrate Feature](features/MIGRATE_FEATURE.md) — planned
+- [DBML Support](features/DBML_SUPPORT.md) — planned
 
 ### Ecosystem Integration Designs (v1.21+)
 
