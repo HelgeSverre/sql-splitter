@@ -73,9 +73,13 @@ pub trait DbSource: Send + Sync {
     /// Returns an iterator that yields (column_names, row_values) tuples.
     /// The iterator is lazy — rows are pulled from the database on demand,
     /// bounded by the driver's fetch buffer, not loaded into a Vec.
+    /// `order_clause` is an optional SQL ORDER BY fragment (e.g.,
+    /// `"CASE WHEN manager_id IS NULL THEN 0 ELSE 1 END, id"`) for
+    /// self-referential FK tables; `None` means no explicit ordering.
     fn stream_table_rows(
         &mut self,
         table: &str,
+        order_clause: Option<&str>,
     ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>>;
 }
 

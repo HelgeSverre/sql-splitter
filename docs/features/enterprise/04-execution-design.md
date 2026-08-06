@@ -134,10 +134,10 @@ for table_op in plan.data_operations_in_topo_order() {
         //  CASE WHEN fk_col IS NULL THEN 0 ELSE 1 END, pk_col"
         table_op.self_ref_ordering()
     } else {
-        String::new()
+        None
     };
-    let source_rows = source.stream_table_rows_ordered(
-        &table_op.table, &order_clause
+    let source_rows = source.stream_table_rows(
+        &table_op.table, order_clause.as_deref()
     )?;
     if table_op.needs_conversion() {
         // Route through TypeMapper for cross-dialect type conversion

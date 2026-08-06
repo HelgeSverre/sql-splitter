@@ -146,7 +146,7 @@ Key design decisions:
    not a performance optimization.
 
 For the detailed crate choices, PlanetScale subprocess handling, error model,
-and connection lifecycle, see `05-connection-architecture.md`.
+and connection lifecycle, see `03-connection-architecture.md`.
 
 **Effort**: Medium-high. Two protocol implementations (MySQL + PostgreSQL),
 TLS, error handling, streaming result set integration with parser events.
