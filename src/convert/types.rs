@@ -12,8 +12,8 @@ use crate::parser::SqlDialect;
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
-use super::warnings::{ConvertWarning, WarningCollector};
 use super::enum_aware_pair;
+use super::warnings::{ConvertWarning, WarningCollector};
 
 /// Map a single column's `source_type` from `from` to `to`, reusing the same
 /// regex-driven rules [`TypeMapper::convert`] applies to a whole statement.
@@ -817,12 +817,10 @@ static RE_TIME: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bTIME\s*(\(\s*\d+\s
 
 static RE_JSON: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bJSON\b").unwrap());
 
-static RE_ENUM: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bENUM\s*\([^)]*(?:\([^)]*\)[^)]*)*\)").unwrap()
-});
-static RE_SET: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bSET\s*\([^)]*(?:\([^)]*\)[^)]*)*\)").unwrap()
-});
+static RE_ENUM: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bENUM\s*\([^)]*(?:\([^)]*\)[^)]*)*\)").unwrap());
+static RE_SET: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bSET\s*\([^)]*(?:\([^)]*\)[^)]*)*\)").unwrap());
 
 static RE_UNSIGNED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+UNSIGNED\b").unwrap());
 static RE_ZEROFILL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+ZEROFILL\b").unwrap());
@@ -979,7 +977,10 @@ mod map_column_type_tests {
             SqlDialect::Postgres,
             &mut warnings,
         );
-        assert!(!warnings.has_warnings(), "PG↔MySQL enum should not warn lossy");
+        assert!(
+            !warnings.has_warnings(),
+            "PG↔MySQL enum should not warn lossy"
+        );
     }
 
     #[test]

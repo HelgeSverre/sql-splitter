@@ -65,6 +65,16 @@ fuzz-model-yaml seconds="60":
 fuzz-model-yaml-cmin:
     cargo +nightly fuzz cmin model_yaml fuzz/corpus/model_yaml -- -timeout=5
 
+# Fuzz the DDL tokenizer (byte→span round-trip, UTF-8 boundary checks).
+[group('test')]
+fuzz-ddl-tokenize seconds="30":
+    cargo +nightly fuzz run ddl_tokenize -- -max_len=65536 -max_total_time={{ seconds }} -timeout=5 -rss_limit_mb=2048
+
+# Minimize the DDL tokenizer corpus.
+[group('test')]
+fuzz-ddl-tokenize-cmin:
+    cargo +nightly fuzz cmin ddl_tokenize -- -timeout=5
+
 # Format code (Rust + Markdown)
 [group('lint')]
 fmt:

@@ -335,16 +335,17 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
 ### Convert Options
 
-| Flag             | Description                                            | Default     |
-| ---------------- | ------------------------------------------------------ | ----------- |
-| `-o, --output`   | Output SQL file or directory (required for glob)       | stdout      |
-| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`, `mssql` | required    |
-| `--strict`       | Fail on any unsupported feature                        | —           |
-| `-p, --progress` | Show progress bar                                      | —           |
-| `--dry-run`      | Preview without writing files                          | —           |
-| `--fail-fast`    | Stop on first error (for glob patterns)                | —           |
-| `--json`         | Output results as JSON                                 | —           |
+| Flag             | Description                                                | Default      |
+| ---------------- | ---------------------------------------------------------- | ------------ |
+| `-o, --output`   | Output SQL file or directory (required for glob)           | stdout       |
+| `--from`         | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql`     | auto-detect  |
+| `--to`           | Target dialect: `mysql`, `postgres`, `sqlite`, `mssql`     | required     |
+| `--strict`       | Fail on any unsupported feature                            | —            |
+| `-p, --progress` | Show progress bar                                          | —            |
+| `--dry-run`      | Preview without writing files                              | —            |
+| `--fail-fast`    | Stop on first error (for glob patterns)                    | —            |
+| `--enum-naming`  | MySQL→PostgreSQL enum type names: `per-column` or `dedupe` | `per-column` |
+| `--json`         | Output results as JSON                                     | —            |
 
 Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 
@@ -363,7 +364,8 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 - AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY ↔ IDENTITY
 - PostgreSQL COPY → INSERT with NULL and escape handling
 - Session command stripping
-- Warnings for unsupported features (ENUM, arrays, triggers)
+- Semantic-preserving ENUM conversion between MySQL and PostgreSQL (`ENUM(...)` ↔ `CREATE TYPE ... AS ENUM`); other targets narrow enums to strings with a warning
+- Warnings for unsupported features (arrays, triggers, PostgreSQL-only DDL)
 
 ### Validate Options
 

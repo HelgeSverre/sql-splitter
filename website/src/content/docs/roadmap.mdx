@@ -29,9 +29,8 @@ All core features have been released:
 | v1.15.0 | Output compression (`--compress`), archive output (tar.\*/zip), 2.4–4.4× split speedup | Released |
 | v1.16.0 | Zip input (all commands), adaptive `--io-strategy` for slow devices                    | Released |
 | v1.17.0 | Synthetic data generation (`generate`)                                                 | Released |
-| v1.18.0 | Enum Type Conversion                                                                   | Released |
 
-## Released in v1.18.0
+## Upcoming
 
 ### `convert` — Enum Type Conversion
 
@@ -45,10 +44,10 @@ sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
 **Features:**
 
 - PostgreSQL `CREATE TYPE ... AS ENUM` → MySQL inline `ENUM()`
-- MySQL inline `ENUM()` → PostgreSQL `CREATE TYPE` with `--enum-naming` flag for deterministic naming
-- DML `INSERT` statements rewriiten with inline ENUM values
-- `::type` casts stripped from DML statements during conversion
-- `VARCHAR` fallback with a warning for unknown types
+- MySQL inline `ENUM()` → PostgreSQL `CREATE TYPE` with `--enum-naming` flag for deterministic naming (`per-column` or `dedupe`)
+- `ALTER TYPE ... ADD VALUE` (including `BEFORE`/`AFTER` and `IF [NOT] EXISTS`) tracked across statements
+- `::type` casts stripped from DEFAULT clauses and DML during conversion; string data passes through untouched
+- Enum narrowing to `TEXT`/`NVARCHAR(255)` with a warning only for targets without enum types (SQLite, MSSQL)
 - Streaming-safe registry-based type tracking across statements
 
 ## Released in v1.17.0
@@ -109,7 +108,7 @@ sql-splitter split dump.sql -o tables/ --io-strategy hdd    # pin it
 
 ## Upcoming Features
 
-### v1.19.0 — Migration Generation
+### Migration Generation (planned)
 
 Generate ALTER statements from schema differences:
 
@@ -126,7 +125,7 @@ sql-splitter migrate old.sql new.sql --breaking-changes
 - Rollback script generation
 - Breaking change detection
 
-### v1.20.0 — DBML Import/Export
+### DBML Import/Export (planned)
 
 Schema documentation and interoperability with [DBML](https://dbml.dbdiagram.io/):
 

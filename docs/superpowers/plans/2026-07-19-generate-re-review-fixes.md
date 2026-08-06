@@ -13,6 +13,7 @@
 ### Task 1: Preserve order-family facts through resolved model emission
 
 **Files:**
+
 - Modify: `tests/generate_api_test.rs`
 - Modify: `src/synthetic/model.rs`
 - Modify: `src/generate/mod.rs`
@@ -27,6 +28,7 @@
 ### Task 2: Compare output destinations by normalized filesystem identity
 
 **Files:**
+
 - Modify: `tests/generate_api_test.rs`
 - Modify: `src/generate/mod.rs`
 
@@ -39,6 +41,7 @@
 ### Task 3: Replace quadratic verifier spool scans
 
 **Files:**
+
 - Modify: `src/generate/verify.rs`
 - Modify: `tests/generate_verify_test.rs` if an end-to-end regression is needed beyond module tests
 
@@ -54,6 +57,7 @@
 ### Task 4: Review, verify, and report
 
 **Files:**
+
 - Modify: `.superpowers/sdd/final-review-fix-report.md` (ignored report; do not commit unless repository policy changes)
 
 1. Run `cargo fmt --all -- --check`, focused nextest suites, `just test`, `cargo test --doc`, `just clippy`, and relevant non-default feature checks.

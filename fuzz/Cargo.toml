@@ -19,4 +19,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "ddl_tokenize"
+path = "fuzz_targets/ddl_tokenize.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

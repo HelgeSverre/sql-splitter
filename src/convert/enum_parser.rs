@@ -3,11 +3,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static RE_PG_CREATE_ENUM: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?i)CREATE\s+TYPE\s+(?:(?P<schema>\w+)\.)?(?P<name>\w+)\s+AS\s+ENUM\s*\((?P<labels>[^)]*)\)",
-    )
-    .unwrap()
+static RE_PG_CREATE_ENUM_HEAD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)CREATE\s+TYPE\s+(?:(?P<schema>\w+)\.)?(?P<name>\w+)\s+AS\s+ENUM\s*\(").unwrap()
 });
 
 static RE_PG_ALTER_ENUM: Lazy<Regex> = Lazy::new(|| {
@@ -17,13 +14,11 @@ static RE_PG_ALTER_ENUM: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
-static RE_MYSQL_INLINE_ENUM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\bENUM\s*\((?P<labels>[^)]*(?:\([^)]*\)[^)]*)*)\)").unwrap());
+static RE_ENUM_KEYWORD: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bENUM\s*\(").unwrap());
 
 pub fn pg_create_enum_name(stmt: &str) -> Option<String> {
-    RE_PG_CREATE_ENUM.captures(stmt).map(|caps| {
+    RE_PG_CREATE_ENUM_HEAD.captures(stmt).map(|caps| {
         let name = caps.name("name").unwrap().as_str().trim_matches('"');
-        // Preserve schema prefix to avoid collisions across schemas
         if let Some(schema) = caps.name("schema") {
             format!("{}.{}", schema.as_str().trim_matches('"'), name)
         } else {
@@ -33,9 +28,10 @@ pub fn pg_create_enum_name(stmt: &str) -> Option<String> {
 }
 
 pub fn pg_create_enum_labels(stmt: &str) -> Option<Vec<String>> {
-    RE_PG_CREATE_ENUM
-        .captures(stmt)
-        .map(|caps| parse_enum_labels(caps.name("labels").unwrap().as_str()))
+    let caps = RE_PG_CREATE_ENUM_HEAD.captures(stmt)?;
+    let open_paren = caps.get(0).unwrap().end();
+    let close = find_matching_paren(stmt, open_paren - 1)?;
+    Some(parse_enum_labels(&stmt[open_paren..close]))
 }
 
 pub fn pg_add_enum_value(stmt: &str) -> Option<(String, Option<(String, bool)>)> {
@@ -51,19 +47,62 @@ pub fn pg_add_enum_value(stmt: &str) -> Option<(String, Option<(String, bool)>)>
 }
 
 pub fn pg_alter_enum_name(stmt: &str) -> Option<String> {
-    RE_PG_ALTER_ENUM.captures(stmt).map(|caps| {
-        caps.name("name").unwrap().as_str().to_string()
-    })
+    RE_PG_ALTER_ENUM
+        .captures(stmt)
+        .map(|caps| caps.name("name").unwrap().as_str().to_string())
 }
 
 pub fn mysql_inline_enum_labels(stmt: &str) -> Vec<(usize, Vec<String>)> {
     let mut results = Vec::new();
-    for caps in RE_MYSQL_INLINE_ENUM.captures_iter(stmt) {
-        let full = caps.get(0).unwrap();
-        let labels = parse_enum_labels(caps.name("labels").unwrap().as_str());
-        results.push((full.start(), labels));
+    for m in RE_ENUM_KEYWORD.find_iter(stmt) {
+        let open_paren = m.end();
+        let Some(close) = find_matching_paren(stmt, open_paren - 1) else {
+            continue;
+        };
+        let labels = parse_enum_labels(&stmt[open_paren..close]);
+        results.push((m.start(), labels));
     }
     results
+}
+
+/// From the index of an opening `(`, find the matching `)` honoring
+/// single-quoted strings (with `''` doubling). Returns the byte index of
+/// the closing `)`, or `None` if unterminated.
+fn find_matching_paren(stmt: &str, open: usize) -> Option<usize> {
+    let bytes = stmt.as_bytes();
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\'' {
+                        if bytes.get(i + 1) == Some(&b'\'') {
+                            i += 2;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Extract the column name immediately preceding `offset` in a CREATE TABLE
@@ -80,26 +119,36 @@ pub fn extract_column_name_before(stmt: &str, enum_offset: usize) -> Option<Stri
     if i == 0 {
         return None;
     }
-    // Check for backtick-quoted identifier
+    // Check for backtick-quoted identifier (handles `` escape)
     if prefix_bytes[i - 1] == b'`' {
         let end = i - 1;
         i -= 1;
-        while i > 0 && prefix_bytes[i - 1] != b'`' {
-            i -= 1;
-        }
-        if i > 0 && prefix_bytes[i - 1] == b'`' {
-            return Some(prefix[i..end].to_string());
+        while i > 0 {
+            if prefix_bytes[i - 1] == b'`' {
+                if i >= 2 && prefix_bytes[i - 2] == b'`' {
+                    i -= 2;
+                } else {
+                    return Some(prefix[i..end].replace("``", "`"));
+                }
+            } else {
+                i -= 1;
+            }
         }
     }
-    // Check for double-quoted identifier
-    if prefix_bytes[i - 1] == b'"' {
+    // Check for double-quoted identifier (handles "" escape)
+    if i > 0 && prefix_bytes[i - 1] == b'"' {
         let end = i - 1;
         i -= 1;
-        while i > 0 && prefix_bytes[i - 1] != b'"' {
-            i -= 1;
-        }
-        if i > 0 && prefix_bytes[i - 1] == b'"' {
-            return Some(prefix[i..end].to_string());
+        while i > 0 {
+            if prefix_bytes[i - 1] == b'"' {
+                if i >= 2 && prefix_bytes[i - 2] == b'"' {
+                    i -= 2;
+                } else {
+                    return Some(prefix[i..end].replace("\"\"", "\""));
+                }
+            } else {
+                i -= 1;
+            }
         }
     }
     // Bare identifier (alphanumeric + underscore, including non-ASCII).
@@ -249,5 +298,38 @@ mod tests {
     fn test_parse_enum_labels_with_spaces() {
         let result = parse_enum_labels("'a', 'b' , 'c'");
         assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_pg_create_enum_labels_with_paren_in_label() {
+        let result = pg_create_enum_labels("CREATE TYPE t AS ENUM ('a)', 'b');");
+        assert_eq!(
+            result,
+            Some(vec!["a)".to_string(), "b".to_string()]),
+            "label containing ')' must not truncate the capture"
+        );
+    }
+
+    #[test]
+    fn test_mysql_inline_enum_labels_with_paren_in_label() {
+        let result = mysql_inline_enum_labels("CREATE TABLE t (v ENUM('a)','b'), w INT);");
+        assert_eq!(result.len(), 1, "should find one ENUM column");
+        assert_eq!(
+            result[0].1,
+            vec!["a)".to_string(), "b".to_string()],
+            "label containing ')' must not truncate the capture"
+        );
+    }
+
+    #[test]
+    fn test_extract_column_name_before_escaped_backtick() {
+        let stmt = "CREATE TABLE t (`col``name` ENUM('a'));";
+        let offset = stmt.find("ENUM").unwrap();
+        let result = extract_column_name_before(stmt, offset);
+        assert_eq!(
+            result,
+            Some("col`name".to_string()),
+            "escaped backtick `` inside backtick-quoted identifier must be handled"
+        );
     }
 }
