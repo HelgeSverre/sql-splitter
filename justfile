@@ -1,8 +1,7 @@
-# sql-splitter justfile — run `just` (or `just --list`) for grouped commands.
-# External tools: coverage → cargo-llvm-cov; flamegraph/samply → cargo-flamegraph / samply.
-# Website recipes auto-install deps on first use (private `_website-deps`).
+# sql-splitter justfile — `just --list` for grouped commands.
+# External tools: cargo-llvm-cov, cargo-flamegraph, samply, wasm-pack.
 
-# Show available commands (default target)
+# List all recipes
 default:
     @just --list
 
@@ -14,22 +13,22 @@ build:
 release:
     cargo build --release
 
-# Optimized build for current CPU (best performance)
+# Release build tuned for this CPU
 [group('build')]
 native:
     RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-# Build with profiling symbols (for flamegraph/samply)
+# Build with profiling symbols
 [group('build')]
 build-profiling:
     cargo build --profile profiling
 
-# Run all tests (nextest)
+# Run all tests
 [group('test')]
 test:
     cargo nextest run
 
-# Coverage HTML report (opens in browser)
+# Coverage HTML report, opens in browser
 [group('test')]
 coverage:
     cargo llvm-cov nextest --html --open
@@ -39,39 +38,39 @@ coverage:
 coverage-summary:
     cargo llvm-cov nextest --summary-only
 
-# Coverage as ./lcov.info (for CI / Codecov)
+# Coverage as lcov.info, for CI
 [group('test')]
 coverage-lcov:
     cargo llvm-cov nextest --lcov --output-path lcov.info
 
-# Verify against real-world SQL dumps
+# Test against real-world dumps
 [group('test')]
 verify-realworld:
     cargo nextest run --test realworld --run-ignored only
 
-# Smoke-test generate against every top-level SQL fixture
+# Smoke-test generate on every SQL fixture
 [group('test')]
 generate-smoke: build
     ./scripts/smoke-test-generate.sh
 
-# Fuzz model YAML parsing, compilation, and bounded row generation.
+# Fuzz model YAML parsing and row generation
 [group('test')]
 fuzz-model-yaml seconds="60":
     mkdir -p fuzz/corpus/model_yaml
     cargo +nightly fuzz run model_yaml fuzz/corpus/model_yaml fuzz/seeds/model_yaml -- -max_len=65536 -max_total_time={{ seconds }} -timeout=5 -rss_limit_mb=2048 -malloc_limit_mb=512 -dict=fuzz/model_yaml.dict
 
-# Remove redundant model YAML corpus entries while preserving coverage.
+# Minimise the fuzz corpus, preserving coverage
 [group('test')]
 fuzz-model-yaml-cmin:
     cargo +nightly fuzz cmin model_yaml fuzz/corpus/model_yaml -- -timeout=5
 
-# Format code (Rust + Markdown)
+# Format Rust + Markdown
 [group('lint')]
 fmt:
     cargo fmt
     bunx prettier --write "**/*.md" --log-level warn
 
-# Check code without building
+# Type-check without building
 [group('lint')]
 check:
     cargo check
@@ -80,77 +79,77 @@ check:
 clippy:
     cargo clippy -- -D warnings
 
-# Run criterion benchmarks
+# Run benchmarks
 [group('bench')]
 bench:
     cargo bench
 
-# Save criterion benchmark baseline
+# Save a benchmark baseline
 [group('bench')]
 bench-baseline name="main":
     cargo bench -- --save-baseline {{ name }}
 
-# Compare current benchmarks against a saved baseline
+# Compare against a saved baseline
 [group('bench')]
 bench-compare baseline="main":
     cargo bench -- --baseline {{ baseline }}
 
-# Benchmark against competitor tools (generates 100MB test data if no file provided)
+# Benchmark against competitors; generates 100MB if no file given
 [group('bench')]
 bench-competitors file="":
     ./scripts/benchmark-competitors.sh {{ file }}
 
-# Docker benchmark (generates test data of specified size in MB)
+# Docker benchmark; size in MB
 [group('docker')]
 docker-bench size="100":
     ./docker/run-benchmark.sh --generate {{ size }}
 
-# Docker benchmark with a specific file
+# Docker benchmark on a given file
 [group('docker')]
 docker-bench-file file:
     ./docker/run-benchmark.sh {{ file }}
 
-# Build Docker benchmark container
+# Build the benchmark container
 [group('docker')]
 docker-build:
     docker compose -f docker/docker-compose.benchmark.yml build
 
-# Memory profile all commands (medium dataset)
+# Memory profile, medium dataset
 [group('profile')]
 profile: release
     ./scripts/profile-memory.sh --size medium --output benchmark-results/profile-medium.txt
 
-# Memory profile with large dataset (~125MB)
+# Memory profile, ~125MB
 [group('profile')]
 profile-large: release
     ./scripts/profile-memory.sh --size large --output benchmark-results/profile-large.txt
 
-# Stress test memory profile (~1GB: 100 tables × 100k rows)
+# Memory profile, ~1GB
 [group('profile')]
 profile-mega: release
     ./scripts/profile-memory.sh --size mega --output benchmark-results/profile-mega.txt
 
-# Extreme stress test (~10GB MySQL only)
+# Memory profile, ~10GB, MySQL only
 [group('profile')]
 profile-giga: release
     ./scripts/profile-memory.sh --size giga --output benchmark-results/profile-giga.txt
 
-# Generate flamegraph for split command
+# Flamegraph for split
 [group('profile')]
 flamegraph file: build-profiling
     @mkdir -p benchmark-results
     cargo flamegraph --profile profiling --bin sql-splitter -o benchmark-results/flamegraph-split.svg -- split {{ file }}
 
-# Profile split command with samply (opens Firefox Profiler)
+# Profile split with samply
 [group('profile')]
 samply file: build-profiling
     samply record ./target/profiling/sql-splitter split {{ file }}
 
-# Clean build artifacts
+# Remove build artifacts
 clean:
     cargo clean
 
-# Install locally (binary + shell completions + man pages)
+# Install binary, completions, and man pages
 [group('install')]
 install: man
     cargo install --path .
@@ -158,32 +157,29 @@ install: man
     @./scripts/install-completions.sh sql-splitter
     @./scripts/install-man.sh
 
-# Install completions only (for current shell)
+# Install completions for the current shell
 [group('install')]
 install-completions:
     @./scripts/install-completions.sh sql-splitter
 
-# Install completions for all supported shells
+# Install completions for all shells
 [group('install')]
 install-completions-all:
     @./scripts/install-completions.sh sql-splitter all
 
-# Install man pages only
+# Install man pages
 [group('install')]
 install-man: man
     @./scripts/install-man.sh
 
-# Generate man pages (real `man` subcommand, built with the man-pages feature)
+# Generate man pages into man/
 [group('docs')]
 man:
     cargo run --release --features man-pages -- man -o man/
     @echo ""
     @echo "Man pages generated in man/ directory"
 
-# Generate JSON schemas from Rust types (--json output schemas, plus
-# generate-config.schema.json for the `generate` command's YAML model/
-# overrides language), validate, and copy to website. Safe to run repeatedly:
-# regenerating twice in a row produces no diff.
+# Regenerate JSON schemas from Rust types, validate, and sync to website/. Idempotent
 [group('docs')]
 schemas: release
     @echo "Generating JSON schemas from Rust types..."
@@ -202,22 +198,19 @@ schemas: release
     @echo ""
     @echo "✓ Schemas generated, validated, and synchronized with website/public/schemas/"
 
-# Install website deps and start the dev server
+# Install deps and start the dev server
 [group('website')]
 website: website-install
     cd website && bun run dev
 
-# Ensure website deps are installed (idempotent; installs only if missing)
+# Install deps only if missing
 [group('website')]
 [private]
 _website-deps:
     cd website && ( [ -d node_modules ] && [ -f bun.lock ] || bun install )
 
-# Build the browser-playground WASM module and refresh the committed artifact
-# in website/public/wasm/. Every website recipe (build, dev, deploy) depends
-# on this, so a stale playground can never ship — commit the refreshed
-# artifact when it changes, because Vercel never builds Rust and serves the
-# committed file. Requires wasm-pack (cargo install wasm-pack).
+# Rebuild the playground WASM into website/public/wasm/. Commit the artifact:
+# Vercel serves it and never builds Rust. Needs wasm-pack
 [group('website')]
 wasm: _website-deps
     rustup target add wasm32-unknown-unknown
@@ -230,12 +223,9 @@ wasm: _website-deps
     cd website && bunx prettier --write "public/wasm/*.js" "public/wasm/*.ts" --log-level warn
     ls -lh website/public/wasm/*.wasm
 
-# Regenerate the playground example dumps from the stress fixtures. Mostly
-# deterministic under each model's own seed (everything.yaml's import_jobs pins
-# `seed: null` by design). For everything.yaml, --rows/--scale break the
-# row-count rules; --max-rows must stay >= 200 (categories needs >= 5 children
-# per each of 40 tenants) and order_items requires exactly 4 x orders, hence
-# the orders pin.
+# Regenerate the playground example dumps. --max-rows must stay >= 200
+# (categories needs 5 children per tenant) and order_items needs exactly
+# 4x orders, hence the orders pin
 [group('website')]
 playground-examples:
     cargo run --release -- generate -c tests/fixtures/generate/stress/everything.yaml \
@@ -255,73 +245,79 @@ playground-examples:
       -o website/public/playground/cms-sqlite.sql
     ls -lh website/public/playground/*.sql
 
-# Build website for production
+# Production build
 [group('website')]
 website-build: _website-deps wasm
     cd website && bun run build
 
-# Start development server with hot reload
+# Dev server with hot reload
 [group('website')]
 website-dev: _website-deps wasm
     cd website && bun run dev
 
-# Preview production build locally (builds first)
+# Serve the production build locally
 [group('website')]
 website-preview: website-build
     cd website && bun run preview
 
-# Check Astro project (type checking, diagnostics)
+# Playwright e2e tests; builds first so the preview server serves a fresh dist/
+[group('website')]
+website-e2e *args: website-build
+    cd website && bunx playwright install chromium
+    cd website && bun run test {{ args }}
+
+# Astro type-check and diagnostics
 [group('website')]
 website-check: _website-deps
     cd website && bun run astro check
 
-# Lint: type-check + format-check (non-mutating, used as a deploy gate)
+# Type-check + format-check; deploy gate
 [group('website')]
 website-lint: _website-deps
     cd website && bun run astro check
     cd website && bunx prettier . --check
 
-# Validate generated schema files against the JSON schema spec
+# Validate the generated schema files
 [group('website')]
 website-validate-schemas: _website-deps
     cd website && bun run validate
 
-# Deploy website to Vercel (production) — refreshes schemas, lints, validates, and builds first; aborts if any step fails
+# Deploy to Vercel; aborts if any gate fails
 [group('website')]
 website-deploy: schemas wasm website-lint website-validate-schemas website-build
     sql_splitter_version="$(just version)"; cd website && vc --prod --build-env "SQL_SPLITTER_VERSION=$sql_splitter_version"
 
-# Clean website build artifacts and caches
+# Remove build artifacts and caches
 [group('website')]
 website-clean:
     cd website && rm -rf dist .astro node_modules/.cache
 
-# Deep clean (including node_modules)
+# Also remove node_modules
 [group('website')]
 website-clean-all:
     cd website && rm -rf dist .astro node_modules
 
-# Clean and rebuild website from scratch
+# Clean and rebuild from scratch
 [group('website')]
 website-rebuild: website-clean
     cd website && bun install && bun run build
 
-# Install/update website dependencies
+# Install dependencies
 [group('website')]
 website-install:
     cd website && bun install
 
-# Update website dependencies to latest versions
+# Update dependencies
 [group('website')]
 website-update: _website-deps
     cd website && bun update
 
-# Check for outdated website dependencies
+# List outdated dependencies
 [group('website')]
 website-outdated: _website-deps
     cd website && bun outdated
 
-# Audit website dependencies for vulnerabilities (bun has no auto-fix; apply fixes manually with `bun update <pkg>`)
+# Audit dependencies; fix manually with `bun update <pkg>`
 [group('website')]
 website-audit: _website-deps
     cd website && bun audit
@@ -331,24 +327,24 @@ website-audit: _website-deps
 website-og-image: _website-deps
     cd website && bun run og
 
-# Open website in browser (localhost:4321)
+# Open localhost:4321
 [group('website')]
 website-open:
     @echo "Opening http://localhost:4321"
     @open http://localhost:4321 || xdg-open http://localhost:4321 || echo "Please open http://localhost:4321 in your browser"
 
-# Full website maintenance (clean, reinstall, audit, build, check)
+# Clean, reinstall, audit, build, check
 [group('website')]
 [private]
 website-maintain: website-clean website-install website-audit website-build website-check
     @echo "✓ Website maintenance complete"
 
-# Show current version from Cargo.toml
+# Show the current version
 [group('release')]
 version:
     @grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
 
-# Bump version (usage: just bump 1.14.0)
+# Bump version, e.g. `just bump 1.14.0`
 [group('release')]
 bump new_version:
     @echo "Bumping version to {{ new_version }}..."
@@ -360,7 +356,7 @@ bump new_version:
     @echo "  1. Update CHANGELOG.md"
     @echo "  2. Run: just release-prepare"
 
-# Prepare release (builds, tests, and updates generated schemas)
+# Build, test, and refresh schemas
 [group('release')]
 release-prepare: release test schemas
     @echo ""
@@ -374,7 +370,7 @@ release-prepare: release test schemas
     @echo "  3. Push: git push origin main --tags"
     @echo "  4. Create GitHub release: gh release create v$(just version)"
 
-# Full release workflow (interactive)
+# Commit and tag a release
 [group('release')]
 release-tag version:
     @echo "Creating release v{{ version }}..."
