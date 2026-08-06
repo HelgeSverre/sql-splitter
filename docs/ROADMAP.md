@@ -751,21 +751,21 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 **Target**: 1-2 weeks
 **Theme**: Preserve constraints that SQLite and MSSQL cannot attach to an existing table
 
-| Feature                            | Effort | Status     | Notes                                  |
-| ---------------------------------- | ------ | ---------- | -------------------------------------- |
+| Feature                            | Effort | Status     | Notes                                   |
+| ---------------------------------- | ------ | ---------- | --------------------------------------- |
 | **`--rebuild` flag**               | 1h     | 🟡 Planned | Opt-in; default stays warn-and-document |
-| **Deferred rebuild emission**      | 3h     | 🟡 Planned | Reuses `take_deferred_statements`      |
-| **SQLite rebuild**                 | 8h     | 🟡 Planned |                                        |
-| ├─ Buffer converted CREATE TABLE   | 2h     |            | Already retained in `created_tables`   |
-| ├─ Fold ALTER constraints into DDL | 3h     |            | PK + FK back into the column list      |
-| └─ Emit copy/drop/rename block     | 3h     |            | Wrapped in a transaction               |
+| **Deferred rebuild emission**      | 3h     | 🟡 Planned | Reuses `take_deferred_statements`       |
+| **SQLite rebuild**                 | 8h     | 🟡 Planned |                                         |
+| ├─ Buffer converted CREATE TABLE   | 2h     |            | Already retained in `created_tables`    |
+| ├─ Fold ALTER constraints into DDL | 3h     |            | PK + FK back into the column list       |
+| └─ Emit copy/drop/rename block     | 3h     |            | Wrapped in a transaction                |
 | **MSSQL IDENTITY rebuild**         | 6h     | 🟡 Planned | MSSQL cannot ALTER a column to IDENTITY |
-| **Testing**                        | 6h     | 🟡 Planned | Round-trip against real engines        |
+| **Testing**                        | 6h     | 🟡 Planned | Round-trip against real engines         |
 
 **Total: ~24h**
 
 **Why**: `pg_dump` emits primary keys, unique keys, foreign keys and sequence
-defaults as separate `ALTER TABLE` statements *after* `CREATE TABLE`. MySQL
+defaults as separate `ALTER TABLE` statements _after_ `CREATE TABLE`. MySQL
 applies all of them in place (`ADD CONSTRAINT`, `MODIFY COLUMN`), so it is
 already lossless. SQLite and MSSQL cannot, and the only faithful route is the
 standard rebuild recipe: create a new table with the full definition, copy the
@@ -913,15 +913,15 @@ rows, drop the original, rename.
 
 ### Upcoming Features (v1.16+)
 
-| Version | Features                                                          | Status  |
-| ------- | ----------------------------------------------------------------- | ------- |
-| v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current |
+| Version | Features                                                          | Status      |
+| ------- | ----------------------------------------------------------------- | ----------- |
+| v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current     |
 | v1.17.0 | Synthetic data generation (`generate`)                            | ✅ Released |
-| v1.18.0 | Enum Conversion                                                   | Planned |
-| v1.19.0 | Migrate                                | Planned     |
-| v1.20.0 | DBML                                   | Planned     |
-| v2.0.0  | Parallel                               | Planned     |
-| v2.1.0  | Infer                                  | Planned     |
+| v1.18.0 | Enum Conversion                                                   | Planned     |
+| v1.19.0 | Migrate                                                           | Planned     |
+| v1.20.0 | DBML                                                              | Planned     |
+| v2.0.0  | Parallel                                                          | Planned     |
+| v2.1.0  | Infer                                                             | Planned     |
 
 ---
 
