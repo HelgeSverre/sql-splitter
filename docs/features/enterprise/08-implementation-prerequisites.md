@@ -227,7 +227,7 @@ DB drivers.
 migrate = ["dep:mysql", "dep:postgres"]
 
 [dependencies]
-mysql = { version = "25", optional = true }
+mysql = { version = "28", optional = true }
 postgres = { version = "0.19", optional = true }
 ```
 

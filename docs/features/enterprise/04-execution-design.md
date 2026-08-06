@@ -81,6 +81,19 @@ Output formats:
 
 ### DDL Execution (`--execute`)
 
+For each phase, in FK dependency order. Post-data DDL (Phase 3b) runs on
+a **single connection** (not the worker pool) with FK checks disabled to
+handle cycle constraints:
+
+```sql
+-- Phase 3b connection startup:
+SET FOREIGN_KEY_CHECKS = 0;
+-- Run all ADD CONSTRAINT / ADD FK operations
+-- (Handles cycles: a→b→c→d→a all exist by now,
+--  so FK creation succeeds despite cyclic references)
+SET FOREIGN_KEY_CHECKS = 1;
+```
+
 For each phase, in FK dependency order (`SchemaGraph::processing_order()`):
 
 ```rust
@@ -110,11 +123,22 @@ re-running the migration after a failure is safe:
 
 ### Data Migration (`--execute`)
 
-For each table, in FK dependency order:
+For each table, in FK dependency order. Self-referential tables
+(employees.manager_id → employees.id) require intra-table row ordering:
+NULL-FK rows first, then rows referencing previously-inserted PKs:
 
 ```rust
 for table_op in plan.data_operations_in_topo_order() {
-    let source_rows = source.stream_table_rows(&table_op.table)?;
+    let order_clause = if table_op.is_self_referential() {
+        // "SELECT ... FROM table ORDER BY
+        //  CASE WHEN fk_col IS NULL THEN 0 ELSE 1 END, pk_col"
+        table_op.self_ref_ordering()
+    } else {
+        String::new()
+    };
+    let source_rows = source.stream_table_rows_ordered(
+        &table_op.table, &order_clause
+    )?;
     if table_op.needs_conversion() {
         // Route through TypeMapper for cross-dialect type conversion
         let converted = convert_rows(source_rows, &table_op.conversions);
@@ -547,9 +571,14 @@ connection starts with session-level safety settings:
 SET FOREIGN_KEY_CHECKS = 0;    -- allow child inserts before parent imports
 SET UNIQUE_CHECKS = 0;         -- faster idempotent INSERT performance
 SET autocommit = 0;            -- batch commits
+SET sql_mode = '';             -- allow zero-dates, relaxed type coercion
+SET time_zone = '+00:00';      -- UTC for deterministic TIMESTAMP handling
+SET wait_timeout = 86400;      -- 24h (default 8h may fire on large tables)
 
 -- PostgreSQL: executed on every worker connection at startup
 SET session_replication_role = 'replica';  -- disable triggers + FK checks
+SET idle_in_transaction_session_timeout = 0;  -- prevent timeout during stall
+SET timezone = 'UTC';
 ```
 
 ```rust
@@ -599,6 +628,22 @@ every byte through the client. Cross-DB transfer is available as
 
 Use `--bench` to measure actual throughput before migration: 10K test rows,
 timed, reports estimated duration against the real target.
+
+**RTT impact**: Throughput assumes RTT <5ms. Cross-region (50ms RTT): ~40%
+of rated throughput. Cross-continent (200ms RTT): ~15%. At 200ms RTT,
+2TB takes ~72h with 4 workers. Mitigations: increase `--batch-size` to
+10,000–100,000 rows to amortize RTT, or use `--copy-mode direct` for
+server-internal transfer.
+
+**Connection pool pre-flight**: Before starting, queries `SELECT
+@@max_connections` and `SELECT COUNT(*) FROM information_schema.PROCESSLIST`
+on the target. Warns if parallel workers would consume >80% of remaining
+slots. For managed MySQL with 51 max_connections and 40 app connections,
+parallel import is limited to sequential mode automatically.
+
+**PostgreSQL post-import VACUUM**: After data import, runs manual `VACUUM
+ANALYZE` on the largest tables before re-enabling autovacuum. Re-enables
+autovacuum in batches of 20 tables with 60s intervals to prevent I/O storm.
 
 ### Integration with Existing `ParallelWriters` Model
 

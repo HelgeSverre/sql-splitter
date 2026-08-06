@@ -35,6 +35,7 @@ file-based DDL generation logic from `MIGRATE_FEATURE.md`.
 | [`07-managed-service-appendix.md`](./07-managed-service-appendix.md)         | **DEFERRED** — Future managed cloud service architecture (API server, workers, KMS, WebSocket progress), not in implementation plan                                      |
 | [`08-implementation-prerequisites.md`](./08-implementation-prerequisites.md) | Refactoring audit — what exists today, what must change before implementation, coherence fixes for design docs, dependency graph                                         |
 | [`09-round-1-review-findings.md`](./09-round-1-review-findings.md)           | Three parallel audits — code accuracy (50+ API refs verified), industry claims (12 checked), adversarial edge cases (38 new failure modes found)                         |
+| [`10-round-2-review-findings.md`](./10-round-2-review-findings.md)           | Five parallel audits — architecture trace (3 critical gaps found), performance model, security, concurrency, feature flag/build. 6 critical, 18 high, 14 medium          |
 
 ## Architecture Overview
 
