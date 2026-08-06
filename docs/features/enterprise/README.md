@@ -24,15 +24,16 @@ file-based DDL generation logic from `MIGRATE_FEATURE.md`.
 
 ## Document Index
 
-| File                                                                 | Contents                                                                                                                                                                 |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`01-migration-landscape.md`](./01-migration-landscape.md)           | PlanetScale/Vitess, AWS DMS, CDC patterns, tooling landscape, enterprise pitfalls, managed database constraints                                                          |
-| [`02-capability-audit.md`](./02-capability-audit.md)                 | Current sql-splitter architecture mapped against migration needs, detailed gap analysis with code references                                                             |
-| [`03-connection-architecture.md`](./03-connection-architecture.md)   | Low-level database connection design — `DbSource`/`DbTarget` traits, crate choices, streaming guarantees, PlanetScale-specific handling                                  |
-| [`04-execution-design.md`](./04-execution-design.md)                 | Full `migrate` command design — pipeline, failure-mode catalog (60+ modes), parallel import, staging strategies, chunking, e2e testing, benchmarking, structured logging |
-| [`05-review-findings.md`](./05-review-findings.md)                   | Adversarial review — 7 critical findings, 13 high-severity findings, Percona research, updated performance model, implementation sequence                                |
-| [`06-cross-industry-patterns.md`](./06-cross-industry-patterns.md)   | Synthesis of 10-agent industry research — Percona, MariaDB, PlanetScale, Neon, ClickHouse, GitHub, AWS, distributed DBs, schema tools, open-source migrants              |
-| [`07-managed-service-appendix.md`](./07-managed-service-appendix.md) | **DEFERRED** — Future managed cloud service architecture (API server, workers, KMS, WebSocket progress), not in implementation plan                                      |
+| File                                                                         | Contents                                                                                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`01-migration-landscape.md`](./01-migration-landscape.md)                   | PlanetScale/Vitess, AWS DMS, CDC patterns, tooling landscape, enterprise pitfalls, managed database constraints                                                          |
+| [`02-capability-audit.md`](./02-capability-audit.md)                         | Current sql-splitter architecture mapped against migration needs, detailed gap analysis with code references                                                             |
+| [`03-connection-architecture.md`](./03-connection-architecture.md)           | Low-level database connection design — `DbSource`/`DbTarget` traits, crate choices, streaming guarantees, PlanetScale-specific handling                                  |
+| [`04-execution-design.md`](./04-execution-design.md)                         | Full `migrate` command design — pipeline, failure-mode catalog (60+ modes), parallel import, staging strategies, chunking, e2e testing, benchmarking, structured logging |
+| [`05-review-findings.md`](./05-review-findings.md)                           | Adversarial review — 7 critical findings, 13 high-severity findings, Percona research, updated performance model, implementation sequence                                |
+| [`06-cross-industry-patterns.md`](./06-cross-industry-patterns.md)           | Synthesis of 10-agent industry research — Percona, MariaDB, PlanetScale, Neon, ClickHouse, GitHub, AWS, distributed DBs, schema tools, open-source migrants              |
+| [`07-managed-service-appendix.md`](./07-managed-service-appendix.md)         | **DEFERRED** — Future managed cloud service architecture (API server, workers, KMS, WebSocket progress), not in implementation plan                                      |
+| [`08-implementation-prerequisites.md`](./08-implementation-prerequisites.md) | Refactoring audit — what exists today, what must change before implementation, coherence fixes for design docs, dependency graph                                         |
 
 ## Architecture Overview
 
@@ -76,6 +77,33 @@ Source DB ──► DbSource::extract_schema() ──► Schema ──► compar
    MySQL DDL, pre-flight checks for connectivity/permissions/charset/FK
    integrity, hazard annotations on every operation, rollback plan
    generation, structured JSON logging with span hierarchy.
+
+## Before Implementation — Prerequisites
+
+See [`08-implementation-prerequisites.md`](./08-implementation-prerequisites.md)
+for the full refactoring audit. In short:
+
+| #   | Prerequisite                              | Effort     | Unlocks                              |
+| --- | ----------------------------------------- | ---------- | ------------------------------------ |
+| P0  | Add `SchemaGraph::topo_levels()`          | ~40 lines  | Parallel import design               |
+| P0  | Make `TypeMapper` `pub`                   | 1 line     | `RowTypeConverter`                   |
+| P1  | Extract `for_each_statement()` combinator | ~100 lines | Single parser loop for all consumers |
+| P1  | Unify COPY pairing across 4 parser loops  | ~80 lines  | Shared file-source path              |
+| P2  | Add `migrate` Cargo feature flag          | ~5 lines   | Phase-gated DB drivers               |
+| P2  | Add `MIG-*` diagnostic codes              | ~30 lines  | Error handling consistency           |
+
+These are refactoring-only — they don't add migration functionality but
+they make the implementation straightforward. After them, `src/migrate/`
+fits naturally into the existing architecture.
+
+## Coherence Fixes
+
+Six design-document inconsistencies need resolution before implementation
+(see §C-FIX-1 through C-FIX-6 in `08-implementation-prerequisites.md`):
+reconcile PlanetScale subprocess position, harmonize phase numbering
+across all documents, update `03` for text protocol decision, add missing
+CLI flags to `04` §6.8, assign orphan gaps 4-8 to phases, add or remove
+`--copy-mode direct` reference.
 
 ## Implementation Phases
 
