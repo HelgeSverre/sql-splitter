@@ -303,16 +303,16 @@ Adding PlanetScale rules requires:
 **What's needed**: A validation mode that checks a dump for PlanetScale
 compatibility before attempting import:
 
-| Rule                                | Check                                                                                                       | Implementation                                                                                                                         |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| All tables have unique non-null key | `table.primary_key.is_empty() && !table.unique_constraints.iter().any(\|uc\| all_cols_not_null(uc, table))` | Iterate `table.unique_constraints` + `table.indexes` (filter `is_unique`). For each, verify all columns are `!col.is_nullable`.        |
-| No stored procedures                | Parser event: scan for `CREATE PROCEDURE` / `CREATE FUNCTION` / `CREATE TRIGGER` / `CREATE EVENT`           | The parser already classifies statement types. Add a check in `Validator::process_statement()` to flag these statement types.          |
-| No views                            | Parser event: scan for `CREATE VIEW`                                                                        | Same approach as stored procedures.                                                                                                    |
-| Only InnoDB tables                  | `table.create_statement` contains `ENGINE=` clause                                                          | Parse the engine from the CREATE TABLE text. `Schema` doesn't track engine (no field for it) — this is net-new parsing in the builder. |
-| Supported charsets only             | `col.collation: Option<String>` on each `Column`                                                            | The `Column` struct already has `collation`. Check against PlanetScale's allowlist (`utf8`, `utf8mb4`, `utf8mb3`, `latin1`, `ascii`).  |
-| No unsupported SQL                  | Parser event scan for `LOAD DATA INFILE`, `JSON_TABLE`, `:=`                                                | Statement-type classification in the parser.                                                                                           |
-| FK compatibility                    | `table.foreign_keys` contains hash-suffixed names                                                           | `ForeignKey.name` is `Option<String>`. Check for PlanetScale hash patterns: `_fk_` followed by ~26 alphanumeric characters.            |
-| No `RENAME COLUMN`                  | Detect `ALTER TABLE ... RENAME COLUMN` in generated migration scripts                                       | Post-diff analysis on the migration plan output; not a validation rule but a plan-generation hazard.                                   |
+| Rule                                | Check                                                                                                       | Implementation                                                                                                                                                                                                                                                                      |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| All tables have unique non-null key | `table.primary_key.is_empty() && !table.unique_constraints.iter().any(\|uc\| all_cols_not_null(uc, table))` | Iterate `table.unique_constraints` + `table.indexes` (filter `is_unique`). For each, verify all columns are `!col.is_nullable`.                                                                                                                                                     |
+| No stored procedures                | Parser event: scan for `CREATE PROCEDURE` / `CREATE FUNCTION` / `CREATE TRIGGER` / `CREATE EVENT`           | NOTE: `StatementType` does NOT currently include `CreateProcedure`, `CreateFunction`, `CreateTrigger`, `CreateEvent`, or `CreateView` variants. The parser returns `Unknown` for these. Adding statement-type classification for these is a prerequisite for this rule (see Gap 7). |
+| No views                            | Parser event: scan for `CREATE VIEW`                                                                        | Same approach as stored procedures.                                                                                                                                                                                                                                                 |
+| Only InnoDB tables                  | `table.create_statement` contains `ENGINE=` clause                                                          | Parse the engine from the CREATE TABLE text. `Schema` doesn't track engine (no field for it) — this is net-new parsing in the builder.                                                                                                                                              |
+| Supported charsets only             | `col.collation: Option<String>` on each `Column`                                                            | The `Column` struct already has `collation`. Check against PlanetScale's allowlist (`utf8`, `utf8mb4`, `utf8mb3`, `latin1`, `ascii`).                                                                                                                                               |
+| No unsupported SQL                  | Parser event scan for `LOAD DATA INFILE`, `JSON_TABLE`, `:=`                                                | Statement-type classification in the parser.                                                                                                                                                                                                                                        |
+| FK compatibility                    | `table.foreign_keys` contains hash-suffixed names                                                           | `ForeignKey.name` is `Option<String>`. Check for PlanetScale hash patterns: `_fk_` followed by ~26 alphanumeric characters.                                                                                                                                                         |
+| No `RENAME COLUMN`                  | Detect `ALTER TABLE ... RENAME COLUMN` in generated migration scripts                                       | Post-diff analysis on the migration plan output; not a validation rule but a plan-generation hazard.                                                                                                                                                                                |
 
 The schema parser already tracks primary keys and unique constraints via
 `TableSchema`. Adding rule checks against the `Schema` object is
@@ -403,10 +403,13 @@ the schema graph.
 **What's needed for migration**:
 
 - **Detection**: Catalog which procedures, functions, triggers, views, and
-  events exist in the dump. The parser already classifies statement types
-  (`CreateProcedure`, `CreateFunction`, `CreateTrigger`, `CreateEvent`,
-  `CreateView`) — building a catalog is about recording these during
-  a pass, not parsing their bodies.
+  events exist in the dump. NOTE: `StatementType` (src/parser/mod.rs:305)
+  does NOT currently include variants for `CreateProcedure`,
+  `CreateFunction`, `CreateTrigger`, `CreateEvent`, or `CreateView`
+  — the parser returns `Unknown` for these. Adding these variants to the
+  enum and statement-type detection logic is a prerequisite for automated
+  cataloging (~100 lines of parser changes). Once added, building a catalog
+  is about recording these during a pass, not parsing their bodies.
 
 - **Preservation**: Pass routines through the pipeline unchanged. For
   PlanetScale → standard MySQL, the catalog tells the migration engineer

@@ -147,15 +147,15 @@ impl SchemaGraph {
 **Unlocks**: Phase 5 parallel import. Existing `topo_sort()` callers are
 unaffected.
 
-### R1: Make `TypeMapper` accessible — 1 line
+### R1: Make `TypeMapper` methods accessible — 1 line
 
 **Why**: The `RowTypeConverter` needs type mapping information to convert
-row values between dialects. `TypeMapper` is `pub(crate)`.
+row values between dialects. The `TypeMapper` struct is already `pub`, but
+`map_column_type()` is `pub(crate)`.
 
 **Where**: `src/convert/types.rs`
 
-**What**: Change `pub(crate) struct TypeMapper` to `pub struct TypeMapper`,
-and `pub(crate) fn map_column_type` to `pub fn map_column_type`.
+**What**: Change `pub(crate) fn map_column_type` to `pub fn map_column_type`.
 
 **Unlocks**: `RowTypeConverter` in `src/migrate/`.
 

@@ -209,18 +209,22 @@ SET idle_in_transaction_session_timeout = 0;
 
 **Source**: Operational review (§8)
 
-PlanetScale VTGate kills individual queries that exceed a timeout (~60s
-scalar, ~300s team/enterprise). A `SELECT * FROM huge_table` running for
-2 hours will be killed regardless of connection keepalive. The design's C7
-suggests keepalive queries, which only prevent **connection** idle timeout,
-not **query** execution timeout.
+PlanetScale VTGate kills individual queries that exceed the documented
+autocommit timeout of 900 seconds (see PlanetScale system limits docs).
+Tier-specific kill thresholds (e.g., 60s scalar, 300s team/enterprise)
+are commonly reported by users but not officially documented. A `SELECT
+
+- FROM huge_table` running for 2+ hours will be killed regardless of
+  tier. The design's C7 suggests keepalive queries, which only prevent
+  **connection** idle timeout, not **query** execution timeout.
 
 **Mitigation**:
 
 1. **For PlanetScale sources, `--chunk-column` is mandatory.** Pre-flight
    check detects PlanetScale (VTGate-specific error or hostname pattern),
-   and requires `--chunk-column` for any table estimated to exceed 60s of
-   query time. Without it, the migration refuses to start.
+   and requires `--chunk-column` for any table estimated to exceed the
+   documented VTGate autocommit timeout (900s) in query time. Without it,
+   the migration refuses to start.
 
 2. **Auto-detect chunk column**: If `--chunk-column` is not specified, the
    executor queries `EXPLAIN SELECT * FROM table LIMIT 1` to find the
@@ -475,7 +479,8 @@ pub enum MigrateError {
 The `run()` function returns `Result<MigrateOutcome, MigrateError>`.
 Non-fatal warnings are collected in `MigrateOutcome.diagnostics`. Fatal
 errors are in `MigrateError`. This matches the generate module's
-established pattern at `src/generate/mod.rs:330`.
+established pattern (`GenerateError` defined in `src/generate/value.rs:157`,
+used in `src/generate/mod.rs:330` via `Generate::run()`).
 
 ---
 

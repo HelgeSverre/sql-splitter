@@ -34,6 +34,7 @@ file-based DDL generation logic from `MIGRATE_FEATURE.md`.
 | [`06-cross-industry-patterns.md`](./06-cross-industry-patterns.md)           | Synthesis of 10-agent industry research — Percona, MariaDB, PlanetScale, Neon, ClickHouse, GitHub, AWS, distributed DBs, schema tools, open-source migrants              |
 | [`07-managed-service-appendix.md`](./07-managed-service-appendix.md)         | **DEFERRED** — Future managed cloud service architecture (API server, workers, KMS, WebSocket progress), not in implementation plan                                      |
 | [`08-implementation-prerequisites.md`](./08-implementation-prerequisites.md) | Refactoring audit — what exists today, what must change before implementation, coherence fixes for design docs, dependency graph                                         |
+| [`09-round-1-review-findings.md`](./09-round-1-review-findings.md)           | Three parallel audits — code accuracy (50+ API refs verified), industry claims (12 checked), adversarial edge cases (38 new failure modes found)                         |
 
 ## Architecture Overview
 
