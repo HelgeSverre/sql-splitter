@@ -58,17 +58,17 @@ let plan = MigrationPlan::from_diff(diff, &source_schema, &target_schema);
 
 The plan is always produced and displayed. It contains:
 
-| Section            | Contents                                                                            |
-| ------------------ | ----------------------------------------------------------------------------------- |
-| Source summary     | Table count, row estimates, dialect, total size estimate                            |
-| Target summary     | Same as source                                                                      |
-| Pre-flight checks  | Connectivity, permissions, disk space, charset compatibility, FK orphan detection   |
-| Phase 1 operations | Pre-data DDL: CREATE TABLE, ADD COLUMN (with defaults), DROP CONSTRAINT, DROP INDEX |
-| Phase 2 operations | Data migration: per-table row counts, type conversions needed, estimated duration   |
-| Phase 3 operations | Post-data DDL: ADD CONSTRAINT, CREATE INDEX, ADD FK                                 |
-| Phase 4 operations | Cleanup: DROP TABLE, DROP COLUMN (if applicable)                                    |
-| Hazards            | DataLoss, DowntimeRequired, LongRunning, Irreversible                               |
-| Rollback plan      | Inverse operations for each phase                                                   |
+| Section           | Contents                                                                          |
+| ----------------- | --------------------------------------------------------------------------------- |
+| Source summary    | Table count, row estimates, dialect, total size estimate                          |
+| Target summary    | Same as source                                                                    |
+| Pre-flight checks | Connectivity, permissions, disk space, charset compatibility, FK orphan detection |
+| Pre-data ops      | CREATE TABLE, ADD COLUMN (with defaults), DROP CONSTRAINT, DROP INDEX             |
+| Data ops          | Per-table row counts, type conversions needed, estimated duration                 |
+| Post-data ops     | ADD CONSTRAINT, CREATE INDEX, ADD FK                                              |
+| Cleanup ops       | DROP TABLE, DROP COLUMN (if applicable)                                           |
+| Hazards           | DataLoss, DowntimeRequired, LongRunning, Irreversible                             |
+| Rollback plan     | Inverse operations for each operation                                             |
 
 Output formats:
 
@@ -151,16 +151,18 @@ for table_op in plan.data_operations_in_topo_order() {
 
 Data import uses idempotent INSERT. Unlike `INSERT IGNORE` (which silently
 swallows ALL errors including type violations and CHECK constraint failures),
-the executor uses PK-targeted dedup that only skips duplicate primary keys:
+the executor uses unique-key-targeted dedup:
 
-| Dialect    | INSERT form                                                                         |
-| ---------- | ----------------------------------------------------------------------------------- |
-| MySQL      | `INSERT INTO table (cols) VALUES (...) ON DUPLICATE KEY UPDATE pk = VALUES(pk)`     |
-| PostgreSQL | `INSERT INTO table (cols) VALUES (...) ON CONFLICT (pk_cols) DO NOTHING`            |
-| SQLite     | `INSERT OR IGNORE INTO table (cols) VALUES (...)` (no PK-targeted syntax available) |
-| MSSQL      | `MERGE INTO table USING (VALUES (...)) AS src ON ... WHEN NOT MATCHED THEN INSERT`  |
+| Dialect    | INSERT form                                                                         | Notes                                                                                                                                                                 |
+| ---------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MySQL      | `INSERT INTO table (cols) VALUES (...) ON DUPLICATE KEY UPDATE pk = VALUES(pk)`     | Fires on ANY unique-key conflict, not just PK. The plan metadata lists only PK columns, but pre-existing UNIQUE constraints on other columns also trigger the clause. |
+| PostgreSQL | `INSERT INTO table (cols) VALUES (...) ON CONFLICT (pk_cols) DO NOTHING`            | Only the named arbiter columns trigger dedup. Explicit PK column list is required.                                                                                    |
+| SQLite     | `INSERT OR IGNORE INTO table (cols) VALUES (...)` (no PK-targeted syntax available) | Suppresses ALL errors — not just PK conflicts. Pre-flight must verify the table has a unique key before enabling idempotency; otherwise re-run doubles rows silently. |
+| MSSQL      | `MERGE INTO table USING (VALUES (...)) AS src ON ... WHEN NOT MATCHED THEN INSERT`  | Only the MERGE ON condition triggers dedup.                                                                                                                           |
 
-PK-targeted dedup means only duplicate primary key rows are skipped. Type
+Unique-key-targeted dedup means only rows matching the listed conflict
+columns are skipped. For MySQL, any UNIQUE constraint on the table also
+triggers `ON DUPLICATE KEY` — this is best-effort, not PK-exclusive.
 conversion errors, CHECK violations, NOT NULL violations, and FK
 violations all produce proper errors that are collected and reported
 (rather than silently swallowed as they would be with `INSERT IGNORE`).
@@ -236,7 +238,7 @@ pub trait DbTarget {
 }
 ```
 
-Implementations: `MySqlTarget` (mysql crate v25, synchronous), `PostgresTarget`
+Implementations: `MySqlTarget` (mysql crate v28, synchronous), `PostgresTarget`
 (postgres crate v0.19, synchronous). Same crate choices as `DbSource` —
 synchronous drivers, no async runtime.
 
@@ -333,20 +335,20 @@ verification.
 
 ### Data Import Failures
 
-| #   | Failure                                                                                            | Detection                                                    | Recovery                                                                                                                  |
-| --- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| D1  | INSERT fails due to NOT NULL column with no default                                                | MySQL error 1364, PG error 23502                             | Log error: "Column X in table Y has no default value; source row contained NULL. Check whether target schema is correct." |
-| D2  | INSERT fails due to FK violation (orphaned row references non-existent parent)                     | MySQL error 1452, PG error 23503                             | Log error with FK detail; skip row; this is a data integrity issue in the source, not a migration bug                     |
-| D3  | INSERT fails due to duplicate PK (idempotent mode should prevent this)                             | Should not occur with INSERT IGNORE / ON CONFLICT DO NOTHING | If it occurs, the idempotency mechanism is broken — this is a bug                                                         |
-| D4  | INSERT fails due to UNIQUE constraint violation from collation difference                          | MySQL error 1062, PG error 23505                             | Log error: "Duplicate key violation on table Y, constraint Z. Source and target collations may differ."                   |
-| D5  | INSERT fails due to CHECK constraint violation                                                     | MySQL error 3819, PG error 23514                             | Log error with CHECK expression; skip row                                                                                 |
-| D6  | Target runs out of disk space during import                                                        | Disk full error from DB driver                               | Exit immediately; report how many tables were imported; suggest increasing target storage                                 |
-| D7  | Target binary log fills up during import                                                           | MySQL error writing to binlog                                | Suggest `SET SQL_LOG_BIN=0` (requires SUPER) or `--skip-binlog` on target; warn that this breaks replication              |
-| D8  | Target connection pool exhausted (too many concurrent INSERTs)                                     | "Too many connections" error                                 | Reduce concurrency; migration executor only uses 1 connection by default (not parallelized in Phase 1)                    |
-| D9  | Index rebuild blocks INSERTs (large indexes on target)                                             | INSERT timeout                                               | Drop non-PK indexes before import, recreate after (pgloader strategy); flag in plan                                       |
-| D10 | Trigger fires on target during INSERT                                                              | Trigger execution on target                                  | Disable triggers before import (`SET session_replication_role = replica;` for Postgres); re-enable after                  |
-| D11 | Auto-vacuum on Postgres target interferes with import                                              | Import throughput drops mid-import                           | Temporarily disable auto-vacuum on target tables during import (`ALTER TABLE ... SET (autovacuum_enabled = false)`)       |
-| D12 | Large BLOB/TEXT values cause INSERT to exceed `max_allowed_packet` (MySQL) or statement size limit | Packet size error                                            | Chunk large values across multiple INSERT statements; configurable `--max-rows-per-insert`                                |
+| #   | Failure                                                                                            | Detection                                                                        | Recovery                                                                                                                  |
+| --- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| D1  | INSERT fails due to NOT NULL column with no default                                                | MySQL error 1364, PG error 23502                                                 | Log error: "Column X in table Y has no default value; source row contained NULL. Check whether target schema is correct." |
+| D2  | INSERT fails due to FK violation (orphaned row references non-existent parent)                     | MySQL error 1452, PG error 23503                                                 | Log error with FK detail; skip row; this is a data integrity issue in the source, not a migration bug                     |
+| D3  | INSERT fails due to duplicate unique key (idempotent mode should prevent this)                     | Should not occur with ON DUPLICATE KEY UPDATE / ON CONFLICT (pk_cols) DO NOTHING | If it occurs, the idempotency mechanism is broken — this is a bug                                                         |
+| D4  | INSERT fails due to UNIQUE constraint violation from collation difference                          | MySQL error 1062, PG error 23505                                                 | Log error: "Duplicate key violation on table Y, constraint Z. Source and target collations may differ."                   |
+| D5  | INSERT fails due to CHECK constraint violation                                                     | MySQL error 3819, PG error 23514                                                 | Log error with CHECK expression; skip row                                                                                 |
+| D6  | Target runs out of disk space during import                                                        | Disk full error from DB driver                                                   | Exit immediately; report how many tables were imported; suggest increasing target storage                                 |
+| D7  | Target binary log fills up during import                                                           | MySQL error writing to binlog                                                    | Suggest `SET SQL_LOG_BIN=0` (requires SUPER) or `--skip-binlog` on target; warn that this breaks replication              |
+| D8  | Target connection pool exhausted (too many concurrent INSERTs)                                     | "Too many connections" error                                                     | Reduce concurrency; migration executor only uses 1 connection by default (not parallelized in Phase 1)                    |
+| D9  | Index rebuild blocks INSERTs (large indexes on target)                                             | INSERT timeout                                                                   | Drop non-PK indexes before import, recreate after (pgloader strategy); flag in plan                                       |
+| D10 | Trigger fires on target during INSERT                                                              | Trigger execution on target                                                      | Disable triggers before import (`SET session_replication_role = replica;` for Postgres); re-enable after                  |
+| D11 | Auto-vacuum on Postgres target interferes with import                                              | Import throughput drops mid-import                                               | Temporarily disable auto-vacuum on target tables during import (`ALTER TABLE ... SET (autovacuum_enabled = false)`)       |
+| D12 | Large BLOB/TEXT values cause INSERT to exceed `max_allowed_packet` (MySQL) or statement size limit | Packet size error                                                                | Chunk large values across multiple INSERT statements; configurable `--max-rows-per-insert`                                |
 
 ### PlanetScale-Specific Failures
 
@@ -395,27 +397,27 @@ verification.
 
 ### What Makes a Migration Tool Enterprise-Ready
 
-| Requirement                       | Status                | Notes                                                                                        |
-| --------------------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
-| **Idempotent execution**          | Designed (§6.2 R1-R4) | INSERT IGNORE / ON CONFLICT, DDL IF NOT EXISTS                                               |
-| **Graceful shutdown**             | Designed (§6.2 R5)    | SIGINT handler, flush current batch, write state file                                        |
-| **Execution log**                 | Designed (§6.7)       | Per-phase progress, per-table row counts, timestamps, structured JSON                        |
-| **Dry-run mode**                  | Designed              | Plan generation against live target without executing                                        |
-| **Pre-flight checks**             | Designed              | Connectivity, permissions, charset compatibility, FK orphan detection, disk space estimate   |
-| **Hazard annotations**            | Designed              | DataLoss, DowntimeRequired, LongRunning, Irreversible                                        |
-| **Rollback plan**                 | Designed              | Inverse operations per phase                                                                 |
-| **SQL output mode**               | Designed              | Generates migration SQL for manual review and execution                                      |
-| **TLS everywhere**                | Designed (§6.2 X3)    | `verify-full` by default; configurable sslmode                                               |
-| **Credential safety**             | Designed (§6.2 X1-X4) | No CLI arg passwords in ps output; env var and config file support; PII redaction in logs    |
-| **No SUPER privilege required**   | Designed              | All operations use standard DDL/DML; session-level settings only where available             |
-| **PII handling in temp files**    | Designed (§6.2 X4)    | 0700 permissions, cleanup on exit                                                            |
-| **SIGINT-safe**                   | Designed (§6.2 R5)    | Flush current batch, close connections, write state                                          |
-| **Progress reporting**            | Designed (§6.7)       | Per-phase, per-table, bytes/sec, rows/sec, ETA                                               |
-| **Non-interactive mode**          | Designed              | `--execute` runs without prompts; `--allow-destructive` for DROP operations                  |
-| **Exit codes**                    | Designed              | 0 = success, 1 = runtime error, 2 = CLI error, 3 = verification failure, 4 = partial success |
-| **Staging strategy for safe DDL** | Designed (§6.3d)      | Rename-safe table swaps for MySQL; direct DDL for Postgres                                   |
-| **Chunk-column override**         | Designed (§6.3c)      | Intra-table parallelism via sort-key chunking; skew detection; Fathom-style "site bundles"   |
-| **Resource limits**               | Designed              | `--chunk-size`, `--batch-size`, `--tables` filter, bounded memory via streaming              |
+| Requirement                       | Status                | Notes                                                                                                                                                                                |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Idempotent execution**          | Designed (§6.2 R1-R4) | `INSERT ... ON DUPLICATE KEY UPDATE` (MySQL) / `ON CONFLICT (pk_cols) DO NOTHING` (PG) — PK-targeted dedup, not INSERT IGNORE. Tables without unique keys require `--no-idempotent`. |
+| **Graceful shutdown**             | Designed (§6.2 R5)    | SIGINT handler, flush current batch, write state file                                                                                                                                |
+| **Execution log**                 | Designed (§6.7)       | Per-phase progress, per-table row counts, timestamps, structured JSON                                                                                                                |
+| **Dry-run mode**                  | Designed              | Plan generation against live target without executing                                                                                                                                |
+| **Pre-flight checks**             | Designed              | Connectivity, permissions, charset compatibility, FK orphan detection, disk space estimate                                                                                           |
+| **Hazard annotations**            | Designed              | DataLoss, DowntimeRequired, LongRunning, Irreversible                                                                                                                                |
+| **Rollback plan**                 | Designed              | Inverse operations per phase                                                                                                                                                         |
+| **SQL output mode**               | Designed              | Generates migration SQL for manual review and execution                                                                                                                              |
+| **TLS everywhere**                | Designed (§6.2 X3)    | `verify-full` by default; configurable sslmode                                                                                                                                       |
+| **Credential safety**             | Designed (§6.2 X1-X4) | No CLI arg passwords in ps output; env var and config file support; PII redaction in logs                                                                                            |
+| **No SUPER privilege required**   | Designed              | All operations use standard DDL/DML; session-level settings only where available                                                                                                     |
+| **PII handling in temp files**    | Designed (§6.2 X4)    | 0700 permissions, cleanup on exit                                                                                                                                                    |
+| **SIGINT-safe**                   | Designed (§6.2 R5)    | Flush current batch, close connections, write state                                                                                                                                  |
+| **Progress reporting**            | Designed (§6.7)       | Per-phase, per-table, bytes/sec, rows/sec, ETA                                                                                                                                       |
+| **Non-interactive mode**          | Designed              | `--execute` runs without prompts; `--allow-destructive` for DROP operations                                                                                                          |
+| **Exit codes**                    | Designed              | 0 = success, 1 = runtime error, 2 = CLI error, 3 = verification failure, 4 = partial success                                                                                         |
+| **Staging strategy for safe DDL** | Designed (§6.3d)      | Rename-safe table swaps for MySQL; direct DDL for Postgres                                                                                                                           |
+| **Chunk-column override**         | Designed (§6.3c)      | Intra-table parallelism via sort-key chunking; skew detection; Fathom-style "site bundles"                                                                                           |
+| **Resource limits**               | Designed              | `--chunk-size`, `--batch-size`, `--tables` filter, bounded memory via streaming                                                                                                      |
 
 ### What's Not Enterprise-Ready Yet (Phase 4+)
 
@@ -1811,11 +1813,23 @@ Logging:
   --log-format <FORMAT>       text|json (default: text for TTY, json for pipe)
   --log-file <PATH>           Write structured log to file
   --state-file <PATH>         Write execution state for resumability
+  --state-interval <SECS>     Interval between state-file writes (default: 30)
   --report <PATH>             Write final migration report (JSON)
 
 Progress:
   --progress <MODE>           bar|log|none (default: bar for TTY, log otherwise)
   --verbose                   Shorthand for --log-level debug --log-format text
+
+Benchmark:
+  --bench                     Measure INSERT throughput with 10K test rows against target before migration begins
+
+Other:
+  --force                     Skip pre-flight confirmation prompts
+  --max-memory <MB>           Soft memory limit for batch buffering (default: 256)
+  --query-timeout <SECS>      Per-query timeout on source (default: 300)
+
+Subcommands:
+  migrate check               Run pre-flight checks only, exit 0 if ready
 
 Development:
   --explain                   Explain plan generation decisions

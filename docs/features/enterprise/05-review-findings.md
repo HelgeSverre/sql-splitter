@@ -227,12 +227,16 @@ are commonly reported by users but not officially documented. A `SELECT
    the migration refuses to start.
 
 2. **Auto-detect chunk column**: If `--chunk-column` is not specified, the
-   executor queries `EXPLAIN SELECT * FROM table LIMIT 1` to find the
-   table's sort key, and uses that as the default chunk column.
+   executor queries the source's `information_schema.STATISTICS` to find
+   the table's clustered index (primary key or first unique key), and uses
+   that as the default sort column for chunking. For PlanetScale file
+   sources, the sort key is extracted from the dump's CREATE TABLE DDL.
 
-3. **Cap parallel workers**: For PlanetScale sources, `--parallel` is
-   capped at 2 regardless of level size. VTGate query multiplexing means
-   parallel `SELECT` cursors compete for the same underlying resources.
+3. **Cap parallel workers**: For PlanetScale file sources imported via
+   mydumper dump files, parallelism is limited by I/O, not VTGate.
+   Standard `--parallel` settings apply. For any live VTGate querying
+   (schema extraction via information_schema only), use a single
+   connection per PlanetScale database.
 
 ### CF-7: Parallel Workers Must Enforce FK_DISABLE
 

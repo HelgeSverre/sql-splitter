@@ -38,7 +38,7 @@ existing guarantees.
 
 |                        | Synchronous Drivers                                                                                      | Async with Tokio Bridge                                                                                   |
 | ---------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Crates**             | `mysql` (v25), `postgres` (v0.19)                                                                        | `mysql_async` (v0.35), `tokio-postgres` (v0.7)                                                            |
+| **Crates**             | `mysql` (v28), `postgres` (v0.19)                                                                        | `mysql_async` (v0.35), `tokio-postgres` (v0.7)                                                            |
 | **Runtime**            | None needed                                                                                              | Tokio `rt-multi-thread` added as dependency                                                               |
 | **Connection pooling** | `r2d2_postgres` for PG; `mysql` crate has no native pool                                                 | `mysql_async::Pool`, `tokio-postgres` deadpool/bb8                                                        |
 | **Streaming**          | `mysql::Conn::query_iter()` — row-by-row (text protocol); `postgres::Client::copy_out()` — COPY protocol | `mysql_async::Conn::query_iter()` — async row iterator; `tokio_postgres::Client::copy_out()` — async COPY |
@@ -138,15 +138,19 @@ impl DbSource for MySqlSource {
     fn stream_table_rows(
         &mut self,
         table: &str,
+        order_clause: Option<&str>,
     ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>> {
         // mysql::Conn::query_iter() streams rows using the text protocol.
         // Text protocol returns human-readable text — identical to what
         // mysqldump produces. Avoids binary protocol edge cases with
         // BIT/ENUM/SET types and server-side prepared statement exhaustion.
         //
-        // We batch them into RowBatch(10_000 rows) to avoid trait call
-        // overhead per row.
-        let query = format!("SELECT * FROM `{}`", table);
+        // When order_clause is provided (for self-referential FK tables),
+        // it is injected as: SELECT * FROM table ORDER BY {order_clause}
+        let query = match order_clause {
+            Some(order) => format!("SELECT * FROM `{}` ORDER BY {}", table, order),
+            None => format!("SELECT * FROM `{}`", table),
+        };
         let mut result = self.conn.query_iter(&query)?;
 
         let columns: Vec<String> = result
@@ -196,16 +200,12 @@ struct PostgresSource {
 
 impl DbSource for PostgresSource {
     fn extract_schema(&mut self) -> Result<Schema> {
-        // Two approaches:
-        //
-        // Approach 1: information_schema queries (portable, but misses
-        //   PG-specific features like inheritance, partitioning, extensions).
-        //
-        // Approach 2 (recommended): Invoke pg_dump --schema-only as a
-        //   subprocess and parse its output. This captures everything PG
-        //   knows about the schema, including extensions, partitions,
-        //   inheritance, and custom types. The output is standard SQL that
-        //   sql-splitter's existing parser already handles.
+        // Approach 1 (recommended for live DB extraction):
+        //   Query pg_catalog / information_schema for portable schema.
+        // Approach 2:
+        //   Run pg_dump --schema-only as a pre-condition (not invoked
+        //   by sql-splitter; the migration engineer provides the dump file
+        //   or runs pg_dump separately per the runbook).
         //
         // For Serverless Postgres (Neon): pg_dump --schema-only works
         // normally. Use direct connections (not pooled via PgBouncer) to
@@ -218,6 +218,7 @@ impl DbSource for PostgresSource {
     fn stream_table_rows(
         &mut self,
         table: &str,
+        order_clause: Option<&str>,
     ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>> {
         // Two approaches:
         //

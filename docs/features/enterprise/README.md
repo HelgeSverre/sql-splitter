@@ -56,7 +56,7 @@ Source DB ──► DbSource::extract_schema() ──► Schema ──► compar
 
 ## Key Design Decisions
 
-1. **Synchronous database drivers** (`mysql` v25, `postgres` v0.19) — match
+1. **Synchronous database drivers** (`mysql` v28, `postgres` v0.19) — match
    the existing codebase architecture, no async runtime needed.
 
 2. **Streaming, bounded-memory operation** — rows stream from source to

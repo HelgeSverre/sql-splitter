@@ -18,10 +18,10 @@ Schema Analysis → Data Movement → Verification → Cutover → Post-Migratio
   report first    (2 phases)    row counts    + shadow read  rebuild + stats
 ```
 
-**Implication for sql-splitter**: The designed pipeline (Phase 0 extract → Phase
-1 plan → Phase 2 DDL → Phase 3 data → Phase 3b post-data DDL → Phase 4 verify)
+**Implication for sql-splitter**: The designed pipeline (extract schemas →
+generate plan → execute DDL → migrate data → post-data DDL → verify)
 matches industry consensus. The industry validation confirms we have the right
-phases in the right order.
+stages in the right order.
 
 ## 8.2 Schema Compatibility Reports: Universally Step 1
 
@@ -52,7 +52,7 @@ will be rewritten, which types will be lossy, which features are unsupported.
 | AWS DMS           | `parallel-load` with partition-aware segment splitting                                 | Auto               |
 | ClickPipes        | Configurable snapshot partition rows                                                   | ~1GB per partition |
 
-**What sql-splitter has**: Static `--chunk-size` (default 100,000). Missing:
+**What the proposed design includes**: Static `--chunk-size` (default 100,000). Missing:
 adaptive sizing based on query execution time.
 
 **Action**: Add `--chunk-time <seconds>` flag. The boundary discovery from §6.3c
@@ -70,7 +70,7 @@ need for manual `--chunk-size` tuning on unfamiliar databases.
 | gh-ost          | Ghost table → cut-over atomic swap                                   |
 | pgloader        | Drop constraints → load data → recreate constraints                  |
 
-**What sql-splitter has**: `--staging-strategy rename-safe` in §6.3d.
+**What the proposed design includes**: `--staging-strategy rename-safe` in §6.3d.
 
 **Gap**: The ClickHouse pattern of partition-based swaps (metadata-level
 operation, instant regardless of data size) is not represented. For ClickHouse
@@ -95,7 +95,7 @@ across MySQL vendors/versions even with identical data. Cross-vendor migration
 cannot rely on database-native checksums. Must use application-level checksums
 (SHA-256 or XXH3) that are database-independent.
 
-**What sql-splitter has**: SHA-256 streaming table checksums in §6.1 Phase 4.
+**What the proposed design includes**: SHA-256 streaming table checksums in §6.1 Phase 4.
 Aligned with industry practice. Application-level checksums (not DB-native) are
 the correct choice.
 
@@ -113,7 +113,7 @@ myloader decomposes restore into three tunable phases:
 | Data loading    | Multi-threaded (parallel)    | Bulk INSERT, no FK constraints                   |
 | Index creation  | Multi-threaded (parallel)    | `--innodb-optimize-keys AFTER_IMPORT_ALL_TABLES` |
 
-**What sql-splitter has**: Phase 1 DDL (sequential), Phase 2 data (parallel
+**What the proposed design includes**: Phase 1 DDL (sequential), Phase 2 data (parallel
 via `--parallel`), Phase 3b post-data DDL (sequential). This decomposition
 matches myloader's architecture exactly.
 

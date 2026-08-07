@@ -125,25 +125,16 @@ algorithm disagreement.
 | V7  | High     | Non-deterministic columns → perpetual verification failures |
 | D18 | High     | JSON normalization → false checksum mismatch                |
 
-## Applied Fixes
+## Fix Status Ledger
 
-These specific corrections have been applied to the design documents:
+Status of issues identified in this round:
 
-1. **`02-capability-audit.md` Gap 7**: Updated to note that `StatementType`
-   variants for CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT/VIEW **do not exist**
-   and must be added to the parser before cataloging is possible.
-
-2. **`05-review-findings.md` CF-6**: Updated PlanetScale VTGate timeout
-   to reference documented 900s autocommit limit rather than unconfirmed
-   60s/300s tier thresholds.
-
-3. **`04-execution-design.md` §6.2**: Added 38 new failure modes (S7-S18,
-   D13-D20, O1-O9, P21-P24, V6-V10) to the failure mode catalog.
-
-4. **`08-implementation-prerequisites.md` R1**: Corrected TypeMapper
-   visibility note — the struct is already `pub`; the `map_column_type()`
-   method is `pub(crate)` and needs visibility change.
-
-5. **`05-review-findings.md` GenerateError reference**: Updated to cite
-   `src/generate/value.rs:157` (definition) instead of `src/generate/mod.rs:330`
-   (call site).
+| #   | Issue                                            | Status          | Where                                                    |
+| --- | ------------------------------------------------ | --------------- | -------------------------------------------------------- |
+| 1   | StatementType lacks CreateProcedure/etc variants | **FIXED**       | `02-capability-audit.md` Gap 7 updated                   |
+| 2   | TypeMapper visibility misdocumented              | **FIXED**       | `08-implementation-prerequisites.md` R1 corrected        |
+| 3   | GenerateError reference wrong                    | **FIXED**       | `05-review-findings.md` reference updated                |
+| 4   | PlanetScale VTGate timeout spec inaccurate       | **FIXED**       | `05-review-findings.md` CF-6 updated to 900s             |
+| 5   | 38 new failure modes added to 04 §6.2            | **NOT APPLIED** | Still only 60 modes in catalog; 38 modes in 09 text only |
+| 6   | All 14 file:line references verified             | **CONFIRMED**   | N/A (verification-only)                                  |
+| 7   | 10/12 industry claims confirmed accurate         | **CONFIRMED**   | N/A (verification-only)                                  |

@@ -87,24 +87,23 @@ metrics, 14 alert types), post-migration reporting, operational runbook
 - **Out-of-scope**: Oracle, MongoDB, rolling migration, blue/green,
   canary, append-only, GDPR residency, HIPAA audit trail
 
-## Applied Fixes
+## Fix Status Ledger
 
-These corrections have been applied to the design documents:
+Status of issues identified in this round:
 
-1. **`04` §6.3d**: Fixed rename-safe SQL — staging table now swaps
-   with `__sql_splitter_old_orders` first, then renames staging to
-   `orders`.
-
-2. **`04` §6.1**: `stream_table_rows_ordered()` removed. Self-ref FK
-   ordering moved into `stream_table_rows()` with a conditional
-   `ORDER BY` clause parameter.
-
-3. **Hanging references fixed**: `05-connection-architecture.md` →
-   `03-connection-architecture.md` in `02`. `04 §4.12` references
-   removed from `10`. `04 §6.10` references removed.
-
-4. **`04` §6.8**: `--neon-branch` flag added (Phase 5, manual workflow
-   documented).
+| #   | Issue                                                                            | Status    | Where                                                                                                                                      |
+| --- | -------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| C1  | Review-ledger self-contradictory (09, 10 claimed fixes not applied)              | **FIXED** | 09, 10 now have status ledger tables replacing aspirational "Applied Fixes"                                                                |
+| C2  | DbSource trait mismatch — impls missing order_clause parameter                   | **FIXED** | `03` MySqlSource + PostgresSource updated to match trait signature                                                                         |
+| C3  | Idempotency SQL contradiction (claims PK-only, MySQL fires on any unique key)    | **FIXED** | `04 §6.1` — prose updated to acknowledge unique-key vs PK-only distinction, per-dialect notes added                                        |
+| C4  | Report example self-contradictory (success + mismatches + meaningless checksums) | **FIXED** | `observability-and-operations.md` — edge_case_types delta now documented as expected skip count; checksums_matched removed (rowcount mode) |
+| C5  | Subprocess boundary unresolved (pg_dump, pscale across 4 docs)                   | **FIXED** | `03` pg_dump changed to pre-condition (not invoked by sql-splitter); PlanetScale sections aligned to file-only policy                      |
+| C6  | PlanetScale file-only vs live streaming contradictory                            | **FIXED** | `05` CF-6 live VTGate controls removed; file-based guidance added                                                                          |
+| C7  | Phase labels — 4 incompatible numbering systems                                  | **FIXED** | `04` plan table, `06` pipeline description now use descriptive labels                                                                      |
+| C8  | MySQL version v25 vs v28 across 4 docs                                           | **FIXED** | `03`, `04`, `README` updated to v28                                                                                                        |
+| C9  | CLI flags incomplete — 6 flags missing from §6.8                                 | **FIXED** | `04 §6.8` — added --state-interval, --max-memory, --query-timeout, --bench, --force, migrate check subcommand                              |
+| C10 | "Has" vs "proposed" language blur in 06                                          | **FIXED** | `06` — all instances changed to "What the proposed design includes"                                                                        |
+| C11 | Readiness table still says INSERT IGNORE after design update                     | **FIXED** | `04` readiness table + D3 failure mode updated to correct idempotency forms                                                                |
 
 5. **`03` §5.2.6, `04` Phase 0**: `START TRANSACTION WITH CONSISTENT
 SNAPSHOT` + GTID capture added to live MySQL extraction path.

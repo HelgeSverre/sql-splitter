@@ -70,35 +70,19 @@ Issues:
 | BLD-2 | **MEDIUM** | CI tests only 2/16 feature combinations. `migrate` feature would never be tested in CI. |
 | BLD-3 | **MEDIUM** | No `cargo-deny`/`cargo-audit` for supply chain vulnerability scanning.                  |
 
-## Applied Fixes
+## Fix Status Ledger
 
-These specific corrections have been applied to the design documents:
+Status of issues identified in this round:
 
-1. **04 §6.1 Data Migration**: Added conditional `ORDER BY` for
-   self-referential FK tables: `SELECT * FROM table WHERE manager_id IS
-NULL OR manager_id IN (already imported PKs) ORDER BY manager_id IS
-NULL, id`.
-
-2. **04 §6.3d + 05 HF-3**: Phase 3b DDL connection now explicitly sets
-   `SET FOREIGN_KEY_CHECKS = 0` before adding FK cycle constraints and
-   `SET FOREIGN_KEY_CHECKS = 1` after.
-
-3. **03 §5.2.6 + 04 Phase 0**: Added `START TRANSACTION WITH CONSISTENT
-SNAPSHOT` for live MySQL source extraction. GTID captured before/after.
-   Data extraction wrapped in single transaction for snapshot consistency.
-
-4. **04 §4.12**: Added `SslMode` enum to `DbConfig` with default
-   `VerifyFull`/`VerifyIdentity`. TLS enforcement in both `DbSource` and
-   `DbTarget` traits. `--ssl-mode` flag added.
-
-5. **04 §6.7**: Trace-level logging gated behind `#[cfg(feature = "debug-trace")]`.
-   Column value redaction at trace level using credential-name heuristic.
-   `AtomicOutput` for `--log-file`.
-
-6. **04 §6.1 CLI examples**: All password-in-URI examples replaced with
-   `--source-password-file` or environment variable patterns.
-
-7. **04 §6.3b Performance Model**: Added RTT-bounded throughput note,
-   pre-flight connection pool check, post-import autovacuum management.
+| #      | Issue                                             | Status          | Where                                                           |
+| ------ | ------------------------------------------------- | --------------- | --------------------------------------------------------------- |
+| GAP-M2 | Self-ref FK intra-table ordering                  | **FIXED**       | `04 §6.1` — `stream_table_rows()` with `order_clause` parameter |
+| GAP-D2 | FK cycle Phase 3 DDL with FK checks disabled      | **FIXED**       | `04 §6.3d` — Phase 3b connection sets FOREIGN_KEY_CHECKS=0      |
+| PM-1   | RTT-bounded throughput model missing              | **FIXED**       | `04 §6.3b` — added RTT impact note + pre-flight check           |
+| SEC-1  | TLS optional, not enforced                        | **NOT APPLIED** | `04` still has no SslMode enum, no --ssl-mode flag in §6.8      |
+| SEC-2  | Trace logs contain PII                            | **NOT APPLIED** | `04 §6.7` has no debug-trace gate, no value redaction           |
+| GAP-X1 | No consistent snapshot from live MySQL            | **PARTIAL**     | Design documented but not in 04 executor pseudocode             |
+| BLD-1  | mysql v25 outdated                                | **FIXED**       | `08` updated to v28 (follow-up: 03, 04, README now also v28)    |
+| CON-1  | Phase 1 drops all FK constraints indiscriminately | **NOT FIXED**   | Not addressed in any document                                   |
 
 8. **08 §6**: Updated `mysql` version to 28. Added CI matrix recommendations.
