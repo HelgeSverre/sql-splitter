@@ -1,388 +1,189 @@
-# Part 3: Database Connection Architecture
+# Database Connection Architecture
 
-> How sql-splitter reads from live databases.
+This is the connection contract for the product boundary in the
+[README](./README.md). It does not use shared `DbSource` or `DbTarget` objects.
 
-## 5.1 The Core Problem
+## Configuration
 
-sql-splitter currently reads from files. Every command starts with file I/O.
-Live database connections are the single feature that unlocks every migration
-workflow described in this research. But the architecture choice has
-consequences that ripple through the entire codebase.
+`EndpointConfig` contains a dialect, host, port, database, and an endpoint
+identity that excludes secrets. `TlsConfig` defaults to authenticated TLS with
+hostname verification and supports an explicit CA bundle and mTLS certificate
+and key. An insecure mode requires an explicit flag, warning, and audit record.
 
-The question:
+`CredentialRef` refers to a protected environment variable, file descriptor,
+OS secret store, or interactive prompt. Source and target references must be
+separate. Password-bearing URLs and command-line password values are rejected.
+The database source role must have server-enforced read-only permissions; an API
+without write methods is not sufficient enforcement.
 
-1. **How do we add live DB reads to a synchronous, file-based, streaming
-   SQL parser and keep it fast?**
+`CapabilitySet` is probed and recorded in the plan. It includes snapshot,
+transaction, DDL atomicity, cursor/COPY, cancellation, identifier, parameter,
+and catalog capabilities. Unknown capability values fail closed when required.
 
-This document answers that question.
-
-## 5.2 Local CLI: Adding Live Database Connections
-
-### 5.2.1 The Existing I/O Model
-
-sql-splitter's current architecture is:
-
-```
-File path → open_input_opt_progress() → streaming parser → events → processing
-```
-
-Everything is synchronous. The parser uses bounded buffers. Memory caps are
-enforced (256 MB max DDL, 256 MB max row, 64 MB max header). The writer uses
-adaptive I/O profiles and parallel output. There is no async runtime.
-
-Adding database connections means adding a _second_ input source that produces
-the same parser events the file path produces, without breaking any of the
-existing guarantees.
-
-### 5.2.2 Synchronous vs. Async: The Fork in the Road
-
-|                        | Synchronous Drivers                                                                                      | Async with Tokio Bridge                                                                                   |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Crates**             | `mysql` (v28), `postgres` (v0.19)                                                                        | `mysql_async` (v0.35), `tokio-postgres` (v0.7)                                                            |
-| **Runtime**            | None needed                                                                                              | Tokio `rt-multi-thread` added as dependency                                                               |
-| **Connection pooling** | `r2d2_postgres` for PG; `mysql` crate has no native pool                                                 | `mysql_async::Pool`, `tokio-postgres` deadpool/bb8                                                        |
-| **Streaming**          | `mysql::Conn::query_iter()` — row-by-row (text protocol); `postgres::Client::copy_out()` — COPY protocol | `mysql_async::Conn::query_iter()` — async row iterator; `tokio_postgres::Client::copy_out()` — async COPY |
-| **TLS**                | Both support native TLS + custom CA certs                                                                | Both support native TLS with async handshake                                                              |
-| **Fit with codebase**  | Matches existing sync architecture                                                                       | Requires `tokio::runtime::Runtime::block_on()` at the boundary                                            |
-| **Risk**               | Lower — no async/sync impedance mismatch                                                                 | Medium — mixing sync parser with async DB I/O needs careful boundary design                               |
-
-**Recommendation: Option A — Synchronous drivers.**
-
-The migration engineer is running a CLI tool on a jump host. They're doing one
-database at a time. Connection pooling is nice-to-have, not must-have. A single
-synchronous connection per database is simpler to implement, simpler to debug,
-and doesn't introduce an async runtime into a codebase that has never needed one.
-
-If connection pooling becomes necessary later (e.g., parallel table extraction
-for large schemas), a Tokio bridge can be added behind the same `DbSource`
-trait without changing any callers.
-
-### 5.2.3 The `DbSource` Trait
+## Factories and sessions
 
 ```rust
-/// A live database that can produce schema and streaming row data.
-///
-/// This mirrors the file-based input in `src/splitter/mod.rs` but
-/// fetches from a live connection instead of reading files.
-pub trait DbSource: Send + Sync {
-    /// Extract the full schema (tables, columns, types, constraints, indexes).
-    /// Does NOT stream data — only DDL metadata.
-    fn extract_schema(&mut self) -> Result<Schema>;
+trait SourceConnectionFactory: Send + Sync {
+    fn open_catalog(&self) -> Result<Box<dyn CatalogSession>>;
+    fn open_reader(&self, snapshot: &SnapshotToken) -> Result<Box<dyn ReadSession>>;
+    fn open_control(&self) -> Result<Box<dyn ControlSession>>;
+}
 
-    /// Stream rows from a table as INSERT events.
-    /// Returns an iterator that yields (column_names, row_values) tuples.
-    /// The iterator is lazy — rows are pulled from the database on demand,
-    /// bounded by the driver's fetch buffer, not loaded into a Vec.
-    /// `order_clause` is an optional SQL ORDER BY fragment (e.g.,
-    /// `"CASE WHEN manager_id IS NULL THEN 0 ELSE 1 END, id"`) for
-    /// self-referential FK tables; `None` means no explicit ordering.
-    fn stream_table_rows(
-        &mut self,
-        table: &str,
-        order_clause: Option<&str>,
-    ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>>;
+trait TargetConnectionFactory: Send + Sync {
+    fn open_writer(&self) -> Result<Box<dyn WriteSession>>;
+    fn open_verifier(&self) -> Result<Box<dyn VerificationSession>>;
+    fn open_control(&self) -> Result<Box<dyn ControlSession>>;
+}
+```
+
+Factories can be shared. Per-session traits are mutable and need not implement
+`Send` or `Sync`; a session belongs to one worker or runner thread. A separate
+control connection performs driver-native cancellation. Cancellation asks the
+active chunk transaction to roll back. It never flushes a partial batch.
+
+`ReadSession` accepts typed `SelectPage` requests, not SQL fragments:
+
+```rust
+struct QualifiedTable { namespace: Identifier, name: Identifier }
+struct KeyTuple(Vec<DbValue>);
+struct KeysetPage {
+    table: QualifiedTable,
+    projection: Vec<Identifier>,
+    key: Vec<Identifier>,
+    after: Option<KeyTuple>,
+    limit: u32,
+}
+```
+
+The dialect renderer quotes typed identifiers and binds values. Raw identifiers,
+row values, and predicates are never interpolated. The target verifier is
+readable and supports the same typed keyset request for canonical comparison.
+
+## Canonical values and bounded batches
+
+This model is a prerequisite to `RowTypeConverter`:
+
+```rust
+enum DbValue {
+    Null,
+    Bool(bool),
+    Signed(i128), Unsigned(u128), Decimal { coefficient: Vec<u8>, scale: i32 },
+    Float32(u32), Float64(u64),
+    Text(String), Bytes(Vec<u8>), Json(Vec<u8>),
+    Date { year: i32, month: u8, day: u8 },
+    Time { nanos: i128 },
+    Timestamp { local: String, offset_minutes: Option<i16>, precision: u8 },
+    Vendor { type_id: String, format: ValueFormat, bytes: Vec<u8> },
+}
+
+struct ColumnMeta {
+    name: Identifier,
+    ordinal: u32,
+    vendor_type: String,
+    nullable: bool,
+    collation: Option<String>,
+    precision: Option<u32>,
+    scale: Option<i32>,
+    timezone_semantics: Option<String>,
 }
 
 struct RowBatch {
-    columns: Vec<String>,
-    rows: Vec<Vec<SqlValue>>, // Chunked for efficiency, configurable batch size
+    columns: Vec<ColumnMeta>,
+    rows: Vec<Vec<DbValue>>,
+    encoded_bytes: usize,
 }
 ```
 
-Design decisions:
+A batch stops at both configured row and byte limits. One row above the byte
+limit gets a dedicated bounded-large-value path or fails before target writes.
+Raw source metadata is retained until conversion and verification finish.
 
-1. **Schema extraction never streams data.** It runs `information_schema`
-   queries or `SHOW CREATE TABLE` / `pg_dump --schema-only`. This is fast
-   (seconds) and doesn't risk memory exhaustion.
+`TypeMapper` maps and rewrites SQL type declarations. It cannot convert runtime
+values. A later cross-dialect `RowTypeConverter` consumes `DbValue`, source and
+target `ColumnMeta`, and an explicit conversion policy.
 
-2. **Data streaming is chunked, not row-at-a-time.** The driver already
-   fetches in chunks internally. A `RowBatch` avoids the overhead of a
-   trait call per row while keeping memory bounded (configurable batch size,
-   default 10,000 rows, ~4–8 MB).
+## Exact vendor catalog
 
-3. **No `dump(&self) -> PathBuf`.** Writing a full dump to a temp file before
-   processing is a regression from the existing streaming architecture. A
-   500 GB dump produces a 500 GB temp file. If the migration engineer's
-   laptop doesn't have 500 GB free, the tool crashes. Instead, the streaming
-   path pipes rows directly from the database driver through the parser event
-   pipeline without intermediate files.
+Do not synthesize DDL from the portable schema and then treat it as authoritative.
+Each adapter produces an exact, versioned vendor catalog that preserves:
 
-### 5.2.4 MySQL Implementation (`mysql` crate)
+- database/schema namespaces, quoted names, owner, charset, and collation;
+- column order, defaults, generated expressions, identity and sequence details;
+- primary, unique, check, and foreign keys, including match and update/delete
+  actions, deferrability, and validation state;
+- index access method, included columns, expressions, predicates, ordering,
+  prefix lengths, visibility, and vendor options;
+- views, routines, triggers, events, partitions, tablespaces, and dependencies.
 
-```rust
-use mysql::prelude::*;
-use mysql::*;
+Every unrepresented or unsupported object enters an `UnsupportedObjectReport`.
+Execution is blocked unless the report is empty for required semantics. Plan-only
+may report unsupported objects without executing.
 
-struct MySqlSource {
-    conn: mysql::Conn,
-    database: String,
-}
+## Snapshot lifecycle and consistency
 
-impl DbSource for MySqlSource {
-    fn extract_schema(&mut self) -> Result<Schema> {
-        // Use information_schema — more portable than SHOW CREATE TABLE,
-        // works across VTGate (PlanetScale), RDS, Cloud SQL, and bare metal.
-        //
-        // information_schema.TABLES → table names, engines, collations
-        // information_schema.COLUMNS → column names, types, nullability, defaults
-        // information_schema.KEY_COLUMN_USAGE → primary keys, unique keys, FKs
-        // information_schema.STATISTICS → indexes
-        //
-        // The existing SchemaBuilder (src/schema/ddl.rs) can be reused here
-        // by feeding it synthesized CREATE TABLE statements from the
-        // information_schema data. This avoids writing a parallel schema
-        // parser for live DB introspection.
-        todo!()
-    }
+`SnapshotToken` is opaque, dialect-specific, and bound to endpoint identity,
+database identity, snapshot mode, and lifecycle. Plan-only catalog inspection
+does not keep a snapshot open across human review. A new execute run acquires
+fresh consistency evidence before its first target write, fingerprints the
+source again, and requires an exact match with the reviewed plan. The runner
+then binds the execution snapshot or write-fence evidence to the journal and
+keeps it valid through source-side verification.
 
-    fn stream_table_rows(
-        &mut self,
-        table: &str,
-        order_clause: Option<&str>,
-    ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>> {
-        // mysql::Conn::query_iter() streams rows using the text protocol.
-        // Text protocol returns human-readable text — identical to what
-        // mysqldump produces. Avoids binary protocol edge cases with
-        // BIT/ENUM/SET types and server-side prepared statement exhaustion.
-        //
-        // When order_clause is provided (for self-referential FK tables),
-        // it is injected as: SELECT * FROM table ORDER BY {order_clause}
-        let query = match order_clause {
-            Some(order) => format!("SELECT * FROM `{}` ORDER BY {}", table, order),
-            None => format!("SELECT * FROM `{}`", table),
-        };
-        let mut result = self.conn.query_iter(&query)?;
+MVP modes are:
 
-        let columns: Vec<String> = result
-            .columns()
-            .iter()
-            .map(|c| c.name_str().to_string())
-            .collect();
+- `write-fence`: the operator quiesces writes and provides an acknowledgement;
+  preflight verifies available database evidence and records the fence window.
+- `consistent-snapshot`: one session owns one native snapshot for the sequential
+  extraction and verification lifecycle.
 
-        Ok(Box::new(BatchingIter {
-            result,
-            columns,
-            batch_size: 10_000,
-        }))
-    }
-}
-```
+Write-fence acknowledgement is supplied at execution, not plan creation. The
+operator must prove that the fence remains continuous from execution preflight
+through verification. Resume is permitted only while the same fence is still
+continuously valid. A fence gap invalidates the migration; a new acknowledgement
+cannot continue old execution state.
 
-**PlanetScale-specific handling:**
+**MySQL sequential contract:** use a dedicated transaction with a consistent
+snapshot at a supported isolation level, establish it before reads, keep the
+same session alive, and reject DDL or connection loss. Record server identity,
+version, transaction settings, and a position/GTID observation as evidence, not
+as a substitute for the snapshot. Every copied table must use a supported
+transactional storage engine. Nontransactional, unknown, or mixed-engine tables
+block consistent-snapshot mode. Preflight records the exact catalog fingerprint
+and a database-level DDL exclusion mechanism or operator-enforced DDL fence.
+Catalog fingerprints are checked again before finalize; unknown DDL-exclusion
+evidence fails closed.
 
-When the source is PlanetScale (detected by `mysql` connection through
-VTGate), the safe path is:
+**PostgreSQL sequential contract:** start one read-only `REPEATABLE READ`
+transaction and perform all source-side catalog, data, and verification reads in
+that transaction. Target verification uses a separate target verification
+session. Record server/database identity and transaction snapshot evidence. Long
+snapshot effects are reported during preflight. Sequence state and other values
+outside normal table MVCC semantics require a continuous write fence or an
+explicit adapter rule; otherwise the affected object is unsupported.
 
-1. **Schema extraction**: Use `information_schema` queries (VTGate-compatible,
-   safer than `SHOW CREATE TABLE` which can include PlanetScale-specific
-   constraints and hash-suffixed FK names).
+Parallel extraction is deferred. It requires PostgreSQL exported snapshots,
+an equivalent proven shareable mechanism, or a stopped replica. MySQL snapshot
+sharing must be proven for the selected driver/server; independent transactions
+are not equivalent.
 
-2. **Data extraction**: Invoke `pscale database dump` as a subprocess OR
-   require the migration engineer to provide a pre-dumped directory. Direct
-   `SELECT *` streaming through VTGate is unreliable for production databases
-   — VTGate internally pools connections and may interfere with long-running
-   queries. See §5.2.6 below for the PlanetScale subprocess wrapper.
+## Driver facts
 
-3. **FK constraint names**: When extracting schema from PlanetScale, FK
-   constraint names include hash suffixes. The schema extraction should detect
-   hash-suffixed names (`_fk_` followed by ~26 alphanumeric characters) and
-   either warn or offer to rename them to stable names for the target.
+- The synchronous `mysql` crate provides `Pool`. Text protocol returns typed
+  protocol fields; it is not mysqldump SQL text. `exec_batch` repeatedly executes
+  a statement for parameter sets; it is not one multi-row insert.
+- `postgres::Client` is mutable and not `Sync`. `query()` collects rows.
+  `query_raw`, server cursors, and `COPY` have different streaming, transaction,
+  and buffering contracts and require focused tests.
+- PostgreSQL TLS requires a connector dependency such as
+  `postgres-native-tls` or `postgres-openssl`; `NoTls` is not production-safe.
+- PostgreSQL `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block
+  and has invalid-index recovery rules. MySQL DDL can implicitly commit. These
+  are explicit adapter capabilities, not hidden transaction behavior.
 
-### 5.2.5 PostgreSQL Implementation (`postgres` crate)
+## PlanetScale input
 
-```rust
-use postgres::{Client, NoTls};
-
-struct PostgresSource {
-    client: postgres::Client,
-    database: String,
-}
-
-impl DbSource for PostgresSource {
-    fn extract_schema(&mut self) -> Result<Schema> {
-        // Approach 1 (recommended for live DB extraction):
-        //   Query pg_catalog / information_schema for portable schema.
-        // Approach 2:
-        //   Run pg_dump --schema-only as a pre-condition (not invoked
-        //   by sql-splitter; the migration engineer provides the dump file
-        //   or runs pg_dump separately per the runbook).
-        //
-        // For Serverless Postgres (Neon): pg_dump --schema-only works
-        // normally. Use direct connections (not pooled via PgBouncer) to
-        // avoid PgBouncer transaction-mode limitations.
-        //
-        // For AWS RDS Postgres: pg_dump --schema-only works normally.
-        todo!()
-    }
-
-    fn stream_table_rows(
-        &mut self,
-        table: &str,
-        order_clause: Option<&str>,
-    ) -> Result<Box<dyn Iterator<Item = Result<RowBatch>> + '_>> {
-        // Two approaches:
-        //
-        // Approach 1: SELECT * FROM table with server-side cursor.
-        //   DECLARE cursor CURSOR FOR SELECT * FROM table;
-        //   FETCH 10000 FROM cursor; -- repeated
-        //   Server-side cursors keep the result set on the server, not in
-        //   client memory. But they require a transaction to stay open.
-        //
-        // Approach 2: COPY table TO STDOUT (binary or text).
-        //   client.copy_out("COPY table TO STDOUT"). This is the fastest
-        //   path for bulk extraction — PG's own dump tool uses it.
-        //   Binary format is faster but dialect-specific; text format is
-        //   compatible with sql-splitter's parser.
-        //
-        // Recommendation: COPY text format for bulk extraction, server-side
-        // cursor for selective extraction (WHERE clauses, subset of columns).
-        todo!()
-    }
-}
-```
-
-### 5.2.6 PlanetScale Subprocess Wrapper
-
-> **Design pattern, not automatic integration.** This section describes how
-> sql-splitter _could_ wrap the `pscale` CLI as a subprocess for bulk data
-> extraction. It is not implemented and is not part of the Phase 1 plan.
-> The migration engineer remains responsible for the PlanetScale dump step.
-
-For PlanetScale sources, direct database connections are unreliable for bulk
-data extraction because VTGate is not designed for long-running `SELECT *`
-queries. The core executor never invokes `pscale` as a subprocess (see
-`05-review-findings.md` §7.6 for the architecture decision).
-
-Instead, PlanetScale data comes from mydumper dump files produced by
-`pscale database dump`. The dump step is a pre-condition, documented in the
-migration runbook, but not automated by sql-splitter:
-
-```bash
-# Run before invoking sql-splitter:
-pscale database dump <DATABASE> <BRANCH> --output /path/to/dump/
-```
-
-sql-splitter reads the resulting per-table `.sql` files through the existing
-file-based parser — the same path as any other file source. This keeps the
-executor's dependency surface clean.
-
-### 5.2.7 Integrating with the Existing Pipeline
-
-The existing `splitter/mod.rs` uses `open_input_opt_progress()` to produce a
-`Box<dyn BufRead>`. The live database path needs to produce the same parser
-events that the file path produces, but from a database connection instead of
-a file.
-
-Two integration approaches:
-
-**Approach 1: Event-level integration (recommended).**
-
-Add an `InputSource` enum to the splitter:
-
-```rust
-enum InputSource {
-    File(PathBuf),
-    Database(Box<dyn DbSource>),
-    // PlanetScale: data comes from mydumper dump files (File variant),
-    // not from a live database connection. See §5.2.6.
-}
-
-// In splitter:
-match input_source {
-    InputSource::File(path) => {
-        // existing file path — unchanged
-    }
-    InputSource::Database(db) => {
-        let schema = db.extract_schema()?;
-        for table in schema.iter() {
-            let rows = db.stream_table_rows(&table.name)?;
-            for batch in rows {
-                for row in batch.rows {
-                    emit(ParserEvent::InsertRow { table, row });
-                }
-            }
-        }
-    }
-}
-```
-
-**Approach 2: SQL generation (simpler, less efficient).**
-
-Generate `CREATE TABLE` and `INSERT` SQL from the live database, feed it
-through the existing parser. This reuses 100% of the existing pipeline but
-loses the efficiency of direct row streaming.
-
-**Recommendation**: Start with Approach 2 for schema-only extraction (fast,
-low risk, reuses everything). Add Approach 1 for data streaming when
-performance measurements show the SQL-generation overhead is a bottleneck.
-
-### 5.2.8 Safety Boundaries
-
-Live database connections introduce new failure modes:
-
-| Failure Mode                                              | Handling                                                                                    |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Connection refused / timeout                              | Exponential backoff retry (3 attempts, 5s/10s/20s), then exit with actionable error message |
-| Authentication failure                                    | Exit immediately, print available auth methods from error                                   |
-| TLS handshake failure                                     | Exit with "check your SSL configuration" and the server's TLS details                       |
-| Query killed mid-stream (PlanetScale VTGate timeout)      | Log warning, skip table, report in migration assessment                                     |
-| Schema extraction timeout (>30s for metadata)             | Log warning about large schema, suggest filtering                                           |
-| Disk full during subprocess dump                          | Exit before starting migration, check available space                                       |
-| Subprocess crash (pscale dump segfault)                   | Capture stderr, report to user, clean up work_dir                                           |
-| Schema mismatch (source schema changed during extraction) | Log warning with timestamp comparison                                                       |
-
-All database connections are **read-only**. No DDL, no DML, no writes. This is
-enforced at the trait level (`&mut self` for cursor state but no write methods
-exposed). The `DbSource` trait has no `execute()` method. If writes are needed
-for the target database (importing data), that goes through a separate
-`DbTarget` trait that is opt-in behind a CLI flag (`--execute`).
-
-## 5.3 Managed Cloud Service Architecture
-
-This section has been deferred. See `07-managed-service-appendix.md` for the
-speculative managed cloud service design. The primary focus is the local CLI
-with live database connections.
-
-## 5.4 Net-new Dependencies
-
-Adding database connections to sql-splitter requires:
-
-| Dependency                 | Purpose                             | License        | Approx. compile time impact |
-| -------------------------- | ----------------------------------- | -------------- | --------------------------- |
-| `mysql` v25                | Sync MySQL driver                   | MIT/Apache 2.0 | ~30s (includes native TLS)  |
-| `postgres` v0.19           | Sync PostgreSQL driver              | MIT/Apache 2.0 | ~20s                        |
-| `ssh2` v0.9 (optional)     | SSH tunneling (behind feature flag) | MIT            | ~15s                        |
-| `r2d2_postgres` (optional) | PG connection pooling               | MIT            | ~5s                         |
-
-All are well-maintained, widely used crates. None require an async runtime.
-None conflict with existing dependencies.
-
-## 5.5 What We Explicitly Do NOT Build
-
-The following are out of scope for Phase 1 and Phase 2:
-
-1. **ORM-style query building.** The `DbSource` trait exposes raw SQL
-   streaming. No query builder, no schema migration DSL, no model layer.
-
-2. **Database writes.** All connections are read-only. Writes go through
-   a separate, opt-in `DbTarget` trait that is only activated with
-   `--execute`. This is a safety boundary, not a future feature.
-
-3. **SSH tunneling in Phase 1.** The SSH tunnel is a convenience for
-   jump-host workflows. Phase 1 assumes the database is directly reachable
-   (or the user handles SSH tunneling externally). `ssh2` integration is
-   Phase 2.
-
-4. **Connection pooling.** Phase 1 uses single connections. Pooling is
-   added in Phase 2 if performance measurements show it's needed.
-
-5. **PlanetScale API integration.** The PlanetScale source uses `pscale
-database dump` as a subprocess. Direct pscale API calls (for auth,
-   branch management, deploy request inspection) are not supported. The
-   PlanetScale relationship is managed by the migration engineer, not
-   by sql-splitter.
-
-6. **Multi-source concurrent connections.** One source database at a time.
-   Multi-source (e.g., diff between live DB and file dump) requires two
-   sources and is different from the core extraction path. It can be built
-   on top of the `DbSource` trait later.
+The core CLI accepts PlanetScale data only as an immutable, completed dump with
+a manifest identity and checksums. It does not query live VTGate, spawn `pscale`,
+accept `pscale://`, or handle PlanetScale service tokens. A managed-service
+subprocess exception is described only in [07](./07-managed-service-appendix.md)
+and is deferred.
