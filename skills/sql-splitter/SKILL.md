@@ -92,7 +92,7 @@ sql-splitter convert mysql.sql --to postgres --output - | psql "$PG_CONN"
 ```
 
 Enum types are properly converted bidirectionally between PostgreSQL and MySQL
-(semantic-preserving). MySQL `ENUM(...)` columns become `CREATE TYPE ... AS ENUM`
+(semantic-preserving when definitions precede their tables). MySQL `ENUM(...)` columns become `CREATE TYPE ... AS ENUM`
 in PostgreSQL; PostgreSQL enums become inline `ENUM(...)` in MySQL. Use
 `--enum-naming` for MySQL→PG to control the naming strategy
 (`per-column`/`dedupe`).

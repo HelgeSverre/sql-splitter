@@ -12,7 +12,6 @@ use crate::parser::SqlDialect;
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
-use super::enum_aware_pair;
 use super::warnings::{ConvertWarning, WarningCollector};
 
 /// Map a single column's `source_type` from `from` to `to`, reusing the same
@@ -38,7 +37,7 @@ pub(crate) fn map_column_type(
         return source_type.to_string();
     }
     let mapped = TypeMapper::convert(source_type, from, to);
-    if is_narrowed_by_conversion(source_type, from, to) {
+    if is_narrowed_by_conversion(source_type, to) {
         warnings.add(ConvertWarning::LossyConversion {
             from_type: source_type.to_string(),
             to_type: mapped.clone(),
@@ -53,16 +52,17 @@ pub(crate) fn map_column_type(
 /// target cannot preserve — a lossy conversion the caller should warn about (and
 /// fail under `--strict`):
 ///
-/// * `ENUM`/`SET`: preserve semantics for PG↔MySQL (bidirectional), collapse to
-///   plain strings for all other targets.
+/// * Inline `ENUM`/`SET` mapping always collapses to a plain string. The
+///   statement converter handles PostgreSQL↔MySQL enum preservation before it
+///   calls this mapper.
 /// * `JSON`/`JSONB` become an unvalidated text column on engines without a JSON
 ///   type (SQLite, MSSQL).
 /// * `UUID`/`UNIQUEIDENTIFIER` lose their fixed 128-bit domain when stored as
 ///   text (MySQL, SQLite).
-fn is_narrowed_by_conversion(source_type: &str, from: SqlDialect, to: SqlDialect) -> bool {
+fn is_narrowed_by_conversion(source_type: &str, to: SqlDialect) -> bool {
     let lower = source_type.to_lowercase();
     if lower.contains("enum(") || lower.contains("set(") {
-        return !enum_aware_pair(from, to);
+        return true;
     }
     if lower.contains("json") && matches!(to, SqlDialect::Sqlite | SqlDialect::Mssql) {
         return true;
@@ -969,18 +969,29 @@ mod map_column_type_tests {
     }
 
     #[test]
-    fn enum_is_not_lossy_when_converting_between_pg_and_mysql() {
+    fn inline_enum_mapping_without_a_registry_is_lossy() {
         let mut warnings = WarningCollector::new();
-        map_column_type(
+        let mapped = map_column_type(
             "ENUM('a','b')",
             SqlDialect::MySql,
             SqlDialect::Postgres,
             &mut warnings,
         );
-        assert!(
-            !warnings.has_warnings(),
-            "PG↔MySQL enum should not warn lossy"
+        assert_eq!(mapped, "VARCHAR(255)");
+        assert!(warnings.has_warnings());
+    }
+
+    #[test]
+    fn mysql_set_to_postgres_is_lossy() {
+        let mut warnings = WarningCollector::new();
+        let mapped = map_column_type(
+            "SET('read','write')",
+            SqlDialect::MySql,
+            SqlDialect::Postgres,
+            &mut warnings,
         );
+        assert_eq!(mapped, "VARCHAR(255)");
+        assert!(warnings.has_warnings());
     }
 
     #[test]

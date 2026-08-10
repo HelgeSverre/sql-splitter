@@ -25,6 +25,13 @@ pub struct LexRules {
     pub dollar_quotes: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EscapeMode {
+    None,
+    MySql,
+    Postgres,
+}
+
 impl LexRules {
     pub fn for_dialect(dialect: SqlDialect) -> Self {
         match dialect {
@@ -131,7 +138,14 @@ pub fn tokenize(stmt: &str, rules: LexRules) -> Vec<Token> {
                 let e_prefix = i > 0
                     && matches!(bytes[i - 1], b'e' | b'E')
                     && (i < 2 || !is_ident_byte(bytes[i - 2]));
-                let (end, value) = lex_quoted(bytes, i, b'\'', rules.backslash_escapes || e_prefix);
+                let escape_mode = if e_prefix {
+                    EscapeMode::Postgres
+                } else if rules.backslash_escapes {
+                    EscapeMode::MySql
+                } else {
+                    EscapeMode::None
+                };
+                let (end, value) = lex_quoted(bytes, i, b'\'', escape_mode);
                 tokens.push(Token::Str(start, end, value));
                 i = end;
             }
@@ -145,7 +159,12 @@ pub fn tokenize(stmt: &str, rules: LexRules) -> Vec<Token> {
                 let start = i;
                 // MySQL string literal (double_quote_ident off): terminates at
                 // the matching double quote, honoring backslash escapes.
-                let (end, value) = lex_quoted(bytes, i, b'"', rules.backslash_escapes);
+                let escape_mode = if rules.backslash_escapes {
+                    EscapeMode::MySql
+                } else {
+                    EscapeMode::None
+                };
+                let (end, value) = lex_quoted(bytes, i, b'"', escape_mode);
                 tokens.push(Token::Str(start, end, value));
                 i = end;
             }
@@ -258,8 +277,17 @@ pub fn table_ddl_type_refs_with_rules(stmt: &str, rules: LexRules) -> Vec<TypeRe
         .map(|(idx, _)| idx)
         .collect();
 
-    let is_create = first_keyword(&tokens, &sig, stmt, "CREATE")
-        .is_some_and(|c| keyword_at(&tokens, &sig, stmt, c + 1, "TABLE").is_some());
+    let is_create = first_keyword(&tokens, &sig, stmt, "CREATE").is_some_and(|c| {
+        let mut pos = c + 1;
+        while pos < sig.len()
+            && ["TEMP", "TEMPORARY", "UNLOGGED", "GLOBAL", "LOCAL"]
+                .iter()
+                .any(|modifier| keyword_at(&tokens, &sig, stmt, pos, modifier).is_some())
+        {
+            pos += 1;
+        }
+        keyword_at(&tokens, &sig, stmt, pos, "TABLE").is_some()
+    });
     if is_create {
         return create_table_refs(stmt, &tokens, &sig);
     }
@@ -386,11 +414,17 @@ fn column_def_ref(
 fn alter_table_refs(stmt: &str, tokens: &[Token], sig: &[usize]) -> Vec<TypeRef> {
     let mut refs = Vec::new();
     let mut k = 0;
-    // Skip `ALTER TABLE [ONLY] name` (name may be schema-qualified/quoted).
+    // Skip `ALTER TABLE [IF EXISTS] [ONLY] name` (possibly qualified/quoted).
     while k < sig.len() {
         let idx = sig[k];
         if tokens[idx].ident_eq(stmt, "TABLE") {
             k += 1;
+            if k + 1 < sig.len()
+                && tokens[sig[k]].ident_eq(stmt, "IF")
+                && tokens[sig[k + 1]].ident_eq(stmt, "EXISTS")
+            {
+                k += 2;
+            }
             if k < sig.len() && tokens[sig[k]].ident_eq(stmt, "ONLY") {
                 k += 1;
             }
@@ -638,28 +672,24 @@ fn is_ident_byte(b: u8) -> bool {
 /// Lex a quoted string starting at `start`, terminated by `quote`. Returns
 /// `(end, decoded)`; `quote quote` doubling always applies, backslash escapes
 /// when enabled.
-fn lex_quoted(bytes: &[u8], start: usize, quote: u8, backslash: bool) -> (usize, String) {
-    fn append_raw(value: &mut String, bytes: &[u8]) {
-        // `bytes` comes from a &str, so this cannot fail; fall back to
-        // nothing rather than panic if it ever does.
-        value.push_str(std::str::from_utf8(bytes).unwrap_or_default());
-    }
-
-    let mut value = String::new();
+fn lex_quoted(bytes: &[u8], start: usize, quote: u8, escape_mode: EscapeMode) -> (usize, String) {
+    let mut value = Vec::new();
     let mut i = start + 1;
     let mut seg_start = i;
     while i < bytes.len() {
         match bytes[i] {
-            b'\\' if backslash => {
-                append_raw(&mut value, &bytes[seg_start..i]);
+            b'\\' if escape_mode != EscapeMode::None => {
+                value.extend_from_slice(&bytes[seg_start..i]);
                 if i + 1 < bytes.len() {
-                    value.push(match bytes[i + 1] {
-                        b'n' => '\n',
-                        b't' => '\t',
-                        b'0' => '\0',
-                        c => c as char,
-                    });
-                    i += 2;
+                    let consumed = match escape_mode {
+                        EscapeMode::MySql => decode_mysql_escape(bytes, i, &mut value),
+                        EscapeMode::Postgres => decode_postgres_escape(bytes, i, &mut value),
+                        EscapeMode::None => {
+                            value.push(bytes[i + 1]);
+                            2
+                        }
+                    };
+                    i += consumed;
                 } else {
                     i += 1;
                 }
@@ -667,20 +697,88 @@ fn lex_quoted(bytes: &[u8], start: usize, quote: u8, backslash: bool) -> (usize,
             }
             q if q == quote => {
                 if bytes.get(i + 1) == Some(&quote) {
-                    append_raw(&mut value, &bytes[seg_start..i]);
-                    value.push(quote as char);
+                    value.extend_from_slice(&bytes[seg_start..i]);
+                    value.push(quote);
                     i += 2;
                     seg_start = i;
                 } else {
-                    append_raw(&mut value, &bytes[seg_start..i]);
-                    return (i + 1, value);
+                    value.extend_from_slice(&bytes[seg_start..i]);
+                    return (i + 1, String::from_utf8_lossy(&value).into_owned());
                 }
             }
             _ => i += 1,
         }
     }
-    append_raw(&mut value, &bytes[seg_start..]);
-    (bytes.len(), value)
+    value.extend_from_slice(&bytes[seg_start..]);
+    (bytes.len(), String::from_utf8_lossy(&value).into_owned())
+}
+
+fn decode_mysql_escape(bytes: &[u8], start: usize, value: &mut Vec<u8>) -> usize {
+    let escaped = bytes[start + 1];
+    match escaped {
+        b'0' => value.push(0),
+        b'b' => value.push(8),
+        b'n' => value.push(b'\n'),
+        b'r' => value.push(b'\r'),
+        b't' => value.push(b'\t'),
+        b'Z' => value.push(26),
+        b'%' | b'_' => value.extend_from_slice(&bytes[start..=start + 1]),
+        other => value.push(other),
+    }
+    2
+}
+
+fn decode_postgres_escape(bytes: &[u8], start: usize, value: &mut Vec<u8>) -> usize {
+    let escaped = bytes[start + 1];
+    let (decoded, consumed, unicode) = match escaped {
+        b'b' => (8, 2, false),
+        b'f' => (12, 2, false),
+        b'n' => (b'\n' as u32, 2, false),
+        b'r' => (b'\r' as u32, 2, false),
+        b't' => (b'\t' as u32, 2, false),
+        b'x' => decode_radix_escape(bytes, start + 2, 2, 16)
+            .map(|(value, digits)| (value, digits + 2, false))
+            .unwrap_or((b'x' as u32, 2, false)),
+        b'u' => decode_radix_escape(bytes, start + 2, 4, 16)
+            .filter(|(_, digits)| *digits == 4)
+            .map(|(value, digits)| (value, digits + 2, true))
+            .unwrap_or((b'u' as u32, 2, false)),
+        b'U' => decode_radix_escape(bytes, start + 2, 8, 16)
+            .filter(|(_, digits)| *digits == 8)
+            .map(|(value, digits)| (value, digits + 2, true))
+            .unwrap_or((b'U' as u32, 2, false)),
+        b'0'..=b'7' => decode_radix_escape(bytes, start + 1, 3, 8)
+            .map(|(value, digits)| (value, digits + 1, false))
+            .unwrap_or((escaped as u32, 2, false)),
+        other => (other as u32, 2, false),
+    };
+    if unicode {
+        if let Some(ch) = char::from_u32(decoded) {
+            let mut encoded = [0; 4];
+            value.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+        }
+    } else if let Ok(byte) = u8::try_from(decoded) {
+        value.push(byte);
+    }
+    consumed
+}
+
+fn decode_radix_escape(
+    bytes: &[u8],
+    start: usize,
+    max_digits: usize,
+    radix: u32,
+) -> Option<(u32, usize)> {
+    let mut value = 0u32;
+    let mut digits = 0usize;
+    for &byte in bytes.get(start..)?.iter().take(max_digits) {
+        let Some(digit) = (byte as char).to_digit(radix) else {
+            break;
+        };
+        value = value.checked_mul(radix)?.checked_add(digit)?;
+        digits += 1;
+    }
+    (digits > 0).then_some((value, digits))
 }
 
 /// Lex a quoted identifier (`"..."` with `""` escape, or `` `...` `` with
@@ -926,6 +1024,17 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].column, "v");
         assert_eq!(refs[1].column, "w");
+    }
+
+    #[test]
+    fn mysql_and_postgres_escape_strings_use_distinct_rules() {
+        let mysql = mysql_inline_enum_columns(r"CREATE TABLE t (x ENUM('\x41','\f','\Z'));");
+        assert_eq!(mysql[0].labels, ["x41", "f", "\u{001a}"]);
+
+        let tokens = tokenize("E'\\x41\\f'", LexRules::for_dialect(SqlDialect::Postgres));
+        assert!(tokens
+            .iter()
+            .any(|token| matches!(token, Token::Str(_, _, value) if value == "A\u{000c}")));
     }
 
     #[test]

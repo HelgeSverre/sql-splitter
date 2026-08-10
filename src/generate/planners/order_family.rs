@@ -1699,8 +1699,6 @@ fn family_of_source_type(source_type: &str) -> SqlTypeFamily {
         || lower.starts_with("tinyint")
     {
         SqlTypeFamily::Integer
-    } else if lower.starts_with("enum(") {
-        SqlTypeFamily::Enum
     } else {
         SqlTypeFamily::Other
     }

@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_yaml_ng = "0.10"
-sql-splitter = { path = "..", default-features = false }
+sql-splitter = { path = "..", default-features = false, features = ["fuzzing"] }
 
 [[bin]]
 name = "model_yaml"

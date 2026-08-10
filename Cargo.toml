@@ -36,6 +36,7 @@ duckdb-query = ["dep:duckdb", "dep:dirs", "dep:rustyline", "compression"]
 compression = ["dep:flate2", "dep:bzip2", "dep:xz2", "dep:zstd"]
 archive = ["compression", "dep:tar", "dep:zip", "dep:crc32fast"]
 man-pages = ["dep:clap_mangen"]
+fuzzing = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

@@ -1,205 +1,308 @@
-//! Parsing helpers for enum type syntax in PostgreSQL and MySQL.
+//! Parsing helpers for PostgreSQL enum type syntax.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
+use super::ddl::{self, LexRules, Token};
+use crate::parser::SqlDialect;
 
-static RE_PG_CREATE_ENUM_HEAD: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)CREATE\s+TYPE\s+(?:(?P<schema>\w+)\.)?(?P<name>\w+)\s+AS\s+ENUM\s*\(").unwrap()
-});
-
-static RE_PG_ALTER_ENUM: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?i)ALTER\s+TYPE\s+(?:(?P<schema>\w+)\.)?(?P<name>\w+)\s+ADD\s+VALUE\s+'(?P<value>(?:[^']|'')*)'\s*(?:(?P<position>BEFORE|AFTER)\s+'(?P<existing>(?:[^']|'')*)')?",
-    )
-    .unwrap()
-});
-
-static RE_ENUM_KEYWORD: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bENUM\s*\(").unwrap());
-
-pub fn pg_create_enum_name(stmt: &str) -> Option<String> {
-    RE_PG_CREATE_ENUM_HEAD.captures(stmt).map(|caps| {
-        let name = caps.name("name").unwrap().as_str().trim_matches('"');
-        if let Some(schema) = caps.name("schema") {
-            format!("{}.{}", schema.as_str().trim_matches('"'), name)
-        } else {
-            name.to_string()
-        }
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedCreateEnum {
+    pub(crate) name: String,
+    pub(crate) labels: Vec<String>,
 }
 
-pub fn pg_create_enum_labels(stmt: &str) -> Option<Vec<String>> {
-    let caps = RE_PG_CREATE_ENUM_HEAD.captures(stmt)?;
-    let open_paren = caps.get(0).unwrap().end();
-    let close = find_matching_paren(stmt, open_paren - 1)?;
-    Some(parse_enum_labels(&stmt[open_paren..close]))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedAlterEnum {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    pub(crate) position: Option<(String, bool)>,
 }
 
-pub fn pg_add_enum_value(stmt: &str) -> Option<(String, Option<(String, bool)>)> {
-    RE_PG_ALTER_ENUM.captures(stmt).map(|caps| {
-        let value = caps.name("value").unwrap().as_str().replace("''", "'");
-        let position = caps.name("position").map(|p| {
-            let existing = caps.name("existing").unwrap().as_str().replace("''", "'");
-            let is_after = p.as_str().eq_ignore_ascii_case("AFTER");
-            (existing, is_after)
-        });
-        (value, position)
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParsedRenameEnum {
+    Type {
+        old_name: String,
+        new_name: String,
+    },
+    Value {
+        name: String,
+        old_value: String,
+        new_value: String,
+    },
 }
 
-pub fn pg_alter_enum_name(stmt: &str) -> Option<String> {
-    RE_PG_ALTER_ENUM
-        .captures(stmt)
-        .map(|caps| caps.name("name").unwrap().as_str().to_string())
+pub(crate) fn pg_create_enum(stmt: &str) -> Option<ParsedCreateEnum> {
+    parse_create_enum(stmt)
 }
 
-pub fn mysql_inline_enum_labels(stmt: &str) -> Vec<(usize, Vec<String>)> {
-    let mut results = Vec::new();
-    for m in RE_ENUM_KEYWORD.find_iter(stmt) {
-        let open_paren = m.end();
-        let Some(close) = find_matching_paren(stmt, open_paren - 1) else {
-            continue;
-        };
-        let labels = parse_enum_labels(&stmt[open_paren..close]);
-        results.push((m.start(), labels));
+pub(crate) fn pg_add_enum_value(stmt: &str) -> Option<ParsedAlterEnum> {
+    parse_alter_enum(stmt)
+}
+
+pub(crate) fn pg_rename_enum(stmt: &str) -> Option<ParsedRenameEnum> {
+    let tokens = ddl::tokenize(stmt, postgres_rules());
+    let sig = significant(&tokens);
+    let mut pos = 0;
+    keyword(stmt, &tokens, &sig, &mut pos, "ALTER")?;
+    keyword(stmt, &tokens, &sig, &mut pos, "TYPE")?;
+    let (name, next) = qualified_name(stmt, &tokens, &sig, pos)?;
+    pos = next;
+    keyword(stmt, &tokens, &sig, &mut pos, "RENAME")?;
+    if ident_at(stmt, &tokens, &sig, pos, "VALUE") {
+        pos += 1;
+        let old_value = string_at(stmt, &tokens, &sig, &mut pos)?;
+        keyword(stmt, &tokens, &sig, &mut pos, "TO")?;
+        let new_value = string_at(stmt, &tokens, &sig, &mut pos)?;
+        trailing_semicolon_only(&tokens, &sig, pos)?;
+        Some(ParsedRenameEnum::Value {
+            name,
+            old_value,
+            new_value,
+        })
+    } else {
+        keyword(stmt, &tokens, &sig, &mut pos, "TO")?;
+        let (new_name, next) = qualified_name(stmt, &tokens, &sig, pos)?;
+        trailing_semicolon_only(&tokens, &sig, next)?;
+        Some(ParsedRenameEnum::Type {
+            old_name: name,
+            new_name,
+        })
     }
-    results
 }
 
-/// From the index of an opening `(`, find the matching `)` honoring
-/// single-quoted strings (with `''` doubling). Returns the byte index of
-/// the closing `)`, or `None` if unterminated.
-fn find_matching_paren(stmt: &str, open: usize) -> Option<usize> {
-    let bytes = stmt.as_bytes();
-    if bytes.get(open) != Some(&b'(') {
+/// Return the registry key for a PostgreSQL type reference.
+///
+/// Unquoted identifiers are case-folded. Quoted identifiers retain their case
+/// and quoting so `mood`, `"Mood"`, and `"mood"` remain distinct.
+pub(crate) fn pg_type_keys(type_name: &str) -> Option<(String, String)> {
+    let tokens = ddl::tokenize(type_name, postgres_rules());
+    let sig = significant(&tokens);
+    let (name, next) = qualified_name(type_name, &tokens, &sig, 0)?;
+    if next != sig.len() {
         return None;
     }
-    let mut depth = 1usize;
-    let mut i = open + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            b'\'' => {
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == b'\'' {
-                        if bytes.get(i + 1) == Some(&b'\'') {
-                            i += 2;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
+    let name_pos = if next == 3 { 2 } else { 0 };
+    let unqualified = ident_key(type_name, tokens.get(*sig.get(name_pos)?)?)?;
+    Some((name, unqualified))
 }
 
-/// Extract the column name immediately preceding `offset` in a CREATE TABLE
-/// statement body. Looks backward from `offset` to find a backtick-quoted,
-/// double-quoted, or bare identifier.
-pub fn extract_column_name_before(stmt: &str, enum_offset: usize) -> Option<String> {
-    let prefix = &stmt[..enum_offset];
-    let prefix_bytes = prefix.as_bytes();
-    let mut i = prefix_bytes.len();
-    // Skip whitespace
-    while i > 0 && prefix_bytes[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    if i == 0 {
-        return None;
-    }
-    // Check for backtick-quoted identifier (handles `` escape)
-    if prefix_bytes[i - 1] == b'`' {
-        let end = i - 1;
-        i -= 1;
-        while i > 0 {
-            if prefix_bytes[i - 1] == b'`' {
-                if i >= 2 && prefix_bytes[i - 2] == b'`' {
-                    i -= 2;
-                } else {
-                    return Some(prefix[i..end].replace("``", "`"));
-                }
-            } else {
-                i -= 1;
-            }
-        }
-    }
-    // Check for double-quoted identifier (handles "" escape)
-    if i > 0 && prefix_bytes[i - 1] == b'"' {
-        let end = i - 1;
-        i -= 1;
-        while i > 0 {
-            if prefix_bytes[i - 1] == b'"' {
-                if i >= 2 && prefix_bytes[i - 2] == b'"' {
-                    i -= 2;
-                } else {
-                    return Some(prefix[i..end].replace("\"\"", "\""));
-                }
-            } else {
-                i -= 1;
-            }
-        }
-    }
-    // Bare identifier (alphanumeric + underscore, including non-ASCII).
-    // MySQL/PG allow non-ASCII characters in unquoted identifiers.
-    let end = i;
-    while i > 0 {
-        let b = prefix_bytes[i - 1];
-        if b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80 {
-            i -= 1;
-        } else {
-            break;
-        }
-    }
-    if i < end {
-        return Some(prefix[i..end].to_string());
-    }
-    None
+pub(crate) fn pg_type_unqualified_key(type_name: &str) -> Option<String> {
+    pg_type_keys(type_name).map(|(_, unqualified)| unqualified)
 }
 
-pub fn parse_enum_labels(labels_str: &str) -> Vec<String> {
-    let chars: Vec<char> = labels_str.chars().collect();
-    let n = chars.len();
+fn parse_create_enum(stmt: &str) -> Option<ParsedCreateEnum> {
+    let tokens = ddl::tokenize(stmt, postgres_rules());
+    let sig = significant(&tokens);
+    let mut pos = 0;
+    keyword(stmt, &tokens, &sig, &mut pos, "CREATE")?;
+    keyword(stmt, &tokens, &sig, &mut pos, "TYPE")?;
+    let (name, next) = qualified_name(stmt, &tokens, &sig, pos)?;
+    pos = next;
+    keyword(stmt, &tokens, &sig, &mut pos, "AS")?;
+    keyword(stmt, &tokens, &sig, &mut pos, "ENUM")?;
+    punct(&tokens, &sig, &mut pos, b'(')?;
+
     let mut labels = Vec::new();
-    let mut i = 0;
-
-    while i < n {
-        if chars[i] == '\'' {
-            i += 1; // skip opening quote
-            let mut label = String::new();
-            while i < n {
-                if chars[i] == '\'' {
-                    if i + 1 < n && chars[i + 1] == '\'' {
-                        label.push('\'');
-                        i += 2;
-                    } else {
-                        // closing quote
-                        i += 1;
-                        break;
-                    }
-                } else {
-                    label.push(chars[i]);
-                    i += 1;
-                }
+    loop {
+        let token = tokens.get(*sig.get(pos)?)?;
+        match token {
+            Token::Str(_, _, value) => {
+                labels.push(value.clone());
+                pos += 1;
             }
-            labels.push(label);
-        } else {
-            i += 1;
+            Token::Ident(_, _) if token.ident_eq(stmt, "E") => pos += 1,
+            Token::Ident(_, _) if token.ident_eq(stmt, "U") => {
+                let amp = tokens.get(*sig.get(pos + 1)?)?;
+                let Token::Other(start, end) = amp else {
+                    return None;
+                };
+                if &stmt[*start..*end] != "&" {
+                    return None;
+                }
+                let Token::Str(_, _, value) = tokens.get(*sig.get(pos + 2)?)? else {
+                    return None;
+                };
+                let mut escape = '\\';
+                let mut consumed = 3;
+                if ident_at(stmt, &tokens, &sig, pos + 3, "UESCAPE") {
+                    let Token::Str(_, _, escape_value) = tokens.get(*sig.get(pos + 4)?)? else {
+                        return None;
+                    };
+                    let mut chars = escape_value.chars();
+                    escape = chars.next()?;
+                    if chars.next().is_some() {
+                        return None;
+                    }
+                    consumed = 5;
+                }
+                labels.push(decode_unicode_escape_string(value, escape)?);
+                pos += consumed;
+            }
+            Token::Punct(_, b',') => pos += 1,
+            Token::Punct(_, b')') => {
+                pos += 1;
+                break;
+            }
+            _ => return None,
         }
     }
+    trailing_semicolon_only(&tokens, &sig, pos)?;
+    Some(ParsedCreateEnum { name, labels })
+}
 
-    labels
+fn decode_unicode_escape_string(value: &str, escape: char) -> Option<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut result = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != escape {
+            result.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        if chars.get(index + 1) == Some(&escape) {
+            result.push(escape);
+            index += 2;
+            continue;
+        }
+        let extended = chars.get(index + 1) == Some(&'+');
+        let digits = if extended { 6 } else { 4 };
+        let start = index + if extended { 2 } else { 1 };
+        let end = start + digits;
+        let hex: String = chars.get(start..end)?.iter().collect();
+        let mut codepoint = u32::from_str_radix(&hex, 16).ok()?;
+        index = end;
+        if (0xD800..=0xDBFF).contains(&codepoint) {
+            if chars.get(index) != Some(&escape) {
+                return None;
+            }
+            let low_start = index + 1;
+            let low_end = low_start + 4;
+            let low_hex: String = chars.get(low_start..low_end)?.iter().collect();
+            let low = u32::from_str_radix(&low_hex, 16).ok()?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return None;
+            }
+            codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
+            index = low_end;
+        }
+        result.push(char::from_u32(codepoint)?);
+    }
+    Some(result)
+}
+
+fn parse_alter_enum(stmt: &str) -> Option<ParsedAlterEnum> {
+    let tokens = ddl::tokenize(stmt, postgres_rules());
+    let sig = significant(&tokens);
+    let mut pos = 0;
+    keyword(stmt, &tokens, &sig, &mut pos, "ALTER")?;
+    keyword(stmt, &tokens, &sig, &mut pos, "TYPE")?;
+    let (name, next) = qualified_name(stmt, &tokens, &sig, pos)?;
+    pos = next;
+    keyword(stmt, &tokens, &sig, &mut pos, "ADD")?;
+    keyword(stmt, &tokens, &sig, &mut pos, "VALUE")?;
+    if ident_at(stmt, &tokens, &sig, pos, "IF") {
+        pos += 1;
+        keyword(stmt, &tokens, &sig, &mut pos, "NOT")?;
+        keyword(stmt, &tokens, &sig, &mut pos, "EXISTS")?;
+    }
+    let value = string_at(stmt, &tokens, &sig, &mut pos)?;
+    let position = if ident_at(stmt, &tokens, &sig, pos, "BEFORE")
+        || ident_at(stmt, &tokens, &sig, pos, "AFTER")
+    {
+        let is_after = ident_at(stmt, &tokens, &sig, pos, "AFTER");
+        pos += 1;
+        Some((string_at(stmt, &tokens, &sig, &mut pos)?, is_after))
+    } else {
+        None
+    };
+    trailing_semicolon_only(&tokens, &sig, pos)?;
+    Some(ParsedAlterEnum {
+        name,
+        value,
+        position,
+    })
+}
+
+fn postgres_rules() -> LexRules {
+    LexRules::for_dialect(SqlDialect::Postgres)
+}
+
+fn significant(tokens: &[Token]) -> Vec<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            (!matches!(token, Token::Whitespace(..) | Token::Comment(..))).then_some(index)
+        })
+        .collect()
+}
+
+fn keyword(
+    stmt: &str,
+    tokens: &[Token],
+    sig: &[usize],
+    pos: &mut usize,
+    expected: &str,
+) -> Option<()> {
+    ident_at(stmt, tokens, sig, *pos, expected).then(|| *pos += 1)
+}
+
+fn ident_at(stmt: &str, tokens: &[Token], sig: &[usize], pos: usize, expected: &str) -> bool {
+    sig.get(pos)
+        .and_then(|index| tokens.get(*index))
+        .is_some_and(|token| token.ident_eq(stmt, expected))
+}
+
+fn punct(tokens: &[Token], sig: &[usize], pos: &mut usize, expected: u8) -> Option<()> {
+    sig.get(*pos)
+        .and_then(|index| tokens.get(*index))
+        .is_some_and(|token| token.is_punct(expected))
+        .then(|| *pos += 1)
+}
+
+fn string_at(stmt: &str, tokens: &[Token], sig: &[usize], pos: &mut usize) -> Option<String> {
+    if ident_at(stmt, tokens, sig, *pos, "E") {
+        *pos += 1;
+    }
+    let Token::Str(_, _, value) = tokens.get(*sig.get(*pos)?)? else {
+        return None;
+    };
+    *pos += 1;
+    Some(value.clone())
+}
+
+fn qualified_name(
+    stmt: &str,
+    tokens: &[Token],
+    sig: &[usize],
+    pos: usize,
+) -> Option<(String, usize)> {
+    let first = ident_key(stmt, tokens.get(*sig.get(pos)?)?)?;
+    if sig
+        .get(pos + 1)
+        .and_then(|index| tokens.get(*index))
+        .is_some_and(|token| token.is_punct(b'.'))
+    {
+        let second = ident_key(stmt, tokens.get(*sig.get(pos + 2)?)?)?;
+        Some((format!("{first}.{second}"), pos + 3))
+    } else {
+        Some((first, pos + 1))
+    }
+}
+
+fn ident_key(stmt: &str, token: &Token) -> Option<String> {
+    match token {
+        Token::Ident(start, end) => Some(stmt[*start..*end].to_lowercase()),
+        Token::QuotedIdent(_, _, value) => Some(format!("\"{}\"", value.replace('"', "\"\""))),
+        _ => None,
+    }
+}
+
+fn trailing_semicolon_only(tokens: &[Token], sig: &[usize], pos: usize) -> Option<()> {
+    match sig.get(pos..) {
+        Some([]) => Some(()),
+        Some([index]) if tokens[*index].is_punct(b';') => Some(()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -207,129 +310,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_simple_labels() {
-        let result = parse_enum_labels("'a','b','c'");
-        assert_eq!(result, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn test_parse_escaped_quotes() {
-        let result = parse_enum_labels("'it''s'");
-        assert_eq!(result, vec!["it's"]);
-    }
-
-    #[test]
-    fn test_parse_empty_enum() {
-        let result = parse_enum_labels("");
-        assert_eq!(result, Vec::<String>::new());
-    }
-
-    #[test]
-    fn test_parse_unicode_labels() {
-        let result = parse_enum_labels("'\u{2705}', '\u{274c}'");
-        assert_eq!(result, vec!["\u{2705}", "\u{274c}"]);
-    }
-
-    #[test]
-    fn test_pg_create_enum_name() {
-        let result = pg_create_enum_name("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');");
-        assert_eq!(result, Some("mood".to_string()));
-
-        let result = pg_create_enum_name("CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy');");
-        assert_eq!(result, Some("public.mood".to_string()));
-
-        let result = pg_create_enum_name("CREATE TABLE foo (id int);");
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_pg_create_enum_labels() {
-        let result = pg_create_enum_labels("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');");
+    fn parses_create_enum_names_and_labels() {
+        let stmt =
+            "CREATE TYPE \"My Schema\".\"Order \"\"Status\" AS ENUM ('new', E'line\\n', $$cash$$);";
         assert_eq!(
-            result,
-            Some(vec![
-                "sad".to_string(),
-                "ok".to_string(),
-                "happy".to_string()
-            ])
+            pg_create_enum(stmt),
+            Some(ParsedCreateEnum {
+                name: "\"My Schema\".\"Order \"\"Status\"".to_string(),
+                labels: vec!["new".into(), "line\n".into(), "cash".into()]
+            })
         );
     }
 
     #[test]
-    fn test_pg_add_enum_value() {
-        let result = pg_add_enum_value("ALTER TYPE mood ADD VALUE 'excited' AFTER 'happy';");
+    fn does_not_match_enum_ddl_inside_other_sql() {
         assert_eq!(
-            result,
-            Some(("excited".to_string(), Some(("happy".to_string(), true))))
+            pg_create_enum("SELECT 'CREATE TYPE fake AS ENUM (''a'')';"),
+            None
         );
-
-        let result = pg_add_enum_value("ALTER TYPE mood ADD VALUE 'sad' BEFORE 'ok';");
         assert_eq!(
-            result,
-            Some(("sad".to_string(), Some(("ok".to_string(), false))))
-        );
-
-        let result = pg_add_enum_value("ALTER TYPE mood ADD VALUE 'neutral';");
-        assert_eq!(result, Some(("neutral".to_string(), None)));
-    }
-
-    #[test]
-    fn test_mysql_inline_enum_labels() {
-        let result =
-            mysql_inline_enum_labels("CREATE TABLE t (status ENUM('active','inactive') NOT NULL);");
-        assert_eq!(result.len(), 1);
-        assert_eq!(&result[0].1, &["active", "inactive"]);
-
-        let result = mysql_inline_enum_labels("CREATE TABLE t (a ENUM('x','y'), b ENUM('1','2'));");
-        assert_eq!(result.len(), 2);
-        assert_eq!(&result[0].1, &["x", "y"]);
-        assert_eq!(&result[1].1, &["1", "2"]);
-    }
-
-    #[test]
-    fn test_mysql_inline_enum_single_quote() {
-        let result =
-            mysql_inline_enum_labels("CREATE TABLE t (status ENUM('it''s','ok') NOT NULL);");
-        assert_eq!(result.len(), 1);
-        assert_eq!(&result[0].1, &["it's", "ok"]);
-    }
-
-    #[test]
-    fn test_parse_enum_labels_with_spaces() {
-        let result = parse_enum_labels("'a', 'b' , 'c'");
-        assert_eq!(result, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn test_pg_create_enum_labels_with_paren_in_label() {
-        let result = pg_create_enum_labels("CREATE TYPE t AS ENUM ('a)', 'b');");
-        assert_eq!(
-            result,
-            Some(vec!["a)".to_string(), "b".to_string()]),
-            "label containing ')' must not truncate the capture"
+            pg_add_enum_value("SELECT 'ALTER TYPE mood ADD VALUE ''bad''';"),
+            None
         );
     }
 
     #[test]
-    fn test_mysql_inline_enum_labels_with_paren_in_label() {
-        let result = mysql_inline_enum_labels("CREATE TABLE t (v ENUM('a)','b'), w INT);");
-        assert_eq!(result.len(), 1, "should find one ENUM column");
+    fn parses_add_value() {
+        let stmt = "ALTER TYPE \"My Schema\".mood ADD VALUE IF NOT EXISTS 'new' AFTER 'old';";
         assert_eq!(
-            result[0].1,
-            vec!["a)".to_string(), "b".to_string()],
-            "label containing ')' must not truncate the capture"
+            pg_add_enum_value(stmt),
+            Some(ParsedAlterEnum {
+                name: "\"My Schema\".mood".into(),
+                value: "new".into(),
+                position: Some(("old".into(), true))
+            })
         );
     }
 
     #[test]
-    fn test_extract_column_name_before_escaped_backtick() {
-        let stmt = "CREATE TABLE t (`col``name` ENUM('a'));";
-        let offset = stmt.find("ENUM").unwrap();
-        let result = extract_column_name_before(stmt, offset);
+    fn type_keys_preserve_quoted_identifier_semantics() {
         assert_eq!(
-            result,
-            Some("col`name".to_string()),
-            "escaped backtick `` inside backtick-quoted identifier must be handled"
+            pg_type_keys("MOOD").as_ref().map(|keys| keys.0.as_str()),
+            Some("mood")
+        );
+        assert_eq!(
+            pg_type_keys("\"Mood\"")
+                .as_ref()
+                .map(|keys| keys.0.as_str()),
+            Some("\"Mood\"")
+        );
+        assert_eq!(
+            pg_type_keys("\"mood\"")
+                .as_ref()
+                .map(|keys| keys.0.as_str()),
+            Some("\"mood\"")
         );
     }
 }

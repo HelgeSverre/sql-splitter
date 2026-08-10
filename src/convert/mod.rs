@@ -9,8 +9,11 @@
 //! - Warning system for unsupported features
 
 pub mod copy_to_insert;
+#[cfg(feature = "fuzzing")]
 pub mod ddl;
-pub mod enum_parser;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod ddl;
+mod enum_parser;
 mod enum_registry;
 mod types;
 mod warnings;
@@ -20,12 +23,13 @@ pub use copy_to_insert::{
     copy_to_inserts, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
 };
 
-pub use enum_registry::{EnumNamingStrategy, EnumRegistry};
+pub use enum_registry::EnumNamingStrategy;
+use enum_registry::EnumRegistry;
 
 use crate::parser::{Parser, SqlDialect, StatementType};
 use crate::splitter::{open_input, open_input_with_progress};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -104,12 +108,16 @@ pub struct Converter {
     deferred: Vec<String>,
     /// Enum type registry for PG↔MySQL enum conversion
     enum_registry: EnumRegistry,
-    /// Enum naming strategy (per-column or dedupe)
-    enum_naming: EnumNamingStrategy,
     /// Pending CREATE TYPE statements to prepend before the next DDL statement
     pending_enum_types: Vec<String>,
     /// Cached PG→MySQL inline map; rebuilt when registry generation changes.
     inline_map_cache: Option<(u64, HashMap<String, String>)>,
+    /// Cached known and ambiguous PostgreSQL enum names.
+    enum_name_cache: Option<(u64, PgEnumNameIndex)>,
+    /// Enum types already materialized into a target table definition.
+    used_pg_enum_types: HashSet<String>,
+    /// User-defined PostgreSQL type references seen before their definitions.
+    unresolved_pg_type_refs: HashSet<String>,
 }
 
 /// Returns the cached inline map, rebuilding it if registry mutated.
@@ -122,19 +130,16 @@ fn get_enum_inline_map<'a>(
     if stale {
         *cache = Some((gen, pg_enum_inline_map(registry)));
     }
-    &cache.as_ref().expect("just populated").1
+    &cache
+        .get_or_insert_with(|| (gen, pg_enum_inline_map(registry)))
+        .1
 }
 
-/// Build a deterministic name→inline-ENUM-text map from the registry.
+/// Build a name-to-inline-ENUM-text map from the registry.
 fn pg_enum_inline_map(registry: &EnumRegistry) -> HashMap<String, String> {
-    let mut entries: Vec<(String, Vec<String>)> = registry
-        .pg_enum_entries()
-        .map(|(n, l)| (n.clone(), l.clone()))
-        .collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
     let mut inline = HashMap::new();
-    for (name, labels) in &entries {
-        let unq = name.rsplit('.').next().unwrap_or(name);
+    let mut unqualified = HashMap::<String, Option<String>>::new();
+    for (name, labels) in registry.pg_enum_entries() {
         let text = if labels.is_empty() {
             "VARCHAR(255)".to_string()
         } else {
@@ -144,12 +149,64 @@ fn pg_enum_inline_map(registry: &EnumRegistry) -> HashMap<String, String> {
                 .collect();
             format!("ENUM({})", q.join(","))
         };
-        inline
-            .entry(name.to_lowercase())
-            .or_insert_with(|| text.clone());
-        inline.entry(unq.to_lowercase()).or_insert(text);
+        inline.insert(name.clone(), text.clone());
+        if let Some(unq) = enum_parser::pg_type_unqualified_key(name) {
+            unqualified
+                .entry(unq)
+                .and_modify(|entry| *entry = None)
+                .or_insert(Some(text));
+        }
+    }
+    for (name, text) in unqualified {
+        if let Some(text) = text {
+            inline.entry(name).or_insert(text);
+        }
     }
     inline
+}
+
+struct PgEnumNameIndex {
+    known: HashSet<String>,
+    ambiguous: HashSet<String>,
+}
+
+fn pg_enum_name_index(registry: &EnumRegistry) -> PgEnumNameIndex {
+    let mut known = HashSet::new();
+    let mut unqualified = HashMap::<String, bool>::new();
+    let mut ambiguous = HashSet::new();
+    for (name, _) in registry.pg_enum_entries() {
+        known.insert(name.clone());
+        if let Some(unqualified_name) = enum_parser::pg_type_unqualified_key(name) {
+            unqualified
+                .entry(unqualified_name)
+                .and_modify(|unique| *unique = false)
+                .or_insert(true);
+        }
+    }
+    for (name, unique) in unqualified {
+        if unique {
+            known.insert(name);
+        } else {
+            ambiguous.insert(name);
+        }
+    }
+    PgEnumNameIndex { known, ambiguous }
+}
+
+fn get_enum_name_index<'a>(
+    cache: &'a mut Option<(u64, PgEnumNameIndex)>,
+    registry: &EnumRegistry,
+) -> &'a PgEnumNameIndex {
+    let generation = registry.generation();
+    if cache
+        .as_ref()
+        .is_none_or(|(cached_generation, _)| *cached_generation != generation)
+    {
+        *cache = Some((generation, pg_enum_name_index(registry)));
+    }
+    &cache
+        .get_or_insert_with(|| (generation, pg_enum_name_index(registry)))
+        .1
 }
 
 /// Normalise a table name for lookup: unquoted, unqualified, lowercased, so
@@ -159,6 +216,236 @@ fn table_key(name: &str) -> String {
         .unwrap_or(name)
         .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
         .to_lowercase()
+}
+
+fn array_type_end(stmt: &str, type_end: usize) -> usize {
+    let bytes = stmt.as_bytes();
+    let mut end = type_end;
+    let mut consumed_dimension = false;
+    loop {
+        let whitespace_start = end;
+        while bytes.get(end).is_some_and(u8::is_ascii_whitespace) {
+            end += 1;
+        }
+        if bytes.get(end) != Some(&b'[') {
+            if !consumed_dimension {
+                return type_end;
+            }
+            return whitespace_start;
+        }
+        let Some(close_offset) = bytes[end + 1..].iter().position(|byte| *byte == b']') else {
+            return if consumed_dimension {
+                whitespace_start
+            } else {
+                type_end
+            };
+        };
+        end += close_offset + 2;
+        consumed_dimension = true;
+    }
+}
+
+fn rewrite_mysql_modify_to_postgres(stmt: &str) -> String {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static RE_MODIFY: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"(?is)^(?P<head>\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?)(?:ONLY\s+)?(?P<table>(?:`(?:``|[^`])*`|"(?:""|[^"])*"|\[[^]]+\]|[^\s.]+)(?:\s*\.\s*(?:`(?:``|[^`])*`|"(?:""|[^"])*"|\[[^]]+\]|[^\s.]+))*)\s+MODIFY(?:\s+COLUMN)?\s+(?P<column>`(?:``|[^`])*`|"(?:""|[^"])*"|\[[^]]+\]|\S+)\s+(?P<rest>.*)$"#)
+        .unwrap()
+    });
+    RE_MODIFY
+        .replace(stmt, "${head}${table} ALTER COLUMN ${column} TYPE ${rest}")
+        .into_owned()
+}
+
+fn rewrite_postgres_alter_type_to_mysql(stmt: &str) -> String {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static RE_ALTER_TYPE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"(?is)^(?P<head>\s*ALTER\s+TABLE\s+)(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?P<table>(?:`(?:``|[^`])*`|"(?:""|[^"])*"|\[[^]]+\]|[^\s.]+)(?:\s*\.\s*(?:`(?:``|[^`])*`|"(?:""|[^"])*"|\[[^]]+\]|[^\s.]+))*)\s+ALTER(?:\s+COLUMN)?\s+(?P<column>`(?:``|[^`])*`|"(?:""|[^"])*"|\[[^]]+\]|\S+)\s+(?:SET\s+DATA\s+)?TYPE\s+(?P<rest>.*)$"#)
+        .unwrap()
+    });
+    RE_ALTER_TYPE
+        .replace(stmt, "${head}${table} MODIFY COLUMN ${column} ${rest}")
+        .into_owned()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlterAction {
+    MySqlModify,
+    MySqlModifyIfExists,
+    MySqlChange,
+    PostgresAlterType,
+    Other,
+}
+
+fn alter_action(stmt: &str, dialect: SqlDialect) -> AlterAction {
+    let tokens = ddl::tokenize(stmt, ddl::LexRules::for_dialect(dialect));
+    let tokens: Vec<_> = tokens
+        .iter()
+        .filter(|token| !matches!(token, ddl::Token::Whitespace(..) | ddl::Token::Comment(..)))
+        .collect();
+    if !tokens
+        .first()
+        .is_some_and(|token| token.ident_eq(stmt, "ALTER"))
+        || !tokens
+            .get(1)
+            .is_some_and(|token| token.ident_eq(stmt, "TABLE"))
+    {
+        return AlterAction::Other;
+    }
+    let mut index = 2;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "IF"))
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.ident_eq(stmt, "EXISTS"))
+    {
+        index += 2;
+    }
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "ONLY"))
+    {
+        index += 1;
+    }
+    if tokens
+        .get(index)
+        .and_then(|token| token.owned_ident_text(stmt))
+        .is_none()
+    {
+        return AlterAction::Other;
+    }
+    index += 1;
+    while tokens.get(index).is_some_and(|token| token.is_punct(b'.'))
+        && tokens
+            .get(index + 1)
+            .and_then(|token| token.owned_ident_text(stmt))
+            .is_some()
+    {
+        index += 2;
+    }
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "MODIFY"))
+    {
+        index += 1;
+        if tokens
+            .get(index)
+            .is_some_and(|token| token.ident_eq(stmt, "COLUMN"))
+        {
+            index += 1;
+        }
+        if tokens
+            .get(index)
+            .is_some_and(|token| token.ident_eq(stmt, "IF"))
+            && tokens
+                .get(index + 1)
+                .is_some_and(|token| token.ident_eq(stmt, "EXISTS"))
+        {
+            return AlterAction::MySqlModifyIfExists;
+        }
+        return AlterAction::MySqlModify;
+    }
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "CHANGE"))
+    {
+        return AlterAction::MySqlChange;
+    }
+    if !tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "ALTER"))
+    {
+        return AlterAction::Other;
+    }
+    index += 1;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "COLUMN"))
+    {
+        index += 1;
+    }
+    if tokens
+        .get(index)
+        .and_then(|token| token.owned_ident_text(stmt))
+        .is_none()
+    {
+        return AlterAction::Other;
+    }
+    index += 1;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "SET"))
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.ident_eq(stmt, "DATA"))
+    {
+        index += 2;
+    }
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.ident_eq(stmt, "TYPE"))
+    {
+        AlterAction::PostgresAlterType
+    } else {
+        AlterAction::Other
+    }
+}
+
+fn without_sql_comments(stmt: &str, dialect: SqlDialect) -> String {
+    let tokens = ddl::tokenize(stmt, ddl::LexRules::for_dialect(dialect));
+    let mut result = String::with_capacity(stmt.len());
+    for token in tokens {
+        if matches!(token, ddl::Token::Comment(..)) {
+            result.push(' ');
+        } else {
+            result.push_str(&stmt[token.start()..token.end()]);
+        }
+    }
+    result
+}
+
+fn has_top_level_comma(stmt: &str, dialect: SqlDialect) -> bool {
+    let tokens = ddl::tokenize(stmt, ddl::LexRules::for_dialect(dialect));
+    let mut depth = 0_u32;
+    for token in tokens {
+        if token.is_punct(b'(') {
+            depth += 1;
+        } else if token.is_punct(b')') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 && token.is_punct(b',') {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_alter_type_using(stmt: &str) -> String {
+    let rules = ddl::LexRules {
+        backtick_ident: true,
+        ..ddl::LexRules::for_dialect(SqlDialect::Postgres)
+    };
+    let tokens = ddl::tokenize(stmt, rules);
+    let Some(using) = tokens.iter().find(|token| token.ident_eq(stmt, "USING")) else {
+        return stmt.to_string();
+    };
+    let mut result = stmt[..using.start()].trim_end().to_string();
+    if stmt.trim_end().ends_with(';') {
+        result.push(';');
+    }
+    result
+}
+
+fn strip_create_unlogged(stmt: &str) -> String {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static RE_UNLOGGED: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\bCREATE\s+UNLOGGED\s+TABLE\b").unwrap());
+    RE_UNLOGGED.replace(stmt, "CREATE TABLE").into_owned()
 }
 
 /// The type `column` was declared with in a converted `CREATE TABLE`, e.g.
@@ -200,9 +487,11 @@ impl Converter {
             created_tables: HashMap::new(),
             deferred: Vec::new(),
             enum_registry: EnumRegistry::new(),
-            enum_naming: EnumNamingStrategy::default(),
             pending_enum_types: Vec::new(),
             inline_map_cache: None,
+            enum_name_cache: None,
+            used_pg_enum_types: HashSet::new(),
+            unresolved_pg_type_refs: HashSet::new(),
         }
     }
 
@@ -219,7 +508,6 @@ impl Converter {
     }
 
     pub fn with_enum_naming(mut self, naming: EnumNamingStrategy) -> Self {
-        self.enum_naming = naming;
         self.enum_registry = EnumRegistry::with_naming(naming);
         self
     }
@@ -239,8 +527,8 @@ impl Converter {
 
     /// Narrow registered PG enum type refs to a string type for SQLite/MSSQL.
     fn narrow_pg_enum_columns(&mut self, stmt: &str, table_name: Option<&str>) -> String {
-        let inline = pg_enum_inline_map(&self.enum_registry);
-        if inline.is_empty() {
+        let names = get_enum_name_index(&mut self.enum_name_cache, &self.enum_registry);
+        if names.known.is_empty() {
             return stmt.to_string();
         }
         let refs = ddl::table_ddl_type_refs(stmt, SqlDialect::Postgres);
@@ -254,17 +542,30 @@ impl Converter {
         let mut result = stmt.to_string();
         for r in refs.iter().rev() {
             if r.is_array {
+                let raw_type = &stmt[r.type_span.0..r.type_span.1];
+                let keys = enum_parser::pg_type_keys(raw_type);
+                if keys.as_ref().is_some_and(|(key, unqualified)| {
+                    names.known.contains(key) || names.known.contains(unqualified)
+                }) {
+                    let end = array_type_end(stmt, r.type_span.1);
+                    result.replace_range(r.type_span.0..end, replacement);
+                    self.warnings.add(ConvertWarning::LossyConversion {
+                        from_type: format!("{}[]", r.type_name.1),
+                        to_type: replacement.to_string(),
+                        table: table_name.map(str::to_string),
+                        column: Some(r.column.clone()),
+                    });
+                }
                 continue;
             }
-            let (schema, name) = &r.type_name;
-            let q = schema
-                .as_ref()
-                .map(|s| format!("{}.{}", s.to_lowercase(), name.to_lowercase()));
-            let uq = name.to_lowercase();
-            if q.as_ref().is_some_and(|q| inline.contains_key(q)) || inline.contains_key(&uq) {
+            let raw_type = &stmt[r.type_span.0..r.type_span.1];
+            let keys = enum_parser::pg_type_keys(raw_type);
+            if keys.as_ref().is_some_and(|(key, unqualified)| {
+                names.known.contains(key) || names.known.contains(unqualified)
+            }) {
                 result.replace_range(r.type_span.0..r.type_span.1, replacement);
                 self.warnings.add(ConvertWarning::LossyConversion {
-                    from_type: format!("ENUM ({})", name),
+                    from_type: format!("ENUM ({})", r.type_name.1),
                     to_type: replacement.to_string(),
                     table: table_name.map(|t| t.to_string()),
                     column: Some(r.column.clone()),
@@ -275,38 +576,72 @@ impl Converter {
     }
 
     /// Replace registered PG enum type references with inline `ENUM(...)`.
-    fn rewrite_pg_enum_types_to_mysql_inline(&mut self, stmt: &str) -> String {
+    fn rewrite_pg_enum_types_to_mysql_inline(
+        &mut self,
+        stmt: &str,
+    ) -> Result<String, ConvertWarning> {
         let rules = ddl::LexRules {
             backtick_ident: true,
             ..ddl::LexRules::for_dialect(SqlDialect::Postgres)
         };
         let refs = ddl::table_ddl_type_refs_with_rules(stmt, rules);
         if refs.is_empty() {
-            return stmt.to_string();
+            return Ok(stmt.to_string());
         }
         let inline = get_enum_inline_map(&mut self.inline_map_cache, &self.enum_registry);
-        if inline.is_empty() {
-            return stmt.to_string();
-        }
+        let names = get_enum_name_index(&mut self.enum_name_cache, &self.enum_registry);
         let mut result = stmt.to_string();
         for r in refs.iter().rev() {
+            let raw_type = &stmt[r.type_span.0..r.type_span.1];
+            let keys = enum_parser::pg_type_keys(raw_type);
             if r.is_array {
+                let matched = keys.as_ref().is_some_and(|(key, unqualified)| {
+                    inline.contains_key(key) || inline.contains_key(unqualified)
+                });
+                if matched {
+                    let end = array_type_end(stmt, r.type_span.1);
+                    result.replace_range(r.type_span.0..end, "JSON");
+                    self.warnings.add(ConvertWarning::LossyConversion {
+                        from_type: format!("{}[]", r.type_name.1),
+                        to_type: "JSON".to_string(),
+                        table: None,
+                        column: Some(r.column.clone()),
+                    });
+                } else if let Some((key, _)) = keys {
+                    self.unresolved_pg_type_refs.insert(key);
+                }
                 continue;
             }
-            let (schema, name) = &r.type_name;
-            let q = schema
+            if let Some(text) = keys
                 .as_ref()
-                .map(|s| format!("{}.{}", s.to_lowercase(), name.to_lowercase()));
-            let uq = name.to_lowercase();
-            if let Some(text) = q
-                .as_ref()
-                .and_then(|q| inline.get(q))
-                .or_else(|| inline.get(&uq))
+                .and_then(|(key, unqualified)| inline.get(key).or_else(|| inline.get(unqualified)))
             {
                 result.replace_range(r.type_span.0..r.type_span.1, text);
+                if let Some((key, _)) = keys {
+                    self.used_pg_enum_types.insert(key);
+                }
+            } else if keys
+                .as_ref()
+                .is_some_and(|(_, unqualified)| names.ambiguous.contains(unqualified))
+            {
+                let warning = ConvertWarning::UnsupportedFeature {
+                    feature: format!(
+                        "ambiguous unqualified PostgreSQL enum type `{}`",
+                        r.type_name.1
+                    ),
+                    suggestion: Some(
+                        "Schema-qualify the type reference before conversion".to_string(),
+                    ),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
+            } else if let Some((key, _)) = keys {
+                self.unresolved_pg_type_refs.insert(key);
             }
         }
-        result
+        Ok(result)
     }
 
     /// Extract inline ENUM definitions from a MySQL CREATE TABLE / ALTER TABLE,
@@ -315,10 +650,26 @@ impl Converter {
         &mut self,
         stmt: &str,
         table_name: Option<&str>,
-    ) -> String {
+    ) -> Result<Option<String>, ConvertWarning> {
         let cols = ddl::mysql_inline_enum_columns(stmt);
         if cols.is_empty() {
-            return stmt.to_string();
+            return Ok(Some(stmt.to_string()));
+        }
+        if cols
+            .iter()
+            .flat_map(|column| &column.labels)
+            .any(|label| label.contains('\0'))
+        {
+            let warning = ConvertWarning::SkippedStatement {
+                reason: "MySQL ENUM contains a NUL label that PostgreSQL text cannot represent"
+                    .to_string(),
+                statement_preview: stmt.trim().chars().take(60).collect(),
+            };
+            self.warnings.add(warning.clone());
+            if self.strict {
+                return Err(warning);
+            }
+            return Ok(None);
         }
         let table = table_name.unwrap_or("unknown_table");
         let mut result = stmt.to_string();
@@ -376,7 +727,7 @@ impl Converter {
         }
         self.pending_enum_types.extend(creates);
         self.pending_enum_types.extend(alters);
-        result
+        Ok(Some(result))
     }
 
     pub(crate) fn is_enum_aware(&self) -> bool {
@@ -442,10 +793,18 @@ impl Converter {
             result = self.strip_postgres_casts(&result);
             result = self.strip_schema_prefix(&result);
         }
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            result = strip_create_unlogged(&result);
+        }
 
         // MySQL→PG: register/replace before type mapper. PG→SQLite/MSSQL: narrow.
         if self.from == SqlDialect::MySql && self.to == SqlDialect::Postgres {
-            result = self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name);
+            let Some(rewritten) =
+                self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name)?
+            else {
+                return Ok(Vec::new());
+            };
+            result = rewritten;
         } else if self.from == SqlDialect::Postgres
             && matches!(self.to, SqlDialect::Sqlite | SqlDialect::Mssql)
         {
@@ -462,16 +821,16 @@ impl Converter {
             result = self.convert_mssql_unicode_strings(&result);
         }
 
-        // Convert identifier quoting
-        result = self.convert_identifiers(&result);
-
-        // Convert data types
-        result = self.convert_data_types(&result);
-
-        // PG→MySQL: replace enum types AFTER the type mapper, which would
-        // otherwise rewrite label text inside injected `ENUM(...)`.
+        // PG→MySQL: map ordinary types first, then replace enums while quoted
+        // type identity is still available. Injecting labels after type mapping
+        // prevents label text such as `UUID` from being rewritten as a type.
         if self.from == SqlDialect::Postgres && self.to == SqlDialect::MySql {
-            result = self.rewrite_pg_enum_types_to_mysql_inline(&result);
+            result = self.convert_data_types(&result);
+            result = self.rewrite_pg_enum_types_to_mysql_inline(&result)?;
+            result = self.convert_identifiers(&result);
+        } else {
+            result = self.convert_identifiers(&result);
+            result = self.convert_data_types(&result);
         }
 
         // Convert AUTO_INCREMENT
@@ -594,6 +953,109 @@ impl Converter {
     ) -> Result<Vec<u8>, ConvertWarning> {
         let stmt_str = String::from_utf8_lossy(stmt);
         let mut result = stmt_str.to_string();
+        let comment_free = without_sql_comments(&result, self.from);
+        let action = alter_action(&result, self.from);
+        let mysql_modify = action == AlterAction::MySqlModify;
+        let mysql_modify_if_exists = action == AlterAction::MySqlModifyIfExists;
+        let mysql_change = action == AlterAction::MySqlChange;
+        let postgres_alter_type = action == AlterAction::PostgresAlterType;
+        if mysql_modify || mysql_modify_if_exists || mysql_change || postgres_alter_type {
+            result = comment_free;
+        }
+        let mysql_enum_columns =
+            if self.from == SqlDialect::MySql && self.to == SqlDialect::Postgres {
+                ddl::mysql_inline_enum_columns(&result)
+            } else {
+                Vec::new()
+            };
+
+        if self.from == SqlDialect::MySql
+            && self.to == SqlDialect::Postgres
+            && mysql_modify_if_exists
+            && !mysql_enum_columns.is_empty()
+        {
+            let warning = ConvertWarning::SkippedStatement {
+                reason: "MariaDB MODIFY COLUMN IF EXISTS has no direct PostgreSQL equivalent"
+                    .to_string(),
+                statement_preview: result.trim().chars().take(60).collect(),
+            };
+            self.warnings.add(warning.clone());
+            if self.strict {
+                return Err(warning);
+            }
+            return Ok(Vec::new());
+        }
+
+        if self.from == SqlDialect::MySql
+            && self.to == SqlDialect::Postgres
+            && mysql_change
+            && !mysql_enum_columns.is_empty()
+        {
+            let warning = ConvertWarning::SkippedStatement {
+                reason:
+                    "MySQL CHANGE COLUMN with ENUM requires separate rename and type operations"
+                        .to_string(),
+                statement_preview: result.trim().chars().take(60).collect(),
+            };
+            self.warnings.add(warning.clone());
+            if self.strict {
+                return Err(warning);
+            }
+            return Ok(Vec::new());
+        }
+
+        if self.from == SqlDialect::MySql
+            && self.to == SqlDialect::Postgres
+            && mysql_modify
+            && mysql_enum_columns.iter().any(|column| {
+                !result[column.span.1..]
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .is_empty()
+            })
+        {
+            let warning = ConvertWarning::UnsupportedFeature {
+                feature: "MySQL MODIFY COLUMN with ENUM attributes or multiple ALTER actions"
+                    .to_string(),
+                suggestion: Some(
+                    "Split the ALTER actions and apply column attributes separately".to_string(),
+                ),
+            };
+            self.warnings.add(warning.clone());
+            if self.strict {
+                return Err(warning);
+            }
+            return Ok(Vec::new());
+        }
+
+        if self.from == SqlDialect::Postgres && self.to == SqlDialect::MySql && postgres_alter_type
+        {
+            let warning = ConvertWarning::UnsupportedFeature {
+                feature: "PostgreSQL ALTER COLUMN TYPE converted to MySQL MODIFY COLUMN"
+                    .to_string(),
+                suggestion: Some(
+                    "Verify NULL/default/comment attributes because MySQL MODIFY COLUMN requires the complete definition"
+                        .to_string(),
+                ),
+            };
+            self.warnings.add(warning.clone());
+            if self.strict {
+                return Err(warning);
+            }
+            if has_top_level_comma(&result, SqlDialect::Postgres) {
+                let warning = ConvertWarning::SkippedStatement {
+                    reason: "PostgreSQL multi-action ALTER TABLE must be split before conversion"
+                        .to_string(),
+                    statement_preview: result.trim().chars().take(60).collect(),
+                };
+                self.warnings.add(warning.clone());
+                if self.strict {
+                    return Err(warning);
+                }
+                return Ok(Vec::new());
+            }
+        }
 
         // pg_dump expands `serial` into a plain integer column plus a separate
         // `ALTER COLUMN ... SET DEFAULT nextval(...)`. Removing just the
@@ -624,19 +1086,33 @@ impl Converter {
 
         // MySQL→PG: register/replace before type mapper. PG→SQLite/MSSQL: narrow.
         if self.from == SqlDialect::MySql && self.to == SqlDialect::Postgres {
-            result = self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name);
+            let Some(rewritten) =
+                self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name)?
+            else {
+                return Ok(Vec::new());
+            };
+            result = rewritten;
         } else if self.from == SqlDialect::Postgres
             && matches!(self.to, SqlDialect::Sqlite | SqlDialect::Mssql)
         {
             result = self.narrow_pg_enum_columns(&result, table_name);
         }
 
-        result = self.convert_identifiers(&result);
-        result = self.convert_data_types(&result);
-
-        // PG→MySQL: replace enum types after the type mapper
         if self.from == SqlDialect::Postgres && self.to == SqlDialect::MySql {
-            result = self.rewrite_pg_enum_types_to_mysql_inline(&result);
+            result = self.convert_data_types(&result);
+            result = self.rewrite_pg_enum_types_to_mysql_inline(&result)?;
+            result = self.convert_identifiers(&result);
+            result = rewrite_postgres_alter_type_to_mysql(&result);
+            if postgres_alter_type {
+                result = strip_alter_type_using(&result);
+            }
+        } else {
+            result = self.convert_identifiers(&result);
+            result = self.convert_data_types(&result);
+        }
+
+        if self.from == SqlDialect::MySql && self.to == SqlDialect::Postgres && mysql_modify {
+            result = rewrite_mysql_modify_to_postgres(&result);
         }
 
         // Convert PostgreSQL-specific syntax
@@ -799,41 +1275,151 @@ impl Converter {
             return Ok(Vec::new()); // Skip
         }
 
-        // Register enum types when converting PG→MySQL
-        if self.is_enum_aware() && self.from == SqlDialect::Postgres {
-            if let Some(name) = enum_parser::pg_create_enum_name(trimmed) {
-                if let Some(labels) = enum_parser::pg_create_enum_labels(trimmed) {
-                    self.enum_registry.register_pg_enum(&name, labels);
+        // Register enum types for every non-PostgreSQL target. MySQL inlines
+        // them, while SQLite and MSSQL need the registry to narrow references.
+        if self.from == SqlDialect::Postgres && self.to != SqlDialect::Postgres {
+            if let Some(parsed) = enum_parser::pg_create_enum(trimmed) {
+                let unqualified = enum_parser::pg_type_unqualified_key(&parsed.name);
+                let used_before_definition = self.unresolved_pg_type_refs.remove(&parsed.name)
+                    || unqualified
+                        .as_ref()
+                        .is_some_and(|name| self.unresolved_pg_type_refs.remove(name));
+                if used_before_definition {
+                    let warning = ConvertWarning::UnsupportedFeature {
+                        feature: format!(
+                            "PostgreSQL enum `{}` was defined after a table used it",
+                            parsed.name
+                        ),
+                        suggestion: Some(
+                            "Place CREATE TYPE before CREATE TABLE, as standard pg_dump does"
+                                .to_string(),
+                        ),
+                    };
+                    self.warnings.add(warning.clone());
+                    if self.strict {
+                        return Err(warning);
+                    }
                 }
+                self.enum_registry
+                    .register_pg_enum(&parsed.name, parsed.labels);
                 return Ok(Vec::new()); // CREATE TYPE is not emitted for MySQL
             }
-            if let Some((value, position)) = enum_parser::pg_add_enum_value(trimmed) {
+            if let Some(parsed) = enum_parser::pg_add_enum_value(trimmed) {
                 // ALTER TYPE ADD VALUE: update registry so subsequent
                 // CREATE TABLE columns get the full label list.
-                if let Some(type_name) = enum_parser::pg_alter_enum_name(trimmed) {
-                    let existing = self
-                        .enum_registry
-                        .get_pg_enum(&type_name)
-                        .map(|labels| labels.to_vec());
-                    if let Some(mut labels) = existing {
-                        match position {
+                let unqualified = enum_parser::pg_type_unqualified_key(&parsed.name);
+                if self.used_pg_enum_types.contains(&parsed.name)
+                    || unqualified
+                        .as_ref()
+                        .is_some_and(|name| self.used_pg_enum_types.contains(name))
+                {
+                    let warning = ConvertWarning::UnsupportedFeature {
+                        feature: format!(
+                            "ALTER TYPE ADD VALUE after `{}` was already used by a table",
+                            parsed.name
+                        ),
+                        suggestion: Some(
+                            "Move enum alterations before CREATE TABLE or update the MySQL columns manually"
+                                .to_string(),
+                        ),
+                    };
+                    self.warnings.add(warning.clone());
+                    if self.strict {
+                        return Err(warning);
+                    }
+                }
+                let existing = self
+                    .enum_registry
+                    .get_pg_enum(&parsed.name)
+                    .map(|labels| labels.to_vec());
+                if let Some(mut labels) = existing {
+                    if !labels.contains(&parsed.value) {
+                        match parsed.position {
                             Some((before, true)) => {
                                 if let Some(pos) = labels.iter().position(|l| *l == before) {
-                                    labels.insert(pos + 1, value);
+                                    labels.insert(pos + 1, parsed.value);
                                 } else {
-                                    labels.push(value);
+                                    labels.push(parsed.value);
                                 }
                             }
                             Some((before, false)) => {
                                 if let Some(pos) = labels.iter().position(|l| *l == before) {
-                                    labels.insert(pos, value);
+                                    labels.insert(pos, parsed.value);
                                 } else {
-                                    labels.push(value);
+                                    labels.push(parsed.value);
                                 }
                             }
-                            None => labels.push(value),
+                            None => labels.push(parsed.value),
                         }
-                        self.enum_registry.register_pg_enum(&type_name, labels);
+                    }
+                    self.enum_registry.register_pg_enum(&parsed.name, labels);
+                } else {
+                    let warning = ConvertWarning::UnsupportedFeature {
+                        feature: format!("ALTER TYPE references unknown enum `{}`", parsed.name),
+                        suggestion: Some(
+                            "Place the enum CREATE TYPE before ALTER TYPE".to_string(),
+                        ),
+                    };
+                    self.warnings.add(warning.clone());
+                    if self.strict {
+                        return Err(warning);
+                    }
+                }
+                return Ok(Vec::new());
+            }
+            if let Some(rename) = enum_parser::pg_rename_enum(trimmed) {
+                let updated = match rename {
+                    enum_parser::ParsedRenameEnum::Type { old_name, new_name } => {
+                        let updated = self.enum_registry.rename_pg_enum(&old_name, &new_name);
+                        let old_unqualified = enum_parser::pg_type_unqualified_key(&old_name);
+                        let was_used = self.used_pg_enum_types.remove(&old_name)
+                            || old_unqualified
+                                .as_ref()
+                                .is_some_and(|name| self.used_pg_enum_types.remove(name));
+                        if updated && was_used {
+                            self.used_pg_enum_types.insert(new_name);
+                        }
+                        updated
+                    }
+                    enum_parser::ParsedRenameEnum::Value {
+                        name,
+                        old_value,
+                        new_value,
+                    } => {
+                        let unqualified = enum_parser::pg_type_unqualified_key(&name);
+                        if self.used_pg_enum_types.contains(&name)
+                            || unqualified
+                                .as_ref()
+                                .is_some_and(|name| self.used_pg_enum_types.contains(name))
+                        {
+                            let warning = ConvertWarning::UnsupportedFeature {
+                                feature: format!(
+                                    "ALTER TYPE RENAME VALUE after `{name}` was used by a table"
+                                ),
+                                suggestion: Some(
+                                    "Update the already-emitted MySQL column manually".to_string(),
+                                ),
+                            };
+                            self.warnings.add(warning.clone());
+                            if self.strict {
+                                return Err(warning);
+                            }
+                        }
+                        self.enum_registry
+                            .rename_pg_enum_value(&name, &old_value, &new_value)
+                    }
+                };
+                if !updated {
+                    let warning = ConvertWarning::UnsupportedFeature {
+                        feature: "ALTER TYPE RENAME references an unknown enum or value"
+                            .to_string(),
+                        suggestion: Some(
+                            "Place the matching enum definition before ALTER TYPE".to_string(),
+                        ),
+                    };
+                    self.warnings.add(warning.clone());
+                    if self.strict {
+                        return Err(warning);
                     }
                 }
                 return Ok(Vec::new());
@@ -916,13 +1502,6 @@ impl Converter {
         // Strip leading comments to find the actual statement
         let stripped = self.strip_leading_sql_comments(stmt);
         let upper = stripped.to_uppercase();
-
-        // Let CREATE TYPE / ALTER TYPE through when target understands enums
-        if self.is_enum_aware()
-            && (upper.starts_with("CREATE TYPE") || upper.starts_with("ALTER TYPE"))
-        {
-            return false;
-        }
 
         // These PostgreSQL features have no MySQL/SQLite equivalent
         upper.starts_with("CREATE DOMAIN")

@@ -364,7 +364,7 @@ Input can be a file path or glob pattern (e.g., `*.sql`, `dumps/**/*.sql`).
 - AUTO_INCREMENT ↔ SERIAL ↔ INTEGER PRIMARY KEY ↔ IDENTITY
 - PostgreSQL COPY → INSERT with NULL and escape handling
 - Session command stripping
-- Semantic-preserving ENUM conversion between MySQL and PostgreSQL (`ENUM(...)` ↔ `CREATE TYPE ... AS ENUM`); other targets narrow enums to strings with a warning
+- Semantic-preserving ENUM declaration conversion between MySQL and PostgreSQL (`ENUM(...)` ↔ `CREATE TYPE ... AS ENUM`); arrays and targets without native enums use a documented lossy fallback with a warning
 - Warnings for unsupported features (arrays, triggers, PostgreSQL-only DDL)
 
 ### Validate Options

@@ -77,17 +77,17 @@ sql-splitter convert pg_dump.sql --to sqlite | sqlite3 dev.db
 
 ## Options
 
-| Flag          | Short | Description                                            | Default     |
-| ------------- | ----- | ------------------------------------------------------ | ----------- |
-| `--output`    | `-o`  | Output SQL file or directory                           | stdout      |
-| `--from`      |       | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--to`        |       | Target dialect (required)                              | -           |
-| `--strict`    |       | Fail on any unsupported feature                        | false       |
-| `--progress`  | `-p`  | Show progress bar                                      | false       |
-| `--dry-run`   |       | Preview without writing files                          | false       |
-| `--fail-fast`    |       | Stop on first error (for glob patterns)                | false       |
-| `--enum-naming`  |       | MySQL→PG enum naming: `per-column` or `dedupe`         | `per-column` |
-| `--json`         |       | Output results as JSON                                 | false       |
+| Flag            | Short | Description                                            | Default     |
+| --------------- | ----- | ------------------------------------------------------ | ----------- |
+| `--output`      | `-o`  | Output SQL file or directory                           | stdout      |
+| `--from`        |       | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
+| `--to`          |       | Target dialect (required)                              | -           |
+| `--strict`      |       | Fail on any unsupported feature                        | false       |
+| `--progress`    | `-p`  | Show progress bar                                      | false       |
+| `--dry-run`     |       | Preview without writing files                          | false       |
+| `--fail-fast`   |       | Stop on first error (for glob patterns)                | false       |
+| `--enum-naming` |       | MySQL→PG enum naming: `per-column` or `dedupe`         | `per-column` |
+| `--json`        |       | Output results as JSON                                 | false       |
 
 ## Supported Conversions
 

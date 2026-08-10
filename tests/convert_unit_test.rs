@@ -1090,6 +1090,133 @@ fn test_postgres_only_feature_detection() {
 }
 
 #[test]
+fn postgres_quoted_enum_name_converts_to_mysql_inline_enum() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+
+    let create_type = converter
+        .convert_statement(b"CREATE TYPE \"Order Status\" AS ENUM ('new', 'done');")
+        .unwrap();
+    assert!(
+        create_type.is_empty(),
+        "PostgreSQL CREATE TYPE must not be emitted to MySQL: {}",
+        String::from_utf8_lossy(&create_type)
+    );
+
+    let create_table = converter
+        .convert_statement(b"CREATE TABLE orders (status \"Order Status\");")
+        .unwrap();
+    let output = String::from_utf8_lossy(&create_table);
+    assert!(
+        output.contains("status ENUM('new','done')"),
+        "got: {output}"
+    );
+}
+
+#[test]
+fn postgres_enum_ddl_inside_string_literal_is_not_consumed() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    let input = b"SELECT 'CREATE TYPE fake AS ENUM (''a'')';";
+    let output = converter.convert_statement(input).unwrap();
+    assert!(!output.is_empty());
+    assert!(String::from_utf8_lossy(&output).contains("CREATE TYPE fake"));
+}
+
+#[test]
+fn quoted_and_unquoted_postgres_enum_names_remain_distinct() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE \"Mood\" AS ENUM ('quoted');")
+        .unwrap();
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('plain');")
+        .unwrap();
+
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (a \"Mood\", b mood);")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("a ENUM('quoted')"), "got: {output}");
+    assert!(output.contains("b ENUM('plain')"), "got: {output}");
+}
+
+#[test]
+fn postgres_enum_accepts_escape_and_dollar_quoted_labels() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM (E'line\\n', $$dollar$$, 'UUID');")
+        .unwrap();
+
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (value mood);")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ENUM('line\n','dollar','UUID')"),
+        "got: {output}"
+    );
+}
+
+#[test]
+fn postgres_add_enum_value_if_not_exists_does_not_duplicate_label() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('plain');")
+        .unwrap();
+    converter
+        .convert_statement(b"ALTER TYPE mood ADD VALUE IF NOT EXISTS 'plain';")
+        .unwrap();
+
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (value mood);")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("ENUM('plain')"), "got: {output}");
+    assert!(!output.contains("'plain','plain'"), "got: {output}");
+}
+
+#[test]
+fn unsupported_postgres_alter_type_is_not_emitted_to_mysql() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('sad', 'ok');")
+        .unwrap();
+
+    let output = converter
+        .convert_statement(b"ALTER TYPE mood RENAME VALUE 'sad' TO 'bad';")
+        .unwrap();
+
+    assert!(
+        output.is_empty(),
+        "PostgreSQL ALTER TYPE must not be emitted to MySQL: {}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+#[test]
+fn generated_postgres_enum_names_do_not_collide_after_sanitization() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+
+    let first = converter
+        .convert_statement(b"CREATE TABLE `a-b` (`x` ENUM('one'));")
+        .unwrap();
+    let second = converter
+        .convert_statement(b"CREATE TABLE `a_b` (`x` ENUM('two'));")
+        .unwrap();
+    let first = String::from_utf8_lossy(&first);
+    let second = String::from_utf8_lossy(&second);
+
+    assert!(first.contains("CREATE TYPE enum__a_b__x AS ENUM ('one');"));
+    assert!(
+        second.contains("CREATE TYPE enum__a_b__x_2 AS ENUM ('two');"),
+        "the second enum needs a distinct type: {second}"
+    );
+    assert!(
+        !second.contains("ALTER TYPE enum__a_b__x"),
+        "unrelated enums must not be merged: {second}"
+    );
+}
+
+#[test]
 fn test_strip_postgres_casts() {
     // Test through convert_statement
     let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
@@ -1442,4 +1569,480 @@ fn test_mysql_to_pg_enum_backtick_quoted_columns() {
         !output_str.contains("VARCHAR(255)"),
         "backtick enum should not become VARCHAR: {output_str}"
     );
+}
+
+#[test]
+fn enum_conversion_handles_create_table_modifiers() {
+    let mut mysql = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let output = mysql
+        .convert_statement(b"CREATE TEMPORARY TABLE t (x ENUM('a','b'));")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("CREATE TYPE enum__t__x"), "got: {output}");
+
+    let mut postgres = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    postgres
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a','b');")
+        .unwrap();
+    let output = postgres
+        .convert_statement(b"CREATE UNLOGGED TABLE t (x mood);")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("x ENUM('a','b')"));
+    assert!(!output.contains("UNLOGGED"), "got: {output}");
+}
+
+#[test]
+fn enum_alter_table_uses_target_dialect_grammar() {
+    let mut mysql = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    mysql
+        .convert_statement(b"CREATE TABLE t (x ENUM('a'));")
+        .unwrap();
+    let output = mysql
+        .convert_statement(b"ALTER TABLE t MODIFY COLUMN x ENUM('a','b');")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ALTER COLUMN x TYPE enum__t__x"),
+        "got: {output}"
+    );
+    assert!(!output.contains("MODIFY COLUMN"), "got: {output}");
+
+    let mut postgres = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    postgres
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a','b');")
+        .unwrap();
+    let output = postgres
+        .convert_statement(b"ALTER TABLE t ALTER COLUMN x TYPE mood;")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("MODIFY COLUMN x ENUM('a','b')"),
+        "got: {output}"
+    );
+}
+
+#[test]
+fn enum_alter_table_handles_quoted_names_and_drops_postgres_using() {
+    let mut mysql = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    mysql
+        .convert_statement(b"CREATE TABLE `My Table` (`Order Status` ENUM('a'));")
+        .unwrap();
+    let output = mysql
+        .convert_statement(b"ALTER TABLE `My Table` MODIFY COLUMN `Order Status` ENUM('a','b');")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ALTER COLUMN \"Order Status\" TYPE"),
+        "got: {output}"
+    );
+    assert!(!output.contains("MODIFY COLUMN"), "got: {output}");
+
+    let mut postgres = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    postgres
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a','b');")
+        .unwrap();
+    let output = postgres
+        .convert_statement(
+            b"ALTER TABLE ONLY \"My Table\" ALTER COLUMN \"Order Status\" TYPE mood USING \"Order Status\"::text::mood;",
+        )
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ALTER TABLE `My Table` MODIFY COLUMN `Order Status` ENUM('a','b');"),
+        "got: {output}"
+    );
+    assert!(!output.contains("USING"), "got: {output}");
+    assert!(!output.contains(" ONLY "), "got: {output}");
+}
+
+#[test]
+fn enum_alter_table_handles_multiline_and_qualified_names() {
+    let mut mysql = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    mysql
+        .convert_statement(b"CREATE TABLE `My Db`.`My Table` (`Order Status` ENUM('a'));")
+        .unwrap();
+    let output = mysql
+        .convert_statement(
+            b"ALTER TABLE `My Db`.`My Table`\nMODIFY\nCOLUMN `Order Status` ENUM('a','b');",
+        )
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ALTER COLUMN \"Order Status\" TYPE"),
+        "got: {output}"
+    );
+    assert!(!output.contains("MODIFY"), "got: {output}");
+
+    let mut postgres = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    postgres
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    let output = postgres
+        .convert_statement(
+            b"ALTER TABLE \"My Schema\".\"My Table\"\nALTER\nCOLUMN \"Order Status\" TYPE mood;",
+        )
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("MODIFY COLUMN `Order Status` ENUM('a')"),
+        "got: {output}"
+    );
+}
+
+#[test]
+fn enum_alter_table_handles_comments_between_keywords() {
+    let mut mysql = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    mysql
+        .convert_statement(b"CREATE TABLE t (x ENUM('a'));")
+        .unwrap();
+    let output = mysql
+        .convert_statement(b"ALTER TABLE t MODIFY /* keep */ COLUMN x ENUM('a','b');")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("ALTER COLUMN x TYPE"), "got: {output}");
+    assert!(!output.contains("MODIFY"), "got: {output}");
+
+    let mut postgres = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    postgres
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    let output = postgres
+        .convert_statement(b"ALTER TABLE t ALTER /* keep */ COLUMN x TYPE mood;")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("MODIFY COLUMN x ENUM('a')"),
+        "got: {output}"
+    );
+}
+
+#[test]
+fn alter_action_keywords_inside_literals_do_not_change_classification() {
+    let mut mysql = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let output = mysql
+        .convert_statement(b"ALTER TABLE t ADD COLUMN action ENUM('CHANGE COLUMN','other');")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ADD COLUMN action enum__t__action"),
+        "got: {output}"
+    );
+
+    let mut postgres = Converter::new(SqlDialect::Postgres, SqlDialect::MySql).with_strict(true);
+    let output = postgres
+        .convert_statement(
+            b"ALTER TABLE t ADD COLUMN note text DEFAULT 'ALTER COLUMN x TYPE mood';",
+        )
+        .unwrap();
+    assert!(!output.is_empty());
+}
+
+#[test]
+fn unrelated_using_clause_is_not_truncated() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    let input = b"ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (x WITH =);";
+    let output = converter.convert_statement(input).unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("USING gist"), "got: {output}");
+}
+
+#[test]
+fn strict_rejects_mysql_enum_modify_with_attributes() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres).with_strict(true);
+    converter
+        .convert_statement(b"CREATE TABLE t (x ENUM('a'));")
+        .unwrap();
+    assert!(converter
+        .convert_statement(b"ALTER TABLE t MODIFY COLUMN x ENUM('a','b') NOT NULL;")
+        .is_err());
+}
+
+#[test]
+fn postgres_enum_renames_update_registry() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('sad');")
+        .unwrap();
+    converter
+        .convert_statement(b"ALTER TYPE mood RENAME VALUE 'sad' TO 'bad';")
+        .unwrap();
+    converter
+        .convert_statement(b"ALTER TYPE mood RENAME TO feeling;")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (x feeling);")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output).contains("ENUM('bad')"));
+}
+
+#[test]
+fn postgres_enum_array_becomes_json_with_warning() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a','b');")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (x mood[]);")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output).contains("x JSON"));
+    assert!(!converter.warnings().is_empty());
+}
+
+#[test]
+fn postgres_enum_array_narrows_for_sqlite_and_mssql() {
+    for (target, expected) in [
+        (SqlDialect::Sqlite, "x TEXT"),
+        (SqlDialect::Mssql, "x NVARCHAR(255)"),
+    ] {
+        let mut converter = Converter::new(SqlDialect::Postgres, target);
+        converter
+            .convert_statement(b"CREATE TYPE mood AS ENUM ('a','b');")
+            .unwrap();
+        let output = converter
+            .convert_statement(b"CREATE TABLE t (x mood[]);")
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains(expected), "got: {output}");
+        assert!(!output.contains("mood[]"), "got: {output}");
+    }
+}
+
+#[test]
+fn postgres_enum_array_consumes_spaced_bounded_and_repeated_dimensions() {
+    for suffix in ["[ ]", "[3]", "[][]", " [ ] [4]"] {
+        let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+        converter
+            .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+            .unwrap();
+        let statement = format!("CREATE TABLE t (x mood{suffix});");
+        let output = converter.convert_statement(statement.as_bytes()).unwrap();
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("x JSON"), "suffix {suffix}, got: {output}");
+        assert!(!output.contains('['), "suffix {suffix}, got: {output}");
+    }
+}
+
+#[test]
+fn postgres_enum_escape_forms_are_decoded() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(br"CREATE TYPE mood AS ENUM (E'\x41', E'\101', E'\r', U&'d\0061t');")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ENUM('A','A','\r','dat')"),
+        "got: {output:?}"
+    );
+}
+
+#[test]
+fn postgres_enum_byte_and_custom_unicode_escapes_are_decoded() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(
+            br"CREATE TYPE mood AS ENUM (E'\xC3\xA9', E'\303\251', U&'d!0061t' UESCAPE '!', U&'\D83D\DE00');",
+        )
+        .unwrap();
+    let output = converter
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ENUM('é','é','dat','😀')"),
+        "got: {output:?}"
+    );
+}
+
+#[test]
+fn mysql_enum_labels_use_mysql_escape_rules() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let output = converter
+        .convert_statement(br"CREATE TABLE t (x ENUM('\x41','\f','\Z'));")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("AS ENUM ('x41', 'f', '\u{001a}')"),
+        "got: {output:?}"
+    );
+    assert!(!output.contains("AS ENUM ('A'"), "got: {output:?}");
+}
+
+#[test]
+fn mysql_enum_nul_label_is_rejected_before_output_or_registry_mutation() {
+    let statement = br"CREATE TABLE t (x ENUM('a\0b'));";
+
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let output = converter.convert_statement(statement).unwrap();
+    assert!(output.is_empty());
+    assert!(converter
+        .warnings()
+        .iter()
+        .any(|warning| warning.to_string().contains("NUL")));
+
+    let mut strict = Converter::new(SqlDialect::MySql, SqlDialect::Postgres).with_strict(true);
+    assert!(strict.convert_statement(statement).is_err());
+}
+
+#[test]
+fn mysql_multi_action_enum_alter_is_rejected_whole() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    converter
+        .convert_statement(b"CREATE TABLE t (x ENUM('a'));")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"ALTER TABLE t MODIFY COLUMN x ENUM('a','b'), ADD COLUMN y INT;")
+        .unwrap();
+    assert!(output.is_empty());
+    assert!(converter
+        .warnings()
+        .iter()
+        .any(|warning| warning.to_string().contains("multiple ALTER actions")));
+}
+
+#[test]
+fn mariadb_modify_if_exists_enum_alter_is_rejected_whole() {
+    for clause in ["MODIFY IF EXISTS", "MODIFY COLUMN IF EXISTS"] {
+        let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+        converter
+            .convert_statement(b"CREATE TABLE t (x ENUM('a'));")
+            .unwrap();
+        let statement = format!("ALTER TABLE t {clause} x ENUM('a','b');");
+        let output = converter.convert_statement(statement.as_bytes()).unwrap();
+        assert!(
+            output.is_empty(),
+            "got: {}",
+            String::from_utf8_lossy(&output)
+        );
+        assert!(converter
+            .warnings()
+            .iter()
+            .any(|warning| warning.to_string().contains("IF EXISTS")));
+    }
+}
+
+#[test]
+fn mariadb_alter_table_if_exists_enum_modify_is_converted() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    converter
+        .convert_statement(b"CREATE TABLE t (x ENUM('a'));")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"ALTER TABLE IF EXISTS t MODIFY COLUMN x ENUM('a','b');")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ALTER TABLE IF EXISTS t ALTER COLUMN x TYPE"),
+        "got: {output}"
+    );
+    assert!(!output.contains("MODIFY"), "got: {output}");
+}
+
+#[test]
+fn postgres_alter_table_if_exists_enum_type_is_converted() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"ALTER TABLE IF EXISTS t ALTER COLUMN x TYPE mood;")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        output.contains("ALTER TABLE t MODIFY COLUMN x ENUM('a')"),
+        "got: {output}"
+    );
+    assert!(!output.contains("IF EXISTS"), "got: {output}");
+}
+
+#[test]
+fn postgres_multi_action_enum_alter_is_rejected_whole() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"ALTER TABLE t ALTER COLUMN x TYPE mood, ALTER COLUMN y TYPE mood;")
+        .unwrap();
+    assert!(output.is_empty());
+    assert!(converter
+        .warnings()
+        .iter()
+        .any(|warning| warning.to_string().contains("multi-action ALTER TABLE")));
+}
+
+#[test]
+fn postgres_enum_change_after_table_warns() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    converter
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    converter
+        .convert_statement(b"ALTER TYPE mood ADD VALUE 'b';")
+        .unwrap();
+    assert!(converter
+        .warnings()
+        .iter()
+        .any(|warning| warning.to_string().contains("already used by a table")));
+}
+
+#[test]
+fn qualified_enum_change_after_unqualified_use_warns() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TYPE public.mood AS ENUM ('a');")
+        .unwrap();
+    converter
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    converter
+        .convert_statement(b"ALTER TYPE public.mood ADD VALUE 'b';")
+        .unwrap();
+    assert!(converter
+        .warnings()
+        .iter()
+        .any(|warning| warning.to_string().contains("already used by a table")));
+}
+
+#[test]
+fn strict_rejects_enum_value_rename_after_table_use() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql).with_strict(true);
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    converter
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    assert!(converter
+        .convert_statement(b"ALTER TYPE mood RENAME VALUE 'a' TO 'b';")
+        .is_err());
+}
+
+#[test]
+fn postgres_enum_definition_after_use_warns_and_strict_fails() {
+    let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+    converter
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    converter
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .unwrap();
+    assert!(converter
+        .warnings()
+        .iter()
+        .any(|warning| warning.to_string().contains("defined after a table")));
+
+    let mut strict = Converter::new(SqlDialect::Postgres, SqlDialect::MySql).with_strict(true);
+    strict
+        .convert_statement(b"CREATE TABLE t (x mood);")
+        .unwrap();
+    assert!(strict
+        .convert_statement(b"CREATE TYPE mood AS ENUM ('a');")
+        .is_err());
 }

@@ -701,21 +701,21 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 **Target**: 2-3 weeks  
 **Theme**: Proper bidirectional enum conversion between PostgreSQL and MySQL
 
-| Feature                          | Effort | Status  | Notes                            |
-| -------------------------------- | ------ | ------- | -------------------------------- |
-| **Enum Registry**                | 2h     | ✅ Done | State tracking across statements |
-| **PG → MySQL**                   | 12h    | ✅ Done |                                  |
-| ├─ Parse CREATE TYPE ... AS ENUM | 3h     |         | Extract type definitions         |
-| ├─ Parse ALTER TYPE ADD VALUE    | 2h     |         | Update registry                  |
-| ├─ Rewrite CREATE TABLE columns  | 3h     |         | Type ref → inline ENUM           |
-| ├─ Strip ::type casts in DML     | 2h     |         | Remove enum casts                |
-| └─ Handle unknown types          | 2h     |         | VARCHAR fallback + warning       |
-| **MySQL → PG**                   | 10h    | ✅ Done |                                  |
-| ├─ Parse inline ENUM()           | 2h     |         | Extract from columns             |
-| ├─ Generate CREATE TYPE          | 3h     |         | Deterministic naming             |
-| ├─ Multi-statement output        | 3h     |         | One input → many outputs         |
-| └─ Deduplication (optional)      | 2h     |         | Signature-based reuse            |
-| **Testing**                      | 6h     | ✅ Done | Unit + integration tests         |
+| Feature                          | Effort | Status  | Notes                                       |
+| -------------------------------- | ------ | ------- | ------------------------------------------- |
+| **Enum Registry**                | 2h     | ✅ Done | State tracking across statements            |
+| **PG → MySQL**                   | 12h    | ✅ Done |                                             |
+| ├─ Parse CREATE TYPE ... AS ENUM | 3h     |         | Extract type definitions                    |
+| ├─ Parse ALTER TYPE ADD VALUE    | 2h     |         | Update registry                             |
+| ├─ Rewrite CREATE TABLE columns  | 3h     |         | Type ref → inline ENUM                      |
+| ├─ Strip ::type casts in DML     | 2h     |         | Remove enum casts                           |
+| └─ Handle unknown types          | 2h     |         | Preserve unchanged; type may not be an enum |
+| **MySQL → PG**                   | 10h    | ✅ Done |                                             |
+| ├─ Parse inline ENUM()           | 2h     |         | Extract from columns                        |
+| ├─ Generate CREATE TYPE          | 3h     |         | Deterministic naming                        |
+| ├─ Multi-statement output        | 3h     |         | One input → many outputs                    |
+| └─ Deduplication (optional)      | 2h     |         | Signature-based reuse                       |
+| **Testing**                      | 6h     | ✅ Done | Unit + integration tests                    |
 
 **Total: ~30h**
 
@@ -733,7 +733,8 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 - Naming: `enum__{table}__{column}` (deterministic, collision-safe)
 - SQLite: Continue to TEXT (no enum support)
-- Unknown types: Fallback to VARCHAR + warning (streaming-compatible)
+- Unknown types: Preserve unchanged; warn if a later enum definition proves the
+  reference was out of order
 
 **Deliverables:**
 

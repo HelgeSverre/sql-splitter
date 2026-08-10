@@ -110,6 +110,7 @@ CREATE TYPE enum__{table}__{column} AS ENUM ('a', 'b');
 `ENUM` converts to `NVARCHAR(255)`. MSSQL has no native enum type.
 
 The `--enum-naming` flag controls the generated type name strategy:
+
 - `per-column` (default): `enum__{table}__{column}`
 - `dedupe`: Reuses identical enum types across columns that share the same values
 

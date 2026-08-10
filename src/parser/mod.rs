@@ -1634,8 +1634,8 @@ impl<R: Read> Parser<R> {
         }
 
         // Use stack-allocated buffer to avoid heap allocation in hot path
-        let mut upper_prefix = [0u8; 25];
-        let prefix_len = stmt.len().min(25);
+        let mut upper_prefix = [0u8; 40];
+        let prefix_len = stmt.len().min(40);
         for (i, &b) in stmt.iter().take(prefix_len).enumerate() {
             upper_prefix[i] = b.to_ascii_uppercase();
         }
@@ -1648,9 +1648,23 @@ impl<R: Read> Parser<R> {
             }
         }
 
-        if upper_prefix.starts_with(b"CREATE TABLE") {
+        let create_table_prefix_len = [
+            "CREATE TABLE",
+            "CREATE TEMP TABLE",
+            "CREATE TEMPORARY TABLE",
+            "CREATE UNLOGGED TABLE",
+            "CREATE GLOBAL TEMPORARY TABLE",
+            "CREATE LOCAL TEMPORARY TABLE",
+        ]
+        .iter()
+        .find_map(|prefix| {
+            upper_prefix
+                .starts_with(prefix.as_bytes())
+                .then_some(prefix.len())
+        });
+        if let Some(prefix_len) = create_table_prefix_len {
             // Try fast extraction first
-            if let Some(name) = extract_table_name_flexible(stmt, 12, dialect) {
+            if let Some(name) = extract_table_name_flexible(stmt, prefix_len, dialect) {
                 return (StatementType::CreateTable, name);
             }
             // Fall back to flexible regex

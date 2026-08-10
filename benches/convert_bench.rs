@@ -422,6 +422,78 @@ fn bench_all_dialect_pairs(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the enum conversion paths whose registries persist across a dump.
+fn bench_enum_conversion(c: &mut Criterion) {
+    let mut group = c.benchmark_group("enum_conversion");
+    group.sample_size(50);
+
+    let mysql_unique: Vec<Vec<u8>> = (0..100)
+        .map(|i| format!("CREATE TABLE `table_{i}` (`status` ENUM('new','done'));").into_bytes())
+        .collect();
+    group.bench_function("mysql_to_postgres_unique_100", |b| {
+        b.iter(|| {
+            let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+            for statement in &mysql_unique {
+                black_box(converter.convert_statement(black_box(statement))).unwrap();
+            }
+        })
+    });
+
+    let mysql_collisions: Vec<Vec<u8>> = (0..100)
+        .map(|i| {
+            let mut value = i;
+            let punctuation: String = (0..5)
+                .map(|_| {
+                    let symbol = ['-', '!', '@'][value % 3];
+                    value /= 3;
+                    symbol
+                })
+                .collect();
+            format!("CREATE TABLE `table{punctuation}` (`status` ENUM('{i}'));").into_bytes()
+        })
+        .collect();
+    group.bench_function("mysql_to_postgres_collisions_100", |b| {
+        b.iter(|| {
+            let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+            for statement in &mysql_collisions {
+                black_box(converter.convert_statement(black_box(statement))).unwrap();
+            }
+        })
+    });
+
+    let postgres_quoted: Vec<(Vec<u8>, Vec<u8>)> = (0..100)
+        .map(|i| {
+            (
+                format!("CREATE TYPE \"Status {i}\" AS ENUM ('new', 'done');").into_bytes(),
+                format!("CREATE TABLE table_{i} (status \"Status {i}\");").into_bytes(),
+            )
+        })
+        .collect();
+    group.bench_function("postgres_to_mysql_quoted_100", |b| {
+        b.iter(|| {
+            let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+            for (create_type, create_table) in &postgres_quoted {
+                black_box(converter.convert_statement(black_box(create_type))).unwrap();
+                black_box(converter.convert_statement(black_box(create_table))).unwrap();
+            }
+        })
+    });
+
+    let non_enum: Vec<Vec<u8>> = (0..100)
+        .map(|i| format!("CREATE TABLE table_{i} (id INTEGER, name TEXT);").into_bytes())
+        .collect();
+    group.bench_function("postgres_to_mysql_non_enum_100", |b| {
+        b.iter(|| {
+            let mut converter = Converter::new(SqlDialect::Postgres, SqlDialect::MySql);
+            for statement in &non_enum {
+                black_box(converter.convert_statement(black_box(statement))).unwrap();
+            }
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_mysql_to_postgres,
@@ -431,6 +503,7 @@ criterion_group!(
     bench_identifier_conversion,
     bench_type_mapping,
     bench_all_dialect_pairs,
+    bench_enum_conversion,
 );
 
 criterion_main!(benches);

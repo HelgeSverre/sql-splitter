@@ -45,7 +45,7 @@ sql-splitter convert pg_dump.sql --to mysql -o mysql.sql
 
 - PostgreSQL `CREATE TYPE ... AS ENUM` → MySQL inline `ENUM()`
 - MySQL inline `ENUM()` → PostgreSQL `CREATE TYPE` with `--enum-naming` flag for deterministic naming (`per-column` or `dedupe`)
-- `ALTER TYPE ... ADD VALUE` (including `BEFORE`/`AFTER` and `IF [NOT] EXISTS`) tracked across statements
+- `ALTER TYPE ... ADD VALUE` (including `BEFORE`/`AFTER` and `IF NOT EXISTS`) tracked across statements
 - `::type` casts stripped from DEFAULT clauses and DML during conversion; string data passes through untouched
 - Enum narrowing to `TEXT`/`NVARCHAR(255)` with a warning only for targets without enum types (SQLite, MSSQL)
 - Streaming-safe registry-based type tracking across statements

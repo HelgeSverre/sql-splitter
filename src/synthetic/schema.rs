@@ -107,7 +107,6 @@ pub enum SqlTypeFamily {
     Integer,
     BigInteger,
     Decimal,
-    Enum,
     Boolean,
     Text,
     Bytes,
@@ -127,7 +126,6 @@ impl SqlTypeFamily {
         match &column.col_type {
             ColumnType::Int => SqlTypeFamily::Integer,
             ColumnType::BigInt => SqlTypeFamily::BigInteger,
-            ColumnType::Enum(_) => SqlTypeFamily::Enum,
             ColumnType::Decimal => SqlTypeFamily::Decimal,
             ColumnType::Bool => SqlTypeFamily::Boolean,
             ColumnType::Text => SqlTypeFamily::Text,
@@ -147,7 +145,6 @@ impl SqlTypeFamily {
         match ColumnType::from_sql_type(source_type) {
             ColumnType::Int => SqlTypeFamily::Integer,
             ColumnType::BigInt => SqlTypeFamily::BigInteger,
-            ColumnType::Enum(_) => SqlTypeFamily::Enum,
             ColumnType::Decimal => SqlTypeFamily::Decimal,
             ColumnType::Bool => SqlTypeFamily::Boolean,
             ColumnType::Text => SqlTypeFamily::Text,

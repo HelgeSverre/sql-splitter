@@ -160,7 +160,6 @@ const ALL_FAMILIES: &[SqlTypeFamily] = &[
     SqlTypeFamily::Integer,
     SqlTypeFamily::BigInteger,
     SqlTypeFamily::Decimal,
-    SqlTypeFamily::Enum,
     SqlTypeFamily::Boolean,
     SqlTypeFamily::Text,
     SqlTypeFamily::Bytes,

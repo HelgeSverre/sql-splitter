@@ -215,9 +215,7 @@ impl ColumnKind {
             ColumnType::BigInt => ColumnKind::BigInt,
             ColumnType::Decimal => ColumnKind::Decimal,
             ColumnType::DateTime => ColumnKind::DateTime,
-            ColumnType::Text | ColumnType::Uuid | ColumnType::Enum(_) | ColumnType::Other(_) => {
-                ColumnKind::Text
-            }
+            ColumnType::Text | ColumnType::Uuid | ColumnType::Other(_) => ColumnKind::Text,
         }
     }
 }

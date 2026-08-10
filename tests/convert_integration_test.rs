@@ -269,6 +269,38 @@ CREATE TABLE `users` (
 }
 
 #[test]
+fn enum_naming_dedupe_cli_reuses_type() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+    fs::write(
+        &input_file,
+        "CREATE TABLE a (x ENUM('on','off'));\nCREATE TABLE b (y ENUM('on','off'));",
+    )
+    .unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "mysql",
+            "--to",
+            "postgres",
+            "--enum-naming",
+            "dedupe",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Command failed: {output:?}");
+    let result = fs::read_to_string(output_file).unwrap();
+    assert_eq!(result.matches("CREATE TYPE").count(), 1, "got: {result}");
+    assert_eq!(result.matches("enum__a__x").count(), 3, "got: {result}");
+}
+
+#[test]
 fn test_convert_dry_run() {
     let temp_dir = TempDir::new().unwrap();
     let input_file = temp_dir.path().join("input.sql");

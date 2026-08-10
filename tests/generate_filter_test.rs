@@ -369,6 +369,18 @@ fn lossy_enum_mapping_warns_cross_dialect_and_is_clean_same_dialect() {
     );
     assert!(warnings >= 1, "cross-dialect ENUM should warn: {sql}");
     assert!(sql.contains("TEXT"), "ENUM not narrowed: {sql}");
+
+    // The generate renderer does not own the statement-level enum registry
+    // used by `convert`. Until it can emit CREATE TYPE statements, its
+    // MySQL→PostgreSQL fallback must remain explicitly lossy.
+    let (sql, warnings) = render(
+        compile_all(enum_model()),
+        SqlDialect::Postgres,
+        Some(SqlDialect::MySql),
+        OutputMode::SchemaOnly,
+    );
+    assert!(warnings >= 1, "PostgreSQL enum fallback should warn: {sql}");
+    assert!(sql.contains("VARCHAR(255)"), "ENUM not narrowed: {sql}");
 }
 
 // --- IDENTITY + explicit values: loadability -------------------------------

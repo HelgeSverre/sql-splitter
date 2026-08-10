@@ -43,8 +43,6 @@ pub enum ColumnType {
     Int,
     /// Big integer types: BIGINT
     BigInt,
-    /// Enum types with their ordered member values
-    Enum(Vec<String>),
     /// Text types: CHAR, VARCHAR, TEXT, etc.
     Text,
     /// UUID types (detected by column name or type)
@@ -87,7 +85,6 @@ impl ColumnType {
             // Auto-increment integer types (PostgreSQL)
             "serial" | "smallserial" => ColumnType::Int,
             "bigint" | "int8" | "bigserial" => ColumnType::BigInt,
-            "enum" => ColumnType::Enum(parse_enum_values(type_str)),
             // Text types (all dialects)
             "char"
             | "varchar"
@@ -95,6 +92,7 @@ impl ColumnType {
             | "tinytext"
             | "mediumtext"
             | "longtext"
+            | "enum"
             | "set"
             | "character"
             | "character varying"
@@ -149,55 +147,6 @@ impl ColumnType {
     pub fn from_mysql_type(type_str: &str) -> Self {
         Self::from_sql_type(type_str)
     }
-}
-
-/// Parse a type string like `"ENUM('a','b','c')"` into the ordered list of
-/// member values. Returns an empty `Vec` when the type string is just `"enum"`
-/// with no `(…)` or when parsing fails.
-fn parse_enum_values(type_str: &str) -> Vec<String> {
-    let lower = type_str.to_lowercase();
-    let open = match lower.find('(') {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let close = match lower.rfind(')') {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let inner = &type_str[open + 1..close];
-    let mut values = Vec::new();
-    let chars: Vec<char> = inner.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
-            i += 1;
-        }
-        if i >= chars.len() {
-            break;
-        }
-        if chars[i] == '\'' {
-            i += 1;
-            let mut val = String::new();
-            while i < chars.len() {
-                if chars[i] == '\'' {
-                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                        val.push('\'');
-                        i += 2;
-                    } else {
-                        i += 1;
-                        break;
-                    }
-                } else {
-                    val.push(chars[i]);
-                    i += 1;
-                }
-            }
-            values.push(val);
-        } else {
-            i += 1;
-        }
-    }
-    values
 }
 
 /// Column definition within a table

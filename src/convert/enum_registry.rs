@@ -11,7 +11,7 @@
 //! known PostgreSQL enum so that casts like `'active'::order_status` can be
 //! stripped correctly — the cast is removed and the literal is left bare.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum EnumNamingStrategy {
@@ -29,9 +29,18 @@ pub struct EnumRegistry {
     /// PostgreSQL enum definitions: type_name → ordered labels
     pg_enums_by_name: HashMap<String, Vec<String>>,
 
-    /// MySQL enum signatures: canonical(labels) → generated_pg_type_name
+    /// MySQL enum signatures: ordered labels → generated_pg_type_name
     /// Used for deduplication when converting MySQL → PostgreSQL
-    enum_signatures: HashMap<String, String>,
+    enum_signatures: HashMap<Vec<String>, String>,
+
+    /// Source table+column identity → generated PostgreSQL type name.
+    pg_types_by_column: HashMap<String, String>,
+
+    /// Names allocated after sanitization and PostgreSQL length limiting.
+    used_pg_type_names: HashSet<String>,
+
+    /// Next suffix to try for each length-limited base name.
+    next_pg_type_suffix: HashMap<String, u32>,
 
     /// Track which CREATE TYPE statements have been emitted, with their labels.
     emitted_pg_types: HashMap<String, Vec<String>>,
@@ -52,6 +61,9 @@ impl EnumRegistry {
         Self {
             pg_enums_by_name: HashMap::new(),
             enum_signatures: HashMap::new(),
+            pg_types_by_column: HashMap::new(),
+            used_pg_type_names: HashSet::new(),
+            next_pg_type_suffix: HashMap::new(),
             emitted_pg_types: HashMap::new(),
             naming,
             generation: 0,
@@ -71,38 +83,80 @@ impl EnumRegistry {
         self.pg_enums_by_name.get(name).map(|v| v.as_slice())
     }
 
+    pub fn rename_pg_enum(&mut self, old_name: &str, new_name: &str) -> bool {
+        let Some(labels) = self.pg_enums_by_name.remove(old_name) else {
+            return false;
+        };
+        self.pg_enums_by_name.insert(new_name.to_string(), labels);
+        self.generation += 1;
+        true
+    }
+
+    pub fn rename_pg_enum_value(&mut self, name: &str, old_value: &str, new_value: &str) -> bool {
+        let Some(labels) = self.pg_enums_by_name.get_mut(name) else {
+            return false;
+        };
+        let Some(value) = labels.iter_mut().find(|value| value.as_str() == old_value) else {
+            return false;
+        };
+        *value = new_value.to_string();
+        self.generation += 1;
+        true
+    }
+
     pub fn get_or_create_pg_type_for_signature(
         &mut self,
         table: &str,
         column: &str,
         labels: &[String],
     ) -> String {
-        let table = sanitize_ident(table);
-        let column = sanitize_ident(column);
-        let signature: Vec<String> = labels.iter().map(|l| l.replace('\0', "")).collect();
-        let signature = signature.join("\0");
-
-        match self.naming {
+        let column_key = format!("{table}\0{column}");
+        if self.naming == EnumNamingStrategy::PerColumn {
+            if let Some(existing) = self.pg_types_by_column.get(&column_key) {
+                return existing.clone();
+            }
+        }
+        let base = format!(
+            "enum__{}__{}",
+            sanitize_ident(table),
+            sanitize_ident(column)
+        );
+        let name = match self.naming {
             EnumNamingStrategy::Dedupe => {
-                if let Some(existing) = self.enum_signatures.get(&signature) {
+                if let Some(existing) = self.enum_signatures.get(labels) {
                     return existing.clone();
                 }
-                let base = format!("enum__{table}__{column}");
-                if self.enum_signatures.values().any(|name| *name == base) {
-                    let mut name = format!("{base}_2");
-                    for n in 3u32.. {
-                        if !self.enum_signatures.values().any(|v| v == &name) {
-                            break;
-                        }
-                        name = format!("{base}_{n}");
-                    }
-                    self.enum_signatures.insert(signature, name.clone());
-                    return name;
-                }
-                self.enum_signatures.insert(signature, base.clone());
-                base
+                let name = self.allocate_type_name(&base);
+                self.enum_signatures.insert(labels.to_vec(), name.clone());
+                name
             }
-            EnumNamingStrategy::PerColumn => format!("enum__{table}__{column}"),
+            EnumNamingStrategy::PerColumn => self.allocate_type_name(&base),
+        };
+        self.pg_types_by_column.insert(column_key, name.clone());
+        name
+    }
+
+    fn allocate_type_name(&mut self, base: &str) -> String {
+        let allocation_key = truncate_utf8(base, 63).to_string();
+        let mut number = self
+            .next_pg_type_suffix
+            .get(&allocation_key)
+            .copied()
+            .unwrap_or(1);
+        loop {
+            let suffix = if number == 1 {
+                String::new()
+            } else {
+                format!("_{number}")
+            };
+            let prefix = truncate_utf8(base, 63 - suffix.len());
+            let candidate = format!("{prefix}{suffix}");
+            if self.used_pg_type_names.insert(candidate.clone()) {
+                self.next_pg_type_suffix
+                    .insert(allocation_key, number.saturating_add(1));
+                return candidate;
+            }
+            number = number.saturating_add(1);
         }
     }
 
@@ -114,50 +168,9 @@ impl EnumRegistry {
             .insert(name.to_string(), labels.to_vec())
     }
 
-    pub fn emitted_labels(&self, name: &str) -> Option<&[String]> {
-        self.emitted_pg_types.get(name).map(|v| v.as_slice())
-    }
-
-    pub fn is_known_pg_enum_type(&self, type_name: &str) -> bool {
-        let normalized = Self::normalize_type_name(type_name);
-        self.pg_enums_by_name.contains_key(&normalized)
-    }
-
-    pub fn pg_enum_labels_for_type(&self, type_name: &str) -> Option<&[String]> {
-        let normalized = Self::normalize_type_name(type_name);
-        self.pg_enums_by_name.get(&normalized).map(|v| v.as_slice())
-    }
-
-    /// Find the registered key that matches `name` (possibly
-    /// differently-qualified). Exact match is tried first; otherwise
-    /// returns the first key whose unqualified name matches.
-    pub fn resolve_pg_enum_key(&self, name: &str) -> Option<String> {
-        if self.pg_enums_by_name.contains_key(name) {
-            return Some(name.to_string());
-        }
-        let unq = Self::normalize_type_name(name);
-        let mut candidates: Vec<&String> = self
-            .pg_enums_by_name
-            .keys()
-            .filter(|k| Self::normalize_type_name(k) == unq)
-            .collect();
-        candidates.sort();
-        candidates.first().map(|k| (*k).clone())
-    }
-
     /// Iterate over all registered PG enum type definitions.
     pub fn pg_enum_entries(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
         self.pg_enums_by_name.iter()
-    }
-
-    pub fn normalize_type_name(name: &str) -> String {
-        let unqualified = name.rsplit('.').next().unwrap_or(name);
-        unqualified
-            .trim_matches('"')
-            .trim_matches('`')
-            .trim_matches('[')
-            .trim_matches(']')
-            .to_string()
     }
 }
 
@@ -178,6 +191,14 @@ fn sanitize_ident(s: &str) -> String {
         out.push_str("col");
     }
     out
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 #[cfg(test)]
@@ -237,42 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_type_name() {
-        assert_eq!(
-            EnumRegistry::normalize_type_name("\"myschema\".\"order_status\""),
-            "order_status"
-        );
-        assert_eq!(
-            EnumRegistry::normalize_type_name("myschema.order_status"),
-            "order_status"
-        );
-        assert_eq!(
-            EnumRegistry::normalize_type_name("\"order_status\""),
-            "order_status"
-        );
-        assert_eq!(
-            EnumRegistry::normalize_type_name("order_status"),
-            "order_status"
-        );
-        assert_eq!(
-            EnumRegistry::normalize_type_name("`order_status`"),
-            "order_status"
-        );
-        assert_eq!(
-            EnumRegistry::normalize_type_name("[order_status]"),
-            "order_status"
-        );
-    }
-
-    #[test]
-    fn test_normalize_schema_qualified() {
-        assert_eq!(
-            EnumRegistry::normalize_type_name("public.order_status"),
-            "order_status"
-        );
-    }
-
-    #[test]
     fn dedupe_collision_uses_deterministic_counter_not_hash() {
         let mut reg = EnumRegistry::with_naming(EnumNamingStrategy::Dedupe);
         let first = reg.get_or_create_pg_type_for_signature("t", "s", &["a".into()]);
@@ -293,5 +278,34 @@ mod tests {
             first, second,
             "labels [\"a,b\",\"c\"] and [\"a\",\"b,c\"] must not share a type"
         );
+    }
+
+    #[test]
+    fn dedupe_signature_is_injective_for_embedded_nul() {
+        let mut registry = EnumRegistry::with_naming(EnumNamingStrategy::Dedupe);
+        let plain = registry.get_or_create_pg_type_for_signature("t1", "a", &["ab".into()]);
+        let with_nul = registry.get_or_create_pg_type_for_signature("t2", "b", &["a\0b".into()]);
+        assert_ne!(plain, with_nul);
+    }
+
+    #[test]
+    fn per_column_names_are_unique_after_sanitization() {
+        let mut reg = EnumRegistry::new();
+        let first = reg.get_or_create_pg_type_for_signature("a-b", "x", &["one".into()]);
+        let second = reg.get_or_create_pg_type_for_signature("a_b", "x", &["two".into()]);
+        assert_eq!(first, "enum__a_b__x");
+        assert_eq!(second, "enum__a_b__x_2");
+    }
+
+    #[test]
+    fn generated_names_fit_postgres_limit_and_remain_unique() {
+        let mut reg = EnumRegistry::new();
+        let long_table = "a".repeat(80);
+        let first = reg.get_or_create_pg_type_for_signature(&long_table, "x-y", &["one".into()]);
+        let second = reg.get_or_create_pg_type_for_signature(&long_table, "x_y", &["two".into()]);
+        assert!(first.len() <= 63, "{first}");
+        assert!(second.len() <= 63, "{second}");
+        assert_ne!(first, second);
+        assert!(second.ends_with("_2"), "{second}");
     }
 }
