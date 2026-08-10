@@ -112,11 +112,26 @@ impl<F: FnMut(u64, u64) -> Result<Vec<u8>, String>> std::io::Read for ChunkCache
         if self.pos < self.chunk_start || self.pos >= chunk_end {
             let start = self.pos;
             let end = (start + CHUNK_BYTES).min(self.total);
-            self.chunk = (self.fetch)(start, end)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            self.chunk = (self.fetch)(start, end).map_err(std::io::Error::other)?;
             self.chunk_start = start;
             if self.chunk.is_empty() {
-                return Ok(0);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "chunk source returned no data at byte {start} of {}",
+                        self.total
+                    ),
+                ));
+            }
+            if self.chunk.len() as u64 > end - start {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "chunk source returned {} bytes for a {}-byte request",
+                        self.chunk.len(),
+                        end - start
+                    ),
+                ));
             }
         }
         let offset = (self.pos - self.chunk_start) as usize;
@@ -770,6 +785,83 @@ mod tests {
         drop(reader);
         // 100KB source with 8MB chunks: a single fetch serves everything.
         assert_eq!(fetches, 1);
+    }
+
+    #[test]
+    fn chunk_cache_reads_across_chunk_boundaries() {
+        let source: Vec<u8> = (0..CHUNK_BYTES as usize + 137)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let total = source.len() as u64;
+        let mut fetches = 0usize;
+        let mut fetch = |start: u64, end: u64| -> Result<Vec<u8>, String> {
+            fetches += 1;
+            Ok(source[start as usize..end as usize].to_vec())
+        };
+        let mut reader = ChunkCache::new(&mut fetch, total);
+
+        use std::io::Read;
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+
+        assert_eq!(out, source);
+        drop(reader);
+        assert_eq!(fetches, 2);
+    }
+
+    #[test]
+    fn chunk_cache_accepts_short_nonempty_chunks() {
+        let source = b"CREATE TABLE t (id INT);";
+        let total = source.len() as u64;
+        let mut fetch = |start: u64, end: u64| -> Result<Vec<u8>, String> {
+            let short_end = (start + 3).min(end);
+            Ok(source[start as usize..short_end as usize].to_vec())
+        };
+        let mut reader = ChunkCache::new(&mut fetch, total);
+
+        use std::io::Read;
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+
+        assert_eq!(out, source);
+    }
+
+    #[test]
+    fn chunk_cache_rejects_empty_chunk_before_total() {
+        let mut reader = ChunkCache::new(|_, _| Ok(Vec::new()), 1);
+        let error = std::io::Read::read(&mut reader, &mut [0; 1]).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn chunk_cache_propagates_fetch_error_after_data() {
+        let mut calls = 0;
+        let mut fetch = |_, _| -> Result<Vec<u8>, String> {
+            calls += 1;
+            if calls == 1 {
+                Ok(vec![1, 2, 3])
+            } else {
+                Err("blob read failed".into())
+            }
+        };
+        let mut reader = ChunkCache::new(&mut fetch, 4);
+
+        use std::io::Read;
+        let mut out = Vec::new();
+        let error = reader.read_to_end(&mut out).unwrap_err();
+
+        assert_eq!(out, [1, 2, 3]);
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "blob read failed");
+    }
+
+    #[test]
+    fn chunk_cache_rejects_data_past_declared_total() {
+        let mut reader = ChunkCache::new(|_, _| Ok(vec![1, 2]), 1);
+        let error = std::io::Read::read(&mut reader, &mut [0; 2]).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
