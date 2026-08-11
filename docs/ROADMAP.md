@@ -44,9 +44,12 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 
 - ✅ `generate` — Production-shaped synthetic SQL from dumps, schemas, or YAML models
 
+**Shipped (v1.22.0):**
+
+- ✅ Enum Conversion — Proper bidirectional PG↔MySQL enum type conversion
+
 **Next:**
 
-- Enum Conversion — Proper PG↔MySQL enum type conversion
 - Migrate — Schema migration generation
 - DBML — Import/export DBML schema definitions
 
@@ -696,7 +699,7 @@ can't just be another `Compression::wrap_reader` decoder. Implementation:
 
 ---
 
-### Enum Type Conversion (implemented, unreleased)
+### Enum Type Conversion (shipped in v1.22.0)
 
 **Target**: 2-3 weeks  
 **Theme**: Proper bidirectional enum conversion between PostgreSQL and MySQL
@@ -918,7 +921,7 @@ rows, drop the original, rename.
 | ------- | ----------------------------------------------------------------- | ----------- |
 | v1.16.0 | Zip Input + Adaptive I/O + Synthetic Data Generation (`generate`) | Current     |
 | v1.17.0 | Synthetic data generation (`generate`)                            | ✅ Released |
-| v1.18.0 | Enum Conversion                                                   | Implemented (unreleased) |
+| v1.22.0 | Enum Conversion                                                   | ✅ Released |
 | v1.19.0 | Migrate                                                           | Planned     |
 | v1.20.0 | DBML                                                              | Planned     |
 | v2.0.0  | Parallel                                                          | Planned     |
@@ -1021,7 +1024,7 @@ rows, drop the original, rename.
     - Production-shaped synthetic SQL from dumps, schemas, or YAML models
     - Bounded profiling, reusable YAML models, deterministic generation, and verification
 
-19. ✅ **Enum Conversion (implemented, unreleased)** — Implemented (unreleased)
+19. ✅ **v1.22.0 — Enum Conversion** — Released
     - Proper PG↔MySQL enum type conversion
     - PostgreSQL CREATE TYPE ... AS ENUM → MySQL inline ENUM()
     - MySQL inline ENUM() → PostgreSQL CREATE TYPE

@@ -77,17 +77,17 @@ sql-splitter convert pg_dump.sql --to sqlite | sqlite3 dev.db
 
 ## Options
 
-| Flag            | Short | Description                                            | Default     |
-| --------------- | ----- | ------------------------------------------------------ | ----------- |
-| `--output`      | `-o`  | Output SQL file or directory                           | stdout      |
-| `--from`        |       | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect |
-| `--to`          |       | Target dialect (required)                              | -           |
-| `--strict`      |       | Fail on any unsupported feature                        | false       |
-| `--progress`    | `-p`  | Show progress bar                                      | false       |
-| `--dry-run`     |       | Preview without writing files                          | false       |
-| `--fail-fast`   |       | Stop on first error (for glob patterns)                | false       |
+| Flag            | Short | Description                                            | Default      |
+| --------------- | ----- | ------------------------------------------------------ | ------------ |
+| `--output`      | `-o`  | Output SQL file or directory                           | stdout       |
+| `--from`        |       | Source dialect: `mysql`, `postgres`, `sqlite`, `mssql` | auto-detect  |
+| `--to`          |       | Target dialect (required)                              | -            |
+| `--strict`      |       | Fail on any unsupported feature                        | false        |
+| `--progress`    | `-p`  | Show progress bar                                      | false        |
+| `--dry-run`     |       | Preview without writing files                          | false        |
+| `--fail-fast`   |       | Stop on first error (for glob patterns)                | false        |
 | `--enum-naming` |       | MySQL→PG enum naming: `per-column` or `dedupe`         | `per-column` |
-| `--json`        |       | Output results as JSON                                 | false       |
+| `--json`        |       | Output results as JSON                                 | false        |
 
 ## Supported Conversions
 
@@ -137,13 +137,13 @@ The conversion **continues successfully** even when encountering unsupported fea
 
 These types are converted to the closest equivalent, with a warning:
 
-| Feature                     | Converted To                                             | Notes                                                            |
-| --------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------- |
-| MySQL `ENUM('a','b','c')` to PostgreSQL | `CREATE TYPE enum__{table}__{column} AS ENUM ('a','b','c')` + typed column | Semantic-preserving: enum values become a PostgreSQL enum type |
-| PostgreSQL `CREATE TYPE ... AS ENUM` to MySQL | Inline `ENUM('a','b','c')` on the column | Semantic-preserving |
-| MySQL `ENUM('a','b','c')` to SQLite | `TEXT` | Lossy: enum values are lost |
-| MySQL `ENUM('a','b','c')` to MSSQL | `NVARCHAR(255)` | Lossy: enum values are lost |
-| PostgreSQL arrays (`INT[]`) | `JSON` (MySQL), `TEXT` (SQLite), `NVARCHAR(MAX)` (MSSQL) | Data format preserved as JSON string                             |
+| Feature                                       | Converted To                                                               | Notes                                                          |
+| --------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| MySQL `ENUM('a','b','c')` to PostgreSQL       | `CREATE TYPE enum__{table}__{column} AS ENUM ('a','b','c')` + typed column | Semantic-preserving: enum values become a PostgreSQL enum type |
+| PostgreSQL `CREATE TYPE ... AS ENUM` to MySQL | Inline `ENUM('a','b','c')` on the column                                   | Semantic-preserving                                            |
+| MySQL `ENUM('a','b','c')` to SQLite           | `TEXT`                                                                     | Lossy: enum values are lost                                    |
+| MySQL `ENUM('a','b','c')` to MSSQL            | `NVARCHAR(255)`                                                            | Lossy: enum values are lost                                    |
+| PostgreSQL arrays (`INT[]`)                   | `JSON` (MySQL), `TEXT` (SQLite), `NVARCHAR(MAX)` (MSSQL)                   | Data format preserved as JSON string                           |
 
 Use `--enum-naming` to control how enum type names are generated for MySQL→PostgreSQL conversions (see [Options](#options)).
 
