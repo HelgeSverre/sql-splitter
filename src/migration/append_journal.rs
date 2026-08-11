@@ -163,6 +163,9 @@ pub enum JournalEvent {
         from: OperationState,
         to: OperationState,
     },
+    OperationsPreparedAtomic {
+        operation_ids: Vec<String>,
+    },
     ChunkPrepared(PreparedChunk),
     ChunkCommitted {
         chunk_id: u64,
@@ -315,6 +318,9 @@ impl JournalProjection {
                 }
                 self.operations.insert(operation_id.clone(), *to);
             }
+            JournalEvent::OperationsPreparedAtomic { operation_ids } => {
+                self.apply_operations_prepared_atomic(operation_ids)?;
+            }
             JournalEvent::ChunkPrepared(chunk) => {
                 if self.status != MigrationStatus::Running || self.schema_verified {
                     return Err(AppendJournalError::InvalidTransition("chunk phase"));
@@ -404,6 +410,54 @@ impl JournalProjection {
             return Err(AppendJournalError::InvalidTransition("first chunk"));
         }
         self.prepared_chunk = Some(chunk.clone());
+        Ok(())
+    }
+
+    fn apply_operations_prepared_atomic(
+        &mut self,
+        operation_ids: &[String],
+    ) -> Result<(), AppendJournalError> {
+        if self.status != MigrationStatus::Running
+            || self.prepared_chunk.is_some()
+            || self.operations.values().any(|state| {
+                matches!(state, OperationState::Running | OperationState::Prepared)
+            })
+        {
+            return Err(AppendJournalError::InvalidTransition(
+                "atomic operation prepare phase",
+            ));
+        }
+        let group = operation_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        if group.is_empty() || group.len() != operation_ids.len() {
+            return Err(AppendJournalError::InvalidTransition(
+                "atomic operation prepare set",
+            ));
+        }
+        for operation_id in &group {
+            if self.operations.get(*operation_id) != Some(&OperationState::Pending)
+                || self.phases.get(*operation_id) != Some(&OperationPhase::Execution)
+            {
+                return Err(AppendJournalError::InvalidTransition(
+                    "atomic operation prepare state",
+                ));
+            }
+            let dependencies = self
+                .dependencies
+                .get(*operation_id)
+                .ok_or(AppendJournalError::InvalidTransition("unknown operation"))?;
+            if dependencies.iter().any(|dependency| {
+                !group.contains(dependency.as_str())
+                    && self.operations.get(dependency) != Some(&OperationState::Verified)
+            }) {
+                return Err(AppendJournalError::InvalidTransition(
+                    "atomic operation dependency incomplete",
+                ));
+            }
+        }
+        for operation_id in group {
+            self.operations
+                .insert(operation_id.to_owned(), OperationState::Prepared);
+        }
         Ok(())
     }
 
@@ -592,6 +646,16 @@ impl AppendJournal {
         self.append_validated(JournalEvent::MigrationStatus {
             from: self.projection.status,
             to,
+        })
+    }
+
+    /// Durably prepares one transactional group before any group effect is sent.
+    pub fn prepare_operations_atomic<'a>(
+        &mut self,
+        operation_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), AppendJournalError> {
+        self.append_validated(JournalEvent::OperationsPreparedAtomic {
+            operation_ids: operation_ids.into_iter().map(str::to_owned).collect(),
         })
     }
 
@@ -1243,13 +1307,17 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
+        genesis_from_operations(operations)
+    }
+
+    fn genesis_from_operations(operations: Vec<PlanOperation>) -> Genesis {
         let specs = operations
             .iter()
             .map(|operation| OperationSpec {
                 operation_id: operation.id.to_string(),
-                dependencies: Vec::new(),
-                is_copy: true,
-                phase: OperationPhase::Execution,
+                dependencies: operation.dependencies.iter().map(ToString::to_string).collect(),
+                is_copy: operation.kind == OperationKind::CopyTable,
+                phase: operation_phase(&operation.kind),
             })
             .collect();
         let reviewed_plan = ReviewedPlan::new(MigrationPlan {
@@ -1410,6 +1478,50 @@ mod tests {
         let mut value = genesis();
         value.operations[0].phase = OperationPhase::Verification;
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn atomic_prepare_accepts_dependencies_inside_the_group() {
+        let namespace = PlanOperation::new(
+            OperationKind::CreateNamespace,
+            None,
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let table = PlanOperation::new(
+            OperationKind::CreateTable,
+            None,
+            vec![namespace.id.clone()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let genesis = genesis_from_operations(vec![namespace, table]);
+        let operation_ids = genesis
+            .operations
+            .iter()
+            .map(|operation| operation.operation_id.clone())
+            .collect::<Vec<_>>();
+        let mut projection = JournalProjection::from_genesis(&genesis);
+        projection
+            .apply(&JournalEvent::OperationsPreparedAtomic {
+                operation_ids: operation_ids.clone(),
+            })
+            .unwrap();
+        assert!(operation_ids.iter().all(|operation_id| {
+            projection.operations.get(operation_id) == Some(&OperationState::Prepared)
+        }));
+
+        let mut invalid = JournalProjection::from_genesis(&genesis);
+        assert!(invalid
+            .apply(&JournalEvent::OperationsPreparedAtomic {
+                operation_ids: vec![operation_ids[1].clone()],
+            })
+            .is_err());
+        assert!(invalid
+            .operations
+            .values()
+            .all(|state| *state == OperationState::Pending));
     }
 
     #[test]
