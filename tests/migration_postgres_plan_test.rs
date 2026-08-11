@@ -53,7 +53,7 @@ use sql_splitter::migration::runner::{
 fn live_plan_is_read_only_self_contained_and_deterministic() -> anyhow::Result<()> {
     let source = required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?;
     let target = required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let first_path = directory.path().join("first.json");
     let second_path = directory.path().join("second.json");
 
@@ -536,7 +536,7 @@ fn live_pre_data_ddl_is_create_only_and_rechecks_emptiness() -> anyhow::Result<(
 fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
     let source = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
     let target = required_path("SQL_SPLITTER_PG_RUN_TARGET_CONFIG")?;
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let plan_path = directory.path().join("reviewed-plan.json");
     let state_path = directory.path().join("migration-state.journal");
     let reviewed = write_live_plan(&source, &target, &plan_path)?;
@@ -675,7 +675,7 @@ fn live_write_fence_rearms_without_erasing_prior_history() -> anyhow::Result<()>
     let old: InstalledPostgresFence = read_json(old_artifact_path)?;
     assert!(postgres_write_fence_is_released(&admin, &old.evidence)?);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let new_artifact_path = directory.path().join("rearmed-fence.json");
     let new = install_postgres_write_fence(&admin, &reviewed, &new_artifact_path)?;
     assert_ne!(old.evidence, new.evidence);
@@ -723,7 +723,7 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
     let base_admin =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let interruptions = [
         PostgresExecutionInterruption::AfterDdlPrepared,
         PostgresExecutionInterruption::AfterDdlCommitted,
@@ -885,7 +885,7 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -954,7 +954,9 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
 
     let state = AppendJournal::open_resume(&state_path)?;
     assert!(state.projection().prepared_chunk.is_some());
-    assert!(committed_chunks(&state)?.next().is_none());
+    assert_eq!(state.projection().last_chunk_id, 0);
+    assert!(state.projection().copy_cursors.is_empty());
+    drop(state);
     let mut target_client = connect(&target)?;
     let row_count: i64 = target_client
         .query_one("SELECT count(*) FROM public.accounts", &[])?
@@ -1030,7 +1032,7 @@ fn live_standalone_unique_index_is_created_before_copy_and_resumed() -> anyhow::
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -1301,7 +1303,7 @@ fn run_live_partition_case(
          GRANT SELECT ON ALL TABLES IN SCHEMA public TO migration_reader"
     ))?;
     drop(setup);
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -1495,7 +1497,7 @@ fn run_live_generated_column_case(
          GRANT SELECT ON public.accounts TO migration_reader"
     ))?;
     drop(setup);
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -1639,7 +1641,7 @@ fn run_live_sequence_recovery_case(
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -1821,7 +1823,7 @@ fn run_live_ordinary_index_recovery_case(
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -2049,7 +2051,7 @@ fn run_live_network_commit_response_loss_case(
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -2169,7 +2171,8 @@ fn wait_for_exact_account_rows(target: &PostgresEndpointConfig) -> anyhow::Resul
 fn assert_one_prepared_chunk(state_path: &std::path::Path) -> anyhow::Result<()> {
     let state = AppendJournal::open_resume(state_path)?;
     assert!(state.projection().prepared_chunk.is_some());
-    assert!(committed_chunks(&state)?.next().is_none());
+    assert_eq!(state.projection().last_chunk_id, 0);
+    assert!(state.projection().copy_cursors.is_empty());
     Ok(())
 }
 
@@ -2291,7 +2294,7 @@ fn run_live_foreign_key_recovery_case(
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -2494,7 +2497,7 @@ fn live_foreign_key_conflict_requires_manual_reconciliation() -> anyhow::Result<
     ))?;
     drop(setup);
 
-    let directory = tempfile::tempdir()?;
+    let directory = private_tempdir()?;
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
     let admin_path = directory.path().join("admin.toml");
@@ -2730,4 +2733,10 @@ fn required_path(name: &str) -> anyhow::Result<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("{name} must name a PostgreSQL endpoint config"))
+}
+
+fn private_tempdir() -> anyhow::Result<tempfile::TempDir> {
+    Ok(tempfile::Builder::new()
+        .prefix("migration-postgres-")
+        .tempdir_in(std::env::current_dir()?)?)
 }
