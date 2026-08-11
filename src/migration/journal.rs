@@ -628,14 +628,15 @@ impl MigrationState {
         &mut self,
         operation_ids: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), JournalError> {
-        if self.status != MigrationStatus::Running
-            || self.operations.iter().any(|operation| {
-                matches!(
-                    operation.state,
-                    OperationState::Running | OperationState::Prepared
-                )
-            })
-        {
+        if !matches!(
+            self.status,
+            MigrationStatus::Running | MigrationStatus::Verifying
+        ) || self.operations.iter().any(|operation| {
+            matches!(
+                operation.state,
+                OperationState::Running | OperationState::Prepared
+            )
+        }) {
             return Err(JournalError::InvalidMigrationStatus);
         }
         let operation_ids = operation_ids.into_iter().collect::<BTreeSet<_>>();
@@ -1143,6 +1144,34 @@ mod tests {
         state.verify_operation("create-a").unwrap();
         state.commit_prepared_operation("create-b").unwrap();
         state.verify_operation("create-b").unwrap();
+    }
+
+    #[test]
+    fn atomic_operation_intent_is_allowed_during_verification() {
+        let mut state = MigrationState::with_operations(
+            binding(),
+            [
+                ("copy".to_owned(), Vec::new()),
+                ("add-fk".to_owned(), vec!["copy".to_owned()]),
+            ],
+        )
+        .unwrap();
+        state.start_operation("copy").unwrap();
+        state.commit_operation("copy").unwrap();
+        state.begin_verification().unwrap();
+        state.verify_operation("copy").unwrap();
+
+        state.prepare_operations_atomic(["add-fk"]).unwrap();
+
+        assert_eq!(
+            state
+                .operations
+                .iter()
+                .find(|operation| operation.operation_id == "add-fk")
+                .unwrap()
+                .state,
+            OperationState::Prepared
+        );
     }
 
     #[test]

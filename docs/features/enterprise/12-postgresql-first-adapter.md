@@ -16,10 +16,14 @@ The feature-gated spike CLI can execute a reviewed same-dialect plan for the
 supported table subset. It durably records operation and chunk transitions,
 uses bounded keyset pages, and performs exact source/target verification before
 finalization. It can resume the implemented table subset from protected state
-under an exactly re-attested write fence. It is not production-ready. There is
-no foreign-key installation or complete crash-reconciliation matrix. Sequences, generated
-columns, user-defined types, extensions, and other unsupported semantics fail
-before DDL.
+under an exactly re-attested write fence. It checks, adds, and validates the
+supported PostgreSQL foreign-key subset after data verification. This includes
+composite, nullable, self-referencing, and cyclic relationships, exact column
+order, `MATCH SIMPLE` and `MATCH FULL`, referential actions, and deferrability.
+Targeted PostgreSQL 15+ `ON DELETE SET NULL/DEFAULT (column-list)` semantics
+fail closed because they are not modeled. It is not production-ready.
+Sequences, generated columns, user-defined types, extensions, and other
+unsupported semantics fail before DDL.
 
 ## Reasons
 
@@ -60,7 +64,12 @@ additional matrix uses the non-default `migration-fault-injection` test feature
 and isolated databases to stop after prepared DDL, committed DDL, prepared data,
 an applied commit with a lost acknowledgement, complete verification, and fence
 release. Every case must resume to the exact expected rows and verified journal.
-The separate feature is not part of the normal spike API.
+The foreign-key matrix also stops before and after constraint commit, resumes,
+and compares exact PostgreSQL catalog metadata and internal constraint-trigger
+state. A negative live case proves composite anti-join detection and persists a
+manual-reconciliation state for a conflicting target constraint. The separate
+feature is not part of the normal spike API. PostgreSQL 17 currently passes this
+matrix; versions 15 and 16 remain required evidence.
 
 ## Configuration and security
 
@@ -100,11 +109,11 @@ the complete report.
 The adapter does not yet prove:
 
 - complete table-key suitability and pagination matrices;
-- resume coverage at every DDL, chunk, verification, and release boundary;
+- a real network fault that loses a commit response before the server applies
+  or rejects the commit;
 - fence generation rollover and the complete fence failure-injection matrix;
 - post-data indexes and broader DDL coverage;
-- foreign-key anti-joins and constraint validation;
-- crash recovery or full resume;
+- unsupported foreign-key variants beyond the explicitly modeled subset;
 - complete real-engine acceptance matrices in CI.
 
 These items remain required by

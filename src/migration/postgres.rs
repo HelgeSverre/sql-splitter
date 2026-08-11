@@ -448,6 +448,513 @@ impl PostgresTargetFactory {
         }
         transaction.commit().map_err(database_error)
     }
+
+    /// Inspect one target foreign key against exact typed source metadata.
+    pub fn inspect_foreign_key(
+        &self,
+        foreign_key: &PostgresForeignKey,
+    ) -> ConnectionResult<PostgresForeignKeyState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        inspect_foreign_key(&mut client, foreign_key)
+    }
+
+    /// Check the exact PostgreSQL null and match semantics without changing target state.
+    pub fn check_foreign_key(
+        &self,
+        foreign_key: &PostgresForeignKey,
+    ) -> ConnectionResult<PostgresForeignKeyCheck> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        check_foreign_key(&mut client, foreign_key)
+    }
+
+    /// Reconcile an absent or unvalidated constraint and require an exact result.
+    ///
+    /// Creation uses one transaction containing the exact anti-join, `ADD
+    /// CONSTRAINT ... NOT VALID`, and `VALIDATE CONSTRAINT`.
+    pub fn reconcile_foreign_key(
+        &self,
+        foreign_key: &PostgresForeignKey,
+    ) -> ConnectionResult<PostgresForeignKeyState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        match inspect_foreign_key(&mut transaction, foreign_key)? {
+            PostgresForeignKeyState::ExactValidated => {
+                transaction.commit().map_err(database_error)?;
+                return Ok(PostgresForeignKeyState::ExactValidated);
+            }
+            PostgresForeignKeyState::Different => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "target constraint {} exists with different semantics",
+                    foreign_key.name
+                )));
+            }
+            PostgresForeignKeyState::Missing => {
+                let check = check_foreign_key(&mut transaction, foreign_key)?;
+                if check.has_violation {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "target rows violate foreign key {}",
+                        foreign_key.name
+                    )));
+                }
+                transaction
+                    .batch_execute(&foreign_key_add_statement(foreign_key))
+                    .map_err(database_error)?;
+            }
+            PostgresForeignKeyState::ExactNotValidated => {}
+        }
+        transaction
+            .batch_execute(&format!(
+                "ALTER TABLE {}.{} VALIDATE CONSTRAINT {}",
+                quote_identifier(&foreign_key.table.namespace),
+                quote_identifier(&foreign_key.table.name),
+                quote_identifier(&foreign_key.name)
+            ))
+            .map_err(database_error)?;
+        if inspect_foreign_key(&mut transaction, foreign_key)?
+            != PostgresForeignKeyState::ExactValidated
+        {
+            return Err(ConnectionError::InvalidRequest(format!(
+                "target constraint {} did not validate exactly",
+                foreign_key.name
+            )));
+        }
+        transaction.commit().map_err(database_error)?;
+        Ok(PostgresForeignKeyState::ExactValidated)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresForeignKeyMatch {
+    Simple,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresForeignKeyAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresForeignKey {
+    pub catalog_object_id: String,
+    pub name: Identifier,
+    pub table: QualifiedTable,
+    pub columns: Vec<Identifier>,
+    pub referenced_table: QualifiedTable,
+    pub referenced_columns: Vec<Identifier>,
+    pub match_type: PostgresForeignKeyMatch,
+    pub update_action: PostgresForeignKeyAction,
+    pub delete_action: PostgresForeignKeyAction,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostgresForeignKeyCheck {
+    pub has_violation: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresForeignKeyState {
+    Missing,
+    ExactNotValidated,
+    ExactValidated,
+    Different,
+}
+
+/// Parse every PostgreSQL foreign key from typed catalog attributes.
+pub fn postgres_foreign_keys(catalog: &VendorCatalog) -> ConnectionResult<Vec<PostgresForeignKey>> {
+    if catalog.dialect != "postgresql" {
+        return Err(ConnectionError::InvalidRequest(
+            "foreign-key metadata requires a PostgreSQL catalog".into(),
+        ));
+    }
+    let tables = catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| {
+            namespace
+                .objects
+                .iter()
+                .filter(|object| object.kind == CatalogObjectKind::Table)
+                .map(|object| {
+                    (
+                        object.id.as_str(),
+                        QualifiedTable {
+                            namespace: namespace.name.clone(),
+                            name: object.name.clone(),
+                        },
+                    )
+                })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut foreign_keys = Vec::new();
+    for namespace in &catalog.namespaces {
+        for object in namespace
+            .objects
+            .iter()
+            .filter(|object| object.kind == CatalogObjectKind::ForeignKey)
+        {
+            let table_oid = required_attribute_text(object, "table_oid")?;
+            let referenced_oid = required_attribute_text(object, "referenced_table_oid")?;
+            let table = tables.get(table_oid).cloned().ok_or_else(|| {
+                ConnectionError::InvalidRequest(format!(
+                    "foreign key {} references an absent child table",
+                    object.name
+                ))
+            })?;
+            if table.namespace != namespace.name {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "foreign key {} has an inconsistent namespace",
+                    object.name
+                )));
+            }
+            let referenced_table = tables.get(referenced_oid).cloned().ok_or_else(|| {
+                ConnectionError::InvalidRequest(format!(
+                    "foreign key {} references an absent parent table",
+                    object.name
+                ))
+            })?;
+            let columns = identifier_array(object, "columns")?;
+            let referenced_columns = identifier_array(object, "referenced_columns")?;
+            if columns.is_empty() || columns.len() != referenced_columns.len() {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "foreign key {} has invalid column metadata",
+                    object.name
+                )));
+            }
+            let match_type = match required_attribute_text(object, "match_type")? {
+                "s" => PostgresForeignKeyMatch::Simple,
+                "f" => PostgresForeignKeyMatch::Full,
+                value => {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "foreign key {} has unsupported match type {value}",
+                        object.name
+                    )));
+                }
+            };
+            let update_action = parse_foreign_key_action(object, "update_action")?;
+            let delete_action = parse_foreign_key_action(object, "delete_action")?;
+            if object
+                .attributes
+                .get("delete_set_columns")
+                .is_some_and(|value| !value.is_null())
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "foreign key {} uses a targeted ON DELETE SET column list that is not modeled",
+                    object.name
+                )));
+            }
+            let deferrable = required_attribute_bool(object, "deferrable")?;
+            let initially_deferred = required_attribute_bool(object, "deferred")?;
+            if initially_deferred && !deferrable {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "foreign key {} is initially deferred but not deferrable",
+                    object.name
+                )));
+            }
+            if !required_attribute_bool(object, "validated")? {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "source foreign key {} is not validated",
+                    object.name
+                )));
+            }
+            foreign_keys.push(PostgresForeignKey {
+                catalog_object_id: object.id.clone(),
+                name: object.name.clone(),
+                table,
+                columns,
+                referenced_table,
+                referenced_columns,
+                match_type,
+                update_action,
+                delete_action,
+                deferrable,
+                initially_deferred,
+            });
+        }
+    }
+    foreign_keys.sort_by(|left, right| {
+        left.table
+            .cmp(&right.table)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(foreign_keys)
+}
+
+fn required_attribute_text<'a>(object: &'a CatalogObject, name: &str) -> ConnectionResult<&'a str> {
+    object
+        .attributes
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            ConnectionError::InvalidRequest(format!(
+                "foreign key {} has no valid {name} attribute",
+                object.name
+            ))
+        })
+}
+
+fn required_attribute_bool(object: &CatalogObject, name: &str) -> ConnectionResult<bool> {
+    object
+        .attributes
+        .get(name)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            ConnectionError::InvalidRequest(format!(
+                "foreign key {} has no valid {name} attribute",
+                object.name
+            ))
+        })
+}
+
+fn identifier_array(object: &CatalogObject, name: &str) -> ConnectionResult<Vec<Identifier>> {
+    object
+        .attributes
+        .get(name)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            ConnectionError::InvalidRequest(format!(
+                "foreign key {} has no valid {name} array",
+                object.name
+            ))
+        })?
+        .iter()
+        .map(|value| {
+            let value = value.as_str().ok_or_else(|| {
+                ConnectionError::InvalidRequest(format!(
+                    "foreign key {} has a non-text {name} entry",
+                    object.name
+                ))
+            })?;
+            Identifier::new(value).map_err(|error| {
+                ConnectionError::InvalidRequest(format!(
+                    "foreign key {} has an invalid {name} entry: {error}",
+                    object.name
+                ))
+            })
+        })
+        .collect()
+}
+
+fn parse_foreign_key_action(
+    object: &CatalogObject,
+    name: &str,
+) -> ConnectionResult<PostgresForeignKeyAction> {
+    match required_attribute_text(object, name)? {
+        "a" => Ok(PostgresForeignKeyAction::NoAction),
+        "r" => Ok(PostgresForeignKeyAction::Restrict),
+        "c" => Ok(PostgresForeignKeyAction::Cascade),
+        "n" => Ok(PostgresForeignKeyAction::SetNull),
+        "d" => Ok(PostgresForeignKeyAction::SetDefault),
+        value => Err(ConnectionError::InvalidRequest(format!(
+            "foreign key {} has unsupported {name} value {value}",
+            object.name
+        ))),
+    }
+}
+
+fn check_foreign_key(
+    client: &mut impl postgres::GenericClient,
+    foreign_key: &PostgresForeignKey,
+) -> ConnectionResult<PostgresForeignKeyCheck> {
+    let sql = foreign_key_violation_query(foreign_key)?;
+    let has_violation = client.query_one(&sql, &[]).map_err(database_error)?.get(0);
+    Ok(PostgresForeignKeyCheck { has_violation })
+}
+
+fn foreign_key_violation_query(foreign_key: &PostgresForeignKey) -> ConnectionResult<String> {
+    validate_foreign_key_shape(foreign_key)?;
+    let child_columns = foreign_key
+        .columns
+        .iter()
+        .map(|column| format!("child.{}", quote_identifier(column)))
+        .collect::<Vec<_>>();
+    let equality = foreign_key
+        .columns
+        .iter()
+        .zip(&foreign_key.referenced_columns)
+        .map(|(child, parent)| {
+            format!(
+                "parent.{} = child.{}",
+                quote_identifier(parent),
+                quote_identifier(child)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let all_non_null = child_columns
+        .iter()
+        .map(|column| format!("{column} IS NOT NULL"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let any_null = child_columns
+        .iter()
+        .map(|column| format!("{column} IS NULL"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let any_non_null = child_columns
+        .iter()
+        .map(|column| format!("{column} IS NOT NULL"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let missing_parent = format!(
+        "NOT EXISTS (SELECT 1 FROM {}.{} AS parent WHERE {equality})",
+        quote_identifier(&foreign_key.referenced_table.namespace),
+        quote_identifier(&foreign_key.referenced_table.name),
+    );
+    let violation = match foreign_key.match_type {
+        PostgresForeignKeyMatch::Simple => format!("({all_non_null}) AND {missing_parent}"),
+        PostgresForeignKeyMatch::Full => format!(
+            "(({any_null}) AND ({any_non_null})) OR (({all_non_null}) AND {missing_parent})"
+        ),
+    };
+    Ok(format!(
+        "SELECT EXISTS (SELECT 1 FROM {}.{} AS child WHERE {violation})",
+        quote_identifier(&foreign_key.table.namespace),
+        quote_identifier(&foreign_key.table.name),
+    ))
+}
+
+fn validate_foreign_key_shape(foreign_key: &PostgresForeignKey) -> ConnectionResult<()> {
+    if foreign_key.columns.is_empty()
+        || foreign_key.columns.len() != foreign_key.referenced_columns.len()
+    {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "foreign key {} has invalid column cardinality",
+            foreign_key.name
+        )));
+    }
+    if foreign_key.initially_deferred && !foreign_key.deferrable {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "foreign key {} is initially deferred but not deferrable",
+            foreign_key.name
+        )));
+    }
+    Ok(())
+}
+
+fn foreign_key_add_statement(foreign_key: &PostgresForeignKey) -> String {
+    let columns = foreign_key
+        .columns
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let referenced_columns = foreign_key
+        .referenced_columns
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "ALTER TABLE {}.{} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {}.{} ({referenced_columns}) MATCH {} ON UPDATE {} ON DELETE {} {} {} NOT VALID",
+        quote_identifier(&foreign_key.table.namespace),
+        quote_identifier(&foreign_key.table.name),
+        quote_identifier(&foreign_key.name),
+        quote_identifier(&foreign_key.referenced_table.namespace),
+        quote_identifier(&foreign_key.referenced_table.name),
+        match foreign_key.match_type {
+            PostgresForeignKeyMatch::Simple => "SIMPLE",
+            PostgresForeignKeyMatch::Full => "FULL",
+        },
+        foreign_key_action_sql(foreign_key.update_action),
+        foreign_key_action_sql(foreign_key.delete_action),
+        if foreign_key.deferrable { "DEFERRABLE" } else { "NOT DEFERRABLE" },
+        if foreign_key.initially_deferred { "INITIALLY DEFERRED" } else { "INITIALLY IMMEDIATE" },
+    )
+}
+
+fn foreign_key_action_sql(action: PostgresForeignKeyAction) -> &'static str {
+    match action {
+        PostgresForeignKeyAction::NoAction => "NO ACTION",
+        PostgresForeignKeyAction::Restrict => "RESTRICT",
+        PostgresForeignKeyAction::Cascade => "CASCADE",
+        PostgresForeignKeyAction::SetNull => "SET NULL",
+        PostgresForeignKeyAction::SetDefault => "SET DEFAULT",
+    }
+}
+
+fn inspect_foreign_key(
+    client: &mut impl postgres::GenericClient,
+    expected: &PostgresForeignKey,
+) -> ConnectionResult<PostgresForeignKeyState> {
+    validate_foreign_key_shape(expected)?;
+    let rows = client
+        .query(
+            "SELECT pn.nspname, pc.relname, array_agg(ca.attname ORDER BY ck.ordinality)::text[], rn.nspname, rc.relname, array_agg(ra.attname ORDER BY rk.ordinality)::text[], con.confmatchtype::text, con.confupdtype::text, con.confdeltype::text, con.condeferrable, con.condeferred, con.convalidated, (SELECT count(*) FROM pg_trigger t WHERE t.tgconstraint=con.oid), (SELECT COALESCE(bool_and(t.tgisinternal AND t.tgenabled='O'), false) FROM pg_trigger t WHERE t.tgconstraint=con.oid), (to_jsonb(con)->'confdelsetcols')::text FROM pg_constraint con JOIN pg_class pc ON pc.oid=con.conrelid JOIN pg_namespace pn ON pn.oid=pc.relnamespace JOIN pg_class rc ON rc.oid=con.confrelid JOIN pg_namespace rn ON rn.oid=rc.relnamespace JOIN unnest(con.conkey) WITH ORDINALITY ck(attnum, ordinality) ON true JOIN pg_attribute ca ON ca.attrelid=con.conrelid AND ca.attnum=ck.attnum JOIN unnest(con.confkey) WITH ORDINALITY rk(attnum, ordinality) ON rk.ordinality=ck.ordinality JOIN pg_attribute ra ON ra.attrelid=con.confrelid AND ra.attnum=rk.attnum WHERE con.contype='f' AND pn.nspname=$1 AND pc.relname=$2 AND con.conname=$3 GROUP BY pn.nspname, pc.relname, rn.nspname, rc.relname, con.confmatchtype, con.confupdtype, con.confdeltype, con.condeferrable, con.condeferred, con.convalidated, con.oid",
+            &[&expected.table.namespace.as_str(), &expected.table.name.as_str(), &expected.name.as_str()],
+        )
+        .map_err(database_error)?;
+    if rows.is_empty() {
+        return Ok(PostgresForeignKeyState::Missing);
+    }
+    if rows.len() != 1 {
+        return Ok(PostgresForeignKeyState::Different);
+    }
+    let row = &rows[0];
+    let columns: Vec<String> = row.get(2);
+    let referenced_columns: Vec<String> = row.get(5);
+    let exact = row.get::<_, String>(0) == expected.table.namespace.as_str()
+        && row.get::<_, String>(1) == expected.table.name.as_str()
+        && columns
+            .iter()
+            .map(String::as_str)
+            .eq(expected.columns.iter().map(Identifier::as_str))
+        && row.get::<_, String>(3) == expected.referenced_table.namespace.as_str()
+        && row.get::<_, String>(4) == expected.referenced_table.name.as_str()
+        && referenced_columns
+            .iter()
+            .map(String::as_str)
+            .eq(expected.referenced_columns.iter().map(Identifier::as_str))
+        && row.get::<_, String>(6) == foreign_key_match_code(expected.match_type)
+        && row.get::<_, String>(7) == foreign_key_action_code(expected.update_action)
+        && row.get::<_, String>(8) == foreign_key_action_code(expected.delete_action)
+        && row.get::<_, bool>(9) == expected.deferrable
+        && row.get::<_, bool>(10) == expected.initially_deferred
+        && row.get::<_, i64>(12) == 4
+        && row.get::<_, bool>(13)
+        && row
+            .get::<_, Option<String>>(14)
+            .is_none_or(|value| value == "null");
+    if !exact {
+        return Ok(PostgresForeignKeyState::Different);
+    }
+    Ok(if row.get(11) {
+        PostgresForeignKeyState::ExactValidated
+    } else {
+        PostgresForeignKeyState::ExactNotValidated
+    })
+}
+
+fn foreign_key_match_code(value: PostgresForeignKeyMatch) -> &'static str {
+    match value {
+        PostgresForeignKeyMatch::Simple => "s",
+        PostgresForeignKeyMatch::Full => "f",
+    }
+}
+
+fn foreign_key_action_code(value: PostgresForeignKeyAction) -> &'static str {
+    match value {
+        PostgresForeignKeyAction::NoAction => "a",
+        PostgresForeignKeyAction::Restrict => "r",
+        PostgresForeignKeyAction::Cascade => "c",
+        PostgresForeignKeyAction::SetNull => "n",
+        PostgresForeignKeyAction::SetDefault => "d",
+    }
 }
 
 fn assert_target_empty_and_owned(
@@ -1609,7 +2116,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'referenced_table_oid', NULLIF(con.confrelid, 0)::text, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text)::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
+        "SELECT con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'referenced_table_oid', NULLIF(con.confrelid, 0)::text, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text, 'delete_set_columns', to_jsonb(con)->'confdelsetcols')::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
         CatalogObjectKind::CheckConstraint,
     )?;
     append_query_objects(
@@ -1863,6 +2370,7 @@ pub fn build_plan_with_consistency(
     let mut operations = Vec::new();
     let mut table_names = BTreeSet::new();
     let mut deferred_objects = Vec::new();
+    let mut foreign_keys = Vec::new();
     for namespace in &source.catalog.namespaces {
         for object in &namespace.objects {
             if object.kind == CatalogObjectKind::Table {
@@ -1875,9 +2383,12 @@ pub fn build_plan_with_consistency(
                 CatalogObjectKind::Sequence | CatalogObjectKind::View
             ) {
                 deferred_objects.push((namespace.name.clone(), object.clone()));
+            } else if object.kind == CatalogObjectKind::ForeignKey {
+                foreign_keys.push(object.clone());
             }
         }
     }
+    let mut copy_operations = BTreeMap::new();
     for table in table_names {
         let parameters = table_parameters(&source.catalog, &table)?;
         let create = PlanOperation::new(
@@ -1894,11 +2405,50 @@ pub fn build_plan_with_consistency(
         )?;
         let verify = PlanOperation::new(
             OperationKind::VerifyTable,
-            Some(table),
+            Some(table.clone()),
             vec![copy.id.clone()],
             BTreeMap::new(),
         )?;
+        copy_operations.insert(table.clone(), copy.id.clone());
         operations.extend([create, copy, verify]);
+    }
+    foreign_keys.sort_by(|left, right| left.id.cmp(&right.id));
+    for foreign_key in foreign_keys {
+        let table_oid = required_catalog_string(&foreign_key, "table_oid")?;
+        let referenced_table_oid = required_catalog_string(&foreign_key, "referenced_table_oid")?;
+        let table = qualified_table_for_oid(&source.catalog, table_oid)?;
+        let referenced_table = qualified_table_for_oid(&source.catalog, referenced_table_oid)?;
+        let mut dependencies = vec![
+            copy_operations
+                .get(&table)
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "foreign key table has no copy operation",
+                ))?
+                .clone(),
+            copy_operations
+                .get(&referenced_table)
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "referenced table has no copy operation",
+                ))?
+                .clone(),
+        ];
+        dependencies.sort();
+        dependencies.dedup();
+        let parameters =
+            BTreeMap::from([("catalog_object".into(), serde_json::to_value(&foreign_key)?)]);
+        let check = PlanOperation::new(
+            OperationKind::CheckForeignKey,
+            Some(table.clone()),
+            dependencies,
+            parameters.clone(),
+        )?;
+        let add = PlanOperation::new(
+            OperationKind::AddForeignKey,
+            Some(table),
+            vec![check.id.clone()],
+            parameters,
+        )?;
+        operations.extend([check, add]);
     }
     for (namespace, object) in deferred_objects {
         let kind = match object.kind {
@@ -1993,6 +2543,40 @@ pub fn build_plan_with_consistency(
         unsupported_objects: unsupported,
     })
     .map_err(PostgresPlanError::from)
+}
+
+fn required_catalog_string<'a>(
+    object: &'a CatalogObject,
+    attribute: &'static str,
+) -> Result<&'a str, PostgresPlanError> {
+    object
+        .attributes
+        .get(attribute)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(PostgresPlanError::InvalidConfig(attribute))
+}
+
+fn qualified_table_for_oid(
+    catalog: &VendorCatalog,
+    table_oid: &str,
+) -> Result<QualifiedTable, PostgresPlanError> {
+    catalog
+        .namespaces
+        .iter()
+        .find_map(|namespace| {
+            namespace
+                .objects
+                .iter()
+                .find(|object| object.kind == CatalogObjectKind::Table && object.id == table_oid)
+                .map(|table| QualifiedTable {
+                    namespace: namespace.name.clone(),
+                    name: table.name.clone(),
+                })
+        })
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "foreign key refers to an unknown table OID",
+        ))
 }
 
 fn table_parameters(
@@ -2190,5 +2774,122 @@ credential_env = "PGPASSWORD"
         assert_eq!(native.plan.consistency_mode, "consistent-snapshot");
         assert_eq!(fenced.plan.consistency_mode, "write-fence");
         assert_ne!(native.plan_hash, fenced.plan_hash);
+    }
+
+    fn composite_foreign_key(match_type: PostgresForeignKeyMatch) -> PostgresForeignKey {
+        PostgresForeignKey {
+            catalog_object_id: "fk-oid-42".into(),
+            name: Identifier::new("orders_customer_fk").unwrap(),
+            table: QualifiedTable {
+                namespace: Identifier::new("sales").unwrap(),
+                name: Identifier::new("orders").unwrap(),
+            },
+            columns: vec![
+                Identifier::new("tenant_id").unwrap(),
+                Identifier::new("customer_id").unwrap(),
+            ],
+            referenced_table: QualifiedTable {
+                namespace: Identifier::new("identity").unwrap(),
+                name: Identifier::new("customers").unwrap(),
+            },
+            referenced_columns: vec![
+                Identifier::new("tenant_id").unwrap(),
+                Identifier::new("id").unwrap(),
+            ],
+            match_type,
+            update_action: PostgresForeignKeyAction::Cascade,
+            delete_action: PostgresForeignKeyAction::SetNull,
+            deferrable: true,
+            initially_deferred: true,
+        }
+    }
+
+    #[test]
+    fn composite_match_simple_anti_join_exempts_any_null_child_key() {
+        let query =
+            foreign_key_violation_query(&composite_foreign_key(PostgresForeignKeyMatch::Simple))
+                .unwrap();
+        assert!(query.contains(
+            "(child.\"tenant_id\" IS NOT NULL AND child.\"customer_id\" IS NOT NULL) AND NOT EXISTS"
+        ));
+        assert!(query.contains(
+            "parent.\"tenant_id\" = child.\"tenant_id\" AND parent.\"id\" = child.\"customer_id\""
+        ));
+    }
+
+    #[test]
+    fn composite_match_full_anti_join_rejects_partially_null_child_key() {
+        let query =
+            foreign_key_violation_query(&composite_foreign_key(PostgresForeignKeyMatch::Full))
+                .unwrap();
+        assert!(query.contains(
+            "(child.\"tenant_id\" IS NULL OR child.\"customer_id\" IS NULL) AND (child.\"tenant_id\" IS NOT NULL OR child.\"customer_id\" IS NOT NULL)"
+        ));
+    }
+
+    #[test]
+    fn foreign_key_ddl_is_typed_quoted_and_not_valid() {
+        let statement =
+            foreign_key_add_statement(&composite_foreign_key(PostgresForeignKeyMatch::Full));
+        assert_eq!(
+            statement,
+            "ALTER TABLE \"sales\".\"orders\" ADD CONSTRAINT \"orders_customer_fk\" FOREIGN KEY (\"tenant_id\", \"customer_id\") REFERENCES \"identity\".\"customers\" (\"tenant_id\", \"id\") MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED NOT VALID"
+        );
+    }
+
+    #[test]
+    fn targeted_set_column_metadata_fails_closed() {
+        let object = CatalogObject {
+            id: "42".into(),
+            kind: CatalogObjectKind::ForeignKey,
+            name: Identifier::new("fk").unwrap(),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("child")),
+                ("referenced_table_oid".into(), serde_json::json!("parent")),
+                ("columns".into(), serde_json::json!(["parent_id"])),
+                ("referenced_columns".into(), serde_json::json!(["id"])),
+                ("match_type".into(), serde_json::json!("s")),
+                ("update_action".into(), serde_json::json!("a")),
+                ("delete_action".into(), serde_json::json!("n")),
+                ("delete_set_columns".into(), serde_json::json!([2])),
+                ("deferrable".into(), serde_json::json!(false)),
+                ("deferred".into(), serde_json::json!(false)),
+                ("validated".into(), serde_json::json!(true)),
+            ]),
+        };
+        let catalog = VendorCatalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            dialect: "postgresql".into(),
+            server_version: "17".into(),
+            database: Identifier::new("db").unwrap(),
+            namespaces: vec![CatalogNamespace {
+                id: "n".into(),
+                name: Identifier::new("public").unwrap(),
+                owner: None,
+                charset: None,
+                collation: None,
+                objects: vec![
+                    CatalogObject {
+                        id: "child".into(),
+                        kind: CatalogObjectKind::Table,
+                        name: Identifier::new("child").unwrap(),
+                        definition: Vec::new(),
+                        attributes: BTreeMap::new(),
+                    },
+                    CatalogObject {
+                        id: "parent".into(),
+                        kind: CatalogObjectKind::Table,
+                        name: Identifier::new("parent").unwrap(),
+                        definition: Vec::new(),
+                        attributes: BTreeMap::new(),
+                    },
+                    object,
+                ],
+            }],
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        };
+        assert!(postgres_foreign_keys(&catalog).is_err());
     }
 }

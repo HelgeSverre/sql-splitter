@@ -21,6 +21,8 @@ use sql_splitter::migration::model::{
     QualifiedTable, VendorCatalog,
 };
 use sql_splitter::migration::plan::ReviewedPlan;
+#[cfg(feature = "migration-fault-injection")]
+use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
 use sql_splitter::migration::postgres::{
     write_live_plan, write_live_plan_with_consistency, PostgresConsistencyMode,
     PostgresEndpointConfig, PostgresSourceFactory,
@@ -490,6 +492,367 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
 
         cleanup.run()?;
     }
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_foreign_keys_are_checked_added_and_database_validated() -> anyhow::Result<()> {
+    for (suffix, interruption) in [
+        (
+            "prepared",
+            PostgresExecutionInterruption::AfterForeignKeyPrepared,
+        ),
+        (
+            "committed",
+            PostgresExecutionInterruption::AfterForeignKeyCommitted,
+        ),
+    ] {
+        run_live_foreign_key_recovery_case(suffix, interruption)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn run_live_foreign_key_recovery_case(
+    suffix: &str,
+    interruption: PostgresExecutionInterruption,
+) -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = format!("migration_fk_{suffix}_source");
+    let target_database = format!("migration_fk_{suffix}_target");
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    target.database.clone_from(&target_database);
+    admin.database.clone_from(&source_database);
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         CREATE TABLE public.parents (a bigint NOT NULL, b bigint NOT NULL, PRIMARY KEY (a,b));
+         CREATE TABLE public.children (
+           id bigint PRIMARY KEY,
+           pa bigint,
+           pb bigint,
+           parent_id bigint,
+           CONSTRAINT children_parent_fk FOREIGN KEY (pa,pb) REFERENCES public.parents(a,b) MATCH SIMPLE ON UPDATE CASCADE ON DELETE SET NULL,
+           CONSTRAINT children_self_fk FOREIGN KEY (parent_id) REFERENCES public.children(id) DEFERRABLE INITIALLY DEFERRED
+         );
+         CREATE TABLE public.full_children (
+           id bigint PRIMARY KEY,
+           pa bigint,
+           pb bigint,
+           CONSTRAINT full_parent_fk FOREIGN KEY (pa,pb) REFERENCES public.parents(a,b) MATCH FULL
+         );
+         CREATE TABLE public.cycle_a (id bigint PRIMARY KEY, b_id bigint);
+         CREATE TABLE public.cycle_b (id bigint PRIMARY KEY, a_id bigint);
+         ALTER TABLE public.cycle_a ADD CONSTRAINT cycle_a_b_fk FOREIGN KEY (b_id) REFERENCES public.cycle_b(id) DEFERRABLE INITIALLY DEFERRED;
+         ALTER TABLE public.cycle_b ADD CONSTRAINT cycle_b_a_fk FOREIGN KEY (a_id) REFERENCES public.cycle_a(id) DEFERRABLE INITIALLY DEFERRED;
+         INSERT INTO public.parents VALUES (1,10), (2,20);
+         INSERT INTO public.children VALUES (1,1,10,NULL), (2,2,20,1), (3,NULL,99,2);
+         INSERT INTO public.full_children VALUES (1,1,10), (2,NULL,NULL);
+         BEGIN;
+         INSERT INTO public.cycle_a VALUES (1,1);
+         INSERT INTO public.cycle_b VALUES (1,1);
+         COMMIT;
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+    let interrupted = execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-foreign-key-approval",
+        state_path: &state_path,
+        interruption,
+    });
+    assert!(interrupted
+        .unwrap_err()
+        .to_string()
+        .contains("injected interruption"));
+    let report = resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    )?;
+    assert_eq!(report.copied_rows, 9);
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    assert!(state.operations.iter().all(|operation| {
+        operation.state == sql_splitter::migration::journal::OperationState::Verified
+    }));
+    let mut target_client = connect(&target)?;
+    let constraint_counts = target_client.query_one(
+        "SELECT count(*), count(*) FILTER (WHERE convalidated) FROM pg_constraint WHERE contype='f'",
+        &[],
+    )?;
+    assert_eq!(constraint_counts.get::<_, i64>(0), 5);
+    assert_eq!(constraint_counts.get::<_, i64>(1), 5);
+    let constraints = target_client.query(
+        "SELECT con.conname, array_agg(ca.attname ORDER BY ck.ordinality)::text[], array_agg(ra.attname ORDER BY rk.ordinality)::text[], con.confmatchtype::text, con.confupdtype::text, con.confdeltype::text, con.condeferrable, con.condeferred, (to_jsonb(con)->'confdelsetcols')::text, (SELECT count(*) FROM pg_trigger t WHERE t.tgconstraint=con.oid), (SELECT bool_and(t.tgisinternal AND t.tgenabled='O') FROM pg_trigger t WHERE t.tgconstraint=con.oid) FROM pg_constraint con JOIN pg_class child ON child.oid=con.conrelid JOIN pg_namespace n ON n.oid=child.relnamespace JOIN unnest(con.conkey) WITH ORDINALITY ck(attnum, ordinality) ON true JOIN pg_attribute ca ON ca.attrelid=child.oid AND ca.attnum=ck.attnum JOIN unnest(con.confkey) WITH ORDINALITY rk(attnum, ordinality) ON rk.ordinality=ck.ordinality JOIN pg_attribute ra ON ra.attrelid=con.confrelid AND ra.attnum=rk.attnum WHERE con.contype='f' AND n.nspname='public' GROUP BY con.oid, con.conname ORDER BY con.conname",
+        &[],
+    )?;
+    let actual_constraints = constraints
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, String>(0),
+                row.get::<_, Vec<String>>(1),
+                row.get::<_, Vec<String>>(2),
+                row.get::<_, String>(3),
+                row.get::<_, String>(4),
+                row.get::<_, String>(5),
+                row.get::<_, bool>(6),
+                row.get::<_, bool>(7),
+                row.get::<_, Option<String>>(8),
+                row.get::<_, i64>(9),
+                row.get::<_, bool>(10),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_constraints,
+        vec![
+            (
+                "children_parent_fk".into(),
+                vec!["pa".into(), "pb".into()],
+                vec!["a".into(), "b".into()],
+                "s".into(),
+                "c".into(),
+                "n".into(),
+                false,
+                false,
+                Some("null".into()),
+                4,
+                true
+            ),
+            (
+                "children_self_fk".into(),
+                vec!["parent_id".into()],
+                vec!["id".into()],
+                "s".into(),
+                "a".into(),
+                "a".into(),
+                true,
+                true,
+                Some("null".into()),
+                4,
+                true
+            ),
+            (
+                "cycle_a_b_fk".into(),
+                vec!["b_id".into()],
+                vec!["id".into()],
+                "s".into(),
+                "a".into(),
+                "a".into(),
+                true,
+                true,
+                Some("null".into()),
+                4,
+                true
+            ),
+            (
+                "cycle_b_a_fk".into(),
+                vec!["a_id".into()],
+                vec!["id".into()],
+                "s".into(),
+                "a".into(),
+                "a".into(),
+                true,
+                true,
+                Some("null".into()),
+                4,
+                true
+            ),
+            (
+                "full_parent_fk".into(),
+                vec!["pa".into(), "pb".into()],
+                vec!["a".into(), "b".into()],
+                "f".into(),
+                "a".into(),
+                "a".into(),
+                false,
+                false,
+                Some("null".into()),
+                4,
+                true
+            ),
+        ]
+    );
+    let violations: bool = target_client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM public.children c WHERE c.pa IS NOT NULL AND c.pb IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.parents p WHERE (p.a,p.b)=(c.pa,c.pb)))",
+            &[],
+        )?
+        .get(0);
+    assert!(!violations);
+    drop(target_client);
+    cleanup.run()?;
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_foreign_key_conflict_requires_manual_reconciliation() -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = "migration_fk_violation_source".to_owned();
+    let target_database = "migration_fk_violation_target".to_owned();
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    target.database.clone_from(&target_database);
+    admin.database.clone_from(&source_database);
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         CREATE TABLE public.parents (id bigint PRIMARY KEY);
+         CREATE TABLE public.children (
+           id bigint PRIMARY KEY,
+           parent_id bigint,
+           CONSTRAINT children_parent_fk FOREIGN KEY (parent_id) REFERENCES public.parents(id)
+         );
+         INSERT INTO public.parents VALUES (1);
+         INSERT INTO public.children VALUES (1,1);
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+    let error = execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-foreign-key-violation",
+        state_path: &state_path,
+        interruption: PostgresExecutionInterruption::BeforeForeignKeyChecks,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("injected interruption"));
+
+    let mut target_client = connect(&target)?;
+    target_client.batch_execute("INSERT INTO public.children VALUES (2,999)")?;
+    let source_catalog = reviewed
+        .plan
+        .source_catalog
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("reviewed plan has no source catalog"))?;
+    let foreign_key = postgres_foreign_keys(source_catalog)?
+        .into_iter()
+        .find(|foreign_key| foreign_key.name.as_str() == "children_parent_fk")
+        .ok_or_else(|| anyhow::anyhow!("reviewed foreign key is absent"))?;
+    assert!(
+        PostgresTargetFactory::new(target.clone())
+            .check_foreign_key(&foreign_key)?
+            .has_violation
+    );
+    target_client.batch_execute(
+        "DELETE FROM public.children WHERE id=2;
+         ALTER TABLE public.children ADD CONSTRAINT children_parent_fk FOREIGN KEY (parent_id) REFERENCES public.parents(id) ON DELETE CASCADE",
+    )?;
+    drop(target_client);
+    let error = resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("foreign-key reconciliation requires manual intervention"),
+        "{error:#}"
+    );
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+    let mut source_admin = connect(&admin)?;
+    assert!(source_admin
+        .batch_execute("INSERT INTO public.parents VALUES (2)")
+        .is_err());
+    drop(source_admin);
+    cleanup.run()?;
     Ok(())
 }
 

@@ -17,7 +17,8 @@ use super::journal::{
     PreparedChunkEvidence, PreparedResolution, ResumeBinding,
 };
 use super::model::{
-    CatalogObjectKind, ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch, VendorCatalog,
+    CatalogObject, CatalogObjectKind, ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch,
+    VendorCatalog,
 };
 use super::plan::{
     MigrationPlan, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObjectReport,
@@ -27,8 +28,9 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
-    catalog_fingerprint, inspect_endpoint, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresSourceFactory, PostgresTargetFactory,
+    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, PostgresConsistencyMode,
+    PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState, PostgresSourceFactory,
+    PostgresTargetFactory,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
@@ -60,6 +62,9 @@ enum ExecutionInterruption {
     CommitUnknownAfterApply,
     AfterCommittedChunks(u64),
     AfterAllVerified,
+    BeforeForeignKeyChecks,
+    AfterForeignKeyPrepared,
+    AfterForeignKeyCommitted,
     AfterFenceReleased,
 }
 
@@ -73,6 +78,9 @@ pub enum PostgresExecutionInterruption {
     CommitUnknownAfterApply,
     AfterCommittedChunks(u64),
     AfterAllVerified,
+    BeforeForeignKeyChecks,
+    AfterForeignKeyPrepared,
+    AfterForeignKeyCommitted,
     AfterFenceReleased,
 }
 
@@ -88,6 +96,11 @@ impl From<PostgresExecutionInterruption> for ExecutionInterruption {
                 Self::AfterCommittedChunks(count)
             }
             PostgresExecutionInterruption::AfterAllVerified => Self::AfterAllVerified,
+            PostgresExecutionInterruption::BeforeForeignKeyChecks => Self::BeforeForeignKeyChecks,
+            PostgresExecutionInterruption::AfterForeignKeyPrepared => Self::AfterForeignKeyPrepared,
+            PostgresExecutionInterruption::AfterForeignKeyCommitted => {
+                Self::AfterForeignKeyCommitted
+            }
             PostgresExecutionInterruption::AfterFenceReleased => Self::AfterFenceReleased,
         }
     }
@@ -553,6 +566,15 @@ fn resume_postgres_fenced_plan_internal(
         complete_operation_if_needed(&mut state, verify.id.as_str())?;
         replace_json(state_path, &state)?;
     }
+    process_postgres_foreign_keys(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut state,
+        state_path,
+        None,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
     verify_schema_projection(&source_catalog, &target_config)?;
     let verify_schema = reviewed
         .plan
@@ -939,6 +961,15 @@ fn execute_postgres_plan_internal(
         state.verify_operation(verify_operation.id.as_str())?;
         replace_json(state_path, &state)?;
     }
+    process_postgres_foreign_keys(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut state,
+        state_path,
+        interruption,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
     verify_schema_projection(&source_catalog, &target_config)?;
     let verify_schema = reviewed
         .plan
@@ -1269,6 +1300,150 @@ fn target_planned_tables_are_empty(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+fn process_postgres_foreign_keys(
+    reviewed: &ReviewedPlan,
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+    state: &mut MigrationState,
+    state_path: &Path,
+    interruption: Option<ExecutionInterruption>,
+    mut attest: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let foreign_keys = postgres_foreign_keys(catalog)?
+        .into_iter()
+        .map(|foreign_key| (foreign_key.catalog_object_id.clone(), foreign_key))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    interrupt_if(interruption, ExecutionInterruption::BeforeForeignKeyChecks)?;
+    for operation in reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CheckForeignKey)
+    {
+        let foreign_key = foreign_key_for_operation(operation, &foreign_keys)?;
+        match operation_state(state, operation.id.as_str())? {
+            OperationState::Pending => {
+                state.start_operation(operation.id.as_str())?;
+                replace_json(state_path, state)?;
+            }
+            OperationState::Running | OperationState::Committed | OperationState::Verified => {}
+            OperationState::Prepared => {
+                return Err(anyhow!(
+                    "foreign-key check operation has an invalid prepared state"
+                ));
+            }
+        }
+        attest()?;
+        if target.check_foreign_key(foreign_key)?.has_violation {
+            state.require_manual_reconciliation()?;
+            replace_json(state_path, state)?;
+            return Err(anyhow!(
+                "target rows violate reviewed foreign key {}",
+                foreign_key.name
+            ));
+        }
+        match operation_state(state, operation.id.as_str())? {
+            OperationState::Running => {
+                state.commit_operation(operation.id.as_str())?;
+                state.verify_operation(operation.id.as_str())?;
+                replace_json(state_path, state)?;
+            }
+            OperationState::Committed => {
+                state.verify_operation(operation.id.as_str())?;
+                replace_json(state_path, state)?;
+            }
+            OperationState::Verified => {}
+            OperationState::Pending | OperationState::Prepared => {
+                return Err(anyhow!("foreign-key check did not enter a runnable state"));
+            }
+        }
+    }
+    for operation in reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::AddForeignKey)
+    {
+        let foreign_key = foreign_key_for_operation(operation, &foreign_keys)?;
+        match operation_state(state, operation.id.as_str())? {
+            OperationState::Pending => {
+                state.prepare_operations_atomic([operation.id.as_str()])?;
+                replace_json(state_path, state)?;
+                interrupt_if(interruption, ExecutionInterruption::AfterForeignKeyPrepared)?;
+            }
+            OperationState::Prepared | OperationState::Verified => {}
+            OperationState::Running | OperationState::Committed => {
+                return Err(anyhow!(
+                    "foreign-key add operation has an invalid durable state"
+                ));
+            }
+        }
+        attest()?;
+        let observed = match operation_state(state, operation.id.as_str())? {
+            OperationState::Prepared => match target.reconcile_foreign_key(foreign_key) {
+                Ok(observed) => observed,
+                Err(ConnectionError::InvalidRequest(reason)) => {
+                    state.require_manual_reconciliation()?;
+                    replace_json(state_path, state)?;
+                    return Err(anyhow!(
+                        "foreign-key reconciliation requires manual intervention: {reason}"
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            },
+            OperationState::Verified => target.inspect_foreign_key(foreign_key)?,
+            _ => unreachable!("validated foreign-key add state"),
+        };
+        interrupt_if(
+            interruption,
+            ExecutionInterruption::AfterForeignKeyCommitted,
+        )?;
+        if observed != PostgresForeignKeyState::ExactValidated {
+            state.require_manual_reconciliation()?;
+            replace_json(state_path, state)?;
+            return Err(anyhow!(
+                "target foreign key {} differs from reviewed semantics",
+                foreign_key.name
+            ));
+        }
+        if operation_state(state, operation.id.as_str())? == OperationState::Prepared {
+            state.commit_prepared_operation(operation.id.as_str())?;
+            state.verify_operation(operation.id.as_str())?;
+            replace_json(state_path, state)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn foreign_key_for_operation<'a>(
+    operation: &super::plan::PlanOperation,
+    foreign_keys: &'a std::collections::BTreeMap<String, PostgresForeignKey>,
+) -> anyhow::Result<&'a PostgresForeignKey> {
+    let object: CatalogObject = serde_json::from_value(
+        operation
+            .parameters
+            .get("catalog_object")
+            .cloned()
+            .ok_or_else(|| anyhow!("foreign-key operation omits catalog_object"))?,
+    )?;
+    if object.kind != CatalogObjectKind::ForeignKey {
+        return Err(anyhow!(
+            "foreign-key operation contains a different catalog object kind"
+        ));
+    }
+    let foreign_key = foreign_keys
+        .get(&object.id)
+        .ok_or_else(|| anyhow!("foreign-key operation refers to an unknown catalog object"))?;
+    if operation.table.as_ref() != Some(&foreign_key.table) {
+        return Err(anyhow!(
+            "foreign-key operation table differs from reviewed catalog"
+        ));
+    }
+    Ok(foreign_key)
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
 fn reconcile_live_prepared_chunk(
     target: &dyn TargetConnectionFactory,
     state: &mut MigrationState,
@@ -1332,6 +1507,8 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
             operation.kind,
             OperationKind::CreateTable
                 | OperationKind::CopyTable
+                | OperationKind::CheckForeignKey
+                | OperationKind::AddForeignKey
                 | OperationKind::VerifyTable
                 | OperationKind::VerifySchema
         ) {
@@ -1342,7 +1519,11 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         }
         if matches!(
             operation.kind,
-            OperationKind::CreateTable | OperationKind::CopyTable | OperationKind::VerifyTable
+            OperationKind::CreateTable
+                | OperationKind::CopyTable
+                | OperationKind::CheckForeignKey
+                | OperationKind::AddForeignKey
+                | OperationKind::VerifyTable
         ) && operation.table.is_none()
         {
             return Err(anyhow!("table operation has no table identity"));
@@ -1364,6 +1545,60 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         .collect::<std::collections::BTreeSet<_>>();
     if copy_tables != verify_tables {
         return Err(anyhow!("copy and table-verification operation sets differ"));
+    }
+    let source_catalog = reviewed
+        .plan
+        .source_catalog
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed PostgreSQL plan has no embedded source catalog"))?;
+    let expected_foreign_keys = postgres_foreign_keys(source_catalog)?
+        .into_iter()
+        .map(|foreign_key| foreign_key.catalog_object_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let operation_foreign_keys = |kind: OperationKind| -> anyhow::Result<_> {
+        reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == kind)
+            .map(|operation| {
+                let object: CatalogObject = serde_json::from_value(
+                    operation
+                        .parameters
+                        .get("catalog_object")
+                        .cloned()
+                        .ok_or_else(|| anyhow!("foreign-key operation omits catalog_object"))?,
+                )?;
+                if object.kind != CatalogObjectKind::ForeignKey {
+                    return Err(anyhow!(
+                        "foreign-key operation contains a different object kind"
+                    ));
+                }
+                let reviewed_object = source_catalog
+                    .namespaces
+                    .iter()
+                    .flat_map(|namespace| namespace.objects.iter())
+                    .find(|candidate| {
+                        candidate.kind == CatalogObjectKind::ForeignKey && candidate.id == object.id
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("foreign-key operation refers to an unknown catalog object")
+                    })?;
+                if reviewed_object != &object {
+                    return Err(anyhow!(
+                        "foreign-key operation payload differs from embedded catalog"
+                    ));
+                }
+                Ok(object.id)
+            })
+            .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()
+    };
+    if operation_foreign_keys(OperationKind::CheckForeignKey)? != expected_foreign_keys
+        || operation_foreign_keys(OperationKind::AddForeignKey)? != expected_foreign_keys
+    {
+        return Err(anyhow!(
+            "foreign-key check/add operation sets differ from reviewed catalog"
+        ));
     }
     Ok(())
 }
@@ -1613,7 +1848,7 @@ fn verify_schema_projection(
     target_config: &PostgresEndpointConfig,
 ) -> anyhow::Result<()> {
     let target = inspect_endpoint(target_config)?;
-    if schema_projection(source)? != schema_projection(&target.catalog)? {
+    if schema_projection(source, true)? != schema_projection(&target.catalog, true)? {
         return Err(anyhow!(
             "final target schema differs from source projection"
         ));
@@ -1627,10 +1862,29 @@ fn target_schema_matches(
     target_config: &PostgresEndpointConfig,
 ) -> anyhow::Result<bool> {
     let target = inspect_endpoint(target_config)?;
-    Ok(schema_projection(source)? == schema_projection(&target.catalog)?)
+    Ok(schema_projection(source, false)? == schema_projection(&target.catalog, false)?)
 }
 
-fn schema_projection(catalog: &VendorCatalog) -> anyhow::Result<serde_json::Value> {
+fn schema_projection(
+    catalog: &VendorCatalog,
+    include_foreign_keys: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let table_names = catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| {
+            namespace
+                .objects
+                .iter()
+                .filter(|object| object.kind == CatalogObjectKind::Table)
+                .map(|table| {
+                    (
+                        table.id.as_str(),
+                        format!("{}.{}", namespace.name, table.name),
+                    )
+                })
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut namespaces = Vec::new();
     for namespace in &catalog.namespaces {
         let mut objects = namespace
@@ -1644,7 +1898,7 @@ fn schema_projection(catalog: &VendorCatalog) -> anyhow::Result<serde_json::Valu
                         | CatalogObjectKind::PrimaryKey
                         | CatalogObjectKind::UniqueConstraint
                         | CatalogObjectKind::CheckConstraint
-                )
+                ) || (include_foreign_keys && object.kind == CatalogObjectKind::ForeignKey)
             })
             .map(|object| {
                 let definition = String::from_utf8(object.definition.clone())
@@ -1664,6 +1918,21 @@ fn schema_projection(catalog: &VendorCatalog) -> anyhow::Result<serde_json::Valu
                         "collation": object.attributes.get("collation"),
                         "type_schema": object.attributes.get("type_schema"),
                         "type_name": object.attributes.get("type_name"),
+                    }),
+                    CatalogObjectKind::ForeignKey => serde_json::json!({
+                        "type": object.attributes.get("type"),
+                        "columns": object.attributes.get("columns"),
+                        "referenced_table": object.attributes
+                            .get("referenced_table_oid")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|oid| table_names.get(oid)),
+                        "referenced_columns": object.attributes.get("referenced_columns"),
+                        "match_type": object.attributes.get("match_type"),
+                        "update_action": object.attributes.get("update_action"),
+                        "delete_action": object.attributes.get("delete_action"),
+                        "validated": object.attributes.get("validated"),
+                        "deferrable": object.attributes.get("deferrable"),
+                        "deferred": object.attributes.get("deferred"),
                     }),
                     _ => serde_json::json!({
                         "type": object.attributes.get("type"),

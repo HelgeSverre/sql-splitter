@@ -8,11 +8,13 @@
 > PostgreSQL runner and a durable database-side source write fence for the
 > currently supported table subset. The fence survives a PostgreSQL restart,
 > is re-attested before each execution stage, and is released only after strict
-> verification. It can resume the narrow supported PostgreSQL table path from
-> its embedded reviewed plan after a durable committed-chunk interruption. It
-> does not implement FK validation, the complete crash matrix, or production
-> recovery, and it does not satisfy the complete real-engine acceptance
-> gates in [08](./08-implementation-prerequisites.md).
+> verification. It can resume the narrow supported PostgreSQL table path across
+> the implemented DDL, data, foreign-key, verification, and fence-release
+> boundaries. PostgreSQL foreign keys are checked with exact composite `MATCH
+> SIMPLE` or `MATCH FULL` null semantics, added without relaxing enforcement,
+> and validated by PostgreSQL. It does not implement the complete crash matrix
+> or production recovery, and it does not satisfy the complete real-engine
+> acceptance gates in [08](./08-implementation-prerequisites.md).
 >
 > A PostgreSQL plan adapter, snapshot-bound source reader, native control
 > session, create-only pre-data DDL transaction, transactional plain-INSERT

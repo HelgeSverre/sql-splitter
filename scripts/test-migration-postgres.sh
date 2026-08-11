@@ -227,3 +227,9 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 test_name=live_write_fence_recovery_boundary_matrix
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_foreign_keys_are_checked_added_and_database_validated
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_foreign_key_conflict_requires_manual_reconciliation
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
