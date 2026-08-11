@@ -282,6 +282,9 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 test_name=live_write_fence_recovery_boundary_matrix
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_runner_cancellation_rolls_back_and_resumes_exactly
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_network_commit_response_loss_matrix
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

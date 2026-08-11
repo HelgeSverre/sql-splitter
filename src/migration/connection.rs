@@ -1,7 +1,19 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
+
+#[cfg(unix)]
+static PROCESS_INTERRUPT_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static SIGINT_HANDLER: OnceLock<Result<(), i32>> = OnceLock::new();
+
+#[cfg(unix)]
+extern "C" fn record_sigint(_signal: libc::c_int) {
+    PROCESS_INTERRUPT_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
 
 use super::model::{Identifier, RowBatch};
 pub use super::model::{KeyTuple, QualifiedTable};
@@ -111,16 +123,85 @@ impl std::error::Error for ConnectionError {}
 
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
 
+#[derive(Debug, Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    observe_sigint: AtomicBool,
+    sigint_baseline: AtomicU64,
+    control_error: Mutex<Option<String>>,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken(Arc<CancellationState>);
 
 impl CancellationToken {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Install the process SIGINT handler and make this token observe it.
+    pub fn observe_process_sigint(&self) -> ConnectionResult<()> {
+        #[cfg(not(unix))]
+        return Ok(());
+
+        #[cfg(unix)]
+        {
+            let baseline = PROCESS_INTERRUPT_GENERATION.load(Ordering::Acquire);
+            let result = SIGINT_HANDLER.get_or_init(|| {
+                // SAFETY: `record_sigint` has C signal-handler ABI and performs only an
+                // atomic store, which is async-signal-safe. The sigaction is initialized
+                // before it is installed and remains valid for the process lifetime.
+                unsafe {
+                    let mut action: libc::sigaction = std::mem::zeroed();
+                    action.sa_sigaction = record_sigint as *const () as usize;
+                    libc::sigemptyset(&mut action.sa_mask);
+                    action.sa_flags = 0;
+                    if libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(-1))
+                    }
+                }
+            });
+            result.map_err(|code| {
+                ConnectionError::Database(format!("failed to install SIGINT handler: errno {code}"))
+            })?;
+            self.0.sigint_baseline.store(baseline, Ordering::Release);
+            self.0.observe_sigint.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        if self.0.cancelled.load(Ordering::Acquire) {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            let baseline = self.0.sigint_baseline.load(Ordering::Acquire);
+            self.0.observe_sigint.load(Ordering::Acquire)
+                && PROCESS_INTERRUPT_GENERATION.load(Ordering::Acquire) != baseline
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
+    pub(crate) fn record_control_error(&self, error: impl Into<String>) {
+        if let Ok(mut slot) = self.0.control_error.lock() {
+            slot.get_or_insert_with(|| error.into());
+        }
+    }
+
+    pub(crate) fn control_error(&self) -> Option<String> {
+        self.0.control_error.lock().ok()?.clone()
     }
 
     pub fn check(&self) -> ConnectionResult<()> {
-        if self.0.load(Ordering::Acquire) {
+        if let Some(error) = self.control_error() {
+            Err(ConnectionError::Database(format!(
+                "statement cancellation control failed: {error}"
+            )))
+        } else if self.is_cancelled() {
             Err(ConnectionError::Cancelled)
         } else {
             Ok(())
@@ -205,6 +286,31 @@ mod tests {
         assert!(matches!(
             capabilities.require(&["server_read_only"]),
             Err(ConnectionError::RequiredCapabilityUnknown { .. })
+        ));
+    }
+
+    #[test]
+    fn cancellation_is_shared_by_every_token_clone() {
+        let cancellation = CancellationToken::default();
+        let session_token = cancellation.clone();
+
+        assert_eq!(session_token.check(), Ok(()));
+        cancellation.cancel();
+
+        assert!(session_token.is_cancelled());
+        assert_eq!(session_token.check(), Err(ConnectionError::Cancelled));
+    }
+
+    #[test]
+    fn cancellation_control_failure_is_retained() {
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        cancellation.record_control_error("control connection failed");
+
+        assert!(matches!(
+            cancellation.check(),
+            Err(ConnectionError::Database(message))
+                if message.contains("control connection failed")
         ));
     }
 }

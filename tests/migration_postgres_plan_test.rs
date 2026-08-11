@@ -42,8 +42,9 @@ use sql_splitter::migration::postgres_fence::{
 use sql_splitter::migration::runner::execute_postgres_plan;
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::runner::{
-    execute_postgres_fenced_plan_with_interruption, execute_postgres_interrupted,
-    resume_postgres_fenced_plan, PostgresExecutionInterruption, PostgresInterruptedExecution,
+    execute_postgres_fenced_plan_with_cancellation, execute_postgres_fenced_plan_with_interruption,
+    execute_postgres_interrupted, resume_postgres_fenced_plan, PostgresCancellationExecution,
+    PostgresExecutionInterruption, PostgresInterruptedExecution,
 };
 
 #[test]
@@ -844,6 +845,143 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
 #[test]
 #[cfg(feature = "migration-fault-injection")]
 #[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = "migration_cancellation_source".to_owned();
+    let target_database = "migration_cancellation_target".to_owned();
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    source.max_batch_rows = 50_000;
+    source.max_batch_bytes = 16 * 1024 * 1024;
+    target.database.clone_from(&target_database);
+    target.max_batch_rows = 50_001;
+    target.max_batch_bytes = 16 * 1024 * 1024;
+    admin.database.clone_from(&source_database);
+
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         CREATE TABLE public.accounts (id bigint PRIMARY KEY, name text NOT NULL);
+         INSERT INTO public.accounts SELECT id, 'row-' || id::text FROM generate_series(1,50000) AS id;
+         GRANT SELECT ON public.accounts TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+
+    let cancellation = CancellationToken::default();
+    let runner_token = cancellation.clone();
+    let mut observer = connect(&PostgresEndpointConfig::read(required_path(
+        "SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG",
+    )?)?)?;
+    let cancelled = thread::scope(|scope| -> anyhow::Result<anyhow::Error> {
+        let handle = scope.spawn(|| {
+            execute_postgres_fenced_plan_with_cancellation(
+                PostgresCancellationExecution {
+                    plan_path: &plan_path,
+                    source_config_path: &source_path,
+                    target_config_path: &target_path,
+                    fence_admin_config_path: &admin_path,
+                    fence_artifact_path: &fence_path,
+                    approval_reference: "docker-cancellation",
+                    state_path: &state_path,
+                },
+                runner_token,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if state_path.exists() {
+                let state: MigrationState = read_json(&state_path)?;
+                let transaction_is_active: bool = observer
+                    .query_one(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND usename='migration_fence_target_owner' AND xact_start IS NOT NULL AND query LIKE 'INSERT INTO%')",
+                        &[&target_database],
+                    )?
+                    .get(0);
+                if state.prepared_chunk()?.is_some() && transaction_is_active {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("target INSERT transaction did not become observable before timeout");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        cancellation.cancel();
+        let result = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("cancellation runner thread panicked"))?;
+        Ok(result.expect_err("controlled cancellation must stop execution"))
+    })?;
+    assert!(format!("{cancelled:#}").contains("Cancelled"));
+
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.chunks.len(), 1);
+    assert_eq!(
+        state.chunks[0].state,
+        sql_splitter::migration::journal::ChunkState::Prepared
+    );
+    let mut target_client = connect(&target)?;
+    let row_count: i64 = target_client
+        .query_one("SELECT count(*) FROM public.accounts", &[])?
+        .get(0);
+    assert_eq!(row_count, 0, "cancelled target transaction must roll back");
+    drop(target_client);
+
+    let report = resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    )?;
+    assert_eq!(report.copied_rows, 50_000);
+    let completed: MigrationState = read_json(&state_path)?;
+    assert_eq!(completed.status, MigrationStatus::Completed);
+    cleanup.run()?;
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
 fn live_network_commit_response_loss_matrix() -> anyhow::Result<()> {
     for (suffix, mode) in [
         ("not_forwarded", CommitFaultMode::NotForwarded),
@@ -981,10 +1119,11 @@ fn live_standalone_unique_index_is_created_before_copy_and_resumed() -> anyhow::
 #[cfg(feature = "migration-fault-injection")]
 #[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
 fn live_ordinary_indexes_are_created_after_copy_and_reconciled() -> anyhow::Result<()> {
-    for (suffix, interruption, exists_before_resume, inject_conflict) in [
+    for (suffix, interruption, exists_before_resume, inject_conflict, cancel_ddl) in [
         (
             "prepared",
             PostgresExecutionInterruption::AfterIndexPrepared,
+            false,
             false,
             false,
         ),
@@ -993,10 +1132,19 @@ fn live_ordinary_indexes_are_created_after_copy_and_reconciled() -> anyhow::Resu
             PostgresExecutionInterruption::AfterIndexCommitted,
             true,
             false,
+            false,
         ),
         (
             "conflict",
             PostgresExecutionInterruption::AfterIndexPrepared,
+            false,
+            true,
+            false,
+        ),
+        (
+            "cancelled_ddl",
+            PostgresExecutionInterruption::AfterIndexPrepared,
+            false,
             false,
             true,
         ),
@@ -1006,6 +1154,7 @@ fn live_ordinary_indexes_are_created_after_copy_and_reconciled() -> anyhow::Resu
             interruption,
             exists_before_resume,
             inject_conflict,
+            cancel_ddl,
         )
         .with_context(|| format!("ordinary-index recovery case {suffix}"))?;
     }
@@ -1627,6 +1776,7 @@ fn run_live_ordinary_index_recovery_case(
     interruption: PostgresExecutionInterruption,
     exists_before_resume: bool,
     inject_conflict: bool,
+    cancel_ddl: bool,
 ) -> anyhow::Result<()> {
     let mut source =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
@@ -1635,6 +1785,7 @@ fn run_live_ordinary_index_recovery_case(
     let mut admin =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
     let control_config = admin.clone();
+    let observer_config = control_config.clone();
     let source_database = format!("migration_ordinary_index_{suffix}_source");
     let target_database = format!("migration_ordinary_index_{suffix}_target");
     let mut control = connect(&control_config)?;
@@ -1715,6 +1866,67 @@ fn run_live_ordinary_index_recovery_case(
     assert_eq!(exists, exists_before_resume);
     if inject_conflict {
         target_client.batch_execute("CREATE SEQUENCE public.accounts_tenant_name_idx")?;
+    }
+    if cancel_ddl {
+        target_client
+            .batch_execute("BEGIN; LOCK TABLE public.accounts IN SHARE ROW EXCLUSIVE MODE")?;
+        let cancellation = CancellationToken::default();
+        let runner_token = cancellation.clone();
+        let mut observer = connect(&observer_config)?;
+        let cancelled = thread::scope(|scope| -> anyhow::Result<anyhow::Error> {
+            let handle = scope.spawn(|| {
+                sql_splitter::migration::runner::resume_postgres_fenced_plan_with_cancellation(
+                    sql_splitter::migration::runner::PostgresCancellationResume {
+                        state_path: &state_path,
+                        source_config_path: &source_path,
+                        target_config_path: &target_path,
+                        fence_admin_config_path: &admin_path,
+                        fence_artifact_path: &fence_path,
+                    },
+                    runner_token,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let create_index_is_waiting: bool = observer
+                    .query_one(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND usename='migration_fence_target_owner' AND state='active' AND query LIKE 'CREATE INDEX%')",
+                        &[&target_database],
+                    )?
+                    .get(0);
+                if create_index_is_waiting {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    anyhow::bail!("CREATE INDEX did not block before cancellation timeout");
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            cancellation.cancel();
+            let result = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("DDL cancellation runner thread panicked"))?;
+            Ok(result.expect_err("DDL cancellation must stop resume"))
+        })?;
+        assert!(format!("{cancelled:#}").contains("Cancelled"));
+        target_client.batch_execute("ROLLBACK")?;
+        let state: MigrationState = read_json(&state_path)?;
+        let index_operation = state
+            .operations
+            .iter()
+            .find(|operation| operation.operation_id == index_operation.id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("ordinary index state is absent"))?;
+        assert_eq!(
+            index_operation.state,
+            sql_splitter::migration::journal::OperationState::Prepared
+        );
+        let exists: bool = target_client
+            .query_one(
+                "SELECT to_regclass('public.accounts_tenant_name_idx') IS NOT NULL",
+                &[],
+            )?
+            .get(0);
+        assert!(!exists, "cancelled CREATE INDEX must roll back");
     }
     drop(target_client);
 

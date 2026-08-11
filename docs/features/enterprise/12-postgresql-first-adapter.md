@@ -158,6 +158,18 @@ mode, trust-root certificate digest, and client-certificate digest. Fence
 artifacts separately bind the administration TLS values, so execution and
 resume reject authentication downgrades or certificate replacement.
 
+Execute and resume install a process `SIGINT` handler on Unix and share one
+cancellation token across catalog reads, source paging, target writes,
+reconciliation, and verification. Cancellation uses PostgreSQL cancel requests
+against the current source and target sessions. An interrupted target chunk is
+rolled back explicitly and remains `Prepared` in the durable journal. Resume
+then reconciles or retries that exact intent. The live acceptance test observes
+an active target INSERT transaction, cancels it, proves that no rows committed,
+and resumes 50,000 rows without omission or duplication. A second case blocks
+`CREATE INDEX` on a database lock, cancels the active DDL through its control
+session, proves that PostgreSQL rolled the index transaction back, and resumes
+the same prepared index operation.
+
 Example:
 
 ```toml

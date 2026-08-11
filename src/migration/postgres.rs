@@ -289,15 +289,47 @@ pub struct PostgresSourceFactory {
     config: PostgresEndpointConfig,
     pending: Mutex<Option<PendingSnapshot>>,
     active_cancel: Mutex<Option<CancelToken>>,
+    cancellation: CancellationToken,
 }
 
 impl PostgresSourceFactory {
     pub fn new(config: PostgresEndpointConfig) -> Self {
+        Self::new_with_cancellation(config, CancellationToken::default())
+    }
+
+    pub fn new_with_cancellation(
+        config: PostgresEndpointConfig,
+        cancellation: CancellationToken,
+    ) -> Self {
         Self {
             config,
             pending: Mutex::new(None),
             active_cancel: Mutex::new(None),
+            cancellation,
         }
+    }
+
+    fn controlled_connect(&self) -> ConnectionResult<Client> {
+        self.cancellation.check()?;
+        let client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        *self
+            .active_cancel
+            .lock()
+            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))? =
+            Some(client.cancel_token());
+        self.cancellation.check()?;
+        Ok(client)
+    }
+
+    pub fn inspect_endpoint(&self) -> ConnectionResult<CatalogSnapshot> {
+        let mut client = self.controlled_connect()?;
+        let snapshot = inspect_connected_endpoint(&self.config, &mut client)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        self.cancellation.check()?;
+        Ok(snapshot)
     }
 
     /// Return the exact catalog captured inside the pending execution snapshot.
@@ -345,10 +377,8 @@ impl SourceConnectionFactory for PostgresSourceFactory {
                 "a snapshot is already waiting for a reader".into(),
             ));
         }
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        self.cancellation.check()?;
+        let mut client = self.controlled_connect()?;
         client
             .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .map_err(database_error)?;
@@ -403,12 +433,7 @@ impl SourceConnectionFactory for PostgresSourceFactory {
         let (catalog, unsupported) =
             extract_catalog(&mut client, &token.database_identity, &token.server_version)
                 .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        let cancel_token = client.cancel_token();
-        *self
-            .active_cancel
-            .lock()
-            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))? =
-            Some(cancel_token);
+        self.cancellation.check()?;
         *pending = Some(PendingSnapshot {
             client,
             token: token.clone(),
@@ -482,13 +507,22 @@ impl ControlSession for PostgresControlSession {
 pub struct PostgresTargetFactory {
     config: PostgresEndpointConfig,
     active_cancel: Mutex<Option<CancelToken>>,
+    cancellation: CancellationToken,
 }
 
 impl PostgresTargetFactory {
     pub fn new(config: PostgresEndpointConfig) -> Self {
+        Self::new_with_cancellation(config, CancellationToken::default())
+    }
+
+    pub fn new_with_cancellation(
+        config: PostgresEndpointConfig,
+        cancellation: CancellationToken,
+    ) -> Self {
         Self {
             config,
             active_cancel: Mutex::new(None),
+            cancellation,
         }
     }
 
@@ -501,13 +535,30 @@ impl PostgresTargetFactory {
         Ok(())
     }
 
-    /// Recheck that the target is empty and owned by the configured role.
-    pub fn assert_empty_and_owned(&self) -> ConnectionResult<()> {
-        let mut client = self
+    fn controlled_connect(&self) -> ConnectionResult<Client> {
+        self.cancellation.check()?;
+        let client = self
             .config
             .connect()
             .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        assert_target_empty_and_owned(&mut client)
+        self.remember_cancel_token(&client)?;
+        self.cancellation.check()?;
+        Ok(client)
+    }
+
+    pub fn inspect_endpoint(&self) -> ConnectionResult<CatalogSnapshot> {
+        let mut client = self.controlled_connect()?;
+        let snapshot = inspect_connected_endpoint(&self.config, &mut client)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        self.cancellation.check()?;
+        Ok(snapshot)
+    }
+
+    /// Recheck that the target is empty and owned by the configured role.
+    pub fn assert_empty_and_owned(&self) -> ConnectionResult<()> {
+        let mut client = self.controlled_connect()?;
+        assert_target_empty_and_owned(&mut client)?;
+        self.cancellation.check()
     }
 
     /// Create supported namespaces and tables in one atomic PostgreSQL transaction.
@@ -518,18 +569,24 @@ impl PostgresTargetFactory {
             ));
         }
         let statements = pre_data_statements(catalog)?;
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         assert_target_empty_and_owned(&mut transaction)?;
         for statement in statements {
+            if let Err(cancelled) = self.cancellation.check() {
+                transaction.rollback().map_err(database_error)?;
+                return Err(cancelled);
+            }
             transaction
                 .batch_execute(&statement)
                 .map_err(database_error)?;
         }
-        transaction.commit().map_err(database_error)
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
+        transaction.commit().map_err(database_error)?;
+        self.cancellation.check()
     }
 
     /// Inspect the exact configuration and current state of one PostgreSQL sequence.
@@ -537,11 +594,10 @@ impl PostgresTargetFactory {
         &self,
         sequence: &PostgresSequence,
     ) -> ConnectionResult<PostgresSequenceState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        inspect_sequence(&mut client, sequence)
+        let mut client = self.controlled_connect()?;
+        let state = inspect_sequence(&mut client, sequence)?;
+        self.cancellation.check()?;
+        Ok(state)
     }
 
     /// Inspect one target stored generated column and its immutable dependency closure.
@@ -549,11 +605,10 @@ impl PostgresTargetFactory {
         &self,
         generated: &PostgresGeneratedColumn,
     ) -> ConnectionResult<PostgresGeneratedColumnState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        inspect_generated_column(&mut client, generated)
+        let mut client = self.controlled_connect()?;
+        let state = inspect_generated_column(&mut client, generated)?;
+        self.cancellation.check()?;
+        Ok(state)
     }
 
     /// Inspect an entire partition root/leaf topology by semantic identity.
@@ -561,10 +616,7 @@ impl PostgresTargetFactory {
         &self,
         expected: &PostgresPartitionTopology,
     ) -> ConnectionResult<PostgresPartitionTopologyState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         let mut expected_relations = vec![expected.root.clone()];
         expected_relations.extend(expected.leaves.iter().map(|leaf| leaf.table.clone()));
         let mut present = 0usize;
@@ -585,8 +637,7 @@ impl PostgresTargetFactory {
             return Ok(PostgresPartitionTopologyState::Partial);
         }
         drop(client);
-        let target = inspect_endpoint(&self.config)
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let target = self.inspect_endpoint()?;
         let topologies = postgres_partition_topologies(&target.catalog)
             .map_err(|error| ConnectionError::Database(error.to_string()))?;
         Ok(
@@ -606,10 +657,7 @@ impl PostgresTargetFactory {
         &self,
         sequence: &PostgresSequence,
     ) -> ConnectionResult<PostgresSequenceState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_sequence(&mut transaction, sequence)? {
             PostgresSequenceState::ExactConfig | PostgresSequenceState::ExactState => {
@@ -623,6 +671,10 @@ impl PostgresTargetFactory {
             }
             PostgresSequenceState::Absent => {
                 for statement in sequence_create_statements(sequence) {
+                    if let Err(cancelled) = self.cancellation.check() {
+                        transaction.rollback().map_err(database_error)?;
+                        return Err(cancelled);
+                    }
                     transaction
                         .batch_execute(&statement)
                         .map_err(database_error)?;
@@ -636,6 +688,10 @@ impl PostgresTargetFactory {
                         sequence.namespace, sequence.name
                     )));
                 }
+                if let Err(cancelled) = self.cancellation.check() {
+                    transaction.rollback().map_err(database_error)?;
+                    return Err(cancelled);
+                }
                 transaction.commit().map_err(database_error)?;
             }
         }
@@ -647,10 +703,7 @@ impl PostgresTargetFactory {
         &self,
         sequence: &PostgresSequence,
     ) -> ConnectionResult<PostgresSequenceState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_sequence(&mut transaction, sequence)? {
             PostgresSequenceState::ExactState => {
@@ -672,6 +725,10 @@ impl PostgresTargetFactory {
             }
         }
         let qualified_name = qualified_regclass_name(&sequence.namespace, &sequence.name);
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
         transaction
             .query_one(
                 "SELECT pg_catalog.setval($1::text::regclass, $2, $3)",
@@ -684,6 +741,10 @@ impl PostgresTargetFactory {
                 sequence.namespace, sequence.name
             )));
         }
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
         transaction.commit().map_err(database_error)?;
         Ok(PostgresSequenceState::ExactState)
     }
@@ -693,11 +754,10 @@ impl PostgresTargetFactory {
         &self,
         foreign_key: &PostgresForeignKey,
     ) -> ConnectionResult<PostgresForeignKeyState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        inspect_foreign_key(&mut client, foreign_key)
+        let mut client = self.controlled_connect()?;
+        let state = inspect_foreign_key(&mut client, foreign_key)?;
+        self.cancellation.check()?;
+        Ok(state)
     }
 
     /// Check the exact PostgreSQL null and match semantics without changing target state.
@@ -705,11 +765,10 @@ impl PostgresTargetFactory {
         &self,
         foreign_key: &PostgresForeignKey,
     ) -> ConnectionResult<PostgresForeignKeyCheck> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        check_foreign_key(&mut client, foreign_key)
+        let mut client = self.controlled_connect()?;
+        let check = check_foreign_key(&mut client, foreign_key)?;
+        self.cancellation.check()?;
+        Ok(check)
     }
 
     /// Reconcile an absent or unvalidated constraint and require an exact result.
@@ -720,10 +779,7 @@ impl PostgresTargetFactory {
         &self,
         foreign_key: &PostgresForeignKey,
     ) -> ConnectionResult<PostgresForeignKeyState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_foreign_key(&mut transaction, foreign_key)? {
             PostgresForeignKeyState::ExactValidated => {
@@ -744,11 +800,19 @@ impl PostgresTargetFactory {
                         foreign_key.name
                     )));
                 }
+                if let Err(cancelled) = self.cancellation.check() {
+                    transaction.rollback().map_err(database_error)?;
+                    return Err(cancelled);
+                }
                 transaction
                     .batch_execute(&foreign_key_add_statement(foreign_key))
                     .map_err(database_error)?;
             }
             PostgresForeignKeyState::ExactNotValidated => {}
+        }
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
         }
         transaction
             .batch_execute(&format!(
@@ -766,25 +830,25 @@ impl PostgresTargetFactory {
                 foreign_key.name
             )));
         }
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
         transaction.commit().map_err(database_error)?;
         Ok(PostgresForeignKeyState::ExactValidated)
     }
 
     /// Inspect one ordinary target index against exact typed source metadata.
     pub fn inspect_index(&self, index: &PostgresIndex) -> ConnectionResult<PostgresIndexState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        inspect_index(&mut client, index)
+        let mut client = self.controlled_connect()?;
+        let state = inspect_index(&mut client, index)?;
+        self.cancellation.check()?;
+        Ok(state)
     }
 
     /// Create an absent ordinary index atomically and require an exact result.
     pub fn reconcile_index(&self, index: &PostgresIndex) -> ConnectionResult<PostgresIndexState> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_index(&mut transaction, index)? {
             PostgresIndexState::Exact => {
@@ -799,6 +863,10 @@ impl PostgresTargetFactory {
             }
             PostgresIndexState::Absent => {}
         }
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
         transaction
             .batch_execute(&ordinary_index_create_statement(index))
             .map_err(database_error)?;
@@ -807,6 +875,10 @@ impl PostgresTargetFactory {
                 "target index {} was not created exactly",
                 index.name
             )));
+        }
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
         }
         transaction.commit().map_err(database_error)?;
         Ok(PostgresIndexState::Exact)
@@ -3022,11 +3094,7 @@ impl TargetConnectionFactory for PostgresTargetFactory {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn WriteSession>> {
-        let client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        self.remember_cancel_token(&client)?;
+        let client = self.controlled_connect()?;
         Ok(Box::new(PostgresWriter {
             client,
             cancellation,
@@ -3038,14 +3106,10 @@ impl TargetConnectionFactory for PostgresTargetFactory {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn VerificationSession>> {
-        let mut client = self
-            .config
-            .connect()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
         client
             .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .map_err(database_error)?;
-        self.remember_cancel_token(&client)?;
         let row = client
             .query_one(
                 "SELECT current_database(), current_setting('server_version'), pg_current_snapshot()::text",
@@ -3789,6 +3853,13 @@ pub fn inspect_endpoint(
     config: &PostgresEndpointConfig,
 ) -> Result<CatalogSnapshot, PostgresPlanError> {
     let mut client = config.connect()?;
+    inspect_connected_endpoint(config, &mut client)
+}
+
+fn inspect_connected_endpoint(
+    config: &PostgresEndpointConfig,
+    client: &mut Client,
+) -> Result<CatalogSnapshot, PostgresPlanError> {
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)

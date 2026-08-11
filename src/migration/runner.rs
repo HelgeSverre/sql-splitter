@@ -2,6 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "enterprise-migration-spike")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "enterprise-migration-spike")]
+use std::sync::Arc;
+#[cfg(feature = "enterprise-migration-spike")]
+use std::thread::{self, JoinHandle};
+#[cfg(feature = "enterprise-migration-spike")]
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 
@@ -9,7 +17,7 @@ use super::artifact::{read_json, replace_json, write_json_new};
 use super::canonical::{digest_rows, encode_row, CanonicalRow, CANONICAL_ENCODING_VERSION};
 use super::connection::{
     CancellationToken, ConnectionError, KeyTuple, KeysetPage, ReadSession, SourceConnectionFactory,
-    TargetConnectionFactory,
+    TargetConnectionFactory, WriteSession,
 };
 use super::fixture::{InMemorySource, InMemoryTarget};
 use super::journal::{
@@ -28,7 +36,7 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
-    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_generated_columns,
+    catalog_fingerprint, postgres_foreign_keys, postgres_generated_columns,
     postgres_partition_topologies, postgres_post_data_indexes, postgres_sequences,
     postgres_tls_binding, select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig,
     PostgresForeignKey, PostgresForeignKeyState, PostgresGeneratedColumnState, PostgresIndex,
@@ -55,6 +63,127 @@ pub struct PostgresExecutionReport {
     pub state: PathBuf,
     pub copied_rows: u64,
     pub committed_chunks: u64,
+}
+
+/// Inputs for a fault-test execution driven by an externally controlled token.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct PostgresCancellationExecution<'a> {
+    pub plan_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub fence_admin_config_path: &'a Path,
+    pub fence_artifact_path: &'a Path,
+    pub approval_reference: &'a str,
+    pub state_path: &'a Path,
+}
+
+/// Inputs for a fault-test resume driven by an externally controlled token.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct PostgresCancellationResume<'a> {
+    pub state_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub fence_admin_config_path: &'a Path,
+    pub fence_artifact_path: &'a Path,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+struct CancellationMonitor {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl CancellationMonitor {
+    fn start(
+        source: Arc<PostgresSourceFactory>,
+        target: Arc<PostgresTargetFactory>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if worker_stop.load(Ordering::Acquire) {
+                return;
+            }
+            let mut errors = Vec::new();
+            match source.open_control() {
+                Ok(mut control) => {
+                    if let Err(error) = control.cancel_active_statement() {
+                        if !matches!(error, ConnectionError::InvalidRequest(_)) {
+                            errors.push(format!("source: {error}"));
+                        }
+                    }
+                }
+                Err(error) if !matches!(error, ConnectionError::InvalidRequest(_)) => {
+                    errors.push(format!("source control: {error}"));
+                }
+                Err(_) => {}
+            }
+            match target.open_control() {
+                Ok(mut control) => {
+                    if let Err(error) = control.cancel_active_statement() {
+                        if !matches!(error, ConnectionError::InvalidRequest(_)) {
+                            errors.push(format!("target: {error}"));
+                        }
+                    }
+                }
+                Err(error) if !matches!(error, ConnectionError::InvalidRequest(_)) => {
+                    errors.push(format!("target control: {error}"));
+                }
+                Err(_) => {}
+            }
+            if !errors.is_empty() {
+                cancellation.record_control_error(errors.join("; "));
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl Drop for CancellationMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn check_cancellation_before_commit(
+    writer: &mut dyn WriteSession,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<()> {
+    if let Err(cancelled) = cancellation.check() {
+        writer.rollback().map_err(|rollback| {
+            anyhow!("cancellation failed and target rollback also failed: {cancelled}; {rollback}")
+        })?;
+        return Err(cancelled.into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn rollback_cancelled_commit(
+    writer: &mut dyn WriteSession,
+    cancelled: ConnectionError,
+) -> anyhow::Error {
+    match writer.rollback() {
+        Ok(()) => cancelled.into(),
+        Err(rollback) => {
+            anyhow!("target commit was cancelled and rollback also failed: {cancelled}; {rollback}")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +287,7 @@ pub fn execute_postgres_plan(
         state_path.as_ref(),
         None,
         None,
+        None,
     )
 }
 
@@ -181,6 +311,7 @@ pub fn execute_postgres_fenced_plan(
             fence_admin_config_path.as_ref(),
             fence_artifact_path.as_ref(),
         )),
+        None,
         None,
     )
 }
@@ -227,6 +358,43 @@ pub fn execute_postgres_interrupted(
         request.state_path,
         Some((request.fence_admin_config_path, request.fence_artifact_path)),
         Some(request.interruption.into()),
+        None,
+    )
+}
+
+/// Execute using a caller-controlled cancellation token for fault testing.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn execute_postgres_fenced_plan_with_cancellation(
+    request: PostgresCancellationExecution<'_>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<PostgresExecutionReport> {
+    execute_postgres_plan_internal(
+        request.plan_path,
+        request.source_config_path,
+        request.target_config_path,
+        request.approval_reference,
+        request.state_path,
+        Some((request.fence_admin_config_path, request.fence_artifact_path)),
+        None,
+        Some(cancellation),
+    )
+}
+
+/// Resume using a caller-controlled cancellation token for fault testing.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn resume_postgres_fenced_plan_with_cancellation(
+    request: PostgresCancellationResume<'_>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<PostgresExecutionReport> {
+    resume_postgres_fenced_plan_internal(
+        request.state_path,
+        request.source_config_path,
+        request.target_config_path,
+        request.fence_admin_config_path,
+        request.fence_artifact_path,
+        Some(cancellation),
     )
 }
 
@@ -248,6 +416,7 @@ pub fn resume_postgres_fenced_plan(
         target_config_path.as_ref(),
         fence_admin_config_path.as_ref(),
         fence_artifact_path.as_ref(),
+        None,
     )
 }
 
@@ -258,6 +427,7 @@ fn resume_postgres_fenced_plan_internal(
     target_config_path: &Path,
     fence_admin_config_path: &Path,
     fence_artifact_path: &Path,
+    injected_cancellation: Option<CancellationToken>,
 ) -> anyhow::Result<PostgresExecutionReport> {
     let mut state: MigrationState = read_json(state_path)?;
     let reviewed = state
@@ -326,7 +496,21 @@ fn resume_postgres_fenced_plan_internal(
     }
     let fence_inventory = attest_postgres_write_fence(&admin_config, &installed.evidence)?;
 
-    let source = PostgresSourceFactory::new(source_config.clone());
+    let cancellation = injected_cancellation.unwrap_or_default();
+    cancellation.observe_process_sigint()?;
+    let source = Arc::new(PostgresSourceFactory::new_with_cancellation(
+        source_config.clone(),
+        cancellation.clone(),
+    ));
+    let target = Arc::new(PostgresTargetFactory::new_with_cancellation(
+        target_config.clone(),
+        cancellation.clone(),
+    ));
+    let _cancellation_monitor = CancellationMonitor::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        cancellation.clone(),
+    );
     source.capabilities().require(&[
         "consistent_snapshot",
         "server_read_only",
@@ -357,13 +541,12 @@ fn resume_postgres_fenced_plan_internal(
     }
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
 
-    let target_snapshot = inspect_endpoint(&target_config)?;
+    let target_snapshot = target.inspect_endpoint()?;
     if target_snapshot.endpoint_identity != state.binding.target_endpoint
         || target_snapshot.endpoint_identity != reviewed.plan.target_endpoint_identity
     {
         return Err(anyhow!("target endpoint differs from durable binding"));
     }
-    let target = PostgresTargetFactory::new(target_config.clone());
     target.capabilities().require(&[
         "transactions",
         "cancellation",
@@ -372,7 +555,6 @@ fn resume_postgres_fenced_plan_internal(
         "plain_insert",
     ])?;
 
-    let cancellation = CancellationToken::default();
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
     if !reader.read_only_evidence().server_enforced || reader.snapshot() != &snapshot {
         return Err(anyhow!("resumed source snapshot evidence is invalid"));
@@ -383,9 +565,9 @@ fn resume_postgres_fenced_plan_internal(
             reviewed: &reviewed,
             source_catalog: &source_catalog,
             target: &target,
-            target_config: &target_config,
             admin: &admin_config,
             installed: &installed,
+            cancellation: &cancellation,
         },
         &mut state,
         state_path,
@@ -405,6 +587,7 @@ fn resume_postgres_fenced_plan_internal(
         .iter()
         .filter(|operation| operation.kind == OperationKind::CopyTable)
     {
+        cancellation.check()?;
         let table = operation
             .table
             .as_ref()
@@ -418,6 +601,7 @@ fn resume_postgres_fenced_plan_internal(
             continue;
         }
         if operation_state == OperationState::Pending {
+            cancellation.check()?;
             state.start_operation(operation.id.as_str())?;
             replace_json(state_path, &state)?;
         } else if operation_state != OperationState::Running {
@@ -446,7 +630,7 @@ fn resume_postgres_fenced_plan_internal(
                 ));
             }
             match reconcile_live_prepared_chunk(
-                &target,
+                target.as_ref(),
                 &mut state,
                 state_path,
                 table,
@@ -463,7 +647,13 @@ fn resume_postgres_fenced_plan_internal(
                         let _ = writer.rollback();
                         return Err(error.into());
                     }
-                    writer.commit()?;
+                    check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
+                    if let Err(error) = writer.commit() {
+                        if error == ConnectionError::Cancelled {
+                            return Err(rollback_cancelled_commit(writer.as_mut(), error));
+                        }
+                        return Err(error.into());
+                    }
                     state.commit(prepared.chunk_id)?;
                     replace_json(state_path, &state)?;
                 }
@@ -492,6 +682,7 @@ fn resume_postgres_fenced_plan_internal(
                 break;
             }
             let final_key = batch_final_key(&batch, &shape)?;
+            cancellation.check()?;
             state.prepare(ChunkRecord {
                 chunk_id: next_chunk_id,
                 operation_id: operation.id.to_string(),
@@ -513,11 +704,12 @@ fn resume_postgres_fenced_plan_internal(
                 let _ = writer.rollback();
                 return Err(error.into());
             }
+            check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
             match writer.commit() {
                 Ok(()) => state.commit(next_chunk_id)?,
                 Err(ConnectionError::CommitOutcomeUnknown(_)) => {
                     match reconcile_live_prepared_chunk(
-                        &target,
+                        target.as_ref(),
                         &mut state,
                         state_path,
                         table,
@@ -536,7 +728,12 @@ fn resume_postgres_fenced_plan_internal(
                         }
                     }
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    if error == ConnectionError::Cancelled {
+                        return Err(rollback_cancelled_commit(writer.as_mut(), error));
+                    }
+                    return Err(error.into());
+                }
             }
             replace_json(state_path, &state)?;
             copied_rows = copied_rows
@@ -558,7 +755,7 @@ fn resume_postgres_fenced_plan_internal(
         return Err(anyhow!("migration status cannot resume verification"));
     }
     attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
-    let mut verifier = target.open_verifier(cancellation)?;
+    let mut verifier = target.open_verifier(cancellation.clone())?;
     for operation in reviewed
         .plan
         .operations
@@ -601,6 +798,7 @@ fn resume_postgres_fenced_plan_internal(
         &mut state,
         state_path,
         None,
+        &cancellation,
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
     process_postgres_indexes(
@@ -610,6 +808,7 @@ fn resume_postgres_fenced_plan_internal(
         &mut state,
         state_path,
         None,
+        &cancellation,
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
     process_postgres_foreign_keys(
@@ -619,8 +818,11 @@ fn resume_postgres_fenced_plan_internal(
         &mut state,
         state_path,
         None,
+        &cancellation,
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
+    drop(verifier);
+    let mut verifier = target.open_verifier(cancellation.clone())?;
     verify_postgres_partition_topologies(
         &reviewed,
         &source_catalog,
@@ -631,9 +833,10 @@ fn resume_postgres_fenced_plan_internal(
         state_path,
         execution_page_limit(&source_config)?,
     )?;
+    cancellation.check()?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_postgres_generated_columns(&source_catalog, &target)?;
-    verify_schema_projection(&source_catalog, &target_config)?;
+    verify_schema_projection(&source_catalog, target.as_ref())?;
     let verify_schema = reviewed
         .plan
         .operations
@@ -643,6 +846,7 @@ fn resume_postgres_fenced_plan_internal(
     complete_operation_if_needed(&mut state, verify_schema.id.as_str())?;
     replace_json(state_path, &state)?;
     attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
+    cancellation.check()?;
     let mut completed = state.clone();
     completed.finalize()?;
     drop(reader);
@@ -650,6 +854,7 @@ fn resume_postgres_fenced_plan_internal(
         ConsistencyEvidence::WriteFence { generation, .. } => generation,
         ConsistencyEvidence::NativeSnapshot { .. } => unreachable!("validated above"),
     };
+    cancellation.check()?;
     release_postgres_write_fence(&admin_config, generation, &installed.token)?;
     replace_json(state_path, &completed)?;
     Ok(PostgresExecutionReport {
@@ -660,6 +865,7 @@ fn resume_postgres_fenced_plan_internal(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)] // Internal operator context plus injected cancellation/fault controls.
 fn execute_postgres_plan_internal(
     plan_path: &Path,
     source_config_path: &Path,
@@ -668,6 +874,7 @@ fn execute_postgres_plan_internal(
     state_path: &Path,
     fence_paths: Option<(&Path, &Path)>,
     interruption: Option<ExecutionInterruption>,
+    injected_cancellation: Option<CancellationToken>,
 ) -> anyhow::Result<PostgresExecutionReport> {
     if approval_reference.trim().is_empty() {
         return Err(anyhow!("approval reference must not be empty"));
@@ -718,7 +925,21 @@ fn execute_postgres_plan_internal(
         _ => return Err(anyhow!("reviewed plan has an unsupported consistency mode")),
     };
 
-    let source = PostgresSourceFactory::new(source_config.clone());
+    let cancellation = injected_cancellation.unwrap_or_default();
+    cancellation.observe_process_sigint()?;
+    let source = Arc::new(PostgresSourceFactory::new_with_cancellation(
+        source_config.clone(),
+        cancellation.clone(),
+    ));
+    let target = Arc::new(PostgresTargetFactory::new_with_cancellation(
+        target_config.clone(),
+        cancellation.clone(),
+    ));
+    let _cancellation_monitor = CancellationMonitor::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        cancellation.clone(),
+    );
     source.capabilities().require(&[
         "consistent_snapshot",
         "server_read_only",
@@ -756,7 +977,7 @@ fn execute_postgres_plan_internal(
     }
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
 
-    let target_preflight = inspect_endpoint(&target_config)?;
+    let target_preflight = target.inspect_endpoint()?;
     if target_preflight.endpoint_identity != reviewed.plan.target_endpoint_identity {
         return Err(anyhow!(
             "target endpoint identity differs from reviewed plan"
@@ -767,7 +988,6 @@ fn execute_postgres_plan_internal(
             "target catalog fingerprint changed after plan review"
         ));
     }
-    let target = PostgresTargetFactory::new(target_config.clone());
     target.capabilities().require(&[
         "transactions",
         "cancellation",
@@ -822,7 +1042,6 @@ fn execute_postgres_plan_internal(
     )?;
     write_json_new(state_path, &state)?;
 
-    let cancellation = CancellationToken::default();
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
     if !reader.read_only_evidence().server_enforced || reader.snapshot() != &snapshot {
         return Err(anyhow!(
@@ -837,12 +1056,14 @@ fn execute_postgres_plan_internal(
         .filter(|operation| is_postgres_pre_data_operation(operation))
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
+    cancellation.check()?;
     state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
     replace_json(state_path, &state)?;
     interrupt_if(interruption, ExecutionInterruption::AfterDdlPrepared)?;
     attest_fence_if_present(fenced.as_ref())?;
+    cancellation.check()?;
     if let Err(initial_error) = target.create_pre_data_schema(&source_catalog) {
-        if target_schema_matches(&source_catalog, &target_config)? {
+        if target_schema_matches(&source_catalog, target.as_ref())? {
             // The atomic DDL transaction committed, but its acknowledgement was lost.
         } else if target.assert_empty_and_owned().is_ok() {
             target.create_pre_data_schema(&source_catalog).with_context(|| {
@@ -873,11 +1094,13 @@ fn execute_postgres_plan_internal(
         .iter()
         .filter(|operation| operation.kind == OperationKind::CopyTable)
     {
+        cancellation.check()?;
         let table = operation
             .table
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
         let shape = table_shape(&source_catalog, table, Some(operation))?;
+        cancellation.check()?;
         state.start_operation(operation.id.as_str())?;
         replace_json(state_path, &state)?;
         let mut after = None;
@@ -899,6 +1122,7 @@ fn execute_postgres_plan_internal(
             next_chunk_id = next_chunk_id
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("chunk identifier overflow"))?;
+            cancellation.check()?;
             state.prepare(ChunkRecord {
                 chunk_id,
                 operation_id: operation.id.to_string(),
@@ -930,12 +1154,16 @@ fn execute_postgres_plan_internal(
             if let Some(ExecutionInterruption::NetworkCommitFault(port)) = interruption {
                 arm_network_commit_fault(port)?;
             }
+            check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
             if let Err(error) = writer.commit() {
+                if error == ConnectionError::Cancelled {
+                    return Err(rollback_cancelled_commit(writer.as_mut(), error));
+                }
                 if !matches!(error, ConnectionError::CommitOutcomeUnknown(_)) {
                     return Err(error.into());
                 }
                 match reconcile_live_prepared_chunk(
-                    &target,
+                    target.as_ref(),
                     &mut state,
                     state_path,
                     table,
@@ -988,7 +1216,7 @@ fn execute_postgres_plan_internal(
     state.begin_verification()?;
     replace_json(state_path, &state)?;
     attest_fence_if_present(fenced.as_ref())?;
-    let mut verifier = target.open_verifier(cancellation)?;
+    let mut verifier = target.open_verifier(cancellation.clone())?;
     for operation in reviewed
         .plan
         .operations
@@ -1031,6 +1259,7 @@ fn execute_postgres_plan_internal(
         &mut state,
         state_path,
         interruption,
+        &cancellation,
         || attest_fence_if_present(fenced.as_ref()),
     )?;
     process_postgres_indexes(
@@ -1040,6 +1269,7 @@ fn execute_postgres_plan_internal(
         &mut state,
         state_path,
         interruption,
+        &cancellation,
         || attest_fence_if_present(fenced.as_ref()),
     )?;
     process_postgres_foreign_keys(
@@ -1049,8 +1279,11 @@ fn execute_postgres_plan_internal(
         &mut state,
         state_path,
         interruption,
+        &cancellation,
         || attest_fence_if_present(fenced.as_ref()),
     )?;
+    drop(verifier);
+    let mut verifier = target.open_verifier(cancellation.clone())?;
     verify_postgres_partition_topologies(
         &reviewed,
         &source_catalog,
@@ -1061,9 +1294,10 @@ fn execute_postgres_plan_internal(
         state_path,
         execution_page_limit(&source_config)?,
     )?;
+    cancellation.check()?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_postgres_generated_columns(&source_catalog, &target)?;
-    verify_schema_projection(&source_catalog, &target_config)?;
+    verify_schema_projection(&source_catalog, target.as_ref())?;
     let verify_schema = reviewed
         .plan
         .operations
@@ -1076,6 +1310,7 @@ fn execute_postgres_plan_internal(
     replace_json(state_path, &state)?;
     interrupt_if(interruption, ExecutionInterruption::AfterAllVerified)?;
     attest_fence_if_present(fenced.as_ref())?;
+    cancellation.check()?;
     let mut completed_state = state.clone();
     completed_state.finalize()?;
     drop(reader);
@@ -1086,6 +1321,7 @@ fn execute_postgres_plan_internal(
                 return Err(anyhow!("fence artifact contains native snapshot evidence"));
             }
         };
+        cancellation.check()?;
         release_postgres_write_fence(admin, generation, &installed.token)?;
     }
     interrupt_if(interruption, ExecutionInterruption::AfterFenceReleased)?;
@@ -1312,9 +1548,9 @@ struct ResumeDdlContext<'a> {
     reviewed: &'a ReviewedPlan,
     source_catalog: &'a VendorCatalog,
     target: &'a PostgresTargetFactory,
-    target_config: &'a PostgresEndpointConfig,
     admin: &'a PostgresEndpointConfig,
     installed: &'a InstalledPostgresFence,
+    cancellation: &'a CancellationToken,
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1339,7 +1575,7 @@ fn resume_pre_data_schema(
         .iter()
         .all(|state| *state == OperationState::Verified)
     {
-        if !target_schema_matches(context.source_catalog, context.target_config)? {
+        if !target_schema_matches(context.source_catalog, context.target)? {
             state.require_manual_reconciliation()?;
             replace_json(state_path, state)?;
             return Err(anyhow!(
@@ -1349,8 +1585,7 @@ fn resume_pre_data_schema(
         return Ok(());
     }
     attest_postgres_write_fence(context.admin, &context.installed.evidence)?;
-    let schema_exists_exactly =
-        target_schema_matches(context.source_catalog, context.target_config)?;
+    let schema_exists_exactly = target_schema_matches(context.source_catalog, context.target)?;
     if states.iter().all(|state| *state == OperationState::Pending) {
         if schema_exists_exactly {
             return Err(anyhow!(
@@ -1358,8 +1593,10 @@ fn resume_pre_data_schema(
             ));
         }
         context.target.assert_empty_and_owned()?;
+        context.cancellation.check()?;
         state.prepare_operations_atomic(create_ids.iter().copied())?;
         replace_json(state_path, state)?;
+        context.cancellation.check()?;
         context
             .target
             .create_pre_data_schema(context.source_catalog)?;
@@ -1368,7 +1605,11 @@ fn resume_pre_data_schema(
         .all(|state| *state == OperationState::Prepared)
     {
         if schema_exists_exactly
-            && !target_planned_tables_are_empty(context.source_catalog, context.target)?
+            && !target_planned_tables_are_empty(
+                context.source_catalog,
+                context.target,
+                context.cancellation.clone(),
+            )?
         {
             state.require_manual_reconciliation()?;
             replace_json(state_path, state)?;
@@ -1421,8 +1662,9 @@ fn is_postgres_pre_data_operation(operation: &PlanOperation) -> bool {
 fn target_planned_tables_are_empty(
     source_catalog: &VendorCatalog,
     target: &dyn TargetConnectionFactory,
+    cancellation: CancellationToken,
 ) -> anyhow::Result<bool> {
-    let mut verifier = target.open_verifier(CancellationToken::default())?;
+    let mut verifier = target.open_verifier(cancellation)?;
     for namespace in &source_catalog.namespaces {
         for object in namespace
             .objects
@@ -1450,6 +1692,7 @@ fn target_planned_tables_are_empty(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)] // Durable operation context and shared cancellation/fence checks.
 fn process_postgres_sequences(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
@@ -1457,6 +1700,7 @@ fn process_postgres_sequences(
     state: &mut MigrationState,
     state_path: &Path,
     interruption: Option<ExecutionInterruption>,
+    cancellation: &CancellationToken,
     mut attest: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let sequences = postgres_sequences(catalog)?
@@ -1469,6 +1713,7 @@ fn process_postgres_sequences(
             OperationKind::Vendor(name) if name == "restore_postgres_sequence"
         )
     }) {
+        cancellation.check()?;
         let reviewed_sequence: PostgresSequence = serde_json::from_value(
             operation
                 .parameters
@@ -1682,6 +1927,7 @@ fn verify_physical_partition_leaf(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)] // Durable operation context and shared cancellation/fence checks.
 fn process_postgres_indexes(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
@@ -1689,6 +1935,7 @@ fn process_postgres_indexes(
     state: &mut MigrationState,
     state_path: &Path,
     interruption: Option<ExecutionInterruption>,
+    cancellation: &CancellationToken,
     mut attest: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let indexes = postgres_post_data_indexes(catalog)?
@@ -1699,6 +1946,7 @@ fn process_postgres_indexes(
         operation.kind == OperationKind::CreateIndex
             && operation.parameters.contains_key("postgres_index")
     }) {
+        cancellation.check()?;
         let reviewed_index: PostgresIndex = serde_json::from_value(
             operation
                 .parameters
@@ -1762,6 +2010,7 @@ fn process_postgres_indexes(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)] // Durable operation context and shared cancellation/fence checks.
 fn process_postgres_foreign_keys(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
@@ -1769,6 +2018,7 @@ fn process_postgres_foreign_keys(
     state: &mut MigrationState,
     state_path: &Path,
     interruption: Option<ExecutionInterruption>,
+    cancellation: &CancellationToken,
     mut attest: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let foreign_keys = postgres_foreign_keys(catalog)?
@@ -1782,6 +2032,7 @@ fn process_postgres_foreign_keys(
         .iter()
         .filter(|operation| operation.kind == OperationKind::CheckForeignKey)
     {
+        cancellation.check()?;
         let foreign_key = foreign_key_for_operation(operation, &foreign_keys)?;
         match operation_state(state, operation.id.as_str())? {
             OperationState::Pending => {
@@ -1826,6 +2077,7 @@ fn process_postgres_foreign_keys(
         .iter()
         .filter(|operation| operation.kind == OperationKind::AddForeignKey)
     {
+        cancellation.check()?;
         let foreign_key = foreign_key_for_operation(operation, &foreign_keys)?;
         match operation_state(state, operation.id.as_str())? {
             OperationState::Pending => {
@@ -2479,9 +2731,9 @@ fn verify_live_table(
 #[cfg(feature = "enterprise-migration-spike")]
 fn verify_schema_projection(
     source: &VendorCatalog,
-    target_config: &PostgresEndpointConfig,
+    target_factory: &PostgresTargetFactory,
 ) -> anyhow::Result<()> {
-    let target = inspect_endpoint(target_config)?;
+    let target = target_factory.inspect_endpoint()?;
     if schema_projection(source, true)? != schema_projection(&target.catalog, true)? {
         return Err(anyhow!(
             "final target schema differs from source projection"
@@ -2493,9 +2745,9 @@ fn verify_schema_projection(
 #[cfg(feature = "enterprise-migration-spike")]
 fn target_schema_matches(
     source: &VendorCatalog,
-    target_config: &PostgresEndpointConfig,
+    target_factory: &PostgresTargetFactory,
 ) -> anyhow::Result<bool> {
-    let target = inspect_endpoint(target_config)?;
+    let target = target_factory.inspect_endpoint()?;
     Ok(schema_projection(source, false)? == schema_projection(&target.catalog, false)?)
 }
 
