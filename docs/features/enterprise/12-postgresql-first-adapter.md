@@ -78,6 +78,15 @@ manual-reconciliation state for a conflicting target constraint. The separate
 feature is not part of the normal spike API. PostgreSQL 15, 16, and 17 pass this
 matrix.
 
+The key-pagination matrix validates every read request against an exact,
+validated, non-null primary or unique constraint. It covers signed integer
+extrema, repeated composite prefixes, `C`-collated Unicode text, binary prefix
+keys, empty and one-row tables, exact page boundaries, nullable and non-unique
+rejection, and byte-bounded page prefixes. Selected text keys bind the collation
+schema, provider, deterministic flag, recorded version, actual provider version,
+and PostgreSQL server version through the reviewed catalog and state
+fingerprints. A provider-version mismatch blocks execution.
+
 ## Configuration and security
 
 Endpoint files contain host, port, database, user, a credential environment
@@ -122,7 +131,7 @@ the complete report.
 
 The adapter does not yet prove:
 
-- complete table-key suitability and pagination matrices;
+- unique-index key selection and rejected index-form matrices;
 - the complete fence failure-injection matrix, including legacy storage upgrades;
 - post-data indexes and broader DDL coverage;
 - unsupported foreign-key variants beyond the explicitly modeled subset;

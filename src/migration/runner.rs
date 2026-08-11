@@ -339,6 +339,7 @@ fn resume_postgres_fenced_plan_internal(
     {
         return Err(anyhow!("resumed source catalog differs from reviewed plan"));
     }
+    validate_copy_table_shapes(&reviewed, &source_catalog)?;
 
     let target_snapshot = inspect_endpoint(&target_config)?;
     if target_snapshot.endpoint_identity != state.binding.target_endpoint
@@ -705,6 +706,7 @@ fn execute_postgres_plan_internal(
             "fresh source catalog differs from embedded reviewed catalog"
         ));
     }
+    validate_copy_table_shapes(&reviewed, &source_catalog)?;
 
     let target_preflight = inspect_endpoint(&target_config)?;
     if target_preflight.endpoint_identity != reviewed.plan.target_endpoint_identity {
@@ -1661,6 +1663,26 @@ struct TableShape {
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+fn validate_copy_table_shapes(
+    reviewed: &ReviewedPlan,
+    catalog: &VendorCatalog,
+) -> anyhow::Result<()> {
+    for operation in reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CopyTable)
+    {
+        let table = operation
+            .table
+            .as_ref()
+            .ok_or_else(|| anyhow!("copy operation has no table"))?;
+        table_shape(catalog, table)
+            .with_context(|| format!("table {table:?} has no safe resumable key"))?;
+    }
+    Ok(())
+}
+
 fn table_shape(catalog: &VendorCatalog, table: &QualifiedTable) -> anyhow::Result<TableShape> {
     let namespace = catalog
         .namespaces
@@ -1698,7 +1720,7 @@ fn table_shape(catalog: &VendorCatalog, table: &QualifiedTable) -> anyhow::Resul
         .iter()
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
-    let key_object = namespace
+    let mut key_candidates = namespace
         .objects
         .iter()
         .filter(|object| {
@@ -1711,48 +1733,69 @@ fn table_shape(catalog: &VendorCatalog, table: &QualifiedTable) -> anyhow::Resul
                 .and_then(serde_json::Value::as_str)
                 == Some(table_object.id.as_str())
         })
-        .min_by_key(|object| {
+        .collect::<Vec<_>>();
+    key_candidates.sort_by_key(|object| {
+        (
             if object.kind == CatalogObjectKind::PrimaryKey {
                 0
             } else {
                 1
-            }
-        })
-        .ok_or_else(|| anyhow!("table has no resumable primary or unique key"))?;
-    let key_names = key_object
-        .attributes
-        .get("columns")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow!("resumable key has no ordered column metadata"))?;
-    if key_names.is_empty() {
-        return Err(anyhow!("resumable key is empty"));
+            },
+            object.id.as_str(),
+        )
+    });
+    if key_candidates.is_empty() {
+        return Err(anyhow!("table has no resumable primary or unique key"));
     }
-    let mut key = Vec::with_capacity(key_names.len());
-    let mut key_indexes = Vec::with_capacity(key_names.len());
-    for name in key_names {
-        let name = name
-            .as_str()
-            .ok_or_else(|| anyhow!("resumable key column is not text"))?;
-        let index = columns
-            .iter()
-            .position(|column| column.name.as_str() == name)
-            .ok_or_else(|| anyhow!("resumable key column is absent from table"))?;
-        if columns[index]
+    for key_object in key_candidates {
+        let Some(key_names) = key_object
             .attributes
-            .get("nullable")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true)
-        {
-            return Err(anyhow!("resumable key column {name} is nullable"));
+            .get("columns")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        if key_names.is_empty() {
+            continue;
         }
-        key.push(columns[index].name.clone());
-        key_indexes.push(index);
+        let mut key = Vec::with_capacity(key_names.len());
+        let mut key_indexes = Vec::with_capacity(key_names.len());
+        let mut suitable = true;
+        for name in key_names {
+            let Some(name) = name.as_str() else {
+                suitable = false;
+                break;
+            };
+            let Some(index) = columns
+                .iter()
+                .position(|column| column.name.as_str() == name)
+            else {
+                suitable = false;
+                break;
+            };
+            if columns[index]
+                .attributes
+                .get("nullable")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            {
+                suitable = false;
+                break;
+            }
+            key.push(columns[index].name.clone());
+            key_indexes.push(index);
+        }
+        if suitable {
+            return Ok(TableShape {
+                projection,
+                key,
+                key_indexes,
+            });
+        }
     }
-    Ok(TableShape {
-        projection,
-        key,
-        key_indexes,
-    })
+    Err(anyhow!(
+        "table has no complete non-null resumable primary or unique key"
+    ))
 }
 
 #[cfg(feature = "enterprise-migration-spike")]

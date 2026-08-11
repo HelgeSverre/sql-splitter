@@ -30,7 +30,7 @@ use super::connection::{
 };
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
-    Identifier, QualifiedTable, RowBatch, ValueFormat, VendorCatalog,
+    Identifier, QualifiedTable, RowBatch, RowBatchError, ValueFormat, VendorCatalog,
 };
 use super::plan::{
     MigrationPlan, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObject,
@@ -439,6 +439,7 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             max_batch_rows: self.config.max_batch_rows,
             max_batch_bytes: self.config.max_batch_bytes,
             metadata_cache: HashMap::new(),
+            validated_keys: BTreeSet::new(),
         }))
     }
 
@@ -1206,6 +1207,17 @@ fn table_column_definitions(
                 .and_then(serde_json::Value::as_str)
             {
                 definition.push_str(" COLLATE ");
+                if let Some(schema) = column
+                    .attributes
+                    .get("collation_schema")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    definition
+                        .push_str(&quote_identifier(&Identifier::new(schema).map_err(
+                            |error| ConnectionError::InvalidRequest(error.to_string()),
+                        )?));
+                    definition.push('.');
+                }
                 definition
                     .push_str(&quote_identifier(&Identifier::new(collation).map_err(
                         |error| ConnectionError::InvalidRequest(error.to_string()),
@@ -1361,6 +1373,7 @@ impl TargetConnectionFactory for PostgresTargetFactory {
                 max_batch_rows: self.config.max_batch_rows,
                 max_batch_bytes: self.config.max_batch_bytes,
                 metadata_cache: HashMap::new(),
+                validated_keys: BTreeSet::new(),
             },
         }))
     }
@@ -1616,6 +1629,7 @@ struct PostgresSnapshotReader {
     max_batch_rows: usize,
     max_batch_bytes: usize,
     metadata_cache: HashMap<(QualifiedTable, Vec<Identifier>), Vec<ColumnMeta>>,
+    validated_keys: BTreeSet<(QualifiedTable, Vec<Identifier>)>,
 }
 
 impl ReadSession for PostgresSnapshotReader {
@@ -1630,6 +1644,11 @@ impl ReadSession for PostgresSnapshotReader {
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
         self.cancellation.check()?;
         validate_page(request, self.max_batch_rows)?;
+        let key_cache_entry = (request.table.clone(), request.key.clone());
+        if !self.validated_keys.contains(&key_cache_entry) {
+            validate_resumable_key(&mut self.client, &request.table, &request.key)?;
+            self.validated_keys.insert(key_cache_entry);
+        }
         let metadata_key = (request.table.clone(), request.projection.clone());
         let metadata = if let Some(metadata) = self.metadata_cache.get(&metadata_key) {
             metadata.clone()
@@ -1710,9 +1729,11 @@ impl ReadSession for PostgresSnapshotReader {
                     .ok_or_else(|| ConnectionError::BatchLimit("row byte count overflow".into()))?;
                 values.push(value);
             }
-            batch
-                .try_push(values, encoded_bytes)
-                .map_err(|error| ConnectionError::BatchLimit(error.to_string()))?;
+            match batch.try_push(values, encoded_bytes) {
+                Ok(()) => {}
+                Err(RowBatchError::ByteLimit { .. }) if !batch.is_empty() => break,
+                Err(error) => return Err(ConnectionError::BatchLimit(error.to_string())),
+            }
         }
         Ok(batch)
     }
@@ -1742,6 +1763,56 @@ fn validate_page(request: &KeysetPage, max_batch_rows: usize) -> ConnectionResul
     Ok(())
 }
 
+fn validate_resumable_key(
+    client: &mut Client,
+    table: &QualifiedTable,
+    key: &[Identifier],
+) -> ConnectionResult<()> {
+    let key_names = key
+        .iter()
+        .map(|identifier| identifier.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let accepted: bool = client
+        .query_one(
+            "SELECT EXISTS (
+               SELECT 1
+               FROM pg_constraint con
+               JOIN pg_class rel ON rel.oid = con.conrelid
+               JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+               WHERE nsp.nspname = $1
+                 AND rel.relname = $2
+                 AND con.contype IN ('p', 'u')
+                 AND con.convalidated
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM unnest(con.conkey) AS key_attnum
+                   JOIN pg_attribute att
+                     ON att.attrelid = con.conrelid AND att.attnum = key_attnum
+                   LEFT JOIN pg_collation coll ON coll.oid = att.attcollation
+                   WHERE NOT att.attnotnull
+                      OR (coll.collversion IS NOT NULL
+                          AND coll.collversion IS DISTINCT FROM pg_collation_actual_version(coll.oid))
+                 )
+                 AND ARRAY(
+                   SELECT att.attname::text
+                   FROM unnest(con.conkey) WITH ORDINALITY AS key_col(attnum, position)
+                   JOIN pg_attribute att
+                     ON att.attrelid = con.conrelid AND att.attnum = key_col.attnum
+                   ORDER BY key_col.position
+                 ) = $3::text[]
+             )",
+            &[&table.namespace.as_str(), &table.name.as_str(), &key_names],
+        )
+        .map_err(database_error)?
+        .get(0);
+    if !accepted {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "pagination key for {table:?} is not an exact validated non-null primary or unique constraint"
+        )));
+    }
+    Ok(())
+}
+
 fn quote_identifier(identifier: &Identifier) -> String {
     format!("\"{}\"", identifier.as_str().replace('"', "\"\""))
 }
@@ -1763,10 +1834,29 @@ fn key_parameter(value: &DbValue, vendor_type: &str) -> ConnectionResult<Box<dyn
             .map_err(|_| ConnectionError::UnsupportedKeyValue),
         (DbValue::Float32(bits), "pg_catalog.float4") => Ok(Box::new(f32::from_bits(*bits))),
         (DbValue::Float64(bits), "pg_catalog.float8") => Ok(Box::new(f64::from_bits(*bits))),
-        (DbValue::Text(value), "pg_catalog.text" | "pg_catalog.varchar") => {
-            Ok(Box::new(value.clone()))
-        }
+        (
+            DbValue::Text(value),
+            "pg_catalog.text" | "pg_catalog.varchar" | "pg_catalog.bpchar" | "pg_catalog.name",
+        ) => Ok(Box::new(value.clone())),
         (DbValue::Bytes(value), "pg_catalog.bytea") => Ok(Box::new(value.clone())),
+        (
+            DbValue::Vendor {
+                type_id,
+                format: ValueFormat::Binary,
+                bytes,
+            },
+            _,
+        ) => {
+            let oid = type_id
+                .strip_prefix("postgres:")
+                .and_then(|value| value.split(':').next())
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or(ConnectionError::UnsupportedKeyValue)?;
+            Ok(Box::new(RawParameter {
+                oid,
+                bytes: bytes.clone(),
+            }))
+        }
         _ => Err(ConnectionError::UnsupportedKeyValue),
     }
 }
@@ -2139,7 +2229,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
+        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
         CatalogObjectKind::Column,
     )?;
     for object in namespaces
@@ -2170,6 +2260,25 @@ fn extract_catalog(
                 object_id: object.id.clone(),
                 object_kind: "user_defined_column_type".into(),
                 reason: "user-defined PostgreSQL types are not reproduced by the executor".into(),
+                required_semantics: true,
+            });
+        }
+        let recorded_collation_version = object
+            .attributes
+            .get("collation_version")
+            .and_then(serde_json::Value::as_str);
+        let actual_collation_version = object
+            .attributes
+            .get("collation_actual_version")
+            .and_then(serde_json::Value::as_str);
+        if recorded_collation_version.is_some()
+            && recorded_collation_version != actual_collation_version
+        {
+            unsupported.push(UnsupportedObject {
+                object_id: object.id.clone(),
+                object_kind: "collation_version_mismatch".into(),
+                reason: "recorded collation version differs from the provider's actual version"
+                    .into(),
                 required_semantics: true,
             });
         }
@@ -2499,7 +2608,17 @@ pub fn build_plan_with_consistency(
         }
     }
     let mut copy_operations = BTreeMap::new();
+    let mut key_unsupported = Vec::new();
     for table in table_names {
+        if !catalog_has_nonnull_constraint_key(&source.catalog, &table) {
+            key_unsupported.push(UnsupportedObject {
+                object_id: format!("resumable-key:{}.{}", table.namespace, table.name),
+                object_kind: "resumable_key".into(),
+                reason: "table has no complete validated non-null primary or unique constraint"
+                    .into(),
+                required_semantics: true,
+            });
+        }
         let parameters = table_parameters(&source.catalog, &table)?;
         let create = PlanOperation::new(
             OperationKind::CreateTable,
@@ -2587,6 +2706,7 @@ pub fn build_plan_with_consistency(
     )?;
     operations.push(verify_schema);
     let mut unsupported = source.unsupported.clone();
+    unsupported.objects.extend(key_unsupported);
     let target_object_count: usize = target
         .catalog
         .namespaces
@@ -2637,6 +2757,69 @@ pub fn build_plan_with_consistency(
         unsupported_objects: unsupported,
     })
     .map_err(PostgresPlanError::from)
+}
+
+fn catalog_has_nonnull_constraint_key(catalog: &VendorCatalog, table: &QualifiedTable) -> bool {
+    let Some(namespace) = catalog
+        .namespaces
+        .iter()
+        .find(|namespace| namespace.name == table.namespace)
+    else {
+        return false;
+    };
+    let Some(table_object) = namespace
+        .objects
+        .iter()
+        .find(|object| object.kind == CatalogObjectKind::Table && object.name == table.name)
+    else {
+        return false;
+    };
+    let columns = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == CatalogObjectKind::Column
+                && object
+                    .attributes
+                    .get("table_oid")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(table_object.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    namespace.objects.iter().any(|object| {
+        matches!(
+            object.kind,
+            CatalogObjectKind::PrimaryKey | CatalogObjectKind::UniqueConstraint
+        ) && object
+            .attributes
+            .get("table_oid")
+            .and_then(serde_json::Value::as_str)
+            == Some(table_object.id.as_str())
+            && object
+                .attributes
+                .get("validated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            && object
+                .attributes
+                .get("columns")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|key_columns| {
+                    !key_columns.is_empty()
+                        && key_columns.iter().all(|key_name| {
+                            key_name.as_str().is_some_and(|key_name| {
+                                columns.iter().any(|column| {
+                                    column.name.as_str() == key_name
+                                        && !column
+                                            .attributes
+                                            .get("nullable")
+                                            .and_then(serde_json::Value::as_bool)
+                                            .unwrap_or(true)
+                                })
+                            })
+                        })
+                })
+    })
 }
 
 fn required_catalog_string<'a>(

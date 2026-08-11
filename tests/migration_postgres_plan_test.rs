@@ -20,7 +20,7 @@ use postgres::{Client, Config};
 use postgres_native_tls::MakeTlsConnector;
 use sql_splitter::migration::artifact::read_json;
 use sql_splitter::migration::connection::{
-    CancellationToken, ConnectionError, KeysetPage, SourceConnectionFactory,
+    CancellationToken, ConnectionError, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
 };
 use sql_splitter::migration::journal::{MigrationState, MigrationStatus};
@@ -30,8 +30,8 @@ use sql_splitter::migration::model::{
 };
 use sql_splitter::migration::plan::ReviewedPlan;
 use sql_splitter::migration::postgres::{
-    inspect_endpoint, write_live_plan, write_live_plan_with_consistency, PostgresConsistencyMode,
-    PostgresEndpointConfig, PostgresSourceFactory,
+    build_plan, inspect_endpoint, write_live_plan, write_live_plan_with_consistency,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresSourceFactory,
 };
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
@@ -127,7 +127,9 @@ fn live_snapshot_paging_is_stable_during_concurrent_writes() -> anyhow::Result<(
     })?;
     assert_eq!(first.len(), 2);
     mutator.batch_execute(
-        "UPDATE public.live_snapshot_rows SET payload = 'changed' WHERE id = 2; DELETE FROM public.live_snapshot_rows WHERE id = 3; INSERT INTO public.live_snapshot_rows (id, payload) VALUES (4, 'four')",
+        "UPDATE public.live_snapshot_rows SET payload = 'changed' WHERE id = 2;
+         UPDATE public.live_snapshot_rows SET id = 30 WHERE id = 3;
+         INSERT INTO public.live_snapshot_rows (id, payload) VALUES (4, 'four')",
     )?;
 
     let second = reader.select_page(&KeysetPage {
@@ -154,10 +156,269 @@ fn live_snapshot_paging_is_stable_during_concurrent_writes() -> anyhow::Result<(
 }
 
 #[test]
-#[ignore = "requires a TLS-enabled PostgreSQL slow_rows test view"]
-fn live_control_session_cancels_the_active_query() -> anyhow::Result<()> {
-    let source_config =
+#[ignore = "requires TLS-enabled PostgreSQL read-only and mutator roles"]
+fn live_key_pagination_matrix_is_exact_and_bounded() -> anyhow::Result<()> {
+    let mut source_config =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?)?;
+    source_config.max_batch_rows = 2;
+    let mut mutator = connect(&PostgresEndpointConfig::read(required_path(
+        "SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG",
+    )?)?)?;
+    mutator.batch_execute(
+        "DROP TABLE IF EXISTS public.migration_key_i16,
+                                    public.migration_key_i32,
+                                    public.migration_key_i64,
+                                    public.migration_key_composite,
+                                    public.migration_key_text,
+                                    public.migration_key_bytes,
+                                    public.migration_key_empty,
+                                    public.migration_key_one,
+                                    public.migration_key_nullable,
+                                    public.migration_key_nonunique,
+                                    public.migration_key_bytes_bounded;
+         CREATE TABLE public.migration_key_i16 (id smallint PRIMARY KEY);
+         INSERT INTO public.migration_key_i16 VALUES (-32768), (0), (32767);
+         CREATE TABLE public.migration_key_i32 (id integer PRIMARY KEY);
+         INSERT INTO public.migration_key_i32 VALUES (-2147483648), (0), (2147483647);
+         CREATE TABLE public.migration_key_i64 (id bigint PRIMARY KEY);
+         INSERT INTO public.migration_key_i64 VALUES (-9223372036854775808), (0), (9223372036854775807);
+         CREATE TABLE public.migration_key_composite (a integer NOT NULL, b bigint NOT NULL, PRIMARY KEY (a,b));
+         INSERT INTO public.migration_key_composite VALUES (-1,9), (0,-9223372036854775808), (0,0), (0,9223372036854775807), (1,-9);
+         CREATE TABLE public.migration_key_text (id text COLLATE \"C\" PRIMARY KEY);
+         INSERT INTO public.migration_key_text VALUES (''), ('A'), ('a'), ('é'), ('😀');
+         CREATE TABLE public.migration_key_bytes (id bytea PRIMARY KEY);
+         INSERT INTO public.migration_key_bytes VALUES ('\\x00'), ('\\x0000'), ('\\x00ff'), ('\\xff');
+         CREATE TABLE public.migration_key_empty (id bigint PRIMARY KEY);
+         CREATE TABLE public.migration_key_one (id bigint PRIMARY KEY);
+         INSERT INTO public.migration_key_one VALUES (7);
+         CREATE TABLE public.migration_key_nullable (id bigint UNIQUE);
+         INSERT INTO public.migration_key_nullable VALUES (NULL), (1);
+         CREATE TABLE public.migration_key_nonunique (id bigint NOT NULL);
+         INSERT INTO public.migration_key_nonunique VALUES (1), (1);
+         CREATE TABLE public.migration_key_bytes_bounded (id bigint PRIMARY KEY, payload text NOT NULL);
+         INSERT INTO public.migration_key_bytes_bounded VALUES (1, repeat('a',30)), (2, repeat('b',30)), (3, repeat('c',30));
+         GRANT SELECT ON public.migration_key_i16,
+                         public.migration_key_i32,
+                         public.migration_key_i64,
+                         public.migration_key_composite,
+                         public.migration_key_text,
+                         public.migration_key_bytes,
+                         public.migration_key_empty,
+                         public.migration_key_one,
+                         public.migration_key_nullable,
+                         public.migration_key_nonunique,
+                         public.migration_key_bytes_bounded TO migration_reader",
+    )?;
+
+    let factory = PostgresSourceFactory::new(source_config.clone());
+    let snapshot = factory.capture_snapshot()?;
+    let mut reader = factory.open_reader(&snapshot, CancellationToken::default())?;
+    assert_eq!(
+        page_all(&mut *reader, "migration_key_i16", &["id"], &["id"])?,
+        vec![
+            vec![DbValue::Signed(i16::MIN.into())],
+            vec![DbValue::Signed(0)],
+            vec![DbValue::Signed(i16::MAX.into())],
+        ]
+    );
+    assert_eq!(
+        page_all(&mut *reader, "migration_key_i32", &["id"], &["id"])?,
+        vec![
+            vec![DbValue::Signed(i32::MIN.into())],
+            vec![DbValue::Signed(0)],
+            vec![DbValue::Signed(i32::MAX.into())],
+        ]
+    );
+    assert_eq!(
+        page_all(&mut *reader, "migration_key_i64", &["id"], &["id"])?,
+        vec![
+            vec![DbValue::Signed(i64::MIN.into())],
+            vec![DbValue::Signed(0)],
+            vec![DbValue::Signed(i64::MAX.into())],
+        ]
+    );
+    assert_eq!(
+        page_all(
+            &mut *reader,
+            "migration_key_composite",
+            &["a", "b"],
+            &["a", "b"],
+        )?,
+        vec![
+            vec![DbValue::Signed(-1), DbValue::Signed(9)],
+            vec![DbValue::Signed(0), DbValue::Signed(i64::MIN.into())],
+            vec![DbValue::Signed(0), DbValue::Signed(0)],
+            vec![DbValue::Signed(0), DbValue::Signed(i64::MAX.into())],
+            vec![DbValue::Signed(1), DbValue::Signed(-9)],
+        ]
+    );
+    assert_eq!(
+        page_all(&mut *reader, "migration_key_text", &["id"], &["id"])?,
+        ["", "A", "a", "é", "😀"]
+            .into_iter()
+            .map(|value| vec![DbValue::Text(value.into())])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        page_all(&mut *reader, "migration_key_bytes", &["id"], &["id"])?,
+        vec![
+            vec![DbValue::Bytes(vec![0])],
+            vec![DbValue::Bytes(vec![0, 0])],
+            vec![DbValue::Bytes(vec![0, 255])],
+            vec![DbValue::Bytes(vec![255])],
+        ]
+    );
+    assert!(page_all(&mut *reader, "migration_key_empty", &["id"], &["id"])?.is_empty());
+    assert_eq!(
+        page_all(&mut *reader, "migration_key_one", &["id"], &["id"])?,
+        vec![vec![DbValue::Signed(7)]]
+    );
+    for table in ["migration_key_nullable", "migration_key_nonunique"] {
+        let error = reader
+            .select_page(&key_page(table, &["id"], &["id"], None, 2)?)
+            .unwrap_err();
+        assert!(
+            matches!(error, ConnectionError::InvalidRequest(_)),
+            "{error:?}"
+        );
+    }
+    drop(reader);
+
+    source_config.max_batch_rows = 10;
+    source_config.max_batch_bytes = 70;
+    let plan_source_config = source_config.clone();
+    let bounded_factory = PostgresSourceFactory::new(source_config);
+    let bounded_snapshot = bounded_factory.capture_snapshot()?;
+    let mut bounded_reader =
+        bounded_factory.open_reader(&bounded_snapshot, CancellationToken::default())?;
+    assert_eq!(
+        page_all(
+            &mut *bounded_reader,
+            "migration_key_bytes_bounded",
+            &["id", "payload"],
+            &["id"],
+        )?
+        .len(),
+        3
+    );
+    let target_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?)?;
+    let reviewed = build_plan(
+        &inspect_endpoint(&plan_source_config)?,
+        &inspect_endpoint(&target_config)?,
+    )?;
+    let source_catalog = reviewed
+        .plan
+        .source_catalog
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("reviewed plan has no source catalog"))?;
+    let text_key = source_catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| &namespace.objects)
+        .find(|object| {
+            object.kind == CatalogObjectKind::Column
+                && object.name.as_str() == "id"
+                && object
+                    .attributes
+                    .get("table")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("migration_key_text")
+        })
+        .ok_or_else(|| anyhow::anyhow!("text key column is absent from catalog"))?;
+    assert_eq!(
+        text_key
+            .attributes
+            .get("collation")
+            .and_then(serde_json::Value::as_str),
+        Some("C")
+    );
+    assert_eq!(
+        text_key
+            .attributes
+            .get("collation_schema")
+            .and_then(serde_json::Value::as_str),
+        Some("pg_catalog")
+    );
+    assert!(text_key.attributes.contains_key("collation_provider"));
+    assert!(!source_catalog.server_version.is_empty());
+    for table in ["migration_key_nullable", "migration_key_nonunique"] {
+        assert!(reviewed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .any(|object| {
+                object.object_kind == "resumable_key" && object.object_id.ends_with(table)
+            }));
+    }
+    assert!(reviewed.plan.validate_for_execution().is_err());
+    Ok(())
+}
+
+fn page_all(
+    reader: &mut dyn ReadSession,
+    table: &str,
+    projection: &[&str],
+    key: &[&str],
+) -> anyhow::Result<Vec<Vec<DbValue>>> {
+    let mut after = None;
+    let mut rows = Vec::new();
+    loop {
+        let page = reader.select_page(&key_page(table, projection, key, after.clone(), 2)?)?;
+        if page.is_empty() {
+            return Ok(rows);
+        }
+        let key_indexes = key
+            .iter()
+            .map(|key_name| {
+                projection
+                    .iter()
+                    .position(|column| column == key_name)
+                    .ok_or_else(|| anyhow::anyhow!("key is absent from projection"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        after = Some(KeyTuple::new(
+            key_indexes
+                .iter()
+                .map(|index| page.rows().last().expect("nonempty page")[*index].clone())
+                .collect(),
+        ));
+        rows.extend_from_slice(page.rows());
+    }
+}
+
+fn key_page(
+    table: &str,
+    projection: &[&str],
+    key: &[&str],
+    after: Option<KeyTuple>,
+    limit: u32,
+) -> anyhow::Result<KeysetPage> {
+    Ok(KeysetPage {
+        table: QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new(table)?,
+        },
+        projection: projection
+            .iter()
+            .map(|name| Identifier::new(*name))
+            .collect::<Result<_, _>>()?,
+        key: key
+            .iter()
+            .map(|name| Identifier::new(*name))
+            .collect::<Result<_, _>>()?,
+        after,
+        limit,
+    })
+}
+
+#[test]
+#[ignore = "requires a TLS-enabled PostgreSQL slow_rows test table"]
+fn live_control_session_cancels_the_active_query() -> anyhow::Result<()> {
+    let mut source_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?)?;
+    source_config.max_batch_rows = 1_000_000;
     let factory = PostgresSourceFactory::new(source_config);
     let snapshot = factory.capture_snapshot()?;
     let mut control = factory.open_control()?;
@@ -174,7 +435,7 @@ fn live_control_session_cancels_the_active_query() -> anyhow::Result<()> {
         projection: vec![Identifier::new("id")?, Identifier::new("payload")?],
         key: vec![Identifier::new("id")?],
         after: None,
-        limit: 100,
+        limit: 1_000_000,
     });
     cancel_thread
         .join()

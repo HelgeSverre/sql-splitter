@@ -79,7 +79,8 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "CREATE TABLE public.live_snapshot_rows (id bigint PRIMARY KEY, payload text NOT NULL)" \
   -c "GRANT SELECT ON public.live_snapshot_rows TO migration_reader" \
   -c "GRANT ALL ON public.live_snapshot_rows TO migration_mutator" \
-  -c "CREATE VIEW public.slow_rows AS SELECT g::bigint AS id, repeat('x',16)::text AS payload FROM generate_series(1,100) AS g CROSS JOIN LATERAL pg_sleep(0.05 + g * 0)" \
+  -c "CREATE TABLE public.slow_rows (id bigint PRIMARY KEY, payload text NOT NULL)" \
+  -c "INSERT INTO public.slow_rows SELECT g, repeat('x',16) FROM generate_series(1,1000000) AS g" \
   -c "GRANT SELECT ON public.slow_rows TO migration_reader" >/dev/null
 
 docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -d migration_mtls_source -v ON_ERROR_STOP=1 \
@@ -214,6 +215,9 @@ test_name=live_mutual_tls_requires_valid_client_identity
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_snapshot_paging_is_stable_during_concurrent_writes
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_key_pagination_matrix_is_exact_and_bounded
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_control_session_cancels_the_active_query
