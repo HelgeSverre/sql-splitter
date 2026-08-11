@@ -4,8 +4,26 @@ set -euo pipefail
 postgres_version="${1:-17}"
 only_test="${2:-}"
 container="sqlspl-migration-pg-${postgres_version}-$$"
+minimum_build_free_kib="${SQL_SPLITTER_TEST_MIN_BUILD_FREE_KIB:-4194304}"
+minimum_journal_free_kib="${SQL_SPLITTER_TEST_MIN_JOURNAL_FREE_KIB:-4194304}"
+minimum_docker_free_kib="${SQL_SPLITTER_TEST_MIN_DOCKER_FREE_KIB:-1048576}"
+build_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+
+if ! [[ "$minimum_build_free_kib" =~ ^[0-9]+$ ]]; then
+  echo "SQL_SPLITTER_TEST_MIN_BUILD_FREE_KIB must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "$minimum_journal_free_kib" =~ ^[0-9]+$ ]]; then
+  echo "SQL_SPLITTER_TEST_MIN_JOURNAL_FREE_KIB must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "$minimum_docker_free_kib" =~ ^[0-9]+$ ]]; then
+  echo "SQL_SPLITTER_TEST_MIN_DOCKER_FREE_KIB must be a non-negative integer" >&2
+  exit 2
+fi
+
+mkdir -p "$build_dir"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-migration-pg.XXXXXX")"
-port="$(ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close')"
 
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
@@ -13,10 +31,47 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+check_host_free_space() {
+  local purpose="$1"
+  local path="$2"
+  local minimum_free_kib="$3"
+  local available_kib
+  available_kib="$(df -Pk "$path" | awk 'NR == 2 { print $4 }')"
+  if [[ -z "$available_kib" ]] || ! [[ "$available_kib" =~ ^[0-9]+$ ]]; then
+    echo "could not determine free disk space for $purpose at $path" >&2
+    exit 2
+  fi
+  if (( available_kib < minimum_free_kib )); then
+    printf 'PostgreSQL migration tests require at least %s KiB free for %s at %s; only %s KiB is available.\n' \
+      "$minimum_free_kib" "$purpose" "$path" "$available_kib" >&2
+    echo "Lower the matching SQL_SPLITTER_TEST_MIN_*_FREE_KIB value only when a smaller verified test budget is intentional." >&2
+    exit 1
+  fi
+}
+
+check_host_free_space "Cargo build output" "$build_dir" "$minimum_build_free_kib"
+check_host_free_space "migration journals" "$test_dir" "$minimum_journal_free_kib"
+
+port="$(ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close')"
+
 docker run -d --name "$container" \
   -e POSTGRES_PASSWORD=admin-secret \
   -p "127.0.0.1:${port}:5432" \
   "postgres:${postgres_version}" >/dev/null
+
+docker_available_kib="$(
+  docker exec "$container" df -Pk /var/lib/postgresql/data | awk 'NR == 2 { print $4 }'
+)"
+if [[ -z "$docker_available_kib" ]] || ! [[ "$docker_available_kib" =~ ^[0-9]+$ ]]; then
+  echo "could not determine free disk space for PostgreSQL container storage" >&2
+  exit 2
+fi
+if (( docker_available_kib < minimum_docker_free_kib )); then
+  printf 'PostgreSQL migration tests require at least %s KiB free in container storage; only %s KiB is available.\n' \
+    "$minimum_docker_free_kib" "$docker_available_kib" >&2
+  echo "Set SQL_SPLITTER_TEST_MIN_DOCKER_FREE_KIB only when a smaller verified test budget is intentional." >&2
+  exit 1
+fi
 
 for _ in {1..30}; do
   if docker exec "$container" pg_isready -U postgres >/dev/null 2>&1; then
