@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 2;
+pub const PLAN_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

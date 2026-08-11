@@ -22,8 +22,12 @@ composite, nullable, self-referencing, and cyclic relationships, exact column
 order, `MATCH SIMPLE` and `MATCH FULL`, referential actions, and deferrability.
 Targeted PostgreSQL 15+ `ON DELETE SET NULL/DEFAULT (column-list)` semantics
 fail closed because they are not modeled. It is not production-ready.
-Sequences, generated columns, user-defined types, extensions, and other
-unsupported semantics fail before DDL.
+The write-fence path supports logged `smallint`, `integer`, and `bigint`
+sequences, including standalone sequences, `serial` ownership, and `GENERATED
+ALWAYS` or `BY DEFAULT` identity ownership. It records exact configuration and
+`last_value`/`is_called`, copies explicit identity values, and restores each
+target sequence through a durable prepared operation. Other generated columns,
+user-defined types, extensions, and unsupported semantics fail before DDL.
 
 ## Reasons
 
@@ -101,6 +105,17 @@ durable prepared operation before transactional `CREATE INDEX`. Resume accepts
 only absence or an exact semantic match; any different observed index requires
 manual reconciliation.
 
+Sequence execution is write-fence-only because PostgreSQL sequence state is
+outside table MVCC. Fence installation transfers sequence ownership to the
+administrator, removes effective `USAGE` and `UPDATE` from non-superuser login
+roles, terminates old sessions that can hold cached values, and records the
+post-drain state. Resume re-attests this state and the exact ownership link.
+Release restores the original owner and effective ACL. The recovery matrix
+stops before and after `setval`, distinguishes the exact initial and desired
+states, and requires manual reconciliation for any third state. PostgreSQL 15,
+16, and 17 pass this sequence matrix for descending/cyclic, never-called,
+identity, and serial sequences.
+
 ## Configuration and security
 
 Endpoint files contain host, port, database, user, a credential environment
@@ -148,6 +163,8 @@ The adapter does not yet prove:
 - complete live rejection and drift matrices for unsupported index forms;
 - the complete fence failure-injection matrix, including legacy storage upgrades;
 - broader post-data DDL coverage;
+- the full sequence type, bound, cache, cycle, ACL, cancellation, and server-
+  restart acceptance matrix beyond the current exact recovery cases;
 - unsupported foreign-key variants beyond the explicitly modeled subset;
 - complete real-engine acceptance matrices in CI.
 

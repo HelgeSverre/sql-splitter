@@ -34,8 +34,8 @@ const DDL_FUNCTION: &str = "reject_source_ddl";
 const DDL_TRIGGER: &str = "sql_splitter_migration_fence_ddl";
 const HISTORY_FUNCTION: &str = "reject_history_mutation";
 const HISTORY_TRIGGER: &str = "sql_splitter_migration_fence_history_immutable";
-const FENCE_FORMAT_VERSION: i32 = 1;
-pub(crate) const POSTGRES_FENCE_ARTIFACT_VERSION: u32 = 2;
+const FENCE_FORMAT_VERSION: i32 = 2;
+pub(crate) const POSTGRES_FENCE_ARTIFACT_VERSION: u32 = 3;
 const DML_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source is protected by sql-splitter migration write fence'; END";
 const DDL_FUNCTION_BODY: &str = "BEGIN IF EXISTS (SELECT 1 FROM sql_splitter_migration_fence.registry WHERE singleton AND state = 'Released' AND admin_role = session_user) THEN RETURN; END IF; RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source DDL is protected by sql-splitter migration write fence'; END";
 const HISTORY_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'sql-splitter migration fence history is immutable'; END";
@@ -110,6 +110,8 @@ pub struct FenceInventory {
     pub ddl_function_oid: u32,
     pub event_trigger_oid: u32,
     pub tables: Vec<FencedTable>,
+    #[serde(default)]
+    pub sequences: Vec<FencedSequence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +122,53 @@ pub struct FencedTable {
     pub relation_oid: u32,
     pub trigger_oid: u32,
     pub trigger_name: String,
+}
+
+/// Exact source sequence contract protected by one fence generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FencedSequence {
+    pub namespace: String,
+    pub sequence: String,
+    pub relation_oid: u32,
+    pub original_owner_oid: u32,
+    pub original_owner: String,
+    pub original_acl_is_null: bool,
+    pub original_acl: Vec<FencedSequenceGrant>,
+    pub data_type: String,
+    pub start_value: i64,
+    pub increment: i64,
+    pub minimum_value: i64,
+    pub maximum_value: i64,
+    pub cache_size: i64,
+    pub cycle: bool,
+    pub ownership: Option<FencedSequenceOwnership>,
+    pub last_value: i64,
+    pub is_called: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FencedSequenceGrant {
+    /// `None` means PUBLIC.
+    pub grantee: Option<String>,
+    pub grantor: String,
+    pub privilege: String,
+    pub grantable: bool,
+}
+
+/// The table column dependency that makes a sequence owner follow its table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FencedSequenceOwnership {
+    pub table_namespace: String,
+    pub table: String,
+    pub table_oid: u32,
+    pub column: String,
+    pub column_number: i16,
+    pub dependency_type: String,
+    pub original_table_owner_oid: u32,
+    pub original_table_owner: String,
 }
 
 impl FenceInventory {
@@ -197,6 +246,7 @@ pub fn install_postgres_write_fence(
     let admin_role: String = transaction.query_one("SELECT current_user", &[])?.get(0);
     let mut inventory =
         lock_and_resolve_tables(&mut transaction, &tables, &generation, &admin_role)?;
+    inventory.sequences = inventory_business_sequences(&mut transaction)?;
     let live_identity = transaction.query_one(
         "SELECT current_database(), COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port(), 0)",
         &[],
@@ -232,6 +282,7 @@ pub fn install_postgres_write_fence(
     }
     install_guard_functions(&mut transaction)?;
     install_table_guards(&mut transaction, &inventory)?;
+    protect_business_sequences(&mut transaction, &mut inventory)?;
     install_ddl_guard(&mut transaction)?;
     resolve_protected_inventory(&mut transaction, &mut inventory)?;
     let inventory_json = serde_json::to_string(&inventory)?;
@@ -285,7 +336,7 @@ pub fn install_postgres_write_fence(
     // The committed Draining fence now prevents all planned-table writes and
     // all new database DDL. End transactions that began before guard commit so
     // no statement that passed the DDL hook earlier can commit afterward.
-    drain_preexisting_transactions(&mut client, &activated_at)?;
+    drain_non_migration_sessions(&mut client)?;
     // Recapture the business catalog after that drain. A failure leaves the
     // durable Draining fence in place and never claims crash-safe consistency.
     let mut snapshot = inspect_endpoint(admin).map_err(PostgresFenceError::Catalog)?;
@@ -315,13 +366,10 @@ pub fn install_postgres_write_fence(
     Ok(installed)
 }
 
-fn drain_preexisting_transactions(
-    client: &mut Client,
-    guard_committed_at: &str,
-) -> Result<(), PostgresFenceError> {
+fn drain_non_migration_sessions(client: &mut Client) -> Result<(), PostgresFenceError> {
     let rows = client.query(
-        "SELECT pid FROM pg_stat_activity WHERE datid = (SELECT oid FROM pg_database WHERE datname=current_database()) AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND xact_start IS NOT NULL AND xact_start <= $1::text::timestamptz",
-        &[&guard_committed_at],
+        "SELECT pid FROM pg_stat_activity WHERE datid = (SELECT oid FROM pg_database WHERE datname=current_database()) AND pid <> pg_backend_pid() AND backend_type = 'client backend'",
+        &[],
     )?;
     for row in rows {
         let pid: i32 = row.get(0);
@@ -336,13 +384,13 @@ fn drain_preexisting_transactions(
     }
     let remaining: i64 = client
         .query_one(
-            "SELECT count(*) FROM pg_stat_activity WHERE datid = (SELECT oid FROM pg_database WHERE datname=current_database()) AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND xact_start IS NOT NULL AND xact_start <= $1::text::timestamptz",
-            &[&guard_committed_at],
+            "SELECT count(*) FROM pg_stat_activity WHERE datid = (SELECT oid FROM pg_database WHERE datname=current_database()) AND pid <> pg_backend_pid() AND backend_type = 'client backend'",
+            &[],
         )?
         .get(0);
     if remaining != 0 {
         return Err(PostgresFenceError::Attestation(
-            "a pre-fence source transaction remains active",
+            "a non-migration source session remains connected",
         ));
     }
     Ok(())
@@ -354,6 +402,7 @@ pub fn remove_attested_fence_objects(
     unsupported: &mut UnsupportedObjectReport,
     inventory: &FenceInventory,
 ) -> Result<(), PostgresFenceError> {
+    normalize_sequence_fence_changes(catalog, unsupported, inventory)?;
     let namespace_position = catalog
         .namespaces
         .iter()
@@ -400,6 +449,49 @@ pub fn remove_attested_fence_objects(
     Ok(())
 }
 
+fn normalize_sequence_fence_changes(
+    catalog: &mut VendorCatalog,
+    unsupported: &mut UnsupportedObjectReport,
+    inventory: &FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    for sequence in &inventory.sequences {
+        let sequence_id = format!("relation:{}", sequence.relation_oid);
+        let object = catalog
+            .namespaces
+            .iter_mut()
+            .flat_map(|namespace| namespace.objects.iter_mut())
+            .find(|object| object.id == sequence_id && object.kind == CatalogObjectKind::Sequence)
+            .ok_or(PostgresFenceError::Attestation(
+                "an attested business sequence is absent from the catalog",
+            ))?;
+        object.attributes.insert(
+            "owner".into(),
+            serde_json::Value::String(sequence.original_owner.clone()),
+        );
+        if let Some(ownership) = &sequence.ownership {
+            let table_id = format!("relation:{}", ownership.table_oid);
+            let table = catalog
+                .namespaces
+                .iter_mut()
+                .flat_map(|namespace| namespace.objects.iter_mut())
+                .find(|object| object.id == table_id && object.kind == CatalogObjectKind::Table)
+                .ok_or(PostgresFenceError::Attestation(
+                    "an attested sequence owning table is absent from the catalog",
+                ))?;
+            table.attributes.insert(
+                "owner".into(),
+                serde_json::Value::String(ownership.original_table_owner.clone()),
+            );
+        }
+        if sequence.original_acl_is_null {
+            unsupported.objects.retain(|object| {
+                object.object_id != format!("relation-acl:{}", sequence.relation_oid)
+            });
+        }
+    }
+    Ok(())
+}
+
 fn fence_unsupported_ids(inventory: &FenceInventory) -> BTreeSet<String> {
     [
         format!("namespace-acl:{}", inventory.schema_oid),
@@ -439,6 +531,11 @@ pub fn attest_postgres_write_fence(
     let mut client = connect_admin(admin)?;
     let mut transaction = client.transaction()?;
     let registry = load_registry(&mut transaction)?;
+    if registry.format_version != FENCE_FORMAT_VERSION {
+        return Err(PostgresFenceError::Attestation(
+            "active registry format does not prove sequence exclusion",
+        ));
+    }
     if registry.state != "Active" {
         return Err(PostgresFenceError::Attestation("registry is not Active"));
     }
@@ -617,12 +714,14 @@ pub fn release_postgres_write_fence(
         quote_ident(FENCE_SCHEMA),
         quote_ident(DML_FUNCTION)
     ))?;
+    restore_business_sequences(&mut transaction, &registry.inventory)?;
     transaction.commit()?;
     Ok(())
 }
 
 #[derive(Debug)]
 struct Registry {
+    format_version: i32,
     generation: String,
     token_hash: String,
     endpoint_identity: String,
@@ -743,9 +842,17 @@ fn inspect_install_storage(
         return Err(PostgresFenceError::AlreadyInstalled);
     }
     let history_storage = history_guard_storage(&registry.inventory)?;
-    let expected_inventory_fingerprint = match history_storage {
-        HistoryGuardStorage::Current => registry.inventory.fingerprint()?,
-        HistoryGuardStorage::Legacy => legacy_inventory_fingerprint(&registry.inventory)?,
+    let expected_inventory_fingerprint = match (registry.format_version, history_storage) {
+        (FENCE_FORMAT_VERSION, HistoryGuardStorage::Current) => registry.inventory.fingerprint()?,
+        (1, HistoryGuardStorage::Current) => {
+            pre_sequence_inventory_fingerprint(&registry.inventory)?
+        }
+        (1, HistoryGuardStorage::Legacy) => legacy_inventory_fingerprint(&registry.inventory)?,
+        _ => {
+            return Err(PostgresFenceError::Attestation(
+                "released registry format is unsupported",
+            ));
+        }
     };
     if registry.inventory.generation != registry.generation
         || expected_inventory_fingerprint != registry.inventory_fingerprint
@@ -799,6 +906,41 @@ fn legacy_inventory_fingerprint(inventory: &FenceInventory) -> Result<String, Po
         tables: &inventory.tables,
     };
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&legacy)?)))
+}
+
+fn pre_sequence_inventory_fingerprint(
+    inventory: &FenceInventory,
+) -> Result<String, PostgresFenceError> {
+    #[derive(Serialize)]
+    struct PreSequenceInventory<'a> {
+        generation: &'a str,
+        admin_role: &'a str,
+        schema_oid: u32,
+        registry_oid: u32,
+        history_oid: u32,
+        history_sequence_oid: u32,
+        history_function_oid: u32,
+        history_trigger_oid: u32,
+        dml_function_oid: u32,
+        ddl_function_oid: u32,
+        event_trigger_oid: u32,
+        tables: &'a [FencedTable],
+    }
+    let prior = PreSequenceInventory {
+        generation: &inventory.generation,
+        admin_role: &inventory.admin_role,
+        schema_oid: inventory.schema_oid,
+        registry_oid: inventory.registry_oid,
+        history_oid: inventory.history_oid,
+        history_sequence_oid: inventory.history_sequence_oid,
+        history_function_oid: inventory.history_function_oid,
+        history_trigger_oid: inventory.history_trigger_oid,
+        dml_function_oid: inventory.dml_function_oid,
+        ddl_function_oid: inventory.ddl_function_oid,
+        event_trigger_oid: inventory.event_trigger_oid,
+        tables: &inventory.tables,
+    };
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&prior)?)))
 }
 
 fn prepare_rearm_registry(
@@ -919,6 +1061,7 @@ fn attest_released_storage(
     registry: &Registry,
 ) -> Result<(), PostgresFenceError> {
     attest_owners_and_acl(transaction, &registry.inventory.admin_role)?;
+    attest_restored_sequences(transaction, &registry.inventory)?;
     let row = transaction.query_one(
         "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4)::oid::bigint, (SELECT oid::bigint FROM pg_trigger WHERE tgrelid=to_regclass($3) AND tgname=$5 AND NOT tgisinternal) FROM pg_namespace n WHERE n.nspname=$1",
         &[
@@ -1093,7 +1236,338 @@ fn lock_and_resolve_tables(
         ddl_function_oid: 0,
         event_trigger_oid: 0,
         tables: inventory,
+        sequences: Vec::new(),
     })
+}
+
+fn inventory_business_sequences(
+    transaction: &mut Transaction<'_>,
+) -> Result<Vec<FencedSequence>, PostgresFenceError> {
+    let rows = transaction.query(
+        "SELECT s.oid::bigint, sn.nspname, s.relname, s.relowner::bigint, pg_get_userbyid(s.relowner), s.relacl IS NULL, pg_catalog.format_type(q.seqtypid, NULL), q.seqstart, q.seqincrement, q.seqmin, q.seqmax, q.seqcache, q.seqcycle FROM pg_class s JOIN pg_namespace sn ON sn.oid=s.relnamespace JOIN pg_sequence q ON q.seqrelid=s.oid WHERE s.relkind='S' AND sn.nspname <> 'information_schema' AND sn.nspname !~ '^pg_' AND sn.nspname <> $1 ORDER BY sn.nspname, s.relname, s.oid",
+        &[&FENCE_SCHEMA],
+    )?;
+    let mut sequences = Vec::with_capacity(rows.len());
+    for row in rows {
+        let relation_oid = oid_from_i64(row.get(0))?;
+        let ownership_rows = transaction.query(
+            "SELECT tn.nspname, t.relname, t.oid::bigint, a.attname, a.attnum, d.deptype::text, t.relowner::bigint, pg_get_userbyid(t.relowner) FROM pg_depend d JOIN pg_class t ON t.oid=d.refobjid JOIN pg_namespace tn ON tn.oid=t.relnamespace JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid WHERE d.classid='pg_class'::regclass AND d.objid=$1::oid AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i') ORDER BY t.oid, a.attnum",
+            &[&relation_oid],
+        )?;
+        let ownership = match ownership_rows.as_slice() {
+            [] => None,
+            [ownership] => Some(FencedSequenceOwnership {
+                table_namespace: ownership.get(0),
+                table: ownership.get(1),
+                table_oid: oid_from_i64(ownership.get(2))?,
+                column: ownership.get(3),
+                column_number: ownership.get(4),
+                dependency_type: ownership.get(5),
+                original_table_owner_oid: oid_from_i64(ownership.get(6))?,
+                original_table_owner: ownership.get(7),
+            }),
+            _ => {
+                return Err(PostgresFenceError::Attestation(
+                    "a business sequence has multiple ownership links",
+                ));
+            }
+        };
+        let grants: Vec<FencedSequenceGrant> = transaction
+            .query(
+                "SELECT CASE WHEN a.grantee=0 THEN NULL ELSE pg_get_userbyid(a.grantee) END, pg_get_userbyid(a.grantor), a.privilege_type, a.is_grantable FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('S'::\"char\", c.relowner))) a WHERE c.oid=$1::oid ORDER BY a.grantee, a.grantor, a.privilege_type, a.is_grantable",
+                &[&relation_oid],
+            )?
+            .into_iter()
+            .map(|grant| FencedSequenceGrant {
+                grantee: grant.get(0),
+                grantor: grant.get(1),
+                privilege: grant.get(2),
+                grantable: grant.get(3),
+            })
+            .collect();
+        if grants.iter().any(|grant: &FencedSequenceGrant| {
+            grant.grantor != row.get::<_, String>(4)
+                || !matches!(grant.privilege.as_str(), "SELECT" | "USAGE" | "UPDATE")
+        }) {
+            return Err(PostgresFenceError::Attestation(
+                "a business sequence ACL has an unsupported delegated grantor or privilege",
+            ));
+        }
+        sequences.push(FencedSequence {
+            namespace: row.get(1),
+            sequence: row.get(2),
+            relation_oid,
+            original_owner_oid: oid_from_i64(row.get(3))?,
+            original_owner: row.get(4),
+            original_acl_is_null: row.get(5),
+            original_acl: grants,
+            data_type: row.get(6),
+            start_value: row.get(7),
+            increment: row.get(8),
+            minimum_value: row.get(9),
+            maximum_value: row.get(10),
+            cache_size: row.get(11),
+            cycle: row.get(12),
+            ownership,
+            last_value: 0,
+            is_called: false,
+        });
+    }
+    Ok(sequences)
+}
+
+fn protect_business_sequences(
+    transaction: &mut Transaction<'_>,
+    inventory: &mut FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    let admin_is_superuser: bool = transaction
+        .query_one(
+            "SELECT rolsuper FROM pg_roles WHERE rolname=current_user",
+            &[],
+        )?
+        .get(0);
+    if !admin_is_superuser {
+        return Err(PostgresFenceError::Attestation(
+            "sequence fencing requires an explicit superuser administrator",
+        ));
+    }
+    let inherited_admin: bool = transaction
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolcanlogin AND NOT r.rolsuper AND r.rolname <> current_user AND pg_has_role(r.oid, current_user, 'MEMBER'))",
+            &[],
+        )?
+        .get(0);
+    if inherited_admin {
+        return Err(PostgresFenceError::Attestation(
+            "a nontrusted login can assume the fence administrator role",
+        ));
+    }
+
+    let mut transferred_tables = BTreeSet::new();
+    for sequence in &inventory.sequences {
+        if let Some(ownership) = &sequence.ownership {
+            if transferred_tables.insert(ownership.table_oid) {
+                transaction.batch_execute(&format!(
+                    "ALTER TABLE {}.{} OWNER TO {}",
+                    quote_ident(&ownership.table_namespace),
+                    quote_ident(&ownership.table),
+                    quote_ident(&inventory.admin_role),
+                ))?;
+            }
+        } else {
+            transaction.batch_execute(&format!(
+                "ALTER SEQUENCE {}.{} OWNER TO {}",
+                quote_ident(&sequence.namespace),
+                quote_ident(&sequence.sequence),
+                quote_ident(&inventory.admin_role),
+            ))?;
+        }
+        revoke_all_sequence_grants(transaction, sequence)?;
+    }
+    attest_sequence_exclusion(transaction, inventory)?;
+    for sequence in &mut inventory.sequences {
+        let state = transaction.query_one(
+            &format!(
+                "SELECT last_value, is_called FROM {}.{}",
+                quote_ident(&sequence.namespace),
+                quote_ident(&sequence.sequence),
+            ),
+            &[],
+        )?;
+        sequence.last_value = state.get(0);
+        sequence.is_called = state.get(1);
+    }
+    Ok(())
+}
+
+fn revoke_all_sequence_grants(
+    transaction: &mut Transaction<'_>,
+    sequence: &FencedSequence,
+) -> Result<(), PostgresFenceError> {
+    let qualified = format!(
+        "{}.{}",
+        quote_ident(&sequence.namespace),
+        quote_ident(&sequence.sequence)
+    );
+    transaction.batch_execute(&format!(
+        "REVOKE USAGE, UPDATE ON SEQUENCE {qualified} FROM PUBLIC"
+    ))?;
+    let grantees = sequence
+        .original_acl
+        .iter()
+        .filter_map(|grant| grant.grantee.as_deref())
+        .collect::<BTreeSet<_>>();
+    for grantee in grantees {
+        transaction.batch_execute(&format!(
+            "REVOKE USAGE, UPDATE ON SEQUENCE {qualified} FROM {}",
+            quote_ident(grantee)
+        ))?;
+    }
+    Ok(())
+}
+
+fn attest_sequence_exclusion(
+    transaction: &mut Transaction<'_>,
+    inventory: &FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    let sequence_oids = inventory
+        .sequences
+        .iter()
+        .map(|sequence| sequence.relation_oid)
+        .collect::<Vec<_>>();
+    if sequence_oids.is_empty() {
+        return Ok(());
+    }
+    let bypass: bool = transaction
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles r CROSS JOIN unnest($1::oid[]) sequence_oid WHERE r.rolcanlogin AND NOT r.rolsuper AND r.rolname <> current_user AND has_sequence_privilege(r.oid, sequence_oid, 'USAGE,UPDATE'))",
+            &[&&sequence_oids[..]],
+        )?
+        .get(0);
+    if bypass {
+        return Err(PostgresFenceError::Attestation(
+            "a nontrusted login retains effective sequence write privilege",
+        ));
+    }
+    Ok(())
+}
+
+fn restore_business_sequences(
+    transaction: &mut Transaction<'_>,
+    inventory: &FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    let mut restored_tables = BTreeSet::new();
+    for sequence in &inventory.sequences {
+        if let Some(ownership) = &sequence.ownership {
+            if sequence.original_owner_oid != ownership.original_table_owner_oid
+                || sequence.original_owner != ownership.original_table_owner
+            {
+                return Err(PostgresFenceError::Attestation(
+                    "an owned sequence and its table had different original owners",
+                ));
+            }
+            if restored_tables.insert(ownership.table_oid) {
+                transaction.batch_execute(&format!(
+                    "ALTER TABLE {}.{} OWNER TO {}",
+                    quote_ident(&ownership.table_namespace),
+                    quote_ident(&ownership.table),
+                    quote_ident(&ownership.original_table_owner),
+                ))?;
+            }
+        } else {
+            transaction.batch_execute(&format!(
+                "ALTER SEQUENCE {}.{} OWNER TO {}",
+                quote_ident(&sequence.namespace),
+                quote_ident(&sequence.sequence),
+                quote_ident(&sequence.original_owner),
+            ))?;
+        }
+    }
+    for sequence in &inventory.sequences {
+        restore_sequence_acl(transaction, sequence)?;
+    }
+    attest_restored_sequences(transaction, inventory)
+}
+
+fn restore_sequence_acl(
+    transaction: &mut Transaction<'_>,
+    sequence: &FencedSequence,
+) -> Result<(), PostgresFenceError> {
+    let qualified = format!(
+        "{}.{}",
+        quote_ident(&sequence.namespace),
+        quote_ident(&sequence.sequence)
+    );
+    transaction.batch_execute(&format!(
+        "SET LOCAL ROLE {}; REVOKE ALL PRIVILEGES ON SEQUENCE {qualified} FROM PUBLIC",
+        quote_ident(&sequence.original_owner)
+    ))?;
+    let grantees = sequence
+        .original_acl
+        .iter()
+        .filter_map(|grant| grant.grantee.as_deref())
+        .filter(|grantee| *grantee != sequence.original_owner)
+        .collect::<BTreeSet<_>>();
+    for grantee in grantees {
+        transaction.batch_execute(&format!(
+            "REVOKE ALL PRIVILEGES ON SEQUENCE {qualified} FROM {}",
+            quote_ident(grantee)
+        ))?;
+    }
+    for grant in sequence.original_acl.iter().filter(|grant| {
+        grant
+            .grantee
+            .as_deref()
+            .is_none_or(|grantee| grantee != sequence.original_owner)
+    }) {
+        let grantee = grant
+            .grantee
+            .as_deref()
+            .map_or_else(|| "PUBLIC".to_owned(), quote_ident);
+        transaction.batch_execute(&format!(
+            "GRANT {} ON SEQUENCE {qualified} TO {grantee}{}",
+            grant.privilege,
+            if grant.grantable {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            }
+        ))?;
+    }
+    transaction.batch_execute("RESET ROLE")?;
+    Ok(())
+}
+
+fn attest_restored_sequences(
+    transaction: &mut Transaction<'_>,
+    inventory: &FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    for sequence in &inventory.sequences {
+        let row = transaction.query_one(
+            "SELECT c.oid::bigint, c.relowner::bigint, pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='S'",
+            &[&sequence.namespace, &sequence.sequence],
+        )?;
+        if oid_from_i64(row.get(0))? != sequence.relation_oid
+            || oid_from_i64(row.get(1))? != sequence.original_owner_oid
+            || row.get::<_, String>(2) != sequence.original_owner
+        {
+            return Err(PostgresFenceError::Attestation(
+                "released sequence owner differs",
+            ));
+        }
+        let actual = transaction
+            .query(
+                "SELECT CASE WHEN a.grantee=0 THEN NULL ELSE pg_get_userbyid(a.grantee) END, pg_get_userbyid(a.grantor), a.privilege_type, a.is_grantable FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('S'::\"char\", c.relowner))) a WHERE c.oid=$1::oid ORDER BY a.grantee, a.grantor, a.privilege_type, a.is_grantable",
+                &[&sequence.relation_oid],
+            )?
+            .into_iter()
+            .map(|grant| FencedSequenceGrant {
+                grantee: grant.get(0),
+                grantor: grant.get(1),
+                privilege: grant.get(2),
+                grantable: grant.get(3),
+            })
+            .collect::<Vec<_>>();
+        if actual != sequence.original_acl {
+            return Err(PostgresFenceError::Attestation(
+                "released sequence ACL differs",
+            ));
+        }
+        if let Some(ownership) = &sequence.ownership {
+            let owner = transaction.query_one(
+                "SELECT relowner::bigint, pg_get_userbyid(relowner) FROM pg_class WHERE oid=$1::oid",
+                &[&ownership.table_oid],
+            )?;
+            if oid_from_i64(owner.get(0))? != ownership.original_table_owner_oid
+                || owner.get::<_, String>(1) != ownership.original_table_owner
+            {
+                return Err(PostgresFenceError::Attestation(
+                    "released sequence owning table owner differs",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_protected_inventory(
@@ -1243,26 +1717,27 @@ fn load_registry_with_suffix(
     transaction: &mut Transaction<'_>,
     suffix: &str,
 ) -> Result<Registry, PostgresFenceError> {
-    let sql = format!("SELECT generation, token_hash, endpoint_identity, database_oid::bigint, system_identifier, business_catalog_fingerprint, inventory_fingerprint, activation_xid, activated_at::text, inventory_json::text, state FROM {}.{} WHERE singleton{suffix}", quote_ident(FENCE_SCHEMA), quote_ident(REGISTRY_TABLE));
+    let sql = format!("SELECT format_version, generation, token_hash, endpoint_identity, database_oid::bigint, system_identifier, business_catalog_fingerprint, inventory_fingerprint, activation_xid, activated_at::text, inventory_json::text, state FROM {}.{} WHERE singleton{suffix}", quote_ident(FENCE_SCHEMA), quote_ident(REGISTRY_TABLE));
     let row = transaction
         .query_opt(&sql, &[])?
         .ok_or(PostgresFenceError::NotInstalled)?;
-    let state: String = row.get(10);
-    let database_oid = u32::try_from(row.get::<_, i64>(3))
+    let state: String = row.get(11);
+    let database_oid = u32::try_from(row.get::<_, i64>(4))
         .map_err(|_| PostgresFenceError::Attestation("database OID is out of range"))?;
-    let activation_xid = u64::try_from(row.get::<_, i64>(7))
+    let activation_xid = u64::try_from(row.get::<_, i64>(8))
         .map_err(|_| PostgresFenceError::Attestation("activation transaction ID is negative"))?;
     Ok(Registry {
-        generation: row.get(0),
-        token_hash: row.get(1),
-        endpoint_identity: row.get(2),
+        format_version: row.get(0),
+        generation: row.get(1),
+        token_hash: row.get(2),
+        endpoint_identity: row.get(3),
         database_oid,
-        system_identifier: row.get(4),
-        business_catalog_fingerprint: row.get(5),
-        inventory_fingerprint: row.get(6),
+        system_identifier: row.get(5),
+        business_catalog_fingerprint: row.get(6),
+        inventory_fingerprint: row.get(7),
         activation_xid,
-        activated_at: row.get(8),
-        inventory: serde_json::from_str(&row.get::<_, String>(9))?,
+        activated_at: row.get(9),
+        inventory: serde_json::from_str(&row.get::<_, String>(10))?,
         state,
     })
 }
@@ -1273,7 +1748,20 @@ fn attest_transaction(
     token_hash: &str,
     expected_state: &str,
 ) -> Result<(), PostgresFenceError> {
-    if inventory.fingerprint()? != load_inventory_fingerprint(transaction)? {
+    let (format_version, stored_fingerprint) = load_inventory_fingerprint(transaction)?;
+    let observed_fingerprint = match format_version {
+        FENCE_FORMAT_VERSION => inventory.fingerprint()?,
+        1 => match history_guard_storage(inventory)? {
+            HistoryGuardStorage::Current => pre_sequence_inventory_fingerprint(inventory)?,
+            HistoryGuardStorage::Legacy => legacy_inventory_fingerprint(inventory)?,
+        },
+        _ => {
+            return Err(PostgresFenceError::Attestation(
+                "registry format is unsupported",
+            ));
+        }
+    };
+    if observed_fingerprint != stored_fingerprint {
         return Err(PostgresFenceError::Attestation(
             "inventory fingerprint differs",
         ));
@@ -1292,6 +1780,10 @@ fn attest_transaction(
         return Err(PostgresFenceError::Attestation("token digest differs"));
     }
     attest_owners_and_acl(transaction, &inventory.admin_role)?;
+    if format_version == FENCE_FORMAT_VERSION {
+        attest_protected_sequences(transaction, inventory)?;
+        attest_sequence_exclusion(transaction, inventory)?;
+    }
     attest_protected_object_ids(transaction, inventory, expected_state)?;
     let event: Option<i64> = transaction.query_opt("SELECT e.oid::bigint FROM pg_event_trigger e JOIN pg_proc p ON p.oid=e.evtfoid JOIN pg_namespace n ON n.oid=p.pronamespace WHERE e.evtname=$1 AND e.evtevent='ddl_command_start' AND e.evtenabled='O' AND n.nspname=$2 AND p.proname=$3", &[&DDL_TRIGGER, &FENCE_SCHEMA, &DDL_FUNCTION])?.map(|row| row.get(0));
     if event.and_then(|oid| u32::try_from(oid).ok()) != Some(inventory.event_trigger_oid) {
@@ -1458,19 +1950,95 @@ fn attest_protected_object_ids(
     Ok(())
 }
 
-fn load_inventory_fingerprint(
+fn attest_protected_sequences(
     transaction: &mut Transaction<'_>,
-) -> Result<String, PostgresFenceError> {
-    Ok(transaction
+    inventory: &FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    let actual_count: i64 = transaction
         .query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='S' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname <> $1",
+            &[&FENCE_SCHEMA],
+        )?
+        .get(0);
+    if usize::try_from(actual_count).ok() != Some(inventory.sequences.len()) {
+        return Err(PostgresFenceError::Attestation(
+            "business sequence inventory count differs",
+        ));
+    }
+    for sequence in &inventory.sequences {
+        let row = transaction
+            .query_opt(
+                "SELECT c.oid::bigint, pg_get_userbyid(c.relowner), pg_catalog.format_type(q.seqtypid, NULL), q.seqstart, q.seqincrement, q.seqmin, q.seqmax, q.seqcache, q.seqcycle FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_sequence q ON q.seqrelid=c.oid WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='S'",
+                &[&sequence.namespace, &sequence.sequence],
+            )?
+            .ok_or(PostgresFenceError::Attestation(
+                "an attested business sequence is absent",
+            ))?;
+        if oid_from_i64(row.get(0))? != sequence.relation_oid
+            || row.get::<_, String>(1) != inventory.admin_role
+            || row.get::<_, String>(2) != sequence.data_type
+            || row.get::<_, i64>(3) != sequence.start_value
+            || row.get::<_, i64>(4) != sequence.increment
+            || row.get::<_, i64>(5) != sequence.minimum_value
+            || row.get::<_, i64>(6) != sequence.maximum_value
+            || row.get::<_, i64>(7) != sequence.cache_size
+            || row.get::<_, bool>(8) != sequence.cycle
+        {
+            return Err(PostgresFenceError::Attestation(
+                "business sequence identity or static configuration differs",
+            ));
+        }
+        let state = transaction.query_one(
             &format!(
-                "SELECT inventory_fingerprint FROM {}.{} WHERE singleton",
-                quote_ident(FENCE_SCHEMA),
-                quote_ident(REGISTRY_TABLE)
+                "SELECT last_value, is_called FROM {}.{}",
+                quote_ident(&sequence.namespace),
+                quote_ident(&sequence.sequence),
             ),
             &[],
-        )?
-        .get(0))
+        )?;
+        if state.get::<_, i64>(0) != sequence.last_value
+            || state.get::<_, bool>(1) != sequence.is_called
+        {
+            return Err(PostgresFenceError::Attestation(
+                "business sequence state changed after drain",
+            ));
+        }
+        let links = transaction.query(
+            "SELECT tn.nspname, t.relname, t.oid::bigint, a.attname, a.attnum, d.deptype::text, pg_get_userbyid(t.relowner) FROM pg_depend d JOIN pg_class t ON t.oid=d.refobjid JOIN pg_namespace tn ON tn.oid=t.relnamespace JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid WHERE d.classid='pg_class'::regclass AND d.objid=$1::oid AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i') ORDER BY t.oid, a.attnum",
+            &[&sequence.relation_oid],
+        )?;
+        match (&sequence.ownership, links.as_slice()) {
+            (None, []) => {}
+            (Some(expected), [actual])
+                if actual.get::<_, String>(0) == expected.table_namespace
+                    && actual.get::<_, String>(1) == expected.table
+                    && oid_from_i64(actual.get(2))? == expected.table_oid
+                    && actual.get::<_, String>(3) == expected.column
+                    && actual.get::<_, i16>(4) == expected.column_number
+                    && actual.get::<_, String>(5) == expected.dependency_type
+                    && actual.get::<_, String>(6) == inventory.admin_role => {}
+            _ => {
+                return Err(PostgresFenceError::Attestation(
+                    "business sequence ownership link differs",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_inventory_fingerprint(
+    transaction: &mut Transaction<'_>,
+) -> Result<(i32, String), PostgresFenceError> {
+    let row = transaction.query_one(
+        &format!(
+            "SELECT format_version, inventory_fingerprint FROM {}.{} WHERE singleton",
+            quote_ident(FENCE_SCHEMA),
+            quote_ident(REGISTRY_TABLE)
+        ),
+        &[],
+    )?;
+    Ok((row.get(0), row.get(1)))
 }
 
 fn attest_owners_and_acl(
@@ -1580,6 +2148,7 @@ mod tests {
                 trigger_oid: 8,
                 trigger_name: "t1".into(),
             }],
+            sequences: Vec::new(),
         };
         assert_eq!(
             inventory.fingerprint().unwrap(),
@@ -1590,6 +2159,41 @@ mod tests {
         assert_ne!(
             inventory.fingerprint().unwrap(),
             changed.fingerprint().unwrap()
+        );
+
+        let mut sequence_changed = inventory.clone();
+        sequence_changed.sequences.push(FencedSequence {
+            namespace: "public".into(),
+            sequence: "account_id_seq".into(),
+            relation_oid: 11,
+            original_owner_oid: 12,
+            original_owner: "app".into(),
+            original_acl_is_null: true,
+            original_acl: vec![FencedSequenceGrant {
+                grantee: Some("app".into()),
+                grantor: "app".into(),
+                privilege: "USAGE".into(),
+                grantable: false,
+            }],
+            data_type: "bigint".into(),
+            start_value: 1,
+            increment: 1,
+            minimum_value: 1,
+            maximum_value: i64::MAX,
+            cache_size: 32,
+            cycle: false,
+            ownership: None,
+            last_value: 33,
+            is_called: true,
+        });
+        assert_ne!(
+            inventory.fingerprint().unwrap(),
+            sequence_changed.fingerprint().unwrap()
+        );
+        sequence_changed.sequences[0].last_value = 65;
+        assert_ne!(
+            inventory.fingerprint().unwrap(),
+            sequence_changed.fingerprint().unwrap()
         );
     }
 
@@ -1608,6 +2212,7 @@ mod tests {
             ddl_function_oid: 6,
             event_trigger_oid: 7,
             tables: Vec::new(),
+            sequences: Vec::new(),
         };
         let ids = fence_unsupported_ids(&inventory);
         assert!(ids.contains("routine-acl:5"));
@@ -1747,6 +2352,7 @@ insecure = true
                 trigger_oid: 9,
                 trigger_name: "legacy-trigger".into(),
             }],
+            sequences: Vec::new(),
         };
         assert_eq!(
             history_guard_storage(&inventory).unwrap(),
@@ -1755,6 +2361,10 @@ insecure = true
         let fingerprint = legacy_inventory_fingerprint(&inventory).unwrap();
         assert_eq!(fingerprint.len(), 64);
         assert_ne!(fingerprint, inventory.fingerprint().unwrap());
+        assert_ne!(
+            pre_sequence_inventory_fingerprint(&inventory).unwrap(),
+            inventory.fingerprint().unwrap()
+        );
 
         let mut malformed = inventory;
         malformed.history_function_oid = 10;

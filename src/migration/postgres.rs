@@ -33,11 +33,11 @@ use super::model::{
     Identifier, QualifiedTable, RowBatch, RowBatchError, ValueFormat, VendorCatalog,
 };
 use super::plan::{
-    MigrationPlan, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObject,
+    MigrationPlan, OperationId, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObject,
     UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
 };
 
-pub(crate) const CATALOG_FORMAT_VERSION: u32 = 2;
+pub(crate) const CATALOG_FORMAT_VERSION: u32 = 3;
 const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -530,6 +530,105 @@ impl PostgresTargetFactory {
         transaction.commit().map_err(database_error)
     }
 
+    /// Inspect the exact configuration and current state of one PostgreSQL sequence.
+    pub fn inspect_sequence(
+        &self,
+        sequence: &PostgresSequence,
+    ) -> ConnectionResult<PostgresSequenceState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        inspect_sequence(&mut client, sequence)
+    }
+
+    /// Create an absent sequence contract or accept an exact existing configuration.
+    pub fn reconcile_sequence_config(
+        &self,
+        sequence: &PostgresSequence,
+    ) -> ConnectionResult<PostgresSequenceState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        match inspect_sequence(&mut transaction, sequence)? {
+            PostgresSequenceState::ExactConfig | PostgresSequenceState::ExactState => {
+                transaction.commit().map_err(database_error)?;
+            }
+            PostgresSequenceState::Different => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "target sequence {}.{} exists with different semantics",
+                    sequence.namespace, sequence.name
+                )));
+            }
+            PostgresSequenceState::Absent => {
+                for statement in sequence_create_statements(sequence) {
+                    transaction
+                        .batch_execute(&statement)
+                        .map_err(database_error)?;
+                }
+                if !matches!(
+                    inspect_sequence(&mut transaction, sequence)?,
+                    PostgresSequenceState::ExactConfig | PostgresSequenceState::ExactState
+                ) {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "target sequence {}.{} did not match after creation",
+                        sequence.namespace, sequence.name
+                    )));
+                }
+                transaction.commit().map_err(database_error)?;
+            }
+        }
+        self.inspect_sequence(sequence)
+    }
+
+    /// Restore the exact `last_value` and `is_called` state with a bound `setval` call.
+    pub fn restore_sequence(
+        &self,
+        sequence: &PostgresSequence,
+    ) -> ConnectionResult<PostgresSequenceState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        match inspect_sequence(&mut transaction, sequence)? {
+            PostgresSequenceState::ExactState => {
+                transaction.commit().map_err(database_error)?;
+                return Ok(PostgresSequenceState::ExactState);
+            }
+            PostgresSequenceState::ExactConfig => {}
+            PostgresSequenceState::Absent => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "target sequence {}.{} is absent",
+                    sequence.namespace, sequence.name
+                )));
+            }
+            PostgresSequenceState::Different => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "target sequence {}.{} exists with different semantics",
+                    sequence.namespace, sequence.name
+                )));
+            }
+        }
+        let qualified_name = qualified_regclass_name(&sequence.namespace, &sequence.name);
+        transaction
+            .query_one(
+                "SELECT pg_catalog.setval($1::text::regclass, $2, $3)",
+                &[&qualified_name, &sequence.last_value, &sequence.is_called],
+            )
+            .map_err(database_error)?;
+        if inspect_sequence(&mut transaction, sequence)? != PostgresSequenceState::ExactState {
+            return Err(ConnectionError::InvalidRequest(format!(
+                "target sequence {}.{} state differs after setval",
+                sequence.namespace, sequence.name
+            )));
+        }
+        transaction.commit().map_err(database_error)?;
+        Ok(PostgresSequenceState::ExactState)
+    }
+
     /// Inspect one target foreign key against exact typed source metadata.
     pub fn inspect_foreign_key(
         &self,
@@ -655,7 +754,471 @@ impl PostgresTargetFactory {
     }
 }
 
+/// Exact PostgreSQL sequence configuration, state, and ownership metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresSequence {
+    pub catalog_object_id: String,
+    pub namespace: Identifier,
+    pub name: Identifier,
+    pub persistence: String,
+    pub data_type: String,
+    pub start_value: i64,
+    pub increment: i64,
+    pub minimum_value: i64,
+    pub maximum_value: i64,
+    pub cache_size: i64,
+    pub cycle: bool,
+    pub last_value: i64,
+    pub is_called: bool,
+    pub ownership: Option<PostgresSequenceOwnership>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresSequenceOwnership {
+    pub table: QualifiedTable,
+    pub column: Identifier,
+    pub kind: PostgresSequenceOwnershipKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresSequenceOwnershipKind {
+    IdentityAlways,
+    IdentityByDefault,
+    Serial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresSequenceState {
+    Absent,
+    ExactConfig,
+    ExactState,
+    Different,
+}
+
+/// Parse and validate every sequence in a PostgreSQL vendor catalog.
+pub fn postgres_sequences(
+    catalog: &VendorCatalog,
+) -> Result<Vec<PostgresSequence>, PostgresPlanError> {
+    if catalog.dialect != "postgresql" {
+        return Err(PostgresPlanError::InvalidConfig(
+            "sequence metadata requires a PostgreSQL catalog",
+        ));
+    }
+    let mut sequences = Vec::new();
+    for namespace in &catalog.namespaces {
+        for object in namespace
+            .objects
+            .iter()
+            .filter(|object| object.kind == CatalogObjectKind::Sequence)
+        {
+            let ownership = match object.attributes.get("ownership") {
+                Some(serde_json::Value::Null) | None => None,
+                Some(value) => Some(serde_json::from_value(value.clone())?),
+            };
+            let ownership_count = object
+                .attributes
+                .get("ownership_count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "sequence ownership count is absent or malformed",
+                ))?;
+            if ownership_count > 1 || (ownership_count == 1) != ownership.is_some() {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "sequence ownership is dangling or multiply defined",
+                ));
+            }
+            let sequence = PostgresSequence {
+                catalog_object_id: object.id.clone(),
+                namespace: namespace.name.clone(),
+                name: object.name.clone(),
+                persistence: required_catalog_string(object, "persistence")?.to_owned(),
+                data_type: required_catalog_string(object, "type")?.to_owned(),
+                start_value: required_catalog_i64(object, "start")?,
+                increment: required_catalog_i64(object, "increment")?,
+                minimum_value: required_catalog_i64(object, "minimum")?,
+                maximum_value: required_catalog_i64(object, "maximum")?,
+                cache_size: required_catalog_i64(object, "cache")?,
+                cycle: required_catalog_bool(object, "cycle")?,
+                last_value: required_catalog_i64(object, "last_value")?,
+                is_called: required_catalog_bool(object, "is_called")?,
+                ownership,
+            };
+            validate_sequence(&sequence)?;
+            sequences.push(sequence);
+        }
+    }
+    sequences.sort_by(|left, right| {
+        left.namespace
+            .cmp(&right.namespace)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.catalog_object_id.cmp(&right.catalog_object_id))
+    });
+    validate_sequence_links(catalog, &sequences)?;
+    Ok(sequences)
+}
+
+fn validate_sequence_links(
+    catalog: &VendorCatalog,
+    sequences: &[PostgresSequence],
+) -> Result<(), PostgresPlanError> {
+    let mut linked_columns = BTreeSet::new();
+    for sequence in sequences {
+        if let Some(ownership) = &sequence.ownership {
+            if !linked_columns.insert((ownership.table.clone(), ownership.column.clone())) {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "multiple sequences own one table column",
+                ));
+            }
+        }
+    }
+    for namespace in &catalog.namespaces {
+        for column in namespace
+            .objects
+            .iter()
+            .filter(|object| object.kind == CatalogObjectKind::Column)
+        {
+            let identity = column
+                .attributes
+                .get("identity")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let sequence_default_id = column
+                .attributes
+                .get("sequence_default_oid")
+                .and_then(serde_json::Value::as_str);
+            let serial = identity.is_empty() && sequence_default_id.is_some();
+            if identity.is_empty() && !serial {
+                continue;
+            }
+            let table =
+                qualified_table_for_oid(catalog, required_catalog_string(column, "table_oid")?)?;
+            let matching = sequences
+                .iter()
+                .filter_map(|sequence| sequence.ownership.as_ref())
+                .filter(|ownership| ownership.table == table && ownership.column == column.name)
+                .collect::<Vec<_>>();
+            let exact = matches!(
+                (identity, serial, matching.as_slice()),
+                ("a", false, [ownership])
+                    if ownership.kind == PostgresSequenceOwnershipKind::IdentityAlways
+            ) || matches!(
+                (identity, serial, matching.as_slice()),
+                ("d", false, [ownership])
+                    if ownership.kind == PostgresSequenceOwnershipKind::IdentityByDefault
+            ) || matches!(
+                (identity, serial, matching.as_slice()),
+                ("", true, [ownership])
+                    if ownership.kind == PostgresSequenceOwnershipKind::Serial
+                        && sequences.iter().any(|sequence| {
+                            sequence.catalog_object_id == sequence_default_id.unwrap_or_default()
+                                && sequence.ownership.as_ref() == Some(*ownership)
+                        })
+            );
+            if !exact {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "identity or serial column has no exact sequence ownership link",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_sequence(sequence: &PostgresSequence) -> Result<(), PostgresPlanError> {
+    if sequence.persistence != "p" {
+        return Err(PostgresPlanError::InvalidConfig(
+            "only logged PostgreSQL sequences are supported",
+        ));
+    }
+    if !matches!(
+        sequence.data_type.as_str(),
+        "smallint" | "integer" | "bigint"
+    ) {
+        return Err(PostgresPlanError::InvalidConfig(
+            "sequence has an unsupported data type",
+        ));
+    }
+    if sequence.increment == 0 || sequence.cache_size <= 0 {
+        return Err(PostgresPlanError::InvalidConfig(
+            "sequence increment and cache must be valid",
+        ));
+    }
+    if sequence.minimum_value >= sequence.maximum_value
+        || !(sequence.minimum_value..=sequence.maximum_value).contains(&sequence.start_value)
+        || !(sequence.minimum_value..=sequence.maximum_value).contains(&sequence.last_value)
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "sequence bounds or state are invalid",
+        ));
+    }
+    let (type_minimum, type_maximum) = match sequence.data_type.as_str() {
+        "smallint" => (i64::from(i16::MIN), i64::from(i16::MAX)),
+        "integer" => (i64::from(i32::MIN), i64::from(i32::MAX)),
+        "bigint" => (i64::MIN, i64::MAX),
+        _ => unreachable!("data type was checked above"),
+    };
+    if sequence.minimum_value < type_minimum || sequence.maximum_value > type_maximum {
+        return Err(PostgresPlanError::InvalidConfig(
+            "sequence bounds exceed its data type",
+        ));
+    }
+    Ok(())
+}
+
+impl PostgresSequence {
+    /// Compute the next value without mutating the source or target sequence.
+    pub fn expected_next_value(&self) -> Result<Option<i64>, PostgresPlanError> {
+        validate_sequence(self)?;
+        if !self.is_called {
+            return Ok(Some(self.last_value));
+        }
+        let candidate = self.last_value.checked_add(self.increment);
+        let within_bounds =
+            candidate.filter(|value| (self.minimum_value..=self.maximum_value).contains(value));
+        if within_bounds.is_some() {
+            return Ok(within_bounds);
+        }
+        if self.cycle {
+            Ok(Some(if self.increment > 0 {
+                self.minimum_value
+            } else {
+                self.maximum_value
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn required_catalog_i64(
+    object: &CatalogObject,
+    name: &'static str,
+) -> Result<i64, PostgresPlanError> {
+    let value = required_catalog_string(object, name)?;
+    value.parse().map_err(|_| {
+        PostgresPlanError::InvalidConfig("sequence numeric catalog metadata is malformed")
+    })
+}
+
+fn required_catalog_bool(
+    object: &CatalogObject,
+    name: &'static str,
+) -> Result<bool, PostgresPlanError> {
+    object
+        .attributes
+        .get(name)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "sequence boolean catalog metadata is malformed",
+        ))
+}
+
+fn sequence_create_statements(sequence: &PostgresSequence) -> Vec<String> {
+    let qualified_sequence = format!(
+        "{}.{}",
+        quote_identifier(&sequence.namespace),
+        quote_identifier(&sequence.name)
+    );
+    let options = sequence_options(sequence);
+    match &sequence.ownership {
+        Some(ownership)
+            if matches!(
+                ownership.kind,
+                PostgresSequenceOwnershipKind::IdentityAlways
+                    | PostgresSequenceOwnershipKind::IdentityByDefault
+            ) =>
+        {
+            let generation = match ownership.kind {
+                PostgresSequenceOwnershipKind::IdentityAlways => "ALWAYS",
+                PostgresSequenceOwnershipKind::IdentityByDefault => "BY DEFAULT",
+                PostgresSequenceOwnershipKind::Serial => unreachable!(),
+            };
+            vec![format!(
+                    "ALTER TABLE {}.{} ALTER COLUMN {} ADD GENERATED {generation} AS IDENTITY (SEQUENCE NAME {qualified_sequence} {options})",
+                    quote_identifier(&ownership.table.namespace),
+                    quote_identifier(&ownership.table.name),
+                    quote_identifier(&ownership.column),
+                )]
+        }
+        ownership => {
+            let mut statements = vec![format!(
+                "CREATE SEQUENCE {qualified_sequence} AS {} {options}",
+                sequence.data_type
+            )];
+            if let Some(ownership) = ownership {
+                statements.push(format!(
+                    "ALTER SEQUENCE {qualified_sequence} OWNED BY {}.{}.{}",
+                    quote_identifier(&ownership.table.namespace),
+                    quote_identifier(&ownership.table.name),
+                    quote_identifier(&ownership.column)
+                ));
+                statements.push(format!(
+                    "ALTER TABLE {}.{} ALTER COLUMN {} SET DEFAULT nextval({}::regclass)",
+                    quote_identifier(&ownership.table.namespace),
+                    quote_identifier(&ownership.table.name),
+                    quote_identifier(&ownership.column),
+                    quote_literal(&qualified_regclass_name(
+                        &sequence.namespace,
+                        &sequence.name
+                    ))
+                ));
+            }
+            statements
+        }
+    }
+}
+
+fn standalone_sequence_create_statement(sequence: &PostgresSequence) -> String {
+    format!(
+        "CREATE SEQUENCE {}.{} AS {} {}",
+        quote_identifier(&sequence.namespace),
+        quote_identifier(&sequence.name),
+        sequence.data_type,
+        sequence_options(sequence)
+    )
+}
+
+fn serial_sequence_association_statements(sequence: &PostgresSequence) -> Vec<String> {
+    let Some(ownership) = &sequence.ownership else {
+        return Vec::new();
+    };
+    if ownership.kind != PostgresSequenceOwnershipKind::Serial {
+        return Vec::new();
+    }
+    let qualified_sequence = format!(
+        "{}.{}",
+        quote_identifier(&sequence.namespace),
+        quote_identifier(&sequence.name)
+    );
+    vec![
+        format!(
+            "ALTER SEQUENCE {qualified_sequence} OWNED BY {}.{}.{}",
+            quote_identifier(&ownership.table.namespace),
+            quote_identifier(&ownership.table.name),
+            quote_identifier(&ownership.column)
+        ),
+        format!(
+            "ALTER TABLE {}.{} ALTER COLUMN {} SET DEFAULT nextval({}::regclass)",
+            quote_identifier(&ownership.table.namespace),
+            quote_identifier(&ownership.table.name),
+            quote_identifier(&ownership.column),
+            quote_literal(&qualified_regclass_name(
+                &sequence.namespace,
+                &sequence.name
+            ))
+        ),
+    ]
+}
+
+fn sequence_options(sequence: &PostgresSequence) -> String {
+    format!(
+        "INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {} CACHE {} {}",
+        sequence.increment,
+        sequence.minimum_value,
+        sequence.maximum_value,
+        sequence.start_value,
+        sequence.cache_size,
+        if sequence.cycle { "CYCLE" } else { "NO CYCLE" }
+    )
+}
+
+fn inspect_sequence(
+    client: &mut impl postgres::GenericClient,
+    expected: &PostgresSequence,
+) -> ConnectionResult<PostgresSequenceState> {
+    let rows = client
+        .query(
+            "SELECT c.relkind::text, c.relpersistence::text, CASE WHEN c.relkind = 'S' THEN pg_catalog.format_type(s.seqtypid, NULL) END, s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle, c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_sequence s ON s.seqrelid = c.oid WHERE n.nspname = $1 AND c.relname = $2",
+            &[&expected.namespace.as_str(), &expected.name.as_str()],
+        )
+        .map_err(database_error)?;
+    let Some(row) = rows.first() else {
+        return Ok(PostgresSequenceState::Absent);
+    };
+    if rows.len() != 1
+        || row.get::<_, String>(0) != "S"
+        || row.get::<_, String>(1) != expected.persistence
+        || row.get::<_, Option<String>>(2).as_deref() != Some(expected.data_type.as_str())
+        || row.get::<_, Option<i64>>(3) != Some(expected.start_value)
+        || row.get::<_, Option<i64>>(4) != Some(expected.increment)
+        || row.get::<_, Option<i64>>(5) != Some(expected.minimum_value)
+        || row.get::<_, Option<i64>>(6) != Some(expected.maximum_value)
+        || row.get::<_, Option<i64>>(7) != Some(expected.cache_size)
+        || row.get::<_, Option<bool>>(8) != Some(expected.cycle)
+    {
+        return Ok(PostgresSequenceState::Different);
+    }
+    let sequence_oid: u32 = row.get(9);
+    let ownership_rows = client
+        .query(
+            "SELECT tn.nspname, t.relname, a.attname, a.attidentity::text, d.deptype::text, EXISTS (SELECT 1 FROM pg_attrdef ad JOIN pg_depend dd ON dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.refobjid = $1 AND dd.deptype = 'n' WHERE ad.adrelid = a.attrelid AND ad.adnum = a.attnum) FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace tn ON tn.oid = t.relnamespace JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid WHERE d.classid = 'pg_class'::regclass AND d.objid = $1 AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a','i') ORDER BY tn.nspname, t.relname, a.attnum",
+            &[&sequence_oid],
+        )
+        .map_err(database_error)?;
+    let actual_ownership = match ownership_rows.as_slice() {
+        [] => None,
+        [row] => {
+            let identity: String = row.get(3);
+            let dependency_type: String = row.get(4);
+            let default_depends_on_sequence: bool = row.get(5);
+            let kind = match (identity.as_str(), dependency_type.as_str()) {
+                ("a", "i") => PostgresSequenceOwnershipKind::IdentityAlways,
+                ("d", "i") => PostgresSequenceOwnershipKind::IdentityByDefault,
+                ("", "a") if default_depends_on_sequence => PostgresSequenceOwnershipKind::Serial,
+                _ => return Ok(PostgresSequenceState::Different),
+            };
+            Some(PostgresSequenceOwnership {
+                table: QualifiedTable {
+                    namespace: Identifier::new(row.get::<_, String>(0))
+                        .map_err(|error| ConnectionError::Database(error.to_string()))?,
+                    name: Identifier::new(row.get::<_, String>(1))
+                        .map_err(|error| ConnectionError::Database(error.to_string()))?,
+                },
+                column: Identifier::new(row.get::<_, String>(2))
+                    .map_err(|error| ConnectionError::Database(error.to_string()))?,
+                kind,
+            })
+        }
+        _ => return Ok(PostgresSequenceState::Different),
+    };
+    if actual_ownership != expected.ownership {
+        return Ok(PostgresSequenceState::Different);
+    }
+    let state = client
+        .query_one(
+            &format!(
+                "SELECT last_value, is_called FROM {}.{}",
+                quote_identifier(&expected.namespace),
+                quote_identifier(&expected.name)
+            ),
+            &[],
+        )
+        .map_err(database_error)?;
+    let last_value = state.get::<_, i64>(0);
+    let is_called = state.get::<_, bool>(1);
+    if last_value == expected.last_value && is_called == expected.is_called {
+        Ok(PostgresSequenceState::ExactState)
+    } else if last_value == expected.start_value && !is_called {
+        Ok(PostgresSequenceState::ExactConfig)
+    } else {
+        Ok(PostgresSequenceState::Different)
+    }
+}
+
+fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn qualified_regclass_name(namespace: &Identifier, name: &Identifier) -> String {
+    format!("{}.{}", quote_identifier(namespace), quote_identifier(name))
+}
+
 /// A conservative, portable PostgreSQL ordinary B-tree index contract.
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostgresIndex {
@@ -1260,23 +1823,24 @@ fn assert_target_empty_and_owned(
 }
 
 fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>> {
-    if catalog.namespaces.iter().any(|namespace| {
-        namespace
-            .objects
-            .iter()
-            .any(|object| object.kind == CatalogObjectKind::Sequence)
-    }) {
-        return Err(ConnectionError::InvalidRequest(
-            "sequence creation, ownership, and state restoration are not implemented".into(),
-        ));
-    }
     let mut statements = Vec::new();
+    let sequences = postgres_sequences(catalog)
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
     for namespace in &catalog.namespaces {
         if namespace.name.as_str() != "public" {
             statements.push(format!(
                 "CREATE SCHEMA {}",
                 quote_identifier(&namespace.name)
             ));
+        }
+    }
+    for sequence in &sequences {
+        if sequence
+            .ownership
+            .as_ref()
+            .is_none_or(|ownership| ownership.kind == PostgresSequenceOwnershipKind::Serial)
+        {
+            statements.push(standalone_sequence_create_statement(sequence));
         }
     }
     for namespace in &catalog.namespaces {
@@ -1313,7 +1877,7 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
                     )));
                 }
             };
-            let mut definitions = table_column_definitions(namespace, table)?;
+            let mut definitions = table_column_definitions(namespace, table, &sequences)?;
             definitions.extend(table_constraint_definitions(namespace, table)?);
             if definitions.is_empty() {
                 return Err(ConnectionError::InvalidRequest(format!(
@@ -1328,6 +1892,9 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
                 definitions.join(", ")
             ));
         }
+    }
+    for sequence in &sequences {
+        statements.extend(serial_sequence_association_statements(sequence));
     }
     for namespace in &catalog.namespaces {
         let mut indexes = namespace
@@ -1378,6 +1945,7 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
 fn table_column_definitions(
     namespace: &CatalogNamespace,
     table: &CatalogObject,
+    sequences: &[PostgresSequence],
 ) -> ConnectionResult<Vec<String>> {
     let mut columns = namespace
         .objects
@@ -1458,22 +2026,57 @@ fn table_column_definitions(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             match identity {
-                "a" => definition.push_str(" GENERATED ALWAYS AS IDENTITY"),
-                "d" => definition.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
+                "a" | "d" => {
+                    let ownership_kind = if identity == "a" {
+                        PostgresSequenceOwnershipKind::IdentityAlways
+                    } else {
+                        PostgresSequenceOwnershipKind::IdentityByDefault
+                    };
+                    let sequence = sequences
+                        .iter()
+                        .find(|sequence| {
+                            sequence.ownership.as_ref().is_some_and(|ownership| {
+                                ownership.table.namespace == namespace.name
+                                    && ownership.table.name == table.name
+                                    && ownership.column == column.name
+                                    && ownership.kind == ownership_kind
+                            })
+                        })
+                        .ok_or_else(|| {
+                            ConnectionError::InvalidRequest(format!(
+                                "identity column {} has no exact sequence",
+                                column.name
+                            ))
+                        })?;
+                    definition.push_str(if identity == "a" {
+                        " GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME "
+                    } else {
+                        " GENERATED BY DEFAULT AS IDENTITY (SEQUENCE NAME "
+                    });
+                    definition.push_str(&format!(
+                        "{}.{} {})",
+                        quote_identifier(&sequence.namespace),
+                        quote_identifier(&sequence.name),
+                        sequence_options(sequence)
+                    ));
+                }
                 "" => {
+                    let has_typed_sequence_default = column
+                        .attributes
+                        .get("sequence_default_oid")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some();
                     if let Some(default) = column
                         .attributes
                         .get("default")
                         .and_then(serde_json::Value::as_str)
                     {
-                        if default.contains("nextval(") {
-                            return Err(ConnectionError::InvalidRequest(format!(
-                                "column {} uses an unsupported serial sequence default",
-                                column.name
-                            )));
+                        if has_typed_sequence_default {
+                            // The typed sequence contract creates the exact default and ownership.
+                        } else {
+                            definition.push_str(" DEFAULT ");
+                            definition.push_str(default);
                         }
-                        definition.push_str(" DEFAULT ");
-                        definition.push_str(default);
                     }
                 }
                 value => {
@@ -2406,6 +3009,14 @@ fn extract_catalog(
                 "cycle".into(),
                 serde_json::Value::Bool(row.get::<_, Option<bool>>(13).unwrap_or(false)),
             );
+            if row.get::<_, String>(5) != "p" {
+                unsupported.push(UnsupportedObject {
+                    object_id: id.clone(),
+                    object_kind: "sequence_persistence".into(),
+                    reason: "unlogged or temporary sequence persistence is not implemented".into(),
+                    required_semantics: true,
+                });
+            }
         }
         if kind == "p" || kind == "m" || kind == "v" || relrowsecurity {
             unsupported.push(UnsupportedObject {
@@ -2435,6 +3046,101 @@ fn extract_catalog(
                 attributes,
             },
         )?;
+    }
+
+    let sequence_ownership_rows = transaction.query(
+        "SELECT 'relation:' || seq.oid::text, tn.nspname, tbl.relname, a.attname, a.attidentity::text, d.deptype::text, EXISTS (SELECT 1 FROM pg_attrdef ad JOIN pg_depend dd ON dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.refobjid = seq.oid AND dd.deptype = 'n' WHERE ad.adrelid = a.attrelid AND ad.adnum = a.attnum) FROM pg_class seq JOIN pg_namespace sn ON sn.oid = seq.relnamespace LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = seq.oid AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a','i') LEFT JOIN pg_class tbl ON tbl.oid = d.refobjid LEFT JOIN pg_namespace tn ON tn.oid = tbl.relnamespace LEFT JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = d.refobjsubid WHERE seq.relkind = 'S' AND sn.nspname <> 'information_schema' AND sn.nspname !~ '^pg_' ORDER BY seq.oid, tn.nspname, tbl.relname, a.attnum",
+        &[],
+    )?;
+    let mut sequence_ownership = BTreeMap::<String, Vec<PostgresSequenceOwnership>>::new();
+    let mut malformed_sequence_ownership = BTreeSet::new();
+    for row in sequence_ownership_rows {
+        let sequence_id: String = row.get(0);
+        let Some(table_namespace) = row.get::<_, Option<String>>(1) else {
+            sequence_ownership.entry(sequence_id).or_default();
+            continue;
+        };
+        let values = (
+            row.get::<_, Option<String>>(2),
+            row.get::<_, Option<String>>(3),
+            row.get::<_, Option<String>>(4),
+            row.get::<_, Option<String>>(5),
+            row.get::<_, Option<bool>>(6),
+        );
+        let (Some(table_name), Some(column_name), Some(identity), Some(dependency_type), default) =
+            values
+        else {
+            malformed_sequence_ownership.insert(sequence_id);
+            continue;
+        };
+        let kind = match (identity.as_str(), dependency_type.as_str()) {
+            ("a", "i") => Some(PostgresSequenceOwnershipKind::IdentityAlways),
+            ("d", "i") => Some(PostgresSequenceOwnershipKind::IdentityByDefault),
+            ("", "a") if default == Some(true) => Some(PostgresSequenceOwnershipKind::Serial),
+            _ => None,
+        };
+        let Some(kind) = kind else {
+            malformed_sequence_ownership.insert(sequence_id);
+            continue;
+        };
+        sequence_ownership
+            .entry(sequence_id)
+            .or_default()
+            .push(PostgresSequenceOwnership {
+                table: QualifiedTable {
+                    namespace: Identifier::new(table_namespace)?,
+                    name: Identifier::new(table_name)?,
+                },
+                column: Identifier::new(column_name)?,
+                kind,
+            });
+    }
+    for namespace in namespaces.values_mut() {
+        if namespace.name.as_str() == "sql_splitter_migration_fence" {
+            continue;
+        }
+        for object in namespace
+            .objects
+            .iter_mut()
+            .filter(|object| object.kind == CatalogObjectKind::Sequence)
+        {
+            let state = transaction.query_one(
+                &format!(
+                    "SELECT last_value, is_called FROM {}.{}",
+                    quote_identifier(&namespace.name),
+                    quote_identifier(&object.name)
+                ),
+                &[],
+            )?;
+            object.attributes.insert(
+                "last_value".into(),
+                serde_json::Value::String(state.get::<_, i64>(0).to_string()),
+            );
+            object
+                .attributes
+                .insert("is_called".into(), serde_json::Value::Bool(state.get(1)));
+            let owners = sequence_ownership.remove(&object.id).unwrap_or_default();
+            object
+                .attributes
+                .insert("ownership_count".into(), serde_json::json!(owners.len()));
+            if owners.len() == 1 && !malformed_sequence_ownership.contains(&object.id) {
+                object
+                    .attributes
+                    .insert("ownership".into(), serde_json::to_value(&owners[0])?);
+            } else {
+                object
+                    .attributes
+                    .insert("ownership".into(), serde_json::Value::Null);
+            }
+            if owners.len() > 1 || malformed_sequence_ownership.contains(&object.id) {
+                unsupported.push(UnsupportedObject {
+                    object_id: object.id.clone(),
+                    object_kind: "sequence_ownership".into(),
+                    reason: "sequence ownership is malformed, dangling, or multiply defined".into(),
+                    required_semantics: true,
+                });
+            }
+        }
     }
 
     let user_type_rows = transaction.query(
@@ -2506,7 +3212,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
+        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
         CatalogObjectKind::Column,
     )?;
     for object in namespaces
@@ -2556,25 +3262,6 @@ fn extract_catalog(
                 object_kind: "collation_version_mismatch".into(),
                 reason: "recorded collation version differs from the provider's actual version"
                     .into(),
-                required_semantics: true,
-            });
-        }
-        let identity = object
-            .attributes
-            .get("identity")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        if identity.is_empty()
-            && object
-                .attributes
-                .get("default")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.contains("nextval("))
-        {
-            unsupported.push(UnsupportedObject {
-                object_id: object.id.clone(),
-                object_kind: "serial_sequence_default".into(),
-                reason: "serial sequence ownership and state are not implemented".into(),
                 required_semantics: true,
             });
         }
@@ -2892,6 +3579,7 @@ pub fn build_plan_with_consistency(
     let mut foreign_keys = Vec::new();
     let mut standalone_indexes = Vec::new();
     let mut post_data_indexes = Vec::new();
+    let sequences = postgres_sequences(&source.catalog)?;
     for namespace in &source.catalog.namespaces {
         for object in &namespace.objects {
             if object.kind == CatalogObjectKind::Table {
@@ -2899,10 +3587,7 @@ pub fn build_plan_with_consistency(
                     namespace: namespace.name.clone(),
                     name: object.name.clone(),
                 });
-            } else if matches!(
-                object.kind,
-                CatalogObjectKind::Sequence | CatalogObjectKind::View
-            ) {
+            } else if object.kind == CatalogObjectKind::View {
                 deferred_objects.push((namespace.name.clone(), object.clone()));
             } else if object.kind == CatalogObjectKind::ForeignKey {
                 foreign_keys.push(object.clone());
@@ -3034,6 +3719,101 @@ pub fn build_plan_with_consistency(
         copy_operations.insert(table, replacement.id);
         operations.push(create_index);
     }
+    let mut sequence_creates = Vec::new();
+    let mut sequence_create_ids = BTreeMap::<QualifiedTable, Vec<OperationId>>::new();
+    for sequence in &sequences {
+        let table = sequence
+            .ownership
+            .as_ref()
+            .map(|ownership| ownership.table.clone());
+        let create_dependencies = table
+            .as_ref()
+            .map(|table| {
+                create_table_operations
+                    .get(table)
+                    .cloned()
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "owned sequence table has no create-table operation",
+                    ))
+            })
+            .transpose()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let create = PlanOperation::new(
+            OperationKind::CreateSequence,
+            table.clone().or_else(|| {
+                Some(QualifiedTable {
+                    namespace: sequence.namespace.clone(),
+                    name: sequence.name.clone(),
+                })
+            }),
+            create_dependencies,
+            BTreeMap::from([("postgres_sequence".into(), serde_json::to_value(sequence)?)]),
+        )?;
+        if let Some(table) = &table {
+            sequence_create_ids
+                .entry(table.clone())
+                .or_default()
+                .push(create.id.clone());
+        }
+        sequence_creates.push((sequence, create));
+    }
+    for (table, create_ids) in sequence_create_ids {
+        let copy_position = operations
+            .iter()
+            .position(|operation| {
+                operation.kind == OperationKind::CopyTable
+                    && operation.table.as_ref() == Some(&table)
+            })
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "owned sequence table has no copy operation",
+            ))?;
+        let old_copy = operations[copy_position].clone();
+        let mut dependencies = old_copy.dependencies.clone();
+        dependencies.extend(create_ids);
+        let replacement = PlanOperation::new(
+            OperationKind::CopyTable,
+            Some(table.clone()),
+            dependencies,
+            old_copy.parameters,
+        )?;
+        let verify_position = operations
+            .iter()
+            .position(|operation| {
+                operation.kind == OperationKind::VerifyTable
+                    && operation.table.as_ref() == Some(&table)
+            })
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "owned sequence table has no verify operation",
+            ))?;
+        let old_verify = operations[verify_position].clone();
+        operations[copy_position] = replacement.clone();
+        operations[verify_position] = PlanOperation::new(
+            OperationKind::VerifyTable,
+            Some(table.clone()),
+            vec![replacement.id.clone()],
+            old_verify.parameters,
+        )?;
+        copy_operations.insert(table.clone(), replacement.id);
+    }
+    for (sequence, create) in sequence_creates {
+        let table = sequence
+            .ownership
+            .as_ref()
+            .map(|ownership| ownership.table.clone());
+        let restore_dependency = table
+            .as_ref()
+            .and_then(|table| copy_operations.get(table))
+            .cloned()
+            .unwrap_or_else(|| create.id.clone());
+        let restore = PlanOperation::new(
+            OperationKind::Vendor("restore_postgres_sequence".into()),
+            table,
+            vec![restore_dependency],
+            BTreeMap::from([("postgres_sequence".into(), serde_json::to_value(sequence)?)]),
+        )?;
+        operations.extend([create, restore]);
+    }
     post_data_indexes.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -3111,7 +3891,6 @@ pub fn build_plan_with_consistency(
     }
     for (namespace, object) in deferred_objects {
         let kind = match object.kind {
-            CatalogObjectKind::Sequence => OperationKind::CreateSequence,
             CatalogObjectKind::View => OperationKind::CreateView,
             _ => continue,
         };
@@ -3137,6 +3916,14 @@ pub fn build_plan_with_consistency(
     operations.push(verify_schema);
     let mut unsupported = source.unsupported.clone();
     unsupported.objects.extend(key_unsupported);
+    if !sequences.is_empty() && consistency_mode != PostgresConsistencyMode::WriteFence {
+        unsupported.objects.push(UnsupportedObject {
+            object_id: "postgres-sequence-write-fence-required".into(),
+            object_kind: "sequence_consistency".into(),
+            reason: "sequence migration requires an attested write fence that blocks nextval and setval, followed by an exact post-drain catalog recapture".into(),
+            required_semantics: true,
+        });
+    }
     let target_object_count: usize = target
         .catalog
         .namespaces
@@ -3996,6 +4783,186 @@ credential_env = "PGPASSWORD"
             .attributes
             .insert("unique".into(), serde_json::json!(false));
         index
+    }
+
+    fn sequence_object(
+        ownership: Option<PostgresSequenceOwnership>,
+        last_value: i64,
+        is_called: bool,
+    ) -> CatalogObject {
+        CatalogObject {
+            id: "relation:sequence-1".into(),
+            kind: CatalogObjectKind::Sequence,
+            name: Identifier::new("accounts_id_seq").unwrap(),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("relkind".into(), serde_json::json!("S")),
+                ("persistence".into(), serde_json::json!("p")),
+                ("type".into(), serde_json::json!("bigint")),
+                ("start".into(), serde_json::json!("-10")),
+                ("increment".into(), serde_json::json!("-2")),
+                ("minimum".into(), serde_json::json!("-100")),
+                ("maximum".into(), serde_json::json!("100")),
+                ("cache".into(), serde_json::json!("7")),
+                ("cycle".into(), serde_json::json!(true)),
+                (
+                    "last_value".into(),
+                    serde_json::json!(last_value.to_string()),
+                ),
+                ("is_called".into(), serde_json::json!(is_called)),
+                (
+                    "ownership_count".into(),
+                    serde_json::json!(usize::from(ownership.is_some())),
+                ),
+                (
+                    "ownership".into(),
+                    ownership
+                        .map(|value| serde_json::to_value(value).unwrap())
+                        .unwrap_or(serde_json::Value::Null),
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn identity_sequence_is_created_inline_once_with_exact_options() {
+        let ownership = PostgresSequenceOwnership {
+            table: QualifiedTable {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new("accounts").unwrap(),
+            },
+            column: Identifier::new("id").unwrap(),
+            kind: PostgresSequenceOwnershipKind::IdentityAlways,
+        };
+        let mut catalog = key_catalog(vec![sequence_object(Some(ownership), -10, false)]);
+        let column = catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap();
+        column
+            .attributes
+            .insert("identity".into(), serde_json::json!("a"));
+        let statements = pre_data_statements(&catalog).unwrap();
+        assert_eq!(
+            statements
+                .iter()
+                .filter(|statement| statement.contains("accounts_id_seq"))
+                .count(),
+            1
+        );
+        let table = statements
+            .iter()
+            .find(|statement| statement.starts_with("CREATE TABLE"))
+            .unwrap();
+        assert!(table.contains("GENERATED ALWAYS AS IDENTITY"));
+        assert!(table.contains("SEQUENCE NAME \"public\".\"accounts_id_seq\""));
+        assert!(table
+            .contains("INCREMENT BY -2 MINVALUE -100 MAXVALUE 100 START WITH -10 CACHE 7 CYCLE"));
+        assert!(!statements
+            .iter()
+            .any(|statement| statement.starts_with("ALTER TABLE")
+                && statement.contains("ADD GENERATED")));
+    }
+
+    #[test]
+    fn sequence_plan_is_blocked_without_write_fence_and_restores_after_copy() {
+        let mut source_catalog = key_catalog(vec![
+            sequence_object(None, 42, true),
+            CatalogObject {
+                id: "constraint:key".into(),
+                kind: CatalogObjectKind::PrimaryKey,
+                name: Identifier::new("accounts_pkey").unwrap(),
+                definition: b"PRIMARY KEY (id)".to_vec(),
+                attributes: BTreeMap::from([
+                    ("table_oid".into(), serde_json::json!("relation:1")),
+                    ("validated".into(), serde_json::json!(true)),
+                    ("columns".into(), serde_json::json!(["id"])),
+                ]),
+            },
+        ]);
+        source_catalog.format_version = CATALOG_FORMAT_VERSION;
+        let source = CatalogSnapshot {
+            endpoint_identity: "source".into(),
+            server_version: "17".into(),
+            server_version_num: 170000,
+            catalog: source_catalog,
+            unsupported: UnsupportedObjectReport::default(),
+            tls_binding: "tls-source".into(),
+        };
+        let mut target = snapshot("target", false);
+        target.catalog.format_version = CATALOG_FORMAT_VERSION;
+        let snapshot_plan = build_plan(&source, &target).unwrap();
+        assert!(snapshot_plan.plan.unsupported_objects.blocks_execution());
+        let fenced =
+            build_plan_with_consistency(&source, &target, PostgresConsistencyMode::WriteFence)
+                .unwrap();
+        let create = fenced
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CreateSequence)
+            .unwrap();
+        let restore = fenced
+            .plan
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.kind == OperationKind::Vendor("restore_postgres_sequence".into())
+            })
+            .unwrap();
+        assert_eq!(restore.dependencies, vec![create.id.clone()]);
+        let planned: PostgresSequence =
+            serde_json::from_value(restore.parameters["postgres_sequence"].clone()).unwrap();
+        assert_eq!(planned.last_value, 42);
+        assert!(planned.is_called);
+    }
+
+    #[test]
+    fn sequence_next_value_checks_bounds_cycle_and_identifier_quoting() {
+        let catalog = key_catalog(vec![sequence_object(None, -100, true)]);
+        let mut sequence = postgres_sequences(&catalog).unwrap().remove(0);
+        sequence.last_value = sequence.minimum_value;
+        sequence.is_called = true;
+        assert_eq!(sequence.expected_next_value().unwrap(), Some(100));
+        sequence.cycle = false;
+        assert_eq!(sequence.expected_next_value().unwrap(), None);
+
+        let namespace = Identifier::new("Mixed.Schema").unwrap();
+        let name = Identifier::new("seq\"name").unwrap();
+        assert_eq!(
+            qualified_regclass_name(&namespace, &name),
+            "\"Mixed.Schema\".\"seq\"\"name\""
+        );
+
+        sequence.data_type = "smallint".into();
+        sequence.maximum_value = i64::from(i16::MAX) + 1;
+        assert!(sequence.expected_next_value().is_err());
+    }
+
+    #[test]
+    fn nextval_text_without_sequence_dependency_is_not_classified_as_serial() {
+        let mut catalog = key_catalog(Vec::new());
+        let column = catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap();
+        column.attributes.insert(
+            "default".into(),
+            serde_json::json!("'literal nextval('::text"),
+        );
+        column
+            .attributes
+            .insert("sequence_default_oid".into(), serde_json::Value::Null);
+
+        assert!(postgres_sequences(&catalog).unwrap().is_empty());
+        let statements = pre_data_statements(&catalog).unwrap();
+        let table = statements
+            .iter()
+            .find(|statement| statement.starts_with("CREATE TABLE"))
+            .unwrap();
+        assert!(table.contains("DEFAULT 'literal nextval('::text"));
     }
 
     #[test]

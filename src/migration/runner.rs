@@ -29,9 +29,10 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
     catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_post_data_indexes,
-    postgres_tls_binding, select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresForeignKey, PostgresForeignKeyState, PostgresIndex, PostgresIndexState,
-    PostgresResumableKey, PostgresSourceFactory, PostgresTargetFactory, CATALOG_FORMAT_VERSION,
+    postgres_sequences, postgres_tls_binding, select_resumable_key, PostgresConsistencyMode,
+    PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState, PostgresIndex,
+    PostgresIndexState, PostgresResumableKey, PostgresSequence, PostgresSequenceState,
+    PostgresSourceFactory, PostgresTargetFactory, CATALOG_FORMAT_VERSION,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
@@ -64,6 +65,8 @@ enum ExecutionInterruption {
     AfterCommittedChunks(u64),
     AfterIndexPrepared,
     AfterIndexCommitted,
+    AfterSequencePrepared,
+    AfterSequenceCommitted,
     AfterAllVerified,
     BeforeForeignKeyChecks,
     AfterForeignKeyPrepared,
@@ -84,6 +87,8 @@ pub enum PostgresExecutionInterruption {
     AfterCommittedChunks(u64),
     AfterIndexPrepared,
     AfterIndexCommitted,
+    AfterSequencePrepared,
+    AfterSequenceCommitted,
     AfterAllVerified,
     BeforeForeignKeyChecks,
     AfterForeignKeyPrepared,
@@ -105,6 +110,8 @@ impl From<PostgresExecutionInterruption> for ExecutionInterruption {
             }
             PostgresExecutionInterruption::AfterIndexPrepared => Self::AfterIndexPrepared,
             PostgresExecutionInterruption::AfterIndexCommitted => Self::AfterIndexCommitted,
+            PostgresExecutionInterruption::AfterSequencePrepared => Self::AfterSequencePrepared,
+            PostgresExecutionInterruption::AfterSequenceCommitted => Self::AfterSequenceCommitted,
             PostgresExecutionInterruption::AfterAllVerified => Self::AfterAllVerified,
             PostgresExecutionInterruption::BeforeForeignKeyChecks => Self::BeforeForeignKeyChecks,
             PostgresExecutionInterruption::AfterForeignKeyPrepared => Self::AfterForeignKeyPrepared,
@@ -583,6 +590,15 @@ fn resume_postgres_fenced_plan_internal(
         complete_operation_if_needed(&mut state, verify.id.as_str())?;
         replace_json(state_path, &state)?;
     }
+    process_postgres_sequences(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut state,
+        state_path,
+        None,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
     process_postgres_indexes(
         &reviewed,
         &source_catalog,
@@ -601,6 +617,7 @@ fn resume_postgres_fenced_plan_internal(
         None,
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
+    verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_schema_projection(&source_catalog, &target_config)?;
     let verify_schema = reviewed
         .plan
@@ -803,9 +820,11 @@ fn execute_postgres_plan_internal(
         .operations
         .iter()
         .filter(|operation| {
-            operation.kind == OperationKind::CreateTable
-                || (operation.kind == OperationKind::CreateIndex
-                    && !operation.parameters.contains_key("postgres_index"))
+            matches!(
+                operation.kind,
+                OperationKind::CreateTable | OperationKind::CreateSequence
+            ) || (operation.kind == OperationKind::CreateIndex
+                && !operation.parameters.contains_key("postgres_index"))
         })
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
@@ -995,6 +1014,15 @@ fn execute_postgres_plan_internal(
         state.verify_operation(verify_operation.id.as_str())?;
         replace_json(state_path, &state)?;
     }
+    process_postgres_sequences(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut state,
+        state_path,
+        interruption,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
     process_postgres_indexes(
         &reviewed,
         &source_catalog,
@@ -1013,6 +1041,7 @@ fn execute_postgres_plan_internal(
         interruption,
         || attest_fence_if_present(fenced.as_ref()),
     )?;
+    verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_schema_projection(&source_catalog, &target_config)?;
     let verify_schema = reviewed
         .plan
@@ -1279,9 +1308,11 @@ fn resume_pre_data_schema(
         .operations
         .iter()
         .filter(|operation| {
-            operation.kind == OperationKind::CreateTable
-                || (operation.kind == OperationKind::CreateIndex
-                    && !operation.parameters.contains_key("postgres_index"))
+            matches!(
+                operation.kind,
+                OperationKind::CreateTable | OperationKind::CreateSequence
+            ) || (operation.kind == OperationKind::CreateIndex
+                && !operation.parameters.contains_key("postgres_index"))
         })
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
@@ -1386,6 +1417,106 @@ fn target_planned_tables_are_empty(
         }
     }
     Ok(true)
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn process_postgres_sequences(
+    reviewed: &ReviewedPlan,
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+    state: &mut MigrationState,
+    state_path: &Path,
+    interruption: Option<ExecutionInterruption>,
+    mut attest: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let sequences = postgres_sequences(catalog)?
+        .into_iter()
+        .map(|sequence| (sequence.catalog_object_id.clone(), sequence))
+        .collect::<BTreeMap<_, _>>();
+    for operation in reviewed.plan.operations.iter().filter(|operation| {
+        matches!(
+            &operation.kind,
+            OperationKind::Vendor(name) if name == "restore_postgres_sequence"
+        )
+    }) {
+        let reviewed_sequence: PostgresSequence = serde_json::from_value(
+            operation
+                .parameters
+                .get("postgres_sequence")
+                .cloned()
+                .ok_or_else(|| anyhow!("sequence restore operation omits postgres_sequence"))?,
+        )?;
+        let sequence = sequences
+            .get(&reviewed_sequence.catalog_object_id)
+            .ok_or_else(|| anyhow!("sequence restore operation refers to an unknown sequence"))?;
+        if sequence != &reviewed_sequence {
+            return Err(anyhow!(
+                "sequence restore operation differs from the reviewed catalog"
+            ));
+        }
+        match operation_state(state, operation.id.as_str())? {
+            OperationState::Pending => {
+                state.prepare_operations_atomic([operation.id.as_str()])?;
+                replace_json(state_path, state)?;
+                interrupt_if(interruption, ExecutionInterruption::AfterSequencePrepared)?;
+            }
+            OperationState::Prepared | OperationState::Verified => {}
+            OperationState::Running | OperationState::Committed => {
+                return Err(anyhow!(
+                    "sequence restore operation has an invalid durable state"
+                ));
+            }
+        }
+        attest()?;
+        let observed = match operation_state(state, operation.id.as_str())? {
+            OperationState::Prepared => match target.restore_sequence(sequence) {
+                Ok(observed) => observed,
+                Err(ConnectionError::InvalidRequest(reason)) => {
+                    state.require_manual_reconciliation()?;
+                    replace_json(state_path, state)?;
+                    return Err(anyhow!(
+                        "sequence reconciliation requires manual intervention: {reason}"
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            },
+            OperationState::Verified => target.inspect_sequence(sequence)?,
+            _ => unreachable!("validated sequence restore state"),
+        };
+        interrupt_if(interruption, ExecutionInterruption::AfterSequenceCommitted)?;
+        if observed != PostgresSequenceState::ExactState {
+            state.require_manual_reconciliation()?;
+            replace_json(state_path, state)?;
+            return Err(anyhow!(
+                "target sequence {}.{} differs from reviewed state",
+                sequence.namespace,
+                sequence.name
+            ));
+        }
+        if operation_state(state, operation.id.as_str())? == OperationState::Prepared {
+            state.commit_prepared_operation(operation.id.as_str())?;
+            state.verify_operation(operation.id.as_str())?;
+            replace_json(state_path, state)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn verify_postgres_sequence_states(
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+) -> anyhow::Result<()> {
+    for sequence in postgres_sequences(catalog)? {
+        if target.inspect_sequence(&sequence)? != PostgresSequenceState::ExactState {
+            return Err(anyhow!(
+                "target sequence {}.{} changed before final verification",
+                sequence.namespace,
+                sequence.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1675,12 +1806,16 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         if !matches!(
             operation.kind,
             OperationKind::CreateTable
+                | OperationKind::CreateSequence
                 | OperationKind::CreateIndex
                 | OperationKind::CopyTable
                 | OperationKind::CheckForeignKey
                 | OperationKind::AddForeignKey
                 | OperationKind::VerifyTable
                 | OperationKind::VerifySchema
+        ) && !matches!(
+            &operation.kind,
+            OperationKind::Vendor(name) if name == "restore_postgres_sequence"
         ) {
             return Err(anyhow!(
                 "PostgreSQL live runner does not implement operation {:?}",
@@ -1722,6 +1857,50 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         .source_catalog
         .as_ref()
         .ok_or_else(|| anyhow!("reviewed PostgreSQL plan has no embedded source catalog"))?;
+    let expected_sequences = postgres_sequences(source_catalog)?
+        .into_iter()
+        .map(|sequence| sequence.catalog_object_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if !expected_sequences.is_empty()
+        && reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str()
+    {
+        return Err(anyhow!(
+            "PostgreSQL sequences require durable write-fence consistency"
+        ));
+    }
+    let sequence_operation_ids =
+        |restore: bool| -> anyhow::Result<std::collections::BTreeSet<String>> {
+            reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                if restore {
+                    matches!(&operation.kind, OperationKind::Vendor(name) if name == "restore_postgres_sequence")
+                } else {
+                    operation.kind == OperationKind::CreateSequence
+                }
+            })
+            .map(|operation| {
+                serde_json::from_value::<PostgresSequence>(
+                    operation
+                        .parameters
+                        .get("postgres_sequence")
+                        .cloned()
+                        .ok_or_else(|| anyhow!("sequence operation omits postgres_sequence"))?,
+                )
+                .map(|sequence| sequence.catalog_object_id)
+                .map_err(Into::into)
+            })
+            .collect()
+        };
+    if sequence_operation_ids(false)? != expected_sequences
+        || sequence_operation_ids(true)? != expected_sequences
+    {
+        return Err(anyhow!(
+            "reviewed PostgreSQL sequence operation sets differ from the catalog"
+        ));
+    }
     let expected_foreign_keys = postgres_foreign_keys(source_catalog)?
         .into_iter()
         .map(|foreign_key| foreign_key.catalog_object_id)
@@ -2072,6 +2251,7 @@ fn schema_projection(
                 matches!(
                     object.kind,
                     CatalogObjectKind::Table
+                        | CatalogObjectKind::Sequence
                         | CatalogObjectKind::Column
                         | CatalogObjectKind::PrimaryKey
                         | CatalogObjectKind::UniqueConstraint
@@ -2096,6 +2276,18 @@ fn schema_projection(
                     CatalogObjectKind::Table => serde_json::json!({
                         "relkind": object.attributes.get("relkind"),
                         "persistence": object.attributes.get("persistence"),
+                    }),
+                    CatalogObjectKind::Sequence => serde_json::json!({
+                        "persistence": object.attributes.get("persistence"),
+                        "type": object.attributes.get("type"),
+                        "start": object.attributes.get("start"),
+                        "increment": object.attributes.get("increment"),
+                        "minimum": object.attributes.get("minimum"),
+                        "maximum": object.attributes.get("maximum"),
+                        "cache": object.attributes.get("cache"),
+                        "cycle": object.attributes.get("cycle"),
+                        "ownership": object.attributes.get("ownership"),
+                        "ownership_count": object.attributes.get("ownership_count"),
                     }),
                     CatalogObjectKind::Column => serde_json::json!({
                         "table": object.attributes.get("table"),
