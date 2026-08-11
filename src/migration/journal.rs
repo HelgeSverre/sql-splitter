@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::model::{DbValue, KeyTuple};
 use super::plan::ReviewedPlan;
 
-pub const STATE_SCHEMA_VERSION: u16 = 6;
+pub const STATE_SCHEMA_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
@@ -45,6 +45,7 @@ pub struct ResumeBinding {
     pub source_schema_fingerprint: String,
     pub target_schema_fingerprint: String,
     pub outage_projection_digest: Option<String>,
+    pub external_quiesce_attestation_digest: Option<String>,
     pub conversion_policy: String,
     pub canonical_encoding_version: u16,
 }
@@ -280,6 +281,7 @@ impl MigrationState {
         check!(source_schema_fingerprint);
         check!(target_schema_fingerprint);
         check!(outage_projection_digest);
+        check!(external_quiesce_attestation_digest);
         check!(conversion_policy);
         check!(canonical_encoding_version);
         Ok(())
@@ -364,6 +366,17 @@ impl MigrationState {
             {
                 return Err(JournalError::InvalidBindingDigest {
                     field: "outage_projection_digest",
+                });
+            }
+        }
+        if let Some(digest) = &self.binding.external_quiesce_attestation_digest {
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(JournalError::InvalidBindingDigest {
+                    field: "external_quiesce_attestation_digest",
                 });
             }
         }
@@ -964,6 +977,7 @@ mod tests {
             source_schema_fingerprint: "sf".into(),
             target_schema_fingerprint: "tf".into(),
             outage_projection_digest: None,
+            external_quiesce_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: 1,
         }

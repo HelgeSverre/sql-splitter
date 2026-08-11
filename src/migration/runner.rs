@@ -9,7 +9,7 @@ use std::sync::{mpsc, Arc};
 #[cfg(feature = "enterprise-migration-spike")]
 use std::thread::{self, JoinHandle};
 #[cfg(feature = "enterprise-migration-spike")]
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
 #[cfg(feature = "enterprise-migration-spike")]
@@ -60,6 +60,12 @@ use super::postgres_ast::PostgresDurableAst;
 use super::postgres_fence::{
     attest_postgres_write_fence, postgres_write_fence_is_released, release_postgres_write_fence,
     remove_attested_fence_objects, InstalledPostgresFence, POSTGRES_FENCE_ARTIFACT_VERSION,
+};
+#[cfg(feature = "enterprise-migration-spike")]
+use super::postgres_profile::{
+    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanEvidence,
+    PostgresExternalQuiesceRescanTableEvidence, PostgresSequenceEqualityEvidence,
+    PostgresSourceProfileContract,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +521,7 @@ fn append_journal_genesis(
     binding: ResumeBinding,
     reviewed_plan: ReviewedPlan,
     accepted_outage_projection: Option<AcceptedOutageProjection>,
+    accepted_external_quiesce: Option<super::postgres_profile::PostgresExternalQuiesceAttestation>,
 ) -> Genesis {
     let operations = reviewed_plan
         .plan
@@ -537,6 +544,7 @@ fn append_journal_genesis(
         binding,
         reviewed_plan,
         accepted_outage_projection,
+        accepted_external_quiesce,
         operations,
     }
 }
@@ -691,6 +699,56 @@ pub fn execute_postgres_plan(
         None,
         None,
         None,
+        None,
+    )
+}
+
+/// Execute an external-quiesce plan after binding one active attestation.
+#[cfg(feature = "enterprise-migration-spike")]
+pub fn execute_postgres_plan_with_external_quiesce(
+    plan_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    external_quiesce_attestation_path: impl AsRef<Path>,
+    approval_reference: &str,
+    state_path: impl AsRef<Path>,
+) -> anyhow::Result<PostgresExecutionReport> {
+    execute_postgres_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        target_config_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        None,
+        Some(external_quiesce_attestation_path.as_ref()),
+        None,
+        None,
+    )
+}
+
+/// Execute an external-quiesce plan until one deterministic recovery boundary.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+#[allow(clippy::too_many_arguments)] // Mirrors the operator API plus one deterministic boundary.
+pub fn execute_postgres_external_quiesce_plan_with_interruption(
+    plan_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    external_quiesce_attestation_path: impl AsRef<Path>,
+    approval_reference: &str,
+    state_path: impl AsRef<Path>,
+    interruption: PostgresExecutionInterruption,
+) -> anyhow::Result<PostgresExecutionReport> {
+    execute_postgres_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        target_config_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        None,
+        Some(external_quiesce_attestation_path.as_ref()),
+        Some(interruption.into()),
+        None,
     )
 }
 
@@ -714,6 +772,7 @@ pub fn execute_postgres_fenced_plan(
             fence_admin_config_path.as_ref(),
             fence_artifact_path.as_ref(),
         )),
+        None,
         None,
         None,
     )
@@ -760,6 +819,7 @@ pub fn execute_postgres_interrupted(
         request.approval_reference,
         request.state_path,
         Some((request.fence_admin_config_path, request.fence_artifact_path)),
+        None,
         Some(request.interruption.into()),
         None,
     )
@@ -780,6 +840,7 @@ pub fn execute_postgres_fenced_plan_with_cancellation(
         request.state_path,
         Some((request.fence_admin_config_path, request.fence_artifact_path)),
         None,
+        None,
         Some(cancellation),
     )
 }
@@ -791,12 +852,12 @@ pub fn resume_postgres_fenced_plan_with_cancellation(
     request: PostgresCancellationResume<'_>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<PostgresExecutionReport> {
-    resume_postgres_fenced_plan_internal(
+    resume_postgres_plan_internal(
         request.state_path,
         request.source_config_path,
         request.target_config_path,
-        request.fence_admin_config_path,
-        request.fence_artifact_path,
+        Some((request.fence_admin_config_path, request.fence_artifact_path)),
+        None,
         Some(cancellation),
     )
 }
@@ -813,23 +874,44 @@ pub fn resume_postgres_fenced_plan(
     fence_admin_config_path: impl AsRef<Path>,
     fence_artifact_path: impl AsRef<Path>,
 ) -> anyhow::Result<PostgresExecutionReport> {
-    resume_postgres_fenced_plan_internal(
+    resume_postgres_plan_internal(
         state_path.as_ref(),
         source_config_path.as_ref(),
         target_config_path.as_ref(),
-        fence_admin_config_path.as_ref(),
-        fence_artifact_path.as_ref(),
+        Some((
+            fence_admin_config_path.as_ref(),
+            fence_artifact_path.as_ref(),
+        )),
+        None,
+        None,
+    )
+}
+
+/// Resume an external-quiesce migration with the same accepted attestation.
+#[cfg(feature = "enterprise-migration-spike")]
+pub fn resume_postgres_plan_with_external_quiesce(
+    state_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    external_quiesce_attestation_path: impl AsRef<Path>,
+) -> anyhow::Result<PostgresExecutionReport> {
+    resume_postgres_plan_internal(
+        state_path.as_ref(),
+        source_config_path.as_ref(),
+        target_config_path.as_ref(),
+        None,
+        Some(external_quiesce_attestation_path.as_ref()),
         None,
     )
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn resume_postgres_fenced_plan_internal(
+fn resume_postgres_plan_internal(
     state_path: &Path,
     source_config_path: &Path,
     target_config_path: &Path,
-    fence_admin_config_path: &Path,
-    fence_artifact_path: &Path,
+    fence_paths: Option<(&Path, &Path)>,
+    external_quiesce_attestation_path: Option<&Path>,
     injected_cancellation: Option<CancellationToken>,
 ) -> anyhow::Result<PostgresExecutionReport> {
     let mut journal = AppendJournal::open_resume(state_path).with_context(|| {
@@ -853,49 +935,74 @@ fn resume_postgres_fenced_plan_internal(
         ));
     }
 
-    let installed: InstalledPostgresFence = read_json(fence_artifact_path)?;
-    if installed.evidence != journal.genesis().binding.consistency_evidence {
-        return Err(anyhow!(
-            "write-fence artifact differs from the state consistency evidence"
-        ));
-    }
-    if !matches!(installed.evidence, ConsistencyEvidence::WriteFence { .. }) {
-        return Err(anyhow!("resume requires write-fence consistency evidence"));
-    }
     let source_config = PostgresEndpointConfig::read(source_config_path)?;
     let target_config = PostgresEndpointConfig::read(target_config_path)?;
     validate_reviewed_tls(&reviewed, "source_tls", &source_config)?;
     validate_reviewed_tls(&reviewed, "target_tls", &target_config)?;
-    let admin_config = PostgresEndpointConfig::read(fence_admin_config_path)?;
-    validate_separate_postgres_credentials(&source_config, &target_config, &admin_config)?;
-    if admin_config.tls.insecure {
-        return Err(anyhow!(
-            "fence administration cannot resume with insecure TLS"
-        ));
-    }
-    validate_fence_tls_binding(&installed, &admin_config)?;
-    if postgres_write_fence_is_released(&admin_config, &installed.evidence)? {
-        if journal.projection().status != MigrationStatus::Verifying
-            || !journal.projection().schema_verified
-        {
+    let accepted_external_quiesce = validate_external_quiesce_resume(
+        &reviewed,
+        journal.genesis().accepted_external_quiesce.as_ref(),
+        &journal.genesis().binding,
+        external_quiesce_attestation_path,
+    )?;
+    let fenced = match (
+        reviewed.plan.consistency_mode.as_str(),
+        fence_paths,
+        accepted_external_quiesce.as_ref(),
+    ) {
+        ("write-fence", Some((admin_path, artifact_path)), None) => {
+            let installed: InstalledPostgresFence = read_json(artifact_path)?;
+            if installed.evidence != journal.genesis().binding.consistency_evidence {
+                return Err(anyhow!(
+                    "write-fence artifact differs from the state consistency evidence"
+                ));
+            }
+            if !matches!(installed.evidence, ConsistencyEvidence::WriteFence { .. }) {
+                return Err(anyhow!("resume requires write-fence consistency evidence"));
+            }
+            let admin = PostgresEndpointConfig::read(admin_path)?;
+            validate_separate_postgres_credentials(&source_config, &target_config, &admin)?;
+            if admin.tls.insecure {
+                return Err(anyhow!(
+                    "fence administration cannot resume with insecure TLS"
+                ));
+            }
+            validate_fence_tls_binding(&installed, &admin)?;
+            if postgres_write_fence_is_released(&admin, &installed.evidence)? {
+                if journal.projection().status != MigrationStatus::Verifying
+                    || !journal.projection().schema_verified
+                {
+                    return Err(anyhow!(
+                        "released fence is not paired with a fully verified durable migration journal"
+                    ));
+                }
+                journal.transition_status(MigrationStatus::Completed)?;
+                let copied_rows = journal
+                    .projection()
+                    .copy_cursors
+                    .values()
+                    .try_fold(0_u64, |total, cursor| total.checked_add(cursor.rows))
+                    .ok_or_else(|| anyhow!("committed row count overflow"))?;
+                return Ok(PostgresExecutionReport {
+                    state: state_path.to_path_buf(),
+                    copied_rows,
+                    committed_chunks: journal.projection().last_chunk_id,
+                });
+            }
+            let inventory = attest_postgres_write_fence(&admin, &installed.evidence)?;
+            Some((admin, installed, inventory))
+        }
+        ("consistent-snapshot", None, Some(_)) => None,
+        ("write-fence", None, _) => {
+            return Err(anyhow!("write-fence resume requires exact fence evidence"));
+        }
+        ("consistent-snapshot", Some(_), _) => {
             return Err(anyhow!(
-                "released fence is not paired with a fully verified durable migration journal"
+                "external-quiesce resume must not accept write-fence evidence"
             ));
         }
-        journal.transition_status(MigrationStatus::Completed)?;
-        let copied_rows = journal
-            .projection()
-            .copy_cursors
-            .values()
-            .try_fold(0_u64, |total, cursor| total.checked_add(cursor.rows))
-            .ok_or_else(|| anyhow!("committed row count overflow"))?;
-        return Ok(PostgresExecutionReport {
-            state: state_path.to_path_buf(),
-            copied_rows,
-            committed_chunks: journal.projection().last_chunk_id,
-        });
-    }
-    let fence_inventory = attest_postgres_write_fence(&admin_config, &installed.evidence)?;
+        _ => return Err(anyhow!("resume source-profile evidence is incomplete")),
+    };
 
     let cancellation = injected_cancellation.unwrap_or_default();
     cancellation.observe_process_sigint()?;
@@ -927,7 +1034,9 @@ fn resume_postgres_fenced_plan_internal(
         return Err(anyhow!("source endpoint differs from durable binding"));
     }
     let (mut source_catalog, mut unsupported, _) = source.captured_catalog(&snapshot)?;
-    remove_attested_fence_objects(&mut source_catalog, &mut unsupported, &fence_inventory)?;
+    if let Some((_, _, inventory)) = &fenced {
+        remove_attested_fence_objects(&mut source_catalog, &mut unsupported, inventory)?;
+    }
     if unsupported.blocks_execution() {
         return Err(anyhow!(
             "resumed source contains execution-blocking unsupported semantics"
@@ -938,6 +1047,15 @@ fn resume_postgres_fenced_plan_internal(
         || source_fingerprint != reviewed.plan.source_catalog_fingerprint
         || reviewed.plan.source_catalog.as_ref() != Some(&source_catalog)
     {
+        if let Some(reviewed_catalog) = reviewed.plan.source_catalog.as_ref() {
+            let drifted_sequences = postgres_sequence_drift_ids(reviewed_catalog, &source_catalog);
+            if !drifted_sequences.is_empty() {
+                return Err(anyhow!(
+                    "resumed source sequence contracts changed: {}",
+                    drifted_sequences.join(", ")
+                ));
+            }
+        }
         return Err(anyhow!("resumed source catalog differs from reviewed plan"));
     }
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
@@ -968,8 +1086,7 @@ fn resume_postgres_fenced_plan_internal(
             reviewed: &reviewed,
             source_catalog: &source_catalog,
             target: &target,
-            admin: &admin_config,
-            installed: &installed,
+            fenced: fenced.as_ref(),
             cancellation: &cancellation,
         },
         &mut journal,
@@ -1016,7 +1133,7 @@ fn resume_postgres_fenced_plan_internal(
             if prepared.operation_id != operation.id.as_str() {
                 return Err(anyhow!("prepared chunk belongs to a different operation"));
             }
-            attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
+            attest_fence_if_present(fenced.as_ref())?;
             let expected = reader.select_page(&KeysetPage {
                 table: table.clone(),
                 projection: shape.projection.clone(),
@@ -1086,7 +1203,7 @@ fn resume_postgres_fenced_plan_internal(
                 .last_chunk_id
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("chunk identifier overflow"))?;
-            attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
+            attest_fence_if_present(fenced.as_ref())?;
             let batch = reader.select_page(&KeysetPage {
                 table: table.clone(),
                 projection: shape.projection.clone(),
@@ -1162,6 +1279,17 @@ fn resume_postgres_fenced_plan_internal(
         journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
         journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
     }
+    verify_rows_before_sequence_equality(
+        &reviewed,
+        &source_catalog,
+        &source_config,
+        reader.as_mut(),
+        target.as_ref(),
+        &journal,
+        None,
+        cancellation.clone(),
+    )?;
+    record_postgres_sequence_equality(&reviewed, &source_catalog, source.as_ref(), &mut journal)?;
     process_postgres_sequences(
         &reviewed,
         &source_catalog,
@@ -1169,7 +1297,7 @@ fn resume_postgres_fenced_plan_internal(
         &mut journal,
         None,
         &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+        || attest_fence_if_present(fenced.as_ref()),
     )?;
     process_postgres_indexes(
         &reviewed,
@@ -1178,7 +1306,7 @@ fn resume_postgres_fenced_plan_internal(
         &mut journal,
         None,
         &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+        || attest_fence_if_present(fenced.as_ref()),
     )?;
     process_postgres_foreign_keys(
         &reviewed,
@@ -1187,7 +1315,7 @@ fn resume_postgres_fenced_plan_internal(
         &mut journal,
         None,
         &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+        || attest_fence_if_present(fenced.as_ref()),
     )?;
     process_postgres_programmable_objects(
         &reviewed,
@@ -1195,14 +1323,14 @@ fn resume_postgres_fenced_plan_internal(
         &target,
         &mut journal,
         &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+        || attest_fence_if_present(fenced.as_ref()),
     )?;
     if journal.projection().status == MigrationStatus::Running {
         journal.transition_status(MigrationStatus::Verifying)?;
     } else if journal.projection().status != MigrationStatus::Verifying {
         return Err(anyhow!("migration status cannot resume verification"));
     }
-    attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
+    attest_fence_if_present(fenced.as_ref())?;
     let mut verifier = target.open_verifier(cancellation.clone())?;
     let mut committed_chunks = journal.all_committed_chunks()?.peekable();
     for operation in reviewed
@@ -1267,8 +1395,20 @@ fn resume_postgres_fenced_plan_internal(
         execution_page_limit(&source_config)?,
     )?;
     cancellation.check()?;
+    record_postgres_sequence_equality(&reviewed, &source_catalog, source.as_ref(), &mut journal)?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_postgres_generated_columns(&source_catalog, &target)?;
+    drop(verifier);
+    drop(reader);
+    record_external_quiesce_verified_rescan(
+        &reviewed,
+        &source_catalog,
+        &source_config,
+        source.as_ref(),
+        target.as_ref(),
+        &mut journal,
+        cancellation.clone(),
+    )?;
     verify_schema_projection(&source_catalog, target.as_ref())?;
     let verify_schema = reviewed
         .plan
@@ -1280,15 +1420,16 @@ fn resume_postgres_fenced_plan_internal(
     if !journal.projection().schema_verified {
         journal.verify_schema(catalog_fingerprint(&source_catalog)?)?;
     }
-    attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
+    attest_fence_if_present(fenced.as_ref())?;
     cancellation.check()?;
-    drop(reader);
-    let generation = match &installed.evidence {
-        ConsistencyEvidence::WriteFence { generation, .. } => generation,
-        ConsistencyEvidence::NativeSnapshot { .. } => unreachable!("validated above"),
-    };
-    cancellation.check()?;
-    release_postgres_write_fence(&admin_config, generation, &installed.token)?;
+    if let Some((admin, installed, _)) = &fenced {
+        let generation = match &installed.evidence {
+            ConsistencyEvidence::WriteFence { generation, .. } => generation,
+            ConsistencyEvidence::NativeSnapshot { .. } => unreachable!("validated above"),
+        };
+        cancellation.check()?;
+        release_postgres_write_fence(admin, generation, &installed.token)?;
+    }
     journal.transition_status(MigrationStatus::Completed)?;
     Ok(PostgresExecutionReport {
         state: state_path.to_path_buf(),
@@ -1306,6 +1447,7 @@ fn execute_postgres_plan_internal(
     approval_reference: &str,
     state_path: &Path,
     fence_paths: Option<(&Path, &Path)>,
+    external_quiesce_attestation_path: Option<&Path>,
     interruption: Option<ExecutionInterruption>,
     injected_cancellation: Option<CancellationToken>,
 ) -> anyhow::Result<PostgresExecutionReport> {
@@ -1411,6 +1553,17 @@ fn execute_postgres_plan_internal(
             "fresh source catalog differs from embedded reviewed catalog"
         ));
     }
+    let accepted_external_quiesce = validate_external_quiesce_admission(
+        &reviewed,
+        external_quiesce_attestation_path,
+        &snapshot.endpoint_identity,
+        &source_fingerprint,
+    )?;
+    let external_quiesce_attestation_digest = accepted_external_quiesce
+        .as_ref()
+        .map(PostgresExternalQuiesceAttestation::canonical_hash)
+        .transpose()
+        .map_err(|error| anyhow!(error.to_string()))?;
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
     let accepted_outage_projection = reviewed
         .plan
@@ -1481,10 +1634,16 @@ fn execute_postgres_plan_internal(
             .execution_target_catalog_fingerprint()?
             .to_owned(),
         outage_projection_digest,
+        external_quiesce_attestation_digest,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
-    let genesis = append_journal_genesis(binding, reviewed.clone(), accepted_outage_projection);
+    let genesis = append_journal_genesis(
+        binding,
+        reviewed.clone(),
+        accepted_outage_projection,
+        accepted_external_quiesce,
+    );
     let mut journal = AppendJournal::create_new(state_path, genesis)?;
 
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
@@ -1677,6 +1836,18 @@ fn execute_postgres_plan_internal(
         .transpose()?;
     interrupt_after_pipelined_evidence(interruption)?;
 
+    verify_rows_before_sequence_equality(
+        &reviewed,
+        &source_catalog,
+        &source_config,
+        reader.as_mut(),
+        target.as_ref(),
+        &journal,
+        pipelined_evidence.as_deref(),
+        cancellation.clone(),
+    )?;
+    record_postgres_sequence_equality(&reviewed, &source_catalog, source.as_ref(), &mut journal)?;
+
     process_postgres_sequences(
         &reviewed,
         &source_catalog,
@@ -1819,8 +1990,20 @@ fn execute_postgres_plan_internal(
         execution_page_limit(&source_config)?,
     )?;
     cancellation.check()?;
+    record_postgres_sequence_equality(&reviewed, &source_catalog, source.as_ref(), &mut journal)?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_postgres_generated_columns(&source_catalog, &target)?;
+    drop(verifier);
+    drop(reader);
+    record_external_quiesce_verified_rescan(
+        &reviewed,
+        &source_catalog,
+        &source_config,
+        source.as_ref(),
+        target.as_ref(),
+        &mut journal,
+        cancellation.clone(),
+    )?;
     verify_schema_projection(&source_catalog, target.as_ref())?;
     let verify_schema = reviewed
         .plan
@@ -1833,7 +2016,6 @@ fn execute_postgres_plan_internal(
     interrupt_if(interruption, ExecutionInterruption::AfterAllVerified)?;
     attest_fence_if_present(fenced.as_ref())?;
     cancellation.check()?;
-    drop(reader);
     if let Some((admin, installed, _)) = &fenced {
         let generation = match &installed.evidence {
             ConsistencyEvidence::WriteFence { generation, .. } => generation,
@@ -1854,13 +2036,100 @@ fn execute_postgres_plan_internal(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn attest_fence_if_present(
-    fenced: Option<&(
-        PostgresEndpointConfig,
-        InstalledPostgresFence,
-        super::postgres_fence::FenceInventory,
-    )>,
-) -> anyhow::Result<()> {
+fn validate_external_quiesce_admission(
+    reviewed: &ReviewedPlan,
+    attestation_path: Option<&Path>,
+    source_endpoint_identity: &str,
+    source_catalog_fingerprint: &str,
+) -> anyhow::Result<Option<PostgresExternalQuiesceAttestation>> {
+    match (
+        reviewed.plan.postgres_source_profile.as_ref(),
+        attestation_path,
+    ) {
+        (Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }), Some(path)) => {
+            let attestation: PostgresExternalQuiesceAttestation = read_json(path)?;
+            let observed_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| anyhow!("system clock is before the Unix epoch"))?
+                .as_secs();
+            attestation
+                .validate_for_plan(
+                    source_endpoint_identity,
+                    source_catalog_fingerprint,
+                    observed_at,
+                )
+                .map_err(|error| anyhow!(error.to_string()))?;
+            Ok(Some(attestation))
+        }
+        (Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }), None) => Err(
+            anyhow!("external-quiesce execution requires its protected attestation artifact"),
+        ),
+        (_, Some(_)) => Err(anyhow!(
+            "external-quiesce attestation is forbidden for this reviewed source profile"
+        )),
+        (_, None) => Ok(None),
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn validate_external_quiesce_resume(
+    reviewed: &ReviewedPlan,
+    accepted: Option<&PostgresExternalQuiesceAttestation>,
+    binding: &ResumeBinding,
+    supplied_path: Option<&Path>,
+) -> anyhow::Result<Option<PostgresExternalQuiesceAttestation>> {
+    match (
+        reviewed.plan.postgres_source_profile.as_ref(),
+        accepted,
+        binding.external_quiesce_attestation_digest.as_ref(),
+        supplied_path,
+    ) {
+        (
+            Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }),
+            Some(accepted),
+            Some(expected_digest),
+            Some(path),
+        ) => {
+            accepted
+                .validate()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let supplied: PostgresExternalQuiesceAttestation = read_json(path)?;
+            supplied
+                .validate()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            if supplied.status == super::postgres_profile::PostgresExternalQuiesceStatus::Withdrawn
+            {
+                return Err(anyhow!("external-quiesce attestation is withdrawn"));
+            }
+            let supplied_digest = supplied
+                .canonical_hash()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            if &supplied_digest != expected_digest || &supplied != accepted {
+                return Err(anyhow!(
+                    "external-quiesce attestation differs from durable admission"
+                ));
+            }
+            Ok(Some(supplied))
+        }
+        (Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }), _, _, _) => Err(
+            anyhow!("external-quiesce resume evidence is incomplete or missing"),
+        ),
+        (_, None, None, None) => Ok(None),
+        _ => Err(anyhow!(
+            "external-quiesce resume evidence is forbidden for this reviewed source profile"
+        )),
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+type ActivePostgresFence = (
+    PostgresEndpointConfig,
+    InstalledPostgresFence,
+    super::postgres_fence::FenceInventory,
+);
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn attest_fence_if_present(fenced: Option<&ActivePostgresFence>) -> anyhow::Result<()> {
     if let Some((admin, installed, expected_inventory)) = fenced {
         let observed = attest_postgres_write_fence(admin, &installed.evidence)?;
         if &observed != expected_inventory {
@@ -1926,8 +2195,16 @@ fn validate_resume_binding(
     reviewed: &ReviewedPlan,
     accepted_outage_projection: Option<&AcceptedOutageProjection>,
 ) -> anyhow::Result<()> {
-    if reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str() {
-        return Err(anyhow!("only a write-fence plan can be resumed"));
+    let expected_consistency = match reviewed.plan.postgres_source_profile.as_ref() {
+        Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }) => {
+            PostgresConsistencyMode::ConsistentSnapshot
+        }
+        _ => PostgresConsistencyMode::WriteFence,
+    };
+    if reviewed.plan.consistency_mode != expected_consistency.as_str() {
+        return Err(anyhow!(
+            "reviewed source profile has incompatible resumable consistency evidence"
+        ));
     }
     if binding.migration_id != reviewed.plan.migration_id
         || binding.plan_hash != reviewed.plan_hash.to_string()
@@ -1975,18 +2252,27 @@ fn validate_resume_binding(
             ));
         }
     }
-    let ConsistencyEvidence::WriteFence {
-        endpoint_identity,
-        business_catalog_fingerprint,
-        ..
-    } = &binding.consistency_evidence
-    else {
-        return Err(anyhow!("migration state is not bound to a write fence"));
-    };
-    if endpoint_identity != &reviewed.plan.source_endpoint_identity
-        || business_catalog_fingerprint != &reviewed.plan.source_catalog_fingerprint
-    {
-        return Err(anyhow!("write-fence binding differs from reviewed source"));
+    match (&expected_consistency, &binding.consistency_evidence) {
+        (
+            PostgresConsistencyMode::WriteFence,
+            ConsistencyEvidence::WriteFence {
+                endpoint_identity,
+                business_catalog_fingerprint,
+                ..
+            },
+        ) if endpoint_identity == &reviewed.plan.source_endpoint_identity
+            && business_catalog_fingerprint == &reviewed.plan.source_catalog_fingerprint => {}
+        (
+            PostgresConsistencyMode::ConsistentSnapshot,
+            ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity, ..
+            },
+        ) if endpoint_identity == &reviewed.plan.source_endpoint_identity => {}
+        _ => {
+            return Err(anyhow!(
+                "durable consistency evidence differs from the reviewed source profile"
+            ));
+        }
     }
     Ok(())
 }
@@ -2068,19 +2354,6 @@ fn validate_fence_tls_binding(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn attest_exact_fence(
-    admin: &PostgresEndpointConfig,
-    installed: &InstalledPostgresFence,
-    expected: &super::postgres_fence::FenceInventory,
-) -> anyhow::Result<()> {
-    let observed = attest_postgres_write_fence(admin, &installed.evidence)?;
-    if &observed != expected {
-        return Err(anyhow!("PostgreSQL fence inventory changed during resume"));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "enterprise-migration-spike")]
 trait RunnerOperationProjection {
     fn runner_operation_state(&self, operation_id: &str) -> anyhow::Result<OperationState>;
 }
@@ -2142,8 +2415,7 @@ struct ResumeDdlContext<'a> {
     reviewed: &'a ReviewedPlan,
     source_catalog: &'a VendorCatalog,
     target: &'a PostgresTargetFactory,
-    admin: &'a PostgresEndpointConfig,
-    installed: &'a InstalledPostgresFence,
+    fenced: Option<&'a ActivePostgresFence>,
     cancellation: &'a CancellationToken,
 }
 
@@ -2176,7 +2448,7 @@ fn resume_pre_data_schema(
         }
         return Ok(());
     }
-    attest_postgres_write_fence(context.admin, &context.installed.evidence)?;
+    attest_fence_if_present(context.fenced)?;
     let schema_exists_exactly = target_schema_matches(context.source_catalog, context.target)?;
     if states.iter().all(|state| *state == OperationState::Pending) {
         if schema_exists_exactly {
@@ -2299,6 +2571,248 @@ fn target_planned_tables_are_empty(
         }
     }
     Ok(true)
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)] // Exact pre-restore verification needs both endpoints and journal evidence.
+fn verify_rows_before_sequence_equality(
+    reviewed: &ReviewedPlan,
+    source_catalog: &VendorCatalog,
+    source_config: &PostgresEndpointConfig,
+    reader: &mut dyn ReadSession,
+    target: &dyn TargetConnectionFactory,
+    journal: &AppendJournal,
+    pipelined_evidence: Option<&[PipelinedTableEvidence]>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<()> {
+    if reviewed.plan.consistency_mode == PostgresConsistencyMode::WriteFence.as_str()
+        || postgres_sequences(source_catalog)?.is_empty()
+    {
+        return Ok(());
+    }
+    let copy_operations = reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CopyTable)
+        .collect::<Vec<_>>();
+    if let Some(evidence) = pipelined_evidence {
+        if evidence.len() != copy_operations.len() {
+            return Err(anyhow!(
+                "pipelined row evidence is incomplete before sequence equality"
+            ));
+        }
+        for (operation, observed) in copy_operations.iter().zip(evidence) {
+            let cursor = journal.projection().copy_cursors.get(operation.id.as_str());
+            if observed.operation_id != operation.id.as_str()
+                || observed.chunk_count != cursor.map_or(0, |cursor| cursor.chunks)
+                || observed.row_count != cursor.map_or(0, |cursor| cursor.rows)
+                || observed.source_hash != observed.target_hash
+            {
+                return Err(anyhow!(
+                    "pipelined row evidence differs before sequence equality"
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    let mut verifier = target.open_verifier(cancellation)?;
+    let mut committed_chunks = journal.all_committed_chunks()?.peekable();
+    for operation in copy_operations {
+        let table = operation
+            .table
+            .as_ref()
+            .ok_or_else(|| anyhow!("copy operation has no table"))?;
+        let shape = table_shape(source_catalog, table, Some(operation))?;
+        verify_live_table(
+            reader,
+            verifier.as_mut(),
+            &mut committed_chunks,
+            operation.id.as_str(),
+            table,
+            &shape,
+            execution_page_limit(source_config)?,
+        )?;
+    }
+    if let Some(chunk) = committed_chunks.next() {
+        return Err(anyhow!(
+            "unexpected committed chunk before sequence equality: {}",
+            chunk?.operation_id
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn record_postgres_sequence_equality(
+    reviewed: &ReviewedPlan,
+    source_catalog: &VendorCatalog,
+    source: &PostgresSourceFactory,
+    journal: &mut AppendJournal,
+) -> anyhow::Result<()> {
+    if reviewed.plan.consistency_mode == PostgresConsistencyMode::WriteFence.as_str() {
+        return Ok(());
+    }
+    let initial = postgres_sequences(source_catalog)?;
+    if initial.is_empty() {
+        return Ok(());
+    }
+    let final_observation = source.observe_sequence_states(&initial)?;
+    let drifted = initial
+        .iter()
+        .zip(&final_observation)
+        .filter(|(before, after)| before != after)
+        .map(|(sequence, _)| sequence.catalog_object_id.as_str())
+        .collect::<Vec<_>>();
+    if !drifted.is_empty() {
+        return Err(anyhow!(
+            "source sequence state changed during migration: {}",
+            drifted.join(", ")
+        ));
+    }
+    let evidence = PostgresSequenceEqualityEvidence::new(
+        catalog_fingerprint(source_catalog)?,
+        initial,
+        final_observation,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| anyhow!("system clock is before the Unix epoch"))?
+            .as_secs(),
+    )
+    .map_err(|error| anyhow!(error.to_string()))?;
+    if journal.projection().sequence_equality.is_none() {
+        journal.record_sequence_equality(evidence)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn postgres_sequence_drift_ids(
+    reviewed_catalog: &VendorCatalog,
+    observed_catalog: &VendorCatalog,
+) -> Vec<String> {
+    let Ok(reviewed) = postgres_sequences(reviewed_catalog) else {
+        return Vec::new();
+    };
+    let Ok(observed) = postgres_sequences(observed_catalog) else {
+        return reviewed
+            .into_iter()
+            .map(|sequence| sequence.catalog_object_id)
+            .collect();
+    };
+    let reviewed = reviewed
+        .into_iter()
+        .map(|sequence| (sequence.catalog_object_id.clone(), sequence))
+        .collect::<BTreeMap<_, _>>();
+    let observed = observed
+        .into_iter()
+        .map(|sequence| (sequence.catalog_object_id.clone(), sequence))
+        .collect::<BTreeMap<_, _>>();
+    let mut object_ids = reviewed
+        .keys()
+        .chain(observed.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    object_ids.sort();
+    object_ids.dedup();
+    object_ids.retain(|object_id| reviewed.get(object_id) != observed.get(object_id));
+    object_ids
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)] // The proof binds reviewed intent, two endpoints, and journal state.
+fn record_external_quiesce_verified_rescan(
+    reviewed: &ReviewedPlan,
+    source_catalog: &VendorCatalog,
+    source_config: &PostgresEndpointConfig,
+    source: &PostgresSourceFactory,
+    target: &dyn TargetConnectionFactory,
+    journal: &mut AppendJournal,
+    cancellation: CancellationToken,
+) -> anyhow::Result<()> {
+    if !matches!(
+        reviewed.plan.postgres_source_profile.as_ref(),
+        Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+            verified_rescan: true,
+            ..
+        })
+    ) {
+        return Ok(());
+    }
+
+    cancellation.check()?;
+    let snapshot = source.capture_snapshot()?;
+    let (fresh_catalog, unsupported, _) = source.captured_catalog(&snapshot)?;
+    if unsupported.blocks_execution()
+        || fresh_catalog != *source_catalog
+        || catalog_fingerprint(&fresh_catalog)? != reviewed.plan.source_catalog_fingerprint
+    {
+        return Err(anyhow!(
+            "external-quiesce verified re-scan found source catalog drift"
+        ));
+    }
+    let mut fresh_reader = source.open_reader(&snapshot, cancellation.clone())?;
+    let source_read_only_server_enforced = fresh_reader.read_only_evidence().server_enforced;
+    if !source_read_only_server_enforced || fresh_reader.snapshot() != &snapshot {
+        return Err(anyhow!(
+            "external-quiesce verified re-scan lacks exact read-only snapshot evidence"
+        ));
+    }
+    let mut verifier = target.open_verifier(cancellation)?;
+    let mut committed_chunks = journal.all_committed_chunks()?.peekable();
+    let mut tables = Vec::new();
+    for operation in reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CopyTable)
+    {
+        let table = operation
+            .table
+            .as_ref()
+            .ok_or_else(|| anyhow!("copy operation has no table"))?;
+        let shape = table_shape(source_catalog, table, Some(operation))?;
+        let (manifest_hash, fresh_source_hash, target_hash) = verify_live_table(
+            fresh_reader.as_mut(),
+            verifier.as_mut(),
+            &mut committed_chunks,
+            operation.id.as_str(),
+            table,
+            &shape,
+            execution_page_limit(source_config)?,
+        )?;
+        let cursor = journal.projection().copy_cursors.get(operation.id.as_str());
+        tables.push(PostgresExternalQuiesceRescanTableEvidence {
+            operation_id: operation.id.to_string(),
+            chunk_count: cursor.map_or(0, |cursor| cursor.chunks),
+            row_count: cursor.map_or(0, |cursor| cursor.rows),
+            manifest_hash,
+            fresh_source_hash,
+            target_hash,
+        });
+    }
+    if let Some(chunk) = committed_chunks.next() {
+        return Err(anyhow!(
+            "external-quiesce verified re-scan found an unexpected chunk for {}",
+            chunk?.operation_id
+        ));
+    }
+    let evidence = PostgresExternalQuiesceRescanEvidence::new(
+        catalog_fingerprint(source_catalog)?,
+        &snapshot,
+        source_read_only_server_enforced,
+        tables,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| anyhow!("system clock is before the Unix epoch"))?
+            .as_secs(),
+    )
+    .map_err(|error| anyhow!(error.to_string()))?;
+    if journal.projection().external_quiesce_rescan.is_none() {
+        journal.record_external_quiesce_rescan(evidence)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -3130,15 +3644,16 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
             ));
         }
     }
-    let expected_sequences = postgres_sequences(source_catalog)?
-        .into_iter()
-        .map(|sequence| sequence.catalog_object_id)
+    let sequences = postgres_sequences(source_catalog)?;
+    let expected_sequences = sequences
+        .iter()
+        .map(|sequence| sequence.catalog_object_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    if !expected_sequences.is_empty()
-        && reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str()
+    if reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str()
+        && sequences.iter().any(|sequence| sequence.cache_size != 1)
     {
         return Err(anyhow!(
-            "PostgreSQL sequences require durable write-fence consistency"
+            "PostgreSQL snapshot sequence equality requires CACHE 1"
         ));
     }
     let sequence_operation_ids =
@@ -3900,10 +4415,11 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         target_catalog: AssessmentStatus::Assessed(target_catalog),
         source_tls_binding: "fixture-source-tls".into(),
         target_tls_binding: AssessmentStatus::Assessed("fixture-target-tls".into()),
-        consistency_mode: "consistent_snapshot".into(),
+        consistency_mode: PostgresConsistencyMode::ConsistentSnapshot.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "same-dialect-exact".into(),
         outage_policy: None,
+        postgres_source_profile: None,
         capabilities: BTreeMap::from([
             ("consistent_snapshot".into(), "fixture_supported".into()),
             ("server_read_only".into(), "fixture_supported".into()),
@@ -3960,6 +4476,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
             .execution_target_catalog_fingerprint()?
             .to_owned(),
         outage_projection_digest: None,
+        external_quiesce_attestation_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -4489,6 +5006,7 @@ mod tests {
             source_schema_fingerprint: "source".into(),
             target_schema_fingerprint: "target".into(),
             outage_projection_digest: None,
+            external_quiesce_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
@@ -4691,6 +5209,7 @@ mod tests {
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "exact".into(),
             outage_policy: None,
+            postgres_source_profile: None,
             capabilities: BTreeMap::from([("source_tls".into(), binding)]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -4829,6 +5348,7 @@ mod tests {
             source_schema_fingerprint: "source".into(),
             target_schema_fingerprint: "target".into(),
             outage_projection_digest: None,
+            external_quiesce_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };

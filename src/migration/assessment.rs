@@ -293,6 +293,13 @@ pub fn render_markdown(assessment: &AssessmentArtifact) -> Result<String, Assess
     writeln!(output)?;
     writeln!(output, "EXPERIMENTAL SPIKE — NOT FOR PRODUCTION")?;
     writeln!(output)?;
+    writeln!(output, "## Source-freeze boundary")?;
+    writeln!(output)?;
+    writeln!(
+        output,
+        "This source-only assessment does not select or enforce a source freeze. If a later execution plan selects `attested_external_quiesce`, sql-splitter records operator evidence but does **not** enforce the external source freeze."
+    )?;
+    writeln!(output)?;
     writeln!(output, "## Identity and evidence")?;
     writeln!(output)?;
     writeln!(
@@ -976,6 +983,9 @@ mod tests {
         assert!(first_report.contains("hostile\\|name"));
         assert!(first_report.contains("`acl.report_only`: `approval_required`"));
         assert!(first_report.contains("Target endpoint: **not assessed**"));
+        assert!(first_report.contains(
+            "sql-splitter records operator evidence but does **not** enforce the external source freeze"
+        ));
     }
 
     fn assessment(estimated_rows: i64) -> AssessmentArtifact {
@@ -1023,6 +1033,7 @@ mod tests {
             canonical_encoding_version: 1,
             conversion_policy: "postgresql_same_dialect_exact".into(),
             outage_policy: None,
+            postgres_source_profile: None,
             capabilities: BTreeMap::from([("acl.report_only".into(), "approval_required".into())]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),

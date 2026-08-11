@@ -52,8 +52,14 @@ use super::plan::{
 use super::postgres_ast::{
     parse_postgres_create_view, parse_postgres_sql_function, PostgresDurableAst,
 };
+use super::postgres_profile::{
+    PostgresSourceProbeArtifact, PostgresSourceProbeRequirement, PostgresSourceProbeResult,
+    PostgresSourceProbeStatus, PostgresSourceProfileContract, PostgresSourceProfileError,
+    PostgresSourceProfileKind, POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+};
 
 pub(crate) const CATALOG_FORMAT_VERSION: u32 = 5;
+pub const POSTGRES_CONSISTENCY_SNAPSHOT: &str = "consistent-snapshot";
 const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -75,7 +81,7 @@ pub enum PostgresWritePolicy {
 impl PostgresConsistencyMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ConsistentSnapshot => "consistent-snapshot",
+            Self::ConsistentSnapshot => POSTGRES_CONSISTENCY_SNAPSHOT,
             Self::WriteFence => "write-fence",
         }
     }
@@ -165,6 +171,8 @@ pub enum PostgresPlanError {
     Assessment(#[from] AssessmentError),
     #[error("outage projection validation failed")]
     OutageProjection(#[from] OutageProjectionError),
+    #[error("PostgreSQL source-profile validation failed")]
+    SourceProfile(#[from] PostgresSourceProfileError),
     #[error("catalog serialization failed")]
     Serialize(#[from] serde_json::Error),
 }
@@ -594,6 +602,53 @@ impl PostgresSourceFactory {
         self.cancellation.check()?;
         Ok(projection)
     }
+
+    /// Re-read exact sequence configuration and state through a fresh session.
+    ///
+    /// The caller supplies the reviewed sequence contracts. Every static
+    /// attribute and ownership link must still match; only `last_value` and
+    /// `is_called` are observed from the live relation.
+    pub fn observe_sequence_states(
+        &self,
+        reviewed: &[PostgresSequence],
+    ) -> ConnectionResult<Vec<PostgresSequence>> {
+        self.cancellation.check()?;
+        let (mut client, _registration) = self.controlled_connect()?;
+        let mut transaction = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(database_error)?;
+        let mut observed = Vec::with_capacity(reviewed.len());
+        for sequence in reviewed {
+            self.cancellation.check()?;
+            let state = transaction
+                .query_one(
+                    &format!(
+                        "SELECT last_value, is_called FROM {}.{}",
+                        quote_identifier(&sequence.namespace),
+                        quote_identifier(&sequence.name)
+                    ),
+                    &[],
+                )
+                .map_err(database_error)?;
+            let mut candidate = sequence.clone();
+            candidate.last_value = state.get(0);
+            candidate.is_called = state.get(1);
+            if inspect_sequence(&mut transaction, &candidate)? != PostgresSequenceState::ExactState
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "source sequence {}.{} differs from its reviewed contract",
+                    sequence.namespace, sequence.name
+                )));
+            }
+            observed.push(candidate);
+        }
+        self.cancellation.check()?;
+        transaction.commit().map_err(database_error)?;
+        Ok(observed)
+    }
 }
 
 impl SourceConnectionFactory for PostgresSourceFactory {
@@ -643,6 +698,7 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             .map_err(database_error)?
             .get(0);
         validate_exported_snapshot_id(&exported_snapshot_id)?;
+        let initial_sequence_states = capture_sequence_states_at_snapshot(&mut client)?;
         let row = client
             .query_one(
                 "SELECT current_database(), current_user, COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port(), 0), current_setting('server_version'), pg_current_snapshot()::text, current_setting('transaction_read_only')::boolean",
@@ -691,9 +747,10 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             server_enforced: true,
             description: "read-only transaction and source role ACL probe deny database, schema, relation, sequence, and privileged-role writes".into(),
         };
-        let (catalog, unsupported) =
+        let (mut catalog, unsupported) =
             extract_catalog(&mut client, &token.database_identity, &token.server_version)
                 .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        apply_initial_sequence_states(&mut catalog, &initial_sequence_states)?;
         self.cancellation.check()?;
         let exporter_lifetime = Arc::new(ExporterLifetime {
             alive: Mutex::new(true),
@@ -779,6 +836,78 @@ fn validate_exported_snapshot_id(snapshot_id: &str) -> ConnectionResult<()> {
         return Err(ConnectionError::Database(
             "PostgreSQL returned an invalid exported snapshot identifier".into(),
         ));
+    }
+    Ok(())
+}
+
+fn capture_sequence_states_at_snapshot(
+    client: &mut Client,
+) -> ConnectionResult<BTreeMap<String, (i64, bool)>> {
+    let sequences = client
+        .query(
+            "SELECT 'relation:' || c.oid::text, n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='S' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspname <> 'sql_splitter_migration_fence' ORDER BY c.oid",
+            &[],
+        )
+        .map_err(database_error)?;
+    let mut states = BTreeMap::new();
+    for sequence in sequences {
+        let object_id = sequence.get::<_, String>(0);
+        let namespace = Identifier::new(sequence.get::<_, String>(1))
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let name = Identifier::new(sequence.get::<_, String>(2))
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let state = client
+            .query_one(
+                &format!(
+                    "SELECT last_value, is_called FROM {}.{}",
+                    quote_identifier(&namespace),
+                    quote_identifier(&name)
+                ),
+                &[],
+            )
+            .map_err(database_error)?;
+        if states
+            .insert(object_id, (state.get(0), state.get(1)))
+            .is_some()
+        {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL snapshot contains a duplicate sequence identity".into(),
+            ));
+        }
+    }
+    Ok(states)
+}
+
+fn apply_initial_sequence_states(
+    catalog: &mut VendorCatalog,
+    initial: &BTreeMap<String, (i64, bool)>,
+) -> ConnectionResult<()> {
+    let mut observed = BTreeSet::new();
+    for object in catalog
+        .namespaces
+        .iter_mut()
+        .filter(|namespace| namespace.name.as_str() != "sql_splitter_migration_fence")
+        .flat_map(|namespace| namespace.objects.iter_mut())
+        .filter(|object| object.kind == CatalogObjectKind::Sequence)
+    {
+        let (last_value, is_called) = initial
+            .get(&object.id)
+            .ok_or(ConnectionError::SnapshotMismatch)?;
+        object.attributes.insert(
+            "last_value".into(),
+            serde_json::Value::String(last_value.to_string()),
+        );
+        object
+            .attributes
+            .insert("is_called".into(), serde_json::Value::Bool(*is_called));
+        observed.insert(object.id.as_str());
+    }
+    if observed.len() != initial.len()
+        || initial
+            .keys()
+            .any(|object_id| !observed.contains(object_id.as_str()))
+    {
+        return Err(ConnectionError::SnapshotMismatch);
     }
     Ok(())
 }
@@ -2290,7 +2419,7 @@ fn validate_sequence_links(
     Ok(())
 }
 
-fn validate_sequence(sequence: &PostgresSequence) -> Result<(), PostgresPlanError> {
+pub(crate) fn validate_sequence(sequence: &PostgresSequence) -> Result<(), PostgresPlanError> {
     if sequence.persistence != "p" {
         return Err(PostgresPlanError::InvalidConfig(
             "only logged PostgreSQL sequences are supported",
@@ -5735,6 +5864,16 @@ pub fn build_plan_with_consistency_and_outage_policy(
     consistency_mode: PostgresConsistencyMode,
     outage_policy: Option<ReviewedOutagePolicy>,
 ) -> Result<ReviewedPlan, PostgresPlanError> {
+    build_plan_with_consistency_and_contracts(source, target, consistency_mode, outage_policy, None)
+}
+
+pub fn build_plan_with_consistency_and_contracts(
+    source: &CatalogSnapshot,
+    target: &CatalogSnapshot,
+    consistency_mode: PostgresConsistencyMode,
+    outage_policy: Option<ReviewedOutagePolicy>,
+    postgres_source_profile: Option<PostgresSourceProfileContract>,
+) -> Result<ReviewedPlan, PostgresPlanError> {
     let mut operations = Vec::new();
     let mut table_names = BTreeSet::new();
     let mut foreign_keys = Vec::new();
@@ -6197,12 +6336,20 @@ pub fn build_plan_with_consistency_and_outage_policy(
     operations.push(verify_schema);
     let mut unsupported = source.unsupported.clone();
     unsupported.objects.extend(key_unsupported);
-    if !sequences.is_empty() && consistency_mode != PostgresConsistencyMode::WriteFence {
+    let unstable_sequences = sequences
+        .iter()
+        .filter(|sequence| sequence.cache_size != 1)
+        .map(|sequence| sequence.catalog_object_id.clone())
+        .collect::<Vec<_>>();
+    if !unstable_sequences.is_empty() && consistency_mode != PostgresConsistencyMode::WriteFence {
         unsupported.objects.push(UnsupportedObject {
             code: UnsupportedObjectCode::SequenceConsistency,
             object_id: "postgres-sequence-write-fence-required".into(),
             object_kind: "sequence_consistency".into(),
-            reason: "sequence migration requires an attested write fence that blocks nextval and setval, followed by an exact post-drain catalog recapture".into(),
+            reason: format!(
+                "sequence equality requires CACHE 1; these sequences remain write-fence-only: {}",
+                unstable_sequences.join(", ")
+            ),
             required_semantics: true,
         });
     }
@@ -6263,6 +6410,7 @@ pub fn build_plan_with_consistency_and_outage_policy(
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_same_dialect_exact".into(),
         outage_policy,
+        postgres_source_profile,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -6985,6 +7133,7 @@ pub fn build_source_assessment_with_profile(
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_source_only_assessment".into(),
         outage_policy: None,
+        postgres_source_profile: None,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -7236,6 +7385,361 @@ fn query_exact_total_relation_bytes(
     })
 }
 
+/// Run the explicit, side-effecting PostgreSQL administrator probe suite and
+/// publish its protected evidence artifact.
+pub fn probe_live_postgres_source_profile(
+    source_config: impl AsRef<Path>,
+    admin_config: impl AsRef<Path>,
+    profile: PostgresSourceProfileKind,
+    output: impl AsRef<Path>,
+) -> Result<PostgresSourceProbeArtifact, PostgresPlanError> {
+    if !profile.requires_privilege_probe() {
+        return Err(PostgresPlanError::InvalidConfig(
+            "external-quiesce profiles do not use administrator probe evidence",
+        ));
+    }
+    let source_config = PostgresEndpointConfig::read(source_config)?;
+    let admin_config = PostgresEndpointConfig::read(admin_config)?;
+    if source_config.credential_env == admin_config.credential_env
+        || source_config.user == admin_config.user
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "source-profile probing requires distinct source and administrator roles",
+        ));
+    }
+    if admin_config.tls.insecure {
+        return Err(PostgresPlanError::InvalidConfig(
+            "source-profile administrator TLS must authenticate the server",
+        ));
+    }
+
+    let source = inspect_endpoint(&source_config)?;
+    let source_catalog_fingerprint = catalog_fingerprint(&source.catalog)?;
+    let mut admin =
+        admin_config.connect_with_application_name("sql-splitter-source-profile-probe")?;
+    let identity = admin.query_one(
+        "SELECT current_database(),current_user,COALESCE(inet_server_addr()::text,'local'),COALESCE(inet_server_port(),0)",
+        &[],
+    )?;
+    let admin_database: String = identity.get(0);
+    let administrator_role: String = identity.get(1);
+    let admin_address: String = identity.get(2);
+    let admin_port: i32 = identity.get(3);
+    let admin_endpoint = format!("postgres://{admin_address}:{admin_port}/{admin_database}");
+    let source_endpoint = source
+        .endpoint_identity
+        .split_once("?user=")
+        .map(|(endpoint, _)| endpoint)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "source endpoint identity is malformed",
+        ))?;
+    if admin_endpoint != source_endpoint {
+        return Err(PostgresPlanError::InvalidConfig(
+            "source and administrator configurations resolve to different databases",
+        ));
+    }
+
+    let relations = probe_relation_manifest(&source.catalog)?;
+    let relation_oids = relations.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+    let relation_ids = relations
+        .iter()
+        .map(|(object_id, _)| object_id.clone())
+        .collect::<Vec<_>>();
+    let sequences = postgres_sequences(&source.catalog)?;
+    let sequence_oids = sequences
+        .iter()
+        .map(|sequence| catalog_oid(&sequence.catalog_object_id, "relation:"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut sequence_ids = sequences
+        .iter()
+        .map(|sequence| sequence.catalog_object_id.clone())
+        .collect::<Vec<_>>();
+    sequence_ids.sort();
+
+    let lock_failures = query_failed_object_ids(
+        &mut admin,
+        "SELECT c.oid, r.rolsuper OR pg_has_role(current_user,c.relowner,'MEMBER') OR has_table_privilege(current_user,c.oid,'UPDATE') OR has_table_privilege(current_user,c.oid,'DELETE') OR has_table_privilege(current_user,c.oid,'TRUNCATE') FROM pg_class c CROSS JOIN pg_roles r WHERE r.rolname=current_user AND c.oid=ANY($1::oid[]) ORDER BY c.oid",
+        &relation_oids,
+        &relations,
+    )?;
+    let trigger_failures = query_failed_object_ids(
+        &mut admin,
+        "SELECT c.oid, has_table_privilege(current_user,c.oid,'TRIGGER') AND (r.rolsuper OR pg_has_role(current_user,c.relowner,'MEMBER')) FROM pg_class c CROSS JOIN pg_roles r WHERE r.rolname=current_user AND c.oid=ANY($1::oid[]) ORDER BY c.oid",
+        &relation_oids,
+        &relations,
+    )?;
+    let sequence_failures = query_sequence_probe_failures(&mut admin, &sequence_oids, &sequences)?;
+
+    let mut results = vec![
+        catalog_probe_result(
+            PostgresSourceProbeRequirement::PlannedTableLockPrivileges,
+            relation_ids.clone(),
+            lock_failures,
+            "catalog privileges required for ACCESS EXCLUSIVE locks were checked",
+        ),
+        catalog_probe_result(
+            PostgresSourceProbeRequirement::PlannedTableTriggerPrivileges,
+            relation_ids,
+            trigger_failures,
+            "TRIGGER privilege and ownership authority required for ENABLE ALWAYS were checked",
+        ),
+        catalog_probe_result(
+            PostgresSourceProbeRequirement::SequenceOwnershipAndPrivileges,
+            sequence_ids,
+            sequence_failures,
+            "sequence ownership-transfer, schema, table-owner, and ACL authority were checked",
+        ),
+        transactional_event_trigger_probe(&mut admin)?,
+        transactional_registry_probe(&mut admin)?,
+        sacrificial_backend_probe(&mut admin, &source_config, &administrator_role)?,
+    ];
+    results.sort_by_key(|result| result.requirement);
+    let artifact = PostgresSourceProbeArtifact {
+        schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+        profile,
+        source_endpoint_identity: source.endpoint_identity,
+        source_catalog_fingerprint,
+        administrator_role,
+        probed_at_unix_seconds: unix_seconds_now()?,
+        results,
+    };
+    artifact.validate()?;
+    write_json_new(output, &artifact)?;
+    Ok(artifact)
+}
+
+fn probe_relation_manifest(
+    catalog: &VendorCatalog,
+) -> Result<Vec<(String, u32)>, PostgresPlanError> {
+    let mut relations = catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| namespace.objects.iter())
+        .filter(|object| {
+            matches!(
+                object.kind,
+                CatalogObjectKind::Table | CatalogObjectKind::Partition
+            )
+        })
+        .map(|object| Ok((object.id.clone(), catalog_oid(&object.id, "relation:")?)))
+        .collect::<Result<Vec<_>, PostgresPlanError>>()?;
+    relations.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(relations)
+}
+
+fn catalog_oid(object_id: &str, prefix: &'static str) -> Result<u32, PostgresPlanError> {
+    object_id
+        .strip_prefix(prefix)
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "catalog object identity does not contain a valid PostgreSQL OID",
+        ))
+}
+
+fn query_failed_object_ids(
+    admin: &mut Client,
+    query: &str,
+    expected_oids: &[u32],
+    manifest: &[(String, u32)],
+) -> Result<Vec<String>, PostgresPlanError> {
+    let rows = admin.query(query, &[&expected_oids])?;
+    query_failed_rows(rows, expected_oids, manifest)
+}
+
+fn query_sequence_probe_failures(
+    admin: &mut Client,
+    sequence_oids: &[u32],
+    sequences: &[PostgresSequence],
+) -> Result<Vec<String>, PostgresPlanError> {
+    let rows = admin.query(
+        "SELECT s.oid, r.rolsuper OR (pg_has_role(current_user,s.relowner,'MEMBER') AND has_schema_privilege(current_user,n.oid,'CREATE') AND NOT EXISTS (SELECT 1 FROM aclexplode(coalesce(s.relacl,acldefault('S'::\"char\",s.relowner))) a WHERE a.grantor<>s.relowner OR a.privilege_type NOT IN ('SELECT','USAGE','UPDATE')) AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_class t ON t.oid=d.refobjid JOIN pg_namespace tn ON tn.oid=t.relnamespace WHERE d.classid='pg_class'::regclass AND d.objid=s.oid AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i') AND (NOT pg_has_role(current_user,t.relowner,'MEMBER') OR NOT has_schema_privilege(current_user,tn.oid,'CREATE')))) FROM pg_class s JOIN pg_namespace n ON n.oid=s.relnamespace CROSS JOIN pg_roles r WHERE r.rolname=current_user AND s.relkind='S' AND s.oid=ANY($1::oid[]) ORDER BY s.oid",
+        &[&sequence_oids],
+    )?;
+    let manifest = sequences
+        .iter()
+        .zip(sequence_oids)
+        .map(|(sequence, oid)| (sequence.catalog_object_id.clone(), *oid))
+        .collect::<Vec<_>>();
+    query_failed_rows(rows, sequence_oids, &manifest)
+}
+
+fn query_failed_rows(
+    rows: Vec<postgres::Row>,
+    expected_oids: &[u32],
+    manifest: &[(String, u32)],
+) -> Result<Vec<String>, PostgresPlanError> {
+    let observed = rows
+        .iter()
+        .map(|row| row.get::<_, u32>(0))
+        .collect::<Vec<_>>();
+    let mut expected = expected_oids.to_vec();
+    expected.sort_unstable();
+    if observed != expected {
+        return Err(PostgresPlanError::InvalidConfig(
+            "probe object inventory differs from the reviewed catalog",
+        ));
+    }
+    Ok(rows
+        .into_iter()
+        .filter(|row| !row.get::<_, bool>(1))
+        .filter_map(|row| {
+            let oid = row.get::<_, u32>(0);
+            manifest
+                .iter()
+                .find(|(_, candidate)| *candidate == oid)
+                .map(|(object_id, _)| object_id.clone())
+        })
+        .collect())
+}
+
+fn catalog_probe_result(
+    requirement: PostgresSourceProbeRequirement,
+    object_ids: Vec<String>,
+    failed_object_ids: Vec<String>,
+    detail: &str,
+) -> PostgresSourceProbeResult {
+    let status = if failed_object_ids.is_empty() {
+        PostgresSourceProbeStatus::Proven
+    } else {
+        PostgresSourceProbeStatus::Unavailable {
+            reason: format!(
+                "administrator lacks required authority for {} object(s): {}",
+                failed_object_ids.len(),
+                failed_object_ids.join(", ")
+            ),
+        }
+    };
+    PostgresSourceProbeResult {
+        requirement,
+        status,
+        object_ids,
+        detail: detail.into(),
+    }
+}
+
+fn transactional_event_trigger_probe(
+    admin: &mut Client,
+) -> Result<PostgresSourceProbeResult, PostgresPlanError> {
+    let backend_pid: i32 = admin.query_one("SELECT pg_backend_pid()", &[])?.get(0);
+    let trigger = Identifier::new(format!("sql_splitter_profile_probe_{backend_pid}"))?;
+    let function = Identifier::new(format!("sql_splitter_profile_probe_function_{backend_pid}"))?;
+    let mut transaction = admin.transaction()?;
+    let outcome = transaction.batch_execute(&format!(
+        "CREATE FUNCTION pg_temp.{}() RETURNS event_trigger LANGUAGE plpgsql AS $body$BEGIN NULL; END$body$; CREATE EVENT TRIGGER {} ON ddl_command_start EXECUTE FUNCTION pg_temp.{}(); DROP EVENT TRIGGER {}; DROP FUNCTION pg_temp.{}()",
+        quote_identifier(&function),
+        quote_identifier(&trigger),
+        quote_identifier(&function),
+        quote_identifier(&trigger),
+        quote_identifier(&function),
+    ));
+    transaction.rollback()?;
+    Ok(exercise_probe_result(
+        PostgresSourceProbeRequirement::TransactionalEventTriggerExercise,
+        "database:event-trigger".into(),
+        "transactional CREATE EVENT TRIGGER exercise was rolled back",
+        outcome,
+    ))
+}
+
+fn transactional_registry_probe(
+    admin: &mut Client,
+) -> Result<PostgresSourceProbeResult, PostgresPlanError> {
+    let backend_pid: i32 = admin.query_one("SELECT pg_backend_pid()", &[])?.get(0);
+    let schema = Identifier::new(format!("sql_splitter_profile_probe_{backend_pid}"))?;
+    let mut transaction = admin.transaction()?;
+    let outcome = transaction.batch_execute(&format!(
+        "SELECT (pg_control_system()).system_identifier; CREATE SCHEMA {}; CREATE TABLE {}.registry (singleton boolean PRIMARY KEY, state text NOT NULL); INSERT INTO {}.registry VALUES (true,'probe'); UPDATE {}.registry SET state='checked' WHERE singleton; DELETE FROM {}.registry WHERE singleton; DROP SCHEMA {} CASCADE",
+        quote_identifier(&schema),
+        quote_identifier(&schema),
+        quote_identifier(&schema),
+        quote_identifier(&schema),
+        quote_identifier(&schema),
+        quote_identifier(&schema),
+    ));
+    transaction.rollback()?;
+    Ok(exercise_probe_result(
+        PostgresSourceProbeRequirement::TransactionalRegistryWriteExercise,
+        "database:fence-registry".into(),
+        "transactional registry schema and write exercise was rolled back",
+        outcome,
+    ))
+}
+
+fn exercise_probe_result(
+    requirement: PostgresSourceProbeRequirement,
+    object_id: String,
+    detail: &str,
+    outcome: Result<(), postgres::Error>,
+) -> PostgresSourceProbeResult {
+    let status = match outcome {
+        Ok(()) => PostgresSourceProbeStatus::Proven,
+        Err(error) => PostgresSourceProbeStatus::Unavailable {
+            reason: format!("PostgreSQL rejected the transactional exercise: {error}"),
+        },
+    };
+    PostgresSourceProbeResult {
+        requirement,
+        status,
+        object_ids: vec![object_id],
+        detail: detail.into(),
+    }
+}
+
+fn sacrificial_backend_probe(
+    admin: &mut Client,
+    source_config: &PostgresEndpointConfig,
+    administrator_role: &str,
+) -> Result<PostgresSourceProbeResult, PostgresPlanError> {
+    let signal_capability: bool = admin
+        .query_one(
+            "SELECT rolsuper OR pg_has_role(current_user,'pg_signal_backend','MEMBER') FROM pg_roles WHERE rolname=current_user",
+            &[],
+        )?
+        .get(0);
+    let mut sacrificial =
+        source_config.connect_with_application_name("sql-splitter-source-profile-sacrificial")?;
+    let identity = sacrificial.query_one("SELECT pg_backend_pid(),current_user", &[])?;
+    let backend_pid: i32 = identity.get(0);
+    let sacrificial_role: String = identity.get(1);
+    let mut status = if sacrificial_role == administrator_role {
+        PostgresSourceProbeStatus::Unavailable {
+            reason: "sacrificial backend did not use a distinct role".into(),
+        }
+    } else if !signal_capability {
+        PostgresSourceProbeStatus::Unavailable {
+            reason: "administrator lacks pg_signal_backend or superuser authority".into(),
+        }
+    } else {
+        match admin.query_one("SELECT pg_terminate_backend($1)", &[&backend_pid]) {
+            Ok(row) if row.get::<_, bool>(0) => PostgresSourceProbeStatus::Proven,
+            Ok(_) => PostgresSourceProbeStatus::Unavailable {
+                reason: "pg_terminate_backend returned false for the sacrificial backend".into(),
+            },
+            Err(error) => PostgresSourceProbeStatus::Unavailable {
+                reason: format!("PostgreSQL rejected sacrificial backend termination: {error}"),
+            },
+        }
+    };
+    if status == PostgresSourceProbeStatus::Proven && sacrificial.simple_query("SELECT 1").is_ok() {
+        status = PostgresSourceProbeStatus::Unavailable {
+            reason: "sacrificial backend remained usable after termination".into(),
+        };
+    }
+    Ok(PostgresSourceProbeResult {
+        requirement: PostgresSourceProbeRequirement::SacrificialBackendTermination,
+        status,
+        object_ids: vec![format!("role:{sacrificial_role}")],
+        detail: "a distinct source-role backend was terminated and observed disconnected".into(),
+    })
+}
+
+fn unix_seconds_now() -> Result<u64, PostgresPlanError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PostgresPlanError::InvalidConfig("system clock is before the Unix epoch"))
+        .map(|duration| duration.as_secs())
+}
+
 pub fn write_live_plan_with_consistency(
     source_config: impl AsRef<Path>,
     target_config: impl AsRef<Path>,
@@ -7264,27 +7768,65 @@ pub fn write_live_plan_with_outage_policy(
     assessment_input: Option<&Path>,
     maximum_approved_seconds: Option<u64>,
 ) -> Result<ReviewedPlan, PostgresPlanError> {
-    let (assessment_input, maximum_approved_seconds) =
-        match (assessment_input, maximum_approved_seconds) {
-            (None, None) => {
-                return write_live_plan_with_consistency(
-                    source_config,
-                    target_config,
-                    output,
-                    consistency_mode,
-                );
-            }
-            (Some(assessment_input), Some(maximum_approved_seconds)) => {
-                (assessment_input, maximum_approved_seconds)
-            }
-            _ => {
-                return Err(PostgresPlanError::InvalidConfig(
-                    "assessment input and maximum outage seconds must be supplied together",
-                ));
-            }
-        };
-    let assessment: AssessmentArtifact = read_json(assessment_input)?;
-    assessment.validate()?;
+    write_live_plan_with_policies(
+        source_config,
+        target_config,
+        output,
+        consistency_mode,
+        assessment_input,
+        maximum_approved_seconds,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_live_plan_with_policies(
+    source_config: impl AsRef<Path>,
+    target_config: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    consistency_mode: PostgresConsistencyMode,
+    assessment_input: Option<&Path>,
+    maximum_approved_seconds: Option<u64>,
+    source_profile: Option<PostgresSourceProfileKind>,
+    source_profile_evidence: Option<&Path>,
+) -> Result<ReviewedPlan, PostgresPlanError> {
+    write_live_plan_with_profile_tier(
+        source_config,
+        target_config,
+        output,
+        consistency_mode,
+        assessment_input,
+        maximum_approved_seconds,
+        source_profile,
+        source_profile_evidence,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_live_plan_with_profile_tier(
+    source_config: impl AsRef<Path>,
+    target_config: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    consistency_mode: PostgresConsistencyMode,
+    assessment_input: Option<&Path>,
+    maximum_approved_seconds: Option<u64>,
+    source_profile: Option<PostgresSourceProfileKind>,
+    source_profile_evidence: Option<&Path>,
+    verified_external_quiesce_rescan: bool,
+) -> Result<ReviewedPlan, PostgresPlanError> {
+    let outage_input = match (assessment_input, maximum_approved_seconds) {
+        (None, None) => None,
+        (Some(assessment_input), Some(maximum_approved_seconds)) => {
+            Some((assessment_input, maximum_approved_seconds))
+        }
+        _ => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "assessment input and maximum outage seconds must be supplied together",
+            ));
+        }
+    };
     let source_config = PostgresEndpointConfig::read(source_config)?;
     let target_config = PostgresEndpointConfig::read(target_config)?;
     if source_config.credential_env == target_config.credential_env {
@@ -7295,6 +7837,26 @@ pub fn write_live_plan_with_outage_policy(
     let source = inspect_endpoint(&source_config)?;
     let target = inspect_endpoint(&target_config)?;
     let source_catalog_fingerprint = catalog_fingerprint(&source.catalog)?;
+    let source_profile_contract = load_source_profile_contract(
+        source_profile,
+        source_profile_evidence,
+        verified_external_quiesce_rescan,
+        &source,
+        &source_catalog_fingerprint,
+    )?;
+    let Some((assessment_input, maximum_approved_seconds)) = outage_input else {
+        let plan = build_plan_with_consistency_and_contracts(
+            &source,
+            &target,
+            consistency_mode,
+            None,
+            source_profile_contract,
+        )?;
+        write_json_new(output, &plan)?;
+        return Ok(plan);
+    };
+    let assessment: AssessmentArtifact = read_json(assessment_input)?;
+    assessment.validate()?;
     if assessment.reviewed_plan.plan.source_catalog_fingerprint != source_catalog_fingerprint {
         return Err(PostgresPlanError::InvalidConfig(
             "assessment source catalog fingerprint does not match the live source",
@@ -7387,14 +7949,91 @@ pub fn write_live_plan_with_outage_policy(
         maximum_approved_seconds,
     };
     policy.validate()?;
-    let plan = build_plan_with_consistency_and_outage_policy(
+    let plan = build_plan_with_consistency_and_contracts(
         &source,
         &target,
         consistency_mode,
         Some(policy),
+        source_profile_contract,
     )?;
     write_json_new(output, &plan)?;
     Ok(plan)
+}
+
+fn load_source_profile_contract(
+    profile: Option<PostgresSourceProfileKind>,
+    evidence_path: Option<&Path>,
+    verified_external_quiesce_rescan: bool,
+    source: &CatalogSnapshot,
+    source_catalog_fingerprint: &str,
+) -> Result<Option<PostgresSourceProfileContract>, PostgresPlanError> {
+    if verified_external_quiesce_rescan
+        && profile != Some(PostgresSourceProfileKind::AttestedExternalQuiesce)
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "verified external-quiesce re-scan requires the attested-external-quiesce profile",
+        ));
+    }
+    let contract = match (profile, evidence_path) {
+        (None, None) => return Ok(None),
+        (None, Some(_)) => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "source-profile evidence requires an explicit source profile",
+            ));
+        }
+        (Some(PostgresSourceProfileKind::AttestedExternalQuiesce), None) => {
+            PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: verified_external_quiesce_rescan,
+                freeze_enforced_by_tool: false,
+            }
+        }
+        (Some(PostgresSourceProfileKind::AttestedExternalQuiesce), Some(_)) => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "external-quiesce profiles take attestation only at execute and resume",
+            ));
+        }
+        (
+            Some(
+                profile @ (PostgresSourceProfileKind::SelfManagedAdministrator
+                | PostgresSourceProfileKind::ManagedAdministrator),
+            ),
+            Some(path),
+        ) => {
+            let probe_artifact: PostgresSourceProbeArtifact = read_json(path)?;
+            probe_artifact.require_all_proven()?;
+            let probe_artifact_digest = probe_artifact.canonical_hash()?;
+            match profile {
+                PostgresSourceProfileKind::SelfManagedAdministrator => {
+                    PostgresSourceProfileContract::SelfManagedAdministrator {
+                        probe_artifact,
+                        probe_artifact_digest,
+                    }
+                }
+                PostgresSourceProfileKind::ManagedAdministrator => {
+                    PostgresSourceProfileContract::ManagedAdministrator {
+                        probe_artifact,
+                        probe_artifact_digest,
+                    }
+                }
+                PostgresSourceProfileKind::AttestedExternalQuiesce => unreachable!(),
+            }
+        }
+        (Some(_), None) => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "administrator source profiles require a protected probe artifact",
+            ));
+        }
+    };
+    contract.validate_for_plan(
+        &source.endpoint_identity,
+        source_catalog_fingerprint,
+        match profile {
+            Some(PostgresSourceProfileKind::AttestedExternalQuiesce) => "consistent-snapshot",
+            Some(_) => "write-fence",
+            None => unreachable!(),
+        },
+    )?;
+    Ok(Some(contract))
 }
 
 #[cfg(test)]

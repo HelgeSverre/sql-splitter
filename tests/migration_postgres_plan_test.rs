@@ -43,19 +43,27 @@ use sql_splitter::migration::plan::{
 use sql_splitter::migration::postgres::postgres_foreign_keys;
 use sql_splitter::migration::postgres::{
     build_plan, collect_live_assessment, collect_live_assessment_with_profile, inspect_endpoint,
-    write_live_assessment, write_live_plan, write_live_plan_with_outage_policy,
-    PostgresConsistencyMode, PostgresEndpointConfig, PostgresPlanError, PostgresSourceFactory,
-    PostgresTargetFactory, PostgresWritePolicy,
+    postgres_sequences, probe_live_postgres_source_profile, write_live_assessment, write_live_plan,
+    write_live_plan_with_outage_policy, write_live_plan_with_policies,
+    write_live_plan_with_profile_tier, PostgresConsistencyMode, PostgresEndpointConfig,
+    PostgresPlanError, PostgresSourceFactory, PostgresTargetFactory, PostgresWritePolicy,
 };
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, postgres_write_fence_is_released,
     release_postgres_write_fence, InstalledPostgresFence,
 };
+use sql_splitter::migration::postgres_profile::{
+    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceStatus,
+    PostgresSourceProfileContract, PostgresSourceProfileKind,
+    POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+};
 use sql_splitter::migration::runner::execute_postgres_plan;
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::runner::{
+    execute_postgres_external_quiesce_plan_with_interruption,
     execute_postgres_fenced_plan_with_cancellation, execute_postgres_fenced_plan_with_interruption,
-    execute_postgres_interrupted, resume_postgres_fenced_plan, PostgresCancellationExecution,
+    execute_postgres_interrupted, resume_postgres_fenced_plan,
+    resume_postgres_plan_with_external_quiesce, PostgresCancellationExecution,
     PostgresExecutionInterruption, PostgresInterruptedExecution,
 };
 
@@ -1595,6 +1603,328 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
         target_objects_after == target_objects_before,
         "blocked outage preflight changed target schema objects"
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires TLS-enabled PostgreSQL source, distinct reader, and administrator roles"]
+fn live_source_profile_probe_is_bound_and_rolled_back() -> anyhow::Result<()> {
+    let source = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
+    let target = required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?;
+    let admin_path = required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?;
+    let directory = private_tempdir()?;
+    let probe_path = directory.path().join("source-profile-probe.json");
+    let plan_path = directory.path().join("source-profile-plan.json");
+
+    let artifact = probe_live_postgres_source_profile(
+        &source,
+        &admin_path,
+        PostgresSourceProfileKind::SelfManagedAdministrator,
+        &probe_path,
+    )?;
+    artifact.require_all_proven()?;
+    let source_snapshot = inspect_endpoint(&PostgresEndpointConfig::read(&source)?)?;
+    assert_eq!(
+        artifact.source_catalog_fingerprint,
+        sql_splitter::migration::postgres::catalog_fingerprint(&source_snapshot.catalog)?
+    );
+
+    let mut admin = connect(&PostgresEndpointConfig::read(&admin_path)?)?;
+    let residual: i64 = admin
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'sql_splitter_profile_probe_%') + (SELECT count(*) FROM pg_event_trigger WHERE evtname LIKE 'sql_splitter_profile_probe_%')",
+            &[],
+        )?
+        .get(0);
+    assert_eq!(residual, 0, "transactional probes left catalog objects");
+
+    let reviewed = write_live_plan_with_policies(
+        &source,
+        &target,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+        None,
+        None,
+        Some(PostgresSourceProfileKind::SelfManagedAdministrator),
+        Some(&probe_path),
+    )?;
+    match reviewed.plan.postgres_source_profile.as_ref() {
+        Some(PostgresSourceProfileContract::SelfManagedAdministrator {
+            probe_artifact,
+            probe_artifact_digest,
+        }) => {
+            assert_eq!(probe_artifact, &artifact);
+            assert_eq!(probe_artifact_digest, &artifact.canonical_hash()?);
+        }
+        profile => anyhow::bail!("unexpected reviewed source profile: {profile:?}"),
+    }
+
+    admin
+        .batch_execute("CREATE TABLE public.profile_probe_catalog_drift (id bigint PRIMARY KEY)")?;
+    let drifted = write_live_plan_with_policies(
+        &source,
+        &target,
+        directory.path().join("drifted-plan.json"),
+        PostgresConsistencyMode::WriteFence,
+        None,
+        None,
+        Some(PostgresSourceProfileKind::SelfManagedAdministrator),
+        Some(&probe_path),
+    );
+    admin.batch_execute("DROP TABLE public.profile_probe_catalog_drift")?;
+    let drifted = drifted.expect_err("catalog drift reused stale probe evidence");
+    assert!(matches!(
+        drifted,
+        PostgresPlanError::SourceProfile(
+            sql_splitter::migration::postgres_profile::PostgresSourceProfileError::ProfileEvidenceMismatch
+        )
+    ));
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and administrator roles"]
+fn live_external_quiesce_sequence_equality_executes_and_binds() -> anyhow::Result<()> {
+    let base_source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let base_target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let base_admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let directory = private_tempdir()?;
+    let suffix = format!(
+        "{}_{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+    );
+    let source_database = format!("migration_external_source_{suffix}");
+    let target_database = format!("migration_external_target_{suffix}");
+
+    let mut control = connect(&base_admin)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        base_admin.clone(),
+        source_database.clone(),
+        target_database.clone(),
+    );
+
+    let mut source = base_source.clone();
+    source.database.clone_from(&source_database);
+    let mut target = base_target.clone();
+    target.database.clone_from(&target_database);
+    let mut admin = base_admin.clone();
+    admin.database.clone_from(&source_database);
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC; \
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC; \
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader; \
+         GRANT USAGE ON SCHEMA public TO migration_reader; \
+         CREATE TABLE public.external_rows (id bigint PRIMARY KEY, payload text NOT NULL); \
+         INSERT INTO public.external_rows VALUES (1, 'one'), (2, 'two'), (3, 'three'); \
+         CREATE SEQUENCE public.external_sequence AS bigint START WITH 7 CACHE 1; \
+         SELECT pg_catalog.setval('public.external_sequence'::regclass, 41, true); \
+         GRANT SELECT ON public.external_rows TO migration_reader; \
+         GRANT SELECT ON SEQUENCE public.external_sequence TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let plan_path = directory.path().join("plan.json");
+    let attestation_path = directory.path().join("external-quiesce.json");
+    let state_path = directory.path().join("state.journal");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+
+    let reviewed = write_live_plan_with_profile_tier(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::ConsistentSnapshot,
+        None,
+        None,
+        Some(PostgresSourceProfileKind::AttestedExternalQuiesce),
+        None,
+        true,
+    )?;
+    anyhow::ensure!(
+        !reviewed.plan.unsupported_objects.blocks_execution(),
+        "external-quiesce plan unexpectedly blocks: {:#?}",
+        reviewed.plan.unsupported_objects
+    );
+    assert_eq!(
+        reviewed.plan.postgres_source_profile,
+        Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+            verified_rescan: true,
+            freeze_enforced_by_tool: false,
+        })
+    );
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let attestation = PostgresExternalQuiesceAttestation {
+        schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+        source_endpoint_identity: reviewed.plan.source_endpoint_identity.clone(),
+        source_catalog_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
+        attestation_reference: format!("live-external-quiesce-{suffix}"),
+        issued_at_unix_seconds: now.saturating_sub(1),
+        expires_at_unix_seconds: now
+            .checked_add(5)
+            .context("external-quiesce expiry overflowed")?,
+        status: PostgresExternalQuiesceStatus::Active,
+    };
+    attestation.require_active_at(now)?;
+    write_json_new(&attestation_path, &attestation)?;
+
+    let interrupted = execute_postgres_external_quiesce_plan_with_interruption(
+        &plan_path,
+        &source_path,
+        &target_path,
+        &attestation_path,
+        "LIVE-EXTERNAL-QUIESCE",
+        &state_path,
+        PostgresExecutionInterruption::AfterCommittedChunks(1),
+    )
+    .expect_err("external execution did not interrupt");
+    assert!(interrupted
+        .to_string()
+        .contains("injected interruption after a durable committed chunk"));
+
+    let interrupted_journal = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(
+        interrupted_journal.projection().status,
+        MigrationStatus::Running
+    );
+    assert_eq!(
+        interrupted_journal
+            .genesis()
+            .accepted_external_quiesce
+            .as_ref(),
+        Some(&attestation)
+    );
+    drop(interrupted_journal);
+
+    let withdrawn_path = directory.path().join("external-quiesce-withdrawn.json");
+    let mut withdrawn = attestation.clone();
+    withdrawn.status = PostgresExternalQuiesceStatus::Withdrawn;
+    write_json_new(&withdrawn_path, &withdrawn)?;
+    let withdrawal_error = resume_postgres_plan_with_external_quiesce(
+        &state_path,
+        &source_path,
+        &target_path,
+        &withdrawn_path,
+    )
+    .expect_err("withdrawn external-quiesce evidence resumed execution");
+    assert!(withdrawal_error.to_string().contains("withdrawn"));
+
+    let mut source_admin = connect(&admin)?;
+    source_admin.query_one(
+        "SELECT pg_catalog.setval('public.external_sequence'::regclass, 42, true)",
+        &[],
+    )?;
+    let drift_error = resume_postgres_plan_with_external_quiesce(
+        &state_path,
+        &source_path,
+        &target_path,
+        &attestation_path,
+    )
+    .expect_err("source sequence drift resumed execution");
+    let reviewed_sequence_id = postgres_sequences(
+        reviewed
+            .plan
+            .source_catalog
+            .as_ref()
+            .context("reviewed plan has no source catalog")?,
+    )?[0]
+        .catalog_object_id
+        .clone();
+    assert!(drift_error
+        .to_string()
+        .contains("resumed source sequence contracts changed"));
+    assert!(drift_error.to_string().contains(&reviewed_sequence_id));
+    source_admin.query_one(
+        "SELECT pg_catalog.setval('public.external_sequence'::regclass, 41, true)",
+        &[],
+    )?;
+    drop(source_admin);
+
+    let sleep_seconds = attestation
+        .expires_at_unix_seconds
+        .saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+        .saturating_add(1);
+    thread::sleep(Duration::from_secs(sleep_seconds));
+    let report = resume_postgres_plan_with_external_quiesce(
+        &state_path,
+        &source_path,
+        &target_path,
+        &attestation_path,
+    )?;
+    assert_eq!(report.state, state_path);
+    assert_eq!(report.copied_rows, 3);
+
+    let journal = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(journal.projection().status, MigrationStatus::Completed);
+    assert_eq!(
+        journal.genesis().accepted_external_quiesce.as_ref(),
+        Some(&attestation)
+    );
+    let attestation_digest = attestation.canonical_hash()?;
+    assert_eq!(
+        journal
+            .genesis()
+            .binding
+            .external_quiesce_attestation_digest
+            .as_deref(),
+        Some(attestation_digest.as_str())
+    );
+    let equality = journal
+        .projection()
+        .sequence_equality
+        .as_ref()
+        .context("completed sequence migration has no equality evidence")?;
+    equality.validate()?;
+    assert_eq!(equality.initial, equality.final_observation);
+    assert_eq!(equality.initial.len(), 1);
+    assert_eq!(equality.initial[0].cache_size, 1);
+    assert_eq!(equality.initial[0].last_value, 41);
+    assert!(equality.initial[0].is_called);
+    let rescan = journal
+        .projection()
+        .external_quiesce_rescan
+        .as_ref()
+        .context("verified external-quiesce plan has no fresh re-scan evidence")?;
+    rescan.validate()?;
+    assert_eq!(rescan.tables.len(), 1);
+    assert_eq!(rescan.tables[0].row_count, 3);
+    assert_eq!(
+        rescan.tables[0].fresh_source_hash,
+        rescan.tables[0].target_hash
+    );
+
+    let target_snapshot = inspect_endpoint(&target)?;
+    let target_sequences = postgres_sequences(&target_snapshot.catalog)?;
+    assert_eq!(target_sequences.len(), 1);
+    assert_eq!(target_sequences[0].name.as_str(), "external_sequence");
+    assert_eq!(target_sequences[0].cache_size, 1);
+    assert_eq!(target_sequences[0].last_value, 41);
+    assert!(target_sequences[0].is_called);
+    let mut target_client = connect(&target)?;
+    let rows = target_client.query(
+        "SELECT id,payload FROM public.external_rows ORDER BY id",
+        &[],
+    )?;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get::<_, i64>(0), 1);
+    assert_eq!(rows[2].get::<_, String>(1), "three");
+    drop(target_client);
+
+    cleanup.run()?;
     Ok(())
 }
 

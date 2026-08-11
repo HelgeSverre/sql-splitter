@@ -13,6 +13,7 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("EXPERIMENTAL SPIKE"));
     assert!(help.contains("assess-postgres"));
+    assert!(help.contains("probe-postgres-source-profile"));
     assert!(help.contains("plan-postgres"));
     assert!(help.contains("execute-postgres"));
     assert!(help.contains("fence-install-postgres"));
@@ -28,10 +29,54 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("--consistency <CONSISTENCY>"));
     assert!(help.contains("--assessment-input <ASSESSMENT_INPUT>"));
     assert!(help.contains("--max-outage-seconds <MAX_OUTAGE_SECONDS>"));
+    assert!(help.contains("--source-profile <SOURCE_PROFILE>"));
+    assert!(help.contains("--source-profile-evidence <SOURCE_PROFILE_EVIDENCE>"));
+    assert!(help.contains("--verified-external-quiesce-rescan"));
     assert!(help.contains("consistent-snapshot"));
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn source_profile_probe_is_separate_and_requires_explicit_authorization() {
+    let output = spike()
+        .args(["probe-postgres-source-profile", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "--source-config",
+        "--admin-config",
+        "--profile",
+        "--probe-output",
+        "--execute",
+    ] {
+        assert!(help.contains(required));
+    }
+    for forbidden in ["--target-config", "--plan-output", "--approval-ref"] {
+        assert!(!help.contains(forbidden));
+    }
+
+    let output = spike()
+        .args([
+            "probe-postgres-source-profile",
+            "--source-config",
+            "source.toml",
+            "--admin-config",
+            "admin.toml",
+            "--profile",
+            "managed-administrator",
+            "--probe-output",
+            "probe.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("--execute"));
 }
 
 #[test]

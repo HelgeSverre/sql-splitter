@@ -8,6 +8,13 @@ enum ConsistencyMode {
     WriteFence,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SourceProfile {
+    SelfManagedAdministrator,
+    ManagedAdministrator,
+    AttestedExternalQuiesce,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "sql-splitter-migration-spike")]
 #[command(about = "EXPERIMENTAL SPIKE — NOT FOR PRODUCTION")]
@@ -41,6 +48,24 @@ enum Command {
         #[arg(long)]
         throughput_profile: Option<PathBuf>,
     },
+    /// Exercise one PostgreSQL administrator profile and publish typed evidence.
+    ProbePostgresSourceProfile {
+        /// Source endpoint TOML used to inspect the exact catalog and open the sacrificial session.
+        #[arg(long)]
+        source_config: PathBuf,
+        /// Authenticated administrator endpoint TOML used for the probe exercises.
+        #[arg(long)]
+        admin_config: PathBuf,
+        /// Administrator profile to test.
+        #[arg(long, value_enum)]
+        profile: SourceProfile,
+        /// New protected probe artifact. Existing files are not replaced.
+        #[arg(long)]
+        probe_output: PathBuf,
+        /// Explicit acknowledgement for transactional and session-termination probes.
+        #[arg(long, required = true)]
+        execute: bool,
+    },
     /// Inspect two live PostgreSQL catalogs and write a deterministic plan.
     PlanPostgres {
         /// Source endpoint TOML. Credentials are referenced through an environment variable.
@@ -58,6 +83,15 @@ enum Command {
         /// Maximum approved copy-and-verification outage in seconds.
         #[arg(long, requires = "assessment_input")]
         max_outage_seconds: Option<u64>,
+        /// Source enforcement profile recorded in the reviewed plan.
+        #[arg(long, value_enum)]
+        source_profile: Option<SourceProfile>,
+        /// Protected administrator probe artifact required by administrator profiles.
+        #[arg(long, requires = "source_profile")]
+        source_profile_evidence: Option<PathBuf>,
+        /// Require a fresh full-source equality re-scan for external quiesce.
+        #[arg(long, requires = "source_profile")]
+        verified_external_quiesce_rescan: bool,
         /// Execution consistency contract recorded for review.
         #[arg(long, value_enum)]
         consistency: ConsistencyMode,
@@ -120,6 +154,12 @@ enum Command {
         /// Protected installed-fence artifact for write-fence plans.
         #[arg(long, requires = "fence_admin_config")]
         fence_artifact: Option<PathBuf>,
+        /// Protected active attestation required by an external-quiesce source profile.
+        #[arg(
+            long,
+            conflicts_with_all = ["fence_admin_config", "fence_artifact"]
+        )]
+        external_quiesce_attestation: Option<PathBuf>,
     },
     /// Resume only the intent embedded in an existing write-fenced state artifact.
     ResumePostgres {
@@ -129,10 +169,23 @@ enum Command {
         source_config: PathBuf,
         #[arg(long)]
         target_config: PathBuf,
-        #[arg(long)]
-        fence_admin_config: PathBuf,
-        #[arg(long)]
-        fence_artifact: PathBuf,
+        #[arg(
+            long,
+            requires = "fence_artifact",
+            conflicts_with = "external_quiesce_attestation"
+        )]
+        fence_admin_config: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "fence_admin_config",
+            conflicts_with = "external_quiesce_attestation"
+        )]
+        fence_artifact: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with_all = ["fence_admin_config", "fence_artifact"]
+        )]
+        external_quiesce_attestation: Option<PathBuf>,
         #[arg(long, required = true)]
         execute: bool,
         #[arg(long, required = true)]
@@ -184,12 +237,47 @@ fn main() -> anyhow::Result<()> {
                     .blocks_execution()
             );
         }
+        Command::ProbePostgresSourceProfile {
+            source_config,
+            admin_config,
+            profile,
+            probe_output,
+            execute,
+        } => {
+            if !execute {
+                anyhow::bail!("--execute is required");
+            }
+            let profile = source_profile(profile);
+            let artifact = sql_splitter::migration::postgres::probe_live_postgres_source_profile(
+                source_config,
+                admin_config,
+                profile,
+                &probe_output,
+            )?;
+            println!("probe artifact: {}", probe_output.display());
+            println!("source catalog: {}", artifact.source_catalog_fingerprint);
+            println!(
+                "proven requirements: {}/{}",
+                artifact
+                    .results
+                    .iter()
+                    .filter(|result| matches!(
+                        result.status,
+                        sql_splitter::migration::postgres_profile::PostgresSourceProbeStatus::Proven
+                    ))
+                    .count(),
+                artifact.results.len()
+            );
+        }
         Command::PlanPostgres {
             source_config,
             target_config,
             plan_output,
             assessment_input,
             max_outage_seconds,
+            source_profile: selected_source_profile,
+            source_profile_evidence,
+            verified_external_quiesce_rescan,
             consistency,
         } => {
             let consistency = match consistency {
@@ -200,13 +288,16 @@ fn main() -> anyhow::Result<()> {
                     sql_splitter::migration::postgres::PostgresConsistencyMode::WriteFence
                 }
             };
-            let plan = sql_splitter::migration::postgres::write_live_plan_with_outage_policy(
+            let plan = sql_splitter::migration::postgres::write_live_plan_with_profile_tier(
                 source_config,
                 target_config,
                 &plan_output,
                 consistency,
                 assessment_input.as_deref(),
                 max_outage_seconds,
+                selected_source_profile.map(source_profile),
+                source_profile_evidence.as_deref(),
+                verified_external_quiesce_rescan,
             )?;
             println!("plan: {}", plan_output.display());
             println!("plan hash: {}", plan.plan_hash);
@@ -215,6 +306,16 @@ fn main() -> anyhow::Result<()> {
                 plan.plan.unsupported_objects.objects.len(),
                 plan.plan.unsupported_objects.blocks_execution()
             );
+            if matches!(
+                plan.plan.postgres_source_profile,
+                Some(
+                    sql_splitter::migration::postgres_profile::PostgresSourceProfileContract::AttestedExternalQuiesce { .. }
+                )
+            ) {
+                eprintln!(
+                    "WARNING: sql-splitter records the external-quiesce attestation but does not enforce the source freeze"
+                );
+            }
         }
         Command::FenceInstallPostgres {
             plan_input,
@@ -291,12 +392,17 @@ fn main() -> anyhow::Result<()> {
             state_output,
             fence_admin_config,
             fence_artifact,
+            external_quiesce_attestation,
         } => {
             if !execute || !strict_verification {
                 anyhow::bail!("--execute and --strict-verification are required");
             }
-            let report = match (fence_admin_config, fence_artifact) {
-                (Some(admin), Some(fence)) => {
+            let report = match (
+                fence_admin_config,
+                fence_artifact,
+                external_quiesce_attestation,
+            ) {
+                (Some(admin), Some(fence), None) => {
                     sql_splitter::migration::runner::execute_postgres_fenced_plan(
                         plan_input,
                         source_config,
@@ -307,7 +413,17 @@ fn main() -> anyhow::Result<()> {
                         &state_output,
                     )?
                 }
-                (None, None) => sql_splitter::migration::runner::execute_postgres_plan(
+                (None, None, Some(attestation)) => {
+                    sql_splitter::migration::runner::execute_postgres_plan_with_external_quiesce(
+                        plan_input,
+                        source_config,
+                        target_config,
+                        attestation,
+                        &approval_ref,
+                        &state_output,
+                    )?
+                }
+                (None, None, None) => sql_splitter::migration::runner::execute_postgres_plan(
                     plan_input,
                     source_config,
                     target_config,
@@ -326,23 +442,53 @@ fn main() -> anyhow::Result<()> {
             target_config,
             fence_admin_config,
             fence_artifact,
+            external_quiesce_attestation,
             execute,
             strict_verification,
         } => {
             if !execute || !strict_verification {
                 anyhow::bail!("--execute and --strict-verification are required");
             }
-            let report = sql_splitter::migration::runner::resume_postgres_fenced_plan(
-                &state,
-                source_config,
-                target_config,
+            let report = match (
                 fence_admin_config,
                 fence_artifact,
-            )?;
+                external_quiesce_attestation,
+            ) {
+                (Some(admin), Some(fence), None) => {
+                    sql_splitter::migration::runner::resume_postgres_fenced_plan(
+                        &state,
+                        source_config,
+                        target_config,
+                        admin,
+                        fence,
+                    )?
+                }
+                (None, None, Some(attestation)) => {
+                    sql_splitter::migration::runner::resume_postgres_plan_with_external_quiesce(
+                        &state,
+                        source_config,
+                        target_config,
+                        attestation,
+                    )?
+                }
+                _ => anyhow::bail!(
+                    "resume requires either the complete fence pair or --external-quiesce-attestation"
+                ),
+            };
             println!("state: {}", report.state.display());
             println!("copied rows: {}", report.copied_rows);
             println!("committed chunks: {}", report.committed_chunks);
         }
     }
     Ok(())
+}
+
+fn source_profile(
+    profile: SourceProfile,
+) -> sql_splitter::migration::postgres_profile::PostgresSourceProfileKind {
+    match profile {
+        SourceProfile::SelfManagedAdministrator => sql_splitter::migration::postgres_profile::PostgresSourceProfileKind::SelfManagedAdministrator,
+        SourceProfile::ManagedAdministrator => sql_splitter::migration::postgres_profile::PostgresSourceProfileKind::ManagedAdministrator,
+        SourceProfile::AttestedExternalQuiesce => sql_splitter::migration::postgres_profile::PostgresSourceProfileKind::AttestedExternalQuiesce,
+    }
 }

@@ -25,6 +25,7 @@ use super::plan::{OperationKind, ReviewedPlan, UnsupportedObjectReport};
 use super::postgres::{
     catalog_fingerprint, inspect_endpoint, postgres_tls_binding, PostgresEndpointConfig,
 };
+use super::postgres_profile::PostgresSourceProfileContract;
 
 const FENCE_SCHEMA: &str = "sql_splitter_migration_fence";
 const REGISTRY_TABLE: &str = "registry";
@@ -261,6 +262,23 @@ pub fn install_postgres_write_fence(
     reject_prepared_transactions(&mut transaction)?;
     let storage = inspect_install_storage(&mut transaction)?;
     let admin_role: String = transaction.query_one("SELECT current_user", &[])?.get(0);
+    let require_superuser = match reviewed.plan.postgres_source_profile.as_ref() {
+        Some(PostgresSourceProfileContract::SelfManagedAdministrator {
+            probe_artifact, ..
+        })
+        | Some(PostgresSourceProfileContract::ManagedAdministrator { probe_artifact, .. }) => {
+            if probe_artifact.administrator_role != admin_role {
+                return Err(PostgresFenceError::Attestation(
+                    "fence administrator role differs from reviewed probe evidence",
+                ));
+            }
+            false
+        }
+        Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }) => {
+            return Err(PostgresFenceError::WrongConsistencyMode);
+        }
+        None => true,
+    };
     let mut inventory =
         lock_and_resolve_tables(&mut transaction, &tables, &generation, &admin_role)?;
     inventory.sequences = inventory_business_sequences(&mut transaction)?;
@@ -299,7 +317,7 @@ pub fn install_postgres_write_fence(
     }
     install_guard_functions(&mut transaction)?;
     install_table_guards(&mut transaction, &inventory)?;
-    protect_business_sequences(&mut transaction, &mut inventory)?;
+    protect_business_sequences(&mut transaction, &mut inventory, require_superuser)?;
     install_ddl_guard(&mut transaction)?;
     resolve_protected_inventory(&mut transaction, &mut inventory)?;
     let inventory_json = serde_json::to_string(&inventory)?;
@@ -1464,6 +1482,7 @@ fn inventory_business_sequences(
 fn protect_business_sequences(
     transaction: &mut Transaction<'_>,
     inventory: &mut FenceInventory,
+    require_superuser: bool,
 ) -> Result<(), PostgresFenceError> {
     let admin_is_superuser: bool = transaction
         .query_one(
@@ -1471,7 +1490,7 @@ fn protect_business_sequences(
             &[],
         )?
         .get(0);
-    if !admin_is_superuser {
+    if require_superuser && !admin_is_superuser {
         return Err(PostgresFenceError::Attestation(
             "sequence fencing requires an explicit superuser administrator",
         ));

@@ -22,6 +22,17 @@ descriptive stages in [04](./04-execution-design.md).
 
 Managed service automation and CDC remain deferred after this sequence.
 
+**Phase status:** Implementation Phase 5a met its exit condition on
+2026-08-11 (mailbox [010]–[020]; commits `0b93a52`, `97d4d79`, `c6e6a8a`):
+the binary COPY path and pipelined verification passed the crash,
+cancellation, fault-injection, and network matrices on PostgreSQL 15–17;
+measured throughput is published in
+[13](./13-throughput-and-copy-path.md#recorded-measurements); and the
+plan-bound outage projection is enforced at execute preflight with live
+over-budget rejection evidence. This is spike evidence within the
+feature-gated command, not a production support statement, and no other
+phase claims completion.
+
 ## Second-dialect scope: MySQL
 
 Implementation Phase 6's dialect is MySQL. Scope for its adapter proof:

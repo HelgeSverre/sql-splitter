@@ -179,9 +179,11 @@ artifact; execute and resume gain no new profile inputs.
   nothing new.
 - Plan creation validates the assessment and its throughput profile and
   embeds a typed reviewed outage policy: assessment digest, source catalog
-  fingerprint, the explicit byte basis (PostgreSQL `total_relation_bytes`),
-  the complete throughput profile, reviewed input bytes and projected
-  seconds, and the approved maximum. The plan hash covers every field.
+  fingerprint, the explicit byte basis (PostgreSQL `pg_total_relation_size`
+  summed over the copied physical `relkind = 'r'` relation inventory, with
+  the exact sorted relation identities bound into the policy), the complete
+  throughput profile, reviewed input bytes and projected seconds, and the
+  approved maximum. The plan hash covers every field.
 - Initial execute refreshes the byte basis from the same source snapshot
   used for catalog attestation, recomputes the projection, and blocks
   before journal creation and before any target effect when the profile is

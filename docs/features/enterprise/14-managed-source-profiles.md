@@ -116,6 +116,51 @@ support statement names the provider, engine version, and admin role tested.
 This follows the same manual reproducible-matrix posture as
 [12](./12-postgresql-first-adapter.md); no CI promise is made here.
 
+## Probe and attestation interfaces (Phase 5b)
+
+Selected contract (mailbox [021-codex]/[023]):
+
+- **Probe command.** Probes with side effects never run inside plan-only or
+  the assessment ([15](./15-assessment-product.md)). A separate
+  approval-gated command, `probe-postgres-source-profile`, consumes the
+  exact planned source catalog plus an administrator endpoint, performs the
+  documented probe suite for the selected profile, and publishes one
+  protected, schema-versioned typed probe artifact recording
+  per-requirement, per-object outcomes. The command requires an explicit
+  `--execute` acknowledgement, and the optional exercised lock probe is
+  documented as briefly blocking production traffic. `plan-postgres`
+  accepts the probe artifact only when an administrator profile is
+  selected, validates it against the exact catalog fingerprint, and binds
+  its digest and outcomes into the reviewed plan. A probe artifact is
+  rejected across catalog drift.
+- **Profile encoding.** The plan records a typed
+  `PostgresSourceProfileContract`
+  (`self_managed_administrator`, `managed_administrator`,
+  `attested_external_quiesce`). Profiles are never encoded as capability
+  strings. The external profile also carries the required durable field
+  `freeze_enforced_by_tool: false`; validation rejects a plan that claims the
+  tool enforces that freeze.
+- **Attestation artifact.** The external-quiesce attestation is a
+  protected typed artifact: schema version, attestation reference, exact
+  source endpoint and catalog fingerprint, issued and expiry times, and
+  active or withdrawn status. Execute and resume take the same artifact
+  input, validate it against the plan, and bind its canonical digest at
+  journal genesis. A different artifact with the same reference is never
+  silently substituted. Withdrawal or sequence-state drift stops execution
+  (the gate-2 analogue above). Expiry follows the outage-policy precedent
+  in [13](./13-throughput-and-copy-path.md): recorded admission stays
+  valid for recovery, and renewal is an explicit recorded event, never a
+  substitution. The initial tier is operator evidence, not independently
+  verified freeze enforcement, and the plan and report say so.
+- **CLI surface**, introduced only in Phase 5b per
+  [04](./04-execution-design.md)'s future-flag rule — probe:
+  `--source-config`, `--admin-config`, `--profile`, `--probe-output`,
+  explicit `--execute`; plan: `--source-profile` and
+  `--source-profile-evidence` for administrator profiles, plus
+  `--verified-external-quiesce-rescan` to select the optional full re-scan
+  tier; execute/resume:
+  `--external-quiesce-attestation` for the external profile only.
+
 ## Delivery placement
 
 This document is Implementation Phase 5b in

@@ -336,6 +336,12 @@ cargo test --release --no-default-features --features enterprise-migration-spike
 test_name=live_reviewed_plan_executes_and_strictly_finalizes
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_source_profile_probe_is_bound_and_rolled_back
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_external_quiesce_sequence_equality_executes_and_binds
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_write_fence_install_is_durable
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

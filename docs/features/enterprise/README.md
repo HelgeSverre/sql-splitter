@@ -22,6 +22,15 @@
 > the current assessment acceptance gates, including blocking-code coverage and
 > statement auditing. It remains an experimental feature-gated command, not a
 > production release.
+> The Implementation Phase 5a throughput increment is also implemented for the
+> supported subset: a binary COPY chunk writer with the INSERT diagnostic
+> fallback, exported-snapshot pipelined chunk verification, measured
+> copy/verification throughput recorded in
+> [13](./13-throughput-and-copy-path.md), and an optional plan-bound outage
+> policy whose projection is refreshed and enforced at execute preflight
+> before any journal or target effect. Its matrices pass on PostgreSQL 15–17.
+> The sequential-beta boundary is unchanged: parallel copy remains Phase 9
+> design, and none of this is a production support statement.
 >
 > A PostgreSQL plan adapter, snapshot-bound source reader, native control
 > session, create-only pre-data DDL transaction, transactional plain-INSERT

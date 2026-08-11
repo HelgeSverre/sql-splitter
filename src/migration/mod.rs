@@ -17,6 +17,7 @@ pub mod plan;
 pub mod postgres;
 pub mod postgres_ast;
 pub mod postgres_fence;
+pub mod postgres_profile;
 pub mod runner;
 pub mod verify;
 

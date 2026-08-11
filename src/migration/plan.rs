@@ -7,8 +7,9 @@ use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
+use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 7;
+pub const PLAN_SCHEMA_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +276,8 @@ pub struct MigrationPlan {
     pub conversion_policy: String,
     #[serde(default)]
     pub outage_policy: Option<ReviewedOutagePolicy>,
+    #[serde(default)]
+    pub postgres_source_profile: Option<PostgresSourceProfileContract>,
     pub capabilities: BTreeMap<String, String>,
     pub operations: Vec<PlanOperation>,
     pub unsupported_objects: UnsupportedObjectReport,
@@ -350,14 +353,26 @@ impl MigrationPlan {
                     field: "consistency_mode",
                 });
             }
-        } else if self.outage_policy.is_some() {
-            return Err(PlanError::AssessmentContainsOutagePolicy);
+        } else {
+            if self.outage_policy.is_some() {
+                return Err(PlanError::AssessmentContainsOutagePolicy);
+            }
+            if self.postgres_source_profile.is_some() {
+                return Err(PlanError::AssessmentContainsSourceProfile);
+            }
         }
         if let Some(outage_policy) = &self.outage_policy {
             outage_policy.validate()?;
             if outage_policy.source_catalog_fingerprint != self.source_catalog_fingerprint {
                 return Err(PlanError::OutagePolicySourceMismatch);
             }
+        }
+        if let Some(source_profile) = &self.postgres_source_profile {
+            source_profile.validate_for_plan(
+                &self.source_endpoint_identity,
+                &self.source_catalog_fingerprint,
+                &self.consistency_mode,
+            )?;
         }
         let mut finding_keys = BTreeSet::new();
         for finding in &self.unsupported_objects.objects {
@@ -567,10 +582,14 @@ pub enum PlanError {
     AssessmentCannotExecute,
     #[error("assessment plan must not contain an execution outage policy")]
     AssessmentContainsOutagePolicy,
+    #[error("assessment plan must not contain a PostgreSQL execution source profile")]
+    AssessmentContainsSourceProfile,
     #[error("outage policy source fingerprint differs from the plan")]
     OutagePolicySourceMismatch,
     #[error("reviewed outage policy is invalid")]
     OutagePolicy(#[from] OutageProjectionError),
+    #[error("reviewed PostgreSQL source profile is invalid")]
+    PostgresSourceProfile(#[from] PostgresSourceProfileError),
     #[error("required plan evidence {field} is absent")]
     MissingEvidence { field: &'static str },
     #[error("target assessment fields must all be assessed or all be not assessed")]
@@ -620,7 +639,7 @@ mod tests {
             target_catalog: AssessmentStatus::Assessed(target_catalog),
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
-            consistency_mode: "consistent_snapshot".into(),
+            consistency_mode: "consistent-snapshot".into(),
             canonical_encoding_version: 1,
             conversion_policy: "exact".into(),
             outage_policy: Some(ReviewedOutagePolicy {
@@ -643,6 +662,7 @@ mod tests {
                 reviewed_projected_seconds: 0,
                 maximum_approved_seconds: 1,
             }),
+            postgres_source_profile: None,
             capabilities: BTreeMap::new(),
             operations: vec![PlanOperation::new(
                 OperationKind::VerifySchema,
@@ -746,6 +766,47 @@ mod tests {
         assert!(matches!(
             assessment.validate(),
             Err(PlanError::AssessmentContainsOutagePolicy)
+        ));
+    }
+
+    #[test]
+    fn execution_binds_a_typed_postgres_source_profile() {
+        let mut external = plan();
+        external.postgres_source_profile =
+            Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: true,
+                freeze_enforced_by_tool: false,
+            });
+        external.validate_for_execution().unwrap();
+
+        external.consistency_mode = "write-fence".into();
+        assert!(matches!(
+            external.validate_for_execution(),
+            Err(PlanError::PostgresSourceProfile(
+                PostgresSourceProfileError::ProfileConsistencyMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn assessment_rejects_a_postgres_source_profile() {
+        let mut assessment = plan();
+        assessment.purpose = PlanPurpose::Assessment;
+        assessment.outage_policy = None;
+        assessment.postgres_source_profile =
+            Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: true,
+                freeze_enforced_by_tool: false,
+            });
+        assessment.target_endpoint_identity = AssessmentStatus::NotAssessed;
+        assessment.target_catalog_fingerprint = AssessmentStatus::NotAssessed;
+        assessment.target_catalog = AssessmentStatus::NotAssessed;
+        assessment.target_tls_binding = AssessmentStatus::NotAssessed;
+        assessment.consistency_mode.clear();
+
+        assert!(matches!(
+            assessment.validate(),
+            Err(PlanError::AssessmentContainsSourceProfile)
         ));
     }
 

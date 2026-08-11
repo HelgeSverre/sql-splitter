@@ -9,14 +9,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::journal::{MigrationStatus, OperationState, ResumeBinding};
-use super::model::DbValue;
+use super::journal::{ConsistencyEvidence, MigrationStatus, OperationState, ResumeBinding};
+use super::model::{CatalogObjectKind, DbValue};
 use super::outage_projection::AcceptedOutageProjection;
 use super::plan::{OperationKind, ReviewedPlan};
+use super::postgres::{postgres_sequences, PostgresSequence, POSTGRES_CONSISTENCY_SNAPSHOT};
+use super::postgres_profile::{
+    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanEvidence,
+    PostgresExternalQuiesceStatus, PostgresSequenceEqualityEvidence, PostgresSourceProfileContract,
+};
 
 const FILE_MAGIC: &[u8; 8] = b"SSJNL001";
 const FRAME_MAGIC: u32 = 0x534a_4631;
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 4;
 const FILE_HEADER_LEN: u64 = 10;
 const FRAME_HEADER_LEN: usize = 84;
 const FRAME_TRAILER_LEN: usize = 32;
@@ -82,6 +87,7 @@ pub struct Genesis {
     pub binding: ResumeBinding,
     pub reviewed_plan: ReviewedPlan,
     pub accepted_outage_projection: Option<AcceptedOutageProjection>,
+    pub accepted_external_quiesce: Option<PostgresExternalQuiesceAttestation>,
     pub operations: Vec<OperationSpec>,
 }
 
@@ -114,6 +120,54 @@ impl Genesis {
                 }
             }
             _ => return Err(AppendJournalError::InvalidGenesis),
+        }
+        match (
+            self.reviewed_plan.plan.postgres_source_profile.as_ref(),
+            self.accepted_external_quiesce.as_ref(),
+            self.binding.external_quiesce_attestation_digest.as_ref(),
+        ) {
+            (
+                Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }),
+                Some(attestation),
+                Some(digest),
+            ) => {
+                attestation
+                    .validate()
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                if attestation.status != PostgresExternalQuiesceStatus::Active
+                    || attestation.source_endpoint_identity
+                        != self.reviewed_plan.plan.source_endpoint_identity
+                    || attestation.source_catalog_fingerprint
+                        != self.reviewed_plan.plan.source_catalog_fingerprint
+                    || &attestation
+                        .canonical_hash()
+                        .map_err(|_| AppendJournalError::InvalidGenesis)?
+                        != digest
+                {
+                    return Err(AppendJournalError::InvalidGenesis);
+                }
+            }
+            (Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }), _, _)
+            | (_, Some(_), _)
+            | (_, _, Some(_)) => return Err(AppendJournalError::InvalidGenesis),
+            _ => {}
+        }
+        if self.reviewed_plan.plan.consistency_mode == POSTGRES_CONSISTENCY_SNAPSHOT {
+            let catalog = self
+                .reviewed_plan
+                .plan
+                .source_catalog
+                .as_ref()
+                .ok_or(AppendJournalError::InvalidGenesis)?;
+            let has_sequences = catalog.namespaces.iter().any(|namespace| {
+                namespace
+                    .objects
+                    .iter()
+                    .any(|object| object.kind == CatalogObjectKind::Sequence)
+            });
+            if has_sequences {
+                postgres_sequences(catalog).map_err(|_| AppendJournalError::InvalidGenesis)?;
+            }
         }
         let plan_ids = self
             .reviewed_plan
@@ -211,6 +265,12 @@ pub enum JournalEvent {
         target_transaction_intent: String,
     },
     ManualReconciliationRequired,
+    SequenceEqualityComplete {
+        evidence: PostgresSequenceEqualityEvidence,
+    },
+    ExternalQuiesceRescanComplete {
+        evidence: PostgresExternalQuiesceRescanEvidence,
+    },
     TableVerificationComplete {
         operation_id: String,
         chunk_count: u64,
@@ -233,9 +293,20 @@ pub struct JournalProjection {
     pub copy_cursors: BTreeMap<String, CopyCursor>,
     pub table_verifications: BTreeSet<String>,
     pub schema_verified: bool,
+    pub sequence_equality: Option<PostgresSequenceEqualityEvidence>,
+    pub external_quiesce_rescan: Option<PostgresExternalQuiesceRescanEvidence>,
+    table_verification_evidence: BTreeMap<String, (String, String, String)>,
     dependencies: BTreeMap<String, Vec<String>>,
     copy_operations: BTreeSet<String>,
     phases: BTreeMap<String, OperationPhase>,
+    requires_sequence_equality: bool,
+    expected_sequences: Vec<PostgresSequence>,
+    requires_external_quiesce_rescan: bool,
+    source_catalog_fingerprint: String,
+    source_endpoint_identity: String,
+    initial_source_database_identity: Option<String>,
+    initial_source_server_version: Option<String>,
+    initial_source_lifecycle_id: Option<String>,
 }
 
 /// A validated, bounded point-in-time view for monitoring only.
@@ -262,6 +333,9 @@ impl JournalProjection {
             copy_cursors: BTreeMap::new(),
             table_verifications: BTreeSet::new(),
             schema_verified: false,
+            sequence_equality: None,
+            external_quiesce_rescan: None,
+            table_verification_evidence: BTreeMap::new(),
             dependencies: genesis
                 .operations
                 .iter()
@@ -283,6 +357,59 @@ impl JournalProjection {
                 .iter()
                 .map(|operation| (operation.operation_id.clone(), operation.phase))
                 .collect(),
+            requires_sequence_equality: genesis.reviewed_plan.plan.consistency_mode
+                == POSTGRES_CONSISTENCY_SNAPSHOT
+                && genesis
+                    .reviewed_plan
+                    .plan
+                    .source_catalog
+                    .as_ref()
+                    .is_some_and(|catalog| {
+                        catalog.namespaces.iter().any(|namespace| {
+                            namespace
+                                .objects
+                                .iter()
+                                .any(|object| object.kind == CatalogObjectKind::Sequence)
+                        })
+                    }),
+            expected_sequences: genesis
+                .reviewed_plan
+                .plan
+                .source_catalog
+                .as_ref()
+                .and_then(|catalog| postgres_sequences(catalog).ok())
+                .unwrap_or_default(),
+            requires_external_quiesce_rescan: matches!(
+                genesis.reviewed_plan.plan.postgres_source_profile,
+                Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                    verified_rescan: true,
+                    ..
+                })
+            ),
+            source_catalog_fingerprint: genesis
+                .reviewed_plan
+                .plan
+                .source_catalog_fingerprint
+                .clone(),
+            source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
+            initial_source_database_identity: match &genesis.binding.consistency_evidence {
+                ConsistencyEvidence::NativeSnapshot {
+                    database_identity, ..
+                } => Some(database_identity.clone()),
+                ConsistencyEvidence::WriteFence { .. } => None,
+            },
+            initial_source_server_version: match &genesis.binding.consistency_evidence {
+                ConsistencyEvidence::NativeSnapshot { server_version, .. } => {
+                    Some(server_version.clone())
+                }
+                ConsistencyEvidence::WriteFence { .. } => None,
+            },
+            initial_source_lifecycle_id: match &genesis.binding.consistency_evidence {
+                ConsistencyEvidence::NativeSnapshot { lifecycle_id, .. } => {
+                    Some(lifecycle_id.clone())
+                }
+                ConsistencyEvidence::WriteFence { .. } => None,
+            },
         }
     }
 
@@ -307,6 +434,7 @@ impl JournalProjection {
                 }
                 if *to == MigrationStatus::Verifying
                     && (self.prepared_chunk.is_some()
+                        || (self.requires_sequence_equality && self.sequence_equality.is_none())
                         || self.operations.iter().any(|(operation_id, state)| {
                             self.phases.get(operation_id) == Some(&OperationPhase::Execution)
                                 && *state != OperationState::Verified
@@ -318,6 +446,8 @@ impl JournalProjection {
                 }
                 if *to == MigrationStatus::Completed
                     && (!self.schema_verified
+                        || (self.requires_external_quiesce_rescan
+                            && self.external_quiesce_rescan.is_none())
                         || self.prepared_chunk.is_some()
                         || self.table_verifications.len() != self.copy_operations.len()
                         || self
@@ -388,6 +518,73 @@ impl JournalProjection {
             JournalEvent::ManualReconciliationRequired => {
                 self.status = MigrationStatus::ManualReconciliationRequired;
             }
+            JournalEvent::SequenceEqualityComplete { evidence } => {
+                if self.status != MigrationStatus::Running
+                    || self.prepared_chunk.is_some()
+                    || !self.requires_sequence_equality
+                    || self.sequence_equality.is_some()
+                    || self.copy_operations.iter().any(|operation_id| {
+                        self.operations.get(operation_id) != Some(&OperationState::Verified)
+                    })
+                    || evidence.source_catalog_fingerprint != self.source_catalog_fingerprint
+                    || evidence.initial != self.expected_sequences
+                {
+                    return Err(AppendJournalError::InvalidTransition(
+                        "sequence equality evidence",
+                    ));
+                }
+                evidence
+                    .validate()
+                    .map_err(|_| AppendJournalError::InvalidTransition("sequence equality"))?;
+                self.sequence_equality = Some(evidence.clone());
+            }
+            JournalEvent::ExternalQuiesceRescanComplete { evidence } => {
+                let evidence_ids = evidence
+                    .tables
+                    .iter()
+                    .map(|table| table.operation_id.as_str())
+                    .collect::<BTreeSet<_>>();
+                if self.status != MigrationStatus::Verifying
+                    || !self.requires_external_quiesce_rescan
+                    || self.external_quiesce_rescan.is_some()
+                    || self.schema_verified
+                    || self.table_verifications.len() != self.copy_operations.len()
+                    || evidence.source_catalog_fingerprint != self.source_catalog_fingerprint
+                    || evidence.source_endpoint_identity != self.source_endpoint_identity
+                    || self.initial_source_database_identity.as_ref()
+                        != Some(&evidence.source_database_identity)
+                    || self.initial_source_server_version.as_ref()
+                        != Some(&evidence.source_server_version)
+                    || self.initial_source_lifecycle_id.as_ref()
+                        == Some(&evidence.source_lifecycle_id)
+                    || evidence_ids.len() != self.copy_operations.len()
+                    || !self
+                        .copy_operations
+                        .iter()
+                        .all(|operation_id| evidence_ids.contains(operation_id.as_str()))
+                    || evidence.tables.iter().any(|table| {
+                        let cursor = self.copy_cursors.get(&table.operation_id);
+                        let verification =
+                            self.table_verification_evidence.get(&table.operation_id);
+                        table.chunk_count != cursor.map_or(0, |cursor| cursor.chunks)
+                            || table.row_count != cursor.map_or(0, |cursor| cursor.rows)
+                            || verification.is_none_or(|(manifest_hash, _, target_hash)| {
+                                &table.manifest_hash != manifest_hash
+                                    || &table.target_hash != target_hash
+                            })
+                    })
+                {
+                    return Err(AppendJournalError::InvalidTransition(
+                        "external-quiesce verified re-scan",
+                    ));
+                }
+                evidence.validate().map_err(|_| {
+                    AppendJournalError::InvalidTransition(
+                        "external-quiesce verified re-scan evidence",
+                    )
+                })?;
+                self.external_quiesce_rescan = Some(evidence.clone());
+            }
             JournalEvent::TableVerificationComplete {
                 operation_id,
                 chunk_count,
@@ -415,6 +612,17 @@ impl JournalProjection {
                     || target_hash.len() != 64
                     || source_hash != target_hash
                     || !self.table_verifications.insert(operation_id.clone())
+                    || self
+                        .table_verification_evidence
+                        .insert(
+                            operation_id.clone(),
+                            (
+                                manifest_hash.clone(),
+                                source_hash.clone(),
+                                target_hash.clone(),
+                            ),
+                        )
+                        .is_some()
                 {
                     return Err(AppendJournalError::InvalidTransition("table verification"));
                 }
@@ -426,6 +634,8 @@ impl JournalProjection {
                     || catalog_fingerprint.len() != 64
                     || self.schema_verified
                     || self.table_verifications.len() != self.copy_operations.len()
+                    || (self.requires_external_quiesce_rescan
+                        && self.external_quiesce_rescan.is_none())
                 {
                     return Err(AppendJournalError::InvalidTransition("schema verification"));
                 }
@@ -771,6 +981,20 @@ impl AppendJournal {
 
     pub fn require_manual_reconciliation(&mut self) -> Result<(), AppendJournalError> {
         self.append_validated(JournalEvent::ManualReconciliationRequired)
+    }
+
+    pub fn record_sequence_equality(
+        &mut self,
+        evidence: PostgresSequenceEqualityEvidence,
+    ) -> Result<(), AppendJournalError> {
+        self.append_validated(JournalEvent::SequenceEqualityComplete { evidence })
+    }
+
+    pub fn record_external_quiesce_rescan(
+        &mut self,
+        evidence: PostgresExternalQuiesceRescanEvidence,
+    ) -> Result<(), AppendJournalError> {
+        self.append_validated(JournalEvent::ExternalQuiesceRescanComplete { evidence })
     }
 
     pub fn verify_table(
@@ -1543,7 +1767,7 @@ fn lock_exclusive(_file: &File) -> Result<(), AppendJournalError> {
 mod tests {
     use super::*;
     use crate::migration::journal::ConsistencyEvidence;
-    use crate::migration::model::{Identifier, VendorCatalog};
+    use crate::migration::model::{CatalogNamespace, CatalogObject, Identifier, VendorCatalog};
     use crate::migration::outage_projection::{
         ByteBasis, ReviewedOutagePolicy, ThroughputProfile, OUTAGE_PROJECTION_SCHEMA_VERSION,
         THROUGHPUT_PROFILE_SCHEMA_VERSION,
@@ -1551,6 +1775,11 @@ mod tests {
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
         UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
+    };
+    use crate::migration::postgres_profile::{
+        PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanTableEvidence,
+        PostgresExternalQuiesceStatus, PostgresSequenceEqualityEvidence,
+        PostgresSourceProfileContract, POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
     };
 
     fn genesis() -> Genesis {
@@ -1625,10 +1854,11 @@ mod tests {
             target_catalog: AssessmentStatus::Assessed(target_catalog),
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
-            consistency_mode: "consistent_snapshot".into(),
+            consistency_mode: POSTGRES_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: 1,
             conversion_policy: "exact".into(),
             outage_policy: Some(outage_policy.clone()),
+            postgres_source_profile: None,
             capabilities: BTreeMap::new(),
             operations,
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -1655,6 +1885,7 @@ mod tests {
                 .unwrap()
                 .to_owned(),
             outage_projection_digest: None,
+            external_quiesce_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: 1,
         };
@@ -1679,6 +1910,7 @@ mod tests {
             binding,
             reviewed_plan,
             accepted_outage_projection: Some(accepted_outage_projection),
+            accepted_external_quiesce: None,
             operations: specs,
         }
     }
@@ -1704,6 +1936,322 @@ mod tests {
 
     fn hash() -> String {
         "0".repeat(64)
+    }
+
+    fn sequence(object_id: &str) -> PostgresSequence {
+        PostgresSequence {
+            catalog_object_id: object_id.into(),
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("sequence_one").unwrap(),
+            persistence: "p".into(),
+            data_type: "bigint".into(),
+            start_value: 1,
+            increment: 1,
+            minimum_value: 1,
+            maximum_value: i64::MAX,
+            cache_size: 1,
+            cycle: false,
+            last_value: 10,
+            is_called: true,
+            ownership: None,
+        }
+    }
+
+    #[test]
+    fn external_quiesce_genesis_requires_the_exact_active_attestation() {
+        let mut genesis = genesis();
+        genesis.reviewed_plan.plan.consistency_mode = POSTGRES_CONSISTENCY_SNAPSHOT.into();
+        genesis.reviewed_plan.plan.outage_policy = None;
+        genesis.reviewed_plan.plan.postgres_source_profile =
+            Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: false,
+                freeze_enforced_by_tool: false,
+            });
+        genesis.reviewed_plan = ReviewedPlan::new(genesis.reviewed_plan.plan).unwrap();
+        genesis.binding.plan_hash = genesis.reviewed_plan.plan_hash.to_string();
+        genesis.binding.outage_projection_digest = None;
+        genesis.accepted_outage_projection = None;
+
+        let attestation = PostgresExternalQuiesceAttestation {
+            schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+            source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
+            source_catalog_fingerprint: genesis
+                .reviewed_plan
+                .plan
+                .source_catalog_fingerprint
+                .clone(),
+            attestation_reference: "external-freeze-1".into(),
+            issued_at_unix_seconds: 10,
+            expires_at_unix_seconds: 20,
+            status: PostgresExternalQuiesceStatus::Active,
+        };
+        genesis.binding.external_quiesce_attestation_digest =
+            Some(attestation.canonical_hash().unwrap());
+        genesis.accepted_external_quiesce = Some(attestation.clone());
+        genesis.validate().unwrap();
+
+        let mut wrong_digest = genesis.clone();
+        wrong_digest.binding.external_quiesce_attestation_digest = Some("0".repeat(64));
+        assert!(matches!(
+            wrong_digest.validate(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+
+        let mut withdrawn = genesis;
+        withdrawn.accepted_external_quiesce.as_mut().unwrap().status =
+            PostgresExternalQuiesceStatus::Withdrawn;
+        assert!(matches!(
+            withdrawn.validate(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+    }
+
+    #[test]
+    fn verified_external_quiesce_cannot_verify_schema_without_fresh_rescan() {
+        let mut genesis = genesis();
+        genesis.reviewed_plan.plan.consistency_mode = POSTGRES_CONSISTENCY_SNAPSHOT.into();
+        genesis.reviewed_plan.plan.outage_policy = None;
+        genesis.reviewed_plan.plan.postgres_source_profile =
+            Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: true,
+                freeze_enforced_by_tool: false,
+            });
+        genesis.reviewed_plan = ReviewedPlan::new(genesis.reviewed_plan.plan).unwrap();
+        genesis.binding.plan_hash = genesis.reviewed_plan.plan_hash.to_string();
+        genesis.binding.outage_projection_digest = None;
+        genesis.accepted_outage_projection = None;
+        let attestation = PostgresExternalQuiesceAttestation {
+            schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+            source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
+            source_catalog_fingerprint: genesis
+                .reviewed_plan
+                .plan
+                .source_catalog_fingerprint
+                .clone(),
+            attestation_reference: "external-verified-1".into(),
+            issued_at_unix_seconds: 10,
+            expires_at_unix_seconds: 20,
+            status: PostgresExternalQuiesceStatus::Active,
+        };
+        genesis.binding.external_quiesce_attestation_digest =
+            Some(attestation.canonical_hash().unwrap());
+        genesis.accepted_external_quiesce = Some(attestation);
+        genesis.validate().unwrap();
+
+        let operation_id = genesis.operations[0].operation_id.clone();
+        let mut projection = JournalProjection::from_genesis(&genesis);
+        for state in [
+            OperationState::Running,
+            OperationState::Prepared,
+            OperationState::Committed,
+            OperationState::Verified,
+        ] {
+            let from = projection.operations[&operation_id];
+            projection
+                .apply(&JournalEvent::OperationTransition {
+                    operation_id: operation_id.clone(),
+                    from,
+                    to: state,
+                })
+                .unwrap();
+        }
+        projection
+            .apply(&JournalEvent::MigrationStatus {
+                from: MigrationStatus::Running,
+                to: MigrationStatus::Verifying,
+            })
+            .unwrap();
+        projection
+            .apply(&JournalEvent::TableVerificationComplete {
+                operation_id: operation_id.clone(),
+                chunk_count: 0,
+                row_count: 0,
+                manifest_hash: hash(),
+                source_hash: hash(),
+                target_hash: hash(),
+            })
+            .unwrap();
+        assert!(projection
+            .apply(&JournalEvent::SchemaVerificationComplete {
+                catalog_fingerprint: hash(),
+            })
+            .is_err());
+
+        let rescan = PostgresExternalQuiesceRescanEvidence {
+            schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+            source_catalog_fingerprint: genesis
+                .reviewed_plan
+                .plan
+                .source_catalog_fingerprint
+                .clone(),
+            source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
+            source_database_identity: "database".into(),
+            source_snapshot_id: "fresh-snapshot".into(),
+            source_lifecycle_id: "fresh-lifecycle".into(),
+            source_server_version: "17".into(),
+            source_read_only_server_enforced: true,
+            tables: vec![PostgresExternalQuiesceRescanTableEvidence {
+                operation_id,
+                chunk_count: 0,
+                row_count: 0,
+                manifest_hash: hash(),
+                fresh_source_hash: hash(),
+                target_hash: hash(),
+            }],
+            verified_at_unix_seconds: 30,
+        };
+        let mut reused_snapshot = rescan.clone();
+        reused_snapshot.source_lifecycle_id = "lifecycle".into();
+        assert!(projection
+            .apply(&JournalEvent::ExternalQuiesceRescanComplete {
+                evidence: reused_snapshot,
+            })
+            .is_err());
+        projection
+            .apply(&JournalEvent::ExternalQuiesceRescanComplete { evidence: rescan })
+            .unwrap();
+        projection
+            .apply(&JournalEvent::SchemaVerificationComplete {
+                catalog_fingerprint: hash(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn snapshot_sequence_plan_cannot_verify_without_equality_evidence() {
+        let mut genesis = genesis();
+        let sequence_id = "relation:42";
+        let observed = sequence(sequence_id);
+        genesis
+            .reviewed_plan
+            .plan
+            .source_catalog
+            .as_mut()
+            .unwrap()
+            .dialect = "postgresql".into();
+        genesis
+            .reviewed_plan
+            .plan
+            .source_catalog
+            .as_mut()
+            .unwrap()
+            .namespaces
+            .push(CatalogNamespace {
+                id: "namespace:1".into(),
+                name: Identifier::new("public").unwrap(),
+                owner: Some("owner".into()),
+                charset: None,
+                collation: None,
+                objects: vec![CatalogObject {
+                    id: sequence_id.into(),
+                    kind: CatalogObjectKind::Sequence,
+                    name: Identifier::new("sequence_one").unwrap(),
+                    definition: Vec::new(),
+                    attributes: BTreeMap::from([
+                        ("relkind".into(), serde_json::json!("S")),
+                        (
+                            "persistence".into(),
+                            serde_json::json!(observed.persistence.clone()),
+                        ),
+                        ("type".into(), serde_json::json!(observed.data_type.clone())),
+                        (
+                            "start".into(),
+                            serde_json::json!(observed.start_value.to_string()),
+                        ),
+                        (
+                            "increment".into(),
+                            serde_json::json!(observed.increment.to_string()),
+                        ),
+                        (
+                            "minimum".into(),
+                            serde_json::json!(observed.minimum_value.to_string()),
+                        ),
+                        (
+                            "maximum".into(),
+                            serde_json::json!(observed.maximum_value.to_string()),
+                        ),
+                        (
+                            "cache".into(),
+                            serde_json::json!(observed.cache_size.to_string()),
+                        ),
+                        ("cycle".into(), serde_json::json!(observed.cycle)),
+                        (
+                            "last_value".into(),
+                            serde_json::json!(observed.last_value.to_string()),
+                        ),
+                        ("is_called".into(), serde_json::json!(observed.is_called)),
+                        ("ownership_count".into(), serde_json::json!(0)),
+                        ("ownership".into(), serde_json::Value::Null),
+                    ]),
+                }],
+            });
+        genesis.reviewed_plan.plan.consistency_mode = POSTGRES_CONSISTENCY_SNAPSHOT.into();
+        genesis.reviewed_plan.plan.outage_policy = None;
+        genesis.accepted_outage_projection = None;
+        genesis.binding.outage_projection_digest = None;
+        let source_catalog = genesis.reviewed_plan.plan.source_catalog.as_ref().unwrap();
+        let source_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(source_catalog).unwrap()));
+        genesis.reviewed_plan.plan.source_catalog_fingerprint = source_fingerprint.clone();
+        genesis.reviewed_plan = ReviewedPlan::new(genesis.reviewed_plan.plan).unwrap();
+        genesis.binding.plan_hash = genesis.reviewed_plan.plan_hash.to_string();
+        genesis.binding.source_schema_fingerprint = source_fingerprint.clone();
+
+        let mut projection = JournalProjection::from_genesis(&genesis);
+        let operation_id = genesis.operations[0].operation_id.clone();
+        for state in [
+            OperationState::Running,
+            OperationState::Prepared,
+            OperationState::Committed,
+            OperationState::Verified,
+        ] {
+            let from = *projection.operations.get(&operation_id).unwrap();
+            projection
+                .apply(&JournalEvent::OperationTransition {
+                    operation_id: operation_id.clone(),
+                    from,
+                    to: state,
+                })
+                .unwrap();
+        }
+        assert!(projection
+            .apply(&JournalEvent::MigrationStatus {
+                from: MigrationStatus::Running,
+                to: MigrationStatus::Verifying,
+            })
+            .is_err());
+
+        let mut substituted = observed.clone();
+        substituted.last_value += 1;
+        assert!(projection
+            .apply(&JournalEvent::SequenceEqualityComplete {
+                evidence: PostgresSequenceEqualityEvidence {
+                    schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+                    source_catalog_fingerprint: source_fingerprint.clone(),
+                    initial: vec![substituted.clone()],
+                    final_observation: vec![substituted],
+                    verified_at_unix_seconds: 1,
+                },
+            })
+            .is_err());
+
+        projection
+            .apply(&JournalEvent::SequenceEqualityComplete {
+                evidence: PostgresSequenceEqualityEvidence {
+                    schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+                    source_catalog_fingerprint: source_fingerprint,
+                    initial: vec![observed.clone()],
+                    final_observation: vec![observed],
+                    verified_at_unix_seconds: 1,
+                },
+            })
+            .unwrap();
+        projection
+            .apply(&JournalEvent::MigrationStatus {
+                from: MigrationStatus::Running,
+                to: MigrationStatus::Verifying,
+            })
+            .unwrap();
     }
 
     // Genesis construction is exercised by integration with real ReviewedPlan values.
@@ -2236,35 +2784,37 @@ mod tests {
         file.write_all(&FORMAT_VERSION.to_le_bytes()).unwrap();
         let mut sequence = 1_u64;
         let mut previous_hash = [0; 32];
-        let mut write_event = |event: JournalEvent| {
-            let frame = encode_event_frame(sequence, previous_hash, &event).unwrap();
-            previous_hash.copy_from_slice(&frame[frame.len() - 32..]);
-            sequence += 1;
-            file.write_all(&frame).unwrap();
-        };
-        write_event(JournalEvent::Genesis(Box::new(genesis)));
-        write_event(JournalEvent::OperationTransition {
-            operation_id: operation_id.clone(),
-            from: OperationState::Pending,
-            to: OperationState::Running,
-        });
-        for chunk_id in 1..=49_999_u64 {
-            write_event(JournalEvent::ChunkPrepared(PreparedChunk {
-                chunk_id,
+        {
+            let mut write_event = |event: JournalEvent| {
+                let frame = encode_event_frame(sequence, previous_hash, &event).unwrap();
+                previous_hash.copy_from_slice(&frame[frame.len() - 32..]);
+                sequence += 1;
+                file.write_all(&frame).unwrap();
+            };
+            write_event(JournalEvent::Genesis(Box::new(genesis)));
+            write_event(JournalEvent::OperationTransition {
                 operation_id: operation_id.clone(),
-                start_key: (chunk_id > 1).then(|| vec![DbValue::Unsigned((chunk_id - 1).into())]),
-                final_key: vec![DbValue::Unsigned(chunk_id.into())],
-                row_count: 1,
-                canonical_digest: hash(),
-                target_transaction_intent: format!("intent-{chunk_id}"),
-            }));
-            write_event(JournalEvent::ChunkCommitted {
-                chunk_id,
-                operation_id: operation_id.clone(),
-                target_transaction_intent: format!("intent-{chunk_id}"),
+                from: OperationState::Pending,
+                to: OperationState::Running,
             });
+            for chunk_id in 1..=49_999_u64 {
+                write_event(JournalEvent::ChunkPrepared(PreparedChunk {
+                    chunk_id,
+                    operation_id: operation_id.clone(),
+                    start_key: (chunk_id > 1)
+                        .then(|| vec![DbValue::Unsigned((chunk_id - 1).into())]),
+                    final_key: vec![DbValue::Unsigned(chunk_id.into())],
+                    row_count: 1,
+                    canonical_digest: hash(),
+                    target_transaction_intent: format!("intent-{chunk_id}"),
+                }));
+                write_event(JournalEvent::ChunkCommitted {
+                    chunk_id,
+                    operation_id: operation_id.clone(),
+                    target_transaction_intent: format!("intent-{chunk_id}"),
+                });
+            }
         }
-        drop(write_event);
         file.sync_all().unwrap();
         drop(file);
         let mut file = File::open(&path).unwrap();
