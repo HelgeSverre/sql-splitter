@@ -87,6 +87,16 @@ schema, provider, deterministic flag, recorded version, actual provider version,
 and PostgreSQL server version through the reviewed catalog and state
 fingerprints. A provider-version mismatch blocks execution.
 
+Tables without a key constraint can use a standalone unique index only when it
+is a valid, ready, live, immediate, ordinary persistent B-tree index over one or
+more non-null physical columns. The supported form has no predicate,
+expressions, included columns, custom operator class or collation, ordering
+override, NULLS NOT DISTINCT behavior, storage options, tablespace, clustering,
+or replica-identity role. The selected key contract is stored in the reviewed
+copy operation. Its typed `CREATE UNIQUE INDEX` operation is part of the atomic
+pre-data intent and is re-attested before resume. Every other standalone index
+form is an explicit execution blocker.
+
 ## Configuration and security
 
 Endpoint files contain host, port, database, user, a credential environment
@@ -131,7 +141,7 @@ the complete report.
 
 The adapter does not yet prove:
 
-- unique-index key selection and rejected index-form matrices;
+- complete live rejection and drift matrices for unsupported index forms;
 - the complete fence failure-injection matrix, including legacy storage upgrades;
 - post-data indexes and broader DDL coverage;
 - unsupported foreign-key variants beyond the explicitly modeled subset;

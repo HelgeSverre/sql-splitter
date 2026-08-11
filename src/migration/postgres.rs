@@ -37,7 +37,7 @@ use super::plan::{
     UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
 };
 
-const CATALOG_FORMAT_VERSION: u32 = 1;
+pub(crate) const CATALOG_FORMAT_VERSION: u32 = 2;
 const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1143,6 +1143,46 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
             ));
         }
     }
+    for namespace in &catalog.namespaces {
+        let mut indexes = namespace
+            .objects
+            .iter()
+            .filter(|object| {
+                object.kind == CatalogObjectKind::Index
+                    && object
+                        .attributes
+                        .get("constraint_oid")
+                        .is_none_or(serde_json::Value::is_null)
+            })
+            .collect::<Vec<_>>();
+        indexes.sort_by(|left, right| left.name.cmp(&right.name));
+        for index in indexes {
+            let columns = standalone_unique_index_columns(index, Some(namespace))
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let table_oid = required_catalog_string(index, "table_oid")
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let table = namespace
+                .objects
+                .iter()
+                .find(|object| object.kind == CatalogObjectKind::Table && object.id == table_oid)
+                .ok_or_else(|| {
+                    ConnectionError::InvalidRequest(
+                        "standalone index refers to an unknown table".into(),
+                    )
+                })?;
+            statements.push(format!(
+                "CREATE UNIQUE INDEX {} ON {}.{} USING btree ({})",
+                quote_identifier(&index.name),
+                quote_identifier(&namespace.name),
+                quote_identifier(&table.name),
+                columns
+                    .iter()
+                    .map(quote_identifier)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
     Ok(statements)
 }
 
@@ -1800,6 +1840,54 @@ fn validate_resumable_key(
                      ON att.attrelid = con.conrelid AND att.attnum = key_col.attnum
                    ORDER BY key_col.position
                  ) = $3::text[]
+             ) OR EXISTS (
+               SELECT 1
+               FROM pg_index idx
+               JOIN pg_class index_rel ON index_rel.oid = idx.indexrelid
+               JOIN pg_class table_rel ON table_rel.oid = idx.indrelid
+               JOIN pg_namespace nsp ON nsp.oid = table_rel.relnamespace
+               JOIN pg_am am ON am.oid = index_rel.relam
+               LEFT JOIN pg_constraint con
+                 ON con.conindid = idx.indexrelid AND con.contype IN ('p','u','x')
+               WHERE nsp.nspname = $1
+                 AND table_rel.relname = $2
+                 AND idx.indisunique AND NOT idx.indisprimary
+                 AND idx.indisvalid AND idx.indisready AND idx.indislive
+                 AND idx.indimmediate AND NOT idx.indisexclusion
+                 AND NOT idx.indnullsnotdistinct
+                 AND NOT idx.indisclustered AND NOT idx.indisreplident
+                 AND con.oid IS NULL AND am.amname = 'btree'
+                 AND idx.indpred IS NULL AND idx.indexprs IS NULL
+                 AND idx.indnkeyatts = idx.indnatts
+                 AND idx.indnkeyatts = cardinality($3::text[])
+                 AND index_rel.relpersistence = 'p'
+                 AND index_rel.reloptions IS NULL AND index_rel.reltablespace = 0
+                 AND ARRAY(
+                   SELECT att.attname::text
+                   FROM unnest(idx.indkey::smallint[]) WITH ORDINALITY AS key_col(attnum, position)
+                   JOIN pg_attribute att
+                     ON att.attrelid = idx.indrelid AND att.attnum = key_col.attnum
+                   ORDER BY key_col.position
+                 ) = $3::text[]
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM unnest(idx.indkey::smallint[]) WITH ORDINALITY AS key_col(attnum, position)
+                   LEFT JOIN pg_attribute att
+                     ON att.attrelid = idx.indrelid AND att.attnum = key_col.attnum
+                   LEFT JOIN pg_collation coll ON coll.oid = att.attcollation
+                   JOIN unnest(idx.indoption::smallint[]) WITH ORDINALITY AS opt(value, position)
+                     USING (position)
+                   JOIN unnest(idx.indclass::oid[]) WITH ORDINALITY AS cls(oid, position)
+                     USING (position)
+                   JOIN pg_opclass opc ON opc.oid = cls.oid
+                   JOIN unnest(idx.indcollation::oid[]) WITH ORDINALITY AS idx_coll(oid, position)
+                     USING (position)
+                   WHERE att.attnum IS NULL OR NOT att.attnotnull
+                      OR opt.value <> 0 OR NOT opc.opcdefault
+                      OR idx_coll.oid <> att.attcollation
+                      OR (coll.collversion IS NOT NULL
+                          AND coll.collversion IS DISTINCT FROM pg_collation_actual_version(coll.oid))
+                 )
              )",
             &[&table.namespace.as_str(), &table.name.as_str(), &key_names],
         )
@@ -1807,7 +1895,7 @@ fn validate_resumable_key(
         .get(0);
     if !accepted {
         return Err(ConnectionError::InvalidRequest(format!(
-            "pagination key for {table:?} is not an exact validated non-null primary or unique constraint"
+            "pagination key for {table:?} is not the reviewed exact validated non-null primary key, unique constraint, or standalone unique index"
         )));
     }
     Ok(())
@@ -2311,9 +2399,27 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT 'index:' || i.indexrelid::text, n.nspname, ci.relname, 'index', pg_get_indexdef(i.indexrelid), jsonb_build_object('table_oid', 'relation:' || i.indrelid::text, 'unique', i.indisunique, 'primary', i.indisprimary, 'valid', i.indisvalid, 'ready', i.indisready)::text FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class ct ON ct.oid = i.indrelid JOIN pg_namespace n ON n.oid = ct.relnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, ci.relname",
+        "SELECT 'index:' || i.indexrelid::text, n.nspname, ci.relname, 'index', pg_get_indexdef(i.indexrelid), jsonb_build_object('table_oid', 'relation:' || i.indrelid::text, 'unique', i.indisunique, 'primary', i.indisprimary, 'valid', i.indisvalid, 'ready', i.indisready, 'live', i.indislive, 'immediate', i.indimmediate, 'clustered', i.indisclustered, 'replica_identity', i.indisreplident, 'exclusion', i.indisexclusion, 'nulls_not_distinct', i.indnullsnotdistinct, 'access_method', am.amname, 'persistence', ci.relpersistence::text, 'reloptions', to_jsonb(ci.reloptions), 'tablespace', CASE WHEN ci.reltablespace = 0 THEN NULL ELSE ts.spcname END, 'predicate', pg_get_expr(i.indpred, i.indrelid), 'has_expressions', i.indexprs IS NOT NULL, 'key_attribute_count', i.indnkeyatts, 'attribute_count', i.indnatts, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(i.indkey::smallint[]) WITH ORDINALITY keys(attnum, ordinality) LEFT JOIN pg_attribute att ON att.attrelid = i.indrelid AND att.attnum = keys.attnum WHERE keys.ordinality <= i.indnkeyatts), '[]'::jsonb), 'included_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(i.indkey::smallint[]) WITH ORDINALITY keys(attnum, ordinality) LEFT JOIN pg_attribute att ON att.attrelid = i.indrelid AND att.attnum = keys.attnum WHERE keys.ordinality > i.indnkeyatts), '[]'::jsonb), 'options', COALESCE((SELECT jsonb_agg(option_value ORDER BY options.ordinality) FROM unnest(i.indoption::smallint[]) WITH ORDINALITY options(option_value, ordinality)), '[]'::jsonb), 'opclasses', COALESCE((SELECT jsonb_agg(jsonb_build_object('schema', opn.nspname, 'name', opc.opcname, 'default', opc.opcdefault) ORDER BY classes.ordinality) FROM unnest(i.indclass::oid[]) WITH ORDINALITY classes(opclass_oid, ordinality) JOIN pg_opclass opc ON opc.oid = classes.opclass_oid JOIN pg_namespace opn ON opn.oid = opc.opcnamespace), '[]'::jsonb), 'collations', COALESCE((SELECT jsonb_agg(CASE WHEN classes.collation_oid = 0 THEN NULL ELSE jsonb_build_object('schema', colln.nspname, 'name', coll.collname) END ORDER BY classes.ordinality) FROM unnest(i.indcollation::oid[]) WITH ORDINALITY classes(collation_oid, ordinality) LEFT JOIN pg_collation coll ON coll.oid = classes.collation_oid LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace), '[]'::jsonb), 'collations_default', COALESCE((SELECT jsonb_agg(classes.collation_oid = att.attcollation ORDER BY classes.ordinality) FROM unnest(i.indcollation::oid[]) WITH ORDINALITY classes(collation_oid, ordinality) JOIN unnest(i.indkey::smallint[]) WITH ORDINALITY keys(attnum, ordinality) USING (ordinality) LEFT JOIN pg_attribute att ON att.attrelid = i.indrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'constraint_oid', CASE WHEN con.oid IS NULL THEN NULL ELSE 'constraint:' || con.oid::text END)::text FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class ct ON ct.oid = i.indrelid JOIN pg_namespace n ON n.oid = ct.relnamespace JOIN pg_am am ON am.oid = ci.relam LEFT JOIN pg_tablespace ts ON ts.oid = ci.reltablespace LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid AND con.contype IN ('p','u','x') WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, ci.relname, i.indexrelid",
         CatalogObjectKind::Index,
     )?;
+    for namespace in namespaces.values() {
+        for object in namespace.objects.iter().filter(|object| {
+            object.kind == CatalogObjectKind::Index
+                && object
+                    .attributes
+                    .get("constraint_oid")
+                    .is_none_or(serde_json::Value::is_null)
+        }) {
+            if let Err(error) = standalone_unique_index_columns(object, Some(namespace)) {
+                unsupported.push(UnsupportedObject {
+                    object_id: object.id.clone(),
+                    object_kind: "standalone_index".into(),
+                    reason: format!("standalone PostgreSQL index is not supported: {error}"),
+                    required_semantics: true,
+                });
+            }
+        }
+    }
 
     let trigger_rows = transaction.query(
         "SELECT 'trigger:' || t.oid::text, n.nspname, t.tgname, pg_get_triggerdef(t.oid, true), 'relation:' || c.oid::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE NOT t.tgisinternal AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, t.tgname, t.oid",
@@ -2590,6 +2696,7 @@ pub fn build_plan_with_consistency(
     let mut table_names = BTreeSet::new();
     let mut deferred_objects = Vec::new();
     let mut foreign_keys = Vec::new();
+    let mut standalone_indexes = Vec::new();
     for namespace in &source.catalog.namespaces {
         for object in &namespace.objects {
             if object.kind == CatalogObjectKind::Table {
@@ -2604,18 +2711,27 @@ pub fn build_plan_with_consistency(
                 deferred_objects.push((namespace.name.clone(), object.clone()));
             } else if object.kind == CatalogObjectKind::ForeignKey {
                 foreign_keys.push(object.clone());
+            } else if object.kind == CatalogObjectKind::Index
+                && object
+                    .attributes
+                    .get("constraint_oid")
+                    .is_none_or(serde_json::Value::is_null)
+                && standalone_unique_index_columns(object, Some(namespace)).is_ok()
+            {
+                standalone_indexes.push((namespace.name.clone(), object.clone()));
             }
         }
     }
     let mut copy_operations = BTreeMap::new();
+    let mut create_table_operations = BTreeMap::new();
     let mut key_unsupported = Vec::new();
     for table in table_names {
-        if !catalog_has_nonnull_constraint_key(&source.catalog, &table) {
+        let resumable_key = select_resumable_key(&source.catalog, &table);
+        if resumable_key.is_err() {
             key_unsupported.push(UnsupportedObject {
                 object_id: format!("resumable-key:{}.{}", table.namespace, table.name),
                 object_kind: "resumable_key".into(),
-                reason: "table has no complete validated non-null primary or unique constraint"
-                    .into(),
+                reason: "table has no complete validated non-null primary key, unique constraint, or supported standalone unique index".into(),
                 required_semantics: true,
             });
         }
@@ -2626,11 +2742,20 @@ pub fn build_plan_with_consistency(
             Vec::new(),
             parameters,
         )?;
+        create_table_operations.insert(table.clone(), create.id.clone());
+        let copy_parameters = resumable_key
+            .map(|key| {
+                BTreeMap::from([(
+                    "resumable_key".into(),
+                    serde_json::to_value(key).expect("resumable key serialization cannot fail"),
+                )])
+            })
+            .unwrap_or_default();
         let copy = PlanOperation::new(
             OperationKind::CopyTable,
             Some(table.clone()),
             vec![create.id.clone()],
-            BTreeMap::new(),
+            copy_parameters,
         )?;
         let verify = PlanOperation::new(
             OperationKind::VerifyTable,
@@ -2640,6 +2765,71 @@ pub fn build_plan_with_consistency(
         )?;
         copy_operations.insert(table.clone(), copy.id.clone());
         operations.extend([create, copy, verify]);
+    }
+    standalone_indexes.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.name.cmp(&right.1.name))
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
+    for (_, index) in standalone_indexes {
+        let table = qualified_table_for_oid(
+            &source.catalog,
+            required_catalog_string(&index, "table_oid")?,
+        )?;
+        let create_table =
+            create_table_operations
+                .get(&table)
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "standalone index table has no create-table operation",
+                ))?;
+        let create_index = PlanOperation::new(
+            OperationKind::CreateIndex,
+            Some(table.clone()),
+            vec![create_table.clone()],
+            BTreeMap::from([("catalog_object".into(), serde_json::to_value(&index)?)]),
+        )?;
+        let copy_position = operations
+            .iter()
+            .position(|operation| {
+                operation.kind == OperationKind::CopyTable
+                    && operation.table.as_ref() == Some(&table)
+            })
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "standalone index table has no copy operation",
+            ))?;
+        let old_copy = operations[copy_position].clone();
+        let mut dependencies = old_copy.dependencies.clone();
+        if dependencies.is_empty() {
+            dependencies.push(create_table.clone());
+        }
+        dependencies.push(create_index.id.clone());
+        let replacement = PlanOperation::new(
+            OperationKind::CopyTable,
+            Some(table.clone()),
+            dependencies,
+            old_copy.parameters,
+        )?;
+        let verify_position = operations
+            .iter()
+            .position(|operation| {
+                operation.kind == OperationKind::VerifyTable
+                    && operation.table.as_ref() == Some(&table)
+            })
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "standalone index table has no verify operation",
+            ))?;
+        let old_verify = operations[verify_position].clone();
+        let replacement_verify = PlanOperation::new(
+            OperationKind::VerifyTable,
+            Some(table.clone()),
+            vec![replacement.id.clone()],
+            old_verify.parameters,
+        )?;
+        operations[copy_position] = replacement.clone();
+        operations[verify_position] = replacement_verify;
+        copy_operations.insert(table, replacement.id);
+        operations.push(create_index);
     }
     foreign_keys.sort_by(|left, right| left.id.cmp(&right.id));
     for foreign_key in foreign_keys {
@@ -2759,20 +2949,35 @@ pub fn build_plan_with_consistency(
     .map_err(PostgresPlanError::from)
 }
 
-fn catalog_has_nonnull_constraint_key(catalog: &VendorCatalog, table: &QualifiedTable) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PostgresResumableKey {
+    pub catalog_object_id: String,
+    pub kind: String,
+    pub columns: Vec<Identifier>,
+}
+
+pub(crate) fn select_resumable_key(
+    catalog: &VendorCatalog,
+    table: &QualifiedTable,
+) -> Result<PostgresResumableKey, PostgresPlanError> {
     let Some(namespace) = catalog
         .namespaces
         .iter()
         .find(|namespace| namespace.name == table.namespace)
     else {
-        return false;
+        return Err(PostgresPlanError::InvalidConfig(
+            "resumable-key table namespace is absent",
+        ));
     };
     let Some(table_object) = namespace
         .objects
         .iter()
         .find(|object| object.kind == CatalogObjectKind::Table && object.name == table.name)
     else {
-        return false;
+        return Err(PostgresPlanError::InvalidConfig(
+            "resumable-key table is absent",
+        ));
     };
     let columns = namespace
         .objects
@@ -2786,40 +2991,238 @@ fn catalog_has_nonnull_constraint_key(catalog: &VendorCatalog, table: &Qualified
                     == Some(table_object.id.as_str())
         })
         .collect::<Vec<_>>();
-    namespace.objects.iter().any(|object| {
-        matches!(
-            object.kind,
-            CatalogObjectKind::PrimaryKey | CatalogObjectKind::UniqueConstraint
-        ) && object
-            .attributes
-            .get("table_oid")
-            .and_then(serde_json::Value::as_str)
-            == Some(table_object.id.as_str())
-            && object
+    let mut candidates = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object
                 .attributes
-                .get("validated")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            && object
-                .attributes
-                .get("columns")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|key_columns| {
-                    !key_columns.is_empty()
-                        && key_columns.iter().all(|key_name| {
-                            key_name.as_str().is_some_and(|key_name| {
-                                columns.iter().any(|column| {
-                                    column.name.as_str() == key_name
-                                        && !column
-                                            .attributes
-                                            .get("nullable")
-                                            .and_then(serde_json::Value::as_bool)
-                                            .unwrap_or(true)
-                                })
-                            })
-                        })
+                .get("table_oid")
+                .and_then(serde_json::Value::as_str)
+                == Some(table_object.id.as_str())
+        })
+        .filter_map(|object| {
+            let (rank, kind, names) = match object.kind {
+                CatalogObjectKind::PrimaryKey | CatalogObjectKind::UniqueConstraint
+                    if object
+                        .attributes
+                        .get("validated")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    let rank = if object.kind == CatalogObjectKind::PrimaryKey {
+                        0
+                    } else {
+                        1
+                    };
+                    let kind = if rank == 0 {
+                        "primary_key"
+                    } else {
+                        "unique_constraint"
+                    };
+                    (
+                        rank,
+                        kind,
+                        catalog_identifier_array(object, "columns").ok()?,
+                    )
+                }
+                CatalogObjectKind::Index => (
+                    2,
+                    "standalone_unique_index",
+                    standalone_unique_index_columns(object, Some(namespace)).ok()?,
+                ),
+                _ => return None,
+            };
+            if names.is_empty()
+                || names.iter().any(|name| {
+                    !columns.iter().any(|column| {
+                        column.name == *name
+                            && !column
+                                .attributes
+                                .get("nullable")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(true)
+                    })
                 })
+            {
+                return None;
+            }
+            Some((
+                rank,
+                names.len(),
+                names.clone(),
+                object.name.clone(),
+                object.id.as_str(),
+                kind,
+                names,
+            ))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        (&left.0, &left.1, &left.2, &left.3, &left.4)
+            .cmp(&(&right.0, &right.1, &right.2, &right.3, &right.4))
+    });
+    let (_, _, _, _, object_id, kind, columns) =
+        candidates
+            .into_iter()
+            .next()
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "table has no safe resumable key",
+            ))?;
+    Ok(PostgresResumableKey {
+        catalog_object_id: object_id.into(),
+        kind: kind.into(),
+        columns,
     })
+}
+
+fn catalog_identifier_array(
+    object: &CatalogObject,
+    attribute: &'static str,
+) -> Result<Vec<Identifier>, PostgresPlanError> {
+    object
+        .attributes
+        .get(attribute)
+        .and_then(serde_json::Value::as_array)
+        .ok_or(PostgresPlanError::InvalidConfig(attribute))?
+        .iter()
+        .map(|value| {
+            Identifier::new(
+                value
+                    .as_str()
+                    .ok_or(PostgresPlanError::InvalidConfig(attribute))?,
+            )
+            .map_err(PostgresPlanError::from)
+        })
+        .collect()
+}
+
+fn standalone_unique_index_columns(
+    object: &CatalogObject,
+    namespace: Option<&CatalogNamespace>,
+) -> Result<Vec<Identifier>, PostgresPlanError> {
+    for (attribute, expected) in [
+        ("unique", true),
+        ("primary", false),
+        ("valid", true),
+        ("ready", true),
+        ("live", true),
+        ("immediate", true),
+        ("clustered", false),
+        ("replica_identity", false),
+        ("exclusion", false),
+        ("nulls_not_distinct", false),
+        ("has_expressions", false),
+    ] {
+        if object
+            .attributes
+            .get(attribute)
+            .and_then(serde_json::Value::as_bool)
+            != Some(expected)
+        {
+            return Err(PostgresPlanError::InvalidConfig(attribute));
+        }
+    }
+    if object
+        .attributes
+        .get("access_method")
+        .and_then(serde_json::Value::as_str)
+        != Some("btree")
+        || object
+            .attributes
+            .get("predicate")
+            .is_some_and(|value| !value.is_null())
+        || object
+            .attributes
+            .get("constraint_oid")
+            .is_some_and(|value| !value.is_null())
+        || object
+            .attributes
+            .get("persistence")
+            .and_then(serde_json::Value::as_str)
+            != Some("p")
+        || object
+            .attributes
+            .get("reloptions")
+            .is_some_and(|value| !value.is_null())
+        || object
+            .attributes
+            .get("tablespace")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(PostgresPlanError::InvalidConfig("standalone index shape"));
+    }
+    let columns = catalog_identifier_array(object, "columns")?;
+    if columns.is_empty()
+        || object
+            .attributes
+            .get("key_attribute_count")
+            .and_then(serde_json::Value::as_u64)
+            != u64::try_from(columns.len()).ok()
+        || object
+            .attributes
+            .get("attribute_count")
+            .and_then(serde_json::Value::as_u64)
+            != u64::try_from(columns.len()).ok()
+        || !object
+            .attributes
+            .get("included_columns")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+        || !object
+            .attributes
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| {
+                values.len() == columns.len() && values.iter().all(|v| v.as_i64() == Some(0))
+            })
+        || !object
+            .attributes
+            .get("collations_default")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| {
+                values.len() == columns.len()
+                    && values.iter().all(|value| value.as_bool() == Some(true))
+            })
+        || !object
+            .attributes
+            .get("opclasses")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| {
+                values.len() == columns.len()
+                    && values.iter().all(|value| {
+                        value.get("default").and_then(serde_json::Value::as_bool) == Some(true)
+                    })
+            })
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "standalone index is not a plain default-btree index",
+        ));
+    }
+    if let Some(namespace) = namespace {
+        let table_oid = required_catalog_string(object, "table_oid")?;
+        if columns.iter().any(|name| {
+            !namespace.objects.iter().any(|column| {
+                column.kind == CatalogObjectKind::Column
+                    && column.name == *name
+                    && column
+                        .attributes
+                        .get("table_oid")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(table_oid)
+                    && !column
+                        .attributes
+                        .get("nullable")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true)
+            })
+        }) {
+            return Err(PostgresPlanError::InvalidConfig(
+                "standalone unique index contains a nullable or unknown column",
+            ));
+        }
+    }
+    Ok(columns)
 }
 
 fn required_catalog_string<'a>(
@@ -3238,5 +3641,175 @@ credential_env = "PGPASSWORD"
             vendor_metadata: BTreeMap::new(),
         };
         assert!(postgres_foreign_keys(&catalog).is_err());
+    }
+
+    fn key_catalog(objects: Vec<CatalogObject>) -> VendorCatalog {
+        let mut all = vec![
+            CatalogObject {
+                id: "relation:1".into(),
+                kind: CatalogObjectKind::Table,
+                name: Identifier::new("accounts").unwrap(),
+                definition: Vec::new(),
+                attributes: BTreeMap::from([
+                    ("relkind".into(), serde_json::json!("r")),
+                    ("persistence".into(), serde_json::json!("p")),
+                ]),
+            },
+            CatalogObject {
+                id: "column:1:1".into(),
+                kind: CatalogObjectKind::Column,
+                name: Identifier::new("id").unwrap(),
+                definition: b"bigint".to_vec(),
+                attributes: BTreeMap::from([
+                    ("table_oid".into(), serde_json::json!("relation:1")),
+                    ("ordinal".into(), serde_json::json!(1)),
+                    ("nullable".into(), serde_json::json!(false)),
+                    ("identity".into(), serde_json::json!("")),
+                    ("generated".into(), serde_json::json!("")),
+                    ("type_schema".into(), serde_json::json!("pg_catalog")),
+                ]),
+            },
+        ];
+        all.extend(objects);
+        VendorCatalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            dialect: "postgresql".into(),
+            server_version: "17".into(),
+            database: Identifier::new("source").unwrap(),
+            namespaces: vec![CatalogNamespace {
+                id: "namespace:public".into(),
+                name: Identifier::new("public").unwrap(),
+                owner: None,
+                charset: Some("UTF8".into()),
+                collation: None,
+                objects: all,
+            }],
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        }
+    }
+
+    fn standalone_index(id: &str) -> CatalogObject {
+        CatalogObject {
+            id: id.into(),
+            kind: CatalogObjectKind::Index,
+            name: Identifier::new("accounts_id_uidx").unwrap(),
+            definition: b"CREATE UNIQUE INDEX accounts_id_uidx ON public.accounts USING btree (id)"
+                .to_vec(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("unique".into(), serde_json::json!(true)),
+                ("primary".into(), serde_json::json!(false)),
+                ("valid".into(), serde_json::json!(true)),
+                ("ready".into(), serde_json::json!(true)),
+                ("live".into(), serde_json::json!(true)),
+                ("immediate".into(), serde_json::json!(true)),
+                ("clustered".into(), serde_json::json!(false)),
+                ("replica_identity".into(), serde_json::json!(false)),
+                ("exclusion".into(), serde_json::json!(false)),
+                ("nulls_not_distinct".into(), serde_json::json!(false)),
+                ("access_method".into(), serde_json::json!("btree")),
+                ("persistence".into(), serde_json::json!("p")),
+                ("reloptions".into(), serde_json::Value::Null),
+                ("tablespace".into(), serde_json::Value::Null),
+                ("predicate".into(), serde_json::Value::Null),
+                ("has_expressions".into(), serde_json::json!(false)),
+                ("key_attribute_count".into(), serde_json::json!(1)),
+                ("attribute_count".into(), serde_json::json!(1)),
+                ("columns".into(), serde_json::json!(["id"])),
+                ("included_columns".into(), serde_json::json!([])),
+                ("options".into(), serde_json::json!([0])),
+                (
+                    "opclasses".into(),
+                    serde_json::json!([{"schema":"pg_catalog","name":"int8_ops","default":true}]),
+                ),
+                ("collations".into(), serde_json::json!([null])),
+                ("collations_default".into(), serde_json::json!([true])),
+                ("constraint_oid".into(), serde_json::Value::Null),
+            ]),
+        }
+    }
+
+    #[test]
+    fn standalone_unique_index_is_a_typed_pre_data_operation_and_persisted_key() {
+        let source_catalog = key_catalog(vec![standalone_index("index:9")]);
+        let source = CatalogSnapshot {
+            endpoint_identity: "source".into(),
+            server_version: "17".into(),
+            server_version_num: 170000,
+            catalog: source_catalog,
+            unsupported: UnsupportedObjectReport::default(),
+            tls_binding: "tls-source".into(),
+        };
+        let mut target = snapshot("target", false);
+        target.catalog.format_version = CATALOG_FORMAT_VERSION;
+        let reviewed = build_plan(&source, &target).unwrap();
+        reviewed.validate().unwrap();
+        let create_index = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CreateIndex)
+            .unwrap();
+        assert!(create_index.parameters.contains_key("catalog_object"));
+        let copy = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CopyTable)
+            .unwrap();
+        assert!(copy.dependencies.contains(&create_index.id));
+        let key: PostgresResumableKey =
+            serde_json::from_value(copy.parameters["resumable_key"].clone()).unwrap();
+        assert_eq!(key.catalog_object_id, "index:9");
+        assert_eq!(key.kind, "standalone_unique_index");
+        assert_eq!(key.columns, vec![Identifier::new("id").unwrap()]);
+    }
+
+    #[test]
+    fn resumable_key_ranking_prefers_primary_key_and_rejects_index_variants() {
+        let primary = CatalogObject {
+            id: "constraint:20".into(),
+            kind: CatalogObjectKind::PrimaryKey,
+            name: Identifier::new("accounts_pkey").unwrap(),
+            definition: b"PRIMARY KEY (id)".to_vec(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("validated".into(), serde_json::json!(true)),
+                ("columns".into(), serde_json::json!(["id"])),
+            ]),
+        };
+        let catalog = key_catalog(vec![standalone_index("index:1"), primary]);
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("accounts").unwrap(),
+        };
+        assert_eq!(
+            select_resumable_key(&catalog, &table)
+                .unwrap()
+                .catalog_object_id,
+            "constraint:20"
+        );
+
+        for (attribute, value) in [
+            ("unique", serde_json::json!(false)),
+            ("access_method", serde_json::json!("hash")),
+            ("predicate", serde_json::json!("id > 0")),
+            ("has_expressions", serde_json::json!(true)),
+            ("included_columns", serde_json::json!(["payload"])),
+            ("options", serde_json::json!([1])),
+            (
+                "opclasses",
+                serde_json::json!([{"schema":"public","name":"custom_ops","default":false}]),
+            ),
+        ] {
+            let mut index = standalone_index("index:bad");
+            index.attributes.insert(attribute.into(), value);
+            assert!(standalone_unique_index_columns(
+                &index,
+                Some(&key_catalog(Vec::new()).namespaces[0])
+            )
+            .is_err());
+        }
     }
 }

@@ -432,12 +432,15 @@ impl MigrationState {
                         dependency: dependency.clone(),
                     });
                 }
+                let dependency_state = self
+                    .operations
+                    .iter()
+                    .find(|candidate| candidate.operation_id == *dependency)
+                    .map(|candidate| &candidate.state);
                 if operation.state != OperationState::Pending
-                    && self
-                        .operations
-                        .iter()
-                        .find(|candidate| candidate.operation_id == *dependency)
-                        .is_none_or(|candidate| candidate.state != OperationState::Verified)
+                    && dependency_state != Some(&OperationState::Verified)
+                    && !(operation.state == OperationState::Prepared
+                        && dependency_state == Some(&OperationState::Prepared))
                 {
                     return Err(JournalError::OperationDependencyIncomplete {
                         operation_id: operation.operation_id.clone(),
@@ -654,10 +657,12 @@ impl MigrationState {
                 })?;
             if operation.state != OperationState::Pending
                 || operation.dependencies.iter().any(|dependency| {
-                    self.operations
-                        .iter()
-                        .find(|candidate| candidate.operation_id == *dependency)
-                        .is_none_or(|candidate| candidate.state != OperationState::Verified)
+                    !operation_ids.contains(dependency.as_str())
+                        && self
+                            .operations
+                            .iter()
+                            .find(|candidate| candidate.operation_id == *dependency)
+                            .is_none_or(|candidate| candidate.state != OperationState::Verified)
                 })
             {
                 return Err(JournalError::InvalidOperationTransition {
@@ -674,6 +679,29 @@ impl MigrationState {
     }
 
     pub fn commit_prepared_operation(&mut self, operation_id: &str) -> Result<(), JournalError> {
+        let dependencies = self
+            .operations
+            .iter()
+            .find(|operation| operation.operation_id == operation_id)
+            .ok_or_else(|| JournalError::UnknownOperation {
+                chunk_id: 0,
+                operation_id: operation_id.into(),
+            })?
+            .dependencies
+            .clone();
+        for dependency in dependencies {
+            if self
+                .operations
+                .iter()
+                .find(|operation| operation.operation_id == dependency)
+                .is_none_or(|operation| operation.state != OperationState::Verified)
+            {
+                return Err(JournalError::OperationDependencyIncomplete {
+                    operation_id: operation_id.into(),
+                    dependency,
+                });
+            }
+        }
         self.transition_operation(
             operation_id,
             OperationState::Prepared,
@@ -1125,7 +1153,7 @@ mod tests {
             binding(),
             [
                 ("create-a".to_owned(), Vec::new()),
-                ("create-b".to_owned(), Vec::new()),
+                ("create-b".to_owned(), vec!["create-a".to_owned()]),
             ],
         )
         .unwrap();
@@ -1139,6 +1167,10 @@ mod tests {
         assert!(matches!(
             state.start_operation("create-a"),
             Err(JournalError::InvalidMigrationStatus | JournalError::MultipleRunningOperations)
+        ));
+        assert!(matches!(
+            state.commit_prepared_operation("create-b"),
+            Err(JournalError::OperationDependencyIncomplete { .. })
         ));
         state.commit_prepared_operation("create-a").unwrap();
         state.verify_operation("create-a").unwrap();

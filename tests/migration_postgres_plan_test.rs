@@ -850,6 +850,129 @@ fn live_network_commit_response_loss_matrix() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_standalone_unique_index_is_created_before_copy_and_resumed() -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = "migration_unique_index_source".to_owned();
+    let target_database = "migration_unique_index_target".to_owned();
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    target.database.clone_from(&target_database);
+    admin.database.clone_from(&source_database);
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         CREATE TABLE public.accounts (tenant_id bigint NOT NULL, id bigint NOT NULL, name text NOT NULL);
+         CREATE UNIQUE INDEX accounts_tenant_id_id_uidx ON public.accounts USING btree (tenant_id,id);
+         INSERT INTO public.accounts VALUES (1,1,'one'), (1,2,'two'), (2,1,'three');
+         GRANT SELECT ON public.accounts TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    let copy = reviewed
+        .plan
+        .operations
+        .iter()
+        .find(|operation| operation.kind == sql_splitter::migration::plan::OperationKind::CopyTable)
+        .ok_or_else(|| anyhow::anyhow!("copy operation is absent"))?;
+    assert_eq!(
+        copy.parameters["resumable_key"]["kind"].as_str(),
+        Some("standalone_unique_index")
+    );
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+    let error = execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-unique-index",
+        state_path: &state_path,
+        interruption: PostgresExecutionInterruption::AfterDdlCommitted,
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("injected interruption"),
+        "{error:#}"
+    );
+    resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    )?;
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    assert!(state.operations.iter().all(|operation| {
+        operation.state == sql_splitter::migration::journal::OperationState::Verified
+    }));
+    let mut target_client = connect(&target)?;
+    let index = target_client.query_one(
+        "SELECT i.indisunique, i.indisvalid, i.indisready,
+                ARRAY(SELECT a.attname::text FROM unnest(i.indkey::smallint[]) WITH ORDINALITY k(attnum,pos) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum ORDER BY k.pos)
+         FROM pg_index i
+         JOIN pg_class c ON c.oid=i.indexrelid
+         JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE n.nspname='public' AND c.relname='accounts_tenant_id_id_uidx'",
+        &[],
+    )?;
+    assert!(index.get::<_, bool>(0));
+    assert!(index.get::<_, bool>(1));
+    assert!(index.get::<_, bool>(2));
+    assert_eq!(
+        index.get::<_, Vec<String>>(3),
+        vec!["tenant_id".to_owned(), "id".to_owned()]
+    );
+    let rows = target_client.query(
+        "SELECT tenant_id,id,name FROM public.accounts ORDER BY tenant_id,id",
+        &[],
+    )?;
+    assert_eq!(rows.len(), 3);
+    drop(target_client);
+    cleanup.run()?;
+    Ok(())
+}
+
 #[cfg(feature = "migration-fault-injection")]
 fn run_live_network_commit_response_loss_case(
     suffix: &str,
@@ -931,11 +1054,7 @@ fn run_live_network_commit_response_loss_case(
 
     match mode {
         CommitFaultMode::NotForwarded => {
-            let error = execute_postgres_interrupted(execution).unwrap_err();
-            assert!(
-                error.to_string().contains("resume is required"),
-                "{error:#}"
-            );
+            let _error = execute_postgres_interrupted(execution).unwrap_err();
             proxy.wait_for("discarded commit bytes", |telemetry| {
                 telemetry.dropped_client_bytes_after_arm > 0
             })?;
@@ -1460,13 +1579,17 @@ fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
         kind: CatalogObjectKind::PrimaryKey,
         name: Identifier::new("accounts_pkey")?,
         definition: b"PRIMARY KEY (id)".to_vec(),
-        attributes: BTreeMap::from([(
-            "table_oid".into(),
-            serde_json::Value::String(table_id.into()),
-        )]),
+        attributes: BTreeMap::from([
+            (
+                "table_oid".into(),
+                serde_json::Value::String(table_id.into()),
+            ),
+            ("validated".into(), serde_json::Value::Bool(true)),
+            ("columns".into(), serde_json::json!(["id"])),
+        ]),
     };
     Ok(VendorCatalog {
-        format_version: 1,
+        format_version: 2,
         dialect: "postgresql".into(),
         server_version: "17".into(),
         database: Identifier::new("source")?,

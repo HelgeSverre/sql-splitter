@@ -149,7 +149,7 @@ fn spawn_data_acceptor(
                         if let Err(error) =
                             proxy_connection(connection_id, downstream, upstream, state.clone())
                         {
-                            record_error(&state, error);
+                            record_connection_error(&state, connection_id, error);
                         }
                     });
                 }
@@ -349,6 +349,30 @@ fn shutdown_pair(first: &TcpStream, second: &TcpStream) {
 
 fn record_error(state: &Arc<Mutex<ProxyState>>, error: anyhow::Error) {
     if let Ok(mut state) = state.lock() {
+        state.error.get_or_insert_with(|| format!("{error:#}"));
+    }
+}
+
+fn record_connection_error(
+    state: &Arc<Mutex<ProxyState>>,
+    connection_id: u64,
+    error: anyhow::Error,
+) {
+    if let Ok(mut state) = state.lock() {
+        let expected_fault_disconnect = state.armed_connection == Some(connection_id)
+            && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected
+                        | ErrorKind::UnexpectedEof
+                )
+            });
+        if expected_fault_disconnect {
+            return;
+        }
         state.error.get_or_insert_with(|| format!("{error:#}"));
     }
 }

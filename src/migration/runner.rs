@@ -29,8 +29,9 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
     catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_tls_binding,
-    PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
-    PostgresSourceFactory, PostgresTargetFactory,
+    select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey,
+    PostgresForeignKeyState, PostgresResumableKey, PostgresSourceFactory, PostgresTargetFactory,
+    CATALOG_FORMAT_VERSION,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
@@ -393,7 +394,7 @@ fn resume_postgres_fenced_plan_internal(
             .table
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
-        let shape = table_shape(&source_catalog, table)?;
+        let shape = table_shape(&source_catalog, table, Some(operation))?;
         let operation_state = operation_state(&state, operation.id.as_str())?;
         if matches!(
             operation_state,
@@ -551,7 +552,7 @@ fn resume_postgres_fenced_plan_internal(
             .table
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
-        let shape = table_shape(&source_catalog, table)?;
+        let shape = table_shape(&source_catalog, table, Some(operation))?;
         verify_live_table(
             reader.as_mut(),
             verifier.as_mut(),
@@ -786,7 +787,12 @@ fn execute_postgres_plan_internal(
         .plan
         .operations
         .iter()
-        .filter(|operation| operation.kind == OperationKind::CreateTable)
+        .filter(|operation| {
+            matches!(
+                operation.kind,
+                OperationKind::CreateTable | OperationKind::CreateIndex
+            )
+        })
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
     state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
@@ -829,7 +835,7 @@ fn execute_postgres_plan_internal(
             .table
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
-        let shape = table_shape(&source_catalog, table)?;
+        let shape = table_shape(&source_catalog, table, Some(operation))?;
         state.start_operation(operation.id.as_str())?;
         replace_json(state_path, &state)?;
         let mut after = None;
@@ -950,7 +956,7 @@ fn execute_postgres_plan_internal(
             .table
             .as_ref()
             .ok_or_else(|| anyhow!("validated copy operation lost its table"))?;
-        let shape = table_shape(&source_catalog, table)?;
+        let shape = table_shape(&source_catalog, table, Some(operation))?;
         verify_live_table(
             reader.as_mut(),
             verifier.as_mut(),
@@ -1249,7 +1255,12 @@ fn resume_pre_data_schema(
         .plan
         .operations
         .iter()
-        .filter(|operation| operation.kind == OperationKind::CreateTable)
+        .filter(|operation| {
+            matches!(
+                operation.kind,
+                OperationKind::CreateTable | OperationKind::CreateIndex
+            )
+        })
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
     let states = create_ids
@@ -1335,7 +1346,7 @@ fn target_planned_tables_are_empty(
                 namespace: namespace.name.clone(),
                 name: object.name.clone(),
             };
-            let shape = table_shape(source_catalog, &table)?;
+            let shape = table_shape(source_catalog, &table, None)?;
             let rows = verifier.select_page(&KeysetPage {
                 table,
                 projection: shape.projection,
@@ -1558,6 +1569,7 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         if !matches!(
             operation.kind,
             OperationKind::CreateTable
+                | OperationKind::CreateIndex
                 | OperationKind::CopyTable
                 | OperationKind::CheckForeignKey
                 | OperationKind::AddForeignKey
@@ -1572,6 +1584,7 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         if matches!(
             operation.kind,
             OperationKind::CreateTable
+                | OperationKind::CreateIndex
                 | OperationKind::CopyTable
                 | OperationKind::CheckForeignKey
                 | OperationKind::AddForeignKey
@@ -1667,6 +1680,12 @@ fn validate_copy_table_shapes(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
 ) -> anyhow::Result<()> {
+    if catalog.format_version != CATALOG_FORMAT_VERSION {
+        return Err(anyhow!(
+            "unsupported PostgreSQL catalog format version {}",
+            catalog.format_version
+        ));
+    }
     for operation in reviewed
         .plan
         .operations
@@ -1677,13 +1696,17 @@ fn validate_copy_table_shapes(
             .table
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
-        table_shape(catalog, table)
+        table_shape(catalog, table, Some(operation))
             .with_context(|| format!("table {table:?} has no safe resumable key"))?;
     }
     Ok(())
 }
 
-fn table_shape(catalog: &VendorCatalog, table: &QualifiedTable) -> anyhow::Result<TableShape> {
+fn table_shape(
+    catalog: &VendorCatalog,
+    table: &QualifiedTable,
+    operation: Option<&PlanOperation>,
+) -> anyhow::Result<TableShape> {
     let namespace = catalog
         .namespaces
         .iter()
@@ -1720,82 +1743,38 @@ fn table_shape(catalog: &VendorCatalog, table: &QualifiedTable) -> anyhow::Resul
         .iter()
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
-    let mut key_candidates = namespace
-        .objects
-        .iter()
-        .filter(|object| {
-            matches!(
-                object.kind,
-                CatalogObjectKind::PrimaryKey | CatalogObjectKind::UniqueConstraint
-            ) && object
-                .attributes
-                .get("table_oid")
-                .and_then(serde_json::Value::as_str)
-                == Some(table_object.id.as_str())
-        })
-        .collect::<Vec<_>>();
-    key_candidates.sort_by_key(|object| {
-        (
-            if object.kind == CatalogObjectKind::PrimaryKey {
-                0
-            } else {
-                1
-            },
-            object.id.as_str(),
+    let selected = select_resumable_key(catalog, table)
+        .map_err(|error| anyhow!("cannot select resumable key: {error}"))?;
+    if let Some(operation) = operation {
+        let persisted: PostgresResumableKey = serde_json::from_value(
+            operation
+                .parameters
+                .get("resumable_key")
+                .cloned()
+                .ok_or_else(|| anyhow!("copy operation has no persisted resumable key"))?,
         )
-    });
-    if key_candidates.is_empty() {
-        return Err(anyhow!("table has no resumable primary or unique key"));
-    }
-    for key_object in key_candidates {
-        let Some(key_names) = key_object
-            .attributes
-            .get("columns")
-            .and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-        if key_names.is_empty() {
-            continue;
+        .context("copy operation has an invalid persisted resumable key")?;
+        if persisted != selected {
+            return Err(anyhow!(
+                "copy operation resumable key differs from deterministic catalog selection"
+            ));
         }
-        let mut key = Vec::with_capacity(key_names.len());
-        let mut key_indexes = Vec::with_capacity(key_names.len());
-        let mut suitable = true;
-        for name in key_names {
-            let Some(name) = name.as_str() else {
-                suitable = false;
-                break;
-            };
-            let Some(index) = columns
+    }
+    let key_indexes = selected
+        .columns
+        .iter()
+        .map(|name| {
+            columns
                 .iter()
-                .position(|column| column.name.as_str() == name)
-            else {
-                suitable = false;
-                break;
-            };
-            if columns[index]
-                .attributes
-                .get("nullable")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true)
-            {
-                suitable = false;
-                break;
-            }
-            key.push(columns[index].name.clone());
-            key_indexes.push(index);
-        }
-        if suitable {
-            return Ok(TableShape {
-                projection,
-                key,
-                key_indexes,
-            });
-        }
-    }
-    Err(anyhow!(
-        "table has no complete non-null resumable primary or unique key"
-    ))
+                .position(|column| column.name == *name)
+                .ok_or_else(|| anyhow!("selected resumable-key column is absent"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(TableShape {
+        projection,
+        key: selected.columns,
+        key_indexes,
+    })
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1991,7 +1970,12 @@ fn schema_projection(
                         | CatalogObjectKind::PrimaryKey
                         | CatalogObjectKind::UniqueConstraint
                         | CatalogObjectKind::CheckConstraint
-                ) || (include_foreign_keys && object.kind == CatalogObjectKind::ForeignKey)
+                ) || (object.kind == CatalogObjectKind::Index
+                    && object
+                        .attributes
+                        .get("constraint_oid")
+                        .is_none_or(serde_json::Value::is_null))
+                    || (include_foreign_keys && object.kind == CatalogObjectKind::ForeignKey)
             })
             .map(|object| {
                 let definition = String::from_utf8(object.definition.clone())
@@ -2009,6 +1993,11 @@ fn schema_projection(
                         "identity": object.attributes.get("identity"),
                         "generated": object.attributes.get("generated"),
                         "collation": object.attributes.get("collation"),
+                        "collation_schema": object.attributes.get("collation_schema"),
+                        "collation_provider": object.attributes.get("collation_provider"),
+                        "collation_deterministic": object.attributes.get("collation_deterministic"),
+                        "collation_version": object.attributes.get("collation_version"),
+                        "collation_actual_version": object.attributes.get("collation_actual_version"),
                         "type_schema": object.attributes.get("type_schema"),
                         "type_name": object.attributes.get("type_name"),
                     }),
@@ -2026,6 +2015,35 @@ fn schema_projection(
                         "validated": object.attributes.get("validated"),
                         "deferrable": object.attributes.get("deferrable"),
                         "deferred": object.attributes.get("deferred"),
+                    }),
+                    CatalogObjectKind::Index => serde_json::json!({
+                        "table": object.attributes
+                            .get("table_oid")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|oid| table_names.get(oid)),
+                        "unique": object.attributes.get("unique"),
+                        "primary": object.attributes.get("primary"),
+                        "valid": object.attributes.get("valid"),
+                        "ready": object.attributes.get("ready"),
+                        "live": object.attributes.get("live"),
+                        "immediate": object.attributes.get("immediate"),
+                        "clustered": object.attributes.get("clustered"),
+                        "replica_identity": object.attributes.get("replica_identity"),
+                        "exclusion": object.attributes.get("exclusion"),
+                        "nulls_not_distinct": object.attributes.get("nulls_not_distinct"),
+                        "access_method": object.attributes.get("access_method"),
+                        "persistence": object.attributes.get("persistence"),
+                        "reloptions": object.attributes.get("reloptions"),
+                        "tablespace": object.attributes.get("tablespace"),
+                        "predicate": object.attributes.get("predicate"),
+                        "has_expressions": object.attributes.get("has_expressions"),
+                        "columns": object.attributes.get("columns"),
+                        "included_columns": object.attributes.get("included_columns"),
+                        "options": object.attributes.get("options"),
+                        "opclasses": object.attributes.get("opclasses"),
+                        "collations": object.attributes.get("collations"),
+                        "collations_default": object.attributes.get("collations_default"),
+                        "constraint_oid": object.attributes.get("constraint_oid"),
                     }),
                     _ => serde_json::json!({
                         "type": object.attributes.get("type"),

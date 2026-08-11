@@ -2,6 +2,7 @@
 set -euo pipefail
 
 postgres_version="${1:-17}"
+only_test="${2:-}"
 container="sqlspl-migration-pg-${postgres_version}-$$"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-migration-pg.XXXXXX")"
 port="$(ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close')"
@@ -211,6 +212,12 @@ export SQL_SPLITTER_PG_FENCE_ADMIN_PASSWORD=fence-admin-secret
 export SQL_SPLITTER_PG_FENCE_TARGET_PASSWORD=fence-target-secret
 export SQL_SPLITTER_PG_MTLS_PASSWORD=unused
 
+if [[ -n "$only_test" ]]; then
+  cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+    --test migration_postgres_plan_test "$only_test" -- --ignored --exact
+  exit 0
+fi
+
 test_name=live_mutual_tls_requires_valid_client_identity
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
@@ -276,6 +283,9 @@ test_name=live_write_fence_recovery_boundary_matrix
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_network_commit_response_loss_matrix
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_standalone_unique_index_is_created_before_copy_and_resumed
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_foreign_keys_are_checked_added_and_database_validated
