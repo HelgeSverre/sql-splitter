@@ -1038,6 +1038,168 @@ fn live_sequences_are_fenced_restored_and_reconciled() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_generated_columns_are_recomputed_and_reconciled() -> anyhow::Result<()> {
+    for (suffix, interruption, applied, conflict) in [
+        (
+            "prepared",
+            PostgresExecutionInterruption::AfterChunkPrepared,
+            false,
+            false,
+        ),
+        (
+            "committed",
+            PostgresExecutionInterruption::CommitUnknownAfterApply,
+            true,
+            false,
+        ),
+        (
+            "conflict",
+            PostgresExecutionInterruption::CommitUnknownAfterApply,
+            true,
+            true,
+        ),
+    ] {
+        run_live_generated_column_case(suffix, interruption, applied, conflict)
+            .with_context(|| format!("generated-column recovery case {suffix}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn run_live_generated_column_case(
+    suffix: &str,
+    interruption: PostgresExecutionInterruption,
+    applied: bool,
+    inject_conflict: bool,
+) -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = format!("migration_generated_{suffix}_source");
+    let target_database = format!("migration_generated_{suffix}_target");
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    target.database.clone_from(&target_database);
+    admin.database.clone_from(&source_database);
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         SET ROLE migration_mutator;
+         CREATE TABLE public.accounts (
+           id bigint PRIMARY KEY,
+           doubled bigint GENERATED ALWAYS AS (amount * 2) STORED,
+           amount bigint
+         );
+         INSERT INTO public.accounts (id,amount) VALUES (1,21),(2,-5),(3,NULLIF(0,0));
+         RESET ROLE;
+         GRANT SELECT ON public.accounts TO migration_reader"
+    ))?;
+    drop(setup);
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+    let error = execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-generated-column",
+        state_path: &state_path,
+        interruption,
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("injected interruption"),
+        "{error:#}"
+    );
+    let mut target_client = connect(&target)?;
+    let rows = target_client.query(
+        "SELECT id,doubled,amount FROM public.accounts ORDER BY id",
+        &[],
+    )?;
+    assert_eq!(rows.len(), if applied { 3 } else { 0 });
+    if inject_conflict {
+        target_client.batch_execute("UPDATE public.accounts SET amount=22 WHERE id=1")?;
+    }
+    drop(target_client);
+    let resumed = resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    );
+    if inject_conflict {
+        let error = resumed.unwrap_err();
+        assert!(error.to_string().contains("durable intent"), "{error:#}");
+        let state: MigrationState = read_json(&state_path)?;
+        assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+        cleanup.run()?;
+        return Ok(());
+    }
+    resumed?;
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    let mut target_client = connect(&target)?;
+    let rows = target_client.query(
+        "SELECT id,doubled,amount FROM public.accounts ORDER BY id",
+        &[],
+    )?;
+    assert_eq!(
+        rows.iter()
+            .map(|row| (
+                row.get::<_, i64>(0),
+                row.get::<_, Option<i64>>(1),
+                row.get::<_, Option<i64>>(2)
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, Some(42), Some(21)),
+            (2, Some(-10), Some(-5)),
+            (3, None, None)
+        ]
+    );
+    cleanup.run()?;
+    Ok(())
+}
+
 #[cfg(feature = "migration-fault-injection")]
 fn run_live_sequence_recovery_case(
     suffix: &str,

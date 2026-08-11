@@ -28,11 +28,12 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
-    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_post_data_indexes,
-    postgres_sequences, postgres_tls_binding, select_resumable_key, PostgresConsistencyMode,
-    PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState, PostgresIndex,
-    PostgresIndexState, PostgresResumableKey, PostgresSequence, PostgresSequenceState,
-    PostgresSourceFactory, PostgresTargetFactory, CATALOG_FORMAT_VERSION,
+    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_generated_columns,
+    postgres_post_data_indexes, postgres_sequences, postgres_tls_binding, select_resumable_key,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
+    PostgresGeneratedColumnState, PostgresIndex, PostgresIndexState, PostgresResumableKey,
+    PostgresSequence, PostgresSequenceState, PostgresSourceFactory, PostgresTargetFactory,
+    CATALOG_FORMAT_VERSION,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
@@ -456,7 +457,8 @@ fn resume_postgres_fenced_plan_internal(
                 PreparedResolution::RetryRequired => {
                     let mut writer = target.open_writer(cancellation.clone())?;
                     writer.begin()?;
-                    if let Err(error) = writer.insert(table, &expected) {
+                    let writable = writable_batch(&expected, &shape)?;
+                    if let Err(error) = writer.insert(table, &writable) {
                         let _ = writer.rollback();
                         return Err(error.into());
                     }
@@ -505,7 +507,8 @@ fn resume_postgres_fenced_plan_internal(
             replace_json(state_path, &state)?;
             let mut writer = target.open_writer(cancellation.clone())?;
             writer.begin()?;
-            if let Err(error) = writer.insert(table, &batch) {
+            let writable = writable_batch(&batch, &shape)?;
+            if let Err(error) = writer.insert(table, &writable) {
                 let _ = writer.rollback();
                 return Err(error.into());
             }
@@ -618,6 +621,7 @@ fn resume_postgres_fenced_plan_internal(
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
+    verify_postgres_generated_columns(&source_catalog, &target)?;
     verify_schema_projection(&source_catalog, &target_config)?;
     let verify_schema = reviewed
         .plan
@@ -912,7 +916,8 @@ fn execute_postgres_plan_internal(
             }
             let mut writer = target.open_writer(cancellation.clone())?;
             writer.begin()?;
-            if let Err(error) = writer.insert(table, &batch) {
+            let writable = writable_batch(&batch, &shape)?;
+            if let Err(error) = writer.insert(table, &writable) {
                 let _ = writer.rollback();
                 return Err(error.into());
             }
@@ -1042,6 +1047,7 @@ fn execute_postgres_plan_internal(
         || attest_fence_if_present(fenced.as_ref()),
     )?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
+    verify_postgres_generated_columns(&source_catalog, &target)?;
     verify_schema_projection(&source_catalog, &target_config)?;
     let verify_schema = reviewed
         .plan
@@ -1520,6 +1526,24 @@ fn verify_postgres_sequence_states(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+fn verify_postgres_generated_columns(
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+) -> anyhow::Result<()> {
+    for generated in postgres_generated_columns(catalog)? {
+        if target.inspect_generated_column(&generated)? != PostgresGeneratedColumnState::Exact {
+            return Err(anyhow!(
+                "target generated column {}.{}.{} differs from the reviewed expression or dependency contract",
+                generated.table.namespace,
+                generated.table.name,
+                generated.column
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
 fn process_postgres_indexes(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
@@ -1958,6 +1982,7 @@ struct TableShape {
     projection: Vec<Identifier>,
     key: Vec<Identifier>,
     key_indexes: Vec<usize>,
+    writable_indexes: Vec<usize>,
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1971,6 +1996,8 @@ fn validate_copy_table_shapes(
             catalog.format_version
         ));
     }
+    postgres_generated_columns(catalog)
+        .context("PostgreSQL generated-column contract is invalid")?;
     for operation in reviewed
         .plan
         .operations
@@ -2055,11 +2082,66 @@ fn table_shape(
                 .ok_or_else(|| anyhow!("selected resumable-key column is absent"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if key_indexes.iter().any(|index| {
+        columns[*index]
+            .attributes
+            .get("generated")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|mode| !mode.is_empty())
+    }) {
+        return Err(anyhow!(
+            "a generated column cannot be the selected resumable key"
+        ));
+    }
+    let writable_indexes = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let generated = column
+                .attributes
+                .get("generated")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            generated.is_empty().then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if writable_indexes.is_empty() {
+        return Err(anyhow!("table has no writable columns"));
+    }
     Ok(TableShape {
         projection,
         key: selected.columns,
         key_indexes,
+        writable_indexes,
     })
+}
+
+fn writable_batch(batch: &RowBatch, shape: &TableShape) -> anyhow::Result<RowBatch> {
+    let columns = shape
+        .writable_indexes
+        .iter()
+        .map(|index| {
+            batch
+                .columns()
+                .get(*index)
+                .cloned()
+                .ok_or_else(|| anyhow!("writable column index exceeds batch width"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut writable = RowBatch::new(columns, batch.len(), usize::MAX);
+    for row in batch.rows() {
+        let values = shape
+            .writable_indexes
+            .iter()
+            .map(|index| {
+                row.get(*index)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("writable column index exceeds row width"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        writable.try_push(values, 0)?;
+    }
+    Ok(writable)
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -2779,6 +2861,7 @@ mod tests {
             projection: vec![Identifier::new("id")?, Identifier::new("name")?],
             key: vec![Identifier::new("id")?],
             key_indexes: vec![0],
+            writable_indexes: vec![0, 1],
         };
         let binding = ResumeBinding {
             migration_id: "m".into(),
@@ -2995,6 +3078,45 @@ mod tests {
     }
 
     #[cfg(feature = "enterprise-migration-spike")]
+    #[test]
+    fn generated_values_remain_in_evidence_but_are_omitted_from_insert() -> anyhow::Result<()> {
+        let columns = vec![
+            column("id", 0, "bigint")?,
+            column("generated_total", 1, "bigint")?,
+            column("amount", 2, "bigint")?,
+        ];
+        let mut batch = RowBatch::new(columns, 1, 1_024);
+        batch.try_push(
+            vec![DbValue::Signed(1), DbValue::Signed(42), DbValue::Signed(21)],
+            24,
+        )?;
+        let shape = TableShape {
+            projection: vec![
+                Identifier::new("id")?,
+                Identifier::new("generated_total")?,
+                Identifier::new("amount")?,
+            ],
+            key: vec![Identifier::new("id")?],
+            key_indexes: vec![0],
+            writable_indexes: vec![0, 2],
+        };
+        let writable = writable_batch(&batch, &shape)?;
+        assert_eq!(
+            writable
+                .columns()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "amount"]
+        );
+        assert_eq!(
+            writable.rows(),
+            &[vec![DbValue::Signed(1), DbValue::Signed(21)]]
+        );
+        assert_eq!(batch.rows()[0][1], DbValue::Signed(42));
+        Ok(())
+    }
+
     #[test]
     fn resumed_verification_completion_is_idempotent() {
         let binding = ResumeBinding {

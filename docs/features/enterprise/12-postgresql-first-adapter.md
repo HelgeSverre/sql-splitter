@@ -28,6 +28,12 @@ ALWAYS` or `BY DEFAULT` identity ownership. It records exact configuration and
 `last_value`/`is_called`, copies explicit identity values, and restores each
 target sequence through a durable prepared operation. Other generated columns,
 user-defined types, extensions, and unsupported semantics fail before DDL.
+The same-major PostgreSQL path also supports stored generated columns over
+built-in types when every expression dependency is an immutable `pg_catalog`
+function, operator, type, or deterministic current-version collation, or
+a non-generated column of the same table. The journal binds complete rows,
+including generated values. Target inserts omit generated columns, PostgreSQL
+recomputes them, and reconciliation compares the complete recomputed row.
 
 ## Reasons
 
@@ -116,6 +122,13 @@ states, and requires manual reconciliation for any third state. PostgreSQL 15,
 16, and 17 pass this sequence matrix for descending/cyclic, never-called,
 identity, and serial sequences.
 
+The generated-column matrix covers a generated column in the middle of the
+physical column order, NULL propagation, negative values, prepared-before-write
+recovery, applied-commit reconciliation, and target base-row tampering. A
+generated pagination key, cross-major migration, mutable or external function,
+unknown dependency, generated-on-generated reference, and unsupported mode all
+fail closed. PostgreSQL 15, 16, and 17 pass this matrix.
+
 ## Configuration and security
 
 Endpoint files contain host, port, database, user, a credential environment
@@ -165,6 +178,9 @@ The adapter does not yet prove:
 - broader post-data DDL coverage;
 - the full sequence type, bound, cache, cycle, ACL, cancellation, and server-
   restart acceptance matrix beyond the current exact recovery cases;
+- the full generated-column expression, collation, hostile-identifier, large-
+  value, cancellation, and network-response-loss matrix beyond the current
+  exact recovery cases;
 - unsupported foreign-key variants beyond the explicitly modeled subset;
 - complete real-engine acceptance matrices in CI.
 

@@ -37,7 +37,7 @@ use super::plan::{
     UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
 };
 
-pub(crate) const CATALOG_FORMAT_VERSION: u32 = 3;
+pub(crate) const CATALOG_FORMAT_VERSION: u32 = 4;
 const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -114,6 +114,8 @@ pub enum PostgresPlanError {
     ParseConfig(#[from] toml::de::Error),
     #[error("invalid endpoint configuration: {0}")]
     InvalidConfig(&'static str),
+    #[error("unsupported generated-column dependency: {0}")]
+    UnsupportedGeneratedDependency(String),
     #[error("credential environment variable {0} is not set or is not Unicode")]
     MissingCredential(String),
     #[error("cannot read configured CA certificate")]
@@ -542,6 +544,18 @@ impl PostgresTargetFactory {
         inspect_sequence(&mut client, sequence)
     }
 
+    /// Inspect one target stored generated column and its immutable dependency closure.
+    pub fn inspect_generated_column(
+        &self,
+        generated: &PostgresGeneratedColumn,
+    ) -> ConnectionResult<PostgresGeneratedColumnState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        inspect_generated_column(&mut client, generated)
+    }
+
     /// Create an absent sequence contract or accept an exact existing configuration.
     pub fn reconcile_sequence_config(
         &self,
@@ -797,6 +811,175 @@ pub enum PostgresSequenceState {
     ExactConfig,
     ExactState,
     Different,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresGeneratedDependencyKind {
+    Column,
+    Function,
+    Operator,
+    Type,
+    Collation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresGeneratedDependency {
+    pub kind: PostgresGeneratedDependencyKind,
+    pub identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresGeneratedColumn {
+    pub catalog_object_id: String,
+    pub table: QualifiedTable,
+    pub column: Identifier,
+    pub expression: String,
+    pub data_type: String,
+    pub collation_schema: Option<Identifier>,
+    pub collation: Option<Identifier>,
+    pub dependencies: Vec<PostgresGeneratedDependency>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresGeneratedColumnState {
+    Absent,
+    Exact,
+    Different,
+}
+
+/// Parse the conservative stored-generated-column subset from a catalog.
+pub fn postgres_generated_columns(
+    catalog: &VendorCatalog,
+) -> Result<Vec<PostgresGeneratedColumn>, PostgresPlanError> {
+    if catalog.dialect != "postgresql" {
+        return Err(PostgresPlanError::InvalidConfig(
+            "generated-column metadata requires a PostgreSQL catalog",
+        ));
+    }
+    let mut generated = Vec::new();
+    for namespace in &catalog.namespaces {
+        for object in namespace
+            .objects
+            .iter()
+            .filter(|object| object.kind == CatalogObjectKind::Column)
+        {
+            let mode = object
+                .attributes
+                .get("generated")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if mode.is_empty() {
+                continue;
+            }
+            if mode != "s" {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "only stored PostgreSQL generated columns are supported",
+                ));
+            }
+            if object
+                .attributes
+                .get("identity")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+                || object
+                    .attributes
+                    .get("default")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "generated column also has identity or default semantics",
+                ));
+            }
+            if required_catalog_string(object, "type_schema")? != "pg_catalog" {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "generated column uses a non-pg_catalog type",
+                ));
+            }
+            let mut dependencies: Vec<PostgresGeneratedDependency> = serde_json::from_value(
+                object
+                    .attributes
+                    .get("generated_dependencies")
+                    .cloned()
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "generated column dependency inventory is absent",
+                    ))?,
+            )?;
+            dependencies.sort();
+            dependencies.dedup();
+            if dependencies.is_empty() {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "generated column dependency inventory is empty",
+                ));
+            }
+            let expression = required_catalog_string(object, "generated_expression")?.to_owned();
+            if expression.trim().is_empty() || expression.contains(';') {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "generated expression is empty or contains a statement separator",
+                ));
+            }
+            let table_oid = required_catalog_string(object, "table_oid")?;
+            for dependency in &dependencies {
+                let valid = match dependency.kind {
+                    PostgresGeneratedDependencyKind::Column => dependency.identity.strip_prefix("column:").is_some_and(|name| namespace.objects.iter().any(|candidate| {
+                        candidate.name.as_str() == name
+                            && candidate.kind == CatalogObjectKind::Column
+                            && candidate.attributes.get("table_oid").and_then(serde_json::Value::as_str)
+                                == Some(table_oid)
+                            && candidate.attributes.get("generated").and_then(serde_json::Value::as_str)
+                                .is_none_or(str::is_empty)
+                    })),
+                    PostgresGeneratedDependencyKind::Function => dependency.identity.starts_with("function:pg_catalog."),
+                    PostgresGeneratedDependencyKind::Operator => dependency.identity.starts_with("operator:pg_catalog.") && dependency.identity.contains(":function=pg_catalog."),
+                    PostgresGeneratedDependencyKind::Type => dependency.identity.starts_with("type:pg_catalog."),
+                    PostgresGeneratedDependencyKind::Collation => dependency.identity.starts_with("collation:pg_catalog.") && dependency.identity.contains(":deterministic=true") && dependency.identity.split(":version=").nth(1).is_some_and(|suffix| {
+                        let mut parts = suffix.split(":actual=");
+                        matches!((parts.next(), parts.next()), (Some(version), Some(actual)) if version.is_empty() || version == actual)
+                    }),
+                };
+                if !valid {
+                    return Err(PostgresPlanError::UnsupportedGeneratedDependency(
+                        dependency.identity.clone(),
+                    ));
+                }
+            }
+            generated.push(PostgresGeneratedColumn {
+                catalog_object_id: object.id.clone(),
+                table: qualified_table_for_oid(catalog, table_oid)?,
+                column: object.name.clone(),
+                expression,
+                data_type: String::from_utf8(object.definition.clone()).map_err(|_| {
+                    PostgresPlanError::InvalidConfig(
+                        "generated column type declaration is not UTF-8",
+                    )
+                })?,
+                collation_schema: optional_catalog_identifier(object, "collation_schema")?,
+                collation: optional_catalog_identifier(object, "collation")?,
+                dependencies,
+            });
+        }
+    }
+    generated.sort_by(|left, right| {
+        left.table
+            .cmp(&right.table)
+            .then_with(|| left.column.cmp(&right.column))
+    });
+    Ok(generated)
+}
+
+fn optional_catalog_identifier(
+    object: &CatalogObject,
+    name: &'static str,
+) -> Result<Option<Identifier>, PostgresPlanError> {
+    object
+        .attributes
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(Identifier::new)
+        .transpose()
+        .map_err(PostgresPlanError::from)
 }
 
 /// Parse and validate every sequence in a PostgreSQL vendor catalog.
@@ -1124,6 +1307,86 @@ fn sequence_options(sequence: &PostgresSequence) -> String {
         sequence.cache_size,
         if sequence.cycle { "CYCLE" } else { "NO CYCLE" }
     )
+}
+
+fn inspect_generated_column(
+    client: &mut impl postgres::GenericClient,
+    expected: &PostgresGeneratedColumn,
+) -> ConnectionResult<PostgresGeneratedColumnState> {
+    let rows = client
+        .query(
+            "SELECT a.attgenerated::text, pg_catalog.format_type(a.atttypid, a.atttypmod), cn.nspname, co.collname, pg_get_expr(ad.adbin, ad.adrelid, false), a.attrelid, a.attnum FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum LEFT JOIN pg_collation co ON co.oid=a.attcollation LEFT JOIN pg_namespace cn ON cn.oid=co.collnamespace WHERE n.nspname=$1 AND c.relname=$2 AND a.attname=$3 AND a.attnum>0 AND NOT a.attisdropped",
+            &[&expected.table.namespace.as_str(), &expected.table.name.as_str(), &expected.column.as_str()],
+        )
+        .map_err(database_error)?;
+    let Some(row) = rows.first() else {
+        return Ok(PostgresGeneratedColumnState::Absent);
+    };
+    if rows.len() != 1
+        || row.get::<_, String>(0) != "s"
+        || row.get::<_, String>(1) != expected.data_type
+        || row.get::<_, Option<String>>(2).as_deref()
+            != expected.collation_schema.as_ref().map(Identifier::as_str)
+        || row.get::<_, Option<String>>(3).as_deref()
+            != expected.collation.as_ref().map(Identifier::as_str)
+        || row.get::<_, Option<String>>(4).as_deref() != Some(expected.expression.as_str())
+    {
+        return Ok(PostgresGeneratedColumnState::Different);
+    }
+    let table_oid: u32 = row.get(5);
+    let attribute_number: i16 = row.get(6);
+    let dependency_rows = client
+        .query(
+            "SELECT CASE d.refclassid WHEN 'pg_class'::regclass THEN 'column' WHEN 'pg_proc'::regclass THEN 'function' WHEN 'pg_operator'::regclass THEN 'operator' WHEN 'pg_type'::regclass THEN 'type' WHEN 'pg_collation'::regclass THEN 'collation' ELSE 'unknown' END,
+                    CASE d.refclassid
+                      WHEN 'pg_class'::regclass THEN 'column:' || refa.attname
+                      WHEN 'pg_proc'::regclass THEN 'function:' || pn.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')->' || pg_catalog.format_type(p.prorettype, NULL)
+                      WHEN 'pg_operator'::regclass THEN 'operator:' || opn.nspname || '.' || o.oprname || '(' || pg_catalog.format_type(o.oprleft, NULL) || ',' || pg_catalog.format_type(o.oprright, NULL) || ')->' || pg_catalog.format_type(o.oprresult, NULL) || ':function=' || ofn_n.nspname || '.' || ofn.proname || '(' || pg_get_function_identity_arguments(ofn.oid) || ')'
+                      WHEN 'pg_type'::regclass THEN 'type:' || tyn.nspname || '.' || ty.typname
+                      WHEN 'pg_collation'::regclass THEN 'collation:' || cn.nspname || '.' || co.collname || ':provider=' || co.collprovider::text || ':deterministic=' || co.collisdeterministic::text || ':version=' || COALESCE(co.collversion, '') || ':actual=' || COALESCE(pg_collation_actual_version(co.oid), '')
+                      ELSE d.refclassid::regclass::text || ':' || d.refobjid::text || ':' || d.refobjsubid::text END,
+                    CASE d.refclassid
+                      WHEN 'pg_class'::regclass THEN d.refobjid=$1 AND d.refobjsubid>0 AND refa.attgenerated=''
+                      WHEN 'pg_proc'::regclass THEN pn.nspname='pg_catalog' AND p.provolatile='i' AND NOT p.prosecdef
+                      WHEN 'pg_operator'::regclass THEN opn.nspname='pg_catalog' AND ofn_n.nspname='pg_catalog' AND ofn.provolatile='i' AND NOT ofn.prosecdef
+                      WHEN 'pg_type'::regclass THEN tyn.nspname='pg_catalog'
+                      WHEN 'pg_collation'::regclass THEN cn.nspname='pg_catalog' AND co.collisdeterministic AND (co.collversion IS NULL OR co.collversion IS NOT DISTINCT FROM pg_collation_actual_version(co.oid))
+                      ELSE false END
+             FROM pg_attrdef ad JOIN pg_depend d ON d.classid='pg_attrdef'::regclass AND d.objid=ad.oid AND d.deptype IN ('n','a','i')
+             LEFT JOIN pg_attribute refa ON d.refclassid='pg_class'::regclass AND refa.attrelid=d.refobjid AND refa.attnum=d.refobjsubid
+             LEFT JOIN pg_proc p ON d.refclassid='pg_proc'::regclass AND p.oid=d.refobjid LEFT JOIN pg_namespace pn ON pn.oid=p.pronamespace
+             LEFT JOIN pg_operator o ON d.refclassid='pg_operator'::regclass AND o.oid=d.refobjid LEFT JOIN pg_namespace opn ON opn.oid=o.oprnamespace LEFT JOIN pg_proc ofn ON ofn.oid=o.oprcode LEFT JOIN pg_namespace ofn_n ON ofn_n.oid=ofn.pronamespace
+             LEFT JOIN pg_type ty ON d.refclassid='pg_type'::regclass AND ty.oid=d.refobjid LEFT JOIN pg_namespace tyn ON tyn.oid=ty.typnamespace
+             LEFT JOIN pg_collation co ON d.refclassid='pg_collation'::regclass AND co.oid=d.refobjid LEFT JOIN pg_namespace cn ON cn.oid=co.collnamespace
+             WHERE ad.adrelid=$1 AND ad.adnum=$2 AND NOT (d.refclassid='pg_class'::regclass AND d.refobjid=$1 AND d.refobjsubid=$2) ORDER BY 1,2",
+            &[&table_oid, &attribute_number],
+        )
+        .map_err(database_error)?;
+    let mut dependencies = Vec::new();
+    for row in dependency_rows {
+        if !row.get::<_, bool>(2) {
+            return Ok(PostgresGeneratedColumnState::Different);
+        }
+        let kind = match row.get::<_, String>(0).as_str() {
+            "column" => PostgresGeneratedDependencyKind::Column,
+            "function" => PostgresGeneratedDependencyKind::Function,
+            "operator" => PostgresGeneratedDependencyKind::Operator,
+            "type" => PostgresGeneratedDependencyKind::Type,
+            "collation" => PostgresGeneratedDependencyKind::Collation,
+            _ => return Ok(PostgresGeneratedColumnState::Different),
+        };
+        dependencies.push(PostgresGeneratedDependency {
+            kind,
+            identity: row.get(1),
+        });
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    Ok(if dependencies == expected.dependencies {
+        PostgresGeneratedColumnState::Exact
+    } else {
+        PostgresGeneratedColumnState::Different
+    })
 }
 
 fn inspect_sequence(
@@ -1826,6 +2089,8 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
     let mut statements = Vec::new();
     let sequences = postgres_sequences(catalog)
         .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    let generated_columns = postgres_generated_columns(catalog)
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
     for namespace in &catalog.namespaces {
         if namespace.name.as_str() != "public" {
             statements.push(format!(
@@ -1877,7 +2142,8 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
                     )));
                 }
             };
-            let mut definitions = table_column_definitions(namespace, table, &sequences)?;
+            let mut definitions =
+                table_column_definitions(namespace, table, &sequences, &generated_columns)?;
             definitions.extend(table_constraint_definitions(namespace, table)?);
             if definitions.is_empty() {
                 return Err(ConnectionError::InvalidRequest(format!(
@@ -1946,6 +2212,7 @@ fn table_column_definitions(
     namespace: &CatalogNamespace,
     table: &CatalogObject,
     sequences: &[PostgresSequence],
+    generated_columns: &[PostgresGeneratedColumn],
 ) -> ConnectionResult<Vec<String>> {
     let mut columns = namespace
         .objects
@@ -1987,17 +2254,11 @@ fn table_column_definitions(
                 )));
             }
             let mut definition = format!("{} {type_declaration}", quote_identifier(&column.name));
-            if column
+            let generated_mode = column
                 .attributes
                 .get("generated")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-            {
-                return Err(ConnectionError::InvalidRequest(format!(
-                    "column {} is generated and cannot be created by the current executor",
-                    column.name
-                )));
-            }
+                .unwrap_or_default();
             if let Some(collation) = column
                 .attributes
                 .get("collation")
@@ -2020,13 +2281,43 @@ fn table_column_definitions(
                         |error| ConnectionError::InvalidRequest(error.to_string()),
                     )?));
             }
+            if generated_mode == "s" {
+                let generated = generated_columns
+                    .iter()
+                    .find(|generated| {
+                        generated.table.namespace == namespace.name
+                            && generated.table.name == table.name
+                            && generated.column == column.name
+                    })
+                    .ok_or_else(|| {
+                        ConnectionError::InvalidRequest(format!(
+                            "generated column {} has no validated expression contract",
+                            column.name
+                        ))
+                    })?;
+                definition.push_str(" GENERATED ALWAYS AS (");
+                definition.push_str(&generated.expression);
+                definition.push_str(") STORED");
+            } else if !generated_mode.is_empty() {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "column {} has unsupported generated mode {generated_mode}",
+                    column.name
+                )));
+            }
             let identity = column
                 .attributes
                 .get("identity")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            match identity {
-                "a" | "d" => {
+            match (generated_mode, identity) {
+                ("s", "") => {}
+                ("s", _) => {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "generated column {} also has identity semantics",
+                        column.name
+                    )));
+                }
+                ("", "a" | "d") => {
                     let ownership_kind = if identity == "a" {
                         PostgresSequenceOwnershipKind::IdentityAlways
                     } else {
@@ -2060,7 +2351,7 @@ fn table_column_definitions(
                         sequence_options(sequence)
                     ));
                 }
-                "" => {
+                ("", "") => {
                     let has_typed_sequence_default = column
                         .attributes
                         .get("sequence_default_oid")
@@ -2079,7 +2370,7 @@ fn table_column_definitions(
                         }
                     }
                 }
-                value => {
+                (_, value) => {
                     return Err(ConnectionError::InvalidRequest(format!(
                         "column {} has unknown identity mode {value}",
                         column.name
@@ -3212,9 +3503,108 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
+        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', CASE WHEN a.attgenerated = '' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'generated_expression', CASE WHEN a.attgenerated = 's' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND a.attgenerated = '' AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
         CatalogObjectKind::Column,
     )?;
+    let generated_dependency_rows = transaction.query(
+        "SELECT 'column:' || a.attrelid::text || ':' || a.attnum::text,
+                CASE d.refclassid
+                  WHEN 'pg_class'::regclass THEN 'column'
+                  WHEN 'pg_proc'::regclass THEN 'function'
+                  WHEN 'pg_operator'::regclass THEN 'operator'
+                  WHEN 'pg_type'::regclass THEN 'type'
+                  WHEN 'pg_collation'::regclass THEN 'collation'
+                  ELSE 'unknown'
+                END,
+                CASE d.refclassid
+                  WHEN 'pg_class'::regclass THEN 'column:' || refa.attname
+                  WHEN 'pg_proc'::regclass THEN 'function:' || pn.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')->' || pg_catalog.format_type(p.prorettype, NULL)
+                  WHEN 'pg_operator'::regclass THEN 'operator:' || opn.nspname || '.' || o.oprname || '(' || pg_catalog.format_type(o.oprleft, NULL) || ',' || pg_catalog.format_type(o.oprright, NULL) || ')->' || pg_catalog.format_type(o.oprresult, NULL) || ':function=' || ofn_n.nspname || '.' || ofn.proname || '(' || pg_get_function_identity_arguments(ofn.oid) || ')'
+                  WHEN 'pg_type'::regclass THEN 'type:' || tyn.nspname || '.' || ty.typname
+                  WHEN 'pg_collation'::regclass THEN 'collation:' || cn.nspname || '.' || co.collname || ':provider=' || co.collprovider::text || ':deterministic=' || co.collisdeterministic::text || ':version=' || COALESCE(co.collversion, '') || ':actual=' || COALESCE(pg_collation_actual_version(co.oid), '')
+                  ELSE d.refclassid::regclass::text || ':' || d.refobjid::text || ':' || d.refobjsubid::text
+                END,
+                CASE d.refclassid
+                  WHEN 'pg_class'::regclass THEN d.refobjid = a.attrelid AND d.refobjsubid > 0 AND refa.attgenerated = ''
+                  WHEN 'pg_proc'::regclass THEN pn.nspname = 'pg_catalog' AND p.provolatile = 'i' AND NOT p.prosecdef
+                  WHEN 'pg_operator'::regclass THEN opn.nspname = 'pg_catalog' AND ofn_n.nspname = 'pg_catalog' AND ofn.provolatile = 'i' AND NOT ofn.prosecdef
+                  WHEN 'pg_type'::regclass THEN tyn.nspname = 'pg_catalog'
+                  WHEN 'pg_collation'::regclass THEN cn.nspname = 'pg_catalog' AND co.collisdeterministic AND (co.collversion IS NULL OR co.collversion IS NOT DISTINCT FROM pg_collation_actual_version(co.oid))
+                  ELSE false
+                END
+         FROM pg_attribute a
+         JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+         JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = ad.oid AND d.deptype IN ('n','a','i')
+         LEFT JOIN pg_attribute refa ON d.refclassid = 'pg_class'::regclass AND refa.attrelid = d.refobjid AND refa.attnum = d.refobjsubid
+         LEFT JOIN pg_proc p ON d.refclassid = 'pg_proc'::regclass AND p.oid = d.refobjid
+         LEFT JOIN pg_namespace pn ON pn.oid = p.pronamespace
+         LEFT JOIN pg_operator o ON d.refclassid = 'pg_operator'::regclass AND o.oid = d.refobjid
+         LEFT JOIN pg_namespace opn ON opn.oid = o.oprnamespace
+         LEFT JOIN pg_proc ofn ON ofn.oid = o.oprcode
+         LEFT JOIN pg_namespace ofn_n ON ofn_n.oid = ofn.pronamespace
+         LEFT JOIN pg_type ty ON d.refclassid = 'pg_type'::regclass AND ty.oid = d.refobjid
+         LEFT JOIN pg_namespace tyn ON tyn.oid = ty.typnamespace
+         LEFT JOIN pg_collation co ON d.refclassid = 'pg_collation'::regclass AND co.oid = d.refobjid
+         LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace
+         WHERE a.attgenerated = 's' AND a.attnum > 0 AND NOT a.attisdropped
+           AND NOT (d.refclassid = 'pg_class'::regclass AND d.refobjid = a.attrelid AND d.refobjsubid = a.attnum)
+         ORDER BY a.attrelid, a.attnum, 2, 3",
+        &[],
+    )?;
+    let mut generated_dependencies = BTreeMap::<String, Vec<PostgresGeneratedDependency>>::new();
+    let mut unsafe_generated_columns = BTreeSet::new();
+    for row in generated_dependency_rows {
+        let column_id: String = row.get(0);
+        let kind = match row.get::<_, String>(1).as_str() {
+            "column" => PostgresGeneratedDependencyKind::Column,
+            "function" => PostgresGeneratedDependencyKind::Function,
+            "operator" => PostgresGeneratedDependencyKind::Operator,
+            "type" => PostgresGeneratedDependencyKind::Type,
+            "collation" => PostgresGeneratedDependencyKind::Collation,
+            _ => {
+                unsafe_generated_columns.insert(column_id);
+                continue;
+            }
+        };
+        if !row.get::<_, bool>(3) {
+            unsafe_generated_columns.insert(column_id.clone());
+        }
+        generated_dependencies
+            .entry(column_id)
+            .or_default()
+            .push(PostgresGeneratedDependency {
+                kind,
+                identity: row.get(2),
+            });
+    }
+    for namespace in namespaces.values_mut() {
+        for object in namespace.objects.iter_mut().filter(|object| {
+            object.kind == CatalogObjectKind::Column
+                && object
+                    .attributes
+                    .get("generated")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("s")
+        }) {
+            let mut dependencies = generated_dependencies
+                .remove(&object.id)
+                .unwrap_or_default();
+            dependencies.sort();
+            dependencies.dedup();
+            object.attributes.insert(
+                "generated_dependencies".into(),
+                serde_json::to_value(dependencies)?,
+            );
+            if unsafe_generated_columns.contains(&object.id) {
+                unsupported.push(UnsupportedObject {
+                    object_id: object.id.clone(),
+                    object_kind: "generated_column_dependency".into(),
+                    reason: "generated expression has a non-pg_catalog, mutable, generated-column, or unknown dependency".into(),
+                    required_semantics: true,
+                });
+            }
+        }
+    }
     for object in namespaces
         .values()
         .flat_map(|namespace| namespace.objects.iter())
@@ -3224,12 +3614,12 @@ fn extract_catalog(
             .attributes
             .get("generated")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(|value| value != "s" && !value.is_empty())
         {
             unsupported.push(UnsupportedObject {
                 object_id: object.id.clone(),
                 object_kind: "generated_column".into(),
-                reason: "generated-column DDL and value verification are not implemented".into(),
+                reason: "only stored PostgreSQL generated columns are implemented".into(),
                 required_semantics: true,
             });
         }
@@ -3580,6 +3970,7 @@ pub fn build_plan_with_consistency(
     let mut standalone_indexes = Vec::new();
     let mut post_data_indexes = Vec::new();
     let sequences = postgres_sequences(&source.catalog)?;
+    let generated_columns = postgres_generated_columns(&source.catalog)?;
     for namespace in &source.catalog.namespaces {
         for object in &namespace.objects {
             if object.kind == CatalogObjectKind::Table {
@@ -3924,6 +4315,16 @@ pub fn build_plan_with_consistency(
             required_semantics: true,
         });
     }
+    if !generated_columns.is_empty()
+        && source.server_version_num / 10_000 != target.server_version_num / 10_000
+    {
+        unsupported.objects.push(UnsupportedObject {
+            object_id: "postgres-generated-column-major-version".into(),
+            object_kind: "generated_column_compatibility".into(),
+            reason: "stored generated columns require the same PostgreSQL major version".into(),
+            required_semantics: true,
+        });
+    }
     let target_object_count: usize = target
         .catalog
         .namespaces
@@ -4069,6 +4470,11 @@ pub(crate) fn select_resumable_key(
                                 .get("nullable")
                                 .and_then(serde_json::Value::as_bool)
                                 .unwrap_or(true)
+                            && column
+                                .attributes
+                                .get("generated")
+                                .and_then(serde_json::Value::as_str)
+                                .is_none_or(str::is_empty)
                     })
                 })
             {
@@ -4938,6 +5344,93 @@ credential_env = "PGPASSWORD"
         sequence.data_type = "smallint".into();
         sequence.maximum_value = i64::from(i16::MAX) + 1;
         assert!(sequence.expected_next_value().is_err());
+    }
+
+    fn generated_column_object(dependencies: Vec<PostgresGeneratedDependency>) -> CatalogObject {
+        CatalogObject {
+            id: "column:1:2".into(),
+            kind: CatalogObjectKind::Column,
+            name: Identifier::new("doubled").unwrap(),
+            definition: b"bigint".to_vec(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("table".into(), serde_json::json!("accounts")),
+                ("ordinal".into(), serde_json::json!(2)),
+                ("nullable".into(), serde_json::json!(true)),
+                ("default".into(), serde_json::Value::Null),
+                ("generated_expression".into(), serde_json::json!("(id * 2)")),
+                ("identity".into(), serde_json::json!("")),
+                ("generated".into(), serde_json::json!("s")),
+                ("collation".into(), serde_json::Value::Null),
+                ("collation_schema".into(), serde_json::Value::Null),
+                ("type_schema".into(), serde_json::json!("pg_catalog")),
+                ("type_name".into(), serde_json::json!("int8")),
+                (
+                    "generated_dependencies".into(),
+                    serde_json::to_value(dependencies).unwrap(),
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn stored_generated_column_is_typed_and_rendered_without_a_default() {
+        let dependencies = vec![
+            PostgresGeneratedDependency {
+                kind: PostgresGeneratedDependencyKind::Column,
+                identity: "column:id".into(),
+            },
+            PostgresGeneratedDependency {
+                kind: PostgresGeneratedDependencyKind::Operator,
+                identity: "operator:pg_catalog.*(bigint,integer)->bigint:function=pg_catalog.int8mul(bigint,bigint)".into(),
+            },
+        ];
+        let catalog = key_catalog(vec![generated_column_object(dependencies.clone())]);
+        let parsed = postgres_generated_columns(&catalog).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].dependencies, dependencies);
+        let statements = pre_data_statements(&catalog).unwrap();
+        let table = statements
+            .iter()
+            .find(|statement| statement.starts_with("CREATE TABLE"))
+            .unwrap();
+        assert!(table.contains("\"doubled\" bigint GENERATED ALWAYS AS ((id * 2)) STORED"));
+        assert!(!table.contains("\"doubled\" bigint DEFAULT"));
+    }
+
+    #[test]
+    fn generated_column_rejects_user_function_dependency_and_pagination_key() {
+        let unsafe_dependency = PostgresGeneratedDependency {
+            kind: PostgresGeneratedDependencyKind::Function,
+            identity: "function:public.bank_round(numeric)->numeric".into(),
+        };
+        let catalog = key_catalog(vec![generated_column_object(vec![unsafe_dependency])]);
+        assert!(postgres_generated_columns(&catalog).is_err());
+
+        let mut generated = generated_column_object(vec![PostgresGeneratedDependency {
+            kind: PostgresGeneratedDependencyKind::Column,
+            identity: "column:id".into(),
+        }]);
+        generated
+            .attributes
+            .insert("nullable".into(), serde_json::json!(false));
+        let constraint = CatalogObject {
+            id: "constraint:generated-key".into(),
+            kind: CatalogObjectKind::UniqueConstraint,
+            name: Identifier::new("accounts_doubled_key").unwrap(),
+            definition: b"UNIQUE (doubled)".to_vec(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("validated".into(), serde_json::json!(true)),
+                ("columns".into(), serde_json::json!(["doubled"])),
+            ]),
+        };
+        let catalog = key_catalog(vec![generated, constraint]);
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("accounts").unwrap(),
+        };
+        assert!(select_resumable_key(&catalog, &table).is_err());
     }
 
     #[test]
