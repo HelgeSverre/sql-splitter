@@ -328,7 +328,7 @@ pub fn remove_attested_fence_objects(
         .iter()
         .position(|namespace| {
             namespace.name.as_str() == FENCE_SCHEMA
-                && namespace.id == inventory.schema_oid.to_string()
+                && namespace.id == format!("namespace:{}", inventory.schema_oid)
         })
         .ok_or(PostgresFenceError::Attestation(
             "attested reserved namespace is absent from the catalog",
@@ -338,13 +338,13 @@ pub fn remove_attested_fence_objects(
         .iter()
         .map(|object| object.id.clone())
         .collect::<BTreeSet<_>>();
-    removed_ids.insert(inventory.schema_oid.to_string());
+    removed_ids.insert(format!("namespace:{}", inventory.schema_oid));
     catalog.namespaces.remove(namespace_position);
 
     let trigger_ids = inventory
         .tables
         .iter()
-        .map(|table| table.trigger_oid.to_string())
+        .map(|table| format!("trigger:{}", table.trigger_oid))
         .collect::<BTreeSet<_>>();
     for namespace in &mut catalog.namespaces {
         namespace.objects.retain(|object| {
@@ -361,37 +361,26 @@ pub fn remove_attested_fence_objects(
             && !removed_ids.contains(&dependency.to_object_id)
     });
 
-    let exact_oid_suffixes = [
-        inventory.schema_oid,
-        inventory.registry_oid,
-        inventory.history_oid,
-        inventory.history_sequence_oid,
-        inventory.dml_function_oid,
-        inventory.ddl_function_oid,
-        inventory.event_trigger_oid,
-    ]
-    .into_iter()
-    .chain(inventory.tables.iter().map(|table| table.trigger_oid))
-    .map(|oid| oid.to_string())
-    .collect::<BTreeSet<_>>();
+    let exact_unsupported_ids = fence_unsupported_ids(inventory);
     unsupported.objects.retain(|object| {
-        if removed_ids.contains(&object.object_id) {
-            return false;
-        }
-        let suffix = object.object_id.rsplit(':').next().unwrap_or_default();
-        !matches!(
-            object.object_kind.as_str(),
-            "namespace_acl"
-                | "relation_acl"
-                | "routine_acl"
-                | "event_trigger"
-                | "trigger"
-                | "routine"
-                | "sequence"
-                | "serial_sequence_default"
-        ) || !exact_oid_suffixes.contains(suffix)
+        !removed_ids.contains(&object.object_id)
+            && !exact_unsupported_ids.contains(&object.object_id)
     });
     Ok(())
+}
+
+fn fence_unsupported_ids(inventory: &FenceInventory) -> BTreeSet<String> {
+    [
+        format!("namespace-acl:{}", inventory.schema_oid),
+        format!("relation-acl:{}", inventory.registry_oid),
+        format!("relation-acl:{}", inventory.history_oid),
+        format!("relation-acl:{}", inventory.history_sequence_oid),
+        format!("routine-acl:{}", inventory.dml_function_oid),
+        format!("routine-acl:{}", inventory.ddl_function_oid),
+        format!("event-trigger:{}", inventory.event_trigger_oid),
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// Attest that the database still has exactly the guards recorded in evidence.
@@ -1178,6 +1167,26 @@ mod tests {
             inventory.fingerprint().unwrap(),
             changed.fingerprint().unwrap()
         );
+    }
+
+    #[test]
+    fn fence_unsupported_ids_are_catalog_class_qualified() {
+        let inventory = FenceInventory {
+            generation: "g".into(),
+            admin_role: "admin".into(),
+            schema_oid: 1,
+            registry_oid: 2,
+            history_oid: 3,
+            history_sequence_oid: 4,
+            dml_function_oid: 5,
+            ddl_function_oid: 6,
+            event_trigger_oid: 7,
+            tables: Vec::new(),
+        };
+        let ids = fence_unsupported_ids(&inventory);
+        assert!(ids.contains("routine-acl:5"));
+        assert!(!ids.contains("relation-acl:5"));
+        assert!(!ids.contains("event-trigger:5"));
     }
 
     #[test]
