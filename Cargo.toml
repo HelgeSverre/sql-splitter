@@ -49,6 +49,7 @@ enterprise-migration-spike = [
   "dep:postgres-native-tls",
   "dep:toml",
 ]
+migration-fault-injection = ["enterprise-migration-spike"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

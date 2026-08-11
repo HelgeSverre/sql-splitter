@@ -28,9 +28,11 @@ use sql_splitter::migration::postgres::{
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, InstalledPostgresFence,
 };
+use sql_splitter::migration::runner::execute_postgres_plan;
+#[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::runner::{
-    execute_postgres_fenced_plan_with_interruption, execute_postgres_plan,
-    resume_postgres_fenced_plan,
+    execute_postgres_fenced_plan_with_interruption, execute_postgres_interrupted,
+    resume_postgres_fenced_plan, PostgresExecutionInterruption, PostgresInterruptedExecution,
 };
 
 #[test]
@@ -295,6 +297,7 @@ fn live_write_fence_install_is_durable() -> anyhow::Result<()> {
 }
 
 #[test]
+#[cfg(feature = "migration-fault-injection")]
 #[ignore = "requires a previously installed PostgreSQL fence and protected artifact"]
 fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow::Result<()> {
     let admin = required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?;
@@ -357,6 +360,136 @@ fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow
 
     let mut client = connect(&admin_config)?;
     client.batch_execute("INSERT INTO public.accounts VALUES (10, 'released')")?;
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
+    let base_source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let base_target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let base_admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let directory = tempfile::tempdir()?;
+    let interruptions = [
+        PostgresExecutionInterruption::AfterDdlPrepared,
+        PostgresExecutionInterruption::AfterDdlCommitted,
+        PostgresExecutionInterruption::AfterChunkPrepared,
+        PostgresExecutionInterruption::CommitUnknownAfterApply,
+        PostgresExecutionInterruption::AfterAllVerified,
+        PostgresExecutionInterruption::AfterFenceReleased,
+    ];
+
+    let mut control = connect(&base_admin)?;
+    for (index, interruption) in interruptions.into_iter().enumerate() {
+        let source_database = format!("migration_recovery_source_{index}");
+        let target_database = format!("migration_recovery_target_{index}");
+        control.batch_execute(&format!(
+            "CREATE DATABASE {source_database} OWNER migration_mutator"
+        ))?;
+        control.batch_execute(&format!(
+            "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+        ))?;
+        let cleanup = RecoveryDatabaseCleanup::new(
+            base_admin.clone(),
+            source_database.clone(),
+            target_database.clone(),
+        );
+
+        let mut source = base_source.clone();
+        source.database.clone_from(&source_database);
+        let mut target = base_target.clone();
+        target.database.clone_from(&target_database);
+        let mut admin = base_admin.clone();
+        admin.database.clone_from(&source_database);
+        let mut setup = connect(&admin)?;
+        setup.batch_execute(&format!(
+            "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT CONNECT ON DATABASE {source_database} TO migration_reader; GRANT USAGE ON SCHEMA public TO migration_reader; CREATE TABLE public.accounts (id bigint PRIMARY KEY, name text NOT NULL); INSERT INTO public.accounts VALUES (1, 'one'), (2, 'two'), (3, 'three'); GRANT SELECT ON public.accounts TO migration_reader"
+        ))?;
+        drop(setup);
+
+        let case = directory.path().join(index.to_string());
+        std::fs::create_dir(&case)?;
+        let source_path = case.join("source.toml");
+        let target_path = case.join("target.toml");
+        let admin_path = case.join("admin.toml");
+        std::fs::write(&source_path, toml::to_string(&source)?)?;
+        std::fs::write(&target_path, toml::to_string(&target)?)?;
+        std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+        let plan_path = case.join("plan.json");
+        let fence_path = case.join("fence.json");
+        let state_path = case.join("state.json");
+        let reviewed = write_live_plan_with_consistency(
+            &source_path,
+            &target_path,
+            &plan_path,
+            PostgresConsistencyMode::WriteFence,
+        )?;
+        install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+
+        let error = execute_postgres_interrupted(PostgresInterruptedExecution {
+            plan_path: &plan_path,
+            source_config_path: &source_path,
+            target_config_path: &target_path,
+            fence_admin_config_path: &admin_path,
+            fence_artifact_path: &fence_path,
+            approval_reference: "docker-recovery-matrix",
+            state_path: &state_path,
+            interruption,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected interruption"));
+
+        let report = resume_postgres_fenced_plan(
+            &state_path,
+            &source_path,
+            &target_path,
+            &admin_path,
+            &fence_path,
+        )?;
+        assert_eq!(report.copied_rows, 3, "{interruption:?}");
+        let state: MigrationState = read_json(&state_path)?;
+        assert_eq!(state.status, MigrationStatus::Completed, "{interruption:?}");
+        assert_eq!(
+            state
+                .chunks
+                .iter()
+                .map(|chunk| chunk.row_count)
+                .sum::<u64>(),
+            3,
+            "{interruption:?}"
+        );
+        assert!(state.chunks.iter().all(|chunk| {
+            chunk.state == sql_splitter::migration::journal::ChunkState::Committed
+        }));
+        assert!(state.operations.iter().all(|operation| {
+            operation.state == sql_splitter::migration::journal::OperationState::Verified
+        }));
+        let mut target_client = connect(&target)?;
+        let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
+        let actual = rows
+            .iter()
+            .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                (1, "one".to_owned()),
+                (2, "two".to_owned()),
+                (3, "three".to_owned()),
+            ],
+            "{interruption:?}"
+        );
+        let mut source_client = connect(&admin)?;
+        source_client.batch_execute("INSERT INTO public.accounts VALUES (10, 'released')")?;
+        drop(source_client);
+        drop(target_client);
+
+        cleanup.run()?;
+    }
     Ok(())
 }
 
@@ -449,6 +582,55 @@ fn connect(config: &PostgresEndpointConfig) -> anyhow::Result<Client> {
             .danger_accept_invalid_hostnames(true);
     }
     Ok(pg.connect(MakeTlsConnector::new(tls.build()?))?)
+}
+
+struct RecoveryDatabaseCleanup {
+    control: PostgresEndpointConfig,
+    source_database: String,
+    target_database: String,
+    armed: bool,
+}
+
+impl RecoveryDatabaseCleanup {
+    fn new(
+        control: PostgresEndpointConfig,
+        source_database: String,
+        target_database: String,
+    ) -> Self {
+        Self {
+            control,
+            source_database,
+            target_database,
+            armed: true,
+        }
+    }
+
+    fn run(mut self) -> anyhow::Result<()> {
+        self.cleanup()?;
+        self.armed = false;
+        Ok(())
+    }
+
+    fn cleanup(&self) -> anyhow::Result<()> {
+        let mut client = connect(&self.control)?;
+        client.batch_execute(&format!(
+            "DROP DATABASE {} WITH (FORCE)",
+            self.source_database
+        ))?;
+        client.batch_execute(&format!(
+            "DROP DATABASE {} WITH (FORCE)",
+            self.target_database
+        ))?;
+        Ok(())
+    }
+}
+
+impl Drop for RecoveryDatabaseCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.cleanup();
+        }
+    }
 }
 
 fn required_path(name: &str) -> anyhow::Result<PathBuf> {

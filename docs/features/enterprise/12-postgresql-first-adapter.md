@@ -55,7 +55,12 @@ re-attests exact object identities and guard definitions, executes into a
 separate target, and releases the fence after durable completion. This is spike
 evidence, not a production support statement. The same matrix injects an
 interruption after a durable committed chunk, resumes from the recorded key,
-re-runs exact final row verification, and proves that no row is duplicated.
+re-runs exact final row verification, and proves that no row is duplicated. An
+additional matrix uses the non-default `migration-fault-injection` test feature
+and isolated databases to stop after prepared DDL, committed DDL, prepared data,
+an applied commit with a lost acknowledgement, complete verification, and fence
+release. Every case must resume to the exact expected rows and verified journal.
+The separate feature is not part of the normal spike API.
 
 ## Configuration and security
 

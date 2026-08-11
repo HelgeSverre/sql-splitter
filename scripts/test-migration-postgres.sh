@@ -173,22 +173,22 @@ export SQL_SPLITTER_PG_FENCE_ADMIN_PASSWORD=fence-admin-secret
 export SQL_SPLITTER_PG_FENCE_TARGET_PASSWORD=fence-target-secret
 
 test_name=live_snapshot_paging_is_stable_during_concurrent_writes
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_control_session_cancels_the_active_query
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_pre_data_ddl_is_create_only_and_rechecks_emptiness
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_target_writer_round_trips_binary_protocol_values
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_reviewed_plan_executes_and_strictly_finalizes
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_write_fence_install_is_durable
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 docker restart "$container" >/dev/null
 sleep 2
@@ -222,5 +222,8 @@ for _ in {1..30}; do
 done
 docker exec "$container" pg_isready -U postgres >/dev/null
 test_name=live_write_fence_attests_after_restart_blocks_writes_and_releases
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_write_fence_recovery_boundary_matrix
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

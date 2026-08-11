@@ -51,6 +51,62 @@ pub struct PostgresExecutionReport {
     pub committed_chunks: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Some boundaries are constructed only by the opt-in fault feature.
+enum ExecutionInterruption {
+    AfterDdlPrepared,
+    AfterDdlCommitted,
+    AfterChunkPrepared,
+    CommitUnknownAfterApply,
+    AfterCommittedChunks(u64),
+    AfterAllVerified,
+    AfterFenceReleased,
+}
+
+/// Deterministic failure boundaries used by the opt-in real-engine matrix.
+#[cfg(feature = "migration-fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresExecutionInterruption {
+    AfterDdlPrepared,
+    AfterDdlCommitted,
+    AfterChunkPrepared,
+    CommitUnknownAfterApply,
+    AfterCommittedChunks(u64),
+    AfterAllVerified,
+    AfterFenceReleased,
+}
+
+#[cfg(feature = "migration-fault-injection")]
+impl From<PostgresExecutionInterruption> for ExecutionInterruption {
+    fn from(value: PostgresExecutionInterruption) -> Self {
+        match value {
+            PostgresExecutionInterruption::AfterDdlPrepared => Self::AfterDdlPrepared,
+            PostgresExecutionInterruption::AfterDdlCommitted => Self::AfterDdlCommitted,
+            PostgresExecutionInterruption::AfterChunkPrepared => Self::AfterChunkPrepared,
+            PostgresExecutionInterruption::CommitUnknownAfterApply => Self::CommitUnknownAfterApply,
+            PostgresExecutionInterruption::AfterCommittedChunks(count) => {
+                Self::AfterCommittedChunks(count)
+            }
+            PostgresExecutionInterruption::AfterAllVerified => Self::AfterAllVerified,
+            PostgresExecutionInterruption::AfterFenceReleased => Self::AfterFenceReleased,
+        }
+    }
+}
+
+/// Inputs for one fault-injected PostgreSQL execution.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct PostgresInterruptedExecution<'a> {
+    pub plan_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub fence_admin_config_path: &'a Path,
+    pub fence_artifact_path: &'a Path,
+    pub approval_reference: &'a str,
+    pub state_path: &'a Path,
+    pub interruption: PostgresExecutionInterruption,
+}
+
 #[cfg(feature = "enterprise-migration-spike")]
 pub fn execute_postgres_plan(
     plan_path: impl AsRef<Path>,
@@ -98,7 +154,7 @@ pub fn execute_postgres_fenced_plan(
 ///
 /// This exists only to drive the real-engine crash matrix for the spike.
 #[doc(hidden)]
-#[cfg(feature = "enterprise-migration-spike")]
+#[cfg(feature = "migration-fault-injection")]
 #[allow(clippy::too_many_arguments)] // Mirrors the operator API plus one deterministic test boundary.
 pub fn execute_postgres_fenced_plan_with_interruption(
     plan_path: impl AsRef<Path>,
@@ -110,17 +166,32 @@ pub fn execute_postgres_fenced_plan_with_interruption(
     state_path: impl AsRef<Path>,
     after_committed_chunks: u64,
 ) -> anyhow::Result<PostgresExecutionReport> {
-    execute_postgres_plan_internal(
-        plan_path.as_ref(),
-        source_config_path.as_ref(),
-        target_config_path.as_ref(),
+    execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: plan_path.as_ref(),
+        source_config_path: source_config_path.as_ref(),
+        target_config_path: target_config_path.as_ref(),
+        fence_admin_config_path: fence_admin_config_path.as_ref(),
+        fence_artifact_path: fence_artifact_path.as_ref(),
         approval_reference,
-        state_path.as_ref(),
-        Some((
-            fence_admin_config_path.as_ref(),
-            fence_artifact_path.as_ref(),
-        )),
-        Some(after_committed_chunks),
+        state_path: state_path.as_ref(),
+        interruption: PostgresExecutionInterruption::AfterCommittedChunks(after_committed_chunks),
+    })
+}
+
+/// Execute until one exact recovery boundary and return an injected error.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn execute_postgres_interrupted(
+    request: PostgresInterruptedExecution<'_>,
+) -> anyhow::Result<PostgresExecutionReport> {
+    execute_postgres_plan_internal(
+        request.plan_path,
+        request.source_config_path,
+        request.target_config_path,
+        request.approval_reference,
+        request.state_path,
+        Some((request.fence_admin_config_path, request.fence_artifact_path)),
+        Some(request.interruption.into()),
     )
 }
 
@@ -516,7 +587,7 @@ fn execute_postgres_plan_internal(
     approval_reference: &str,
     state_path: &Path,
     fence_paths: Option<(&Path, &Path)>,
-    interrupt_after_committed_chunks: Option<u64>,
+    interruption: Option<ExecutionInterruption>,
 ) -> anyhow::Result<PostgresExecutionReport> {
     if approval_reference.trim().is_empty() {
         return Err(anyhow!("approval reference must not be empty"));
@@ -683,6 +754,7 @@ fn execute_postgres_plan_internal(
         .collect::<Vec<_>>();
     state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
     replace_json(state_path, &state)?;
+    interrupt_if(interruption, ExecutionInterruption::AfterDdlPrepared)?;
     attest_fence_if_present(fenced.as_ref())?;
     if let Err(initial_error) = target.create_pre_data_schema(&source_catalog) {
         if target_schema_matches(&source_catalog, &target_config)? {
@@ -701,6 +773,7 @@ fn execute_postgres_plan_internal(
             ));
         }
     }
+    interrupt_if(interruption, ExecutionInterruption::AfterDdlCommitted)?;
     for operation_id in create_operation_ids {
         state.commit_prepared_operation(operation_id)?;
         state.verify_operation(operation_id)?;
@@ -755,6 +828,12 @@ fn execute_postgres_plan_internal(
                 state: ChunkState::Prepared,
             })?;
             replace_json(state_path, &state)?;
+            if matches!(
+                interruption,
+                Some(ExecutionInterruption::AfterChunkPrepared)
+            ) {
+                return Err(injected_interruption(interruption));
+            }
             let mut writer = target.open_writer(cancellation.clone())?;
             writer.begin()?;
             if let Err(error) = writer.insert(table, &batch) {
@@ -791,6 +870,8 @@ fn execute_postgres_plan_internal(
                         ));
                     }
                 }
+            } else if interruption == Some(ExecutionInterruption::CommitUnknownAfterApply) {
+                return Err(injected_interruption(interruption));
             } else {
                 state.commit(chunk_id)?;
             }
@@ -798,7 +879,10 @@ fn execute_postgres_plan_internal(
             copied_rows = copied_rows
                 .checked_add(u64::try_from(batch.len()).context("batch size exceeds u64")?)
                 .ok_or_else(|| anyhow!("copied row count overflow"))?;
-            if interrupt_after_committed_chunks.is_some_and(|limit| {
+            if interruption.is_some_and(|point| {
+                let ExecutionInterruption::AfterCommittedChunks(limit) = point else {
+                    return false;
+                };
                 state
                     .chunks
                     .iter()
@@ -866,6 +950,7 @@ fn execute_postgres_plan_internal(
     state.commit_operation(verify_schema.id.as_str())?;
     state.verify_operation(verify_schema.id.as_str())?;
     replace_json(state_path, &state)?;
+    interrupt_if(interruption, ExecutionInterruption::AfterAllVerified)?;
     attest_fence_if_present(fenced.as_ref())?;
     let mut completed_state = state.clone();
     completed_state.finalize()?;
@@ -879,6 +964,7 @@ fn execute_postgres_plan_internal(
         };
         release_postgres_write_fence(admin, generation, &installed.token)?;
     }
+    interrupt_if(interruption, ExecutionInterruption::AfterFenceReleased)?;
     state = completed_state;
     replace_json(state_path, &state)?;
     Ok(PostgresExecutionReport {
@@ -905,6 +991,22 @@ fn attest_fence_if_present(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn interrupt_if(
+    configured: Option<ExecutionInterruption>,
+    boundary: ExecutionInterruption,
+) -> anyhow::Result<()> {
+    if configured == Some(boundary) {
+        return Err(injected_interruption(configured));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn injected_interruption(configured: Option<ExecutionInterruption>) -> anyhow::Error {
+    anyhow!("injected interruption at PostgreSQL execution boundary {configured:?}")
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
