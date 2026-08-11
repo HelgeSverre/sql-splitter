@@ -450,6 +450,14 @@ fn run_multi(
 }
 
 fn print_stats(stats: &ConvertStats, dry_run: bool, progress: bool) {
+    // A warning means something was silently dropped or narrowed during
+    // conversion. It must not require --progress/--dry-run to surface --
+    // the tool's own --help example (`convert x.sql --to postgres -o y.sql`)
+    // uses neither, so gating this behind them hid every warning by default.
+    if !stats.warnings.is_empty() {
+        crate::convert::print_warnings_summary(&stats.warnings, 100);
+    }
+
     if !progress && !dry_run {
         return;
     }
@@ -460,10 +468,6 @@ fn print_stats(stats: &ConvertStats, dry_run: bool, progress: bool) {
     eprintln!("  Statements converted: {}", stats.statements_converted);
     eprintln!("  Statements unchanged: {}", stats.statements_unchanged);
     eprintln!("  Statements skipped: {}", stats.statements_skipped);
-
-    if !stats.warnings.is_empty() {
-        crate::convert::print_warnings_summary(&stats.warnings, 100);
-    }
 
     if dry_run {
         eprintln!();

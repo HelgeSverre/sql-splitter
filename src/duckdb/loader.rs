@@ -786,9 +786,8 @@ impl<'a> DumpLoader<'a> {
 
         // MySQL 8 also allows CURRENT_TIMESTAMP as a function call in DEFAULT
         // position; DuckDB only accepts the bare keyword there.
-        static RE_DEFAULT_CURRENT_TIMESTAMP_CALL: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)(DEFAULT\s+CURRENT_TIMESTAMP)\s*\(\s*\d*\s*\)").unwrap()
-        });
+        static RE_DEFAULT_CURRENT_TIMESTAMP_CALL: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)(DEFAULT\s+CURRENT_TIMESTAMP)\s*\(\s*\d*\s*\)").unwrap());
         result = RE_DEFAULT_CURRENT_TIMESTAMP_CALL
             .replace_all(&result, "$1")
             .to_string();

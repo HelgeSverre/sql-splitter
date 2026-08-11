@@ -300,6 +300,43 @@ fn enum_naming_dedupe_cli_reuses_type() {
     assert_eq!(result.matches("enum__a__x").count(), 3, "got: {result}");
 }
 
+/// The tool's own `--help` example (`convert mysql.sql --to postgres -o
+/// pg.sql`) uses neither `--progress` nor `--dry-run`. A warning means
+/// something was silently dropped or narrowed during conversion, so it must
+/// not require an extra flag to become visible -- that's the whole point of
+/// emitting it.
+#[test]
+fn convert_prints_warnings_without_progress_or_dry_run() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("input.sql");
+    let output_file = temp_dir.path().join("output.sql");
+    fs::write(
+        &input_file,
+        "CREATE TABLE t (status ENUM('a'));\nALTER TABLE t MODIFY COLUMN status ENUM('c');",
+    )
+    .unwrap();
+
+    let output = sql_splitter()
+        .args([
+            "convert",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_file.to_str().unwrap(),
+            "--from",
+            "mysql",
+            "--to",
+            "postgres",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Command failed: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("changed between definitions"),
+        "expected the enum-label-drift warning without -p/--dry-run, got stderr: {stderr}"
+    );
+}
+
 #[test]
 fn test_convert_dry_run() {
     let temp_dir = TempDir::new().unwrap();

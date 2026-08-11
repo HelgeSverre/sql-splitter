@@ -186,7 +186,10 @@ INSERT INTO `users` (`id`, `email`) VALUES
     );
 
     let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
-    assert_eq!(result.rows[0][0], "3", "users must be unaffected by the earlier missing table");
+    assert_eq!(
+        result.rows[0][0], "3",
+        "users must be unaffected by the earlier missing table"
+    );
 }
 
 /// MySQL's `0000-00-00` zero-date sentinel (legal under non-strict SQL_MODE)
@@ -291,7 +294,11 @@ INSERT INTO `tags` (`id`, `slug`) VALUES
     assert_eq!(result.rows[0][0], "3");
     let result = engine.query("SELECT id FROM tags ORDER BY id").unwrap();
     assert_eq!(
-        result.rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
+        result
+            .rows
+            .iter()
+            .map(|r| r[0].as_str())
+            .collect::<Vec<_>>(),
         vec!["1", "2", "4"]
     );
 }

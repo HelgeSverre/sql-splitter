@@ -3,7 +3,7 @@
 //! Tests that used private methods have been rewritten to test through the
 //! public `convert_statement` interface.
 
-use sql_splitter::convert::Converter;
+use sql_splitter::convert::{Converter, EnumNamingStrategy};
 use sql_splitter::parser::{mysql_insert, SqlDialect};
 use sql_splitter::schema::SchemaBuilder;
 
@@ -1590,6 +1590,77 @@ fn enum_conversion_handles_create_table_modifiers() {
     let output = String::from_utf8_lossy(&output);
     assert!(output.contains("x ENUM('a','b')"));
     assert!(!output.contains("UNLOGGED"), "got: {output}");
+}
+
+/// Under `--enum-naming dedupe`, a MODIFY COLUMN whose label set differs from
+/// the column's current one allocates a brand new PG enum type (dedupe never
+/// reuses a type across two different label sets, unlike per-column, which
+/// always keeps the same name for a given table.column and just evolves it in
+/// place). PostgreSQL has no implicit cast between two distinct enum types, so
+/// the emitted `ALTER COLUMN ... TYPE ...` must cast through text or the
+/// statement fails outright when actually run against Postgres.
+#[test]
+fn enum_dedupe_modify_column_casts_through_text_to_the_new_type() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres)
+        .with_enum_naming(EnumNamingStrategy::Dedupe);
+    converter
+        .convert_statement(b"CREATE TABLE t (status ENUM('a','b'));")
+        .unwrap();
+    let output = converter
+        .convert_statement(b"ALTER TABLE t MODIFY COLUMN status ENUM('a','b','c');")
+        .unwrap();
+    let output = String::from_utf8_lossy(&output);
+
+    assert!(
+        output.contains("ALTER COLUMN status TYPE enum__t__status_2"),
+        "got: {output}"
+    );
+    assert!(
+        output.contains("USING status::text::enum__t__status_2"),
+        "ALTER COLUMN TYPE to a different enum type must cast through text or Postgres \
+         rejects it (\"cannot be cast automatically\"), got: {output}"
+    );
+}
+
+/// The enum registry keys on table.column identity only -- it has no notion
+/// of a table being dropped and a same-named table taking its place later.
+/// Without forgetting the dropped table's entry, a differently-shaped
+/// recreated column would silently reuse the old PG type and get widened via
+/// `ALTER TYPE ... ADD VALUE`, so the new column ends up able to hold the
+/// *previous* table's stale labels too instead of getting its own type.
+#[test]
+fn dropping_a_table_forgets_its_enum_types_so_a_recreated_table_gets_a_fresh_one() {
+    let mut converter = Converter::new(SqlDialect::MySql, SqlDialect::Postgres);
+    let first = converter
+        .convert_statement(b"CREATE TABLE t (status ENUM('a','b'));")
+        .unwrap();
+    let first = String::from_utf8_lossy(&first);
+    assert!(
+        first.contains("CREATE TYPE enum__t__status AS ENUM ('a', 'b')"),
+        "got: {first}"
+    );
+
+    converter.convert_statement(b"DROP TABLE t;").unwrap();
+
+    let second = converter
+        .convert_statement(b"CREATE TABLE t (status ENUM('x','y'));")
+        .unwrap();
+    let second = String::from_utf8_lossy(&second);
+
+    assert!(
+        !second.contains("ADD VALUE"),
+        "a dropped-and-recreated table must get a fresh enum type, not ALTER TYPE ADD VALUE \
+         onto the old (dropped) table's type, got: {second}"
+    );
+    assert!(
+        second.contains("CREATE TYPE enum__t__status_2 AS ENUM ('x', 'y')"),
+        "expected a fresh CREATE TYPE distinct from the dropped table's, got: {second}"
+    );
+    assert!(
+        second.contains("status enum__t__status_2)"),
+        "the recreated column must reference its own fresh type, not the dropped table's, \
+         got: {second}"
+    );
 }
 
 #[test]

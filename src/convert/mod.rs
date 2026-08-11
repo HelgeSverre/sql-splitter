@@ -646,10 +646,19 @@ impl Converter {
 
     /// Extract inline ENUM definitions from a MySQL CREATE TABLE / ALTER TABLE,
     /// register them, replace with generated PG type names, and emit CREATE TYPE.
+    ///
+    /// `column_type_change`: true when this rewrite happens inside a MySQL
+    /// `MODIFY COLUMN` (an *existing* column's type is changing), as opposed
+    /// to `CREATE TABLE`/`ADD COLUMN` (no prior data to reconcile). PostgreSQL
+    /// has no implicit cast between two distinct enum types -- and even the
+    /// same-named type can gain labels between definitions -- so an
+    /// `ALTER COLUMN ... TYPE` onto an enum must always cast through text or
+    /// Postgres rejects the statement outright.
     fn rewrite_mysql_inline_enums_to_pg_types(
         &mut self,
         stmt: &str,
         table_name: Option<&str>,
+        column_type_change: bool,
     ) -> Result<Option<String>, ConvertWarning> {
         let cols = ddl::mysql_inline_enum_columns(stmt);
         if cols.is_empty() {
@@ -683,7 +692,12 @@ impl Converter {
                 &col.labels,
             );
             let q = pg_quote_ident(&pg_type_name);
-            replacements.push((col.span, q.clone()));
+            let replacement = if column_type_change {
+                format!("{q} USING {}::text::{q}", pg_quote_ident(&col.column))
+            } else {
+                q.clone()
+            };
+            replacements.push((col.span, replacement));
             match self.enum_registry.mark_emitted(&pg_type_name, &col.labels) {
                 None => {
                     let ql: Vec<String> = col
@@ -768,7 +782,7 @@ impl Converter {
             StatementType::Insert => self.convert_insert(stmt, table),
             StatementType::CreateIndex => self.convert_create_index(stmt),
             StatementType::AlterTable => self.convert_alter_table(stmt, table),
-            StatementType::DropTable => self.convert_drop_table(stmt),
+            StatementType::DropTable => self.convert_drop_table(stmt, table),
             StatementType::Copy => self.convert_copy(stmt, table),
             StatementType::Unknown => self.convert_other(stmt),
         }
@@ -799,8 +813,9 @@ impl Converter {
 
         // MySQL→PG: register/replace before type mapper. PG→SQLite/MSSQL: narrow.
         if self.from == SqlDialect::MySql && self.to == SqlDialect::Postgres {
+            // false: CREATE TABLE has no existing column data to cast.
             let Some(rewritten) =
-                self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name)?
+                self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name, false)?
             else {
                 return Ok(Vec::new());
             };
@@ -1086,8 +1101,10 @@ impl Converter {
 
         // MySQL→PG: register/replace before type mapper. PG→SQLite/MSSQL: narrow.
         if self.from == SqlDialect::MySql && self.to == SqlDialect::Postgres {
+            // mysql_modify: MODIFY COLUMN changes an *existing* column's
+            // type, so it needs a USING cast; ADD COLUMN doesn't.
             let Some(rewritten) =
-                self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name)?
+                self.rewrite_mysql_inline_enums_to_pg_types(&result, table_name, mysql_modify)?
             else {
                 return Ok(Vec::new());
             };
@@ -1200,9 +1217,19 @@ impl Converter {
     }
 
     /// Convert DROP TABLE statement
-    fn convert_drop_table(&mut self, stmt: &[u8]) -> Result<Vec<u8>, ConvertWarning> {
+    fn convert_drop_table(
+        &mut self,
+        stmt: &[u8],
+        table_name: Option<&str>,
+    ) -> Result<Vec<u8>, ConvertWarning> {
         let stmt_str = String::from_utf8_lossy(stmt);
         let mut result = stmt_str.to_string();
+
+        // A dropped table's enum types must not be silently reused (and
+        // widened) by a later, unrelated table created with the same name.
+        if let Some(table) = table_name {
+            self.enum_registry.forget_table(table);
+        }
 
         result = self.convert_identifiers(&result);
 

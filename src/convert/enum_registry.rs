@@ -168,6 +168,24 @@ impl EnumRegistry {
             .insert(name.to_string(), labels.to_vec())
     }
 
+    /// Forget a dropped table's table.column → type mappings, so a later
+    /// `CREATE TABLE` reusing the same table name allocates a fresh type
+    /// instead of reusing (and silently widening, via ALTER TYPE ADD VALUE)
+    /// the dropped table's type with an unrelated new column's labels.
+    ///
+    /// Only `pg_types_by_column` is purged. `used_pg_type_names` and
+    /// `emitted_pg_types` deliberately keep the old type name reserved and
+    /// its labels on record: the already-emitted `CREATE TYPE` for it is
+    /// still valid SQL earlier in the output and must not be reallocated to
+    /// something else. `enum_signatures` (dedupe's labels → name map) is
+    /// left alone too -- it's intentionally cross-table shared state, so an
+    /// unrelated table with the same labels may still be relying on it.
+    pub fn forget_table(&mut self, table: &str) {
+        let prefix = format!("{table}\0");
+        self.pg_types_by_column
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
     /// Iterate over all registered PG enum type definitions.
     pub fn pg_enum_entries(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
         self.pg_enums_by_name.iter()

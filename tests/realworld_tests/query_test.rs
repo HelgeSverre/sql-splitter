@@ -67,9 +67,12 @@ fn run_query_test(case: &'static super::cases::TestCase) {
     // Run a count query on the first table
     let first_table = &tables[0];
     let count_query = format!("SELECT COUNT(*) as count FROM \"{}\"", first_table);
-    let result = engine
-        .query(&count_query)
-        .unwrap_or_else(|e| panic!("{}: count query on {} failed: {}", case.name, first_table, e));
+    let result = engine.query(&count_query).unwrap_or_else(|e| {
+        panic!(
+            "{}: count query on {} failed: {}",
+            case.name, first_table, e
+        )
+    });
     if !result.rows.is_empty() {
         eprintln!("  Query: {} has {} rows", first_table, result.rows[0][0]);
     }
@@ -203,7 +206,10 @@ fn all_query_tests() {
 
         match engine.query(&format!("SELECT COUNT(*) FROM \"{}\"", tables[0])) {
             Ok(_) => {
-                eprintln!("✓ {} ({} tables, {} rows)", case.name, tables_created, rows_inserted);
+                eprintln!(
+                    "✓ {} ({} tables, {} rows)",
+                    case.name, tables_created, rows_inserted
+                );
                 passed += 1;
             }
             Err(e) => {
@@ -222,5 +228,10 @@ fn all_query_tests() {
         skipped
     );
 
-    assert!(failures.is_empty(), "{} case(s) failed: {:?}", failures.len(), failures);
+    assert!(
+        failures.is_empty(),
+        "{} case(s) failed: {:?}",
+        failures.len(),
+        failures
+    );
 }
