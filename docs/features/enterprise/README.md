@@ -1,5 +1,14 @@
 # Enterprise Database Migration Plan
 
+> **Spike status:** The non-default `enterprise-migration-spike` Cargo feature
+> contains a fixture-backed spike for selected contracts needed by
+> Implementation Phases 1–5: typed values, bounded batches, deterministic
+> plans, snapshot-bound keyset paging, journal ordering, ambiguous-commit
+> classification, and exact row comparison. It does not implement live
+> adapters, DDL, FK validation, complete resume orchestration, or production
+> finalization, and it does not satisfy the real-engine acceptance gates in
+> [08](./08-implementation-prerequisites.md).
+
 ## Status and product boundary
 
 This directory is a design plan, not a description of implemented behavior.

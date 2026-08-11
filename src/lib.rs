@@ -22,6 +22,8 @@ pub mod json_schema;
 #[cfg(feature = "man-pages")]
 pub mod man;
 pub mod merger;
+#[cfg(feature = "enterprise-migration-spike")]
+pub mod migration;
 pub mod parser;
 pub mod pk;
 pub mod profile;

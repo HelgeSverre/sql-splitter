@@ -75,6 +75,14 @@ fmt:
 check:
     cargo check
 
+# Check the non-production enterprise migration contract spike.
+[group('lint')]
+migration-spike-check:
+    cargo fmt --all -- --check
+    cargo check --no-default-features --features enterprise-migration-spike
+    cargo clippy --no-default-features --features enterprise-migration-spike --lib --bins -- -D warnings
+    cargo test --no-default-features --features enterprise-migration-spike
+
 [group('lint')]
 clippy:
     cargo clippy -- -D warnings
