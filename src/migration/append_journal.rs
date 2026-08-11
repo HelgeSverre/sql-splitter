@@ -55,6 +55,8 @@ pub enum AppendJournalError {
 pub enum AppendJournalFault {
     /// Persist a proper prefix of `ChunkCommitted`, then report `ENOSPC`.
     TornChunkCommittedEnospc,
+    /// Persist the complete `ChunkCommitted`, then lose the sync acknowledgement.
+    ChunkCommittedSyncAckLost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,20 +825,35 @@ impl AppendJournal {
         }
         let frame = encode_event_frame(self.next_sequence, self.head_hash, event)?;
         #[cfg(feature = "migration-fault-injection")]
-        if matches!(event, JournalEvent::ChunkCommitted { .. })
-            && self.fault.take() == Some(AppendJournalFault::TornChunkCommittedEnospc)
-        {
-            let prefix_len = (frame.len() / 2).clamp(1, frame.len() - 1);
-            if let Err(error) = self
-                .file
-                .write_all(&frame[..prefix_len])
-                .and_then(|()| self.file.sync_all())
-            {
-                self.poisoned = true;
-                return Err(error.into());
+        if matches!(event, JournalEvent::ChunkCommitted { .. }) {
+            match self.fault.take() {
+                Some(AppendJournalFault::TornChunkCommittedEnospc) => {
+                    let prefix_len = (frame.len() / 2).clamp(1, frame.len() - 1);
+                    if let Err(error) = self
+                        .file
+                        .write_all(&frame[..prefix_len])
+                        .and_then(|()| self.file.sync_all())
+                    {
+                        self.poisoned = true;
+                        return Err(error.into());
+                    }
+                    self.poisoned = true;
+                    return Err(io::Error::from_raw_os_error(libc::ENOSPC).into());
+                }
+                Some(AppendJournalFault::ChunkCommittedSyncAckLost) => {
+                    if let Err(error) = self
+                        .file
+                        .write_all(&frame)
+                        .and_then(|()| self.file.sync_all())
+                    {
+                        self.poisoned = true;
+                        return Err(error.into());
+                    }
+                    self.poisoned = true;
+                    return Err(io::Error::from_raw_os_error(libc::EIO).into());
+                }
+                None => {}
             }
-            self.poisoned = true;
-            return Err(io::Error::from_raw_os_error(libc::ENOSPC).into());
         }
         if let Err(error) = self
             .file
@@ -1757,6 +1774,51 @@ mod tests {
         resumed.commit_chunk_after_ack().unwrap();
         assert!(resumed.projection().prepared_chunk.is_none());
         assert_eq!(resumed.projection().copy_cursors[&operation_id].rows, 1);
+    }
+
+    #[cfg(feature = "migration-fault-injection")]
+    #[test]
+    fn committed_sync_ack_loss_recovers_the_complete_frame_without_retry() {
+        let directory = private_tempdir();
+        let path = directory.path().join("state");
+        let mut journal = AppendJournal::create_new(&path, genesis()).unwrap();
+        let operation_id = journal.genesis.operations[0].operation_id.clone();
+        journal
+            .transition_operation(&operation_id, OperationState::Running)
+            .unwrap();
+        journal
+            .prepare_chunk(PreparedChunk {
+                chunk_id: 1,
+                operation_id: operation_id.clone(),
+                start_key: None,
+                final_key: vec![DbValue::Signed(1)],
+                row_count: 1,
+                canonical_digest: hash(),
+                target_transaction_intent: "intent-1".into(),
+            })
+            .unwrap();
+        journal
+            .arm_fault(AppendJournalFault::ChunkCommittedSyncAckLost)
+            .unwrap();
+
+        let error = journal.commit_chunk_after_ack().unwrap_err();
+        assert!(matches!(
+            error,
+            AppendJournalError::Io(ref error) if error.raw_os_error() == Some(libc::EIO)
+        ));
+        assert!(journal.projection().prepared_chunk.is_some());
+        drop(journal);
+
+        let resumed = AppendJournal::open_resume(&path).unwrap();
+        assert!(resumed.projection().prepared_chunk.is_none());
+        assert_eq!(resumed.projection().last_chunk_id, 1);
+        assert_eq!(resumed.projection().copy_cursors[&operation_id].rows, 1);
+        let chunks = resumed
+            .committed_chunks(operation_id)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
     }
 
     #[test]

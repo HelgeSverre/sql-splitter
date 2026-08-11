@@ -729,12 +729,15 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
         PostgresExecutionInterruption::AfterDdlCommitted,
         PostgresExecutionInterruption::AfterChunkPrepared,
         PostgresExecutionInterruption::CommitUnknownAfterApply,
+        PostgresExecutionInterruption::TornChunkCommittedEnospc,
+        PostgresExecutionInterruption::ChunkCommittedSyncAckLost,
         PostgresExecutionInterruption::AfterAllVerified,
         PostgresExecutionInterruption::AfterFenceReleased,
     ];
 
     let mut control = connect(&base_admin)?;
     for (index, interruption) in interruptions.into_iter().enumerate() {
+        eprintln!("running recovery interruption {interruption:?}");
         let source_database = format!("migration_recovery_source_{index}");
         let target_database = format!("migration_recovery_target_{index}");
         control.batch_execute(&format!(
@@ -757,7 +760,7 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
         admin.database.clone_from(&source_database);
         let mut setup = connect(&admin)?;
         setup.batch_execute(&format!(
-            "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT CONNECT ON DATABASE {source_database} TO migration_reader; GRANT USAGE ON SCHEMA public TO migration_reader; CREATE TABLE public.accounts (id bigint PRIMARY KEY, name text NOT NULL); INSERT INTO public.accounts VALUES (1, 'one'), (2, 'two'), (3, 'three'); GRANT SELECT ON public.accounts TO migration_reader"
+            "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT CONNECT ON DATABASE {source_database} TO migration_reader; GRANT USAGE ON SCHEMA public TO migration_reader; CREATE TABLE public.accounts (id bigint PRIMARY KEY, name text NOT NULL); INSERT INTO public.accounts VALUES (1, 'one'), (2, 'two'), (3, 'three'); CREATE FUNCTION public.double_id(value bigint) RETURNS bigint LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE RETURN value * 2; CREATE VIEW public.account_values AS SELECT id, public.double_id(id) AS doubled FROM public.accounts; GRANT SELECT ON public.accounts TO migration_reader"
         ))?;
         drop(setup);
 
@@ -778,6 +781,11 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
             &plan_path,
             PostgresConsistencyMode::WriteFence,
         )?;
+        assert!(
+            !reviewed.plan.unsupported_objects.blocks_execution(),
+            "{:#?}",
+            reviewed.plan.unsupported_objects
+        );
         install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
 
         let error = execute_postgres_interrupted(PostgresInterruptedExecution {
@@ -791,7 +799,42 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
             interruption,
         })
         .unwrap_err();
-        assert!(error.to_string().contains("injected interruption"));
+        match interruption {
+            PostgresExecutionInterruption::TornChunkCommittedEnospc => assert!(
+                format!("{error:#}").contains("No space left on device"),
+                "{interruption:?}: {error:#}"
+            ),
+            PostgresExecutionInterruption::ChunkCommittedSyncAckLost => assert!(
+                format!("{error:#}").contains("Input/output error"),
+                "{interruption:?}: {error:#}"
+            ),
+            _ => assert!(
+                error.to_string().contains("injected interruption"),
+                "{interruption:?}: {error:#}"
+            ),
+        }
+        if interruption == PostgresExecutionInterruption::TornChunkCommittedEnospc {
+            let prepared = AppendJournal::open_resume(&state_path)?;
+            assert!(prepared.projection().prepared_chunk.is_some());
+            assert_eq!(prepared.projection().last_chunk_id, 0);
+            assert!(prepared.projection().copy_cursors.is_empty());
+            drop(prepared);
+        }
+        if interruption == PostgresExecutionInterruption::ChunkCommittedSyncAckLost {
+            let committed = AppendJournal::open_resume(&state_path)?;
+            assert!(committed.projection().prepared_chunk.is_none());
+            assert_eq!(committed.projection().last_chunk_id, 1);
+            assert_eq!(
+                committed
+                    .projection()
+                    .copy_cursors
+                    .values()
+                    .map(|cursor| cursor.rows)
+                    .sum::<u64>(),
+                3
+            );
+            drop(committed);
+        }
 
         let report = resume_postgres_fenced_plan(
             &state_path,
@@ -829,6 +872,17 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
                 (3, "three".to_owned()),
             ],
             "{interruption:?}"
+        );
+        let view_rows = target_client.query(
+            "SELECT id,doubled FROM public.account_values ORDER BY id",
+            &[],
+        )?;
+        assert_eq!(
+            view_rows
+                .iter()
+                .map(|row| (row.get::<_, i64>(0), row.get::<_, i64>(1)))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (2, 4), (3, 6)]
         );
         let mut source_client = connect(&admin)?;
         source_client.batch_execute("INSERT INTO public.accounts VALUES (10, 'released')")?;

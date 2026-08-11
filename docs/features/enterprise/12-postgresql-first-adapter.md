@@ -34,6 +34,14 @@ function, operator, type, or deterministic current-version collation, or
 a non-generated column of the same table. The journal binds complete rows,
 including generated values. Target inserts omit generated columns, PostgreSQL
 recomputes them, and reconciliation compares the complete recomputed row.
+The post-data path supports a conservative programmable-object subset. Ordinary
+views use a validated typed `CREATE VIEW` AST. SQL scalar functions must use a
+parsed SQL-standard `RETURN` body and be immutable, strict, parallel safe,
+security invoker, non-leakproof, and free of custom configuration or overloads.
+All relation, function, type, operator, collation, namespace, and language
+dependencies are resolved through `pg_depend` into typed identities. Raw or
+dollar-quoted bodies, unresolved dependencies, materialized views, custom
+privileges, and view column privileges fail closed.
 
 ## Reasons
 
@@ -87,6 +95,14 @@ state. A negative live case proves composite anti-join detection and persists a
 manual-reconciliation state for a conflicting target constraint. The separate
 feature is not part of the normal spike API. PostgreSQL 15, 16, and 17 pass this
 matrix.
+
+The same opt-in matrix injects two journal publication failures after the target
+commit. One writes and syncs only a strict prefix of the committed frame before
+returning `ENOSPC`; resume truncates the tail and reconciles the durable prepared
+intent. The other writes and syncs the complete frame but loses the sync
+acknowledgement; resume accepts the validated committed frame and does not replay
+the target transaction. The Docker harness checks the actual Cargo target,
+journal directory, and PostgreSQL container filesystems before loading fixtures.
 
 The key-pagination matrix validates every read request against an exact,
 validated, non-null primary or unique constraint. It covers signed integer
@@ -203,6 +219,29 @@ security, and policies. Unsupported semantics remain visible in the plan and
 block later execution. Plan generation can succeed so reviewers can inspect
 the complete report.
 
+### Extensions
+
+Extensions remain blocking today. The admission contract for lifting one
+specific extension is: the plan records its name, version, and schema; target
+preflight proves availability at a compatible version through
+`pg_available_extensions`; execution creates the extension with an explicit
+version and schema inside the pre-data intent; objects owned by the extension
+(per `pg_depend` membership) are excluded from create-only DDL and attested
+after creation; and the behavior is proven per extension, per PostgreSQL
+version, by the live matrix. The allowlist starts empty. Any extension
+without a proven entry fails closed. There is no blanket extension support
+claim.
+
+### Privileges (ACLs)
+
+The beta does not migrate grants, and this is no longer silent. Namespace,
+relation, routine, and default-privilege findings are elevated from
+non-blocking notes to one mandatory reviewed capability, `acl.report_only`.
+It appears in the plan and in the assessment report
+([15](./15-assessment-product.md)), must be acknowledged during plan review,
+and the acknowledgement is bound into the durable genesis record. Migrating a
+conservative grant subset is future work; silent omission is removed.
+
 The adapter does not yet prove:
 
 - complete live rejection and drift matrices for unsupported index forms;
@@ -216,6 +255,11 @@ The adapter does not yet prove:
 - composite and expression partition keys, broader bound types, subpartitions,
   and the complete partition topology tamper/cancellation/network-loss matrix;
 - unsupported foreign-key variants beyond the explicitly modeled subset;
+- materialized views and programmable objects outside the strict typed ordinary-
+  view and immutable SQL scalar-function subset;
+- complete programmable-object collision, privilege, cancellation, and network-
+  response-loss matrices beyond the current typed identity and journal recovery
+  cases;
 - complete real-engine acceptance matrices in CI.
 
 These items remain required by

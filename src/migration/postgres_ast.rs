@@ -427,6 +427,14 @@ mod tests {
     }
 
     #[test]
+    fn postgres_deparsed_view_with_qualified_dependencies_is_accepted() {
+        parse_postgres_create_view(
+            "CREATE VIEW public.account_values AS SELECT id, public.double_id(id) AS doubled FROM public.accounts;",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn parsed_sql_return_function_round_trips_json() {
         let ast = parse_postgres_durable_statement(
             r#"CREATE FUNCTION "app"."plus_one"("x" integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURN "x" + 1"#,

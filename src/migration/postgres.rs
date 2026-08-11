@@ -36,8 +36,11 @@ use super::plan::{
     MigrationPlan, OperationId, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObject,
     UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
 };
+use super::postgres_ast::{
+    parse_postgres_create_view, parse_postgres_sql_function, PostgresDurableAst,
+};
 
-pub(crate) const CATALOG_FORMAT_VERSION: u32 = 4;
+pub(crate) const CATALOG_FORMAT_VERSION: u32 = 5;
 const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -611,6 +614,70 @@ impl PostgresTargetFactory {
         Ok(state)
     }
 
+    pub fn inspect_programmable_object(
+        &self,
+        expected: &PostgresProgrammableObject,
+    ) -> ConnectionResult<PostgresProgrammableObjectState> {
+        let mut client = self.controlled_connect()?;
+        let relation_kind = matches!(expected.ast, PostgresDurableAst::View(_));
+        let occupied: bool = client
+            .query_one(
+                "SELECT CASE WHEN $3 THEN EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2) ELSE EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname=$2) END",
+                &[&expected.namespace.as_str(), &expected.name.as_str(), &relation_kind],
+            )
+            .map_err(database_error)?
+            .get(0);
+        if !occupied {
+            return Ok(PostgresProgrammableObjectState::Absent);
+        }
+        let snapshot = inspect_connected_endpoint(&self.config, &mut client)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let exact = postgres_programmable_objects(&snapshot.catalog)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?
+            .into_iter()
+            .any(|actual| programmable_object_semantically_equal(expected, &actual));
+        self.cancellation.check()?;
+        Ok(if exact {
+            PostgresProgrammableObjectState::Exact
+        } else {
+            PostgresProgrammableObjectState::Different
+        })
+    }
+
+    pub fn reconcile_programmable_object(
+        &self,
+        expected: &PostgresProgrammableObject,
+    ) -> ConnectionResult<PostgresProgrammableObjectState> {
+        match self.inspect_programmable_object(expected)? {
+            PostgresProgrammableObjectState::Exact => {
+                return Ok(PostgresProgrammableObjectState::Exact);
+            }
+            PostgresProgrammableObjectState::Different => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "target programmable object {}.{} has different semantics",
+                    expected.namespace, expected.name
+                )));
+            }
+            PostgresProgrammableObjectState::Absent => {}
+        }
+        let statement = expected
+            .ast
+            .render_canonical()
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let mut client = self.controlled_connect()?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        self.cancellation.check()?;
+        transaction
+            .batch_execute(&statement)
+            .map_err(database_error)?;
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
+        transaction.commit().map_err(database_error)?;
+        self.inspect_programmable_object(expected)
+    }
+
     /// Inspect an entire partition root/leaf topology by semantic identity.
     pub fn inspect_partition_topology(
         &self,
@@ -1024,6 +1091,61 @@ pub enum PostgresPartitionTopologyState {
     Absent,
     Exact,
     Partial,
+    Different,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresProgrammableObject {
+    pub catalog_object_id: String,
+    pub namespace: Identifier,
+    pub name: Identifier,
+    pub ast: PostgresDurableAst,
+    pub authoritative_identity: PostgresProgrammableIdentity,
+    /// Complete, catalog-resolved `pg_depend` identities, not syntax-derived hints.
+    pub authoritative_dependencies: Vec<PostgresProgrammableIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PostgresProgrammableIdentity {
+    Relation {
+        namespace: Identifier,
+        name: Identifier,
+    },
+    Function {
+        namespace: Identifier,
+        name: Identifier,
+        identity_arguments: String,
+        return_type: String,
+    },
+    Type {
+        namespace: Identifier,
+        name: Identifier,
+    },
+    Collation {
+        namespace: Identifier,
+        name: Identifier,
+    },
+    Operator {
+        namespace: Identifier,
+        name: Identifier,
+        left_type: String,
+        right_type: String,
+        result_type: String,
+    },
+    Namespace {
+        name: Identifier,
+    },
+    Language {
+        name: Identifier,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresProgrammableObjectState {
+    Absent,
+    Exact,
     Different,
 }
 
@@ -1614,6 +1736,175 @@ pub fn postgres_sequences(
     });
     validate_sequence_links(catalog, &sequences)?;
     Ok(sequences)
+}
+
+pub fn postgres_programmable_objects(
+    catalog: &VendorCatalog,
+) -> Result<Vec<PostgresProgrammableObject>, PostgresPlanError> {
+    let mut objects = Vec::new();
+    for namespace in &catalog.namespaces {
+        for object in namespace.objects.iter().filter(|object| {
+            matches!(
+                object.kind,
+                CatalogObjectKind::View | CatalogObjectKind::Routine
+            ) && object.attributes.contains_key("postgres_durable_ast")
+        }) {
+            let ast_json = object
+                .attributes
+                .get("postgres_durable_ast")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "programmable object omits its durable AST",
+                ))?;
+            let ast = PostgresDurableAst::from_canonical_json(ast_json)
+                .map_err(|_| PostgresPlanError::InvalidConfig("programmable AST is invalid"))?;
+            let authoritative_dependencies: Vec<PostgresProgrammableIdentity> =
+                serde_json::from_value(
+                    object
+                        .attributes
+                        .get("postgres_authoritative_dependencies")
+                        .cloned()
+                        .ok_or(PostgresPlanError::InvalidConfig(
+                            "programmable object omits authoritative dependencies",
+                        ))?,
+                )?;
+            let authoritative_identity: PostgresProgrammableIdentity = serde_json::from_value(
+                object
+                    .attributes
+                    .get("postgres_authoritative_identity")
+                    .cloned()
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "programmable object omits authoritative identity",
+                    ))?,
+            )?;
+            if !authoritative_dependencies
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "programmable dependencies are not sorted and unique",
+                ));
+            }
+            let hints = ast.syntactic_dependency_hints();
+            let relation_hints_resolved = hints.relations.iter().all(|identity| {
+                identity
+                    .parts
+                    .as_slice()
+                    .first()
+                    .zip(identity.parts.get(1))
+                    .is_some_and(|(namespace, name)| {
+                        authoritative_dependencies.iter().any(|dependency| {
+                            matches!(
+                                dependency,
+                                PostgresProgrammableIdentity::Relation {
+                                    namespace: dependency_namespace,
+                                    name: dependency_name,
+                                } if dependency_namespace.as_str() == namespace.value
+                                    && dependency_name.as_str() == name.value
+                            )
+                        })
+                    })
+            });
+            let function_hints_resolved = hints.functions.iter().all(|identity| {
+                identity
+                    .parts
+                    .as_slice()
+                    .first()
+                    .zip(identity.parts.get(1))
+                    .is_some_and(|(namespace, name)| {
+                        authoritative_dependencies.iter().any(|dependency| {
+                            matches!(
+                                dependency,
+                                PostgresProgrammableIdentity::Function {
+                                    namespace: dependency_namespace,
+                                    name: dependency_name,
+                                    ..
+                                } if dependency_namespace.as_str() == namespace.value
+                                    && dependency_name.as_str() == name.value
+                            )
+                        })
+                    })
+            });
+            if !relation_hints_resolved || !function_hints_resolved {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "syntactic dependency hint is absent from authoritative pg_depend closure",
+                ));
+            }
+            objects.push(PostgresProgrammableObject {
+                catalog_object_id: object.id.clone(),
+                namespace: namespace.name.clone(),
+                name: object.name.clone(),
+                ast,
+                authoritative_identity,
+                authoritative_dependencies,
+            });
+        }
+    }
+    objects.sort_by(|left, right| left.catalog_object_id.cmp(&right.catalog_object_id));
+    Ok(objects)
+}
+
+fn programmable_object_semantically_equal(
+    expected: &PostgresProgrammableObject,
+    actual: &PostgresProgrammableObject,
+) -> bool {
+    expected.namespace == actual.namespace
+        && expected.name == actual.name
+        && expected.ast == actual.ast
+        && expected.authoritative_identity == actual.authoritative_identity
+        && expected.authoritative_dependencies == actual.authoritative_dependencies
+}
+
+fn programmable_builtin_dependency(
+    dependency: &PostgresProgrammableIdentity,
+    object_namespace: &Identifier,
+) -> bool {
+    match dependency {
+        PostgresProgrammableIdentity::Function { namespace, .. }
+        | PostgresProgrammableIdentity::Type { namespace, .. }
+        | PostgresProgrammableIdentity::Collation { namespace, .. }
+        | PostgresProgrammableIdentity::Operator { namespace, .. } => {
+            namespace.as_str() == "pg_catalog"
+        }
+        PostgresProgrammableIdentity::Namespace { name } => name == object_namespace,
+        PostgresProgrammableIdentity::Language { name } => name.as_str() == "sql",
+        PostgresProgrammableIdentity::Relation { .. } => false,
+    }
+}
+
+fn view_security_is_supported(
+    persistence: &str,
+    relation_options_and_acl_clear: bool,
+    column_acl_clear: bool,
+) -> bool {
+    persistence == "p" && relation_options_and_acl_clear && column_acl_clear
+}
+
+fn unsupported_view_security(
+    object_id: &str,
+    persistence: &str,
+    relation_options_and_acl_clear: bool,
+    column_acl_clear: bool,
+) -> Option<UnsupportedObject> {
+    if column_acl_clear && persistence == "p" && relation_options_and_acl_clear {
+        return None;
+    }
+    Some(UnsupportedObject {
+        object_id: object_id.to_owned(),
+        object_kind: if column_acl_clear {
+            "view_security"
+        } else {
+            "view_column_acl"
+        }
+        .into(),
+        reason: if column_acl_clear {
+            "view has unsupported persistence, options, privileges, or row security"
+        } else {
+            "custom view-column privileges are not implemented"
+        }
+        .into(),
+        required_semantics: true,
+    })
 }
 
 fn validate_sequence_links(
@@ -3875,6 +4166,7 @@ fn inspect_connected_endpoint(
     let port: i32 = identity.get(3);
     let server_version: String = identity.get(4);
     let server_version_num: i32 = identity.get(5);
+    transaction.batch_execute("SET LOCAL search_path = pg_catalog")?;
     let read_only: bool = identity.get(6);
     if !read_only {
         return Err(PostgresPlanError::InvalidConfig(
@@ -3899,6 +4191,7 @@ fn extract_catalog(
     database: &str,
     server_version: &str,
 ) -> Result<(VendorCatalog, UnsupportedObjectReport), PostgresPlanError> {
+    transaction.batch_execute("SET LOCAL search_path = pg_catalog")?;
     let database_settings = transaction.query_one(
         "SELECT pg_encoding_to_char(encoding), datcollate, datctype FROM pg_database WHERE datname = current_database()",
         &[],
@@ -3927,7 +4220,7 @@ fn extract_catalog(
     }
 
     let relation_rows = transaction.query(
-        "SELECT 'relation:' || c.oid::text, n.nspname, c.relname, c.relkind::text, pg_get_userbyid(c.relowner), c.relpersistence::text, c.relrowsecurity, CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid, true) ELSE NULL END, seq.seqstart::text, seq.seqincrement::text, seq.seqmax::text, seq.seqmin::text, seq.seqcache::text, seq.seqcycle, CASE WHEN seq.seqtypid IS NULL THEN NULL ELSE pg_catalog.format_type(seq.seqtypid, NULL) END, c.relispartition, CASE WHEN parent.oid IS NULL THEN NULL ELSE 'relation:' || parent.oid::text END, CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid, false) END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_sequence seq ON seq.seqrelid = c.oid LEFT JOIN pg_inherits inh ON inh.inhrelid = c.oid LEFT JOIN pg_class parent ON parent.oid = inh.inhparent WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','S','v','m') ORDER BY n.nspname, c.relname, c.relkind",
+        "SELECT 'relation:' || c.oid::text, n.nspname, c.relname, c.relkind::text, pg_get_userbyid(c.relowner), c.relpersistence::text, c.relrowsecurity, CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid, true) ELSE NULL END, seq.seqstart::text, seq.seqincrement::text, seq.seqmax::text, seq.seqmin::text, seq.seqcache::text, seq.seqcycle, CASE WHEN seq.seqtypid IS NULL THEN NULL ELSE pg_catalog.format_type(seq.seqtypid, NULL) END, c.relispartition, CASE WHEN parent.oid IS NULL THEN NULL ELSE 'relation:' || parent.oid::text END, CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid, false) END, c.reloptions IS NULL AND c.relacl IS NULL, NOT EXISTS (SELECT 1 FROM pg_attribute va WHERE va.attrelid=c.oid AND va.attnum>0 AND NOT va.attisdropped AND va.attacl IS NOT NULL) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_sequence seq ON seq.seqrelid = c.oid LEFT JOIN pg_inherits inh ON inh.inhrelid = c.oid LEFT JOIN pg_class parent ON parent.oid = inh.inhparent WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','S','v','m') ORDER BY n.nspname, c.relname, c.relkind",
         &[],
     )?;
     let mut unsupported = Vec::new();
@@ -3995,13 +4288,71 @@ fn extract_catalog(
                 });
             }
         }
-        if kind == "m" || kind == "v" || relrowsecurity {
+        if kind == "v" && !relrowsecurity {
+            let view_name = Identifier::new(name.clone())?;
+            let namespace_name = Identifier::new(namespace.clone())?;
+            let create_sql = format!(
+                "CREATE VIEW {}.{} AS {}",
+                quote_identifier(&namespace_name),
+                quote_identifier(&view_name),
+                definition.as_deref().unwrap_or_default()
+            );
+            match parse_postgres_create_view(&create_sql) {
+                Ok(ast)
+                    if view_security_is_supported(
+                        &row.get::<_, String>(5),
+                        row.get(18),
+                        row.get(19),
+                    ) =>
+                {
+                    let object_oid = id
+                        .strip_prefix("relation:")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .ok_or(PostgresPlanError::InvalidConfig("view OID is invalid"))?;
+                    let dependencies = programmable_dependencies(transaction, object_oid, true)?;
+                    let durable = PostgresDurableAst::View(Box::new(ast));
+                    attributes.insert(
+                        "postgres_durable_ast".into(),
+                        serde_json::Value::String(durable.canonical_json().map_err(|_| {
+                            PostgresPlanError::InvalidConfig("view AST is invalid")
+                        })?),
+                    );
+                    attributes.insert(
+                        "postgres_authoritative_dependencies".into(),
+                        serde_json::to_value(dependencies)?,
+                    );
+                    attributes.insert(
+                        "postgres_authoritative_identity".into(),
+                        serde_json::to_value(PostgresProgrammableIdentity::Relation {
+                            namespace: namespace_name,
+                            name: view_name,
+                        })?,
+                    );
+                }
+                Ok(_) => unsupported.push(
+                    unsupported_view_security(
+                        &id,
+                        &row.get::<_, String>(5),
+                        row.get(18),
+                        row.get(19),
+                    )
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "supported view unexpectedly reached security rejection",
+                    ))?,
+                ),
+                Err(error) => unsupported.push(UnsupportedObject {
+                    object_id: id.clone(),
+                    object_kind: "view".into(),
+                    reason: format!("view is outside the strict ordinary AST subset: {error}"),
+                    required_semantics: true,
+                }),
+            }
+        }
+        if kind == "m" || relrowsecurity {
             unsupported.push(UnsupportedObject {
                 object_id: id.clone(),
                 object_kind: if relrowsecurity {
                     "row_security"
-                } else if kind == "v" {
-                    "view"
                 } else if kind == "m" {
                     "materialized_view"
                 } else {
@@ -4507,7 +4858,16 @@ fn extract_catalog(
     }
 
     let routine_rows = transaction.query(
-        "SELECT 'routine:' || p.oid::text, n.nspname, p.proname, CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) ELSE p.prokind::text || ' ' || pg_get_function_identity_arguments(p.oid) END FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, p.proname, p.oid",
+        "SELECT 'routine:' || p.oid::text, n.nspname, p.proname, pg_get_functiondef(p.oid), p.oid,
+                p.prokind='f' AND l.lanname='sql' AND p.provolatile='i' AND NOT p.prosecdef
+                AND NOT p.proleakproof AND p.proparallel='s' AND p.proisstrict
+                AND NOT p.proretset AND p.provariadic=0 AND p.pronargdefaults=0
+                AND p.proconfig IS NULL AND p.prosupport=0 AND p.proacl IS NULL
+                AND NOT EXISTS (SELECT 1 FROM pg_proc sibling WHERE sibling.pronamespace=p.pronamespace AND sibling.proname=p.proname AND sibling.oid<>p.oid),
+                pg_get_function_identity_arguments(p.oid), pg_catalog.format_type(p.prorettype,NULL)
+         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
+         WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+         ORDER BY n.nspname,p.proname,p.oid",
         &[],
     )?;
     for row in routine_rows {
@@ -4515,12 +4875,44 @@ fn extract_catalog(
         let namespace: String = row.get(1);
         let name: String = row.get(2);
         let definition: String = row.get(3);
-        unsupported.push(UnsupportedObject {
-            object_id: id.clone(),
-            object_kind: "routine".into(),
-            reason: "routine execution semantics are not implemented".into(),
-            required_semantics: true,
-        });
+        let allowed: bool = row.get(5);
+        let create_only = definition.replacen("CREATE OR REPLACE FUNCTION ", "CREATE FUNCTION ", 1);
+        let ast = allowed
+            .then(|| parse_postgres_sql_function(&create_only))
+            .transpose();
+        let mut attributes = BTreeMap::new();
+        match ast {
+            Ok(Some(ast)) if create_only != definition => {
+                let dependencies =
+                    programmable_dependencies(transaction, row.get::<_, u32>(4), false)?;
+                let durable = PostgresDurableAst::SqlFunction(Box::new(ast));
+                attributes.insert(
+                    "postgres_durable_ast".into(),
+                    serde_json::Value::String(durable.canonical_json().map_err(|_| {
+                        PostgresPlanError::InvalidConfig("SQL function AST is invalid")
+                    })?),
+                );
+                attributes.insert(
+                    "postgres_authoritative_identity".into(),
+                    serde_json::to_value(PostgresProgrammableIdentity::Function {
+                        namespace: Identifier::new(namespace.clone())?,
+                        name: Identifier::new(name.clone())?,
+                        identity_arguments: row.get(6),
+                        return_type: row.get(7),
+                    })?,
+                );
+                attributes.insert(
+                    "postgres_authoritative_dependencies".into(),
+                    serde_json::to_value(dependencies)?,
+                );
+            }
+            _ => unsupported.push(UnsupportedObject {
+                object_id: id.clone(),
+                object_kind: "routine".into(),
+                reason: "routine is outside the immutable SQL scalar create-only AST subset".into(),
+                required_semantics: true,
+            }),
+        }
         push_object(
             &mut namespaces,
             &namespace,
@@ -4529,7 +4921,7 @@ fn extract_catalog(
                 kind: CatalogObjectKind::Routine,
                 name: Identifier::new(name)?,
                 definition: definition.into_bytes(),
-                attributes: BTreeMap::new(),
+                attributes,
             },
         )?;
     }
@@ -4610,6 +5002,111 @@ fn extract_catalog(
             objects: unsupported,
         },
     ))
+}
+
+fn programmable_dependencies(
+    client: &mut impl postgres::GenericClient,
+    object_oid: u32,
+    view: bool,
+) -> Result<Vec<PostgresProgrammableIdentity>, PostgresPlanError> {
+    let rows = client.query(
+        "SELECT DISTINCT CASE d.refclassid WHEN 'pg_class'::regclass THEN 'relation' WHEN 'pg_proc'::regclass THEN 'function' WHEN 'pg_type'::regclass THEN 'type' WHEN 'pg_collation'::regclass THEN 'collation' WHEN 'pg_operator'::regclass THEN 'operator' WHEN 'pg_namespace'::regclass THEN 'namespace' WHEN 'pg_language'::regclass THEN 'language' ELSE NULL END,
+           COALESCE(rn.nspname,pn.nspname,tn.nspname,cn.nspname,onsp.nspname),
+           COALESCE(rc.relname,p.proname,t.typname,coll.collname,op.oprname,dn.nspname,lang.lanname),
+           CASE WHEN p.oid IS NULL THEN NULL ELSE pg_get_function_identity_arguments(p.oid) END,
+           CASE WHEN p.oid IS NULL THEN NULL ELSE pg_catalog.format_type(p.prorettype,NULL) END,
+           CASE WHEN op.oid IS NULL THEN NULL ELSE pg_catalog.format_type(op.oprleft,NULL) END,
+           CASE WHEN op.oid IS NULL THEN NULL ELSE pg_catalog.format_type(op.oprright,NULL) END,
+           CASE WHEN op.oid IS NULL THEN NULL ELSE pg_catalog.format_type(op.oprresult,NULL) END
+         FROM pg_depend d
+         LEFT JOIN pg_class rc ON d.refclassid='pg_class'::regclass AND rc.oid=d.refobjid
+         LEFT JOIN pg_namespace rn ON rn.oid=rc.relnamespace
+         LEFT JOIN pg_proc p ON d.refclassid='pg_proc'::regclass AND p.oid=d.refobjid
+         LEFT JOIN pg_namespace pn ON pn.oid=p.pronamespace
+         LEFT JOIN pg_type t ON d.refclassid='pg_type'::regclass AND t.oid=d.refobjid
+         LEFT JOIN pg_namespace tn ON tn.oid=t.typnamespace
+         LEFT JOIN pg_collation coll ON d.refclassid='pg_collation'::regclass AND coll.oid=d.refobjid
+         LEFT JOIN pg_namespace cn ON cn.oid=coll.collnamespace
+         LEFT JOIN pg_operator op ON d.refclassid='pg_operator'::regclass AND op.oid=d.refobjid
+         LEFT JOIN pg_namespace onsp ON onsp.oid=op.oprnamespace
+         LEFT JOIN pg_namespace dn ON d.refclassid='pg_namespace'::regclass AND dn.oid=d.refobjid
+         LEFT JOIN pg_language lang ON d.refclassid='pg_language'::regclass AND lang.oid=d.refobjid
+         WHERE (( $2 AND d.classid='pg_rewrite'::regclass AND d.objid=(SELECT oid FROM pg_rewrite WHERE ev_class=$1 AND rulename='_RETURN'))
+             OR (NOT $2 AND d.classid='pg_proc'::regclass AND d.objid=$1))
+           AND d.deptype IN ('n','a')
+           AND NOT (d.refclassid='pg_class'::regclass AND d.refobjid=$1)
+         ORDER BY 1,2,3,4,5,6,7,8",
+        &[&object_oid, &view],
+    )?;
+    let mut identities = rows
+        .into_iter()
+        .map(programmable_identity_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    identities.sort();
+    if !identities.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(PostgresPlanError::InvalidConfig(
+            "programmable pg_depend closure contains duplicate identities",
+        ));
+    }
+    Ok(identities)
+}
+
+fn programmable_identity_from_row(
+    row: postgres::Row,
+) -> Result<PostgresProgrammableIdentity, PostgresPlanError> {
+    let kind = row
+        .get::<_, Option<String>>(0)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "programmable object has unsupported pg_depend class",
+        ))?;
+    let namespace = || {
+        row.get::<_, Option<String>>(1)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "dependency namespace is absent",
+            ))
+            .and_then(|value| Identifier::new(value).map_err(Into::into))
+    };
+    let name = || {
+        row.get::<_, Option<String>>(2)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "dependency name is absent",
+            ))
+            .and_then(|value| Identifier::new(value).map_err(Into::into))
+    };
+    Ok(match kind.as_str() {
+        "relation" => PostgresProgrammableIdentity::Relation {
+            namespace: namespace()?,
+            name: name()?,
+        },
+        "function" => PostgresProgrammableIdentity::Function {
+            namespace: namespace()?,
+            name: name()?,
+            identity_arguments: row.get(3),
+            return_type: row.get(4),
+        },
+        "type" => PostgresProgrammableIdentity::Type {
+            namespace: namespace()?,
+            name: name()?,
+        },
+        "collation" => PostgresProgrammableIdentity::Collation {
+            namespace: namespace()?,
+            name: name()?,
+        },
+        "operator" => PostgresProgrammableIdentity::Operator {
+            namespace: namespace()?,
+            name: name()?,
+            left_type: row.get(5),
+            right_type: row.get(6),
+            result_type: row.get(7),
+        },
+        "namespace" => PostgresProgrammableIdentity::Namespace { name: name()? },
+        "language" => PostgresProgrammableIdentity::Language { name: name()? },
+        _ => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "programmable object has unsupported pg_depend class",
+            ));
+        }
+    })
 }
 
 fn validate_catalog_identity(catalog: &VendorCatalog) -> Result<(), PostgresPlanError> {
@@ -4748,7 +5245,6 @@ pub fn build_plan_with_consistency(
 ) -> Result<ReviewedPlan, PostgresPlanError> {
     let mut operations = Vec::new();
     let mut table_names = BTreeSet::new();
-    let mut deferred_objects = Vec::new();
     let mut foreign_keys = Vec::new();
     let mut standalone_indexes = Vec::new();
     let mut post_data_indexes = Vec::new();
@@ -4762,8 +5258,6 @@ pub fn build_plan_with_consistency(
                     namespace: namespace.name.clone(),
                     name: object.name.clone(),
                 });
-            } else if object.kind == CatalogObjectKind::View {
-                deferred_objects.push((namespace.name.clone(), object.clone()));
             } else if object.kind == CatalogObjectKind::ForeignKey {
                 foreign_keys.push(object.clone());
             } else if object.kind == CatalogObjectKind::Index
@@ -5102,20 +5596,67 @@ pub fn build_plan_with_consistency(
         )?;
         operations.extend([check, add]);
     }
-    for (namespace, object) in deferred_objects {
-        let kind = match object.kind {
-            CatalogObjectKind::View => OperationKind::CreateView,
-            _ => continue,
+    let mut programmable_objects = postgres_programmable_objects(&source.catalog)?;
+    let programmable_identities = programmable_objects
+        .iter()
+        .map(|object| object.authoritative_identity.clone())
+        .collect::<BTreeSet<_>>();
+    let mut programmable_operation_ids: BTreeMap<PostgresProgrammableIdentity, OperationId> =
+        BTreeMap::new();
+    while !programmable_objects.is_empty() {
+        let next = programmable_objects.iter().position(|object| {
+            object.authoritative_dependencies.iter().all(|dependency| {
+                !programmable_identities.contains(dependency)
+                    || programmable_operation_ids.contains_key(dependency)
+            })
+        });
+        let Some(next) = next else {
+            return Err(PostgresPlanError::InvalidConfig(
+                "programmable dependency graph is cyclic",
+            ));
         };
-        operations.push(PlanOperation::new(
+        let programmable = programmable_objects.remove(next);
+        let mut dependencies = Vec::new();
+        for dependency in &programmable.authoritative_dependencies {
+            if let Some(operation_id) = programmable_operation_ids.get(dependency) {
+                dependencies.push(operation_id.clone());
+            } else if let Some((_, operation_id)) = copy_operations.iter().find(|(table, _)| {
+                matches!(dependency,
+                    PostgresProgrammableIdentity::Relation { namespace, name }
+                    if namespace == &table.namespace && name == &table.name)
+            }) {
+                dependencies.push(operation_id.clone());
+            } else if !programmable_builtin_dependency(dependency, &programmable.namespace) {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "programmable dependency has no reviewed operation",
+                ));
+            }
+        }
+        dependencies.sort();
+        dependencies.dedup();
+        let kind = match &programmable.ast {
+            PostgresDurableAst::View(_) => OperationKind::CreateView,
+            PostgresDurableAst::SqlFunction(_) => {
+                OperationKind::Vendor("create_postgres_sql_function".into())
+            }
+        };
+        let operation = PlanOperation::new(
             kind,
             Some(QualifiedTable {
-                namespace,
-                name: object.name.clone(),
+                namespace: programmable.namespace.clone(),
+                name: programmable.name.clone(),
             }),
-            Vec::new(),
-            BTreeMap::from([("catalog_object".into(), serde_json::to_value(object)?)]),
-        )?);
+            dependencies,
+            BTreeMap::from([(
+                "postgres_programmable_object".into(),
+                serde_json::to_value(&programmable)?,
+            )]),
+        )?;
+        programmable_operation_ids.insert(
+            programmable.authoritative_identity.clone(),
+            operation.id.clone(),
+        );
+        operations.push(operation);
     }
     for topology in &partition_topologies {
         let verify = operations
@@ -6616,5 +7157,97 @@ credential_env = "PGPASSWORD"
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn programmable_catalog_requires_canonical_ast_and_sorted_authoritative_dependencies() {
+        let ast = PostgresDurableAst::View(Box::new(
+            parse_postgres_create_view(
+                "CREATE VIEW public.active_accounts AS SELECT id FROM public.accounts",
+            )
+            .unwrap(),
+        ));
+        let mut catalog = snapshot("source", false).catalog;
+        catalog.namespaces[0].objects.push(CatalogObject {
+            id: "relation:20".into(),
+            kind: CatalogObjectKind::View,
+            name: Identifier::new("active_accounts").unwrap(),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                (
+                    "postgres_durable_ast".into(),
+                    serde_json::Value::String(ast.canonical_json().unwrap()),
+                ),
+                (
+                    "postgres_authoritative_identity".into(),
+                    serde_json::to_value(PostgresProgrammableIdentity::Relation {
+                        namespace: Identifier::new("public").unwrap(),
+                        name: Identifier::new("active_accounts").unwrap(),
+                    })
+                    .unwrap(),
+                ),
+                (
+                    "postgres_authoritative_dependencies".into(),
+                    serde_json::to_value([PostgresProgrammableIdentity::Relation {
+                        namespace: Identifier::new("public").unwrap(),
+                        name: Identifier::new("accounts").unwrap(),
+                    }])
+                    .unwrap(),
+                ),
+            ]),
+        });
+
+        let objects = postgres_programmable_objects(&catalog).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects[0].authoritative_dependencies,
+            [PostgresProgrammableIdentity::Relation {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new("accounts").unwrap(),
+            }]
+        );
+
+        catalog.namespaces[0].objects[0].attributes.insert(
+            "postgres_authoritative_dependencies".into(),
+            serde_json::to_value([
+                PostgresProgrammableIdentity::Type {
+                    namespace: Identifier::new("pg_catalog").unwrap(),
+                    name: Identifier::new("int8").unwrap(),
+                },
+                PostgresProgrammableIdentity::Relation {
+                    namespace: Identifier::new("public").unwrap(),
+                    name: Identifier::new("accounts").unwrap(),
+                },
+            ])
+            .unwrap(),
+        );
+        assert!(postgres_programmable_objects(&catalog).is_err());
+    }
+
+    #[test]
+    fn typed_programmable_identities_do_not_collide_on_dotted_identifiers() {
+        let left = PostgresProgrammableIdentity::Relation {
+            namespace: Identifier::new("a.b").unwrap(),
+            name: Identifier::new("c").unwrap(),
+        };
+        let right = PostgresProgrammableIdentity::Relation {
+            namespace: Identifier::new("a").unwrap(),
+            name: Identifier::new("b.c").unwrap(),
+        };
+        assert_ne!(left, right);
+        assert_ne!(
+            serde_json::to_value(&left).unwrap(),
+            serde_json::to_value(&right).unwrap()
+        );
+        assert_eq!(BTreeSet::from([left, right]).len(), 2);
+    }
+
+    #[test]
+    fn view_column_acl_is_not_supported() {
+        assert!(view_security_is_supported("p", true, true));
+        assert!(!view_security_is_supported("p", true, false));
+        let unsupported = unsupported_view_security("relation:7", "p", true, false).unwrap();
+        assert_eq!(unsupported.object_kind, "view_column_acl");
+        assert!(unsupported.required_semantics);
     }
 }

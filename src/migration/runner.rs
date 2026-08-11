@@ -15,6 +15,8 @@ use anyhow::{anyhow, Context};
 #[cfg(feature = "enterprise-migration-spike")]
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "migration-fault-injection")]
+use super::append_journal::AppendJournalFault;
 #[cfg(feature = "enterprise-migration-spike")]
 use super::append_journal::{
     AppendJournal, CommittedChunkIter, Genesis, OperationPhase, OperationSpec, PreparedChunk,
@@ -43,13 +45,16 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
     catalog_fingerprint, postgres_foreign_keys, postgres_generated_columns,
-    postgres_partition_topologies, postgres_post_data_indexes, postgres_sequences,
-    postgres_tls_binding, select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresForeignKey, PostgresForeignKeyState, PostgresGeneratedColumnState, PostgresIndex,
-    PostgresIndexState, PostgresPartitionTopology, PostgresPartitionTopologyState,
+    postgres_partition_topologies, postgres_post_data_indexes, postgres_programmable_objects,
+    postgres_sequences, postgres_tls_binding, select_resumable_key, PostgresConsistencyMode,
+    PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
+    PostgresGeneratedColumnState, PostgresIndex, PostgresIndexState, PostgresPartitionTopology,
+    PostgresPartitionTopologyState, PostgresProgrammableObject, PostgresProgrammableObjectState,
     PostgresResumableKey, PostgresSequence, PostgresSequenceState, PostgresSourceFactory,
     PostgresTargetFactory, CATALOG_FORMAT_VERSION,
 };
+#[cfg(feature = "enterprise-migration-spike")]
+use super::postgres_ast::PostgresDurableAst;
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
     attest_postgres_write_fence, postgres_write_fence_is_released, release_postgres_write_fence,
@@ -269,6 +274,10 @@ enum ExecutionInterruption {
     AfterFenceReleased,
     #[cfg(feature = "migration-fault-injection")]
     NetworkCommitFault(u16),
+    #[cfg(feature = "migration-fault-injection")]
+    TornChunkCommittedEnospc,
+    #[cfg(feature = "migration-fault-injection")]
+    ChunkCommittedSyncAckLost,
 }
 
 /// Deterministic failure boundaries used by the opt-in real-engine matrix.
@@ -290,6 +299,8 @@ pub enum PostgresExecutionInterruption {
     AfterForeignKeyCommitted,
     AfterFenceReleased,
     NetworkCommitFault(u16),
+    TornChunkCommittedEnospc,
+    ChunkCommittedSyncAckLost,
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -316,6 +327,12 @@ impl From<PostgresExecutionInterruption> for ExecutionInterruption {
             PostgresExecutionInterruption::AfterFenceReleased => Self::AfterFenceReleased,
             PostgresExecutionInterruption::NetworkCommitFault(port) => {
                 Self::NetworkCommitFault(port)
+            }
+            PostgresExecutionInterruption::TornChunkCommittedEnospc => {
+                Self::TornChunkCommittedEnospc
+            }
+            PostgresExecutionInterruption::ChunkCommittedSyncAckLost => {
+                Self::ChunkCommittedSyncAckLost
             }
         }
     }
@@ -836,6 +853,14 @@ fn resume_postgres_fenced_plan_internal(
         &cancellation,
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
+    process_postgres_programmable_objects(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        &cancellation,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
     if journal.projection().status == MigrationStatus::Running {
         journal.transition_status(MigrationStatus::Verifying)?;
     } else if journal.projection().status != MigrationStatus::Verifying {
@@ -1034,7 +1059,8 @@ fn execute_postgres_plan_internal(
     }
     if execution_unsupported.blocks_execution() {
         return Err(anyhow!(
-            "fresh source snapshot contains execution-blocking unsupported semantics"
+            "fresh source snapshot contains execution-blocking unsupported semantics: {:?}",
+            execution_unsupported.objects
         ));
     }
     if source_fingerprint != reviewed.plan.source_catalog_fingerprint {
@@ -1231,6 +1257,12 @@ fn execute_postgres_plan_internal(
             } else if interruption == Some(ExecutionInterruption::CommitUnknownAfterApply) {
                 return Err(injected_interruption(interruption));
             } else {
+                #[cfg(feature = "migration-fault-injection")]
+                if interruption == Some(ExecutionInterruption::TornChunkCommittedEnospc) {
+                    journal.arm_fault(AppendJournalFault::TornChunkCommittedEnospc)?;
+                } else if interruption == Some(ExecutionInterruption::ChunkCommittedSyncAckLost) {
+                    journal.arm_fault(AppendJournalFault::ChunkCommittedSyncAckLost)?;
+                }
                 journal.commit_chunk_after_ack()?;
             }
             copied_rows = copied_rows
@@ -1277,6 +1309,14 @@ fn execute_postgres_plan_internal(
         &target,
         &mut journal,
         interruption,
+        &cancellation,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
+    process_postgres_programmable_objects(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
         &cancellation,
         || attest_fence_if_present(fenced.as_ref()),
     )?;
@@ -1862,6 +1902,102 @@ fn verify_postgres_sequence_states(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+fn process_postgres_programmable_objects(
+    reviewed: &ReviewedPlan,
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+    journal: &mut AppendJournal,
+    cancellation: &CancellationToken,
+    mut attest: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let programmable_objects = postgres_programmable_objects(catalog)?
+        .into_iter()
+        .map(|object| (object.catalog_object_id.clone(), object))
+        .collect::<BTreeMap<_, _>>();
+    for operation in reviewed.plan.operations.iter().filter(|operation| {
+        operation.kind == OperationKind::CreateView
+            || matches!(&operation.kind, OperationKind::Vendor(name) if name == "create_postgres_sql_function")
+    }) {
+        cancellation.check()?;
+        let reviewed_object: PostgresProgrammableObject = serde_json::from_value(
+            operation
+                .parameters
+                .get("postgres_programmable_object")
+                .cloned()
+                .ok_or_else(|| anyhow!("programmable-object operation omits postgres_programmable_object"))?,
+        )?;
+        let object = programmable_objects
+            .get(&reviewed_object.catalog_object_id)
+            .ok_or_else(|| anyhow!("programmable-object operation refers to an unknown object"))?;
+        if object != &reviewed_object {
+            return Err(anyhow!(
+                "programmable-object operation differs from the reviewed catalog"
+            ));
+        }
+        let expected_kind = match &object.ast {
+            PostgresDurableAst::View(_) => OperationKind::CreateView,
+            PostgresDurableAst::SqlFunction(_) => {
+                OperationKind::Vendor("create_postgres_sql_function".into())
+            }
+        };
+        let expected_identity = QualifiedTable {
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+        };
+        if operation.kind != expected_kind || operation.table.as_ref() != Some(&expected_identity) {
+            return Err(anyhow!(
+                "programmable-object operation kind or identity differs from the reviewed catalog"
+            ));
+        }
+
+        let state = operation_state(journal, operation.id.as_str())?;
+        if matches!(state, OperationState::Pending | OperationState::Running) {
+            journal_prepare_effect(journal, operation.id.as_str())?;
+        }
+        attest()?;
+        let observed = match operation_state(journal, operation.id.as_str())? {
+            OperationState::Prepared => match target.reconcile_programmable_object(object) {
+                Ok(observed) => observed,
+                Err(ConnectionError::InvalidRequest(reason)) => {
+                    journal.require_manual_reconciliation()?;
+                    return Err(anyhow!(
+                        "programmable-object reconciliation requires manual intervention: {reason}"
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            },
+            OperationState::Committed | OperationState::Verified => {
+                target.inspect_programmable_object(object)?
+            }
+            OperationState::Pending | OperationState::Running => {
+                return Err(anyhow!("programmable object was not durably prepared"));
+            }
+        };
+        if observed != PostgresProgrammableObjectState::Exact {
+            journal.require_manual_reconciliation()?;
+            return Err(anyhow!(
+                "target programmable object {} differs from reviewed semantics",
+                object.catalog_object_id
+            ));
+        }
+        match operation_state(journal, operation.id.as_str())? {
+            OperationState::Prepared => {
+                journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+                journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+            }
+            OperationState::Committed => {
+                journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+            }
+            OperationState::Verified => {}
+            OperationState::Pending | OperationState::Running => {
+                return Err(anyhow!("programmable object has an incomplete durable state"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
 fn verify_postgres_generated_columns(
     catalog: &VendorCatalog,
     target: &PostgresTargetFactory,
@@ -2338,6 +2474,7 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
             OperationKind::CreateTable
                 | OperationKind::CreateSequence
                 | OperationKind::CreateIndex
+                | OperationKind::CreateView
                 | OperationKind::CopyTable
                 | OperationKind::CheckForeignKey
                 | OperationKind::AddForeignKey
@@ -2349,6 +2486,7 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
                 if name == "restore_postgres_sequence"
                     || name == "create_postgres_partitioned_table"
                     || name == "create_postgres_partition"
+                    || name == "create_postgres_sql_function"
                     || name == "verify_postgres_partition_topology"
         ) {
             return Err(anyhow!(
@@ -2360,6 +2498,7 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
             operation.kind,
             OperationKind::CreateTable
                 | OperationKind::CreateIndex
+                | OperationKind::CreateView
                 | OperationKind::CopyTable
                 | OperationKind::CheckForeignKey
                 | OperationKind::AddForeignKey
@@ -2391,6 +2530,57 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         .source_catalog
         .as_ref()
         .ok_or_else(|| anyhow!("reviewed PostgreSQL plan has no embedded source catalog"))?;
+    let expected_programmable_objects = postgres_programmable_objects(source_catalog)?
+        .into_iter()
+        .map(|object| serde_json::to_string(&object))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let operation_programmable_objects = reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| {
+            operation.kind == OperationKind::CreateView
+                || matches!(&operation.kind, OperationKind::Vendor(name) if name == "create_postgres_sql_function")
+        })
+        .map(|operation| {
+            let object: PostgresProgrammableObject = serde_json::from_value(
+                operation
+                    .parameters
+                    .get("postgres_programmable_object")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("programmable-object operation omits postgres_programmable_object"))?,
+            )?;
+            let expected_kind = match &object.ast {
+                PostgresDurableAst::View(_) => OperationKind::CreateView,
+                PostgresDurableAst::SqlFunction(_) => {
+                    OperationKind::Vendor("create_postgres_sql_function".into())
+                }
+            };
+            let expected_identity = QualifiedTable {
+                namespace: object.namespace.clone(),
+                name: object.name.clone(),
+            };
+            if operation.kind != expected_kind
+                || operation.table.as_ref() != Some(&expected_identity)
+            {
+                return Err(anyhow!(
+                    "programmable-object operation kind or identity differs from the reviewed catalog"
+                ));
+            }
+            Ok(serde_json::to_string(&object)?)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let operation_programmable_object_set = operation_programmable_objects
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if operation_programmable_objects.len() != operation_programmable_object_set.len()
+        || operation_programmable_object_set != expected_programmable_objects
+    {
+        return Err(anyhow!(
+            "reviewed PostgreSQL programmable-object operation set differs from the catalog"
+        ));
+    }
     let expected_topologies = postgres_partition_topologies(source_catalog)?;
     for topology in &expected_topologies {
         let root_creates = reviewed
@@ -2875,7 +3065,9 @@ fn target_schema_matches(
     target_factory: &PostgresTargetFactory,
 ) -> anyhow::Result<bool> {
     let target = target_factory.inspect_endpoint()?;
-    Ok(schema_projection(source, false)? == schema_projection(&target.catalog, false)?)
+    let source_projection = schema_projection(source, false)?;
+    let target_projection = schema_projection(&target.catalog, false)?;
+    Ok(source_projection == target_projection)
 }
 
 fn schema_projection(
@@ -2930,6 +3122,11 @@ fn schema_projection(
                             .and_then(serde_json::Value::as_bool)
                             == Some(true)))
                     || (include_post_data_objects && object.kind == CatalogObjectKind::ForeignKey)
+                    || (include_post_data_objects
+                        && matches!(
+                            object.kind,
+                            CatalogObjectKind::View | CatalogObjectKind::Routine
+                        ))
             })
             .map(|object| {
                 let definition = String::from_utf8(object.definition.clone())
@@ -2984,6 +3181,11 @@ fn schema_projection(
                         "collation_actual_version": object.attributes.get("collation_actual_version"),
                         "type_schema": object.attributes.get("type_schema"),
                         "type_name": object.attributes.get("type_name"),
+                    }),
+                    CatalogObjectKind::View | CatalogObjectKind::Routine => serde_json::json!({
+                        "postgres_durable_ast": object.attributes.get("postgres_durable_ast"),
+                        "postgres_authoritative_identity": object.attributes.get("postgres_authoritative_identity"),
+                        "postgres_authoritative_dependencies": object.attributes.get("postgres_authoritative_dependencies"),
                     }),
                     CatalogObjectKind::ForeignKey => serde_json::json!({
                         "type": object.attributes.get("type"),
