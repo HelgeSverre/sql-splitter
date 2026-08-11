@@ -68,8 +68,8 @@ The foreign-key matrix also stops before and after constraint commit, resumes,
 and compares exact PostgreSQL catalog metadata and internal constraint-trigger
 state. A negative live case proves composite anti-join detection and persists a
 manual-reconciliation state for a conflicting target constraint. The separate
-feature is not part of the normal spike API. PostgreSQL 17 currently passes this
-matrix; versions 15 and 16 remain required evidence.
+feature is not part of the normal spike API. PostgreSQL 15, 16, and 17 pass this
+matrix.
 
 ## Configuration and security
 
