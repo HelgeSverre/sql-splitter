@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::model::QualifiedTable;
+use super::model::{QualifiedTable, VendorCatalog};
 
 pub const PLAN_SCHEMA_VERSION: u16 = 1;
 
@@ -163,6 +163,8 @@ pub struct MigrationPlan {
     pub target_endpoint_identity: String,
     pub source_catalog_fingerprint: String,
     pub target_catalog_fingerprint: String,
+    pub source_catalog: Option<VendorCatalog>,
+    pub target_catalog: Option<VendorCatalog>,
     pub consistency_mode: String,
     pub canonical_encoding_version: u16,
     pub conversion_policy: String,
@@ -196,6 +198,25 @@ impl MigrationPlan {
         ] {
             if value.is_empty() {
                 return Err(PlanError::EmptyField { field });
+            }
+        }
+        for (field, catalog, expected) in [
+            (
+                "source_catalog_fingerprint",
+                self.source_catalog.as_ref(),
+                &self.source_catalog_fingerprint,
+            ),
+            (
+                "target_catalog_fingerprint",
+                self.target_catalog.as_ref(),
+                &self.target_catalog_fingerprint,
+            ),
+        ] {
+            if let Some(catalog) = catalog {
+                let actual = hex::encode(Sha256::digest(serde_json::to_vec(catalog)?));
+                if &actual != expected {
+                    return Err(PlanError::CatalogFingerprintMismatch { field, actual });
+                }
             }
         }
         let ids: BTreeSet<_> = self.operations.iter().map(|op| &op.id).collect();
@@ -325,6 +346,8 @@ pub enum PlanError {
     Serialization(#[from] serde_json::Error),
     #[error("plan contains unsupported objects with required semantics")]
     UnsupportedRequiredSemantics,
+    #[error("{field} does not match the embedded catalog; actual fingerprint is {actual}")]
+    CatalogFingerprintMismatch { field: &'static str, actual: String },
 }
 
 #[cfg(test)]
@@ -339,6 +362,8 @@ mod tests {
             target_endpoint_identity: "t".into(),
             source_catalog_fingerprint: "sf".into(),
             target_catalog_fingerprint: "tf".into(),
+            source_catalog: None,
+            target_catalog: None,
             consistency_mode: "consistent_snapshot".into(),
             canonical_encoding_version: 1,
             conversion_policy: "exact".into(),
@@ -388,5 +413,26 @@ mod tests {
             Err(PlanError::UnsupportedRequiredSemantics)
         ));
         assert!(ReviewedPlan::new(plan).is_ok());
+    }
+
+    #[test]
+    fn embedded_catalog_must_match_its_declared_fingerprint() {
+        let mut plan = plan();
+        plan.source_catalog = Some(VendorCatalog {
+            format_version: 1,
+            dialect: "postgresql".into(),
+            server_version: "17".into(),
+            database: super::super::model::Identifier::new("app").unwrap(),
+            namespaces: Vec::new(),
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        });
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::CatalogFingerprintMismatch {
+                field: "source_catalog_fingerprint",
+                ..
+            })
+        ));
     }
 }

@@ -5,9 +5,12 @@
 > Implementation Phases 1–5: typed values, bounded batches, deterministic
 > plans, snapshot-bound keyset paging, journal ordering, ambiguous-commit
 > classification, and exact row comparison. It does not implement live
-> adapters, DDL, FK validation, complete resume orchestration, or production
+> data adapters, DDL, FK validation, complete resume orchestration, or production
 > finalization, and it does not satisfy the real-engine acceptance gates in
 > [08](./08-implementation-prerequisites.md).
+>
+> A read-only PostgreSQL plan adapter is available in the spike. See
+> [12](./12-postgresql-first-adapter.md) for its boundary and support matrix.
 
 ## Status and product boundary
 
@@ -36,7 +39,7 @@ This plan distinguishes three products:
 
 ## Document index
 
-This directory contains 14 documents:
+This directory contains 15 documents:
 
 | Document                                            | Purpose                                                               |
 | --------------------------------------------------- | --------------------------------------------------------------------- |
@@ -51,6 +54,7 @@ This directory contains 14 documents:
 | [09](./09-round-1-review-findings.md)               | Round-1 resolution ledger                                             |
 | [10](./10-round-2-review-findings.md)               | Round-2 resolution ledger                                             |
 | [11](./11-round-3-review-findings.md)               | Round-3 resolution ledger                                             |
+| [12](./12-postgresql-first-adapter.md)               | First live-dialect decision and plan-only boundary                    |
 | [Competitive landscape](./competitive-landscape.md) | Tool categories and scoped positioning                                |
 | [Observability](./observability-and-operations.md)  | Metrics, logs, alerts, and operations                                 |
 | This README                                         | Scope and navigation                                                  |

@@ -70,6 +70,8 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         target_endpoint_identity: "fixture-target".into(),
         source_catalog_fingerprint: "fixture-source-schema-v1".into(),
         target_catalog_fingerprint: "empty-target-v1".into(),
+        source_catalog: None,
+        target_catalog: None,
         consistency_mode: "consistent_snapshot".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "same-dialect-exact".into(),

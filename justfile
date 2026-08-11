@@ -81,7 +81,13 @@ migration-spike-check:
     cargo fmt --all -- --check
     cargo check --no-default-features --features enterprise-migration-spike
     cargo clippy --no-default-features --features enterprise-migration-spike --lib --bins -- -D warnings
-    cargo test --no-default-features --features enterprise-migration-spike
+    cargo test --no-default-features --features enterprise-migration-spike migration:: --lib
+    cargo test --no-default-features --features enterprise-migration-spike --test migration_postgres_plan_test --no-run
+
+# Run the ignored live plan test. Set source/target config and credential env vars first.
+[group('test')]
+migration-postgres-plan-test:
+    cargo test --no-default-features --features enterprise-migration-spike --test migration_postgres_plan_test -- --ignored
 
 [group('lint')]
 clippy:
