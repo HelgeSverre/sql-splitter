@@ -127,14 +127,16 @@ durable prepared operation before transactional `CREATE INDEX`. Resume accepts
 only absence or an exact semantic match; any different observed index requires
 manual reconciliation.
 
-Sequence execution is write-fence-only because PostgreSQL sequence state is
-outside table MVCC. A planned relaxation in
-[14](./14-managed-source-profiles.md) admits `CACHE 1` sequences under
-snapshot modes through a start/end state-equality proof; it is not
-implemented and its gates have not run. Fence installation transfers sequence ownership to the
-administrator, removes effective `USAGE` and `UPDATE` from non-superuser login
-roles, terminates old sessions that can hold cached values, and records the
-post-drain state. Resume re-attests this state and the exact ownership link.
+PostgreSQL sequence state is outside table MVCC. Write-fence execution remains
+the database-enforced path. Implementation Phase 5b also admits `CACHE 1`
+sequences for the reviewed external-quiesce profile through the start/end
+state-equality and optional full-source re-scan contract in
+[14](./14-managed-source-profiles.md). That local PostgreSQL 15–17 matrix is
+complete; the managed-provider exit gate remains open. Fence installation
+transfers sequence ownership to the administrator, removes effective `USAGE`
+and `UPDATE` from non-superuser login roles, terminates old sessions that can
+hold cached values, and records the post-drain state. Resume re-attests this
+state and the exact ownership link.
 Release restores the original owner and effective ACL. The recovery matrix
 stops before and after `setval`, distinguishes the exact initial and desired
 states, and requires manual reconciliation for any third state. PostgreSQL 15,

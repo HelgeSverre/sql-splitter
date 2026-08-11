@@ -12,6 +12,7 @@ pub mod connection;
 pub mod fixture;
 pub mod journal;
 pub mod model;
+pub mod mysql;
 pub mod outage_projection;
 pub mod plan;
 pub mod postgres;

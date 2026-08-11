@@ -6411,6 +6411,7 @@ pub fn build_plan_with_consistency_and_contracts(
         conversion_policy: "postgresql_same_dialect_exact".into(),
         outage_policy,
         postgres_source_profile,
+        mysql_snapshot_evidence: None,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -7134,6 +7135,7 @@ pub fn build_source_assessment_with_profile(
         conversion_policy: "postgresql_source_only_assessment".into(),
         outage_policy: None,
         postgres_source_profile: None,
+        mysql_snapshot_evidence: None,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),

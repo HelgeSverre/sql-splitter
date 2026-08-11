@@ -1034,6 +1034,7 @@ mod tests {
             conversion_policy: "postgresql_same_dialect_exact".into(),
             outage_policy: None,
             postgres_source_profile: None,
+            mysql_snapshot_evidence: None,
             capabilities: BTreeMap::from([("acl.report_only".into(), "approval_required".into())]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),

@@ -4420,6 +4420,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         conversion_policy: "same-dialect-exact".into(),
         outage_policy: None,
         postgres_source_profile: None,
+        mysql_snapshot_evidence: None,
         capabilities: BTreeMap::from([
             ("consistent_snapshot".into(), "fixture_supported".into()),
             ("server_read_only".into(), "fixture_supported".into()),
@@ -5210,6 +5211,7 @@ mod tests {
             conversion_policy: "exact".into(),
             outage_policy: None,
             postgres_source_profile: None,
+            mysql_snapshot_evidence: None,
             capabilities: BTreeMap::from([("source_tls".into(), binding)]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),

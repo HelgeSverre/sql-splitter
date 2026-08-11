@@ -15,6 +15,7 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("assess-postgres"));
     assert!(help.contains("probe-postgres-source-profile"));
     assert!(help.contains("plan-postgres"));
+    assert!(help.contains("plan-mysql"));
     assert!(help.contains("execute-postgres"));
     assert!(help.contains("fence-install-postgres"));
     assert!(help.contains("fence-attest-postgres"));
@@ -36,6 +37,41 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn mysql_plan_is_read_only_and_requires_an_explicit_consistency_contract() {
+    let output = spike().args(["plan-mysql", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "--source-config",
+        "--target-config",
+        "--plan-output",
+        "--consistency <CONSISTENCY>",
+    ] {
+        assert!(help.contains(required));
+    }
+    for forbidden in ["--execute", "--approval-ref", "--fence-artifact"] {
+        assert!(!help.contains(forbidden));
+    }
+
+    let output = spike()
+        .args([
+            "plan-mysql",
+            "--source-config",
+            "source.toml",
+            "--target-config",
+            "target.toml",
+            "--plan-output",
+            "plan.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("--consistency"));
 }
 
 #[test]

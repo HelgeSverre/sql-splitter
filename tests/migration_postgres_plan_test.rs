@@ -296,6 +296,22 @@ fn live_postgres_blocking_code_registry_matrix() -> anyhow::Result<()> {
             UnsupportedObjectCode::GeneratedCrossMajor,
             "cross-major compatibility requires both source and target endpoints",
         ),
+        (
+            UnsupportedObjectCode::MySqlStorageEngine,
+            "MySQL-specific catalog evidence is outside the PostgreSQL matrix",
+        ),
+        (
+            UnsupportedObjectCode::MySqlCatalogSemantics,
+            "MySQL-specific catalog evidence is outside the PostgreSQL matrix",
+        ),
+        (
+            UnsupportedObjectCode::MySqlFreezeEvidence,
+            "MySQL-specific freeze evidence is outside the PostgreSQL matrix",
+        ),
+        (
+            UnsupportedObjectCode::MySqlAutoIncrementConsistency,
+            "MySQL-specific AUTO_INCREMENT evidence is outside the PostgreSQL matrix",
+        ),
     ];
     const NONBLOCKING_REPORT_REQUIRED: &[UnsupportedObjectCode] = &[
         UnsupportedObjectCode::NamespaceAcl,

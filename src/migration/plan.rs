@@ -9,7 +9,26 @@ use super::model::{QualifiedTable, VendorCatalog};
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 8;
+pub const PLAN_SCHEMA_VERSION: u16 = 9;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlSnapshotEvidence {
+    pub endpoint_identity: String,
+    pub database_identity: String,
+    pub server_uuid: String,
+    pub server_version: String,
+    pub lifecycle_id: String,
+    pub connection_id: u32,
+    pub transaction_isolation: String,
+    pub transaction_read_only: bool,
+    pub session_time_zone: String,
+    /// MySQL data-dictionary reads are not protected by the InnoDB row snapshot.
+    pub catalog_snapshot_protected: bool,
+    pub information_schema_stats_expiry: u64,
+    pub gtid_executed_observation: String,
+    pub catalog_fingerprint: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +246,10 @@ unsupported_object_codes! {
     GeneratedCrossMajor => "generated_cross_major",
     TargetNotEmpty => "target_not_empty",
     SameEndpoint => "same_endpoint",
+    MySqlStorageEngine => "mysql_storage_engine",
+    MySqlCatalogSemantics => "mysql_catalog_semantics",
+    MySqlFreezeEvidence => "mysql_freeze_evidence",
+    MySqlAutoIncrementConsistency => "mysql_auto_increment_consistency",
 }
 
 impl UnsupportedObjectCode {
@@ -278,6 +301,8 @@ pub struct MigrationPlan {
     pub outage_policy: Option<ReviewedOutagePolicy>,
     #[serde(default)]
     pub postgres_source_profile: Option<PostgresSourceProfileContract>,
+    #[serde(default)]
+    pub mysql_snapshot_evidence: Option<MySqlSnapshotEvidence>,
     pub capabilities: BTreeMap<String, String>,
     pub operations: Vec<PlanOperation>,
     pub unsupported_objects: UnsupportedObjectReport,
@@ -373,6 +398,41 @@ impl MigrationPlan {
                 &self.source_catalog_fingerprint,
                 &self.consistency_mode,
             )?;
+        }
+        match (
+            source_catalog.dialect.as_str(),
+            &self.mysql_snapshot_evidence,
+        ) {
+            ("mysql", Some(evidence)) => {
+                if evidence.endpoint_identity != self.source_endpoint_identity
+                    || evidence.database_identity != source_catalog.database.as_str()
+                    || evidence.server_version != source_catalog.server_version
+                    || evidence.catalog_fingerprint != self.source_catalog_fingerprint
+                    || evidence.server_uuid.is_empty()
+                    || evidence.lifecycle_id.is_empty()
+                    || evidence.connection_id == 0
+                    || !evidence
+                        .transaction_isolation
+                        .eq_ignore_ascii_case("REPEATABLE-READ")
+                    || !evidence.transaction_read_only
+                    || evidence.session_time_zone != "+00:00"
+                    || evidence.catalog_snapshot_protected
+                    || evidence.information_schema_stats_expiry != 0
+                    || self.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
+                {
+                    return Err(PlanError::InvalidMySqlSnapshotEvidence);
+                }
+                if self.postgres_source_profile.is_some() {
+                    return Err(PlanError::InvalidMySqlSnapshotEvidence);
+                }
+            }
+            ("mysql", None) => {
+                return Err(PlanError::MissingEvidence {
+                    field: "mysql_snapshot_evidence",
+                });
+            }
+            (_, Some(_)) => return Err(PlanError::UnexpectedMySqlSnapshotEvidence),
+            (_, None) => {}
         }
         let mut finding_keys = BTreeSet::new();
         for finding in &self.unsupported_objects.objects {
@@ -590,6 +650,10 @@ pub enum PlanError {
     OutagePolicy(#[from] OutageProjectionError),
     #[error("reviewed PostgreSQL source profile is invalid")]
     PostgresSourceProfile(#[from] PostgresSourceProfileError),
+    #[error("reviewed MySQL snapshot evidence is invalid or inconsistent")]
+    InvalidMySqlSnapshotEvidence,
+    #[error("non-MySQL plan contains MySQL snapshot evidence")]
+    UnexpectedMySqlSnapshotEvidence,
     #[error("required plan evidence {field} is absent")]
     MissingEvidence { field: &'static str },
     #[error("target assessment fields must all be assessed or all be not assessed")]
@@ -663,6 +727,7 @@ mod tests {
                 maximum_approved_seconds: 1,
             }),
             postgres_source_profile: None,
+            mysql_snapshot_evidence: None,
             capabilities: BTreeMap::new(),
             operations: vec![PlanOperation::new(
                 OperationKind::VerifySchema,
@@ -683,6 +748,50 @@ mod tests {
         assert!(matches!(
             changed.validate(),
             Err(PlanError::HashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn mysql_plan_requires_exact_unprotected_catalog_snapshot_evidence() {
+        let mut plan = plan();
+        let source_catalog = plan.source_catalog.as_mut().unwrap();
+        source_catalog.dialect = "mysql".into();
+        source_catalog.server_version = "8.4.0".into();
+        let source_fingerprint = fingerprint(source_catalog);
+        plan.source_catalog_fingerprint = source_fingerprint.clone();
+        plan.consistency_mode = "mysql-repeatable-read-consistent-snapshot".into();
+        plan.outage_policy = None;
+        plan.mysql_snapshot_evidence = Some(MySqlSnapshotEvidence {
+            endpoint_identity: plan.source_endpoint_identity.clone(),
+            database_identity: source_catalog.database.to_string(),
+            server_uuid: "server-uuid".into(),
+            server_version: "8.4.0".into(),
+            lifecycle_id: "mysql-session-1".into(),
+            connection_id: 7,
+            transaction_isolation: "REPEATABLE-READ".into(),
+            transaction_read_only: true,
+            session_time_zone: "+00:00".into(),
+            catalog_snapshot_protected: false,
+            information_schema_stats_expiry: 0,
+            gtid_executed_observation: "uuid:1-7".into(),
+            catalog_fingerprint: source_fingerprint,
+        });
+        assert!(plan.validate().is_ok());
+
+        plan.mysql_snapshot_evidence
+            .as_mut()
+            .unwrap()
+            .catalog_snapshot_protected = true;
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::InvalidMySqlSnapshotEvidence)
+        ));
+        plan.mysql_snapshot_evidence = None;
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::MissingEvidence {
+                field: "mysql_snapshot_evidence"
+            })
         ));
     }
     #[test]

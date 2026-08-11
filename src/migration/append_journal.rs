@@ -1859,6 +1859,7 @@ mod tests {
             conversion_policy: "exact".into(),
             outage_policy: Some(outage_policy.clone()),
             postgres_source_profile: None,
+            mysql_snapshot_evidence: None,
             capabilities: BTreeMap::new(),
             operations,
             unsupported_objects: UnsupportedObjectReport::default(),
