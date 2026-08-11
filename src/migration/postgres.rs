@@ -1399,6 +1399,7 @@ fn extract_catalog(
         namespaces.insert(
             name.clone(),
             CatalogNamespace {
+                id: row.get(0),
                 name: Identifier::new(name)?,
                 owner: Some(row.get(2)),
                 charset: Some(server_encoding.clone()),
@@ -1692,6 +1693,35 @@ fn extract_catalog(
                 row.get::<_, String>(2)
             ),
             required_semantics: true,
+        });
+    }
+
+    let unsupported_catalog_rows = transaction.query(
+        "SELECT object_id, object_kind, reason FROM (\
+         SELECT 'namespace-acl:' || n.oid::text AS object_id, 'namespace_acl' AS object_kind, 'custom namespace privileges are not implemented' AS reason FROM pg_namespace n WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND n.nspacl IS NOT NULL \
+         UNION ALL SELECT 'relation-acl:' || c.oid::text, 'relation_acl', 'custom relation privileges are not implemented' FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relacl IS NOT NULL \
+         UNION ALL SELECT 'routine-acl:' || p.oid::text, 'routine_acl', 'custom routine privileges are not implemented' FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND p.proacl IS NOT NULL \
+         UNION ALL SELECT 'default-acl:' || d.oid::text, 'default_privileges', 'default privileges are not implemented' FROM pg_default_acl d \
+         UNION ALL SELECT 'event-trigger:' || e.oid::text, 'event_trigger', 'event-trigger semantics are not implemented' FROM pg_event_trigger e \
+         UNION ALL SELECT 'rule:' || r.oid::text, 'rewrite_rule', 'rewrite-rule semantics are not implemented' FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND r.rulename <> '_RETURN' \
+         UNION ALL SELECT 'publication:' || p.oid::text, 'logical_replication_publication', 'logical replication publications are not implemented' FROM pg_publication p \
+         UNION ALL SELECT 'foreign-server:' || s.oid::text, 'foreign_server', 'foreign-data server semantics are not implemented' FROM pg_foreign_server s \
+         UNION ALL SELECT 'foreign-table:' || c.oid::text, 'foreign_table', 'foreign-table semantics are not implemented' FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind = 'f' \
+         UNION ALL SELECT 'extended-statistics:' || s.oid::text, 'extended_statistics', 'extended statistics are not implemented' FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' \
+         UNION ALL SELECT 'collation:' || c.oid::text, 'user_collation', 'user-defined collation installation and version validation are not implemented' FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'\
+         ) unsupported_catalog ORDER BY object_id",
+        &[],
+    )?;
+    for row in unsupported_catalog_rows {
+        let object_kind: String = row.get(1);
+        unsupported.push(UnsupportedObject {
+            object_id: row.get(0),
+            required_semantics: !matches!(
+                object_kind.as_str(),
+                "namespace_acl" | "relation_acl" | "routine_acl" | "default_privileges"
+            ),
+            object_kind,
+            reason: row.get(2),
         });
     }
 
@@ -2068,6 +2098,7 @@ mod tests {
                 server_version: "17.0".into(),
                 database: Identifier::new("app").unwrap(),
                 namespaces: vec![CatalogNamespace {
+                    id: "namespace-public".into(),
                     name: Identifier::new("public").unwrap(),
                     owner: Some("owner".into()),
                     charset: Some("UTF8".into()),
@@ -2141,5 +2172,23 @@ credential_env = "PGPASSWORD"
         assert!(first.plan.source_catalog.is_some());
         first.validate().unwrap();
         second.validate().unwrap();
+    }
+
+    #[test]
+    fn reviewed_plan_binds_the_selected_consistency_contract() {
+        let source = snapshot("source", true);
+        let target = snapshot("target", false);
+        let native = build_plan_with_consistency(
+            &source,
+            &target,
+            PostgresConsistencyMode::ConsistentSnapshot,
+        )
+        .unwrap();
+        let fenced =
+            build_plan_with_consistency(&source, &target, PostgresConsistencyMode::WriteFence)
+                .unwrap();
+        assert_eq!(native.plan.consistency_mode, "consistent-snapshot");
+        assert_eq!(fenced.plan.consistency_mode, "write-fence");
+        assert_ne!(native.plan_hash, fenced.plan_hash);
     }
 }

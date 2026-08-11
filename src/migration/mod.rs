@@ -12,6 +12,7 @@ pub mod journal;
 pub mod model;
 pub mod plan;
 pub mod postgres;
+pub mod postgres_fence;
 pub mod runner;
 pub mod verify;
 

@@ -30,6 +30,11 @@ use super::postgres::{
     catalog_fingerprint, inspect_endpoint, PostgresEndpointConfig, PostgresSourceFactory,
     PostgresTargetFactory,
 };
+#[cfg(feature = "enterprise-migration-spike")]
+use super::postgres_fence::{
+    attest_postgres_write_fence, release_postgres_write_fence, remove_attested_fence_objects,
+    InstalledPostgresFence,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpikeArtifacts {
@@ -54,6 +59,48 @@ pub fn execute_postgres_plan(
     approval_reference: &str,
     state_path: impl AsRef<Path>,
 ) -> anyhow::Result<PostgresExecutionReport> {
+    execute_postgres_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        target_config_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        None,
+    )
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+pub fn execute_postgres_fenced_plan(
+    plan_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    fence_admin_config_path: impl AsRef<Path>,
+    fence_artifact_path: impl AsRef<Path>,
+    approval_reference: &str,
+    state_path: impl AsRef<Path>,
+) -> anyhow::Result<PostgresExecutionReport> {
+    execute_postgres_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        target_config_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        Some((
+            fence_admin_config_path.as_ref(),
+            fence_artifact_path.as_ref(),
+        )),
+    )
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn execute_postgres_plan_internal(
+    plan_path: &Path,
+    source_config_path: &Path,
+    target_config_path: &Path,
+    approval_reference: &str,
+    state_path: &Path,
+    fence_paths: Option<(&Path, &Path)>,
+) -> anyhow::Result<PostgresExecutionReport> {
     if approval_reference.trim().is_empty() {
         return Err(anyhow!("approval reference must not be empty"));
     }
@@ -61,11 +108,6 @@ pub fn execute_postgres_plan(
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
     validate_postgres_execution_operations(&reviewed)?;
-    if reviewed.plan.consistency_mode != "consistent-snapshot" {
-        return Err(anyhow!(
-            "reviewed plan requires write-fence evidence, but no durable PostgreSQL fence was supplied"
-        ));
-    }
     let source_config = PostgresEndpointConfig::read(source_config_path)?;
     let target_config = PostgresEndpointConfig::read(target_config_path)?;
     if source_config.credential_env == target_config.credential_env {
@@ -73,6 +115,36 @@ pub fn execute_postgres_plan(
             "source and target must use separate credential references"
         ));
     }
+    let fenced = match (reviewed.plan.consistency_mode.as_str(), fence_paths) {
+        ("consistent-snapshot", None) => None,
+        ("write-fence", Some((admin_path, artifact_path))) => {
+            let admin = PostgresEndpointConfig::read(admin_path)?;
+            if [
+                source_config.credential_env.as_str(),
+                target_config.credential_env.as_str(),
+            ]
+            .contains(&admin.credential_env.as_str())
+            {
+                return Err(anyhow!(
+                    "fence administration must use a separate credential reference"
+                ));
+            }
+            let installed: InstalledPostgresFence = read_json(artifact_path)?;
+            let inventory = attest_postgres_write_fence(&admin, &installed.evidence)?;
+            Some((admin, installed, inventory))
+        }
+        ("consistent-snapshot", Some(_)) => {
+            return Err(anyhow!(
+                "a consistent-snapshot plan must not accept write-fence evidence"
+            ));
+        }
+        ("write-fence", None) => {
+            return Err(anyhow!(
+                "reviewed plan requires a protected, active PostgreSQL write fence"
+            ));
+        }
+        _ => return Err(anyhow!("reviewed plan has an unsupported consistency mode")),
+    };
 
     let source = PostgresSourceFactory::new(source_config.clone());
     source.capabilities().require(&[
@@ -89,8 +161,12 @@ pub fn execute_postgres_plan(
             "source endpoint identity differs from reviewed plan"
         ));
     }
-    let (source_catalog, execution_unsupported, source_fingerprint) =
+    let (mut source_catalog, mut execution_unsupported, mut source_fingerprint) =
         source.captured_catalog(&snapshot)?;
+    if let Some((_, _, inventory)) = &fenced {
+        remove_attested_fence_objects(&mut source_catalog, &mut execution_unsupported, inventory)?;
+        source_fingerprint = catalog_fingerprint(&source_catalog)?;
+    }
     if execution_unsupported.blocks_execution() {
         return Err(anyhow!(
             "fresh source snapshot contains execution-blocking unsupported semantics"
@@ -135,13 +211,16 @@ pub fn execute_postgres_plan(
         tool_version: reviewed.plan.tool_version.clone(),
         source_endpoint: snapshot.endpoint_identity.clone(),
         target_endpoint: target_preflight.endpoint_identity,
-        consistency_evidence: ConsistencyEvidence::NativeSnapshot {
-            endpoint_identity: snapshot.endpoint_identity.clone(),
-            database_identity: snapshot.database_identity.clone(),
-            lifecycle_id: snapshot.lifecycle_id.clone(),
-            snapshot_id: snapshot.snapshot_id.clone(),
-            server_version: snapshot.server_version.clone(),
-        },
+        consistency_evidence: fenced.as_ref().map_or_else(
+            || ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity: snapshot.endpoint_identity.clone(),
+                database_identity: snapshot.database_identity.clone(),
+                lifecycle_id: snapshot.lifecycle_id.clone(),
+                snapshot_id: snapshot.snapshot_id.clone(),
+                server_version: snapshot.server_version.clone(),
+            },
+            |(_, installed, _)| installed.evidence.clone(),
+        ),
         source_schema_fingerprint: source_fingerprint,
         target_schema_fingerprint: reviewed.plan.target_catalog_fingerprint.clone(),
         conversion_policy: reviewed.plan.conversion_policy.clone(),
@@ -168,7 +247,6 @@ pub fn execute_postgres_plan(
             .iter()
             .map(|operation| operation.id.as_str()),
     )?;
-    let state_path = state_path.as_ref();
     write_json_new(state_path, &state)?;
 
     let cancellation = CancellationToken::default();
@@ -188,6 +266,7 @@ pub fn execute_postgres_plan(
         .collect::<Vec<_>>();
     state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
     replace_json(state_path, &state)?;
+    attest_fence_if_present(fenced.as_ref())?;
     if let Err(initial_error) = target.create_pre_data_schema(&source_catalog) {
         if target_schema_matches(&source_catalog, &target_config)? {
             // The atomic DDL transaction committed, but its acknowledgement was lost.
@@ -228,6 +307,7 @@ pub fn execute_postgres_plan(
         replace_json(state_path, &state)?;
         let mut after = None;
         loop {
+            attest_fence_if_present(fenced.as_ref())?;
             let batch = reader.select_page(&KeysetPage {
                 table: table.clone(),
                 projection: shape.projection.clone(),
@@ -309,6 +389,7 @@ pub fn execute_postgres_plan(
 
     state.begin_verification()?;
     replace_json(state_path, &state)?;
+    attest_fence_if_present(fenced.as_ref())?;
     let mut verifier = target.open_verifier(cancellation)?;
     for operation in reviewed
         .plan
@@ -355,13 +436,45 @@ pub fn execute_postgres_plan(
     state.start_operation(verify_schema.id.as_str())?;
     state.commit_operation(verify_schema.id.as_str())?;
     state.verify_operation(verify_schema.id.as_str())?;
-    state.finalize()?;
+    attest_fence_if_present(fenced.as_ref())?;
+    let mut completed_state = state.clone();
+    completed_state.finalize()?;
+    drop(reader);
+    if let Some((admin, installed, _)) = &fenced {
+        let generation = match &installed.evidence {
+            ConsistencyEvidence::WriteFence { generation, .. } => generation,
+            ConsistencyEvidence::NativeSnapshot { .. } => {
+                return Err(anyhow!("fence artifact contains native snapshot evidence"));
+            }
+        };
+        release_postgres_write_fence(admin, generation, &installed.token)?;
+    }
+    state = completed_state;
     replace_json(state_path, &state)?;
     Ok(PostgresExecutionReport {
         state: state_path.to_path_buf(),
         copied_rows,
         committed_chunks: next_chunk_id - 1,
     })
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn attest_fence_if_present(
+    fenced: Option<&(
+        PostgresEndpointConfig,
+        InstalledPostgresFence,
+        super::postgres_fence::FenceInventory,
+    )>,
+) -> anyhow::Result<()> {
+    if let Some((admin, installed, expected_inventory)) = fenced {
+        let observed = attest_postgres_write_fence(admin, &installed.evidence)?;
+        if &observed != expected_inventory {
+            return Err(anyhow!(
+                "PostgreSQL fence inventory changed during execution"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]

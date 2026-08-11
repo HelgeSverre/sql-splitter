@@ -231,6 +231,7 @@ pub struct VendorCatalog {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogNamespace {
+    pub id: String,
     pub name: Identifier,
     pub owner: Option<String>,
     pub charset: Option<String>,

@@ -48,8 +48,11 @@ and verifies snapshot stability during concurrent writes, native query
 cancellation, source-role write rejection, create-only DDL and empty-target
 rechecks, identity-value insertion, and exact binary-protocol round trips for
 text, bytes, floats, JSONB, numeric, and temporal values. It also executes and
-strictly finalizes a three-row reviewed plan. This is spike evidence, not a
-production support statement.
+strictly finalizes a three-row reviewed plan. The write-fence test installs
+database-side DML and DDL guards, exits the installer, restarts PostgreSQL,
+re-attests exact object identities and guard definitions, executes into a
+separate target, and releases the fence after durable completion. This is spike
+evidence, not a production support statement.
 
 ## Configuration and security
 
@@ -89,7 +92,8 @@ the complete report.
 The adapter does not yet prove:
 
 - complete table-key suitability and pagination matrices;
-- restartable snapshot or continuous write-fence evidence for resume;
+- full journal resume under the implemented durable write fence;
+- fence generation rollover and the complete fence failure-injection matrix;
 - post-data indexes and broader DDL coverage;
 - foreign-key anti-joins and constraint validation;
 - crash recovery or full resume;

@@ -41,6 +41,35 @@ enum Command {
         #[arg(long, value_enum)]
         consistency: ConsistencyMode,
     },
+    /// Install and durably record the source fence required by a write-fence plan.
+    FenceInstallPostgres {
+        #[arg(long)]
+        plan_input: PathBuf,
+        #[arg(long)]
+        fence_admin_config: PathBuf,
+        #[arg(long)]
+        fence_artifact: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+    },
+    /// Attest an installed source fence without changing it.
+    FenceAttestPostgres {
+        #[arg(long)]
+        fence_admin_config: PathBuf,
+        #[arg(long)]
+        fence_artifact: PathBuf,
+    },
+    /// Release an exact installed source fence after explicit authorization.
+    FenceReleasePostgres {
+        #[arg(long)]
+        fence_admin_config: PathBuf,
+        #[arg(long)]
+        fence_artifact: PathBuf,
+        #[arg(long)]
+        approval_ref: String,
+        #[arg(long, required = true)]
+        execute: bool,
+    },
     /// Execute one reviewed same-dialect PostgreSQL plan into an empty target.
     ExecutePostgres {
         /// Exact protected reviewed plan artifact.
@@ -64,6 +93,12 @@ enum Command {
         /// New protected durable migration state artifact.
         #[arg(long)]
         state_output: PathBuf,
+        /// Privileged source fence administrator configuration for write-fence plans.
+        #[arg(long, requires = "fence_artifact")]
+        fence_admin_config: Option<PathBuf>,
+        /// Protected installed-fence artifact for write-fence plans.
+        #[arg(long, requires = "fence_admin_config")]
+        fence_artifact: Option<PathBuf>,
     },
 }
 
@@ -109,6 +144,71 @@ fn main() -> anyhow::Result<()> {
                 plan.plan.unsupported_objects.blocks_execution()
             );
         }
+        Command::FenceInstallPostgres {
+            plan_input,
+            fence_admin_config,
+            fence_artifact,
+            execute,
+        } => {
+            if !execute {
+                anyhow::bail!("--execute is required");
+            }
+            let reviewed: sql_splitter::migration::plan::ReviewedPlan =
+                sql_splitter::migration::artifact::read_json(plan_input)?;
+            let admin = sql_splitter::migration::postgres::PostgresEndpointConfig::read(
+                fence_admin_config,
+            )?;
+            let installed = sql_splitter::migration::postgres_fence::install_postgres_write_fence(
+                &admin,
+                &reviewed,
+                &fence_artifact,
+            )?;
+            println!("fence artifact: {}", fence_artifact.display());
+            println!("fence evidence: {:?}", installed.evidence);
+        }
+        Command::FenceAttestPostgres {
+            fence_admin_config,
+            fence_artifact,
+        } => {
+            let admin = sql_splitter::migration::postgres::PostgresEndpointConfig::read(
+                fence_admin_config,
+            )?;
+            let installed: sql_splitter::migration::postgres_fence::InstalledPostgresFence =
+                sql_splitter::migration::artifact::read_json(fence_artifact)?;
+            let inventory = sql_splitter::migration::postgres_fence::attest_postgres_write_fence(
+                &admin,
+                &installed.evidence,
+            )?;
+            println!("attested tables: {}", inventory.tables.len());
+        }
+        Command::FenceReleasePostgres {
+            fence_admin_config,
+            fence_artifact,
+            approval_ref,
+            execute,
+        } => {
+            if !execute || approval_ref.trim().is_empty() {
+                anyhow::bail!("--execute and a non-empty --approval-ref are required");
+            }
+            let admin = sql_splitter::migration::postgres::PostgresEndpointConfig::read(
+                fence_admin_config,
+            )?;
+            let installed: sql_splitter::migration::postgres_fence::InstalledPostgresFence =
+                sql_splitter::migration::artifact::read_json(fence_artifact)?;
+            let generation = match &installed.evidence {
+                sql_splitter::migration::journal::ConsistencyEvidence::WriteFence {
+                    generation,
+                    ..
+                } => generation,
+                _ => anyhow::bail!("fence artifact does not contain write-fence evidence"),
+            };
+            sql_splitter::migration::postgres_fence::release_postgres_write_fence(
+                &admin,
+                generation,
+                &installed.token,
+            )?;
+            println!("released fence generation: {generation}");
+        }
         Command::ExecutePostgres {
             plan_input,
             source_config,
@@ -117,17 +217,33 @@ fn main() -> anyhow::Result<()> {
             execute,
             strict_verification,
             state_output,
+            fence_admin_config,
+            fence_artifact,
         } => {
             if !execute || !strict_verification {
                 anyhow::bail!("--execute and --strict-verification are required");
             }
-            let report = sql_splitter::migration::runner::execute_postgres_plan(
-                plan_input,
-                source_config,
-                target_config,
-                &approval_ref,
-                &state_output,
-            )?;
+            let report = match (fence_admin_config, fence_artifact) {
+                (Some(admin), Some(fence)) => {
+                    sql_splitter::migration::runner::execute_postgres_fenced_plan(
+                        plan_input,
+                        source_config,
+                        target_config,
+                        admin,
+                        fence,
+                        &approval_ref,
+                        &state_output,
+                    )?
+                }
+                (None, None) => sql_splitter::migration::runner::execute_postgres_plan(
+                    plan_input,
+                    source_config,
+                    target_config,
+                    &approval_ref,
+                    &state_output,
+                )?,
+                _ => unreachable!("clap requires both fence arguments"),
+            };
             println!("state: {}", report.state.display());
             println!("copied rows: {}", report.copied_rows);
             println!("committed chunks: {}", report.committed_chunks);

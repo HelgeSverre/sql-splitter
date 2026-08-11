@@ -4,6 +4,7 @@ set -euo pipefail
 postgres_version="${1:-17}"
 container="sqlspl-migration-pg-${postgres_version}-$$"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-migration-pg.XXXXXX")"
+port="$(ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close')"
 
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
@@ -13,7 +14,7 @@ trap cleanup EXIT INT TERM
 
 docker run -d --name "$container" \
   -e POSTGRES_PASSWORD=admin-secret \
-  -p 127.0.0.1::5432 \
+  -p "127.0.0.1:${port}:5432" \
   "postgres:${postgres_version}" >/dev/null
 
 for _ in {1..30}; do
@@ -53,9 +54,12 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "CREATE ROLE migration_mutator LOGIN PASSWORD 'mutator-secret'" \
   -c "CREATE ROLE migration_target_owner LOGIN PASSWORD 'target-secret'" \
   -c "CREATE ROLE migration_run_target_owner LOGIN PASSWORD 'run-target-secret'" \
+  -c "CREATE ROLE migration_fence_admin LOGIN SUPERUSER PASSWORD 'fence-admin-secret'" \
+  -c "CREATE ROLE migration_fence_target_owner LOGIN PASSWORD 'fence-target-secret'" \
   -c "CREATE DATABASE migration_target OWNER migration_target_owner" \
   -c "CREATE DATABASE migration_run_source OWNER migration_mutator" \
   -c "CREATE DATABASE migration_run_target OWNER migration_run_target_owner" \
+  -c "CREATE DATABASE migration_fence_target OWNER migration_fence_target_owner" \
   -c "GRANT CONNECT ON DATABASE postgres TO migration_reader, migration_mutator" \
   -c "GRANT USAGE ON SCHEMA public TO migration_reader" \
   -c "GRANT ALL ON SCHEMA public TO migration_mutator" \
@@ -75,7 +79,7 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -d migratio
   -c "GRANT SELECT ON public.accounts TO migration_reader" >/dev/null
 
 cat >"$test_dir/source.toml" <<EOF
-host = "localhost"
+host = "127.0.0.1"
 port = $port
 database = "postgres"
 user = "migration_reader"
@@ -86,7 +90,7 @@ ca_certificate = "$test_dir/ca.crt"
 EOF
 
 cat >"$test_dir/mutator.toml" <<EOF
-host = "localhost"
+host = "127.0.0.1"
 port = $port
 database = "postgres"
 user = "migration_mutator"
@@ -97,7 +101,7 @@ ca_certificate = "$test_dir/ca.crt"
 EOF
 
 cat >"$test_dir/target.toml" <<EOF
-host = "localhost"
+host = "127.0.0.1"
 port = $port
 database = "migration_target"
 user = "migration_target_owner"
@@ -108,7 +112,7 @@ ca_certificate = "$test_dir/ca.crt"
 EOF
 
 cat >"$test_dir/run-source.toml" <<EOF
-host = "localhost"
+host = "127.0.0.1"
 port = $port
 database = "migration_run_source"
 user = "migration_reader"
@@ -119,11 +123,33 @@ ca_certificate = "$test_dir/ca.crt"
 EOF
 
 cat >"$test_dir/run-target.toml" <<EOF
-host = "localhost"
+host = "127.0.0.1"
 port = $port
 database = "migration_run_target"
 user = "migration_run_target_owner"
 credential_env = "SQL_SPLITTER_PG_RUN_TARGET_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+
+cat >"$test_dir/fence-admin.toml" <<EOF
+host = "127.0.0.1"
+port = $port
+database = "migration_run_source"
+user = "migration_fence_admin"
+credential_env = "SQL_SPLITTER_PG_FENCE_ADMIN_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+
+cat >"$test_dir/fence-target.toml" <<EOF
+host = "127.0.0.1"
+port = $port
+database = "migration_fence_target"
+user = "migration_fence_target_owner"
+credential_env = "SQL_SPLITTER_PG_FENCE_TARGET_PASSWORD"
 
 [tls]
 ca_certificate = "$test_dir/ca.crt"
@@ -134,10 +160,17 @@ export SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG="$test_dir/mutator.toml"
 export SQL_SPLITTER_PG_TEST_TARGET_CONFIG="$test_dir/target.toml"
 export SQL_SPLITTER_PG_RUN_SOURCE_CONFIG="$test_dir/run-source.toml"
 export SQL_SPLITTER_PG_RUN_TARGET_CONFIG="$test_dir/run-target.toml"
+export SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG="$test_dir/fence-admin.toml"
+export SQL_SPLITTER_PG_FENCE_TARGET_CONFIG="$test_dir/fence-target.toml"
+export SQL_SPLITTER_PG_FENCE_ARTIFACT="$test_dir/fence.json"
+export SQL_SPLITTER_PG_FENCE_PLAN="$test_dir/fence-plan.json"
+export SQL_SPLITTER_PG_FENCE_STATE="$test_dir/fence-state.json"
 export SQL_SPLITTER_PG_READER_PASSWORD=reader-secret
 export SQL_SPLITTER_PG_MUTATOR_PASSWORD=mutator-secret
 export SQL_SPLITTER_PG_TARGET_PASSWORD=target-secret
 export SQL_SPLITTER_PG_RUN_TARGET_PASSWORD=run-target-secret
+export SQL_SPLITTER_PG_FENCE_ADMIN_PASSWORD=fence-admin-secret
+export SQL_SPLITTER_PG_FENCE_TARGET_PASSWORD=fence-target-secret
 
 test_name=live_snapshot_paging_is_stable_during_concurrent_writes
 cargo test --no-default-features --features enterprise-migration-spike \
@@ -152,5 +185,42 @@ test_name=live_target_writer_round_trips_binary_protocol_values
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_reviewed_plan_executes_and_strictly_finalizes
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_write_fence_install_is_durable
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+docker restart "$container" >/dev/null
+sleep 2
+port="$(docker port "$container" 5432/tcp | sed 's/.*://')"
+cat >"$test_dir/fence-admin.toml" <<EOF
+host = "127.0.0.1"
+port = $port
+database = "migration_run_source"
+user = "migration_fence_admin"
+credential_env = "SQL_SPLITTER_PG_FENCE_ADMIN_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+cat >"$test_dir/fence-target.toml" <<EOF
+host = "127.0.0.1"
+port = $port
+database = "migration_fence_target"
+user = "migration_fence_target_owner"
+credential_env = "SQL_SPLITTER_PG_FENCE_TARGET_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+for _ in {1..30}; do
+  if docker exec "$container" pg_isready -U postgres >/dev/null 2>&1 && \
+    nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+docker exec "$container" pg_isready -U postgres >/dev/null
+test_name=live_write_fence_attests_after_restart_blocks_writes_and_releases
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

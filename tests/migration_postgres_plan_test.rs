@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
+use anyhow::Context;
 use native_tls::{Certificate, TlsConnector};
 use postgres::config::SslMode;
 use postgres::{Client, Config};
@@ -21,9 +22,13 @@ use sql_splitter::migration::model::{
 };
 use sql_splitter::migration::plan::ReviewedPlan;
 use sql_splitter::migration::postgres::{
-    write_live_plan, PostgresEndpointConfig, PostgresSourceFactory,
+    write_live_plan, write_live_plan_with_consistency, PostgresConsistencyMode,
+    PostgresEndpointConfig, PostgresSourceFactory,
 };
-use sql_splitter::migration::runner::execute_postgres_plan;
+use sql_splitter::migration::postgres_fence::{
+    attest_postgres_write_fence, install_postgres_write_fence, InstalledPostgresFence,
+};
+use sql_splitter::migration::runner::{execute_postgres_fenced_plan, execute_postgres_plan};
 
 #[test]
 #[ignore = "requires TLS-enabled PostgreSQL source and empty target databases"]
@@ -264,6 +269,85 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires dedicated TLS-enabled PostgreSQL source and superuser fence admin"]
+fn live_write_fence_install_is_durable() -> anyhow::Result<()> {
+    let source = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
+    let target = required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?;
+    let admin = required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?;
+    let plan_path = required_path("SQL_SPLITTER_PG_FENCE_PLAN")?;
+    let reviewed = write_live_plan_with_consistency(
+        &source,
+        &target,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    let admin_config = PostgresEndpointConfig::read(&admin)?;
+    install_postgres_write_fence(
+        &admin_config,
+        &reviewed,
+        required_path("SQL_SPLITTER_PG_FENCE_ARTIFACT")?,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a previously installed PostgreSQL fence and protected artifact"]
+fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow::Result<()> {
+    let admin = required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?;
+    let source = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
+    let target = required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?;
+    let plan = required_path("SQL_SPLITTER_PG_FENCE_PLAN")?;
+    let artifact = required_path("SQL_SPLITTER_PG_FENCE_ARTIFACT")?;
+    let state_path = required_path("SQL_SPLITTER_PG_FENCE_STATE")?;
+    let installed: InstalledPostgresFence = read_json(&artifact)?;
+    let admin_config = PostgresEndpointConfig::read(&admin)?;
+    attest_postgres_write_fence(&admin_config, &installed.evidence)
+        .context("attest durable fence after PostgreSQL restart")?;
+
+    let mut client = connect(&admin_config)?;
+    for statement in [
+        "INSERT INTO public.accounts VALUES (10, 'blocked')",
+        "UPDATE public.accounts SET name = 'blocked' WHERE id = 1",
+        "DELETE FROM public.accounts WHERE id = 1",
+        "TRUNCATE public.accounts",
+        "CREATE TABLE public.blocked_ddl (id integer)",
+        "ALTER TABLE public.accounts ADD COLUMN blocked integer",
+        "GRANT SELECT ON public.accounts TO PUBLIC",
+    ] {
+        assert!(client.batch_execute(statement).is_err(), "{statement}");
+    }
+    let row_count: i64 = client
+        .query_one("SELECT count(*) FROM public.accounts", &[])?
+        .get(0);
+    assert_eq!(row_count, 3);
+
+    drop(client);
+    let report = execute_postgres_fenced_plan(
+        &plan,
+        &source,
+        &target,
+        &admin,
+        &artifact,
+        "docker-write-fence-approval",
+        &state_path,
+    )
+    .context("execute the reviewed plan under the durable write fence")?;
+    assert_eq!(report.copied_rows, 3);
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+
+    let mut target_client = connect(&PostgresEndpointConfig::read(target)?)?;
+    let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get::<_, i64>(0), 1);
+    assert_eq!(rows[2].get::<_, String>(1), "three");
+
+    let mut client = connect(&admin_config)?;
+    client.batch_execute("INSERT INTO public.accounts VALUES (10, 'released')")?;
+    Ok(())
+}
+
 fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
     let table_id = "table-accounts";
     let table = CatalogObject {
@@ -317,6 +401,7 @@ fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
         server_version: "17".into(),
         database: Identifier::new("source")?,
         namespaces: vec![CatalogNamespace {
+            id: "namespace-public".into(),
             name: Identifier::new("public")?,
             owner: None,
             charset: Some("UTF8".into()),

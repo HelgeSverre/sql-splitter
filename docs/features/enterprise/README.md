@@ -5,16 +5,20 @@
 > Implementation Phases 1–5: typed values, bounded batches, deterministic
 > plans, snapshot-bound keyset paging, journal ordering, ambiguous-commit
 > classification, and exact row comparison. It includes an internal live
-> PostgreSQL runner for the currently supported table subset. It does not
-> implement FK validation, complete resume orchestration, or production
+> PostgreSQL runner and a durable database-side source write fence for the
+> currently supported table subset. The fence survives a PostgreSQL restart,
+> is re-attested before each execution stage, and is released only after strict
+> verification. It does not implement FK validation, complete resume
+> orchestration, or production
 > recovery, and it does not satisfy the complete real-engine acceptance
 > gates in [08](./08-implementation-prerequisites.md).
 >
 > A PostgreSQL plan adapter, snapshot-bound source reader, native control
 > session, create-only pre-data DDL transaction, transactional plain-INSERT
-> writer, read-only target verifier, and strict finalization path are available
-> as internal spike contracts. A feature-gated spike command can execute this
-> narrow path. There is no resume command. See
+> writer, read-only target verifier, strict finalization path, and explicit
+> fence install/attest/release operations are available as internal spike
+> contracts. A feature-gated spike command can execute this narrow path. There
+> is no resume command. See
 > [12](./12-postgresql-first-adapter.md) for the exact boundary and support
 > matrix.
 
