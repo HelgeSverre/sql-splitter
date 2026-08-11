@@ -160,8 +160,13 @@ The durable state schema contains:
 - staging state when that future feature exists.
 
 State/report/log files are created with mode `0600`, exclusive creation,
-regular-file checks, parent ownership checks, and symlink defenses. Updates use
-fsync and atomic replacement where the platform supports it.
+regular-file checks, parent ownership checks, and symlink defenses. The state
+file is a versioned append-only frame stream. Each frame binds its sequence,
+payload digest, and previous-frame digest, and each durable transition fsyncs
+the file. Resume truncates only an incomplete final frame; internal corruption,
+reordering, or deletion fails closed. The in-memory replay projection is bounded
+by the reviewed operation graph, one prepared chunk, and one cursor per copied
+table. It does not retain the complete chunk manifest.
 
 `--resume` does not regenerate intent. It loads state, verifies versions, plan
 hash, endpoint identities, snapshot/dump identity, schema fingerprints,
@@ -172,8 +177,8 @@ Before sending target writes, the runner durably records a `prepared` chunk with
 its exact source snapshot identity, start and final key tuples, row count,
 canonical digest, and target transaction intent. It then writes and commits the
 target transaction. Only after commit acknowledgement does it durably transition
-that same record to `committed`. State publication and directory metadata are
-fsynced according to the artifact contract.
+that same record to `committed`. Initial creation fsyncs the file and parent
+directory. Later append transitions fsync the journal file.
 
 A disconnect at commit leaves a durable `prepared` record and is ambiguous:
 open a fresh readable target session, compare the complete chunk key interval

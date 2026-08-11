@@ -201,6 +201,16 @@ pub struct JournalProjection {
     phases: BTreeMap<String, OperationPhase>,
 }
 
+/// A validated, bounded point-in-time view for monitoring only.
+///
+/// This snapshot does not acquire the exclusive resume lock and is not an
+/// authority for recovery or mutation.
+#[derive(Debug, Clone)]
+pub struct JournalSnapshot {
+    pub genesis: Genesis,
+    pub projection: JournalProjection,
+}
+
 impl JournalProjection {
     fn from_genesis(genesis: &Genesis) -> Self {
         Self {
@@ -544,6 +554,25 @@ impl std::fmt::Debug for AppendJournal {
 }
 
 impl AppendJournal {
+    pub fn read_snapshot(
+        path: impl AsRef<Path>,
+    ) -> Result<Option<JournalSnapshot>, AppendJournalError> {
+        let path = path.as_ref();
+        validate_parent(path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(path)?;
+        validate_open_file(path, &file)?;
+        let snapshot_end = file.metadata()?.len();
+        validate_file_header(&mut file)?;
+        read_snapshot_frames(&file, snapshot_end)
+    }
+
     pub fn create_new(
         path: impl AsRef<Path>,
         genesis: Genesis,
@@ -720,15 +749,27 @@ impl AppendJournal {
         &self,
         operation_id: impl Into<String>,
     ) -> Result<CommittedChunkIter, AppendJournalError> {
+        self.committed_chunk_stream(Some(operation_id.into()))
+    }
+
+    /// Streams every committed chunk once in global journal order.
+    pub fn all_committed_chunks(&self) -> Result<CommittedChunkIter, AppendJournalError> {
+        self.committed_chunk_stream(None)
+    }
+
+    fn committed_chunk_stream(
+        &self,
+        operation_filter: Option<String>,
+    ) -> Result<CommittedChunkIter, AppendJournalError> {
         let file = self.file.try_clone()?;
         let snapshot_end = self.file.metadata()?.len();
         Ok(CommittedChunkIter {
             file,
-            operation_id: operation_id.into(),
+            operation_filter,
             previous_hash: [0; 32],
             expected_sequence: 1,
             pending: None,
-            target_cursor: None,
+            cursors: BTreeMap::new(),
             last_global_chunk_id: 0,
             position: FILE_HEADER_LEN,
             snapshot_end,
@@ -760,11 +801,11 @@ impl AppendJournal {
 
 pub struct CommittedChunkIter {
     file: File,
-    operation_id: String,
+    operation_filter: Option<String>,
     previous_hash: [u8; 32],
     expected_sequence: u64,
     pending: Option<PreparedChunk>,
-    target_cursor: Option<CopyCursor>,
+    cursors: BTreeMap<String, CopyCursor>,
     last_global_chunk_id: u64,
     position: u64,
     snapshot_end: u64,
@@ -782,7 +823,11 @@ impl Iterator for CommittedChunkIter {
         loop {
             if self.position == self.snapshot_end {
                 self.done = true;
-                return if self.previous_hash == self.snapshot_head {
+                return if self.pending.is_some() {
+                    Some(Err(AppendJournalError::InvalidTransition(
+                        "prepared chunk has no commit record",
+                    )))
+                } else if self.previous_hash == self.snapshot_head {
                     None
                 } else {
                     Some(Err(AppendJournalError::CorruptFrame {
@@ -853,29 +898,36 @@ impl Iterator for CommittedChunkIter {
                                 )));
                             }
                             self.last_global_chunk_id = chunk_id;
-                            if operation_id == self.operation_id {
-                                if let Some(cursor) = &self.target_cursor {
-                                    if chunk.start_key.as_ref() != Some(&cursor.final_key) {
-                                        self.done = true;
-                                        return Some(Err(AppendJournalError::InvalidTransition(
-                                            "chunk continuity",
-                                        )));
-                                    }
-                                } else if chunk.start_key.is_some() {
+                            if let Some(cursor) = self.cursors.get(&operation_id) {
+                                if chunk.start_key.as_ref() != Some(&cursor.final_key) {
                                     self.done = true;
                                     return Some(Err(AppendJournalError::InvalidTransition(
-                                        "first chunk",
+                                        "chunk continuity",
                                     )));
                                 }
-                                let previous = self.target_cursor.as_ref();
-                                self.target_cursor = Some(CopyCursor {
+                            } else if chunk.start_key.is_some() {
+                                self.done = true;
+                                return Some(Err(AppendJournalError::InvalidTransition(
+                                    "first chunk",
+                                )));
+                            }
+                            let previous = self.cursors.get(&operation_id);
+                            self.cursors.insert(
+                                operation_id.clone(),
+                                CopyCursor {
                                     last_chunk_id: chunk.chunk_id,
                                     final_key: chunk.final_key.clone(),
                                     chunks: previous.map_or(1, |cursor| cursor.chunks + 1),
                                     rows: previous.map_or(chunk.row_count, |cursor| {
                                         cursor.rows + chunk.row_count
                                     }),
-                                });
+                                },
+                            );
+                            if self
+                                .operation_filter
+                                .as_ref()
+                                .is_none_or(|filter| filter == &operation_id)
+                            {
                                 return Some(Ok(chunk));
                             }
                         }
@@ -901,6 +953,93 @@ struct ScanResult {
     valid_end: u64,
     last_sequence: u64,
     head_hash: [u8; 32],
+}
+
+fn read_snapshot_frames(
+    file: &File,
+    snapshot_end: u64,
+) -> Result<Option<JournalSnapshot>, AppendJournalError> {
+    let mut genesis = None;
+    let mut projection = None;
+    let mut sequence = 1_u64;
+    let mut previous_hash = [0; 32];
+    let mut position = FILE_HEADER_LEN;
+    while position < snapshot_end {
+        if snapshot_end - position < 20 {
+            return Ok(None);
+        }
+        let mut prefix = [0_u8; 20];
+        read_exact_at(file, &mut prefix, position)?;
+        let magic = u32::from_le_bytes(
+            prefix[0..4]
+                .try_into()
+                .map_err(|_| AppendJournalError::CorruptFrame { offset: position })?,
+        );
+        let version = u16::from_le_bytes(
+            prefix[4..6]
+                .try_into()
+                .map_err(|_| AppendJournalError::CorruptFrame { offset: position })?,
+        );
+        let kind = u16::from_le_bytes(
+            prefix[6..8]
+                .try_into()
+                .map_err(|_| AppendJournalError::CorruptFrame { offset: position })?,
+        );
+        let payload_len = u32::from_le_bytes(
+            prefix[16..20]
+                .try_into()
+                .map_err(|_| AppendJournalError::CorruptFrame { offset: position })?,
+        ) as u64;
+        let frame_sequence = u64::from_le_bytes(
+            prefix[8..16]
+                .try_into()
+                .map_err(|_| AppendJournalError::CorruptFrame { offset: position })?,
+        );
+        if magic != FRAME_MAGIC
+            || version != FORMAT_VERSION
+            || frame_sequence != sequence
+            || payload_len > maximum_payload_len(kind) as u64
+        {
+            return Err(AppendJournalError::CorruptFrame { offset: position });
+        }
+        let frame_end = position
+            .checked_add(FRAME_HEADER_LEN as u64)
+            .and_then(|value| value.checked_add(payload_len))
+            .and_then(|value| value.checked_add(FRAME_TRAILER_LEN as u64))
+            .ok_or(AppendJournalError::CorruptFrame { offset: position })?;
+        if frame_end > snapshot_end {
+            return Ok(None);
+        }
+        let (event, hash, end) =
+            read_frame_at(file, position, snapshot_end, sequence, previous_hash)?
+                .ok_or(AppendJournalError::CorruptFrame { offset: position })?;
+        match event {
+            JournalEvent::Genesis(value) if sequence == 1 => {
+                value.validate()?;
+                projection = Some(JournalProjection::from_genesis(&value));
+                genesis = Some(*value);
+            }
+            JournalEvent::Genesis(_) => {
+                return Err(AppendJournalError::InvalidTransition("duplicate genesis"));
+            }
+            event => projection
+                .as_mut()
+                .ok_or(AppendJournalError::InvalidGenesis)?
+                .apply(&event)?,
+        }
+        previous_hash = hash;
+        position = end;
+        sequence = sequence
+            .checked_add(1)
+            .ok_or(AppendJournalError::SequenceOverflow)?;
+    }
+    let (Some(genesis), Some(projection)) = (genesis, projection) else {
+        return Ok(None);
+    };
+    Ok(Some(JournalSnapshot {
+        genesis,
+        projection,
+    }))
 }
 
 fn scan_frames(file: &mut File, permit_torn_tail: bool) -> Result<ScanResult, AppendJournalError> {
@@ -1463,6 +1602,46 @@ mod tests {
     }
 
     #[test]
+    fn read_snapshot_does_not_require_the_writer_lock() {
+        let directory = private_tempdir();
+        let path = directory.path().join("state");
+        let mut journal = AppendJournal::create_new(&path, genesis()).unwrap();
+        let operation_id = journal.genesis.operations[0].operation_id.clone();
+        journal
+            .transition_operation(&operation_id, OperationState::Running)
+            .unwrap();
+
+        let snapshot = AppendJournal::read_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snapshot.genesis, *journal.genesis());
+        assert_eq!(
+            snapshot.projection.operations[&operation_id],
+            OperationState::Running
+        );
+    }
+
+    #[test]
+    fn read_snapshot_reports_a_torn_captured_tail_as_retryable() {
+        let directory = private_tempdir();
+        let path = directory.path().join("state");
+        let mut journal = AppendJournal::create_new(&path, genesis()).unwrap();
+        let operation_id = journal.genesis.operations[0].operation_id.clone();
+        let frame = encode_event_frame(
+            journal.next_sequence,
+            journal.head_hash,
+            &JournalEvent::OperationTransition {
+                operation_id,
+                from: OperationState::Pending,
+                to: OperationState::Running,
+            },
+        )
+        .unwrap();
+        journal.file.write_all(&frame[..frame.len() / 2]).unwrap();
+        journal.file.sync_all().unwrap();
+
+        assert!(AppendJournal::read_snapshot(&path).unwrap().is_none());
+    }
+
+    #[test]
     fn final_torn_tail_is_truncated() {
         let directory = private_tempdir();
         let path = directory.path().join("state");
@@ -1613,6 +1792,49 @@ mod tests {
         assert_eq!(projection.last_chunk_id, 3);
         assert_eq!(projection.copy_cursors[&first].chunks, 2);
         assert_eq!(projection.copy_cursors[&second].last_chunk_id, 2);
+    }
+
+    #[test]
+    fn global_chunk_stream_reads_each_operation_in_one_pass() {
+        let directory = private_tempdir();
+        let path = directory.path().join("state");
+        let mut journal =
+            AppendJournal::create_new(&path, genesis_with_copy_operations(2)).unwrap();
+        let operation_ids = journal
+            .genesis()
+            .operations
+            .iter()
+            .map(|operation| operation.operation_id.clone())
+            .collect::<Vec<_>>();
+        for operation_id in &operation_ids {
+            journal
+                .transition_operation(operation_id, OperationState::Running)
+                .unwrap();
+        }
+        for (chunk_id, operation_id, final_key) in [
+            (1, &operation_ids[0], 1_i64),
+            (2, &operation_ids[1], 10_i64),
+        ] {
+            journal
+                .prepare_chunk(PreparedChunk {
+                    chunk_id,
+                    operation_id: operation_id.clone(),
+                    start_key: None,
+                    final_key: vec![DbValue::Signed(final_key.into())],
+                    row_count: 1,
+                    canonical_digest: hash(),
+                    target_transaction_intent: format!("intent-{chunk_id}"),
+                })
+                .unwrap();
+            journal.commit_chunk_after_ack().unwrap();
+        }
+        let observed = journal
+            .all_committed_chunks()
+            .unwrap()
+            .map(|chunk| chunk.map(|chunk| chunk.operation_id))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(observed, operation_ids);
     }
 
     #[test]

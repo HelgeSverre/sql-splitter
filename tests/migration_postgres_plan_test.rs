@@ -18,12 +18,13 @@ use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::config::SslMode;
 use postgres::{Client, Config};
 use postgres_native_tls::MakeTlsConnector;
+use sql_splitter::migration::append_journal::{AppendJournal, PreparedChunk};
 use sql_splitter::migration::artifact::read_json;
 use sql_splitter::migration::connection::{
     CancellationToken, ConnectionError, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
 };
-use sql_splitter::migration::journal::{MigrationState, MigrationStatus};
+use sql_splitter::migration::journal::{MigrationStatus, OperationState};
 use sql_splitter::migration::model::{
     CatalogNamespace, CatalogObject, CatalogObjectKind, DbValue, Identifier, KeyTuple,
     QualifiedTable, VendorCatalog,
@@ -537,7 +538,7 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
     let target = required_path("SQL_SPLITTER_PG_RUN_TARGET_CONFIG")?;
     let directory = tempfile::tempdir()?;
     let plan_path = directory.path().join("reviewed-plan.json");
-    let state_path = directory.path().join("migration-state.json");
+    let state_path = directory.path().join("migration-state.journal");
     let reviewed = write_live_plan(&source, &target, &plan_path)?;
     assert!(
         !reviewed.plan.unsupported_objects.blocks_execution(),
@@ -554,17 +555,14 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
     )?;
     assert_eq!(report.copied_rows, 3);
     assert!(report.committed_chunks >= 1);
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
     assert!(state
+        .projection()
         .operations
-        .iter()
-        .all(|operation| operation.state
-            == sql_splitter::migration::journal::OperationState::Verified));
-    assert!(state
-        .chunks
-        .iter()
-        .all(|chunk| chunk.state == sql_splitter::migration::journal::ChunkState::Committed));
+        .values()
+        .all(|state| *state == OperationState::Verified));
+    assert!(committed_chunks(&state)?.next().is_some());
 
     let mut target_client = connect(&PostgresEndpointConfig::read(target)?)?;
     let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
@@ -643,14 +641,17 @@ fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow
         .unwrap_err()
         .to_string()
         .contains("injected interruption"));
-    let interrupted_state: MigrationState = read_json(&state_path)?;
-    assert_eq!(interrupted_state.status, MigrationStatus::Running);
+    let interrupted_state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(
+        interrupted_state.projection().status,
+        MigrationStatus::Running
+    );
 
     let report = resume_postgres_fenced_plan(&state_path, &source, &target, &admin, &artifact)
         .context("resume the reviewed plan under the durable write fence")?;
     assert_eq!(report.copied_rows, 3);
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
 
     let mut target_client = connect(&PostgresEndpointConfig::read(target)?)?;
     let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
@@ -770,7 +771,7 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
         std::fs::write(&admin_path, toml::to_string(&admin)?)?;
         let plan_path = case.join("plan.json");
         let fence_path = case.join("fence.json");
-        let state_path = case.join("state.json");
+        let state_path = case.join("state.journal");
         let reviewed = write_live_plan_with_consistency(
             &source_path,
             &target_path,
@@ -800,23 +801,20 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
             &fence_path,
         )?;
         assert_eq!(report.copied_rows, 3, "{interruption:?}");
-        let state: MigrationState = read_json(&state_path)?;
-        assert_eq!(state.status, MigrationStatus::Completed, "{interruption:?}");
+        let state = AppendJournal::open_resume(&state_path)?;
         assert_eq!(
-            state
-                .chunks
-                .iter()
-                .map(|chunk| chunk.row_count)
-                .sum::<u64>(),
-            3,
+            state.projection().status,
+            MigrationStatus::Completed,
             "{interruption:?}"
         );
-        assert!(state.chunks.iter().all(|chunk| {
-            chunk.state == sql_splitter::migration::journal::ChunkState::Committed
-        }));
-        assert!(state.operations.iter().all(|operation| {
-            operation.state == sql_splitter::migration::journal::OperationState::Verified
-        }));
+        let copied_rows = committed_chunks(&state)?
+            .try_fold(0_u64, |sum, chunk| chunk.map(|chunk| sum + chunk.row_count))?;
+        assert_eq!(copied_rows, 3, "{interruption:?}");
+        assert!(state
+            .projection()
+            .operations
+            .values()
+            .all(|state| *state == OperationState::Verified));
         let mut target_client = connect(&target)?;
         let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
         let actual = rows
@@ -893,7 +891,7 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
     let admin_path = directory.path().join("admin.toml");
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     std::fs::write(&source_path, toml::to_string(&source)?)?;
     std::fs::write(&target_path, toml::to_string(&target)?)?;
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
@@ -928,14 +926,16 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if state_path.exists() {
-                let state: MigrationState = read_json(&state_path)?;
+                let state = AppendJournal::read_snapshot(&state_path)?;
                 let transaction_is_active: bool = observer
                     .query_one(
                         "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND usename='migration_fence_target_owner' AND xact_start IS NOT NULL AND query LIKE 'INSERT INTO%')",
                         &[&target_database],
                     )?
                     .get(0);
-                if state.prepared_chunk()?.is_some() && transaction_is_active {
+                if state.is_some_and(|snapshot| snapshot.projection.prepared_chunk.is_some())
+                    && transaction_is_active
+                {
                     break;
                 }
             }
@@ -952,12 +952,9 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
     })?;
     assert!(format!("{cancelled:#}").contains("Cancelled"));
 
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.chunks.len(), 1);
-    assert_eq!(
-        state.chunks[0].state,
-        sql_splitter::migration::journal::ChunkState::Prepared
-    );
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert!(state.projection().prepared_chunk.is_some());
+    assert!(committed_chunks(&state)?.next().is_none());
     let mut target_client = connect(&target)?;
     let row_count: i64 = target_client
         .query_one("SELECT count(*) FROM public.accounts", &[])?
@@ -973,8 +970,8 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
         &fence_path,
     )?;
     assert_eq!(report.copied_rows, 50_000);
-    let completed: MigrationState = read_json(&state_path)?;
-    assert_eq!(completed.status, MigrationStatus::Completed);
+    let completed = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(completed.projection().status, MigrationStatus::Completed);
     cleanup.run()?;
     Ok(())
 }
@@ -1042,7 +1039,7 @@ fn live_standalone_unique_index_is_created_before_copy_and_resumed() -> anyhow::
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -1083,11 +1080,13 @@ fn live_standalone_unique_index_is_created_before_copy_and_resumed() -> anyhow::
         &admin_path,
         &fence_path,
     )?;
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
-    assert!(state.operations.iter().all(|operation| {
-        operation.state == sql_splitter::migration::journal::OperationState::Verified
-    }));
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
+    assert!(state
+        .projection()
+        .operations
+        .values()
+        .all(|state| *state == OperationState::Verified));
     let mut target_client = connect(&target)?;
     let index = target_client.query_one(
         "SELECT i.indisunique, i.indisvalid, i.indisready,
@@ -1311,7 +1310,7 @@ fn run_live_partition_case(
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     if strategy == "range" {
         let mut source_admin = connect(&admin)?;
         source_admin.batch_execute(
@@ -1426,13 +1425,13 @@ fn run_live_partition_case(
         &admin_path,
         &fence_path,
     )?;
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
     assert!(state
+        .projection()
         .operations
-        .iter()
-        .all(|operation| operation.state
-            == sql_splitter::migration::journal::OperationState::Verified));
+        .values()
+        .all(|state| *state == OperationState::Verified));
     let mut source_client = connect(&source)?;
     let mut target_client = connect(&target)?;
     let query = "SELECT tableoid::regclass::text,id,payload FROM public.accounts ORDER BY id";
@@ -1505,7 +1504,7 @@ fn run_live_generated_column_case(
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -1549,14 +1548,17 @@ fn run_live_generated_column_case(
     if inject_conflict {
         let error = resumed.unwrap_err();
         assert!(error.to_string().contains("durable intent"), "{error:#}");
-        let state: MigrationState = read_json(&state_path)?;
-        assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+        let state = AppendJournal::open_resume(&state_path)?;
+        assert_eq!(
+            state.projection().status,
+            MigrationStatus::ManualReconciliationRequired
+        );
         cleanup.run()?;
         return Ok(());
     }
     resumed?;
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
     let mut target_client = connect(&target)?;
     let rows = target_client.query(
         "SELECT id,doubled,amount FROM public.accounts ORDER BY id",
@@ -1646,7 +1648,7 @@ fn run_live_sequence_recovery_case(
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -1713,19 +1715,22 @@ fn run_live_sequence_recovery_case(
             error.to_string().contains("manual intervention"),
             "{error:#}"
         );
-        let state: MigrationState = read_json(&state_path)?;
-        assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+        let state = AppendJournal::open_resume(&state_path)?;
+        assert_eq!(
+            state.projection().status,
+            MigrationStatus::ManualReconciliationRequired
+        );
         cleanup.run()?;
         return Ok(());
     }
     resumed?;
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
     assert!(state
+        .projection()
         .operations
-        .iter()
-        .all(|operation| operation.state
-            == sql_splitter::migration::journal::OperationState::Verified));
+        .values()
+        .all(|state| *state == OperationState::Verified));
     let mut target_client = connect(&target)?;
     let rows = target_client.query(
         "SELECT id,serial_id,name FROM public.accounts ORDER BY id",
@@ -1825,7 +1830,7 @@ fn run_live_ordinary_index_recovery_case(
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -1910,16 +1915,13 @@ fn run_live_ordinary_index_recovery_case(
         })?;
         assert!(format!("{cancelled:#}").contains("Cancelled"));
         target_client.batch_execute("ROLLBACK")?;
-        let state: MigrationState = read_json(&state_path)?;
+        let state = AppendJournal::open_resume(&state_path)?;
         let index_operation = state
+            .projection()
             .operations
-            .iter()
-            .find(|operation| operation.operation_id == index_operation.id.as_str())
+            .get(index_operation.id.as_str())
             .ok_or_else(|| anyhow::anyhow!("ordinary index state is absent"))?;
-        assert_eq!(
-            index_operation.state,
-            sql_splitter::migration::journal::OperationState::Prepared
-        );
+        assert_eq!(*index_operation, OperationState::Prepared);
         let exists: bool = target_client
             .query_one(
                 "SELECT to_regclass('public.accounts_tenant_name_idx') IS NOT NULL",
@@ -1943,17 +1945,22 @@ fn run_live_ordinary_index_recovery_case(
             error.to_string().contains("manual intervention"),
             "{error:#}"
         );
-        let state: MigrationState = read_json(&state_path)?;
-        assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+        let state = AppendJournal::open_resume(&state_path)?;
+        assert_eq!(
+            state.projection().status,
+            MigrationStatus::ManualReconciliationRequired
+        );
         cleanup.run()?;
         return Ok(());
     }
     resume?;
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
-    assert!(state.operations.iter().all(|operation| {
-        operation.state == sql_splitter::migration::journal::OperationState::Verified
-    }));
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
+    assert!(state
+        .projection()
+        .operations
+        .values()
+        .all(|state| *state == OperationState::Verified));
     let mut target_client = connect(&target)?;
     let index = target_client.query_one(
         "SELECT i.indisunique, i.indisvalid, i.indisready,
@@ -2051,7 +2058,7 @@ fn run_live_network_commit_response_loss_case(
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -2160,12 +2167,9 @@ fn wait_for_exact_account_rows(target: &PostgresEndpointConfig) -> anyhow::Resul
 
 #[cfg(feature = "migration-fault-injection")]
 fn assert_one_prepared_chunk(state_path: &std::path::Path) -> anyhow::Result<()> {
-    let state: MigrationState = read_json(state_path)?;
-    assert_eq!(state.chunks.len(), 1);
-    assert_eq!(
-        state.chunks[0].state,
-        sql_splitter::migration::journal::ChunkState::Prepared
-    );
+    let state = AppendJournal::open_resume(state_path)?;
+    assert!(state.projection().prepared_chunk.is_some());
+    assert!(committed_chunks(&state)?.next().is_none());
     Ok(())
 }
 
@@ -2174,16 +2178,14 @@ fn assert_completed_exactly_once(
     state_path: &std::path::Path,
     target: &PostgresEndpointConfig,
 ) -> anyhow::Result<()> {
-    let state: MigrationState = read_json(state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
-    assert_eq!(state.chunks.len(), 1);
-    assert_eq!(
-        state.chunks[0].state,
-        sql_splitter::migration::journal::ChunkState::Committed
-    );
-    assert!(state.operations.iter().all(|operation| {
-        operation.state == sql_splitter::migration::journal::OperationState::Verified
-    }));
+    let state = AppendJournal::open_resume(state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
+    assert_eq!(committed_chunks(&state)?.count(), 1);
+    assert!(state
+        .projection()
+        .operations
+        .values()
+        .all(|state| *state == OperationState::Verified));
     assert_eq!(
         exact_account_rows(target)?,
         vec![
@@ -2193,6 +2195,16 @@ fn assert_completed_exactly_once(
         ]
     );
     Ok(())
+}
+
+fn committed_chunks(
+    journal: &AppendJournal,
+) -> anyhow::Result<
+    impl Iterator<
+        Item = Result<PreparedChunk, sql_splitter::migration::append_journal::AppendJournalError>,
+    >,
+> {
+    Ok(journal.all_committed_chunks()?)
 }
 
 #[test]
@@ -2288,7 +2300,7 @@ fn run_live_foreign_key_recovery_case(
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -2318,11 +2330,13 @@ fn run_live_foreign_key_recovery_case(
         &fence_path,
     )?;
     assert_eq!(report.copied_rows, 9);
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::Completed);
-    assert!(state.operations.iter().all(|operation| {
-        operation.state == sql_splitter::migration::journal::OperationState::Verified
-    }));
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(state.projection().status, MigrationStatus::Completed);
+    assert!(state
+        .projection()
+        .operations
+        .values()
+        .all(|state| *state == OperationState::Verified));
     let mut target_client = connect(&target)?;
     let constraint_counts = target_client.query_one(
         "SELECT count(*), count(*) FILTER (WHERE convalidated) FROM pg_constraint WHERE contype='f'",
@@ -2489,7 +2503,7 @@ fn live_foreign_key_conflict_requires_manual_reconciliation() -> anyhow::Result<
     std::fs::write(&admin_path, toml::to_string(&admin)?)?;
     let plan_path = directory.path().join("plan.json");
     let fence_path = directory.path().join("fence.json");
-    let state_path = directory.path().join("state.json");
+    let state_path = directory.path().join("state.journal");
     let reviewed = write_live_plan_with_consistency(
         &source_path,
         &target_path,
@@ -2545,8 +2559,11 @@ fn live_foreign_key_conflict_requires_manual_reconciliation() -> anyhow::Result<
             .contains("foreign-key reconciliation requires manual intervention"),
         "{error:#}"
     );
-    let state: MigrationState = read_json(&state_path)?;
-    assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+    let state = AppendJournal::open_resume(&state_path)?;
+    assert_eq!(
+        state.projection().status,
+        MigrationStatus::ManualReconciliationRequired
+    );
     let mut source_admin = connect(&admin)?;
     assert!(source_admin
         .batch_execute("INSERT INTO public.parents VALUES (2)")

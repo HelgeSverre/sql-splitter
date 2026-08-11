@@ -170,6 +170,14 @@ and resumes 50,000 rows without omission or duplication. A second case blocks
 session, proves that PostgreSQL rolled the index transaction back, and resumes
 the same prepared index operation.
 
+The execution state is a protected append-only journal rather than a rewritten
+JSON snapshot. Resume replays a hash-linked frame stream into bounded operation
+and cursor state. Final verification scans committed chunks once across all
+tables, so journal processing is linear in the number of durable events. A
+100,000-event replay test verifies the bounded projection. The older spike JSON
+state format does not contain the independent table and schema evidence required
+by this format and is therefore rejected for automatic resume.
+
 Example:
 
 ```toml

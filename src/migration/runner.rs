@@ -12,7 +12,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+#[cfg(feature = "enterprise-migration-spike")]
+use sha2::{Digest, Sha256};
 
+#[cfg(feature = "enterprise-migration-spike")]
+use super::append_journal::{
+    AppendJournal, CommittedChunkIter, Genesis, OperationPhase, OperationSpec, PreparedChunk,
+};
 use super::artifact::{read_json, replace_json, write_json_new};
 use super::canonical::{digest_rows, encode_row, CanonicalRow, CANONICAL_ENCODING_VERSION};
 use super::connection::{
@@ -22,7 +28,7 @@ use super::connection::{
 use super::fixture::{InMemorySource, InMemoryTarget};
 use super::journal::{
     ChunkRecord, ChunkState, ConsistencyEvidence, MigrationState, MigrationStatus, OperationState,
-    PreparedChunkEvidence, PreparedResolution, ResumeBinding,
+    PreparedResolution, ResumeBinding,
 };
 use super::model::{
     CatalogObject, CatalogObjectKind, ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch,
@@ -184,6 +190,64 @@ fn rollback_cancelled_commit(
             anyhow!("target commit was cancelled and rollback also failed: {cancelled}; {rollback}")
         }
     }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn append_journal_genesis(binding: ResumeBinding, reviewed_plan: ReviewedPlan) -> Genesis {
+    let operations = reviewed_plan
+        .plan
+        .operations
+        .iter()
+        .map(|operation| OperationSpec {
+            operation_id: operation.id.to_string(),
+            dependencies: operation.dependencies.iter().map(ToString::to_string).collect(),
+            is_copy: operation.kind == OperationKind::CopyTable,
+            phase: if matches!(operation.kind, OperationKind::VerifyTable | OperationKind::VerifySchema)
+                || matches!(&operation.kind, OperationKind::Vendor(name) if name == "verify_postgres_partition_topology")
+            {
+                OperationPhase::Verification
+            } else {
+                OperationPhase::Execution
+            },
+        })
+        .collect();
+    Genesis {
+        binding,
+        reviewed_plan,
+        operations,
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn journal_operation_state(
+    journal: &AppendJournal,
+    operation_id: &str,
+) -> anyhow::Result<OperationState> {
+    journal
+        .projection()
+        .operations
+        .get(operation_id)
+        .copied()
+        .ok_or_else(|| anyhow!("migration journal has no state for operation {operation_id}"))
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn journal_prepare_effect(journal: &mut AppendJournal, operation_id: &str) -> anyhow::Result<()> {
+    match journal_operation_state(journal, operation_id)? {
+        OperationState::Pending => {
+            journal.prepare_operations_atomic([operation_id])?;
+        }
+        OperationState::Running => {
+            journal.transition_operation(operation_id, OperationState::Prepared)?;
+        }
+        OperationState::Prepared => {}
+        OperationState::Committed | OperationState::Verified => {
+            return Err(anyhow!(
+                "operation {operation_id} has already passed its effect preparation boundary"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,33 +493,25 @@ fn resume_postgres_fenced_plan_internal(
     fence_artifact_path: &Path,
     injected_cancellation: Option<CancellationToken>,
 ) -> anyhow::Result<PostgresExecutionReport> {
-    let mut state: MigrationState = read_json(state_path)?;
-    let reviewed = state
-        .reviewed_plan
-        .clone()
-        .ok_or_else(|| anyhow!("migration state has no embedded reviewed plan"))?;
+    let mut journal = AppendJournal::open_resume(state_path).with_context(|| {
+        "resume requires the append-only journal format; legacy JSON state requires explicit operator recovery"
+    })?;
+    let reviewed = journal.genesis().reviewed_plan.clone();
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
     validate_postgres_execution_operations(&reviewed)?;
-    validate_resume_plan_binding(&state, &reviewed)?;
-    state.validate_for_operations(
-        reviewed
-            .plan
-            .operations
-            .iter()
-            .map(|operation| operation.id.as_str()),
-    )?;
-    if state.status == MigrationStatus::Completed {
+    validate_resume_binding(&journal.genesis().binding, &reviewed)?;
+    if journal.projection().status == MigrationStatus::Completed {
         return Err(anyhow!("completed migration state cannot be resumed"));
     }
-    if state.status == MigrationStatus::ManualReconciliationRequired {
+    if journal.projection().status == MigrationStatus::ManualReconciliationRequired {
         return Err(anyhow!(
             "migration requires manual reconciliation and cannot resume automatically"
         ));
     }
 
     let installed: InstalledPostgresFence = read_json(fence_artifact_path)?;
-    if installed.evidence != state.binding.consistency_evidence {
+    if installed.evidence != journal.genesis().binding.consistency_evidence {
         return Err(anyhow!(
             "write-fence artifact differs from the state consistency evidence"
         ));
@@ -478,20 +534,24 @@ fn resume_postgres_fenced_plan_internal(
     }
     validate_fence_tls_binding(&installed, &admin_config)?;
     if postgres_write_fence_is_released(&admin_config, &installed.evidence)? {
-        let mut completed = state.clone();
-        completed.finalize().context(
-            "released fence is not paired with a fully verified durable migration state",
-        )?;
-        let copied_rows = completed
-            .chunks
-            .iter()
-            .try_fold(0_u64, |total, chunk| total.checked_add(chunk.row_count))
+        if journal.projection().status != MigrationStatus::Verifying
+            || !journal.projection().schema_verified
+        {
+            return Err(anyhow!(
+                "released fence is not paired with a fully verified durable migration journal"
+            ));
+        }
+        journal.transition_status(MigrationStatus::Completed)?;
+        let copied_rows = journal
+            .projection()
+            .copy_cursors
+            .values()
+            .try_fold(0_u64, |total, cursor| total.checked_add(cursor.rows))
             .ok_or_else(|| anyhow!("committed row count overflow"))?;
-        replace_json(state_path, &completed)?;
         return Ok(PostgresExecutionReport {
             state: state_path.to_path_buf(),
             copied_rows,
-            committed_chunks: u64::try_from(completed.chunks.len())?,
+            committed_chunks: journal.projection().last_chunk_id,
         });
     }
     let fence_inventory = attest_postgres_write_fence(&admin_config, &installed.evidence)?;
@@ -520,7 +580,7 @@ fn resume_postgres_fenced_plan_internal(
         "bound_parameters",
     ])?;
     let snapshot = source.capture_snapshot()?;
-    if snapshot.endpoint_identity != state.binding.source_endpoint
+    if snapshot.endpoint_identity != journal.genesis().binding.source_endpoint
         || snapshot.endpoint_identity != reviewed.plan.source_endpoint_identity
     {
         return Err(anyhow!("source endpoint differs from durable binding"));
@@ -533,7 +593,7 @@ fn resume_postgres_fenced_plan_internal(
         ));
     }
     let source_fingerprint = catalog_fingerprint(&source_catalog)?;
-    if source_fingerprint != state.binding.source_schema_fingerprint
+    if source_fingerprint != journal.genesis().binding.source_schema_fingerprint
         || source_fingerprint != reviewed.plan.source_catalog_fingerprint
         || reviewed.plan.source_catalog.as_ref() != Some(&source_catalog)
     {
@@ -542,7 +602,7 @@ fn resume_postgres_fenced_plan_internal(
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
 
     let target_snapshot = target.inspect_endpoint()?;
-    if target_snapshot.endpoint_identity != state.binding.target_endpoint
+    if target_snapshot.endpoint_identity != journal.genesis().binding.target_endpoint
         || target_snapshot.endpoint_identity != reviewed.plan.target_endpoint_identity
     {
         return Err(anyhow!("target endpoint differs from durable binding"));
@@ -569,16 +629,14 @@ fn resume_postgres_fenced_plan_internal(
             installed: &installed,
             cancellation: &cancellation,
         },
-        &mut state,
-        state_path,
+        &mut journal,
     )?;
 
-    let mut next_chunk_id = state.next_chunk_id()?;
-    let mut copied_rows = state
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.state == ChunkState::Committed)
-        .try_fold(0_u64, |total, chunk| total.checked_add(chunk.row_count))
+    let mut copied_rows = journal
+        .projection()
+        .copy_cursors
+        .values()
+        .try_fold(0_u64, |total, cursor| total.checked_add(cursor.rows))
         .ok_or_else(|| anyhow!("committed row count overflow"))?;
 
     for operation in reviewed
@@ -593,22 +651,25 @@ fn resume_postgres_fenced_plan_internal(
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
         let shape = table_shape(&source_catalog, table, Some(operation))?;
-        let operation_state = operation_state(&state, operation.id.as_str())?;
-        if matches!(
-            operation_state,
-            OperationState::Committed | OperationState::Verified
-        ) {
+        let operation_state = operation_state(&journal, operation.id.as_str())?;
+        if operation_state == OperationState::Verified {
             continue;
         }
         if operation_state == OperationState::Pending {
             cancellation.check()?;
-            state.start_operation(operation.id.as_str())?;
-            replace_json(state_path, &state)?;
+            journal.transition_operation(operation.id.as_str(), OperationState::Running)?;
+        } else if operation_state == OperationState::Prepared {
+            journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+            continue;
+        } else if operation_state == OperationState::Committed {
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+            continue;
         } else if operation_state != OperationState::Running {
             return Err(anyhow!("copy operation has an invalid resumable state"));
         }
 
-        if let Some(prepared) = state.prepared_chunk()?.cloned() {
+        if let Some(prepared) = journal.projection().prepared_chunk.clone() {
             if prepared.operation_id != operation.id.as_str() {
                 return Err(anyhow!("prepared chunk belongs to a different operation"));
             }
@@ -631,8 +692,7 @@ fn resume_postgres_fenced_plan_internal(
             }
             match reconcile_live_prepared_chunk(
                 target.as_ref(),
-                &mut state,
-                state_path,
+                &mut journal,
                 table,
                 &shape,
                 &expected,
@@ -654,8 +714,7 @@ fn resume_postgres_fenced_plan_internal(
                         }
                         return Err(error.into());
                     }
-                    state.commit(prepared.chunk_id)?;
-                    replace_json(state_path, &state)?;
+                    journal.commit_chunk_after_ack()?;
                 }
                 PreparedResolution::ManualReconciliationRequired => {
                     return Err(anyhow!(
@@ -668,8 +727,17 @@ fn resume_postgres_fenced_plan_internal(
                 .ok_or_else(|| anyhow!("committed row count overflow"))?;
         }
 
-        let mut after = state.resume_cursor(operation.id.as_str())?;
+        let mut after = journal
+            .projection()
+            .copy_cursors
+            .get(operation.id.as_str())
+            .map(|cursor| KeyTuple::new(cursor.final_key.clone()));
         loop {
+            let next_chunk_id = journal
+                .projection()
+                .last_chunk_id
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("chunk identifier overflow"))?;
             attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
             let batch = reader.select_page(&KeysetPage {
                 table: table.clone(),
@@ -683,7 +751,7 @@ fn resume_postgres_fenced_plan_internal(
             }
             let final_key = batch_final_key(&batch, &shape)?;
             cancellation.check()?;
-            state.prepare(ChunkRecord {
+            journal.prepare_chunk(PreparedChunk {
                 chunk_id: next_chunk_id,
                 operation_id: operation.id.to_string(),
                 start_key: after.as_ref().map(|key| key.0.clone()),
@@ -694,9 +762,7 @@ fn resume_postgres_fenced_plan_internal(
                     "{}:{}:{next_chunk_id}",
                     reviewed.plan_hash, operation.id
                 ),
-                state: ChunkState::Prepared,
             })?;
-            replace_json(state_path, &state)?;
             let mut writer = target.open_writer(cancellation.clone())?;
             writer.begin()?;
             let writable = writable_batch(&batch, &shape)?;
@@ -706,12 +772,11 @@ fn resume_postgres_fenced_plan_internal(
             }
             check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
             match writer.commit() {
-                Ok(()) => state.commit(next_chunk_id)?,
+                Ok(()) => journal.commit_chunk_after_ack()?,
                 Err(ConnectionError::CommitOutcomeUnknown(_)) => {
                     match reconcile_live_prepared_chunk(
                         target.as_ref(),
-                        &mut state,
-                        state_path,
+                        &mut journal,
                         table,
                         &shape,
                         &batch,
@@ -735,27 +800,50 @@ fn resume_postgres_fenced_plan_internal(
                     return Err(error.into());
                 }
             }
-            replace_json(state_path, &state)?;
             copied_rows = copied_rows
                 .checked_add(u64::try_from(batch.len())?)
                 .ok_or_else(|| anyhow!("copied row count overflow"))?;
-            next_chunk_id = next_chunk_id
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("chunk identifier overflow"))?;
             after = Some(final_key);
         }
-        state.commit_operation(operation.id.as_str())?;
-        replace_json(state_path, &state)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Prepared)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
     }
-
-    if state.status == MigrationStatus::Running {
-        state.begin_verification()?;
-        replace_json(state_path, &state)?;
-    } else if state.status != MigrationStatus::Verifying {
+    process_postgres_sequences(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        None,
+        &cancellation,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
+    process_postgres_indexes(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        None,
+        &cancellation,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
+    process_postgres_foreign_keys(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        None,
+        &cancellation,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
+    if journal.projection().status == MigrationStatus::Running {
+        journal.transition_status(MigrationStatus::Verifying)?;
+    } else if journal.projection().status != MigrationStatus::Verifying {
         return Err(anyhow!("migration status cannot resume verification"));
     }
     attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
     let mut verifier = target.open_verifier(cancellation.clone())?;
+    let mut committed_chunks = journal.all_committed_chunks()?.peekable();
     for operation in reviewed
         .plan
         .operations
@@ -767,17 +855,26 @@ fn resume_postgres_fenced_plan_internal(
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
         let shape = table_shape(&source_catalog, table, Some(operation))?;
-        verify_live_table(
+        let (manifest_hash, source_hash, target_hash) = verify_live_table(
             reader.as_mut(),
             verifier.as_mut(),
-            &state,
+            &mut committed_chunks,
             operation.id.as_str(),
             table,
             &shape,
             execution_page_limit(&source_config)?,
         )?;
-        if operation_state(&state, operation.id.as_str())? != OperationState::Verified {
-            state.verify_operation(operation.id.as_str())?;
+        if !journal
+            .projection()
+            .table_verifications
+            .contains(operation.id.as_str())
+        {
+            journal.verify_table(
+                operation.id.as_str(),
+                manifest_hash,
+                source_hash,
+                target_hash,
+            )?;
         }
         let verify = reviewed
             .plan
@@ -788,39 +885,15 @@ fn resume_postgres_fenced_plan_internal(
                     && candidate.table.as_ref() == Some(table)
             })
             .ok_or_else(|| anyhow!("table has no reviewed verification operation"))?;
-        complete_operation_if_needed(&mut state, verify.id.as_str())?;
-        replace_json(state_path, &state)?;
+        complete_operation_if_needed(&mut journal, verify.id.as_str())?;
     }
-    process_postgres_sequences(
-        &reviewed,
-        &source_catalog,
-        &target,
-        &mut state,
-        state_path,
-        None,
-        &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
-    )?;
-    process_postgres_indexes(
-        &reviewed,
-        &source_catalog,
-        &target,
-        &mut state,
-        state_path,
-        None,
-        &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
-    )?;
-    process_postgres_foreign_keys(
-        &reviewed,
-        &source_catalog,
-        &target,
-        &mut state,
-        state_path,
-        None,
-        &cancellation,
-        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
-    )?;
+    if let Some(chunk) = committed_chunks.next() {
+        let chunk = chunk?;
+        return Err(anyhow!(
+            "journal contains an unexpected committed chunk for operation {}",
+            chunk.operation_id
+        ));
+    }
     drop(verifier);
     let mut verifier = target.open_verifier(cancellation.clone())?;
     verify_postgres_partition_topologies(
@@ -829,8 +902,7 @@ fn resume_postgres_fenced_plan_internal(
         &target,
         reader.as_mut(),
         verifier.as_mut(),
-        &mut state,
-        state_path,
+        &mut journal,
         execution_page_limit(&source_config)?,
     )?;
     cancellation.check()?;
@@ -843,12 +915,12 @@ fn resume_postgres_fenced_plan_internal(
         .iter()
         .find(|operation| operation.kind == OperationKind::VerifySchema)
         .ok_or_else(|| anyhow!("reviewed plan has no schema verification operation"))?;
-    complete_operation_if_needed(&mut state, verify_schema.id.as_str())?;
-    replace_json(state_path, &state)?;
+    complete_operation_if_needed(&mut journal, verify_schema.id.as_str())?;
+    if !journal.projection().schema_verified {
+        journal.verify_schema(catalog_fingerprint(&source_catalog)?)?;
+    }
     attest_exact_fence(&admin_config, &installed, &fence_inventory)?;
     cancellation.check()?;
-    let mut completed = state.clone();
-    completed.finalize()?;
     drop(reader);
     let generation = match &installed.evidence {
         ConsistencyEvidence::WriteFence { generation, .. } => generation,
@@ -856,11 +928,11 @@ fn resume_postgres_fenced_plan_internal(
     };
     cancellation.check()?;
     release_postgres_write_fence(&admin_config, generation, &installed.token)?;
-    replace_json(state_path, &completed)?;
+    journal.transition_status(MigrationStatus::Completed)?;
     Ok(PostgresExecutionReport {
         state: state_path.to_path_buf(),
         copied_rows,
-        committed_chunks: u64::try_from(completed.chunks.len())?,
+        committed_chunks: journal.projection().last_chunk_id,
     })
 }
 
@@ -1019,28 +1091,8 @@ fn execute_postgres_plan_internal(
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
-    let mut state = MigrationState::with_operations(
-        binding,
-        reviewed.plan.operations.iter().map(|operation| {
-            (
-                operation.id.to_string(),
-                operation
-                    .dependencies
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-            )
-        }),
-    )?;
-    state.bind_reviewed_plan(reviewed.clone())?;
-    state.validate_for_operations(
-        reviewed
-            .plan
-            .operations
-            .iter()
-            .map(|operation| operation.id.as_str()),
-    )?;
-    write_json_new(state_path, &state)?;
+    let genesis = append_journal_genesis(binding, reviewed.clone());
+    let mut journal = AppendJournal::create_new(state_path, genesis)?;
 
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
     if !reader.read_only_evidence().server_enforced || reader.snapshot() != &snapshot {
@@ -1057,8 +1109,7 @@ fn execute_postgres_plan_internal(
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
     cancellation.check()?;
-    state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
-    replace_json(state_path, &state)?;
+    journal.prepare_operations_atomic(create_operation_ids.iter().copied())?;
     interrupt_if(interruption, ExecutionInterruption::AfterDdlPrepared)?;
     attest_fence_if_present(fenced.as_ref())?;
     cancellation.check()?;
@@ -1072,8 +1123,7 @@ fn execute_postgres_plan_internal(
                 )
             })?;
         } else {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, &state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "pre-data DDL has a partial or different target effect; manual reconciliation is required: {initial_error}"
             ));
@@ -1081,10 +1131,9 @@ fn execute_postgres_plan_internal(
     }
     interrupt_if(interruption, ExecutionInterruption::AfterDdlCommitted)?;
     for operation_id in create_operation_ids {
-        state.commit_prepared_operation(operation_id)?;
-        state.verify_operation(operation_id)?;
+        journal.transition_operation(operation_id, OperationState::Committed)?;
+        journal.transition_operation(operation_id, OperationState::Verified)?;
     }
-    replace_json(state_path, &state)?;
 
     let mut next_chunk_id = 1u64;
     let mut copied_rows = 0u64;
@@ -1101,8 +1150,7 @@ fn execute_postgres_plan_internal(
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
         let shape = table_shape(&source_catalog, table, Some(operation))?;
         cancellation.check()?;
-        state.start_operation(operation.id.as_str())?;
-        replace_json(state_path, &state)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Running)?;
         let mut after = None;
         loop {
             attest_fence_if_present(fenced.as_ref())?;
@@ -1123,7 +1171,7 @@ fn execute_postgres_plan_internal(
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("chunk identifier overflow"))?;
             cancellation.check()?;
-            state.prepare(ChunkRecord {
+            journal.prepare_chunk(PreparedChunk {
                 chunk_id,
                 operation_id: operation.id.to_string(),
                 start_key: after.as_ref().map(|key: &KeyTuple| key.0.clone()),
@@ -1134,9 +1182,7 @@ fn execute_postgres_plan_internal(
                     "{}:{}:{chunk_id}",
                     reviewed.plan_hash, operation.id
                 ),
-                state: ChunkState::Prepared,
             })?;
-            replace_json(state_path, &state)?;
             if matches!(
                 interruption,
                 Some(ExecutionInterruption::AfterChunkPrepared)
@@ -1164,8 +1210,7 @@ fn execute_postgres_plan_internal(
                 }
                 match reconcile_live_prepared_chunk(
                     target.as_ref(),
-                    &mut state,
-                    state_path,
+                    &mut journal,
                     table,
                     &shape,
                     &batch,
@@ -1186,9 +1231,8 @@ fn execute_postgres_plan_internal(
             } else if interruption == Some(ExecutionInterruption::CommitUnknownAfterApply) {
                 return Err(injected_interruption(interruption));
             } else {
-                state.commit(chunk_id)?;
+                journal.commit_chunk_after_ack()?;
             }
-            replace_json(state_path, &state)?;
             copied_rows = copied_rows
                 .checked_add(u64::try_from(batch.len()).context("batch size exceeds u64")?)
                 .ok_or_else(|| anyhow!("copied row count overflow"))?;
@@ -1196,12 +1240,7 @@ fn execute_postgres_plan_internal(
                 let ExecutionInterruption::AfterCommittedChunks(limit) = point else {
                     return false;
                 };
-                state
-                    .chunks
-                    .iter()
-                    .filter(|chunk| chunk.state == ChunkState::Committed)
-                    .count()
-                    >= usize::try_from(limit).unwrap_or(usize::MAX)
+                journal.projection().last_chunk_id >= limit
             }) {
                 return Err(anyhow!(
                     "injected interruption after a durable committed chunk"
@@ -1209,14 +1248,42 @@ fn execute_postgres_plan_internal(
             }
             after = Some(final_key);
         }
-        state.commit_operation(operation.id.as_str())?;
-        replace_json(state_path, &state)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Prepared)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+        journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
     }
 
-    state.begin_verification()?;
-    replace_json(state_path, &state)?;
+    process_postgres_sequences(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        interruption,
+        &cancellation,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
+    process_postgres_indexes(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        interruption,
+        &cancellation,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
+    process_postgres_foreign_keys(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut journal,
+        interruption,
+        &cancellation,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
+    journal.transition_status(MigrationStatus::Verifying)?;
     attest_fence_if_present(fenced.as_ref())?;
     let mut verifier = target.open_verifier(cancellation.clone())?;
+    let mut committed_chunks = journal.all_committed_chunks()?.peekable();
     for operation in reviewed
         .plan
         .operations
@@ -1228,16 +1295,21 @@ fn execute_postgres_plan_internal(
             .as_ref()
             .ok_or_else(|| anyhow!("validated copy operation lost its table"))?;
         let shape = table_shape(&source_catalog, table, Some(operation))?;
-        verify_live_table(
+        let (manifest_hash, source_hash, target_hash) = verify_live_table(
             reader.as_mut(),
             verifier.as_mut(),
-            &state,
+            &mut committed_chunks,
             operation.id.as_str(),
             table,
             &shape,
             execution_page_limit(&source_config)?,
         )?;
-        state.verify_operation(operation.id.as_str())?;
+        journal.verify_table(
+            operation.id.as_str(),
+            manifest_hash,
+            source_hash,
+            target_hash,
+        )?;
         let verify_operation = reviewed
             .plan
             .operations
@@ -1247,41 +1319,15 @@ fn execute_postgres_plan_internal(
                     && candidate.table.as_ref() == Some(table)
             })
             .ok_or_else(|| anyhow!("table has no reviewed verification operation"))?;
-        state.start_operation(verify_operation.id.as_str())?;
-        state.commit_operation(verify_operation.id.as_str())?;
-        state.verify_operation(verify_operation.id.as_str())?;
-        replace_json(state_path, &state)?;
+        complete_operation_if_needed(&mut journal, verify_operation.id.as_str())?;
     }
-    process_postgres_sequences(
-        &reviewed,
-        &source_catalog,
-        &target,
-        &mut state,
-        state_path,
-        interruption,
-        &cancellation,
-        || attest_fence_if_present(fenced.as_ref()),
-    )?;
-    process_postgres_indexes(
-        &reviewed,
-        &source_catalog,
-        &target,
-        &mut state,
-        state_path,
-        interruption,
-        &cancellation,
-        || attest_fence_if_present(fenced.as_ref()),
-    )?;
-    process_postgres_foreign_keys(
-        &reviewed,
-        &source_catalog,
-        &target,
-        &mut state,
-        state_path,
-        interruption,
-        &cancellation,
-        || attest_fence_if_present(fenced.as_ref()),
-    )?;
+    if let Some(chunk) = committed_chunks.next() {
+        let chunk = chunk?;
+        return Err(anyhow!(
+            "journal contains an unexpected committed chunk for operation {}",
+            chunk.operation_id
+        ));
+    }
     drop(verifier);
     let mut verifier = target.open_verifier(cancellation.clone())?;
     verify_postgres_partition_topologies(
@@ -1290,8 +1336,7 @@ fn execute_postgres_plan_internal(
         &target,
         reader.as_mut(),
         verifier.as_mut(),
-        &mut state,
-        state_path,
+        &mut journal,
         execution_page_limit(&source_config)?,
     )?;
     cancellation.check()?;
@@ -1304,15 +1349,11 @@ fn execute_postgres_plan_internal(
         .iter()
         .find(|operation| operation.kind == OperationKind::VerifySchema)
         .ok_or_else(|| anyhow!("reviewed plan has no schema verification operation"))?;
-    state.start_operation(verify_schema.id.as_str())?;
-    state.commit_operation(verify_schema.id.as_str())?;
-    state.verify_operation(verify_schema.id.as_str())?;
-    replace_json(state_path, &state)?;
+    complete_operation_if_needed(&mut journal, verify_schema.id.as_str())?;
+    journal.verify_schema(catalog_fingerprint(&source_catalog)?)?;
     interrupt_if(interruption, ExecutionInterruption::AfterAllVerified)?;
     attest_fence_if_present(fenced.as_ref())?;
     cancellation.check()?;
-    let mut completed_state = state.clone();
-    completed_state.finalize()?;
     drop(reader);
     if let Some((admin, installed, _)) = &fenced {
         let generation = match &installed.evidence {
@@ -1325,8 +1366,7 @@ fn execute_postgres_plan_internal(
         release_postgres_write_fence(admin, generation, &installed.token)?;
     }
     interrupt_if(interruption, ExecutionInterruption::AfterFenceReleased)?;
-    state = completed_state;
-    replace_json(state_path, &state)?;
+    journal.transition_status(MigrationStatus::Completed)?;
     Ok(PostgresExecutionReport {
         state: state_path.to_path_buf(),
         copied_rows,
@@ -1391,37 +1431,34 @@ fn arm_network_commit_fault(port: u16) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn validate_resume_plan_binding(
-    state: &MigrationState,
-    reviewed: &ReviewedPlan,
-) -> anyhow::Result<()> {
+fn validate_resume_binding(binding: &ResumeBinding, reviewed: &ReviewedPlan) -> anyhow::Result<()> {
     if reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str() {
         return Err(anyhow!("only a write-fence plan can be resumed"));
     }
-    if state.binding.migration_id != reviewed.plan.migration_id
-        || state.binding.plan_hash != reviewed.plan_hash.to_string()
-        || state.binding.tool_version != reviewed.plan.tool_version
-        || state.binding.source_endpoint != reviewed.plan.source_endpoint_identity
-        || state.binding.target_endpoint != reviewed.plan.target_endpoint_identity
-        || state.binding.source_schema_fingerprint != reviewed.plan.source_catalog_fingerprint
-        || state.binding.target_schema_fingerprint != reviewed.plan.target_catalog_fingerprint
-        || state.binding.conversion_policy != reviewed.plan.conversion_policy
-        || state.binding.canonical_encoding_version != CANONICAL_ENCODING_VERSION
+    if binding.migration_id != reviewed.plan.migration_id
+        || binding.plan_hash != reviewed.plan_hash.to_string()
+        || binding.tool_version != reviewed.plan.tool_version
+        || binding.source_endpoint != reviewed.plan.source_endpoint_identity
+        || binding.target_endpoint != reviewed.plan.target_endpoint_identity
+        || binding.source_schema_fingerprint != reviewed.plan.source_catalog_fingerprint
+        || binding.target_schema_fingerprint != reviewed.plan.target_catalog_fingerprint
+        || binding.conversion_policy != reviewed.plan.conversion_policy
+        || binding.canonical_encoding_version != CANONICAL_ENCODING_VERSION
         || reviewed.plan.canonical_encoding_version != CANONICAL_ENCODING_VERSION
-        || state.binding.tool_version != env!("CARGO_PKG_VERSION")
+        || binding.tool_version != env!("CARGO_PKG_VERSION")
     {
         return Err(anyhow!(
             "migration state binding differs from reviewed plan or running tool"
         ));
     }
-    if state.binding.approval_reference.trim().is_empty() {
+    if binding.approval_reference.trim().is_empty() {
         return Err(anyhow!("migration state has no approval reference"));
     }
     let ConsistencyEvidence::WriteFence {
         endpoint_identity,
         business_catalog_fingerprint,
         ..
-    } = &state.binding.consistency_evidence
+    } = &binding.consistency_evidence
     else {
         return Err(anyhow!("migration state is not bound to a write fence"));
     };
@@ -1508,31 +1545,52 @@ fn attest_exact_fence(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn operation_state(state: &MigrationState, operation_id: &str) -> anyhow::Result<OperationState> {
-    state
-        .operations
-        .iter()
-        .find(|operation| operation.operation_id == operation_id)
-        .map(|operation| operation.state)
-        .ok_or_else(|| anyhow!("migration state has no reviewed operation {operation_id}"))
+trait RunnerOperationProjection {
+    fn runner_operation_state(&self, operation_id: &str) -> anyhow::Result<OperationState>;
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl RunnerOperationProjection for AppendJournal {
+    fn runner_operation_state(&self, operation_id: &str) -> anyhow::Result<OperationState> {
+        journal_operation_state(self, operation_id)
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl RunnerOperationProjection for MigrationState {
+    fn runner_operation_state(&self, operation_id: &str) -> anyhow::Result<OperationState> {
+        self.operations
+            .iter()
+            .find(|operation| operation.operation_id == operation_id)
+            .map(|operation| operation.state)
+            .ok_or_else(|| anyhow!("migration state has no reviewed operation {operation_id}"))
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn operation_state(
+    projection: &impl RunnerOperationProjection,
+    operation_id: &str,
+) -> anyhow::Result<OperationState> {
+    projection.runner_operation_state(operation_id)
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
 fn complete_operation_if_needed(
-    state: &mut MigrationState,
+    journal: &mut AppendJournal,
     operation_id: &str,
 ) -> anyhow::Result<()> {
-    match operation_state(state, operation_id)? {
+    match operation_state(journal, operation_id)? {
         OperationState::Pending => {
-            state.start_operation(operation_id)?;
-            state.commit_operation(operation_id)?;
-            state.verify_operation(operation_id)?;
+            journal.transition_operation(operation_id, OperationState::Running)?;
+            journal.transition_operation(operation_id, OperationState::Verified)?;
         }
         OperationState::Running => {
-            state.commit_operation(operation_id)?;
-            state.verify_operation(operation_id)?;
+            journal.transition_operation(operation_id, OperationState::Verified)?;
         }
-        OperationState::Committed => state.verify_operation(operation_id)?,
+        OperationState::Committed => {
+            journal.transition_operation(operation_id, OperationState::Verified)?;
+        }
         OperationState::Verified => {}
         OperationState::Prepared => {
             return Err(anyhow!(
@@ -1556,8 +1614,7 @@ struct ResumeDdlContext<'a> {
 #[cfg(feature = "enterprise-migration-spike")]
 fn resume_pre_data_schema(
     context: ResumeDdlContext<'_>,
-    state: &mut MigrationState,
-    state_path: &Path,
+    journal: &mut AppendJournal,
 ) -> anyhow::Result<()> {
     let create_ids = context
         .reviewed
@@ -1569,15 +1626,14 @@ fn resume_pre_data_schema(
         .collect::<Vec<_>>();
     let states = create_ids
         .iter()
-        .map(|id| operation_state(state, id))
+        .map(|id| operation_state(journal, id))
         .collect::<anyhow::Result<Vec<_>>>()?;
     if states
         .iter()
         .all(|state| *state == OperationState::Verified)
     {
         if !target_schema_matches(context.source_catalog, context.target)? {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "verified pre-data schema differs on resume; manual intervention is required"
             ));
@@ -1594,16 +1650,17 @@ fn resume_pre_data_schema(
         }
         context.target.assert_empty_and_owned()?;
         context.cancellation.check()?;
-        state.prepare_operations_atomic(create_ids.iter().copied())?;
-        replace_json(state_path, state)?;
+        journal.prepare_operations_atomic(create_ids.iter().copied())?;
         context.cancellation.check()?;
         context
             .target
             .create_pre_data_schema(context.source_catalog)?;
-    } else if states
-        .iter()
-        .all(|state| *state == OperationState::Prepared)
-    {
+    } else if states.iter().all(|state| {
+        matches!(
+            state,
+            OperationState::Prepared | OperationState::Committed | OperationState::Verified
+        )
+    }) {
         if schema_exists_exactly
             && !target_planned_tables_are_empty(
                 context.source_catalog,
@@ -1611,24 +1668,31 @@ fn resume_pre_data_schema(
                 context.cancellation.clone(),
             )?
         {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "prepared DDL target contains rows outside durable migration intent"
             ));
         }
-        if !schema_exists_exactly {
+        if !schema_exists_exactly
+            && states
+                .iter()
+                .all(|state| *state == OperationState::Prepared)
+        {
             if context.target.assert_empty_and_owned().is_ok() {
                 context
                     .target
                     .create_pre_data_schema(context.source_catalog)?;
             } else {
-                state.require_manual_reconciliation()?;
-                replace_json(state_path, state)?;
+                journal.require_manual_reconciliation()?;
                 return Err(anyhow!(
                     "prepared DDL has a partial or different target effect"
                 ));
             }
+        } else if !schema_exists_exactly {
+            journal.require_manual_reconciliation()?;
+            return Err(anyhow!(
+                "committed pre-data DDL differs from reviewed target semantics"
+            ));
         }
     } else {
         return Err(anyhow!(
@@ -1636,10 +1700,20 @@ fn resume_pre_data_schema(
         ));
     }
     for operation_id in create_ids {
-        state.commit_prepared_operation(operation_id)?;
-        state.verify_operation(operation_id)?;
+        match operation_state(journal, operation_id)? {
+            OperationState::Prepared => {
+                journal.transition_operation(operation_id, OperationState::Committed)?;
+                journal.transition_operation(operation_id, OperationState::Verified)?;
+            }
+            OperationState::Committed => {
+                journal.transition_operation(operation_id, OperationState::Verified)?;
+            }
+            OperationState::Verified => {}
+            OperationState::Pending | OperationState::Running => {
+                return Err(anyhow!("pre-data operation was not durably prepared"));
+            }
+        }
     }
-    replace_json(state_path, state)?;
     Ok(())
 }
 
@@ -1697,8 +1771,7 @@ fn process_postgres_sequences(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
     target: &PostgresTargetFactory,
-    state: &mut MigrationState,
-    state_path: &Path,
+    journal: &mut AppendJournal,
     interruption: Option<ExecutionInterruption>,
     cancellation: &CancellationToken,
     mut attest: impl FnMut() -> anyhow::Result<()>,
@@ -1729,49 +1802,43 @@ fn process_postgres_sequences(
                 "sequence restore operation differs from the reviewed catalog"
             ));
         }
-        match operation_state(state, operation.id.as_str())? {
-            OperationState::Pending => {
-                state.prepare_operations_atomic([operation.id.as_str()])?;
-                replace_json(state_path, state)?;
+        match operation_state(journal, operation.id.as_str())? {
+            OperationState::Pending | OperationState::Running => {
+                journal_prepare_effect(journal, operation.id.as_str())?;
                 interrupt_if(interruption, ExecutionInterruption::AfterSequencePrepared)?;
             }
-            OperationState::Prepared | OperationState::Verified => {}
-            OperationState::Running | OperationState::Committed => {
-                return Err(anyhow!(
-                    "sequence restore operation has an invalid durable state"
-                ));
-            }
+            OperationState::Prepared | OperationState::Committed | OperationState::Verified => {}
         }
         attest()?;
-        let observed = match operation_state(state, operation.id.as_str())? {
+        let observed = match operation_state(journal, operation.id.as_str())? {
             OperationState::Prepared => match target.restore_sequence(sequence) {
                 Ok(observed) => observed,
                 Err(ConnectionError::InvalidRequest(reason)) => {
-                    state.require_manual_reconciliation()?;
-                    replace_json(state_path, state)?;
+                    journal.require_manual_reconciliation()?;
                     return Err(anyhow!(
                         "sequence reconciliation requires manual intervention: {reason}"
                     ));
                 }
                 Err(error) => return Err(error.into()),
             },
+            OperationState::Committed => target.inspect_sequence(sequence)?,
             OperationState::Verified => target.inspect_sequence(sequence)?,
             _ => unreachable!("validated sequence restore state"),
         };
-        interrupt_if(interruption, ExecutionInterruption::AfterSequenceCommitted)?;
         if observed != PostgresSequenceState::ExactState {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "target sequence {}.{} differs from reviewed state",
                 sequence.namespace,
                 sequence.name
             ));
         }
-        if operation_state(state, operation.id.as_str())? == OperationState::Prepared {
-            state.commit_prepared_operation(operation.id.as_str())?;
-            state.verify_operation(operation.id.as_str())?;
-            replace_json(state_path, state)?;
+        if operation_state(journal, operation.id.as_str())? == OperationState::Prepared {
+            journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+            interrupt_if(interruption, ExecutionInterruption::AfterSequenceCommitted)?;
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+        } else if operation_state(journal, operation.id.as_str())? == OperationState::Committed {
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
         }
     }
     Ok(())
@@ -1820,8 +1887,7 @@ fn verify_postgres_partition_topologies(
     target: &PostgresTargetFactory,
     reader: &mut dyn ReadSession,
     verifier: &mut dyn super::connection::VerificationSession,
-    state: &mut MigrationState,
-    state_path: &Path,
+    journal: &mut AppendJournal,
     page_limit: u32,
 ) -> anyhow::Result<()> {
     let catalog_topologies = postgres_partition_topologies(catalog)?;
@@ -1871,8 +1937,7 @@ fn verify_postgres_partition_topologies(
                 page_limit,
             )?;
         }
-        complete_operation_if_needed(state, operation.id.as_str())?;
-        replace_json(state_path, state)?;
+        complete_operation_if_needed(journal, operation.id.as_str())?;
     }
     Ok(())
 }
@@ -1932,8 +1997,7 @@ fn process_postgres_indexes(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
     target: &PostgresTargetFactory,
-    state: &mut MigrationState,
-    state_path: &Path,
+    journal: &mut AppendJournal,
     interruption: Option<ExecutionInterruption>,
     cancellation: &CancellationToken,
     mut attest: impl FnMut() -> anyhow::Result<()>,
@@ -1962,48 +2026,42 @@ fn process_postgres_indexes(
                 "post-data index operation differs from the reviewed catalog"
             ));
         }
-        match operation_state(state, operation.id.as_str())? {
-            OperationState::Pending => {
-                state.prepare_operations_atomic([operation.id.as_str()])?;
-                replace_json(state_path, state)?;
+        match operation_state(journal, operation.id.as_str())? {
+            OperationState::Pending | OperationState::Running => {
+                journal_prepare_effect(journal, operation.id.as_str())?;
                 interrupt_if(interruption, ExecutionInterruption::AfterIndexPrepared)?;
             }
-            OperationState::Prepared | OperationState::Verified => {}
-            OperationState::Running | OperationState::Committed => {
-                return Err(anyhow!(
-                    "post-data index operation has an invalid durable state"
-                ));
-            }
+            OperationState::Prepared | OperationState::Committed | OperationState::Verified => {}
         }
         attest()?;
-        let observed = match operation_state(state, operation.id.as_str())? {
+        let observed = match operation_state(journal, operation.id.as_str())? {
             OperationState::Prepared => match target.reconcile_index(index) {
                 Ok(observed) => observed,
                 Err(ConnectionError::InvalidRequest(reason)) => {
-                    state.require_manual_reconciliation()?;
-                    replace_json(state_path, state)?;
+                    journal.require_manual_reconciliation()?;
                     return Err(anyhow!(
                         "index reconciliation requires manual intervention: {reason}"
                     ));
                 }
                 Err(error) => return Err(error.into()),
             },
+            OperationState::Committed => target.inspect_index(index)?,
             OperationState::Verified => target.inspect_index(index)?,
             _ => unreachable!("validated post-data index state"),
         };
-        interrupt_if(interruption, ExecutionInterruption::AfterIndexCommitted)?;
         if observed != PostgresIndexState::Exact {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "target index {} differs from reviewed semantics",
                 index.name
             ));
         }
-        if operation_state(state, operation.id.as_str())? == OperationState::Prepared {
-            state.commit_prepared_operation(operation.id.as_str())?;
-            state.verify_operation(operation.id.as_str())?;
-            replace_json(state_path, state)?;
+        if operation_state(journal, operation.id.as_str())? == OperationState::Prepared {
+            journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+            interrupt_if(interruption, ExecutionInterruption::AfterIndexCommitted)?;
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+        } else if operation_state(journal, operation.id.as_str())? == OperationState::Committed {
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
         }
     }
     Ok(())
@@ -2015,8 +2073,7 @@ fn process_postgres_foreign_keys(
     reviewed: &ReviewedPlan,
     catalog: &VendorCatalog,
     target: &PostgresTargetFactory,
-    state: &mut MigrationState,
-    state_path: &Path,
+    journal: &mut AppendJournal,
     interruption: Option<ExecutionInterruption>,
     cancellation: &CancellationToken,
     mut attest: impl FnMut() -> anyhow::Result<()>,
@@ -2034,10 +2091,9 @@ fn process_postgres_foreign_keys(
     {
         cancellation.check()?;
         let foreign_key = foreign_key_for_operation(operation, &foreign_keys)?;
-        match operation_state(state, operation.id.as_str())? {
+        match operation_state(journal, operation.id.as_str())? {
             OperationState::Pending => {
-                state.start_operation(operation.id.as_str())?;
-                replace_json(state_path, state)?;
+                journal.transition_operation(operation.id.as_str(), OperationState::Running)?;
             }
             OperationState::Running | OperationState::Committed | OperationState::Verified => {}
             OperationState::Prepared => {
@@ -2048,22 +2104,18 @@ fn process_postgres_foreign_keys(
         }
         attest()?;
         if target.check_foreign_key(foreign_key)?.has_violation {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "target rows violate reviewed foreign key {}",
                 foreign_key.name
             ));
         }
-        match operation_state(state, operation.id.as_str())? {
+        match operation_state(journal, operation.id.as_str())? {
             OperationState::Running => {
-                state.commit_operation(operation.id.as_str())?;
-                state.verify_operation(operation.id.as_str())?;
-                replace_json(state_path, state)?;
+                journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
             }
             OperationState::Committed => {
-                state.verify_operation(operation.id.as_str())?;
-                replace_json(state_path, state)?;
+                journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
             }
             OperationState::Verified => {}
             OperationState::Pending | OperationState::Prepared => {
@@ -2079,51 +2131,45 @@ fn process_postgres_foreign_keys(
     {
         cancellation.check()?;
         let foreign_key = foreign_key_for_operation(operation, &foreign_keys)?;
-        match operation_state(state, operation.id.as_str())? {
-            OperationState::Pending => {
-                state.prepare_operations_atomic([operation.id.as_str()])?;
-                replace_json(state_path, state)?;
+        match operation_state(journal, operation.id.as_str())? {
+            OperationState::Pending | OperationState::Running => {
+                journal_prepare_effect(journal, operation.id.as_str())?;
                 interrupt_if(interruption, ExecutionInterruption::AfterForeignKeyPrepared)?;
             }
-            OperationState::Prepared | OperationState::Verified => {}
-            OperationState::Running | OperationState::Committed => {
-                return Err(anyhow!(
-                    "foreign-key add operation has an invalid durable state"
-                ));
-            }
+            OperationState::Prepared | OperationState::Committed | OperationState::Verified => {}
         }
         attest()?;
-        let observed = match operation_state(state, operation.id.as_str())? {
+        let observed = match operation_state(journal, operation.id.as_str())? {
             OperationState::Prepared => match target.reconcile_foreign_key(foreign_key) {
                 Ok(observed) => observed,
                 Err(ConnectionError::InvalidRequest(reason)) => {
-                    state.require_manual_reconciliation()?;
-                    replace_json(state_path, state)?;
+                    journal.require_manual_reconciliation()?;
                     return Err(anyhow!(
                         "foreign-key reconciliation requires manual intervention: {reason}"
                     ));
                 }
                 Err(error) => return Err(error.into()),
             },
+            OperationState::Committed => target.inspect_foreign_key(foreign_key)?,
             OperationState::Verified => target.inspect_foreign_key(foreign_key)?,
             _ => unreachable!("validated foreign-key add state"),
         };
-        interrupt_if(
-            interruption,
-            ExecutionInterruption::AfterForeignKeyCommitted,
-        )?;
         if observed != PostgresForeignKeyState::ExactValidated {
-            state.require_manual_reconciliation()?;
-            replace_json(state_path, state)?;
+            journal.require_manual_reconciliation()?;
             return Err(anyhow!(
                 "target foreign key {} differs from reviewed semantics",
                 foreign_key.name
             ));
         }
-        if operation_state(state, operation.id.as_str())? == OperationState::Prepared {
-            state.commit_prepared_operation(operation.id.as_str())?;
-            state.verify_operation(operation.id.as_str())?;
-            replace_json(state_path, state)?;
+        if operation_state(journal, operation.id.as_str())? == OperationState::Prepared {
+            journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
+            interrupt_if(
+                interruption,
+                ExecutionInterruption::AfterForeignKeyCommitted,
+            )?;
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+        } else if operation_state(journal, operation.id.as_str())? == OperationState::Committed {
+            journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
         }
     }
     Ok(())
@@ -2160,15 +2206,16 @@ fn foreign_key_for_operation<'a>(
 #[cfg(feature = "enterprise-migration-spike")]
 fn reconcile_live_prepared_chunk(
     target: &dyn TargetConnectionFactory,
-    state: &mut MigrationState,
-    state_path: &Path,
+    journal: &mut AppendJournal,
     table: &QualifiedTable,
     shape: &TableShape,
     expected: &RowBatch,
     cancellation: CancellationToken,
 ) -> anyhow::Result<PreparedResolution> {
-    let chunk = state
-        .prepared_chunk()?
+    let chunk = journal
+        .projection()
+        .prepared_chunk
+        .as_ref()
         .cloned()
         .ok_or_else(|| anyhow!("commit ambiguity has no durable prepared chunk"))?;
     let observed_limit = chunk
@@ -2199,6 +2246,55 @@ fn reconcile_live_prepared_chunk(
             (observed_count, "different".into())
         }
     };
+    let resolution = if row_count == 0 {
+        PreparedResolution::RetryRequired
+    } else if row_count == chunk.row_count && digest == chunk.canonical_digest {
+        journal.commit_chunk_after_ack()?;
+        PreparedResolution::MarkedCommitted
+    } else {
+        journal.require_manual_reconciliation()?;
+        PreparedResolution::ManualReconciliationRequired
+    };
+    Ok(resolution)
+}
+
+#[cfg(all(test, feature = "enterprise-migration-spike"))]
+fn reconcile_legacy_prepared_chunk(
+    target: &dyn TargetConnectionFactory,
+    state: &mut MigrationState,
+    state_path: &Path,
+    table: &QualifiedTable,
+    shape: &TableShape,
+    expected: &RowBatch,
+    cancellation: CancellationToken,
+) -> anyhow::Result<PreparedResolution> {
+    use super::journal::PreparedChunkEvidence;
+
+    let chunk = state
+        .prepared_chunk()?
+        .cloned()
+        .ok_or_else(|| anyhow!("commit ambiguity has no durable prepared chunk"))?;
+    let mut verifier = target.open_verifier(cancellation)?;
+    let observed = verifier.select_page(&KeysetPage {
+        table: table.clone(),
+        projection: shape.projection.clone(),
+        key: shape.key.clone(),
+        after: chunk.start_key.clone().map(KeyTuple::new),
+        limit: u32::try_from(
+            chunk
+                .row_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("row count overflow"))?,
+        )?,
+    })?;
+    let (row_count, digest) = if observed.is_empty() {
+        (0, String::new())
+    } else {
+        (
+            u64::try_from(observed.len())?,
+            batch_digest(table, shape, &observed)?,
+        )
+    };
     let resolution = state.reconcile_prepared_evidence(&PreparedChunkEvidence {
         chunk_id: chunk.chunk_id,
         operation_id: chunk.operation_id,
@@ -2211,7 +2307,27 @@ fn reconcile_live_prepared_chunk(
     if resolution != PreparedResolution::RetryRequired {
         replace_json(state_path, state)?;
     }
+    let _ = expected;
     Ok(resolution)
+}
+
+#[cfg(all(test, feature = "enterprise-migration-spike"))]
+fn complete_legacy_operation_if_needed(
+    state: &mut MigrationState,
+    operation_id: &str,
+) -> anyhow::Result<()> {
+    match operation_state(state, operation_id)? {
+        OperationState::Pending => state.start_operation(operation_id)?,
+        OperationState::Running | OperationState::Committed | OperationState::Verified => {}
+        OperationState::Prepared => return Err(anyhow!("unexpected prepared state")),
+    }
+    if operation_state(state, operation_id)? == OperationState::Running {
+        state.commit_operation(operation_id)?;
+    }
+    if operation_state(state, operation_id)? == OperationState::Committed {
+        state.verify_operation(operation_id)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -2661,22 +2777,24 @@ fn batch_digest(
 fn verify_live_table(
     reader: &mut dyn ReadSession,
     verifier: &mut dyn super::connection::VerificationSession,
-    state: &MigrationState,
+    chunks: &mut std::iter::Peekable<CommittedChunkIter>,
     operation_id: &str,
     table: &QualifiedTable,
     shape: &TableShape,
     page_limit: u32,
-) -> anyhow::Result<()> {
-    let chunks = state
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.operation_id == operation_id)
-        .collect::<Vec<_>>();
+) -> anyhow::Result<(String, String, String)> {
     let mut after = None;
-    for chunk in chunks {
-        if chunk.state != ChunkState::Committed {
-            return Err(anyhow!("verification encountered an uncommitted chunk"));
+    let mut manifest = Sha256::new();
+    let mut source = Sha256::new();
+    let mut target = Sha256::new();
+    while let Some(chunk) = chunks.peek() {
+        let chunk = chunk.as_ref().map_err(|error| anyhow!(error.to_string()))?;
+        if chunk.operation_id != operation_id {
+            break;
         }
+        let chunk = chunks
+            .next()
+            .ok_or_else(|| anyhow!("committed chunk stream ended unexpectedly"))??;
         if chunk.start_key != after.as_ref().map(|key: &KeyTuple| key.0.clone()) {
             return Err(anyhow!("chunk manifest has a keyspace gap"));
         }
@@ -2709,6 +2827,11 @@ fn verify_live_table(
         {
             return Err(anyhow!("canonical chunk verification failed"));
         }
+        let encoded_chunk = serde_json::to_vec(&chunk)?;
+        manifest.update(u64::try_from(encoded_chunk.len())?.to_be_bytes());
+        manifest.update(encoded_chunk);
+        source.update(expected_digest.as_bytes());
+        target.update(actual_digest.as_bytes());
         after = Some(expected_final);
     }
     let tail_request = KeysetPage {
@@ -2725,7 +2848,11 @@ fn verify_live_table(
             "source or target contains rows outside committed intervals"
         ));
     }
-    Ok(())
+    Ok((
+        hex::encode(manifest.finalize()),
+        hex::encode(source.finalize()),
+        hex::encode(target.finalize()),
+    ))
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -3389,7 +3516,7 @@ mod tests {
             replacement_writer.insert(&table, &replacement)?;
             replacement_writer.commit()?;
         }
-        let resolution = reconcile_live_prepared_chunk(
+        let resolution = reconcile_legacy_prepared_chunk(
             &target,
             &mut state,
             &state_path,
@@ -3612,8 +3739,8 @@ mod tests {
         let mut state =
             MigrationState::with_operations(binding, [("verify".to_owned(), Vec::<String>::new())])
                 .unwrap();
-        complete_operation_if_needed(&mut state, "verify").unwrap();
-        complete_operation_if_needed(&mut state, "verify").unwrap();
+        complete_legacy_operation_if_needed(&mut state, "verify").unwrap();
+        complete_legacy_operation_if_needed(&mut state, "verify").unwrap();
         assert_eq!(
             operation_state(&state, "verify").unwrap(),
             OperationState::Verified
