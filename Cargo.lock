@@ -2991,6 +2991,7 @@ version = "1.21.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "bytes",
  "bzip2",
  "chrono",
  "chrono-tz",

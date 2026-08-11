@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use native_tls::{Certificate, TlsConnector};
 use postgres::config::SslMode;
-use postgres::types::{FromSql, ToSql, Type};
-use postgres::{Client, Config, IsolationLevel, Transaction};
+use postgres::types::{FromSql, IsNull, ToSql, Type};
+use postgres::{CancelToken, Client, Config, IsolationLevel, Transaction};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,8 +21,9 @@ use thiserror::Error;
 use super::artifact::write_json_new;
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::connection::{
-    CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult, KeysetPage,
-    ReadOnlyEvidence, ReadSession, SnapshotToken, SourceConnectionFactory,
+    CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
+    ControlSession, KeysetPage, ReadOnlyEvidence, ReadSession, SnapshotToken,
+    SourceConnectionFactory, TargetConnectionFactory, VerificationSession, WriteSession,
 };
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
@@ -159,6 +161,10 @@ impl PostgresEndpointConfig {
             .ssl_mode(SslMode::Require)
             .connect_timeout(Duration::from_secs(self.connect_timeout_seconds));
 
+        Ok(config.connect(self.tls_connector()?)?)
+    }
+
+    fn tls_connector(&self) -> Result<MakeTlsConnector, PostgresPlanError> {
         let mut tls = TlsConnector::builder();
         if let Some(path) = &self.tls.ca_certificate {
             let pem = fs::read(path).map_err(PostgresPlanError::ReadCa)?;
@@ -168,7 +174,7 @@ impl PostgresEndpointConfig {
             tls.danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true);
         }
-        Ok(config.connect(MakeTlsConnector::new(tls.build()?))?)
+        Ok(MakeTlsConnector::new(tls.build()?))
     }
 }
 
@@ -182,6 +188,7 @@ struct PendingSnapshot {
 pub struct PostgresSourceFactory {
     config: PostgresEndpointConfig,
     pending: Mutex<Option<PendingSnapshot>>,
+    active_cancel: Mutex<Option<CancelToken>>,
 }
 
 impl PostgresSourceFactory {
@@ -189,6 +196,7 @@ impl PostgresSourceFactory {
         Self {
             config,
             pending: Mutex::new(None),
+            active_cancel: Mutex::new(None),
         }
     }
 }
@@ -201,12 +209,7 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             ("transactions", Capability::Supported),
             ("typed_identifiers", Capability::Supported),
             ("bound_parameters", Capability::Supported),
-            (
-                "cancellation",
-                Capability::Unknown {
-                    reason: "the live control session is not implemented".into(),
-                },
-            ),
+            ("cancellation", Capability::Supported),
         ])
     }
 
@@ -275,6 +278,12 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             server_enforced: true,
             description: "read-only transaction and source role ACL probe deny database, schema, relation, sequence, and privileged-role writes".into(),
         };
+        let cancel_token = client.cancel_token();
+        *self
+            .active_cancel
+            .lock()
+            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))? =
+            Some(cancel_token);
         *pending = Some(PendingSnapshot {
             client,
             token: token.clone(),
@@ -306,6 +315,377 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             max_batch_bytes: self.config.max_batch_bytes,
             metadata_cache: HashMap::new(),
         }))
+    }
+
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
+        let token = self
+            .active_cancel
+            .lock()
+            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))?
+            .clone()
+            .ok_or_else(|| {
+                ConnectionError::InvalidRequest(
+                    "capture a PostgreSQL snapshot before opening its control session".into(),
+                )
+            })?;
+        Ok(Box::new(PostgresControlSession {
+            token,
+            config: self.config.clone(),
+        }))
+    }
+}
+
+struct PostgresControlSession {
+    token: CancelToken,
+    config: PostgresEndpointConfig,
+}
+
+impl ControlSession for PostgresControlSession {
+    fn cancel_active_statement(&mut self) -> ConnectionResult<()> {
+        let connector = self
+            .config
+            .tls_connector()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        self.token.cancel_query(connector).map_err(database_error)
+    }
+}
+
+/// PostgreSQL target factory for transactional same-dialect chunk writes.
+pub struct PostgresTargetFactory {
+    config: PostgresEndpointConfig,
+    active_cancel: Mutex<Option<CancelToken>>,
+}
+
+impl PostgresTargetFactory {
+    pub fn new(config: PostgresEndpointConfig) -> Self {
+        Self {
+            config,
+            active_cancel: Mutex::new(None),
+        }
+    }
+
+    fn remember_cancel_token(&self, client: &Client) -> ConnectionResult<()> {
+        *self
+            .active_cancel
+            .lock()
+            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))? =
+            Some(client.cancel_token());
+        Ok(())
+    }
+}
+
+impl TargetConnectionFactory for PostgresTargetFactory {
+    fn capabilities(&self) -> CapabilitySet {
+        CapabilitySet::from_entries([
+            ("transactions", Capability::Supported),
+            ("cancellation", Capability::Supported),
+            ("typed_identifiers", Capability::Supported),
+            ("bound_parameters", Capability::Supported),
+            ("plain_insert", Capability::Supported),
+        ])
+    }
+
+    fn open_writer(
+        &self,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn WriteSession>> {
+        let client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        self.remember_cancel_token(&client)?;
+        Ok(Box::new(PostgresWriter {
+            client,
+            cancellation,
+            transaction_open: false,
+        }))
+    }
+
+    fn open_verifier(
+        &self,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn VerificationSession>> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        client
+            .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .map_err(database_error)?;
+        self.remember_cancel_token(&client)?;
+        let row = client
+            .query_one(
+                "SELECT current_database(), current_setting('server_version'), pg_current_snapshot()::text",
+                &[],
+            )
+            .map_err(database_error)?;
+        let token = SnapshotToken {
+            endpoint_identity: "target-verification-session".into(),
+            database_identity: row.get(0),
+            server_version: row.get(1),
+            snapshot_id: row.get(2),
+            consistency_mode: "postgres_repeatable_read_read_only_target_verification".into(),
+            lifecycle_id: format!(
+                "pg-target-verifier-{}",
+                SNAPSHOT_LIFECYCLE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
+        Ok(Box::new(PostgresTargetVerifier {
+            reader: PostgresSnapshotReader {
+                client,
+                token,
+                evidence: ReadOnlyEvidence {
+                    server_enforced: true,
+                    description: "target verification transaction is read-only".into(),
+                },
+                cancellation,
+                max_batch_rows: self.config.max_batch_rows,
+                max_batch_bytes: self.config.max_batch_bytes,
+                metadata_cache: HashMap::new(),
+            },
+        }))
+    }
+
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
+        let token = self
+            .active_cancel
+            .lock()
+            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))?
+            .clone()
+            .ok_or_else(|| {
+                ConnectionError::InvalidRequest(
+                    "open a PostgreSQL target session before its control session".into(),
+                )
+            })?;
+        Ok(Box::new(PostgresControlSession {
+            token,
+            config: self.config.clone(),
+        }))
+    }
+}
+
+struct PostgresTargetVerifier {
+    reader: PostgresSnapshotReader,
+}
+
+impl VerificationSession for PostgresTargetVerifier {
+    fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        self.reader.select_page(request)
+    }
+}
+
+struct PostgresWriter {
+    client: Client,
+    cancellation: CancellationToken,
+    transaction_open: bool,
+}
+
+impl WriteSession for PostgresWriter {
+    fn begin(&mut self) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if self.transaction_open {
+            return Err(ConnectionError::TransactionAlreadyOpen);
+        }
+        self.client.batch_execute("BEGIN").map_err(database_error)?;
+        self.transaction_open = true;
+        Ok(())
+    }
+
+    fn insert(&mut self, table: &QualifiedTable, batch: &RowBatch) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        if batch.columns().is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "insert batch must contain columns".into(),
+            ));
+        }
+        let columns = batch
+            .columns()
+            .iter()
+            .map(|column| quote_identifier(&column.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders = (1..=batch.columns().len())
+            .map(|index| format!("${index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {}.{} ({columns}) OVERRIDING SYSTEM VALUE VALUES ({placeholders})",
+            quote_identifier(&table.namespace),
+            quote_identifier(&table.name)
+        );
+        let statement = self.client.prepare(&sql).map_err(database_error)?;
+        for row in batch.rows() {
+            self.cancellation.check()?;
+            if row.len() != statement.params().len() {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "row has {} values but INSERT expects {}",
+                    row.len(),
+                    statement.params().len()
+                )));
+            }
+            let parameters = row
+                .iter()
+                .zip(statement.params())
+                .map(|(value, ty)| write_parameter(value, ty))
+                .collect::<ConnectionResult<Vec<_>>>()?;
+            let parameter_refs = parameters
+                .iter()
+                .map(|value| value.as_ref() as &(dyn ToSql + Sync))
+                .collect::<Vec<_>>();
+            let affected = self
+                .client
+                .execute(&statement, &parameter_refs)
+                .map_err(database_error)?;
+            if affected != 1 {
+                return Err(ConnectionError::Database(format!(
+                    "plain INSERT affected {affected} rows instead of one"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        self.transaction_open = false;
+        self.client
+            .batch_execute("COMMIT")
+            .map_err(|error| ConnectionError::CommitOutcomeUnknown(error.to_string()))
+    }
+
+    fn rollback(&mut self) -> ConnectionResult<()> {
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        self.transaction_open = false;
+        self.client
+            .batch_execute("ROLLBACK")
+            .map_err(database_error)
+    }
+}
+
+#[derive(Debug)]
+struct NullParameter;
+
+impl ToSql for NullParameter {
+    fn to_sql(
+        &self,
+        _: &Type,
+        _: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(IsNull::Yes)
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    postgres::types::to_sql_checked!();
+}
+
+#[derive(Debug)]
+struct RawParameter {
+    oid: u32,
+    bytes: Vec<u8>,
+}
+
+impl ToSql for RawParameter {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        if ty.oid() != self.oid {
+            return Err(format!(
+                "source PostgreSQL type OID {} differs from target type OID {}",
+                self.oid,
+                ty.oid()
+            )
+            .into());
+        }
+        out.extend_from_slice(&self.bytes);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    postgres::types::to_sql_checked!();
+}
+
+fn write_parameter(value: &DbValue, ty: &Type) -> ConnectionResult<Box<dyn ToSql + Sync>> {
+    match value {
+        DbValue::Null => Ok(Box::new(NullParameter)),
+        DbValue::Bool(value) if *ty == Type::BOOL => Ok(Box::new(*value)),
+        DbValue::Signed(value) if *ty == Type::INT2 => i16::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::InvalidRequest("int2 value is out of range".into())),
+        DbValue::Signed(value) if *ty == Type::INT4 => i32::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::InvalidRequest("int4 value is out of range".into())),
+        DbValue::Signed(value) if *ty == Type::INT8 => i64::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::InvalidRequest("int8 value is out of range".into())),
+        DbValue::Unsigned(value) if *ty == Type::OID => u32::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::InvalidRequest("oid value is out of range".into())),
+        DbValue::Float32(bits) if *ty == Type::FLOAT4 => Ok(Box::new(f32::from_bits(*bits))),
+        DbValue::Float64(bits) if *ty == Type::FLOAT8 => Ok(Box::new(f64::from_bits(*bits))),
+        DbValue::Text(value)
+            if matches!(*ty, Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME) =>
+        {
+            Ok(Box::new(RawParameter {
+                oid: ty.oid(),
+                bytes: value.as_bytes().to_vec(),
+            }))
+        }
+        DbValue::Bytes(value) if *ty == Type::BYTEA => Ok(Box::new(RawParameter {
+            oid: ty.oid(),
+            bytes: value.clone(),
+        })),
+        DbValue::Json(value) if *ty == Type::JSON => Ok(Box::new(RawParameter {
+            oid: ty.oid(),
+            bytes: value.clone(),
+        })),
+        DbValue::Json(value) if *ty == Type::JSONB => {
+            let mut bytes = Vec::with_capacity(value.len() + 1);
+            bytes.push(1);
+            bytes.extend_from_slice(value);
+            Ok(Box::new(RawParameter {
+                oid: ty.oid(),
+                bytes,
+            }))
+        }
+        DbValue::Vendor {
+            type_id,
+            format: ValueFormat::Binary,
+            bytes,
+        } => {
+            let oid = type_id
+                .strip_prefix("postgres:")
+                .and_then(|value| value.split(':').next())
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or_else(|| {
+                    ConnectionError::InvalidRequest(
+                        "invalid PostgreSQL vendor type identity".into(),
+                    )
+                })?;
+            Ok(Box::new(RawParameter {
+                oid,
+                bytes: bytes.clone(),
+            }))
+        }
+        _ => Err(ConnectionError::InvalidRequest(format!(
+            "cannot bind canonical value to PostgreSQL type {}",
+            ty.name()
+        ))),
     }
 }
 
@@ -610,7 +990,11 @@ fn encoded_size(value: &DbValue) -> usize {
 }
 
 fn database_error(error: postgres::Error) -> ConnectionError {
-    ConnectionError::Database(error.to_string())
+    if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) {
+        ConnectionError::Cancelled
+    } else {
+        ConnectionError::Database(error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

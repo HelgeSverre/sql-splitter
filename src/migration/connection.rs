@@ -90,6 +90,7 @@ pub enum ConnectionError {
     UnsupportedKeyValue,
     Database(String),
     BatchLimit(String),
+    CommitOutcomeUnknown(String),
     RequiredCapabilityUnavailable {
         capability: &'static str,
         reason: String,
@@ -135,6 +136,7 @@ pub trait SourceConnectionFactory: Send + Sync {
         snapshot: &SnapshotToken,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn ReadSession>>;
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>>;
 }
 
 pub trait TargetConnectionFactory: Send + Sync {
@@ -147,6 +149,11 @@ pub trait TargetConnectionFactory: Send + Sync {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn VerificationSession>>;
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>>;
+}
+
+pub trait ControlSession: Send {
+    fn cancel_active_statement(&mut self) -> ConnectionResult<()>;
 }
 
 pub trait ReadSession {

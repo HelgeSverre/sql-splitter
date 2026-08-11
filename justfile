@@ -89,6 +89,11 @@ migration-spike-check:
 migration-postgres-plan-test:
     cargo test --no-default-features --features enterprise-migration-spike --test migration_postgres_plan_test -- --ignored
 
+# Create a disposable TLS PostgreSQL container and run live snapshot, cancellation, and writer tests.
+[group('test')]
+migration-postgres-live version="17":
+    ./scripts/test-migration-postgres.sh {{ version }}
+
 [group('lint')]
 clippy:
     cargo clippy -- -D warnings

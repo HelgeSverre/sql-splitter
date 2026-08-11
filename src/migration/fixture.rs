@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::connection::{
-    CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult, KeysetPage,
-    QualifiedTable, ReadOnlyEvidence, ReadSession, SnapshotToken, SourceConnectionFactory,
-    TargetConnectionFactory, VerificationSession, WriteSession,
+    CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
+    ControlSession, KeysetPage, QualifiedTable, ReadOnlyEvidence, ReadSession, SnapshotToken,
+    SourceConnectionFactory, TargetConnectionFactory, VerificationSession, WriteSession,
 };
 use super::model::{ColumnMeta, DbValue, Identifier, RowBatch};
 
@@ -30,6 +30,7 @@ pub struct InMemorySource {
     database_identity: String,
     tables: Arc<Mutex<Tables>>,
     failure: Arc<Mutex<Option<FailurePoint>>>,
+    active_cancellation: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl InMemorySource {
@@ -39,6 +40,7 @@ impl InMemorySource {
             database_identity: database_identity.into(),
             tables: Arc::new(Mutex::new(HashMap::new())),
             failure: Arc::new(Mutex::new(None)),
+            active_cancellation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -93,6 +95,10 @@ impl SourceConnectionFactory for InMemorySource {
             .lock()
             .expect("fixture table lock must not be poisoned")
             .clone();
+        *self
+            .active_cancellation
+            .lock()
+            .expect("fixture cancellation lock must not be poisoned") = Some(cancellation.clone());
         Ok(Box::new(FixtureReader {
             snapshot: snapshot.clone(),
             evidence: ReadOnlyEvidence {
@@ -103,6 +109,20 @@ impl SourceConnectionFactory for InMemorySource {
             cancellation,
             failure: Arc::clone(&self.failure),
         }))
+    }
+
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
+        let cancellation = self
+            .active_cancellation
+            .lock()
+            .expect("fixture cancellation lock must not be poisoned")
+            .clone()
+            .ok_or_else(|| {
+                ConnectionError::InvalidRequest(
+                    "open a fixture reader before its control session".into(),
+                )
+            })?;
+        Ok(Box::new(FixtureControl { cancellation }))
     }
 }
 
@@ -134,6 +154,7 @@ impl ReadSession for FixtureReader {
 pub struct InMemoryTarget {
     committed: Arc<Mutex<Tables>>,
     failure: Arc<Mutex<Option<FailurePoint>>>,
+    active_cancellation: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl InMemoryTarget {
@@ -163,6 +184,10 @@ impl TargetConnectionFactory for InMemoryTarget {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn WriteSession>> {
+        *self
+            .active_cancellation
+            .lock()
+            .expect("fixture cancellation lock must not be poisoned") = Some(cancellation.clone());
         Ok(Box::new(FixtureWriter {
             committed: Arc::clone(&self.committed),
             pending: None,
@@ -175,10 +200,39 @@ impl TargetConnectionFactory for InMemoryTarget {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn VerificationSession>> {
+        *self
+            .active_cancellation
+            .lock()
+            .expect("fixture cancellation lock must not be poisoned") = Some(cancellation.clone());
         Ok(Box::new(FixtureVerifier {
             committed: Arc::clone(&self.committed),
             cancellation,
         }))
+    }
+
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
+        let cancellation = self
+            .active_cancellation
+            .lock()
+            .expect("fixture cancellation lock must not be poisoned")
+            .clone()
+            .ok_or_else(|| {
+                ConnectionError::InvalidRequest(
+                    "open a fixture target session before its control session".into(),
+                )
+            })?;
+        Ok(Box::new(FixtureControl { cancellation }))
+    }
+}
+
+struct FixtureControl {
+    cancellation: CancellationToken,
+}
+
+impl ControlSession for FixtureControl {
+    fn cancel_active_statement(&mut self) -> ConnectionResult<()> {
+        self.cancellation.cancel();
+        Ok(())
     }
 }
 
@@ -502,14 +556,15 @@ mod tests {
     fn cancellation_prevents_a_partial_commit() {
         let target = InMemoryTarget::default();
         let cancellation = CancellationToken::default();
-        let mut writer = target.open_writer(cancellation.clone()).unwrap();
+        let mut writer = target.open_writer(cancellation).unwrap();
+        let mut control = target.open_control().unwrap();
         let mut batch = RowBatch::new(vec![column("a", 0), column("b", 1)], 1, 0);
         batch
             .try_push(vec![DbValue::Signed(1), DbValue::Signed(2)], 0)
             .unwrap();
         writer.begin().unwrap();
         writer.insert(&table(), &batch).unwrap();
-        cancellation.cancel();
+        control.cancel_active_statement().unwrap();
         assert_eq!(writer.commit(), Err(ConnectionError::Cancelled));
         assert!(target.rows(&table()).is_empty());
     }
