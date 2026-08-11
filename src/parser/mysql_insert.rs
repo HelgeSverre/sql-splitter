@@ -770,15 +770,21 @@ impl<'a> InsertParser<'a> {
                 owned.extend_from_slice(&self.stmt[chunk_start..self.pos]);
                 match self.stmt.get(self.pos + 1) {
                     Some(&c) => {
-                        // MySQL escape sequences
-                        let escaped = match c {
-                            b'n' => b'\n',
-                            b'r' => b'\r',
-                            b't' => b'\t',
-                            b'0' => 0,
-                            _ => c, // \', \\, etc.
-                        };
-                        owned.push(escaped);
+                        // MySQL escape sequences. `\0` denotes an embedded
+                        // NUL byte, which is valid UTF-8 but DuckDB's binding
+                        // layer rejects outright ("nul byte found in
+                        // provided data") on both the Appender and
+                        // prepared-statement paths -- so it's dropped rather
+                        // than kept, matching `convert_mysql_escapes`'
+                        // handling of the same escape on the raw-SQL-text
+                        // pipeline used for statements this parser declines.
+                        match c {
+                            b'n' => owned.push(b'\n'),
+                            b'r' => owned.push(b'\r'),
+                            b't' => owned.push(b'\t'),
+                            b'0' => {}
+                            _ => owned.push(c), // \', \\, etc.
+                        }
                         self.pos += 2;
                     }
                     // Trailing backslash at end of statement: drop it.
@@ -809,6 +815,21 @@ impl<'a> InsertParser<'a> {
                 Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
             }
         };
+
+        // MySQL's zero-date sentinel (`0000-00-00[ 00:00:00[.ffffff]]`) is a
+        // placeholder for "no date", permitted under non-strict SQL_MODE.
+        // DuckDB has no such value and rejects it with "field value out of
+        // range", so normalize it to a fixed epoch sentinel -- NOT NULL,
+        // because the column itself is very often declared NOT NULL (e.g.
+        // WordPress's `wp_posts.post_date_gmt`), and NULL would just trade
+        // one rejected insert for another (NOT NULL constraint failure).
+        if self.dialect == SqlDialect::MySql {
+            if let Some(replacement) = mysql_zero_date_replacement(&value) {
+                return ParsedValue::String {
+                    value: replacement.to_string(),
+                };
+            }
+        }
 
         ParsedValue::String { value }
     }
@@ -985,6 +1006,22 @@ pub enum ParsedValue {
     Hex(Vec<u8>),
     /// Other value (decimals, floats, expressions) as raw bytes
     Other(Vec<u8>),
+}
+
+/// If `value` is MySQL's zero-date sentinel (`0000-00-00`, optionally with a
+/// zero time and fractional seconds), the epoch replacement to use instead.
+/// Shared with the raw-SQL-text conversion path in `duckdb::loader`, which
+/// normalizes the same literal in statements that bypass this parser (e.g.
+/// `INSERT ... ON DUPLICATE KEY UPDATE`) -- keep the replacement values in
+/// sync if this changes.
+pub(crate) fn mysql_zero_date_replacement(value: &str) -> Option<&'static str> {
+    if value == "0000-00-00" {
+        Some("1970-01-01")
+    } else if value.starts_with("0000-00-00 00:00:00") {
+        Some("1970-01-01 00:00:00")
+    } else {
+        None
+    }
 }
 
 /// Parse all rows from an INSERT statement using the given dialect's escaping.
@@ -1199,6 +1236,55 @@ mod tests {
             Some(vec!["id".to_string(), "name".to_string()])
         );
         assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn mysql_zero_date_and_zero_datetime_become_epoch_sentinel() {
+        // `0000-00-00[ 00:00:00]` is MySQL's placeholder for "no date", legal
+        // under non-strict SQL_MODE. DuckDB has no such value and rejects it
+        // outright, which used to fail the whole multi-row INSERT statement
+        // (dropping every valid row alongside the one bad date). NULL isn't
+        // used as the replacement because the column is very often NOT NULL.
+        let sql = b"INSERT INTO `motors` (`id`, `installed_at`, `removed_at`) VALUES \
+                    (1, '0000-00-00', '0000-00-00 00:00:00')";
+        let result = parse_insert_for_bulk(sql, SqlDialect::MySql).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert!(matches!(
+            &result.rows[0][1],
+            ParsedValue::String { value } if value == "1970-01-01"
+        ));
+        assert!(matches!(
+            &result.rows[0][2],
+            ParsedValue::String { value } if value == "1970-01-01 00:00:00"
+        ));
+    }
+
+    #[test]
+    fn non_mysql_dialects_keep_zero_date_text_as_is() {
+        // Only MySQL produces this sentinel; leave other dialects' literal
+        // text alone rather than guessing at intent.
+        let sql = b"INSERT INTO users (note) VALUES ('0000-00-00')";
+        let result = parse_insert_for_bulk(sql, SqlDialect::Postgres).unwrap();
+        assert!(matches!(
+            &result.rows[0][0],
+            ParsedValue::String { value } if value == "0000-00-00"
+        ));
+    }
+
+    #[test]
+    fn mysql_backslash_zero_escape_drops_the_nul_byte() {
+        // `\0` is valid UTF-8 as a raw byte, but DuckDB's binding layer
+        // rejects any string carrying one outright ("nul byte found in
+        // provided data") on both the Appender and prepared-statement paths.
+        // Keeping it produced an unrecoverable per-row failure; dropping it
+        // (matching `convert_mysql_escapes`' handling of the same escape on
+        // the raw-SQL-text pipeline) keeps the row insertable.
+        let sql = b"INSERT INTO t (note) VALUES ('a\\0b')";
+        let result = parse_insert_for_bulk(sql, SqlDialect::MySql).unwrap();
+        assert!(matches!(
+            &result.rows[0][0],
+            ParsedValue::String { value } if value == "ab" && !value.contains('\0')
+        ));
     }
 }
 

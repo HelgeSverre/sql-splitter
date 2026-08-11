@@ -93,7 +93,6 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
         (b"PostgreSQL database dump", SqlDialect::Postgres, 10),
         (b"MySQL dump", SqlDialect::MySql, 10),
         (b"MariaDB dump", SqlDialect::MySql, 10),
-        (b"SQLite", SqlDialect::Sqlite, 10),
         (b"search_path", SqlDialect::Postgres, 5),
         (b"LOCK TABLES", SqlDialect::MySql, 5),
         (b"PRAGMA", SqlDialect::Sqlite, 5),
@@ -117,6 +116,25 @@ pub fn detect_dialect(header: &[u8]) -> DialectDetectionResult {
                 SqlDialect::Mssql => score.mssql += weight,
             }
         }
+    }
+
+    // Case-insensitive markers. "SQLite" is a proper noun that dump tools
+    // (and header comments naming the source file, e.g. `database.sqlite`)
+    // routinely spell in lowercase, unlike the SQL-keyword markers above
+    // which dump tools emit in a consistent case.
+    let header_lower = header.to_ascii_lowercase();
+    if contains_bytes(&header_lower, b"sqlite") {
+        score.sqlite += 10;
+    }
+    // `INTEGER PRIMARY KEY AUTOINCREMENT` is SQLite-exclusive syntax --
+    // MySQL's equivalent is always `AUTO_INCREMENT` (with an underscore) --
+    // so it's a strong signal even when a dump never mentions "sqlite" by
+    // name. A TablePlus-exported SQLite dump with no PRAGMA/BEGIN TRANSACTION
+    // and only an incidental lowercase "sqlite" in a comment used to score 0
+    // on every dialect and silently default to MySQL, which then left
+    // "autoincrement" unstripped and broke every CREATE TABLE.
+    if contains_bytes(&header_lower, b"primary key autoincrement") {
+        score.sqlite += 10;
     }
 
     // Compound / structural markers that don't fit the simple table.

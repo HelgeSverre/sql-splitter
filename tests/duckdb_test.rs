@@ -146,6 +146,156 @@ fn test_postgres_copy_keeps_valid_rows_after_rejected_rows() {
     }
 }
 
+/// Reproduces a real-world partial mysqldump/TablePlus export: a table with
+/// `INSERT`s but no matching `CREATE TABLE` (structure export scope missed
+/// it), immediately followed by a normal table. Regression coverage for the
+/// MySQL bulk-batch counterpart to `test_postgres_copy_keeps_valid_rows_after_rejected_rows`:
+/// `flush_batch`'s missing-table branch used to clear the batch and record no
+/// warning at all, and there was no MySQL-path test catching that silence.
+#[test]
+fn test_mysql_insert_into_missing_table_warns_and_does_not_break_later_tables() {
+    let dump = r#"
+INSERT INTO `ghost_table` (`id`, `name`) VALUES (1, 'orphaned'), (2, 'orphaned');
+
+CREATE TABLE `users` (
+    `id` INT PRIMARY KEY,
+    `email` VARCHAR(255) NOT NULL
+);
+
+INSERT INTO `users` (`id`, `email`) VALUES
+(1, 'alice@example.com'),
+(2, 'bob@example.com'),
+(3, 'carol@example.com');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1, "only users has a CREATE TABLE");
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|w| w.contains("ghost_table") && w.contains("does not exist")),
+        "expected a warning naming the missing table, got: {:?}",
+        stats.warnings
+    );
+
+    let result = engine.query("SELECT COUNT(*) FROM users").unwrap();
+    assert_eq!(result.rows[0][0], "3", "users must be unaffected by the earlier missing table");
+}
+
+/// MySQL's `0000-00-00` zero-date sentinel (legal under non-strict SQL_MODE)
+/// has no DuckDB equivalent. A single occurrence used to fail the whole
+/// multi-row INSERT statement it lived in, silently dropping every valid row
+/// beside it -- observed for real on a `motors` table where all ~2000 rows
+/// vanished because of 4 bad dates spread across 4 statements.
+#[test]
+fn test_mysql_zero_date_does_not_drop_rest_of_batch() {
+    // `removed_at` is NOT NULL, mirroring the real case (WordPress's
+    // `wp_posts.post_date_gmt` etc.): normalizing the zero-date to NULL used
+    // to just trade "field value out of range" for a NOT NULL constraint
+    // failure via the Appender, still losing the row.
+    let dump = r#"
+CREATE TABLE `motors` (
+    `id` INT PRIMARY KEY,
+    `installed_at` DATETIME DEFAULT NULL,
+    `removed_at` DATETIME NOT NULL
+);
+
+INSERT INTO `motors` (`id`, `installed_at`, `removed_at`) VALUES
+(1, '2020-01-01 00:00:00', '0000-00-00 00:00:00'),
+(2, '2020-02-02 00:00:00', '2020-02-03 00:00:00'),
+(3, '0000-00-00 00:00:00', '2020-03-03 00:00:00'),
+(4, '2020-04-04 00:00:00', '2020-04-05 00:00:00');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+    assert_eq!(
+        stats.rows_inserted, 4,
+        "all 4 rows survive despite 2 zero-dates, warnings: {:?}",
+        stats.warnings
+    );
+
+    let result = engine.query("SELECT COUNT(*) FROM motors").unwrap();
+    assert_eq!(result.rows[0][0], "4");
+
+    let result = engine
+        .query("SELECT removed_at FROM motors WHERE id = 1")
+        .unwrap();
+    assert!(
+        result.rows[0][0].starts_with("1970-01-01"),
+        "zero-date should normalize to the epoch sentinel (not NULL, so NOT NULL columns still \
+         accept it), got: {}",
+        result.rows[0][0]
+    );
+}
+
+/// A source row can itself violate the schema it was dumped from -- e.g. an
+/// explicit `NULL` inserted into a `NOT NULL` column, which some MySQL
+/// configurations tolerate. That row correctly fails and correctly gets a
+/// warning, but `fallback_execute` used to replay the *entire* original
+/// multi-row INSERT statement as one atomic unit, so the one genuinely bad
+/// row took every valid row in the same statement down with it. Observed for
+/// real: one `NULL` in a NOT NULL JSON column dropped all 134 rows of a
+/// `tags` table's single INSERT statement.
+#[test]
+fn test_mysql_bad_row_does_not_drop_the_rest_of_its_insert_statement() {
+    let dump = r#"
+CREATE TABLE `tags` (
+    `id` INT PRIMARY KEY,
+    `slug` JSON NOT NULL
+);
+
+INSERT INTO `tags` (`id`, `slug`) VALUES
+(1, '{"no": "spyling"}'),
+(2, '{"no": "vaskeprogram"}'),
+(3, NULL),
+(4, '{"no": "priser"}');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(stats.tables_created, 1);
+    assert_eq!(
+        stats.rows_inserted, 3,
+        "the 3 valid rows must survive the 1 bad row in the same statement, warnings: {:?}",
+        stats.warnings
+    );
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|w| w.contains("tags") && w.contains("NOT NULL")),
+        "expected a warning naming the rejected row, got: {:?}",
+        stats.warnings
+    );
+
+    let result = engine.query("SELECT COUNT(*) FROM tags").unwrap();
+    assert_eq!(result.rows[0][0], "3");
+    let result = engine.query("SELECT id FROM tags ORDER BY id").unwrap();
+    assert_eq!(
+        result.rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
+        vec!["1", "2", "4"]
+    );
+}
+
 #[test]
 fn test_mssql_qualified_inserts_use_duckdb_default_schema() {
     let config = QueryConfig {
@@ -968,6 +1118,44 @@ INSERT INTO orders VALUES (1, 100);
     }
 }
 
+/// MySQL allows an index-algorithm hint (`USING BTREE`/`USING HASH`) after
+/// the column list on KEY, UNIQUE KEY, and PRIMARY KEY. DuckDB understands
+/// none of it. The KEY/UNIQUE KEY stripping regexes end their match at the
+/// closing paren, so a trailing USING clause used to survive as orphaned
+/// text and fail the whole CREATE TABLE -- observed for real on a `products`
+/// table with `KEY products_view_count (view_count) USING BTREE`.
+#[test]
+fn test_mysql_key_constraints_with_using_btree_hint() {
+    let dump = r#"
+CREATE TABLE products (
+    id INT NOT NULL,
+    sku VARCHAR(255) NOT NULL,
+    view_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (id) USING BTREE,
+    UNIQUE KEY products_sku_unique (sku) USING BTREE,
+    KEY products_view_count (view_count) USING BTREE
+);
+
+INSERT INTO products (id, sku, view_count) VALUES (1, 'ABC', 10);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(
+        stats.tables_created, 1,
+        "CREATE TABLE must succeed despite the USING BTREE hints, warnings: {:?}",
+        stats.warnings
+    );
+    let result = engine.query("SELECT COUNT(*) FROM products").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
 #[test]
 fn test_mysql_generated_column() {
     let dump = r#"
@@ -1061,6 +1249,37 @@ INSERT INTO test VALUES (3, 'Return\rhere');
     assert_eq!(result.rows[0][0], "3");
 }
 
+/// MySQL's `\0` escape is valid UTF-8 as a raw byte, but DuckDB's Rust
+/// binding rejects any string carrying an embedded NUL byte outright ("nul
+/// byte found in provided data") on both the Appender and prepared-statement
+/// paths. Observed for real on `order_items`/`invoice_items` rows in a
+/// production dump: the row failed and was correctly isolated (not dropping
+/// its neighbors, thanks to the per-row fallback retry), but it should not
+/// have failed at all -- the byte is droppable, not the whole row.
+#[test]
+fn test_mysql_backslash_zero_escape_does_not_fail_the_row() {
+    let dump = r#"
+CREATE TABLE test (id INT, value VARCHAR(100));
+INSERT INTO test VALUES (1, 'a\0b');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(
+        stats.rows_inserted, 1,
+        "row must import despite the \\0 escape, warnings: {:?}",
+        stats.warnings
+    );
+    let result = engine.query("SELECT value FROM test WHERE id = 1").unwrap();
+    assert_eq!(result.rows[0][0], "ab");
+}
+
 #[test]
 fn test_mysql_character_set_stripping() {
     let dump = r#"
@@ -1124,6 +1343,43 @@ INSERT INTO test (id) VALUES (1);
 
     let tables = engine.list_tables().unwrap();
     assert!(tables.contains(&"test".to_string()));
+}
+
+/// MySQL 8 also allows CURRENT_TIMESTAMP as a function call (with parens),
+/// lowercase in most dumps. `ON UPDATE current_timestamp()` used to have its
+/// trailing `()` survive stripping (the old regex only matched the bare
+/// keyword), producing `current_timestamp()()` right after the column's own
+/// `DEFAULT current_timestamp()` and failing the whole CREATE TABLE --
+/// observed for real on WordPress's wp_wpsc_* tables.
+#[test]
+fn test_mysql_current_timestamp_function_call_form() {
+    let dump = r#"
+CREATE TABLE wp_wpsc_visitor_meta (
+    id INT PRIMARY KEY,
+    created timestamp NOT NULL DEFAULT current_timestamp(),
+    meta_timestamp timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+);
+
+INSERT INTO wp_wpsc_visitor_meta (id) VALUES (1);
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(
+        stats.tables_created, 1,
+        "CREATE TABLE must succeed despite the current_timestamp() call form, warnings: {:?}",
+        stats.warnings
+    );
+    let result = engine
+        .query("SELECT COUNT(*) FROM wp_wpsc_visitor_meta")
+        .unwrap();
+    assert_eq!(result.rows[0][0], "1");
 }
 
 #[test]
@@ -3954,6 +4210,48 @@ INSERT INTO `invoices` (`id`, `date`, `due_days`) VALUES (1, '2024-01-01', 30);
     assert_eq!(stats.rows_inserted, 1, "Row must be inserted");
 
     let result = engine.query("SELECT COUNT(*) FROM invoices").unwrap();
+    assert_eq!(result.rows[0][0], "1");
+}
+
+/// Reproduces a real dump: a `varchar(191) COLLATE ...` (not a bare-word
+/// type) generated column whose expression contains MySQL charset-introduced
+/// string literals (`_utf8mb4' ('`) that embed literal `(`/`)` characters.
+/// The old regex assumed a single bare-word type before GENERATED and only
+/// balanced one level of parens, so it neither matched the type nor could
+/// balance the 3-level-deep expression -- leaving `_utf8mb4` in the DDL text,
+/// which DuckDB's parser reads as an unknown type name and fails the whole
+/// CREATE TABLE. This column can't be translated (DuckDB doesn't understand
+/// MySQL's charset-introducer syntax), so it must be dropped, not fail.
+#[test]
+fn test_mysql_generated_column_with_typed_column_and_nested_string_parens() {
+    let dump = r#"
+CREATE TABLE `subscription_plans` (
+    `id` INT PRIMARY KEY,
+    `title` VARCHAR(191) DEFAULT NULL,
+    `subtitle` VARCHAR(191) DEFAULT NULL,
+    `billing_interval` VARCHAR(191) NOT NULL,
+    `display_title` varchar(191) COLLATE utf8mb4_unicode_ci GENERATED ALWAYS AS (concat(`title`,_utf8mb4' ',`subtitle`,_utf8mb4' (',`billing_interval`,_utf8mb4')')) VIRTUAL
+);
+
+INSERT INTO `subscription_plans` (`id`, `title`, `subtitle`, `billing_interval`) VALUES (1, 'Pro', 'Team', 'monthly');
+"#;
+    let (_temp_dir, dump_path) = create_test_dump(dump);
+
+    let config = QueryConfig {
+        dialect: Some(sql_splitter::parser::SqlDialect::MySql),
+        ..Default::default()
+    };
+    let mut engine = QueryEngine::new(&config).unwrap();
+    let stats = engine.import_dump(&dump_path).unwrap();
+
+    assert_eq!(
+        stats.tables_created, 1,
+        "CREATE TABLE must succeed with the generated column dropped, warnings: {:?}",
+        stats.warnings
+    );
+    let result = engine
+        .query("SELECT COUNT(*) FROM subscription_plans")
+        .unwrap();
     assert_eq!(result.rows[0][0], "1");
 }
 

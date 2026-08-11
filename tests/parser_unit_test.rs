@@ -235,6 +235,37 @@ CREATE TABLE test (id INT);
     }
 
     #[test]
+    fn test_detect_sqlite_from_lowercase_filename_mention_only() {
+        // Real-world case: a TablePlus export of a SQLite database whose
+        // header comment names the source file in lowercase and never emits
+        // PRAGMA/BEGIN TRANSACTION. The old case-sensitive `SQLite` marker
+        // scored 0 on every dialect here and silently defaulted to MySQL,
+        // which then left `autoincrement` (no underscore, SQLite spelling)
+        // unstripped and broke every CREATE TABLE in the dump.
+        let header = br#"-- TablePlus 6.1.2(568)
+-- Database: database.sqlite
+-- Generation Time: 2025-12-05 15:50:59.4200
+
+DROP TABLE IF EXISTS "basic_pages";
+CREATE TABLE "basic_pages" ("id" integer primary key autoincrement not null, "title" varchar not null);
+"#;
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Sqlite);
+    }
+
+    #[test]
+    fn test_detect_sqlite_from_autoincrement_syntax_with_no_sqlite_mention() {
+        // `INTEGER PRIMARY KEY AUTOINCREMENT` is SQLite-exclusive (MySQL's
+        // equivalent always has the underscore, `AUTO_INCREMENT`), so it must
+        // out-detect a plain default even when the word "sqlite" never
+        // appears anywhere in the header.
+        let header = br#"CREATE TABLE "widgets" ("id" integer primary key autoincrement not null, "name" varchar not null);
+"#;
+        let result = detect_dialect(header);
+        assert_eq!(result.dialect, SqlDialect::Sqlite);
+    }
+
+    #[test]
     fn test_detect_mysql_backticks() {
         let header = b"CREATE TABLE `users` (
   `id` int NOT NULL AUTO_INCREMENT,
