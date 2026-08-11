@@ -1,12 +1,16 @@
 //! Read-only PostgreSQL plan adapter for the enterprise migration spike.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
+use fallible_iterator::FallibleIterator;
 use native_tls::{Certificate, TlsConnector};
 use postgres::config::SslMode;
+use postgres::types::{FromSql, ToSql, Type};
 use postgres::{Client, Config, IsolationLevel, Transaction};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
@@ -15,9 +19,13 @@ use thiserror::Error;
 
 use super::artifact::write_json_new;
 use super::canonical::CANONICAL_ENCODING_VERSION;
+use super::connection::{
+    CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult, KeysetPage,
+    ReadOnlyEvidence, ReadSession, SnapshotToken, SourceConnectionFactory,
+};
 use super::model::{
-    CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, Identifier,
-    QualifiedTable, VendorCatalog,
+    CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
+    Identifier, QualifiedTable, RowBatch, ValueFormat, VendorCatalog,
 };
 use super::plan::{
     MigrationPlan, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObject,
@@ -25,6 +33,9 @@ use super::plan::{
 };
 
 const CATALOG_FORMAT_VERSION: u32 = 1;
+const DEFAULT_BATCH_ROWS: usize = 10_000;
+const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
+static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +50,10 @@ pub struct PostgresEndpointConfig {
     pub tls: PostgresTlsConfig,
     #[serde(default = "default_timeout_seconds")]
     pub connect_timeout_seconds: u64,
+    #[serde(default = "default_batch_rows")]
+    pub max_batch_rows: usize,
+    #[serde(default = "default_batch_bytes")]
+    pub max_batch_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +71,14 @@ fn default_port() -> u16 {
 
 fn default_timeout_seconds() -> u64 {
     10
+}
+
+fn default_batch_rows() -> usize {
+    DEFAULT_BATCH_ROWS
+}
+
+fn default_batch_bytes() -> usize {
+    DEFAULT_BATCH_BYTES
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +137,11 @@ impl PostgresEndpointConfig {
                 "connect_timeout_seconds must be positive",
             ));
         }
+        if self.max_batch_rows == 0 || self.max_batch_bytes == 0 {
+            return Err(PostgresPlanError::InvalidConfig(
+                "max_batch_rows and max_batch_bytes must be positive",
+            ));
+        }
         Ok(())
     }
 
@@ -142,6 +170,447 @@ impl PostgresEndpointConfig {
         }
         Ok(config.connect(MakeTlsConnector::new(tls.build()?))?)
     }
+}
+
+struct PendingSnapshot {
+    client: Client,
+    token: SnapshotToken,
+    evidence: ReadOnlyEvidence,
+}
+
+/// PostgreSQL source factory that transfers ownership of one live snapshot session.
+pub struct PostgresSourceFactory {
+    config: PostgresEndpointConfig,
+    pending: Mutex<Option<PendingSnapshot>>,
+}
+
+impl PostgresSourceFactory {
+    pub fn new(config: PostgresEndpointConfig) -> Self {
+        Self {
+            config,
+            pending: Mutex::new(None),
+        }
+    }
+}
+
+impl SourceConnectionFactory for PostgresSourceFactory {
+    fn capabilities(&self) -> CapabilitySet {
+        CapabilitySet::from_entries([
+            ("consistent_snapshot", Capability::Supported),
+            ("server_read_only", Capability::Supported),
+            ("transactions", Capability::Supported),
+            ("typed_identifiers", Capability::Supported),
+            ("bound_parameters", Capability::Supported),
+            (
+                "cancellation",
+                Capability::Unknown {
+                    reason: "the live control session is not implemented".into(),
+                },
+            ),
+        ])
+    }
+
+    fn capture_snapshot(&self) -> ConnectionResult<SnapshotToken> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| ConnectionError::Database("snapshot factory lock is poisoned".into()))?;
+        if pending.is_some() {
+            return Err(ConnectionError::InvalidRequest(
+                "a snapshot is already waiting for a reader".into(),
+            ));
+        }
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        client
+            .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .map_err(database_error)?;
+        let row = client
+            .query_one(
+                "SELECT current_database(), current_user, COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port(), 0), current_setting('server_version'), pg_current_snapshot()::text, current_setting('transaction_read_only')::boolean",
+                &[],
+            )
+            .map_err(database_error)?;
+        let database: String = row.get(0);
+        let user: String = row.get(1);
+        let address: String = row.get(2);
+        let port: i32 = row.get(3);
+        let server_version: String = row.get(4);
+        let snapshot_id: String = row.get(5);
+        let transaction_read_only: bool = row.get(6);
+        if !transaction_read_only {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL did not establish a read-only transaction".into(),
+            ));
+        }
+        let privilege_row = client
+            .query_one(
+                "SELECT NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication AND NOT r.rolbypassrls AND NOT has_database_privilege(current_user, current_database(), 'CREATE,TEMP') AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'S' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND has_sequence_privilege(current_user, c.oid, 'USAGE,UPDATE')) AND NOT EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND has_schema_privilege(current_user, n.oid, 'CREATE')) FROM pg_roles r WHERE r.rolname = current_user",
+                &[],
+            )
+            .map_err(database_error)?;
+        let role_has_no_write_privileges: bool = privilege_row.get(0);
+        if !role_has_no_write_privileges {
+            return Err(ConnectionError::InvalidRequest(
+                "source role has database, schema, table, sequence, or privileged-role write capability"
+                    .into(),
+            ));
+        }
+        let endpoint_identity = format!("postgres://{address}:{port}/{database}?user={user}");
+        let lifecycle_id = format!(
+            "pg-session-{}",
+            SNAPSHOT_LIFECYCLE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let token = SnapshotToken {
+            endpoint_identity,
+            database_identity: database,
+            snapshot_id,
+            consistency_mode: "postgres_repeatable_read_read_only".into(),
+            server_version,
+            lifecycle_id,
+        };
+        let evidence = ReadOnlyEvidence {
+            server_enforced: true,
+            description: "read-only transaction and source role ACL probe deny database, schema, relation, sequence, and privileged-role writes".into(),
+        };
+        *pending = Some(PendingSnapshot {
+            client,
+            token: token.clone(),
+            evidence,
+        });
+        Ok(token)
+    }
+
+    fn open_reader(
+        &self,
+        snapshot: &SnapshotToken,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn ReadSession>> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| ConnectionError::Database("snapshot factory lock is poisoned".into()))?;
+        let pending_snapshot = pending.take().ok_or(ConnectionError::SnapshotMismatch)?;
+        if &pending_snapshot.token != snapshot {
+            *pending = Some(pending_snapshot);
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        Ok(Box::new(PostgresSnapshotReader {
+            client: pending_snapshot.client,
+            token: pending_snapshot.token,
+            evidence: pending_snapshot.evidence,
+            cancellation,
+            max_batch_rows: self.config.max_batch_rows,
+            max_batch_bytes: self.config.max_batch_bytes,
+            metadata_cache: HashMap::new(),
+        }))
+    }
+}
+
+struct PostgresSnapshotReader {
+    client: Client,
+    token: SnapshotToken,
+    evidence: ReadOnlyEvidence,
+    cancellation: CancellationToken,
+    max_batch_rows: usize,
+    max_batch_bytes: usize,
+    metadata_cache: HashMap<(QualifiedTable, Vec<Identifier>), Vec<ColumnMeta>>,
+}
+
+impl ReadSession for PostgresSnapshotReader {
+    fn read_only_evidence(&self) -> &ReadOnlyEvidence {
+        &self.evidence
+    }
+
+    fn snapshot(&self) -> &SnapshotToken {
+        &self.token
+    }
+
+    fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        self.cancellation.check()?;
+        validate_page(request, self.max_batch_rows)?;
+        let metadata_key = (request.table.clone(), request.projection.clone());
+        let metadata = if let Some(metadata) = self.metadata_cache.get(&metadata_key) {
+            metadata.clone()
+        } else {
+            let metadata =
+                load_projection_metadata(&mut self.client, &request.table, &request.projection)?;
+            self.metadata_cache.insert(metadata_key, metadata.clone());
+            metadata
+        };
+        let projection = request
+            .projection
+            .iter()
+            .map(quote_identifier)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let key = request
+            .key
+            .iter()
+            .map(quote_identifier)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let table = format!(
+            "{}.{}",
+            quote_identifier(&request.table.namespace),
+            quote_identifier(&request.table.name)
+        );
+        let mut parameters: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+        let predicate = if let Some(after) = &request.after {
+            if after.0.len() != request.key.len() {
+                return Err(ConnectionError::InvalidRequest(
+                    "key tuple width differs from key".into(),
+                ));
+            }
+            for (key, value) in request.key.iter().zip(&after.0) {
+                let column = request
+                    .projection
+                    .iter()
+                    .position(|name| name == key)
+                    .and_then(|index| metadata.get(index))
+                    .ok_or_else(|| {
+                        ConnectionError::InvalidRequest(format!(
+                            "key column {key} is not present in projection metadata"
+                        ))
+                    })?;
+                parameters.push(key_parameter(value, &column.vendor_type)?);
+            }
+            let placeholders = (1..=parameters.len())
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" WHERE ({key}) > ({placeholders})")
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT {projection} FROM {table}{predicate} ORDER BY {key} ASC LIMIT {}",
+            request.limit
+        );
+        let parameter_refs = parameters
+            .iter()
+            .map(|value| value.as_ref() as &(dyn ToSql + Sync))
+            .collect::<Vec<_>>();
+        let statement = self.client.prepare(&sql).map_err(database_error)?;
+        let mut rows = self
+            .client
+            .query_raw(&statement, parameter_refs)
+            .map_err(database_error)?;
+        let mut batch = RowBatch::new(metadata, request.limit as usize, self.max_batch_bytes);
+        while let Some(row) = rows.next().map_err(database_error)? {
+            self.cancellation.check()?;
+            let mut values = Vec::with_capacity(row.len());
+            let mut encoded_bytes = 0usize;
+            for (index, column) in row.columns().iter().enumerate() {
+                let raw: Option<RawBinary> = row.try_get(index).map_err(database_error)?;
+                let value = decode_value(column.type_(), raw)?;
+                encoded_bytes = encoded_bytes
+                    .checked_add(encoded_size(&value))
+                    .ok_or_else(|| ConnectionError::BatchLimit("row byte count overflow".into()))?;
+                values.push(value);
+            }
+            batch
+                .try_push(values, encoded_bytes)
+                .map_err(|error| ConnectionError::BatchLimit(error.to_string()))?;
+        }
+        Ok(batch)
+    }
+}
+
+fn validate_page(request: &KeysetPage, max_batch_rows: usize) -> ConnectionResult<()> {
+    if request.limit == 0 || request.key.is_empty() || request.projection.is_empty() {
+        return Err(ConnectionError::InvalidRequest(
+            "projection, key, and limit must be non-empty".into(),
+        ));
+    }
+    if request.limit as usize > max_batch_rows {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "requested row limit {} exceeds configured maximum {max_batch_rows}",
+            request.limit
+        )));
+    }
+    if request
+        .key
+        .iter()
+        .any(|key| !request.projection.contains(key))
+    {
+        return Err(ConnectionError::InvalidRequest(
+            "every key column must be present in the projection".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn quote_identifier(identifier: &Identifier) -> String {
+    format!("\"{}\"", identifier.as_str().replace('"', "\"\""))
+}
+
+fn key_parameter(value: &DbValue, vendor_type: &str) -> ConnectionResult<Box<dyn ToSql + Sync>> {
+    match (value, vendor_type) {
+        (DbValue::Bool(value), "pg_catalog.bool") => Ok(Box::new(*value)),
+        (DbValue::Signed(value), "pg_catalog.int2") => i16::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::UnsupportedKeyValue),
+        (DbValue::Signed(value), "pg_catalog.int4") => i32::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::UnsupportedKeyValue),
+        (DbValue::Signed(value), "pg_catalog.int8") => i64::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::UnsupportedKeyValue),
+        (DbValue::Unsigned(value), "pg_catalog.oid") => u32::try_from(*value)
+            .map(|value| Box::new(value) as Box<dyn ToSql + Sync>)
+            .map_err(|_| ConnectionError::UnsupportedKeyValue),
+        (DbValue::Float32(bits), "pg_catalog.float4") => Ok(Box::new(f32::from_bits(*bits))),
+        (DbValue::Float64(bits), "pg_catalog.float8") => Ok(Box::new(f64::from_bits(*bits))),
+        (DbValue::Text(value), "pg_catalog.text" | "pg_catalog.varchar") => {
+            Ok(Box::new(value.clone()))
+        }
+        (DbValue::Bytes(value), "pg_catalog.bytea") => Ok(Box::new(value.clone())),
+        _ => Err(ConnectionError::UnsupportedKeyValue),
+    }
+}
+
+#[derive(Debug)]
+struct RawBinary(Vec<u8>);
+
+impl<'a> FromSql<'a> for RawBinary {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(raw.to_vec()))
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+}
+
+fn decode_value(ty: &Type, raw: Option<RawBinary>) -> ConnectionResult<DbValue> {
+    let Some(RawBinary(bytes)) = raw else {
+        return Ok(DbValue::Null);
+    };
+    let invalid = || ConnectionError::Database(format!("invalid binary value for PostgreSQL {ty}"));
+    match *ty {
+        Type::BOOL if bytes.as_slice() == [0] => Ok(DbValue::Bool(false)),
+        Type::BOOL if bytes.as_slice() == [1] => Ok(DbValue::Bool(true)),
+        Type::INT2 if bytes.len() == 2 => Ok(DbValue::Signed(i16::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        ) as i128)),
+        Type::INT4 if bytes.len() == 4 => Ok(DbValue::Signed(i32::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        ) as i128)),
+        Type::INT8 if bytes.len() == 8 => Ok(DbValue::Signed(i64::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        ) as i128)),
+        Type::OID if bytes.len() == 4 => Ok(DbValue::Unsigned(u32::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        ) as u128)),
+        Type::FLOAT4 if bytes.len() == 4 => Ok(DbValue::Float32(u32::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        ))),
+        Type::FLOAT8 if bytes.len() == 8 => Ok(DbValue::Float64(u64::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        ))),
+        Type::BYTEA => Ok(DbValue::Bytes(bytes)),
+        Type::JSON => Ok(DbValue::Json(bytes)),
+        Type::JSONB if bytes.first() == Some(&1) => Ok(DbValue::Json(bytes[1..].to_vec())),
+        Type::JSONB => Err(invalid()),
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::XML => {
+            String::from_utf8(bytes)
+                .map(DbValue::Text)
+                .map_err(|_| invalid())
+        }
+        Type::BOOL
+        | Type::INT2
+        | Type::INT4
+        | Type::INT8
+        | Type::OID
+        | Type::FLOAT4
+        | Type::FLOAT8 => Err(invalid()),
+        _ => Ok(DbValue::Vendor {
+            type_id: format!("postgres:{}:{}", ty.oid(), ty.name()),
+            format: ValueFormat::Binary,
+            bytes,
+        }),
+    }
+}
+
+fn load_projection_metadata(
+    client: &mut Client,
+    table: &QualifiedTable,
+    projection: &[Identifier],
+) -> ConnectionResult<Vec<ColumnMeta>> {
+    let rows = client
+        .query(
+            "SELECT column_name, ordinal_position::integer, udt_schema || '.' || udt_name, is_nullable = 'YES', collation_name, numeric_precision::integer, numeric_scale::integer, datetime_precision::integer, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position",
+            &[&table.namespace.as_str(), &table.name.as_str()],
+        )
+        .map_err(database_error)?;
+    let mut by_name = BTreeMap::new();
+    for row in rows {
+        let name: String = row.get(0);
+        let data_type: String = row.get(8);
+        by_name.insert(
+            name.clone(),
+            ColumnMeta {
+                name: Identifier::new(name).map_err(|error| {
+                    ConnectionError::Database(format!("invalid catalog column name: {error}"))
+                })?,
+                ordinal: u32::try_from(row.get::<_, i32>(1)).map_err(|_| {
+                    ConnectionError::Database("negative PostgreSQL column ordinal".into())
+                })?,
+                vendor_type: row.get(2),
+                nullable: row.get(3),
+                collation: row.get(4),
+                precision: row
+                    .get::<_, Option<i32>>(5)
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| ConnectionError::Database("negative numeric precision".into()))?,
+                scale: row.get(6),
+                timezone_semantics: match data_type.as_str() {
+                    "timestamp with time zone" | "time with time zone" => {
+                        Some("with_time_zone".into())
+                    }
+                    "timestamp without time zone" | "time without time zone" => {
+                        Some("without_time_zone".into())
+                    }
+                    _ => None,
+                },
+            },
+        );
+    }
+    projection
+        .iter()
+        .map(|name| {
+            by_name.get(name.as_str()).cloned().ok_or_else(|| {
+                ConnectionError::InvalidRequest(format!(
+                    "column {} is not present in {}.{}",
+                    name, table.namespace, table.name
+                ))
+            })
+        })
+        .collect()
+}
+
+fn encoded_size(value: &DbValue) -> usize {
+    match value {
+        DbValue::Null => 1,
+        DbValue::Bool(_) => 2,
+        DbValue::Signed(_) | DbValue::Unsigned(_) | DbValue::Time { .. } => 17,
+        DbValue::Float32(_) => 5,
+        DbValue::Float64(_) => 9,
+        DbValue::Date { .. } => 7,
+        DbValue::Timestamp { local, .. } => 8 + local.len(),
+        DbValue::Decimal { coefficient, .. } => 8 + coefficient.len(),
+        DbValue::Text(value) => 9 + value.len(),
+        DbValue::Bytes(value) | DbValue::Json(value) => 9 + value.len(),
+        DbValue::Vendor { type_id, bytes, .. } => 16 + type_id.len() + bytes.len(),
+    }
+}
+
+fn database_error(error: postgres::Error) -> ConnectionError {
+    ConnectionError::Database(error.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -783,6 +1252,27 @@ credential_env = "PGPASSWORD"
         .unwrap();
         assert!(!parsed.tls.insecure);
         assert_eq!(parsed.port, 5432);
+    }
+
+    #[test]
+    fn identifier_quoting_doubles_embedded_quotes() {
+        let identifier = Identifier::new("accounts\"; DROP TABLE audit; --").unwrap();
+        assert_eq!(
+            quote_identifier(&identifier),
+            "\"accounts\"\"; DROP TABLE audit; --\""
+        );
+    }
+
+    #[test]
+    fn binary_decoder_rejects_invalid_boolean_and_jsonb_versions() {
+        assert!(matches!(
+            decode_value(&Type::BOOL, Some(RawBinary(vec![2]))),
+            Err(ConnectionError::Database(_))
+        ));
+        assert!(matches!(
+            decode_value(&Type::JSONB, Some(RawBinary(vec![2, b'{', b'}']))),
+            Err(ConnectionError::Database(_))
+        ));
     }
 
     #[test]

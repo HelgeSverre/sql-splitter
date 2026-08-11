@@ -67,6 +67,9 @@ pub struct SnapshotToken {
     pub endpoint_identity: String,
     pub database_identity: String,
     pub snapshot_id: String,
+    pub consistency_mode: String,
+    pub server_version: String,
+    pub lifecycle_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +88,8 @@ pub enum ConnectionError {
     TransactionRequired,
     TransactionAlreadyOpen,
     UnsupportedKeyValue,
+    Database(String),
+    BatchLimit(String),
     RequiredCapabilityUnavailable {
         capability: &'static str,
         reason: String,

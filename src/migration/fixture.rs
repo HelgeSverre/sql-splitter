@@ -72,6 +72,9 @@ impl SourceConnectionFactory for InMemorySource {
             endpoint_identity: self.endpoint_identity.clone(),
             database_identity: self.database_identity.clone(),
             snapshot_id: "fixture-snapshot-v1".to_owned(),
+            consistency_mode: "fixture_immutable_snapshot".to_owned(),
+            server_version: "fixture-v1".to_owned(),
+            lifecycle_id: "fixture-lifecycle-v1".to_owned(),
         })
     }
 
