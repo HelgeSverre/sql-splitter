@@ -4,6 +4,7 @@
 //! between the plan, snapshot, journal, execution, resume, and verification
 //! contracts. It does not provide a production database adapter.
 
+pub mod append_journal;
 pub mod artifact;
 pub mod canonical;
 pub mod connection;
