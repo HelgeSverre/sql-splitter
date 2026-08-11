@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConsistencyMode {
+    ConsistentSnapshot,
+    WriteFence,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "sql-splitter-migration-spike")]
@@ -31,6 +37,9 @@ enum Command {
         /// New protected plan artifact. Existing files are not replaced.
         #[arg(long)]
         plan_output: PathBuf,
+        /// Execution consistency contract recorded for review.
+        #[arg(long, value_enum)]
+        consistency: ConsistencyMode,
     },
     /// Execute one reviewed same-dialect PostgreSQL plan into an empty target.
     ExecutePostgres {
@@ -76,11 +85,21 @@ fn main() -> anyhow::Result<()> {
             source_config,
             target_config,
             plan_output,
+            consistency,
         } => {
-            let plan = sql_splitter::migration::postgres::write_live_plan(
+            let consistency = match consistency {
+                ConsistencyMode::ConsistentSnapshot => {
+                    sql_splitter::migration::postgres::PostgresConsistencyMode::ConsistentSnapshot
+                }
+                ConsistencyMode::WriteFence => {
+                    sql_splitter::migration::postgres::PostgresConsistencyMode::WriteFence
+                }
+            };
+            let plan = sql_splitter::migration::postgres::write_live_plan_with_consistency(
                 source_config,
                 target_config,
                 &plan_output,
+                consistency,
             )?;
             println!("plan: {}", plan_output.display());
             println!("plan hash: {}", plan.plan_hash);

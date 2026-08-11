@@ -7,7 +7,30 @@ use serde::{Deserialize, Serialize};
 use super::model::{DbValue, KeyTuple};
 use super::plan::ReviewedPlan;
 
-pub const STATE_SCHEMA_VERSION: u16 = 4;
+pub const STATE_SCHEMA_VERSION: u16 = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ConsistencyEvidence {
+    NativeSnapshot {
+        endpoint_identity: String,
+        database_identity: String,
+        lifecycle_id: String,
+        snapshot_id: String,
+        server_version: String,
+    },
+    WriteFence {
+        generation: String,
+        token_hash: String,
+        endpoint_identity: String,
+        database_oid: u32,
+        system_identifier: String,
+        business_catalog_fingerprint: String,
+        fence_inventory_fingerprint: String,
+        activation_xid: u64,
+        activated_at: String,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,7 +41,7 @@ pub struct ResumeBinding {
     pub tool_version: String,
     pub source_endpoint: String,
     pub target_endpoint: String,
-    pub snapshot_identity: String,
+    pub consistency_evidence: ConsistencyEvidence,
     pub source_schema_fingerprint: String,
     pub target_schema_fingerprint: String,
     pub conversion_policy: String,
@@ -245,7 +268,11 @@ impl MigrationState {
         check!(tool_version);
         check!(source_endpoint);
         check!(target_endpoint);
-        check!(snapshot_identity);
+        if self.binding.consistency_evidence != expected.consistency_evidence {
+            return Err(JournalError::BindingMismatch {
+                field: "consistency_evidence",
+            });
+        }
         check!(source_schema_fingerprint);
         check!(target_schema_fingerprint);
         check!(conversion_policy);
@@ -310,7 +337,6 @@ impl MigrationState {
             ("tool_version", self.binding.tool_version.as_str()),
             ("source_endpoint", self.binding.source_endpoint.as_str()),
             ("target_endpoint", self.binding.target_endpoint.as_str()),
-            ("snapshot_identity", self.binding.snapshot_identity.as_str()),
             (
                 "source_schema_fingerprint",
                 self.binding.source_schema_fingerprint.as_str(),
@@ -324,6 +350,61 @@ impl MigrationState {
             if value.is_empty() {
                 return Err(JournalError::EmptyBindingField { field });
             }
+        }
+        let consistency_fields: Vec<(&'static str, &str)> = match &self.binding.consistency_evidence
+        {
+            ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity,
+                database_identity,
+                lifecycle_id,
+                snapshot_id,
+                server_version,
+            } => vec![
+                ("consistency_endpoint_identity", endpoint_identity),
+                ("consistency_database_identity", database_identity),
+                ("snapshot_lifecycle_id", lifecycle_id),
+                ("snapshot_id", snapshot_id),
+                ("snapshot_server_version", server_version),
+            ],
+            ConsistencyEvidence::WriteFence {
+                generation,
+                token_hash,
+                endpoint_identity,
+                system_identifier,
+                business_catalog_fingerprint,
+                fence_inventory_fingerprint,
+                activated_at,
+                ..
+            } => vec![
+                ("fence_generation", generation),
+                ("fence_token_hash", token_hash),
+                ("consistency_endpoint_identity", endpoint_identity),
+                ("fence_system_identifier", system_identifier),
+                (
+                    "fence_business_catalog_fingerprint",
+                    business_catalog_fingerprint,
+                ),
+                ("fence_inventory_fingerprint", fence_inventory_fingerprint),
+                ("fence_activated_at", activated_at),
+            ],
+        };
+        for (field, value) in consistency_fields {
+            if value.is_empty() {
+                return Err(JournalError::EmptyBindingField { field });
+            }
+        }
+        let consistency_endpoint = match &self.binding.consistency_evidence {
+            ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity, ..
+            }
+            | ConsistencyEvidence::WriteFence {
+                endpoint_identity, ..
+            } => endpoint_identity,
+        };
+        if consistency_endpoint != &self.binding.source_endpoint {
+            return Err(JournalError::BindingMismatch {
+                field: "consistency_endpoint_identity",
+            });
         }
 
         let mut durable_operation_ids = BTreeSet::new();
@@ -828,7 +909,13 @@ mod tests {
             tool_version: "t".into(),
             source_endpoint: "s".into(),
             target_endpoint: "d".into(),
-            snapshot_identity: "x".into(),
+            consistency_evidence: ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity: "s".into(),
+                database_identity: "db".into(),
+                lifecycle_id: "lifecycle".into(),
+                snapshot_id: "x".into(),
+                server_version: "fixture".into(),
+            },
             source_schema_fingerprint: "sf".into(),
             target_schema_fingerprint: "tf".into(),
             conversion_policy: "exact".into(),
@@ -860,12 +947,18 @@ mod tests {
     #[test]
     fn resume_rejects_drift() {
         let mut changed = binding();
-        changed.snapshot_identity = "other".into();
+        changed.consistency_evidence = ConsistencyEvidence::NativeSnapshot {
+            endpoint_identity: "s".into(),
+            database_identity: "db".into(),
+            lifecycle_id: "other".into(),
+            snapshot_id: "other".into(),
+            server_version: "fixture".into(),
+        };
         let state = MigrationState::new(binding());
         assert_eq!(
             state.validate_resume(&changed),
             Err(JournalError::BindingMismatch {
-                field: "snapshot_identity"
+                field: "consistency_evidence"
             })
         );
     }
@@ -1050,5 +1143,50 @@ mod tests {
         state.verify_operation("create-a").unwrap();
         state.commit_prepared_operation("create-b").unwrap();
         state.verify_operation("create-b").unwrap();
+    }
+
+    #[test]
+    fn write_fence_evidence_is_typed_and_endpoint_bound() {
+        let mut binding = binding();
+        binding.consistency_evidence = ConsistencyEvidence::WriteFence {
+            generation: "generation-1".into(),
+            token_hash: "a".repeat(64),
+            endpoint_identity: binding.source_endpoint.clone(),
+            database_oid: 42,
+            system_identifier: "system-1".into(),
+            business_catalog_fingerprint: "b".repeat(64),
+            fence_inventory_fingerprint: "c".repeat(64),
+            activation_xid: 100,
+            activated_at: "2026-08-11T00:00:00Z".into(),
+        };
+        let state = MigrationState::new(binding.clone());
+        state.validate_resume(&binding).unwrap();
+
+        let mut changed = binding.clone();
+        if let ConsistencyEvidence::WriteFence { generation, .. } =
+            &mut changed.consistency_evidence
+        {
+            *generation = "generation-2".into();
+        }
+        assert!(matches!(
+            state.validate_resume(&changed),
+            Err(JournalError::BindingMismatch {
+                field: "consistency_evidence"
+            })
+        ));
+
+        let mut wrong_endpoint = binding;
+        if let ConsistencyEvidence::WriteFence {
+            endpoint_identity, ..
+        } = &mut wrong_endpoint.consistency_evidence
+        {
+            *endpoint_identity = "other".into();
+        }
+        assert!(matches!(
+            MigrationState::new(wrong_endpoint).validate_for_operations([]),
+            Err(JournalError::BindingMismatch {
+                field: "consistency_endpoint_identity"
+            })
+        ));
     }
 }

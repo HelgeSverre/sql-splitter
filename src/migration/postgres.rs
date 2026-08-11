@@ -39,6 +39,22 @@ const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostgresConsistencyMode {
+    ConsistentSnapshot,
+    WriteFence,
+}
+
+impl PostgresConsistencyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConsistentSnapshot => "consistent-snapshot",
+            Self::WriteFence => "write-fence",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostgresEndpointConfig {
@@ -1806,6 +1822,14 @@ pub fn build_plan(
     source: &CatalogSnapshot,
     target: &CatalogSnapshot,
 ) -> Result<ReviewedPlan, PostgresPlanError> {
+    build_plan_with_consistency(source, target, PostgresConsistencyMode::ConsistentSnapshot)
+}
+
+pub fn build_plan_with_consistency(
+    source: &CatalogSnapshot,
+    target: &CatalogSnapshot,
+    consistency_mode: PostgresConsistencyMode,
+) -> Result<ReviewedPlan, PostgresPlanError> {
     let mut operations = Vec::new();
     let mut table_names = BTreeSet::new();
     let mut deferred_objects = Vec::new();
@@ -1908,7 +1932,7 @@ pub fn build_plan(
         target_catalog_fingerprint: catalog_fingerprint(&target.catalog)?,
         source_catalog: Some(source.catalog.clone()),
         target_catalog: Some(target.catalog.clone()),
-        consistency_mode: "postgres_repeatable_read_read_only".into(),
+        consistency_mode: consistency_mode.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_same_dialect_exact".into(),
         capabilities: BTreeMap::from([
@@ -1981,6 +2005,20 @@ pub fn write_live_plan(
     target_config: impl AsRef<Path>,
     output: impl AsRef<Path>,
 ) -> Result<ReviewedPlan, PostgresPlanError> {
+    write_live_plan_with_consistency(
+        source_config,
+        target_config,
+        output,
+        PostgresConsistencyMode::ConsistentSnapshot,
+    )
+}
+
+pub fn write_live_plan_with_consistency(
+    source_config: impl AsRef<Path>,
+    target_config: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    consistency_mode: PostgresConsistencyMode,
+) -> Result<ReviewedPlan, PostgresPlanError> {
     let source_config = PostgresEndpointConfig::read(source_config)?;
     let target_config = PostgresEndpointConfig::read(target_config)?;
     if source_config.credential_env == target_config.credential_env {
@@ -1990,7 +2028,7 @@ pub fn write_live_plan(
     }
     let source = inspect_endpoint(&source_config)?;
     let target = inspect_endpoint(&target_config)?;
-    let plan = build_plan(&source, &target)?;
+    let plan = build_plan_with_consistency(&source, &target, consistency_mode)?;
     write_json_new(output, &plan)?;
     Ok(plan)
 }

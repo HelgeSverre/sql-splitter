@@ -13,8 +13,8 @@ use super::connection::{
 };
 use super::fixture::{InMemorySource, InMemoryTarget};
 use super::journal::{
-    ChunkRecord, ChunkState, MigrationState, PreparedChunkEvidence, PreparedResolution,
-    ResumeBinding,
+    ChunkRecord, ChunkState, ConsistencyEvidence, MigrationState, PreparedChunkEvidence,
+    PreparedResolution, ResumeBinding,
 };
 use super::model::{
     CatalogObjectKind, ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch, VendorCatalog,
@@ -61,6 +61,11 @@ pub fn execute_postgres_plan(
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
     validate_postgres_execution_operations(&reviewed)?;
+    if reviewed.plan.consistency_mode != "consistent-snapshot" {
+        return Err(anyhow!(
+            "reviewed plan requires write-fence evidence, but no durable PostgreSQL fence was supplied"
+        ));
+    }
     let source_config = PostgresEndpointConfig::read(source_config_path)?;
     let target_config = PostgresEndpointConfig::read(target_config_path)?;
     if source_config.credential_env == target_config.credential_env {
@@ -130,7 +135,13 @@ pub fn execute_postgres_plan(
         tool_version: reviewed.plan.tool_version.clone(),
         source_endpoint: snapshot.endpoint_identity.clone(),
         target_endpoint: target_preflight.endpoint_identity,
-        snapshot_identity: format!("{}:{}", snapshot.lifecycle_id, snapshot.snapshot_id),
+        consistency_evidence: ConsistencyEvidence::NativeSnapshot {
+            endpoint_identity: snapshot.endpoint_identity.clone(),
+            database_identity: snapshot.database_identity.clone(),
+            lifecycle_id: snapshot.lifecycle_id.clone(),
+            snapshot_id: snapshot.snapshot_id.clone(),
+            server_version: snapshot.server_version.clone(),
+        },
         source_schema_fingerprint: source_fingerprint,
         target_schema_fingerprint: reviewed.plan.target_catalog_fingerprint.clone(),
         conversion_policy: reviewed.plan.conversion_policy.clone(),
@@ -863,7 +874,13 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         tool_version: reviewed.plan.tool_version.clone(),
         source_endpoint: reviewed.plan.source_endpoint_identity.clone(),
         target_endpoint: reviewed.plan.target_endpoint_identity.clone(),
-        snapshot_identity: snapshot.snapshot_id.clone(),
+        consistency_evidence: ConsistencyEvidence::NativeSnapshot {
+            endpoint_identity: snapshot.endpoint_identity.clone(),
+            database_identity: snapshot.database_identity.clone(),
+            lifecycle_id: snapshot.lifecycle_id.clone(),
+            snapshot_id: snapshot.snapshot_id.clone(),
+            server_version: snapshot.server_version.clone(),
+        },
         source_schema_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
         target_schema_fingerprint: reviewed.plan.target_catalog_fingerprint.clone(),
         conversion_policy: reviewed.plan.conversion_policy.clone(),
@@ -1182,7 +1199,13 @@ mod tests {
             tool_version: "t".into(),
             source_endpoint: "s".into(),
             target_endpoint: "d".into(),
-            snapshot_identity: "snapshot".into(),
+            consistency_evidence: ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity: "s".into(),
+                database_identity: "db".into(),
+                lifecycle_id: "lifecycle".into(),
+                snapshot_id: "snapshot".into(),
+                server_version: "fixture".into(),
+            },
             source_schema_fingerprint: "source".into(),
             target_schema_fingerprint: "target".into(),
             conversion_policy: "exact".into(),
