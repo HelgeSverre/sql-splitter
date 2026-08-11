@@ -95,7 +95,11 @@ override, NULLS NOT DISTINCT behavior, storage options, tablespace, clustering,
 or replica-identity role. The selected key contract is stored in the reviewed
 copy operation. Its typed `CREATE UNIQUE INDEX` operation is part of the atomic
 pre-data intent and is re-attested before resume. Every other standalone index
-form is an explicit execution blocker.
+form is an explicit execution blocker. Ordinary non-unique indexes use the same
+conservative plain-column B-tree subset. They are created after data copy with a
+durable prepared operation before transactional `CREATE INDEX`. Resume accepts
+only absence or an exact semantic match; any different observed index requires
+manual reconciliation.
 
 ## Configuration and security
 
@@ -143,7 +147,7 @@ The adapter does not yet prove:
 
 - complete live rejection and drift matrices for unsupported index forms;
 - the complete fence failure-injection matrix, including legacy storage upgrades;
-- post-data indexes and broader DDL coverage;
+- broader post-data DDL coverage;
 - unsupported foreign-key variants beyond the explicitly modeled subset;
 - complete real-engine acceptance matrices in CI.
 

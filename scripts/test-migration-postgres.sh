@@ -288,6 +288,9 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 test_name=live_standalone_unique_index_is_created_before_copy_and_resumed
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_ordinary_indexes_are_created_after_copy_and_reconciled
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_foreign_keys_are_checked_added_and_database_validated
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

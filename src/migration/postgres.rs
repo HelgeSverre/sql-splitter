@@ -611,6 +611,192 @@ impl PostgresTargetFactory {
         transaction.commit().map_err(database_error)?;
         Ok(PostgresForeignKeyState::ExactValidated)
     }
+
+    /// Inspect one ordinary target index against exact typed source metadata.
+    pub fn inspect_index(&self, index: &PostgresIndex) -> ConnectionResult<PostgresIndexState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        inspect_index(&mut client, index)
+    }
+
+    /// Create an absent ordinary index atomically and require an exact result.
+    pub fn reconcile_index(&self, index: &PostgresIndex) -> ConnectionResult<PostgresIndexState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        match inspect_index(&mut transaction, index)? {
+            PostgresIndexState::Exact => {
+                transaction.commit().map_err(database_error)?;
+                return Ok(PostgresIndexState::Exact);
+            }
+            PostgresIndexState::Different => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "target index {} exists with different semantics",
+                    index.name
+                )));
+            }
+            PostgresIndexState::Absent => {}
+        }
+        transaction
+            .batch_execute(&ordinary_index_create_statement(index))
+            .map_err(database_error)?;
+        if inspect_index(&mut transaction, index)? != PostgresIndexState::Exact {
+            return Err(ConnectionError::InvalidRequest(format!(
+                "target index {} was not created exactly",
+                index.name
+            )));
+        }
+        transaction.commit().map_err(database_error)?;
+        Ok(PostgresIndexState::Exact)
+    }
+}
+
+/// A conservative, portable PostgreSQL ordinary B-tree index contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresIndex {
+    pub catalog_object_id: String,
+    pub name: Identifier,
+    pub table: QualifiedTable,
+    pub columns: Vec<Identifier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresIndexState {
+    Absent,
+    Exact,
+    Different,
+}
+
+/// Parse all supported post-data ordinary indexes from typed catalog metadata.
+pub fn postgres_post_data_indexes(
+    catalog: &VendorCatalog,
+) -> Result<Vec<PostgresIndex>, PostgresPlanError> {
+    if catalog.dialect != "postgresql" {
+        return Err(PostgresPlanError::InvalidConfig(
+            "ordinary-index metadata requires a PostgreSQL catalog",
+        ));
+    }
+    let mut indexes = Vec::new();
+    for namespace in &catalog.namespaces {
+        for object in namespace.objects.iter().filter(|object| {
+            object.kind == CatalogObjectKind::Index
+                && object
+                    .attributes
+                    .get("constraint_oid")
+                    .is_none_or(serde_json::Value::is_null)
+        }) {
+            if object
+                .attributes
+                .get("unique")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            {
+                continue;
+            }
+            let columns = ordinary_index_columns(object, Some(namespace))?;
+            let table =
+                qualified_table_for_oid(catalog, required_catalog_string(object, "table_oid")?)?;
+            indexes.push(PostgresIndex {
+                catalog_object_id: object.id.clone(),
+                name: object.name.clone(),
+                table,
+                columns,
+            });
+        }
+    }
+    indexes.sort_by(|left, right| {
+        left.table
+            .cmp(&right.table)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.catalog_object_id.cmp(&right.catalog_object_id))
+    });
+    Ok(indexes)
+}
+
+fn ordinary_index_create_statement(index: &PostgresIndex) -> String {
+    format!(
+        "CREATE INDEX {} ON {}.{} USING btree ({})",
+        quote_identifier(&index.name),
+        quote_identifier(&index.table.namespace),
+        quote_identifier(&index.table.name),
+        index
+            .columns
+            .iter()
+            .map(quote_identifier)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn inspect_index(
+    client: &mut impl postgres::GenericClient,
+    expected: &PostgresIndex,
+) -> ConnectionResult<PostgresIndexState> {
+    if expected.columns.is_empty() {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "ordinary index {} has no columns",
+            expected.name
+        )));
+    }
+    let occupied_kind = client
+        .query_opt(
+            "SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2",
+            &[&expected.table.namespace.as_str(), &expected.name.as_str()],
+        )
+        .map_err(database_error)?
+        .map(|row| row.get::<_, String>(0));
+    let Some(occupied_kind) = occupied_kind else {
+        return Ok(PostgresIndexState::Absent);
+    };
+    if occupied_kind != "i" && occupied_kind != "I" {
+        return Ok(PostgresIndexState::Different);
+    }
+    let rows = client
+        .query(
+            "SELECT tn.nspname, tc.relname, i.indisunique, i.indisprimary, i.indisvalid, i.indisready, i.indislive, i.indimmediate, i.indisclustered, i.indisreplident, i.indisexclusion, i.indnullsnotdistinct, am.amname, ci.relpersistence::text, ci.reloptions IS NULL, ci.reltablespace = 0, i.indpred IS NULL, i.indexprs IS NULL, i.indnkeyatts, i.indnatts, ARRAY(SELECT a.attname FROM unnest(i.indkey::smallint[]) WITH ORDINALITY k(attnum, ordinality) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum WHERE k.ordinality <= i.indnkeyatts ORDER BY k.ordinality)::text[], NOT EXISTS (SELECT 1 FROM unnest(i.indkey::smallint[]) WITH ORDINALITY k(attnum, ordinality) WHERE k.ordinality > i.indnkeyatts), NOT EXISTS (SELECT 1 FROM unnest(i.indoption::smallint[]) option_value WHERE option_value <> 0), NOT EXISTS (SELECT 1 FROM unnest(i.indclass::oid[]) opclass_oid JOIN pg_opclass opc ON opc.oid=opclass_oid WHERE NOT opc.opcdefault), NOT EXISTS (SELECT 1 FROM unnest(i.indcollation::oid[]) WITH ORDINALITY co(collation_oid, ordinality) JOIN unnest(i.indkey::smallint[]) WITH ORDINALITY k(attnum, ordinality) USING (ordinality) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum WHERE co.collation_oid <> a.attcollation), NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid=i.indexrelid AND con.contype IN ('p','u','x')) FROM pg_class ci JOIN pg_namespace ni ON ni.oid=ci.relnamespace JOIN pg_index i ON i.indexrelid=ci.oid JOIN pg_class tc ON tc.oid=i.indrelid JOIN pg_namespace tn ON tn.oid=tc.relnamespace JOIN pg_am am ON am.oid=ci.relam WHERE ni.nspname=$1 AND ci.relname=$2",
+            &[&expected.table.namespace.as_str(), &expected.name.as_str()],
+        )
+        .map_err(database_error)?;
+    if rows.is_empty() {
+        return Ok(PostgresIndexState::Different);
+    }
+    if rows.len() != 1 {
+        return Ok(PostgresIndexState::Different);
+    }
+    let row = &rows[0];
+    let columns: Vec<String> = row.get(20);
+    let exact = row.get::<_, String>(0) == expected.table.namespace.as_str()
+        && row.get::<_, String>(1) == expected.table.name.as_str()
+        && !row.get::<_, bool>(2)
+        && !row.get::<_, bool>(3)
+        && row.get::<_, bool>(4)
+        && row.get::<_, bool>(5)
+        && row.get::<_, bool>(6)
+        && row.get::<_, bool>(7)
+        && !row.get::<_, bool>(8)
+        && !row.get::<_, bool>(9)
+        && !row.get::<_, bool>(10)
+        && !row.get::<_, bool>(11)
+        && row.get::<_, String>(12) == "btree"
+        && row.get::<_, String>(13) == "p"
+        && (14..=17).all(|column| row.get::<_, bool>(column))
+        && row.get::<_, i16>(18) as usize == expected.columns.len()
+        && row.get::<_, i16>(19) as usize == expected.columns.len()
+        && columns
+            .iter()
+            .map(String::as_str)
+            .eq(expected.columns.iter().map(Identifier::as_str))
+        && (21..=25).all(|column| row.get::<_, bool>(column));
+    Ok(if exact {
+        PostgresIndexState::Exact
+    } else {
+        PostgresIndexState::Different
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1157,6 +1343,9 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
             .collect::<Vec<_>>();
         indexes.sort_by(|left, right| left.name.cmp(&right.name));
         for index in indexes {
+            if ordinary_index_columns(index, Some(namespace)).is_ok() {
+                continue;
+            }
             let columns = standalone_unique_index_columns(index, Some(namespace))
                 .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
             let table_oid = required_catalog_string(index, "table_oid")
@@ -2410,11 +2599,16 @@ fn extract_catalog(
                     .get("constraint_oid")
                     .is_none_or(serde_json::Value::is_null)
         }) {
-            if let Err(error) = standalone_unique_index_columns(object, Some(namespace)) {
+            if let (Err(unique_error), Err(ordinary_error)) = (
+                standalone_unique_index_columns(object, Some(namespace)),
+                ordinary_index_columns(object, Some(namespace)),
+            ) {
                 unsupported.push(UnsupportedObject {
                     object_id: object.id.clone(),
                     object_kind: "standalone_index".into(),
-                    reason: format!("standalone PostgreSQL index is not supported: {error}"),
+                    reason: format!(
+                        "standalone PostgreSQL index is not supported: unique form: {unique_error}; ordinary form: {ordinary_error}"
+                    ),
                     required_semantics: true,
                 });
             }
@@ -2697,6 +2891,7 @@ pub fn build_plan_with_consistency(
     let mut deferred_objects = Vec::new();
     let mut foreign_keys = Vec::new();
     let mut standalone_indexes = Vec::new();
+    let mut post_data_indexes = Vec::new();
     for namespace in &source.catalog.namespaces {
         for object in &namespace.objects {
             if object.kind == CatalogObjectKind::Table {
@@ -2719,6 +2914,14 @@ pub fn build_plan_with_consistency(
                 && standalone_unique_index_columns(object, Some(namespace)).is_ok()
             {
                 standalone_indexes.push((namespace.name.clone(), object.clone()));
+            } else if object.kind == CatalogObjectKind::Index
+                && object
+                    .attributes
+                    .get("constraint_oid")
+                    .is_none_or(serde_json::Value::is_null)
+                && ordinary_index_columns(object, Some(namespace)).is_ok()
+            {
+                post_data_indexes.push((namespace.name.clone(), object.clone()));
             }
         }
     }
@@ -2830,6 +3033,43 @@ pub fn build_plan_with_consistency(
         operations[verify_position] = replacement_verify;
         copy_operations.insert(table, replacement.id);
         operations.push(create_index);
+    }
+    post_data_indexes.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.name.cmp(&right.1.name))
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
+    for (namespace_name, object) in post_data_indexes {
+        let namespace = source
+            .catalog
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.name == namespace_name)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "ordinary index namespace is absent",
+            ))?;
+        let index = PostgresIndex {
+            catalog_object_id: object.id.clone(),
+            name: object.name.clone(),
+            table: qualified_table_for_oid(
+                &source.catalog,
+                required_catalog_string(&object, "table_oid")?,
+            )?,
+            columns: ordinary_index_columns(&object, Some(namespace))?,
+        };
+        let copy = copy_operations
+            .get(&index.table)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "ordinary index table has no copy operation",
+            ))?
+            .clone();
+        operations.push(PlanOperation::new(
+            OperationKind::CreateIndex,
+            Some(index.table.clone()),
+            vec![copy],
+            BTreeMap::from([("postgres_index".into(), serde_json::to_value(index)?)]),
+        )?);
     }
     foreign_keys.sort_by(|left, right| left.id.cmp(&right.id));
     for foreign_key in foreign_keys {
@@ -3101,8 +3341,24 @@ fn standalone_unique_index_columns(
     object: &CatalogObject,
     namespace: Option<&CatalogNamespace>,
 ) -> Result<Vec<Identifier>, PostgresPlanError> {
+    plain_standalone_btree_index_columns(object, namespace, true, true)
+}
+
+fn ordinary_index_columns(
+    object: &CatalogObject,
+    namespace: Option<&CatalogNamespace>,
+) -> Result<Vec<Identifier>, PostgresPlanError> {
+    plain_standalone_btree_index_columns(object, namespace, false, false)
+}
+
+fn plain_standalone_btree_index_columns(
+    object: &CatalogObject,
+    namespace: Option<&CatalogNamespace>,
+    unique: bool,
+    require_non_null: bool,
+) -> Result<Vec<Identifier>, PostgresPlanError> {
     for (attribute, expected) in [
-        ("unique", true),
+        ("unique", unique),
         ("primary", false),
         ("valid", true),
         ("ready", true),
@@ -3210,15 +3466,16 @@ fn standalone_unique_index_columns(
                         .get("table_oid")
                         .and_then(serde_json::Value::as_str)
                         == Some(table_oid)
-                    && !column
-                        .attributes
-                        .get("nullable")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true)
+                    && (!require_non_null
+                        || !column
+                            .attributes
+                            .get("nullable")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true))
             })
         }) {
             return Err(PostgresPlanError::InvalidConfig(
-                "standalone unique index contains a nullable or unknown column",
+                "standalone index contains an unknown column or a disallowed nullable column",
             ));
         }
     }
@@ -3727,6 +3984,101 @@ credential_env = "PGPASSWORD"
                 ("collations_default".into(), serde_json::json!([true])),
                 ("constraint_oid".into(), serde_json::Value::Null),
             ]),
+        }
+    }
+
+    fn ordinary_index(id: &str) -> CatalogObject {
+        let mut index = standalone_index(id);
+        index.name = Identifier::new("accounts_id_idx").unwrap();
+        index.definition =
+            b"CREATE INDEX accounts_id_idx ON public.accounts USING btree (id)".to_vec();
+        index
+            .attributes
+            .insert("unique".into(), serde_json::json!(false));
+        index
+    }
+
+    #[test]
+    fn ordinary_index_is_typed_post_data_operation() {
+        let source_catalog = key_catalog(vec![
+            ordinary_index("index:ordinary"),
+            CatalogObject {
+                id: "constraint:key".into(),
+                kind: CatalogObjectKind::PrimaryKey,
+                name: Identifier::new("accounts_pkey").unwrap(),
+                definition: b"PRIMARY KEY (id)".to_vec(),
+                attributes: BTreeMap::from([
+                    ("table_oid".into(), serde_json::json!("relation:1")),
+                    ("validated".into(), serde_json::json!(true)),
+                    ("columns".into(), serde_json::json!(["id"])),
+                ]),
+            },
+        ]);
+        let indexes = postgres_post_data_indexes(&source_catalog).unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].catalog_object_id, "index:ordinary");
+        assert_eq!(
+            ordinary_index_create_statement(&indexes[0]),
+            "CREATE INDEX \"accounts_id_idx\" ON \"public\".\"accounts\" USING btree (\"id\")"
+        );
+
+        let source = CatalogSnapshot {
+            endpoint_identity: "source".into(),
+            server_version: "17".into(),
+            server_version_num: 170000,
+            catalog: source_catalog,
+            unsupported: UnsupportedObjectReport::default(),
+            tls_binding: "tls-source".into(),
+        };
+        let mut target = snapshot("target", false);
+        target.catalog.format_version = CATALOG_FORMAT_VERSION;
+        let reviewed = build_plan(&source, &target).unwrap();
+        reviewed.validate().unwrap();
+        let create_index = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.parameters.contains_key("postgres_index"))
+            .unwrap();
+        assert_eq!(create_index.kind, OperationKind::CreateIndex);
+        let copy = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CopyTable)
+            .unwrap();
+        assert_eq!(create_index.dependencies, vec![copy.id.clone()]);
+        let planned: PostgresIndex =
+            serde_json::from_value(create_index.parameters["postgres_index"].clone()).unwrap();
+        assert_eq!(planned, indexes[0]);
+    }
+
+    #[test]
+    fn ordinary_index_rejects_non_default_forms() {
+        for (attribute, value) in [
+            ("unique", serde_json::json!(true)),
+            ("access_method", serde_json::json!("hash")),
+            ("predicate", serde_json::json!("id > 0")),
+            ("has_expressions", serde_json::json!(true)),
+            ("included_columns", serde_json::json!(["payload"])),
+            ("options", serde_json::json!([1])),
+            ("reloptions", serde_json::json!(["fillfactor=80"])),
+            ("tablespace", serde_json::json!("fast")),
+            ("clustered", serde_json::json!(true)),
+            ("replica_identity", serde_json::json!(true)),
+            ("nulls_not_distinct", serde_json::json!(true)),
+            (
+                "opclasses",
+                serde_json::json!([{"schema":"public","name":"custom_ops","default":false}]),
+            ),
+            ("collations_default", serde_json::json!([false])),
+        ] {
+            let mut index = ordinary_index("index:bad");
+            index.attributes.insert(attribute.into(), value);
+            assert!(
+                ordinary_index_columns(&index, Some(&key_catalog(Vec::new()).namespaces[0]))
+                    .is_err()
+            );
         }
     }
 

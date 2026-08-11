@@ -973,6 +973,200 @@ fn live_standalone_unique_index_is_created_before_copy_and_resumed() -> anyhow::
     Ok(())
 }
 
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_ordinary_indexes_are_created_after_copy_and_reconciled() -> anyhow::Result<()> {
+    for (suffix, interruption, exists_before_resume, inject_conflict) in [
+        (
+            "prepared",
+            PostgresExecutionInterruption::AfterIndexPrepared,
+            false,
+            false,
+        ),
+        (
+            "committed",
+            PostgresExecutionInterruption::AfterIndexCommitted,
+            true,
+            false,
+        ),
+        (
+            "conflict",
+            PostgresExecutionInterruption::AfterIndexPrepared,
+            false,
+            true,
+        ),
+    ] {
+        run_live_ordinary_index_recovery_case(
+            suffix,
+            interruption,
+            exists_before_resume,
+            inject_conflict,
+        )
+        .with_context(|| format!("ordinary-index recovery case {suffix}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn run_live_ordinary_index_recovery_case(
+    suffix: &str,
+    interruption: PostgresExecutionInterruption,
+    exists_before_resume: bool,
+    inject_conflict: bool,
+) -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = format!("migration_ordinary_index_{suffix}_source");
+    let target_database = format!("migration_ordinary_index_{suffix}_target");
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    target.database.clone_from(&target_database);
+    admin.database.clone_from(&source_database);
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         CREATE TABLE public.accounts (id bigint PRIMARY KEY, tenant_id bigint NOT NULL, name text NOT NULL);
+         CREATE INDEX accounts_tenant_name_idx ON public.accounts USING btree (tenant_id,name);
+         INSERT INTO public.accounts VALUES (1,2,'two'), (2,1,'one'), (3,2,'three');
+         GRANT SELECT ON public.accounts TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    let index_operation = reviewed
+        .plan
+        .operations
+        .iter()
+        .find(|operation| operation.parameters.contains_key("postgres_index"))
+        .ok_or_else(|| anyhow::anyhow!("ordinary index operation is absent"))?;
+    assert_eq!(index_operation.dependencies.len(), 1);
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+    let error = execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-ordinary-index",
+        state_path: &state_path,
+        interruption,
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("injected interruption"),
+        "{error:#}"
+    );
+    let mut target_client = connect(&target)?;
+    let exists: bool = target_client
+        .query_one(
+            "SELECT to_regclass('public.accounts_tenant_name_idx') IS NOT NULL",
+            &[],
+        )?
+        .get(0);
+    assert_eq!(exists, exists_before_resume);
+    if inject_conflict {
+        target_client.batch_execute("CREATE SEQUENCE public.accounts_tenant_name_idx")?;
+    }
+    drop(target_client);
+
+    let resume = resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    );
+    if inject_conflict {
+        let error = resume.unwrap_err();
+        assert!(
+            error.to_string().contains("manual intervention"),
+            "{error:#}"
+        );
+        let state: MigrationState = read_json(&state_path)?;
+        assert_eq!(state.status, MigrationStatus::ManualReconciliationRequired);
+        cleanup.run()?;
+        return Ok(());
+    }
+    resume?;
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    assert!(state.operations.iter().all(|operation| {
+        operation.state == sql_splitter::migration::journal::OperationState::Verified
+    }));
+    let mut target_client = connect(&target)?;
+    let index = target_client.query_one(
+        "SELECT i.indisunique, i.indisvalid, i.indisready,
+                ARRAY(SELECT a.attname::text FROM unnest(i.indkey::smallint[]) WITH ORDINALITY k(attnum,pos) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum ORDER BY k.pos)
+         FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE n.nspname='public' AND c.relname='accounts_tenant_name_idx'",
+        &[],
+    )?;
+    assert!(!index.get::<_, bool>(0));
+    assert!(index.get::<_, bool>(1));
+    assert!(index.get::<_, bool>(2));
+    assert_eq!(
+        index.get::<_, Vec<String>>(3),
+        vec!["tenant_id".to_owned(), "name".to_owned()]
+    );
+    let rows = target_client.query(
+        "SELECT id,tenant_id,name FROM public.accounts ORDER BY id",
+        &[],
+    )?;
+    assert_eq!(
+        rows.iter()
+            .map(|row| (
+                row.get::<_, i64>(0),
+                row.get::<_, i64>(1),
+                row.get::<_, String>(2),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, 2, "two".to_owned()),
+            (2, 1, "one".to_owned()),
+            (3, 2, "three".to_owned()),
+        ]
+    );
+    drop(target_client);
+    cleanup.run()?;
+    Ok(())
+}
+
 #[cfg(feature = "migration-fault-injection")]
 fn run_live_network_commit_response_loss_case(
     suffix: &str,

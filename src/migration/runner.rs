@@ -28,10 +28,10 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
-    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_tls_binding,
-    select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey,
-    PostgresForeignKeyState, PostgresResumableKey, PostgresSourceFactory, PostgresTargetFactory,
-    CATALOG_FORMAT_VERSION,
+    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_post_data_indexes,
+    postgres_tls_binding, select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig,
+    PostgresForeignKey, PostgresForeignKeyState, PostgresIndex, PostgresIndexState,
+    PostgresResumableKey, PostgresSourceFactory, PostgresTargetFactory, CATALOG_FORMAT_VERSION,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
@@ -62,6 +62,8 @@ enum ExecutionInterruption {
     AfterChunkPrepared,
     CommitUnknownAfterApply,
     AfterCommittedChunks(u64),
+    AfterIndexPrepared,
+    AfterIndexCommitted,
     AfterAllVerified,
     BeforeForeignKeyChecks,
     AfterForeignKeyPrepared,
@@ -80,6 +82,8 @@ pub enum PostgresExecutionInterruption {
     AfterChunkPrepared,
     CommitUnknownAfterApply,
     AfterCommittedChunks(u64),
+    AfterIndexPrepared,
+    AfterIndexCommitted,
     AfterAllVerified,
     BeforeForeignKeyChecks,
     AfterForeignKeyPrepared,
@@ -99,6 +103,8 @@ impl From<PostgresExecutionInterruption> for ExecutionInterruption {
             PostgresExecutionInterruption::AfterCommittedChunks(count) => {
                 Self::AfterCommittedChunks(count)
             }
+            PostgresExecutionInterruption::AfterIndexPrepared => Self::AfterIndexPrepared,
+            PostgresExecutionInterruption::AfterIndexCommitted => Self::AfterIndexCommitted,
             PostgresExecutionInterruption::AfterAllVerified => Self::AfterAllVerified,
             PostgresExecutionInterruption::BeforeForeignKeyChecks => Self::BeforeForeignKeyChecks,
             PostgresExecutionInterruption::AfterForeignKeyPrepared => Self::AfterForeignKeyPrepared,
@@ -577,6 +583,15 @@ fn resume_postgres_fenced_plan_internal(
         complete_operation_if_needed(&mut state, verify.id.as_str())?;
         replace_json(state_path, &state)?;
     }
+    process_postgres_indexes(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut state,
+        state_path,
+        None,
+        || attest_exact_fence(&admin_config, &installed, &fence_inventory),
+    )?;
     process_postgres_foreign_keys(
         &reviewed,
         &source_catalog,
@@ -788,10 +803,9 @@ fn execute_postgres_plan_internal(
         .operations
         .iter()
         .filter(|operation| {
-            matches!(
-                operation.kind,
-                OperationKind::CreateTable | OperationKind::CreateIndex
-            )
+            operation.kind == OperationKind::CreateTable
+                || (operation.kind == OperationKind::CreateIndex
+                    && !operation.parameters.contains_key("postgres_index"))
         })
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
@@ -981,6 +995,15 @@ fn execute_postgres_plan_internal(
         state.verify_operation(verify_operation.id.as_str())?;
         replace_json(state_path, &state)?;
     }
+    process_postgres_indexes(
+        &reviewed,
+        &source_catalog,
+        &target,
+        &mut state,
+        state_path,
+        interruption,
+        || attest_fence_if_present(fenced.as_ref()),
+    )?;
     process_postgres_foreign_keys(
         &reviewed,
         &source_catalog,
@@ -1256,10 +1279,9 @@ fn resume_pre_data_schema(
         .operations
         .iter()
         .filter(|operation| {
-            matches!(
-                operation.kind,
-                OperationKind::CreateTable | OperationKind::CreateIndex
-            )
+            operation.kind == OperationKind::CreateTable
+                || (operation.kind == OperationKind::CreateIndex
+                    && !operation.parameters.contains_key("postgres_index"))
         })
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
@@ -1272,7 +1294,11 @@ fn resume_pre_data_schema(
         .all(|state| *state == OperationState::Verified)
     {
         if !target_schema_matches(context.source_catalog, context.target_config)? {
-            return Err(anyhow!("verified pre-data schema differs on resume"));
+            state.require_manual_reconciliation()?;
+            replace_json(state_path, state)?;
+            return Err(anyhow!(
+                "verified pre-data schema differs on resume; manual intervention is required"
+            ));
         }
         return Ok(());
     }
@@ -1360,6 +1386,86 @@ fn target_planned_tables_are_empty(
         }
     }
     Ok(true)
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn process_postgres_indexes(
+    reviewed: &ReviewedPlan,
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+    state: &mut MigrationState,
+    state_path: &Path,
+    interruption: Option<ExecutionInterruption>,
+    mut attest: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let indexes = postgres_post_data_indexes(catalog)?
+        .into_iter()
+        .map(|index| (index.catalog_object_id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for operation in reviewed.plan.operations.iter().filter(|operation| {
+        operation.kind == OperationKind::CreateIndex
+            && operation.parameters.contains_key("postgres_index")
+    }) {
+        let reviewed_index: PostgresIndex = serde_json::from_value(
+            operation
+                .parameters
+                .get("postgres_index")
+                .cloned()
+                .ok_or_else(|| anyhow!("post-data index operation omits postgres_index"))?,
+        )?;
+        let index = indexes
+            .get(&reviewed_index.catalog_object_id)
+            .ok_or_else(|| anyhow!("post-data index operation refers to an unknown index"))?;
+        if index != &reviewed_index || operation.table.as_ref() != Some(&index.table) {
+            return Err(anyhow!(
+                "post-data index operation differs from the reviewed catalog"
+            ));
+        }
+        match operation_state(state, operation.id.as_str())? {
+            OperationState::Pending => {
+                state.prepare_operations_atomic([operation.id.as_str()])?;
+                replace_json(state_path, state)?;
+                interrupt_if(interruption, ExecutionInterruption::AfterIndexPrepared)?;
+            }
+            OperationState::Prepared | OperationState::Verified => {}
+            OperationState::Running | OperationState::Committed => {
+                return Err(anyhow!(
+                    "post-data index operation has an invalid durable state"
+                ));
+            }
+        }
+        attest()?;
+        let observed = match operation_state(state, operation.id.as_str())? {
+            OperationState::Prepared => match target.reconcile_index(index) {
+                Ok(observed) => observed,
+                Err(ConnectionError::InvalidRequest(reason)) => {
+                    state.require_manual_reconciliation()?;
+                    replace_json(state_path, state)?;
+                    return Err(anyhow!(
+                        "index reconciliation requires manual intervention: {reason}"
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            },
+            OperationState::Verified => target.inspect_index(index)?,
+            _ => unreachable!("validated post-data index state"),
+        };
+        interrupt_if(interruption, ExecutionInterruption::AfterIndexCommitted)?;
+        if observed != PostgresIndexState::Exact {
+            state.require_manual_reconciliation()?;
+            replace_json(state_path, state)?;
+            return Err(anyhow!(
+                "target index {} differs from reviewed semantics",
+                index.name
+            ));
+        }
+        if operation_state(state, operation.id.as_str())? == OperationState::Prepared {
+            state.commit_prepared_operation(operation.id.as_str())?;
+            state.verify_operation(operation.id.as_str())?;
+            replace_json(state_path, state)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1939,7 +2045,7 @@ fn target_schema_matches(
 
 fn schema_projection(
     catalog: &VendorCatalog,
-    include_foreign_keys: bool,
+    include_post_data_objects: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let table_names = catalog
         .namespaces
@@ -1974,8 +2080,14 @@ fn schema_projection(
                     && object
                         .attributes
                         .get("constraint_oid")
-                        .is_none_or(serde_json::Value::is_null))
-                    || (include_foreign_keys && object.kind == CatalogObjectKind::ForeignKey)
+                        .is_none_or(serde_json::Value::is_null)
+                    && (include_post_data_objects
+                        || object
+                            .attributes
+                            .get("unique")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)))
+                    || (include_post_data_objects && object.kind == CatalogObjectKind::ForeignKey)
             })
             .map(|object| {
                 let definition = String::from_utf8(object.definition.clone())
