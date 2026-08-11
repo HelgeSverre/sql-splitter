@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Context;
-use native_tls::{Certificate, TlsConnector};
+use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::config::SslMode;
 use postgres::{Client, Config};
 use postgres_native_tls::MakeTlsConnector;
@@ -21,12 +21,12 @@ use sql_splitter::migration::model::{
     QualifiedTable, VendorCatalog,
 };
 use sql_splitter::migration::plan::ReviewedPlan;
-#[cfg(feature = "migration-fault-injection")]
-use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
 use sql_splitter::migration::postgres::{
-    write_live_plan, write_live_plan_with_consistency, PostgresConsistencyMode,
+    inspect_endpoint, write_live_plan, write_live_plan_with_consistency, PostgresConsistencyMode,
     PostgresEndpointConfig, PostgresSourceFactory,
 };
+#[cfg(feature = "migration-fault-injection")]
+use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, InstalledPostgresFence,
 };
@@ -62,6 +62,29 @@ fn live_plan_is_read_only_self_contained_and_deterministic() -> anyhow::Result<(
             .all(|namespace| namespace.objects.is_empty())));
     assert!(!first.plan.operations.is_empty());
     assert_eq!(read_json::<ReviewedPlan>(first_path)?, first);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires PostgreSQL configured to require a trusted client certificate"]
+fn live_mutual_tls_requires_valid_client_identity() -> anyhow::Result<()> {
+    let config_path = required_path("SQL_SPLITTER_PG_MTLS_CONFIG")?;
+    let config = PostgresEndpointConfig::read(config_path)?;
+    let snapshot = inspect_endpoint(&config)?;
+    assert!(snapshot.tls_binding.starts_with("hostname_verified+mtls;"));
+
+    let mut missing_identity = config.clone();
+    missing_identity.tls.client_certificate = None;
+    missing_identity.tls.client_private_key = None;
+    assert!(inspect_endpoint(&missing_identity).is_err());
+
+    let mut wrong_ca = config;
+    wrong_ca.tls.ca_certificate = Some(
+        required_path("SQL_SPLITTER_PG_ROGUE_CA")?
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert!(inspect_endpoint(&wrong_ca).is_err());
     Ok(())
 }
 
@@ -939,6 +962,15 @@ fn connect(config: &PostgresEndpointConfig) -> anyhow::Result<Client> {
     let mut tls = TlsConnector::builder();
     if let Some(path) = &config.tls.ca_certificate {
         tls.add_root_certificate(Certificate::from_pem(&std::fs::read(path)?)?);
+    }
+    if let (Some(certificate_path), Some(key_path)) = (
+        &config.tls.client_certificate,
+        &config.tls.client_private_key,
+    ) {
+        tls.identity(Identity::from_pkcs8(
+            &std::fs::read(certificate_path)?,
+            &std::fs::read(key_path)?,
+        )?);
     }
     if config.tls.insecure {
         tls.danger_accept_invalid_certs(true)

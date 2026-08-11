@@ -7,9 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use native_tls::{Certificate, TlsConnector};
+use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::config::SslMode;
 use postgres::types::{FromSql, IsNull, ToSql, Type};
 use postgres::{CancelToken, Client, Config, IsolationLevel};
@@ -80,6 +83,10 @@ pub struct PostgresTlsConfig {
     #[serde(default)]
     pub ca_certificate: Option<String>,
     #[serde(default)]
+    pub client_certificate: Option<String>,
+    #[serde(default)]
+    pub client_private_key: Option<String>,
+    #[serde(default)]
     pub insecure: bool,
 }
 
@@ -111,6 +118,10 @@ pub enum PostgresPlanError {
     MissingCredential(String),
     #[error("cannot read configured CA certificate")]
     ReadCa(#[source] std::io::Error),
+    #[error("cannot read configured TLS client certificate")]
+    ReadClientCertificate(#[source] std::io::Error),
+    #[error("cannot read configured TLS client private key")]
+    ReadClientPrivateKey(#[source] std::io::Error),
     #[error("invalid TLS configuration")]
     Tls(#[from] native_tls::Error),
     #[error("PostgreSQL operation failed")]
@@ -133,7 +144,7 @@ impl PostgresEndpointConfig {
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), PostgresPlanError> {
+    pub(crate) fn validate(&self) -> Result<(), PostgresPlanError> {
         if self.host.trim().is_empty() {
             return Err(PostgresPlanError::InvalidConfig("host must not be empty"));
         }
@@ -160,10 +171,19 @@ impl PostgresEndpointConfig {
                 "max_batch_rows and max_batch_bytes must be positive",
             ));
         }
+        if self.tls.client_certificate.is_some() != self.tls.client_private_key.is_some() {
+            return Err(PostgresPlanError::InvalidConfig(
+                "client_certificate and client_private_key must be configured together",
+            ));
+        }
+        if let Some(path) = &self.tls.client_private_key {
+            validate_client_private_key(Path::new(path))?;
+        }
         Ok(())
     }
 
     fn connect(&self) -> Result<Client, PostgresPlanError> {
+        self.validate()?;
         let password = std::env::var(&self.credential_env)
             .map_err(|_| PostgresPlanError::MissingCredential(self.credential_env.clone()))?;
         let mut config = Config::new();
@@ -186,12 +206,72 @@ impl PostgresEndpointConfig {
             let pem = fs::read(path).map_err(PostgresPlanError::ReadCa)?;
             tls.add_root_certificate(Certificate::from_pem(&pem)?);
         }
+        if let (Some(certificate_path), Some(key_path)) =
+            (&self.tls.client_certificate, &self.tls.client_private_key)
+        {
+            let certificate =
+                fs::read(certificate_path).map_err(PostgresPlanError::ReadClientCertificate)?;
+            let private_key =
+                fs::read(key_path).map_err(PostgresPlanError::ReadClientPrivateKey)?;
+            tls.identity(Identity::from_pkcs8(&certificate, &private_key)?);
+        }
         if self.tls.insecure {
             tls.danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true);
         }
         Ok(MakeTlsConnector::new(tls.build()?))
     }
+}
+
+fn validate_client_private_key(path: &Path) -> Result<(), PostgresPlanError> {
+    let metadata = fs::symlink_metadata(path).map_err(PostgresPlanError::ReadClientPrivateKey)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(PostgresPlanError::InvalidConfig(
+            "TLS client private key must be a regular file and not a symlink",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no arguments and only reads process credentials.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(PostgresPlanError::InvalidConfig(
+                "TLS client private key must be owned by the current user with mode 0600",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn postgres_tls_binding(
+    config: &PostgresEndpointConfig,
+) -> Result<String, PostgresPlanError> {
+    config.validate()?;
+    let policy = match (config.tls.insecure, config.tls.client_certificate.is_some()) {
+        (true, true) => "insecure_explicit+mtls",
+        (true, false) => "insecure_explicit",
+        (false, true) => "hostname_verified+mtls",
+        (false, false) => "hostname_verified",
+    };
+    let roots = match &config.tls.ca_certificate {
+        Some(path) => format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(
+                fs::read(path).map_err(PostgresPlanError::ReadCa)?
+            ))
+        ),
+        None => "platform".into(),
+    };
+    let client = match &config.tls.client_certificate {
+        Some(path) => format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(
+                fs::read(path).map_err(PostgresPlanError::ReadClientCertificate)?
+            ))
+        ),
+        None => "none".into(),
+    };
+    Ok(format!("{policy};roots={roots};client={client}"))
 }
 
 struct PendingSnapshot {
@@ -1843,7 +1923,7 @@ pub struct CatalogSnapshot {
     pub server_version_num: i32,
     pub catalog: VendorCatalog,
     pub unsupported: UnsupportedObjectReport,
-    pub tls_insecure: bool,
+    pub tls_binding: String,
 }
 
 pub fn inspect_endpoint(
@@ -1880,7 +1960,7 @@ pub fn inspect_endpoint(
         server_version_num,
         catalog,
         unsupported,
-        tls_insecure: config.tls.insecure,
+        tls_binding: postgres_tls_binding(config)?,
     })
 }
 
@@ -2550,24 +2630,8 @@ pub fn build_plan_with_consistency(
                 "catalog_snapshot".into(),
                 "repeatable_read_read_only".into(),
             ),
-            (
-                "source_tls".into(),
-                if source.tls_insecure {
-                    "insecure_explicit"
-                } else {
-                    "hostname_verified"
-                }
-                .into(),
-            ),
-            (
-                "target_tls".into(),
-                if target.tls_insecure {
-                    "insecure_explicit"
-                } else {
-                    "hostname_verified"
-                }
-                .into(),
-            ),
+            ("source_tls".into(), source.tls_binding.clone()),
+            ("target_tls".into(), target.tls_binding.clone()),
         ]),
         operations,
         unsupported_objects: unsupported,
@@ -2723,7 +2787,7 @@ mod tests {
                 vendor_metadata: BTreeMap::new(),
             },
             unsupported: UnsupportedObjectReport::default(),
-            tls_insecure: false,
+            tls_binding: "hostname_verified;roots=platform;client=none".into(),
         }
     }
 
@@ -2752,6 +2816,61 @@ credential_env = "PGPASSWORD"
         .unwrap();
         assert!(!parsed.tls.insecure);
         assert_eq!(parsed.port, 5432);
+    }
+
+    #[test]
+    fn client_certificate_and_private_key_are_an_atomic_policy() {
+        let certificate_only = r#"
+host = "db.example.com"
+database = "app"
+user = "reader"
+credential_env = "PGPASSWORD"
+
+[tls]
+client_certificate = "/cert.pem"
+"#;
+        let config: PostgresEndpointConfig = toml::from_str(certificate_only).unwrap();
+        assert!(config.validate().is_err());
+
+        let mutual_tls = r#"
+host = "db.example.com"
+database = "app"
+user = "reader"
+credential_env = "PGPASSWORD"
+
+[tls]
+client_certificate = "/cert.pem"
+client_private_key = "/key.pem"
+"#;
+        let config: PostgresEndpointConfig = toml::from_str(mutual_tls).unwrap();
+        assert!(config.tls.client_certificate.is_some());
+        assert!(config.tls.client_private_key.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directly_constructed_config_rejects_unprotected_client_key() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("client.pem");
+        let key = directory.path().join("client-key.pem");
+        fs::write(&certificate, b"certificate").unwrap();
+        fs::write(&key, b"private-key").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut config: PostgresEndpointConfig = toml::from_str(
+            r#"
+host = "db.example.com"
+database = "app"
+user = "reader"
+credential_env = "PGPASSWORD"
+"#,
+        )
+        .unwrap();
+        config.tls.client_certificate = Some(certificate.to_string_lossy().into_owned());
+        config.tls.client_private_key = Some(key.to_string_lossy().into_owned());
+
+        assert!(postgres_tls_binding(&config).is_err());
     }
 
     #[test]

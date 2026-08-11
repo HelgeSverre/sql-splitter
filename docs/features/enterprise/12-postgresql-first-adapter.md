@@ -51,7 +51,8 @@ TLS-enabled source and empty target databases. The reproducible
 `just migration-postgres-live <version>` test creates a disposable TLS container
 and verifies snapshot stability during concurrent writes, native query
 cancellation, source-role write rejection, create-only DDL and empty-target
-rechecks, identity-value insertion, and exact binary-protocol round trips for
+rechecks, trusted client-certificate authentication, missing-client-certificate
+and wrong-CA rejection, identity-value insertion, and exact binary-protocol round trips for
 text, bytes, floats, JSONB, numeric, and temporal values. It also executes and
 strictly finalizes a three-row reviewed plan. The write-fence test installs
 database-side DML and DDL guards, exits the installer, restarts PostgreSQL,
@@ -79,9 +80,14 @@ password or connection URL. Certificate and hostname verification are enabled
 by default. An explicit `tls.insecure = true` setting is recorded as an
 insecure capability in the plan.
 
-The first connector supports platform roots and an additional PEM CA
-certificate. Client-certificate authentication is deferred and must be added
-before an environment that requires mTLS can be supported.
+The connector supports platform roots, an additional PEM CA certificate, and
+PEM client-certificate authentication with a PKCS#8 private key. The client
+certificate and key are an atomic configuration pair. On Unix, the key must be
+a current-user-owned regular file with no group or world access; symlinks and
+permissive modes fail before a connection. Reviewed plans bind source and target TLS
+mode, trust-root certificate digest, and client-certificate digest. Fence
+artifacts separately bind the administration TLS values, so execution and
+resume reject authentication downgrades or certificate replacement.
 
 Example:
 
@@ -95,6 +101,8 @@ connect_timeout_seconds = 10
 
 [tls]
 ca_certificate = "/etc/sql-splitter/source-ca.pem"
+client_certificate = "/etc/sql-splitter/source-client.pem"
+client_private_key = "/etc/sql-splitter/source-client-key.pem"
 insecure = false
 ```
 

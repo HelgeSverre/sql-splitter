@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use native_tls::{Certificate, TlsConnector};
+use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::config::SslMode;
 use postgres::{Client, Config, Transaction};
 use postgres_native_tls::MakeTlsConnector;
@@ -22,7 +22,9 @@ use super::artifact::write_json_new;
 use super::journal::ConsistencyEvidence;
 use super::model::{CatalogObjectKind, QualifiedTable, VendorCatalog};
 use super::plan::{OperationKind, ReviewedPlan, UnsupportedObjectReport};
-use super::postgres::{catalog_fingerprint, inspect_endpoint, PostgresEndpointConfig};
+use super::postgres::{
+    catalog_fingerprint, inspect_endpoint, postgres_tls_binding, PostgresEndpointConfig,
+};
 
 const FENCE_SCHEMA: &str = "sql_splitter_migration_fence";
 const REGISTRY_TABLE: &str = "registry";
@@ -31,6 +33,7 @@ const DML_FUNCTION: &str = "reject_source_writes";
 const DDL_FUNCTION: &str = "reject_source_ddl";
 const DDL_TRIGGER: &str = "sql_splitter_migration_fence_ddl";
 const FENCE_FORMAT_VERSION: i32 = 1;
+pub(crate) const POSTGRES_FENCE_ARTIFACT_VERSION: u32 = 2;
 const DML_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source is protected by sql-splitter migration write fence'; END";
 const DDL_FUNCTION_BODY: &str = "BEGIN IF EXISTS (SELECT 1 FROM sql_splitter_migration_fence.registry WHERE singleton AND state = 'Released' AND admin_role = session_user) THEN RETURN; END IF; RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source DDL is protected by sql-splitter migration write fence'; END";
 
@@ -68,8 +71,12 @@ impl FenceToken {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledPostgresFence {
+    #[serde(default)]
+    pub format_version: u32,
     pub token: FenceToken,
     pub evidence: ConsistencyEvidence,
+    #[serde(default)]
+    pub admin_tls_binding: Option<String>,
 }
 
 impl std::fmt::Debug for InstalledPostgresFence {
@@ -130,6 +137,10 @@ pub enum PostgresFenceError {
     MissingCredential(String),
     #[error("cannot read configured CA certificate")]
     ReadCa(#[source] std::io::Error),
+    #[error("cannot read configured TLS client certificate")]
+    ReadClientCertificate(#[source] std::io::Error),
+    #[error("cannot read configured TLS client private key")]
+    ReadClientPrivateKey(#[source] std::io::Error),
     #[error("invalid TLS configuration")]
     Tls(#[from] native_tls::Error),
     #[error("PostgreSQL fence operation failed")]
@@ -159,6 +170,11 @@ pub fn install_postgres_write_fence(
     artifact_path: impl AsRef<Path>,
 ) -> Result<InstalledPostgresFence, PostgresFenceError> {
     reviewed.validate()?;
+    if admin.tls.insecure {
+        return Err(PostgresFenceError::Attestation(
+            "fence administration requires authenticated TLS",
+        ));
+    }
     if reviewed.plan.consistency_mode != "write-fence" {
         return Err(PostgresFenceError::WrongConsistencyMode);
     }
@@ -235,7 +251,9 @@ pub fn install_postgres_write_fence(
     )?;
     append_history(&mut transaction, &generation, "Draining")?;
     let installed = InstalledPostgresFence {
+        format_version: POSTGRES_FENCE_ARTIFACT_VERSION,
         token,
+        admin_tls_binding: Some(postgres_tls_binding(admin).map_err(PostgresFenceError::Catalog)?),
         evidence: ConsistencyEvidence::WriteFence {
             generation: generation.clone(),
             token_hash: token_hash.clone(),
@@ -615,6 +633,11 @@ fn planned_tables(reviewed: &ReviewedPlan) -> Result<Vec<QualifiedTable>, Postgr
 }
 
 fn connect_admin(config: &PostgresEndpointConfig) -> Result<Client, PostgresFenceError> {
+    if config.tls.insecure {
+        return Err(PostgresFenceError::Attestation(
+            "fence administration requires authenticated TLS",
+        ));
+    }
     let password = std::env::var(&config.credential_env)
         .map_err(|_| PostgresFenceError::MissingCredential(config.credential_env.clone()))?;
     let mut postgres = Config::new();
@@ -631,10 +654,20 @@ fn connect_admin(config: &PostgresEndpointConfig) -> Result<Client, PostgresFenc
 }
 
 fn tls_connector(config: &PostgresEndpointConfig) -> Result<MakeTlsConnector, PostgresFenceError> {
+    config.validate().map_err(PostgresFenceError::Catalog)?;
     let mut tls = TlsConnector::builder();
     if let Some(path) = &config.tls.ca_certificate {
         let pem = fs::read(path).map_err(PostgresFenceError::ReadCa)?;
         tls.add_root_certificate(Certificate::from_pem(&pem)?);
+    }
+    if let (Some(certificate_path), Some(key_path)) = (
+        &config.tls.client_certificate,
+        &config.tls.client_private_key,
+    ) {
+        let certificate =
+            fs::read(certificate_path).map_err(PostgresFenceError::ReadClientCertificate)?;
+        let private_key = fs::read(key_path).map_err(PostgresFenceError::ReadClientPrivateKey)?;
+        tls.identity(Identity::from_pkcs8(&certificate, &private_key)?);
     }
     if config.tls.insecure {
         tls.danger_accept_invalid_certs(true)
@@ -1187,6 +1220,55 @@ mod tests {
         assert!(ids.contains("routine-acl:5"));
         assert!(!ids.contains("relation-acl:5"));
         assert!(!ids.contains("event-trigger:5"));
+    }
+
+    #[test]
+    fn legacy_fence_artifact_remains_readable_for_explicit_recovery() {
+        let artifact = InstalledPostgresFence {
+            format_version: POSTGRES_FENCE_ARTIFACT_VERSION,
+            token: FenceToken::generate(),
+            evidence: ConsistencyEvidence::NativeSnapshot {
+                endpoint_identity: "source".into(),
+                database_identity: "database".into(),
+                lifecycle_id: "lifecycle".into(),
+                snapshot_id: "snapshot".into(),
+                server_version: "17".into(),
+            },
+            admin_tls_binding: Some("binding".into()),
+        };
+        let mut value = serde_json::to_value(artifact).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("format_version");
+        object.remove("admin_tls_binding");
+
+        let legacy: InstalledPostgresFence = serde_json::from_value(value).unwrap();
+
+        assert_eq!(legacy.format_version, 0);
+        assert!(legacy.admin_tls_binding.is_none());
+        assert!(!legacy.token.expose_secret().is_empty());
+    }
+
+    #[test]
+    fn fence_admin_rejects_insecure_tls_before_reading_credentials() {
+        let mut config: PostgresEndpointConfig = toml::from_str(
+            r#"
+host = "127.0.0.1"
+database = "source"
+user = "admin"
+credential_env = "SQL_SPLITTER_TEST_MISSING_ADMIN_PASSWORD"
+
+[tls]
+insecure = true
+"#,
+        )
+        .unwrap();
+        config.connect_timeout_seconds = 1;
+        assert!(matches!(
+            connect_admin(&config),
+            Err(PostgresFenceError::Attestation(
+                "fence administration requires authenticated TLS"
+            ))
+        ));
     }
 
     #[test]

@@ -28,14 +28,14 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
-    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, PostgresConsistencyMode,
-    PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState, PostgresSourceFactory,
-    PostgresTargetFactory,
+    catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_tls_binding,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
+    PostgresSourceFactory, PostgresTargetFactory,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
     attest_postgres_write_fence, postgres_write_fence_is_released, release_postgres_write_fence,
-    remove_attested_fence_objects, InstalledPostgresFence,
+    remove_attested_fence_objects, InstalledPostgresFence, POSTGRES_FENCE_ARTIFACT_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +273,8 @@ fn resume_postgres_fenced_plan_internal(
     }
     let source_config = PostgresEndpointConfig::read(source_config_path)?;
     let target_config = PostgresEndpointConfig::read(target_config_path)?;
+    validate_reviewed_tls(&reviewed, "source_tls", &source_config)?;
+    validate_reviewed_tls(&reviewed, "target_tls", &target_config)?;
     let admin_config = PostgresEndpointConfig::read(fence_admin_config_path)?;
     validate_separate_postgres_credentials(&source_config, &target_config, &admin_config)?;
     validate_reviewed_tls(&reviewed, "source_tls", &source_config)?;
@@ -282,6 +284,7 @@ fn resume_postgres_fenced_plan_internal(
             "fence administration cannot resume with insecure TLS"
         ));
     }
+    validate_fence_tls_binding(&installed, &admin_config)?;
     if postgres_write_fence_is_released(&admin_config, &installed.evidence)? {
         let mut completed = state.clone();
         completed.finalize().context(
@@ -629,6 +632,9 @@ fn execute_postgres_plan_internal(
         ("consistent-snapshot", None) => None,
         ("write-fence", Some((admin_path, artifact_path))) => {
             let admin = PostgresEndpointConfig::read(admin_path)?;
+            if admin.tls.insecure {
+                return Err(anyhow!("fence administration requires authenticated TLS"));
+            }
             if [
                 source_config.credential_env.as_str(),
                 target_config.credential_env.as_str(),
@@ -640,6 +646,7 @@ fn execute_postgres_plan_internal(
                 ));
             }
             let installed: InstalledPostgresFence = read_json(artifact_path)?;
+            validate_fence_tls_binding(&installed, &admin)?;
             let inventory = attest_postgres_write_fence(&admin, &installed.evidence)?;
             Some((admin, installed, inventory))
         }
@@ -1116,13 +1123,30 @@ fn validate_reviewed_tls(
         .capabilities
         .get(capability)
         .ok_or_else(|| anyhow!("reviewed plan omits {capability}"))?;
-    let observed = if config.tls.insecure {
-        "insecure_explicit"
-    } else {
-        "hostname_verified"
-    };
-    if expected != observed {
+    let observed = postgres_tls_binding(config)?;
+    if expected != &observed {
         return Err(anyhow!("{capability} differs from the reviewed TLS policy"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn validate_fence_tls_binding(
+    installed: &InstalledPostgresFence,
+    config: &PostgresEndpointConfig,
+) -> anyhow::Result<()> {
+    let expected = installed.admin_tls_binding.as_ref().ok_or_else(|| {
+        anyhow!(
+            "legacy fence artifact has no TLS binding; automatic execution is refused, but authenticated explicit fence release remains available"
+        )
+    })?;
+    if installed.format_version != POSTGRES_FENCE_ARTIFACT_VERSION {
+        return Err(anyhow!("unsupported fence artifact format version"));
+    }
+    if expected != &postgres_tls_binding(config)? {
+        return Err(anyhow!(
+            "fence administration TLS policy differs from the installed fence artifact"
+        ));
     }
     Ok(())
 }
@@ -2530,6 +2554,53 @@ mod tests {
             &endpoint("ADMIN")
         )
         .is_ok());
+    }
+
+    #[cfg(feature = "enterprise-migration-spike")]
+    #[test]
+    fn reviewed_tls_policy_rejects_downgrade_and_authentication_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("certificate.pem");
+        let private_key = directory.path().join("private-key.pem");
+        std::fs::write(&certificate, b"certificate-a").unwrap();
+        std::fs::write(&private_key, b"private-key").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut config = endpoint("SOURCE");
+        config.tls.client_certificate = Some(certificate.to_string_lossy().into_owned());
+        config.tls.client_private_key = Some(private_key.to_string_lossy().into_owned());
+        let binding = postgres_tls_binding(&config).unwrap();
+        let reviewed = ReviewedPlan::new(MigrationPlan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            migration_id: "tls-policy".into(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+            source_endpoint_identity: "source".into(),
+            target_endpoint_identity: "target".into(),
+            source_catalog_fingerprint: "source-catalog".into(),
+            target_catalog_fingerprint: "target-catalog".into(),
+            source_catalog: None,
+            target_catalog: None,
+            consistency_mode: "write-fence".into(),
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+            conversion_policy: "exact".into(),
+            capabilities: BTreeMap::from([("source_tls".into(), binding)]),
+            operations: Vec::new(),
+            unsupported_objects: UnsupportedObjectReport::default(),
+        })
+        .unwrap();
+        validate_reviewed_tls(&reviewed, "source_tls", &config).unwrap();
+        let replacement = directory.path().join("replacement.pem");
+        std::fs::write(&replacement, b"certificate-b").unwrap();
+        config.tls.client_certificate = Some(replacement.to_string_lossy().into_owned());
+        assert!(validate_reviewed_tls(&reviewed, "source_tls", &config).is_err());
+        config.tls.client_certificate = None;
+        config.tls.client_private_key = None;
+        assert!(validate_reviewed_tls(&reviewed, "source_tls", &config).is_err());
+        config.tls.insecure = true;
+        assert!(validate_reviewed_tls(&reviewed, "source_tls", &config).is_err());
     }
 
     #[cfg(feature = "enterprise-migration-spike")]
