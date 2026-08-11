@@ -8,8 +8,9 @@
 > PostgreSQL runner and a durable database-side source write fence for the
 > currently supported table subset. The fence survives a PostgreSQL restart,
 > is re-attested before each execution stage, and is released only after strict
-> verification. It does not implement FK validation, complete resume
-> orchestration, or production
+> verification. It can resume the narrow supported PostgreSQL table path from
+> its embedded reviewed plan after a durable committed-chunk interruption. It
+> does not implement FK validation, the complete crash matrix, or production
 > recovery, and it does not satisfy the complete real-engine acceptance
 > gates in [08](./08-implementation-prerequisites.md).
 >
@@ -17,8 +18,8 @@
 > session, create-only pre-data DDL transaction, transactional plain-INSERT
 > writer, read-only target verifier, strict finalization path, and explicit
 > fence install/attest/release operations are available as internal spike
-> contracts. A feature-gated spike command can execute this narrow path. There
-> is no resume command. See
+> contracts. A feature-gated spike command can execute and resume this narrow
+> path. See
 > [12](./12-postgresql-first-adapter.md) for the exact boundary and support
 > matrix.
 

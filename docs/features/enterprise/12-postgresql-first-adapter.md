@@ -15,8 +15,9 @@ tables, columns, primary keys, unique constraints, and check constraints.
 The feature-gated spike CLI can execute a reviewed same-dialect plan for the
 supported table subset. It durably records operation and chunk transitions,
 uses bounded keyset pages, and performs exact source/target verification before
-finalization. It is not production-ready. There is no resume command, foreign-
-key installation, or complete crash-reconciliation path. Sequences, generated
+finalization. It can resume the implemented table subset from protected state
+under an exactly re-attested write fence. It is not production-ready. There is
+no foreign-key installation or complete crash-reconciliation matrix. Sequences, generated
 columns, user-defined types, extensions, and other unsupported semantics fail
 before DDL.
 
@@ -52,7 +53,9 @@ strictly finalizes a three-row reviewed plan. The write-fence test installs
 database-side DML and DDL guards, exits the installer, restarts PostgreSQL,
 re-attests exact object identities and guard definitions, executes into a
 separate target, and releases the fence after durable completion. This is spike
-evidence, not a production support statement.
+evidence, not a production support statement. The same matrix injects an
+interruption after a durable committed chunk, resumes from the recorded key,
+re-runs exact final row verification, and proves that no row is duplicated.
 
 ## Configuration and security
 
@@ -92,7 +95,7 @@ the complete report.
 The adapter does not yet prove:
 
 - complete table-key suitability and pagination matrices;
-- full journal resume under the implemented durable write fence;
+- resume coverage at every DDL, chunk, verification, and release boundary;
 - fence generation rollover and the complete fence failure-injection matrix;
 - post-data indexes and broader DDL coverage;
 - foreign-key anti-joins and constraint validation;

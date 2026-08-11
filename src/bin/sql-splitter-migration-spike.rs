@@ -100,6 +100,23 @@ enum Command {
         #[arg(long, requires = "fence_admin_config")]
         fence_artifact: Option<PathBuf>,
     },
+    /// Resume only the intent embedded in an existing write-fenced state artifact.
+    ResumePostgres {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        fence_admin_config: PathBuf,
+        #[arg(long)]
+        fence_artifact: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -244,6 +261,29 @@ fn main() -> anyhow::Result<()> {
                 )?,
                 _ => unreachable!("clap requires both fence arguments"),
             };
+            println!("state: {}", report.state.display());
+            println!("copied rows: {}", report.copied_rows);
+            println!("committed chunks: {}", report.committed_chunks);
+        }
+        Command::ResumePostgres {
+            state,
+            source_config,
+            target_config,
+            fence_admin_config,
+            fence_artifact,
+            execute,
+            strict_verification,
+        } => {
+            if !execute || !strict_verification {
+                anyhow::bail!("--execute and --strict-verification are required");
+            }
+            let report = sql_splitter::migration::runner::resume_postgres_fenced_plan(
+                &state,
+                source_config,
+                target_config,
+                fence_admin_config,
+                fence_artifact,
+            )?;
             println!("state: {}", report.state.display());
             println!("copied rows: {}", report.copied_rows);
             println!("committed chunks: {}", report.committed_chunks);

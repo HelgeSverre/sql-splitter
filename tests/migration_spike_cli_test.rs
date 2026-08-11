@@ -14,6 +14,10 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("EXPERIMENTAL SPIKE"));
     assert!(help.contains("plan-postgres"));
     assert!(help.contains("execute-postgres"));
+    assert!(help.contains("fence-install-postgres"));
+    assert!(help.contains("fence-attest-postgres"));
+    assert!(help.contains("fence-release-postgres"));
+    assert!(help.contains("resume-postgres"));
     assert!(!help.contains("--password"));
     assert!(!help.contains("--database-url"));
 
@@ -25,6 +29,66 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn resume_consumes_state_and_endpoint_evidence_only() {
+    let output = spike()
+        .args(["resume-postgres", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "--state",
+        "--source-config",
+        "--target-config",
+        "--fence-admin-config",
+        "--fence-artifact",
+        "--execute",
+        "--strict-verification",
+    ] {
+        assert!(help.contains(required));
+    }
+    assert!(!help.contains("--plan-input"));
+    assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn mutating_fence_commands_require_explicit_authorization() {
+    let install = spike()
+        .args([
+            "fence-install-postgres",
+            "--plan-input",
+            "plan.json",
+            "--fence-admin-config",
+            "admin.toml",
+            "--fence-artifact",
+            "fence.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!install.status.success());
+    assert!(String::from_utf8(install.stderr)
+        .unwrap()
+        .contains("--execute"));
+
+    let release = spike()
+        .args([
+            "fence-release-postgres",
+            "--fence-admin-config",
+            "admin.toml",
+            "--fence-artifact",
+            "fence.json",
+            "--approval-ref",
+            "change-1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!release.status.success());
+    assert!(String::from_utf8(release.stderr)
+        .unwrap()
+        .contains("--execute"));
 }
 
 #[test]

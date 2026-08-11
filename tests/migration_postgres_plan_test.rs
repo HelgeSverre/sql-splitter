@@ -28,7 +28,10 @@ use sql_splitter::migration::postgres::{
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, InstalledPostgresFence,
 };
-use sql_splitter::migration::runner::{execute_postgres_fenced_plan, execute_postgres_plan};
+use sql_splitter::migration::runner::{
+    execute_postgres_fenced_plan_with_interruption, execute_postgres_plan,
+    resume_postgres_fenced_plan,
+};
 
 #[test]
 #[ignore = "requires TLS-enabled PostgreSQL source and empty target databases"]
@@ -323,7 +326,7 @@ fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow
     assert_eq!(row_count, 3);
 
     drop(client);
-    let report = execute_postgres_fenced_plan(
+    let interrupted = execute_postgres_fenced_plan_with_interruption(
         &plan,
         &source,
         &target,
@@ -331,8 +334,17 @@ fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow
         &artifact,
         "docker-write-fence-approval",
         &state_path,
-    )
-    .context("execute the reviewed plan under the durable write fence")?;
+        1,
+    );
+    assert!(interrupted
+        .unwrap_err()
+        .to_string()
+        .contains("injected interruption"));
+    let interrupted_state: MigrationState = read_json(&state_path)?;
+    assert_eq!(interrupted_state.status, MigrationStatus::Running);
+
+    let report = resume_postgres_fenced_plan(&state_path, &source, &target, &admin, &artifact)
+        .context("resume the reviewed plan under the durable write fence")?;
     assert_eq!(report.copied_rows, 3);
     let state: MigrationState = read_json(&state_path)?;
     assert_eq!(state.status, MigrationStatus::Completed);

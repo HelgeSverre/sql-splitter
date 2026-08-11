@@ -440,6 +440,80 @@ pub fn attest_postgres_write_fence(
     Ok(registry.inventory)
 }
 
+/// Return whether exact fence evidence has reached its atomic Released state.
+pub fn postgres_write_fence_is_released(
+    admin: &PostgresEndpointConfig,
+    evidence: &ConsistencyEvidence,
+) -> Result<bool, PostgresFenceError> {
+    let ConsistencyEvidence::WriteFence {
+        generation,
+        token_hash,
+        endpoint_identity,
+        database_oid,
+        system_identifier,
+        business_catalog_fingerprint,
+        fence_inventory_fingerprint,
+        activation_xid,
+        activated_at,
+    } = evidence
+    else {
+        return Err(PostgresFenceError::Attestation(
+            "evidence is not a write fence",
+        ));
+    };
+    let mut client = connect_admin(admin)?;
+    let mut transaction = client.transaction()?;
+    let registry = load_registry(&mut transaction)?;
+    if &registry.generation != generation
+        || &registry.token_hash != token_hash
+        || &registry.endpoint_identity != endpoint_identity
+        || &registry.database_oid != database_oid
+        || &registry.system_identifier != system_identifier
+        || &registry.business_catalog_fingerprint != business_catalog_fingerprint
+        || &registry.inventory_fingerprint != fence_inventory_fingerprint
+        || &registry.activation_xid != activation_xid
+        || &registry.activated_at != activated_at
+    {
+        return Err(PostgresFenceError::Attestation(
+            "registry differs from consistency evidence",
+        ));
+    }
+    if registry.state != "Released" {
+        transaction.commit()?;
+        return Ok(false);
+    }
+    let history: Vec<String> = transaction
+        .query(
+            &format!(
+                "SELECT state FROM {}.{} WHERE generation=$1 ORDER BY sequence",
+                quote_ident(FENCE_SCHEMA),
+                quote_ident(HISTORY_TABLE)
+            ),
+            &[generation],
+        )?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    if history != ["Draining", "Active", "Released"] && history != ["Draining", "Released"] {
+        return Err(PostgresFenceError::Attestation(
+            "released fence history is invalid",
+        ));
+    }
+    let remaining_guards: i64 = transaction
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_event_trigger WHERE evtname=$1) + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$2 AND p.proname = ANY($3)) + (SELECT count(*) FROM pg_trigger WHERE oid = ANY($4))",
+            &[&DDL_TRIGGER, &FENCE_SCHEMA, &&[DML_FUNCTION, DDL_FUNCTION][..], &&registry.inventory.tables.iter().map(|table| table.trigger_oid).collect::<Vec<_>>()[..]],
+        )?
+        .get(0);
+    if remaining_guards != 0 {
+        return Err(PostgresFenceError::Attestation(
+            "released fence retains active guard objects",
+        ));
+    }
+    transaction.commit()?;
+    Ok(true)
+}
+
 /// Release an installed fence after exact generation and secret validation.
 ///
 /// The protected registry and append-only history remain as audit evidence.
