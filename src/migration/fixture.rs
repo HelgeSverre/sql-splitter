@@ -22,6 +22,8 @@ pub enum FailurePoint {
     Read,
     Insert,
     Commit,
+    CommitOutcomeUnknownBeforeApply,
+    CommitOutcomeUnknownAfterApply,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,19 @@ impl InMemoryTarget {
             .map(|value| value.rows.clone())
             .unwrap_or_default()
     }
+
+    pub fn add_empty_table(&self, table: QualifiedTable, columns: Vec<ColumnMeta>) {
+        self.committed
+            .lock()
+            .expect("fixture target lock must not be poisoned")
+            .insert(
+                table,
+                FixtureTable {
+                    columns,
+                    rows: Vec::new(),
+                },
+            );
+    }
 }
 
 impl TargetConnectionFactory for InMemoryTarget {
@@ -273,6 +288,12 @@ impl WriteSession for FixtureWriter {
     fn commit(&mut self) -> ConnectionResult<()> {
         self.cancellation.check()?;
         take_failure(&self.failure, FailurePoint::Commit)?;
+        if consume_failure(&self.failure, FailurePoint::CommitOutcomeUnknownBeforeApply) {
+            self.pending = None;
+            return Err(ConnectionError::CommitOutcomeUnknown(
+                "fixture commit was not applied".into(),
+            ));
+        }
         let pending = self
             .pending
             .take()
@@ -287,6 +308,11 @@ impl WriteSession for FixtureWriter {
                 rows: Vec::new(),
             });
             entry.rows.append(&mut addition.rows);
+        }
+        if consume_failure(&self.failure, FailurePoint::CommitOutcomeUnknownAfterApply) {
+            return Err(ConnectionError::CommitOutcomeUnknown(
+                "fixture commit was applied but acknowledgement was lost".into(),
+            ));
         }
         Ok(())
     }
@@ -340,6 +366,18 @@ fn take_failure(
         return Err(ConnectionError::InjectedFailure(format!("{expected:?}")));
     }
     Ok(())
+}
+
+fn consume_failure(failure: &Mutex<Option<FailurePoint>>, expected: FailurePoint) -> bool {
+    let mut failure = failure
+        .lock()
+        .expect("fixture failure lock must not be poisoned");
+    if *failure == Some(expected) {
+        *failure = None;
+        true
+    } else {
+        false
+    }
 }
 
 fn select_page(tables: &Tables, request: &KeysetPage) -> ConnectionResult<RowBatch> {

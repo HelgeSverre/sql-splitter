@@ -8,11 +8,14 @@ use anyhow::{anyhow, Context};
 use super::artifact::{read_json, replace_json, write_json_new};
 use super::canonical::{digest_rows, encode_row, CanonicalRow, CANONICAL_ENCODING_VERSION};
 use super::connection::{
-    CancellationToken, KeyTuple, KeysetPage, ReadSession, SourceConnectionFactory,
+    CancellationToken, ConnectionError, KeyTuple, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
 };
 use super::fixture::{InMemorySource, InMemoryTarget};
-use super::journal::{ChunkRecord, ChunkState, MigrationState, ResumeBinding};
+use super::journal::{
+    ChunkRecord, ChunkState, MigrationState, PreparedChunkEvidence, PreparedResolution,
+    ResumeBinding,
+};
 use super::model::{
     CatalogObjectKind, ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch, VendorCatalog,
 };
@@ -174,7 +177,23 @@ pub fn execute_postgres_plan(
         .collect::<Vec<_>>();
     state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
     replace_json(state_path, &state)?;
-    target.create_pre_data_schema(&source_catalog)?;
+    if let Err(initial_error) = target.create_pre_data_schema(&source_catalog) {
+        if target_schema_matches(&source_catalog, &target_config)? {
+            // The atomic DDL transaction committed, but its acknowledgement was lost.
+        } else if target.assert_empty_and_owned().is_ok() {
+            target.create_pre_data_schema(&source_catalog).with_context(|| {
+                format!(
+                    "retry create-only schema after an unacknowledged empty-target outcome ({initial_error})"
+                )
+            })?;
+        } else {
+            state.require_manual_reconciliation()?;
+            replace_json(state_path, &state)?;
+            return Err(anyhow!(
+                "pre-data DDL has a partial or different target effect; manual reconciliation is required: {initial_error}"
+            ));
+        }
+    }
     for operation_id in create_operation_ids {
         state.commit_prepared_operation(operation_id)?;
         state.verify_operation(operation_id)?;
@@ -235,9 +254,38 @@ pub fn execute_postgres_plan(
                 return Err(error.into());
             }
             if let Err(error) = writer.commit() {
-                return Err(error.into());
+                if !matches!(error, ConnectionError::CommitOutcomeUnknown(_)) {
+                    return Err(error.into());
+                }
+                match reconcile_live_prepared_chunk(
+                    &target,
+                    &mut state,
+                    state_path,
+                    table,
+                    &shape,
+                    &batch,
+                    cancellation.clone(),
+                )? {
+                    PreparedResolution::MarkedCommitted => {}
+                    PreparedResolution::RetryRequired => {
+                        let mut retry_writer = target.open_writer(cancellation.clone())?;
+                        retry_writer.begin()?;
+                        if let Err(error) = retry_writer.insert(table, &batch) {
+                            let _ = retry_writer.rollback();
+                            return Err(error.into());
+                        }
+                        retry_writer.commit()?;
+                        state.commit(chunk_id)?;
+                    }
+                    PreparedResolution::ManualReconciliationRequired => {
+                        return Err(anyhow!(
+                            "prepared target interval differs from its durable intent; manual reconciliation is required"
+                        ));
+                    }
+                }
+            } else {
+                state.commit(chunk_id)?;
             }
-            state.commit(chunk_id)?;
             replace_json(state_path, &state)?;
             copied_rows = copied_rows
                 .checked_add(u64::try_from(batch.len()).context("batch size exceeds u64")?)
@@ -303,6 +351,63 @@ pub fn execute_postgres_plan(
         copied_rows,
         committed_chunks: next_chunk_id - 1,
     })
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn reconcile_live_prepared_chunk(
+    target: &dyn TargetConnectionFactory,
+    state: &mut MigrationState,
+    state_path: &Path,
+    table: &QualifiedTable,
+    shape: &TableShape,
+    expected: &RowBatch,
+    cancellation: CancellationToken,
+) -> anyhow::Result<PreparedResolution> {
+    let chunk = state
+        .prepared_chunk()?
+        .cloned()
+        .ok_or_else(|| anyhow!("commit ambiguity has no durable prepared chunk"))?;
+    let observed_limit = chunk
+        .row_count
+        .checked_add(1)
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or_else(|| anyhow!("prepared chunk is too large to reconcile"))?;
+    let mut verifier = target.open_verifier(cancellation)?;
+    let observed = verifier.select_page(&KeysetPage {
+        table: table.clone(),
+        projection: shape.projection.clone(),
+        key: shape.key.clone(),
+        after: chunk.start_key.clone().map(KeyTuple::new),
+        limit: observed_limit,
+    })?;
+    let (row_count, digest) = if observed.is_empty() {
+        (0, String::new())
+    } else {
+        let final_key = batch_final_key(&observed, shape)?;
+        let observed_count =
+            u64::try_from(observed.len()).context("observed chunk row count exceeds u64")?;
+        let exact = observed.rows() == expected.rows()
+            && observed_count == chunk.row_count
+            && final_key.0 == chunk.final_key;
+        if exact {
+            (observed_count, batch_digest(table, shape, &observed)?)
+        } else {
+            (observed_count, "different".into())
+        }
+    };
+    let resolution = state.reconcile_prepared_evidence(&PreparedChunkEvidence {
+        chunk_id: chunk.chunk_id,
+        operation_id: chunk.operation_id,
+        start_key: chunk.start_key,
+        final_key: chunk.final_key,
+        row_count,
+        canonical_digest: digest,
+        target_transaction_intent: chunk.target_transaction_intent,
+    })?;
+    if resolution != PreparedResolution::RetryRequired {
+        replace_json(state_path, state)?;
+    }
+    Ok(resolution)
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -599,6 +704,15 @@ fn verify_schema_projection(
         ));
     }
     Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn target_schema_matches(
+    source: &VendorCatalog,
+    target_config: &PostgresEndpointConfig,
+) -> anyhow::Result<bool> {
+    let target = inspect_endpoint(target_config)?;
+    Ok(schema_projection(source)? == schema_projection(&target.catalog)?)
 }
 
 fn schema_projection(catalog: &VendorCatalog) -> anyhow::Result<serde_json::Value> {
@@ -1012,6 +1126,7 @@ fn verify_manifest(state: &MigrationState, rows: &[Vec<DbValue>]) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::fixture::FailurePoint;
 
     #[test]
     fn vertical_spike_copies_journals_and_verifies() {
@@ -1038,5 +1153,142 @@ mod tests {
             vec![DbValue::Unsigned(3), DbValue::Text("Linus".into())],
         ];
         assert!(verify_manifest(&state, &rows).is_err());
+    }
+
+    fn ambiguous_commit_fixture(
+        failure: FailurePoint,
+        replacement_rows: Option<Vec<Vec<DbValue>>>,
+    ) -> anyhow::Result<(PreparedResolution, MigrationState, InMemoryTarget)> {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new("accounts")?,
+        };
+        let columns = vec![column("id", 0, "bigint")?, column("name", 1, "text")?];
+        let mut batch = RowBatch::new(columns.clone(), 2, 1_024);
+        batch.try_push(vec![DbValue::Unsigned(1), DbValue::Text("Ada".into())], 16)?;
+        batch.try_push(
+            vec![DbValue::Unsigned(2), DbValue::Text("Grace".into())],
+            20,
+        )?;
+        let shape = TableShape {
+            projection: vec![Identifier::new("id")?, Identifier::new("name")?],
+            key: vec![Identifier::new("id")?],
+            key_indexes: vec![0],
+        };
+        let binding = ResumeBinding {
+            migration_id: "m".into(),
+            plan_hash: "p".into(),
+            approval_reference: "a".into(),
+            tool_version: "t".into(),
+            source_endpoint: "s".into(),
+            target_endpoint: "d".into(),
+            snapshot_identity: "snapshot".into(),
+            source_schema_fingerprint: "source".into(),
+            target_schema_fingerprint: "target".into(),
+            conversion_policy: "exact".into(),
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+        };
+        let mut state =
+            MigrationState::with_operations(binding, [("copy".to_owned(), Vec::new())])?;
+        state.start_operation("copy")?;
+        state.prepare(ChunkRecord {
+            chunk_id: 1,
+            operation_id: "copy".into(),
+            start_key: None,
+            final_key: batch_final_key(&batch, &shape)?.0,
+            row_count: u64::try_from(batch.len())?,
+            canonical_digest: batch_digest(&table, &shape, &batch)?,
+            target_transaction_intent: "intent-1".into(),
+            state: ChunkState::Prepared,
+        })?;
+        let directory = tempfile::tempdir()?;
+        let state_path = directory.path().join("state.json");
+        write_json_new(&state_path, &state)?;
+        let target = InMemoryTarget::default();
+        target.add_empty_table(table.clone(), columns);
+        target.fail_once(failure);
+        let mut writer = target.open_writer(CancellationToken::default())?;
+        writer.begin()?;
+        writer.insert(&table, &batch)?;
+        assert!(matches!(
+            writer.commit(),
+            Err(ConnectionError::CommitOutcomeUnknown(_))
+        ));
+        if let Some(rows) = replacement_rows {
+            let mut replacement = RowBatch::new(batch.columns().to_vec(), rows.len(), 1_024);
+            for row in rows {
+                replacement.try_push(row, 32)?;
+            }
+            let mut replacement_writer = target.open_writer(CancellationToken::default())?;
+            replacement_writer.begin()?;
+            replacement_writer.insert(&table, &replacement)?;
+            replacement_writer.commit()?;
+        }
+        let resolution = reconcile_live_prepared_chunk(
+            &target,
+            &mut state,
+            &state_path,
+            &table,
+            &shape,
+            &batch,
+            CancellationToken::default(),
+        )?;
+        Ok((resolution, state, target))
+    }
+
+    #[test]
+    fn ambiguous_commit_after_apply_is_marked_committed_on_exact_equality() {
+        let (resolution, state, target) =
+            ambiguous_commit_fixture(FailurePoint::CommitOutcomeUnknownAfterApply, None).unwrap();
+        assert_eq!(resolution, PreparedResolution::MarkedCommitted);
+        assert_eq!(state.chunks[0].state, ChunkState::Committed);
+        assert_eq!(
+            target
+                .rows(&QualifiedTable {
+                    namespace: Identifier::new("public").unwrap(),
+                    name: Identifier::new("accounts").unwrap(),
+                })
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn ambiguous_commit_before_apply_requires_exact_retry() {
+        let (resolution, state, target) =
+            ambiguous_commit_fixture(FailurePoint::CommitOutcomeUnknownBeforeApply, None).unwrap();
+        assert_eq!(resolution, PreparedResolution::RetryRequired);
+        assert_eq!(state.chunks[0].state, ChunkState::Prepared);
+        assert!(target
+            .rows(&QualifiedTable {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new("accounts").unwrap(),
+            })
+            .is_empty());
+    }
+
+    #[test]
+    fn ambiguous_partial_or_different_effect_requires_manual_reconciliation() {
+        for rows in [
+            vec![vec![DbValue::Unsigned(1), DbValue::Text("Ada".into())]],
+            vec![
+                vec![DbValue::Unsigned(1), DbValue::Text("changed".into())],
+                vec![DbValue::Unsigned(2), DbValue::Text("Grace".into())],
+            ],
+            vec![
+                vec![DbValue::Unsigned(1), DbValue::Text("Ada".into())],
+                vec![DbValue::Unsigned(2), DbValue::Text("Grace".into())],
+                vec![DbValue::Unsigned(3), DbValue::Text("extra".into())],
+            ],
+        ] {
+            let (resolution, state, _) =
+                ambiguous_commit_fixture(FailurePoint::CommitOutcomeUnknownBeforeApply, Some(rows))
+                    .unwrap();
+            assert_eq!(resolution, PreparedResolution::ManualReconciliationRequired);
+            assert_eq!(
+                state.status,
+                super::super::journal::MigrationStatus::ManualReconciliationRequired
+            );
+        }
     }
 }

@@ -662,6 +662,14 @@ impl MigrationState {
         self.validate_structure(None)
     }
 
+    pub fn require_manual_reconciliation(&mut self) -> Result<(), JournalError> {
+        if self.status == MigrationStatus::Completed {
+            return Err(JournalError::InvalidMigrationStatus);
+        }
+        self.status = MigrationStatus::ManualReconciliationRequired;
+        Ok(())
+    }
+
     pub fn prepare(&mut self, chunk: ChunkRecord) -> Result<(), JournalError> {
         if self.status != MigrationStatus::Running {
             return Err(JournalError::InvalidMigrationStatus);
