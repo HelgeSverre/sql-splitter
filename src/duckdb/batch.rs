@@ -283,7 +283,16 @@ pub fn flush_batch(
             Ok(())
         }
         Ok(false) => {
-            // Table doesn't exist or other non-recoverable error
+            // Table doesn't exist: dropping the batch here would otherwise be
+            // silent, unlike every other missing-table path in the loader
+            // (COPY, fallback_execute, direct INSERT), which all warn.
+            if stats.warnings.len() < 100 {
+                stats.warnings.push(format!(
+                    "Table {} does not exist, skipping {} row(s)",
+                    batch.table,
+                    batch.rows.len()
+                ));
+            }
             failed_tables.insert(batch.table.clone());
             batch.clear();
             Ok(())
@@ -484,13 +493,31 @@ fn is_missing_table_error(error: &duckdb::Error) -> bool {
     )
 }
 
-/// Fallback: execute original SQL statements one by one
+/// Fallback: retry each row individually via freshly generated single-row
+/// INSERTs.
+///
+/// The combined batch statement (already built from `batch.rows`, not the
+/// original source text, by `try_batch_insert`) just failed. A multi-row
+/// INSERT is atomic in DuckDB, so replaying the *original* source statements
+/// verbatim -- each of which can itself hold hundreds of rows in one
+/// `INSERT ... VALUES (...), (...), ...;` -- would drop every valid row
+/// alongside the one bad row that caused the failure. Observed for real: a
+/// single explicit NULL in a `NOT NULL` JSON column (`tags.slug`) took out
+/// all 134 rows of that table's INSERT. Retrying row by row mirrors
+/// `process_copy_rows` on the Postgres COPY path, which exists for the same
+/// reason.
 fn fallback_execute(conn: &Connection, batch: &InsertBatch, stats: &mut ImportStats) -> Result<()> {
-    for stmt in &batch.statements {
-        match conn.execute(stmt, []) {
+    for row in &batch.rows {
+        let insert_sql = generate_batch_insert(
+            &batch.table,
+            &batch.columns,
+            std::slice::from_ref(row),
+            batch.dialect,
+        );
+        match conn.execute(&insert_sql, []) {
             Ok(_) => {
                 stats.insert_statements += 1;
-                stats.rows_inserted += count_insert_rows(stmt);
+                stats.rows_inserted += 1;
             }
             Err(e) => {
                 if stats.warnings.len() < 100 {
@@ -504,37 +531,6 @@ fn fallback_execute(conn: &Connection, batch: &InsertBatch, stats: &mut ImportSt
         }
     }
     Ok(())
-}
-
-/// Count rows in an INSERT statement (simple heuristic)
-fn count_insert_rows(sql: &str) -> u64 {
-    if let Some(values_pos) = sql.to_uppercase().find("VALUES") {
-        let after_values = &sql[values_pos + 6..];
-        let mut count = 0u64;
-        let mut depth: i32 = 0;
-        let mut in_string = false;
-        let mut prev_char = ' ';
-
-        for c in after_values.chars() {
-            if c == '\'' && prev_char != '\\' {
-                in_string = !in_string;
-            }
-            if !in_string {
-                if c == '(' {
-                    if depth == 0 {
-                        count += 1;
-                    }
-                    depth += 1;
-                } else if c == ')' {
-                    depth = depth.saturating_sub(1);
-                }
-            }
-            prev_char = c;
-        }
-        count
-    } else {
-        1
-    }
 }
 
 #[cfg(test)]
@@ -598,16 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn test_count_insert_rows() {
-        assert_eq!(count_insert_rows("INSERT INTO t VALUES (1)"), 1);
-        assert_eq!(count_insert_rows("INSERT INTO t VALUES (1), (2), (3)"), 3);
-        assert_eq!(
-            count_insert_rows("INSERT INTO t VALUES (1, 'a(b)'), (2, 'c')"),
-            2
-        );
-    }
-
-    #[test]
     fn test_generate_batch_insert_with_columns() {
         let rows = vec![
             vec![
@@ -664,5 +650,31 @@ mod tests {
         let sql = generate_batch_insert("dbo.users", &None, &rows, SqlDialect::Mssql);
 
         assert_eq!(sql, "INSERT INTO \"users\" VALUES\n(1);");
+    }
+
+    #[test]
+    fn flush_batch_warns_instead_of_silently_dropping_rows_for_a_missing_table() {
+        // A dump with INSERTs for a table that never got a CREATE TABLE (e.g. a
+        // partial mysqldump/export) must not vanish without a trace: the old
+        // code cleared the batch and recorded nothing.
+        let conn = Connection::open_in_memory().unwrap();
+        let mut batch = InsertBatch::new("ghost_table".to_string(), None, SqlDialect::MySql);
+        batch.rows.push(vec![ParsedValue::Integer(1)]);
+        batch
+            .statements
+            .push("INSERT INTO ghost_table VALUES (1)".to_string());
+        batch.rows_per_statement.push(1);
+
+        let mut stats = ImportStats::default();
+        let mut failed_tables = std::collections::HashSet::new();
+        flush_batch(&conn, &mut batch, &mut stats, &mut failed_tables).unwrap();
+
+        assert!(failed_tables.contains("ghost_table"));
+        assert_eq!(stats.rows_inserted, 0);
+        assert!(
+            stats.warnings.iter().any(|w| w.contains("ghost_table")),
+            "expected a warning naming the skipped table, got: {:?}",
+            stats.warnings
+        );
     }
 }

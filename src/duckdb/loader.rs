@@ -517,6 +517,7 @@ impl<'a> DumpLoader<'a> {
         // Convert MySQL backslash escapes to SQL standard
         if dialect == SqlDialect::MySql {
             result = Self::convert_mysql_escapes(&result);
+            result = Self::normalize_mysql_zero_dates(&result);
         }
 
         // Remove PostgreSQL schema prefix
@@ -589,6 +590,31 @@ impl<'a> DumpLoader<'a> {
             }
         }
         result
+    }
+
+    /// Replace MySQL zero-date literals (`'0000-00-00'`, optionally with a
+    /// zero time and fractional seconds) with a fixed epoch sentinel.
+    /// `parse_insert_for_bulk` normalizes the same literal when it can parse
+    /// the statement into `ParsedValue`s (the Appender/batch-SQL paths); this
+    /// covers the raw-SQL-text path used for statements that parser declines
+    /// (e.g. `INSERT ... ON DUPLICATE KEY UPDATE`) and for the fallback replay
+    /// of a batch statement DuckDB rejected for some other reason. DuckDB has
+    /// no representation for the zero-date and rejects it with "field value
+    /// out of range" -- NULL is not used because the column is very often
+    /// declared NOT NULL (e.g. WordPress's `wp_posts.post_date_gmt`).
+    fn normalize_mysql_zero_dates(stmt: &str) -> String {
+        static RE_ZERO_DATE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"'0000-00-00(?: 00:00:00(?:\.\d+)?)?'").unwrap());
+        RE_ZERO_DATE
+            .replace_all(stmt, |caps: &regex::Captures<'_>| {
+                match crate::parser::mysql_insert::mysql_zero_date_replacement(
+                    caps[0].trim_matches('\''),
+                ) {
+                    Some(replacement) => format!("'{replacement}'"),
+                    None => caps[0].to_string(),
+                }
+            })
+            .to_string()
     }
 
     /// Convert identifier quoting (backticks/brackets to double quotes)
@@ -748,10 +774,35 @@ impl<'a> DumpLoader<'a> {
         static RE_COND_COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"/\*!\d+\s*|\*/").unwrap());
         result = RE_COND_COMMENT.replace_all(&result, "").to_string();
 
-        // Remove ON UPDATE CURRENT_TIMESTAMP
-        static RE_ON_UPDATE: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"(?i)\s*ON\s+UPDATE\s+CURRENT_TIMESTAMP").unwrap());
+        // Remove ON UPDATE CURRENT_TIMESTAMP, including MySQL 8's function-call
+        // spelling CURRENT_TIMESTAMP() / CURRENT_TIMESTAMP(6). Without the
+        // optional parens the trailing `()` used to survive as orphaned text
+        // right after a `DEFAULT CURRENT_TIMESTAMP()` on the same column,
+        // producing `CURRENT_TIMESTAMP()()` and failing the whole CREATE TABLE.
+        static RE_ON_UPDATE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)\s*ON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?").unwrap()
+        });
         result = RE_ON_UPDATE.replace_all(&result, "").to_string();
+
+        // MySQL 8 also allows CURRENT_TIMESTAMP as a function call in DEFAULT
+        // position; DuckDB only accepts the bare keyword there.
+        static RE_DEFAULT_CURRENT_TIMESTAMP_CALL: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?i)(DEFAULT\s+CURRENT_TIMESTAMP)\s*\(\s*\d*\s*\)").unwrap()
+        });
+        result = RE_DEFAULT_CURRENT_TIMESTAMP_CALL
+            .replace_all(&result, "$1")
+            .to_string();
+
+        // Remove the index-algorithm hint MySQL allows after any key's column
+        // list -- `KEY foo (col) USING BTREE`, and the same on UNIQUE KEY and
+        // PRIMARY KEY. DuckDB has no such syntax. This must run before the
+        // KEY-stripping regexes below: they end their match at the closing
+        // `)`, so a trailing USING clause would otherwise survive as orphaned
+        // text and fail the whole CREATE TABLE. PRIMARY KEY is never stripped
+        // (DuckDB needs it), so this is the only place its USING gets removed.
+        static RE_KEY_USING: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?i)\)\s*USING\s+(?:BTREE|HASH|RTREE)").unwrap());
+        result = RE_KEY_USING.replace_all(&result, ")").to_string();
 
         // Remove UNIQUE KEY constraint lines: UNIQUE KEY `name` (`col1`, `col2`)
         // Must handle both: ,UNIQUE KEY... at end of column list and UNIQUE KEY... on its own line
@@ -771,13 +822,10 @@ impl<'a> DumpLoader<'a> {
         });
         result = RE_KEY_INDEX.replace_all(&result, "").to_string();
 
-        // Remove GENERATED ALWAYS AS columns entirely
-        // Match: `col` TYPE GENERATED ALWAYS AS (expr) STORED/VIRTUAL
-        // The expression can contain nested parentheses so we match one level deep
-        static RE_GENERATED_COL: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r#"(?i),?\s*[`"']?\w+[`"']?\s+\w+\s+GENERATED\s+ALWAYS\s+AS\s*\((?:[^()]+|\([^()]*\))+\)\s*(?:STORED|VIRTUAL)?"#).unwrap()
-        });
-        result = RE_GENERATED_COL.replace_all(&result, "").to_string();
+        // Remove GENERATED ALWAYS AS columns entirely. DuckDB support for
+        // computed columns doesn't reliably track MySQL's expression
+        // dialect, so these are dropped rather than translated.
+        result = Self::strip_generated_columns(&result);
 
         // Remove entire FOREIGN KEY constraints (DuckDB enforces them which causes issues with batch loading)
         // Match: CONSTRAINT `name` FOREIGN KEY (...) REFERENCES ... [ON DELETE/UPDATE ...]
@@ -787,6 +835,92 @@ impl<'a> DumpLoader<'a> {
         });
         result = RE_FK_CONSTRAINT.replace_all(&result, "").to_string();
 
+        result
+    }
+
+    /// Remove `col TYPE GENERATED ALWAYS AS (expr) STORED/VIRTUAL` column
+    /// definitions entirely.
+    ///
+    /// A regex can't do this correctly: `expr` is arbitrary MySQL SQL and can
+    /// nest parens without bound, including ones that are only "inside a
+    /// paren" by raw character count because they're actually inside one of
+    /// the expression's own string literals -- e.g. a charset-introduced
+    /// literal like `_utf8mb4' ('` embeds a literal `(` that a fixed-depth
+    /// regex counts as a real nesting level. A `CREATE TABLE` with `concat(a,
+    /// _utf8mb4' (', b, _utf8mb4')')` as a generated-column expression (a
+    /// common `display_title`-style computed column) needed 3 levels of
+    /// nesting once the embedded parens were counted, which a regex
+    /// supporting only 1-2 fixed levels can never balance. This scans
+    /// instead: quote-aware, so embedded parens inside strings don't count,
+    /// and depth-tracking, so it balances regardless of how deep the
+    /// expression nests.
+    fn strip_generated_columns(stmt: &str) -> String {
+        static RE_GENERATED_START: Lazy<Regex> = Lazy::new(|| {
+            // Column name, then its type -- a base word, an optional single
+            // parenthesized argument list (`(191)`, `(10,2)`), and any
+            // further decoration words (UNSIGNED, CHARACTER SET utf8mb4,
+            // COLLATE utf8mb4_unicode_ci, ...) -- then the GENERATED clause
+            // up to its opening paren, which the scan below takes over from.
+            Regex::new(
+                r#"(?i),?\s*[`"']?\w+[`"']?\s+\w+(?:\s*\([^()]*\))?(?:\s+\w+)*\s+GENERATED\s+ALWAYS\s+AS\s*\("#,
+            )
+            .unwrap()
+        });
+
+        let bytes = stmt.as_bytes();
+        let mut result = String::with_capacity(stmt.len());
+        let mut pos = 0;
+
+        while let Some(m) = RE_GENERATED_START.find(&stmt[pos..]) {
+            let match_start = pos + m.start();
+            let paren_start = pos + m.end() - 1; // the '(' the match ends on
+            result.push_str(&stmt[pos..match_start]);
+
+            let mut depth: i32 = 0;
+            let mut in_string = false;
+            let mut i = paren_start;
+            let mut close = None;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'\'' && bytes.get(i.wrapping_sub(1)) != Some(&b'\\') {
+                    in_string = !in_string;
+                } else if !in_string {
+                    if c == b'(' {
+                        depth += 1;
+                    } else if c == b')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            let Some(close) = close else {
+                // Unbalanced (shouldn't happen on valid SQL) -- leave the
+                // rest untouched rather than risk corrupting it.
+                result.push_str(&stmt[match_start..]);
+                pos = stmt.len();
+                break;
+            };
+
+            // Skip a trailing STORED/VIRTUAL keyword along with the column.
+            let after_paren = close + 1;
+            let tail = &stmt[after_paren..];
+            let trimmed = tail.trim_start();
+            let consumed_ws = tail.len() - trimmed.len();
+            let keyword_len = ["STORED", "VIRTUAL"]
+                .iter()
+                .find_map(|kw| {
+                    (trimmed.len() >= kw.len() && trimmed[..kw.len()].eq_ignore_ascii_case(kw))
+                        .then_some(kw.len())
+                })
+                .unwrap_or(0);
+            pos = after_paren + consumed_ws + keyword_len;
+        }
+        result.push_str(&stmt[pos..]);
         result
     }
 
