@@ -13,6 +13,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use native_tls::{Certificate, Identity, TlsConnector};
+use postgres::binary_copy::BinaryCopyInWriter;
 use postgres::config::SslMode;
 use postgres::types::{FromSql, IsNull, ToSql, Type};
 use postgres::{CancelToken, Client, Config, IsolationLevel};
@@ -55,6 +56,13 @@ static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub enum PostgresConsistencyMode {
     ConsistentSnapshot,
     WriteFence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresWritePolicy {
+    BinaryCopyWithInsertFallbackV1,
+    PlainInsertIdentityAlwaysV1,
 }
 
 impl PostgresConsistencyMode {
@@ -3401,6 +3409,7 @@ impl TargetConnectionFactory for PostgresTargetFactory {
             ("typed_identifiers", Capability::Supported),
             ("bound_parameters", Capability::Supported),
             ("plain_insert", Capability::Supported),
+            ("bulk_write", Capability::Supported),
         ])
     }
 
@@ -3564,6 +3573,60 @@ impl WriteSession for PostgresWriter {
         Ok(())
     }
 
+    fn bulk_write(&mut self, table: &QualifiedTable, batch: &RowBatch) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        validate_bulk_batch(batch)?;
+        let probe = self
+            .client
+            .prepare(&bulk_type_probe_sql(table, batch))
+            .map_err(database_error)?;
+        let types = probe
+            .columns()
+            .iter()
+            .map(|column| column.type_().clone())
+            .collect::<Vec<_>>();
+        if types.len() != batch.columns().len() {
+            return Err(ConnectionError::Database(format!(
+                "PostgreSQL type probe returned {} columns for a {}-column batch",
+                types.len(),
+                batch.columns().len()
+            )));
+        }
+        let copy = self
+            .client
+            .copy_in(&bulk_copy_sql(table, batch))
+            .map_err(database_error)?;
+        let mut writer = BinaryCopyInWriter::new(copy, &types);
+        for row in batch.rows() {
+            self.cancellation.check()?;
+            let parameters = row
+                .iter()
+                .zip(&types)
+                .map(|(value, ty)| write_parameter(value, ty))
+                .collect::<ConnectionResult<Vec<_>>>()?;
+            let parameter_refs = parameters
+                .iter()
+                .map(|value| value.as_ref() as &(dyn ToSql + Sync))
+                .collect::<Vec<_>>();
+            writer.write(&parameter_refs).map_err(database_error)?;
+        }
+        self.cancellation.check()?;
+        let affected = writer.finish().map_err(database_error)?;
+        self.cancellation.check()?;
+        let expected = u64::try_from(batch.len()).map_err(|_| {
+            ConnectionError::InvalidRequest("bulk-write row count exceeds u64".into())
+        })?;
+        if affected != expected {
+            return Err(ConnectionError::Database(format!(
+                "binary COPY affected {affected} rows instead of {expected}"
+            )));
+        }
+        Ok(())
+    }
+
     fn commit(&mut self) -> ConnectionResult<()> {
         self.cancellation.check()?;
         if !self.transaction_open {
@@ -3584,6 +3647,52 @@ impl WriteSession for PostgresWriter {
             .batch_execute("ROLLBACK")
             .map_err(database_error)
     }
+}
+
+fn validate_bulk_batch(batch: &RowBatch) -> ConnectionResult<()> {
+    if batch.columns().is_empty() {
+        return Err(ConnectionError::InvalidRequest(
+            "bulk-write batch must contain columns".into(),
+        ));
+    }
+    for row in batch.rows() {
+        if row.len() != batch.columns().len() {
+            return Err(ConnectionError::InvalidRequest(format!(
+                "row has {} values but binary COPY expects {}",
+                row.len(),
+                batch.columns().len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn bulk_copy_sql(table: &QualifiedTable, batch: &RowBatch) -> String {
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| quote_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "COPY {}.{} ({columns}) FROM STDIN (FORMAT binary)",
+        quote_identifier(&table.namespace),
+        quote_identifier(&table.name)
+    )
+}
+
+fn bulk_type_probe_sql(table: &QualifiedTable, batch: &RowBatch) -> String {
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| quote_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT {columns} FROM {}.{} WHERE FALSE",
+        quote_identifier(&table.namespace),
+        quote_identifier(&table.name)
+    )
 }
 
 #[derive(Debug)]
@@ -5429,14 +5538,13 @@ pub fn build_plan_with_consistency(
                 leaf_creates.push(leaf_create);
             }
         }
-        let copy_parameters = resumable_key
-            .map(|key| {
-                BTreeMap::from([(
-                    "resumable_key".into(),
-                    serde_json::to_value(key).expect("resumable key serialization cannot fail"),
-                )])
-            })
-            .unwrap_or_default();
+        let mut copy_parameters = BTreeMap::from([(
+            "postgres_write_policy".into(),
+            serde_json::to_value(postgres_write_policy(&source.catalog, &table)?)?,
+        )]);
+        if let Ok(key) = resumable_key {
+            copy_parameters.insert("resumable_key".into(), serde_json::to_value(key)?);
+        }
         let copy = PlanOperation::new(
             OperationKind::CopyTable,
             Some(table.clone()),
@@ -6210,6 +6318,63 @@ fn qualified_table_for_oid(
         ))
 }
 
+pub fn postgres_write_policy(
+    catalog: &VendorCatalog,
+    table: &QualifiedTable,
+) -> Result<PostgresWritePolicy, PostgresPlanError> {
+    let namespace = catalog
+        .namespaces
+        .iter()
+        .find(|namespace| namespace.name == table.namespace)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "write-policy table namespace is absent from the catalog",
+        ))?;
+    let table_object = namespace
+        .objects
+        .iter()
+        .find(|object| object.kind == CatalogObjectKind::Table && object.name == table.name)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "write-policy table is absent from the catalog",
+        ))?;
+    let mut has_columns = false;
+    let mut has_identity_always = false;
+    for column in namespace.objects.iter().filter(|object| {
+        object.kind == CatalogObjectKind::Column
+            && object
+                .attributes
+                .get("table_oid")
+                .and_then(serde_json::Value::as_str)
+                == Some(table_object.id.as_str())
+    }) {
+        has_columns = true;
+        match column
+            .attributes
+            .get("identity")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "write-policy column omits identity metadata",
+            ))? {
+            "" | "d" => {}
+            "a" => has_identity_always = true,
+            _ => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "write-policy column has unknown identity metadata",
+                ));
+            }
+        }
+    }
+    if !has_columns {
+        return Err(PostgresPlanError::InvalidConfig(
+            "write-policy table has no catalog columns",
+        ));
+    }
+    Ok(if has_identity_always {
+        PostgresWritePolicy::PlainInsertIdentityAlwaysV1
+    } else {
+        PostgresWritePolicy::BinaryCopyWithInsertFallbackV1
+    })
+}
+
 fn table_parameters(
     catalog: &VendorCatalog,
     table: &QualifiedTable,
@@ -6625,10 +6790,13 @@ mod tests {
                 kind: CatalogObjectKind::Column,
                 name: Identifier::new("accounts.id").unwrap(),
                 definition: b"bigint".to_vec(),
-                attributes: BTreeMap::from([(
-                    "table_oid".into(),
-                    serde_json::Value::String("table-1".into()),
-                )]),
+                attributes: BTreeMap::from([
+                    (
+                        "table_oid".into(),
+                        serde_json::Value::String("table-1".into()),
+                    ),
+                    ("identity".into(), serde_json::json!("")),
+                ]),
             });
         }
         CatalogSnapshot {
@@ -7746,5 +7914,101 @@ credential_env = "PGPASSWORD"
         let unsupported = unsupported_view_security("relation:7", "p", true, false).unwrap();
         assert_eq!(unsupported.object_kind, "view_column_acl");
         assert!(unsupported.required_semantics);
+    }
+
+    #[test]
+    fn bulk_copy_sql_quotes_hostile_identifiers_and_uses_one_binary_stream() {
+        let table = QualifiedTable {
+            namespace: Identifier::new("tenant.schema").unwrap(),
+            name: Identifier::new("order\"items").unwrap(),
+        };
+        let batch = RowBatch::new(
+            vec![ColumnMeta {
+                name: Identifier::new("value,column").unwrap(),
+                ordinal: 1,
+                vendor_type: "text".into(),
+                nullable: false,
+                collation: None,
+                precision: None,
+                scale: None,
+                timezone_semantics: None,
+            }],
+            1,
+            1,
+        );
+        assert_eq!(
+            bulk_copy_sql(&table, &batch),
+            "COPY \"tenant.schema\".\"order\"\"items\" (\"value,column\") FROM STDIN (FORMAT binary)"
+        );
+        assert_eq!(
+            bulk_type_probe_sql(&table, &batch),
+            "SELECT \"value,column\" FROM \"tenant.schema\".\"order\"\"items\" WHERE FALSE"
+        );
+    }
+
+    #[test]
+    fn bulk_copy_rejects_a_batch_without_columns_before_opening_a_stream() {
+        let batch = RowBatch::new(Vec::new(), 1, 1);
+        assert!(matches!(
+            validate_bulk_batch(&batch),
+            Err(ConnectionError::InvalidRequest(message))
+                if message == "bulk-write batch must contain columns"
+        ));
+    }
+
+    #[test]
+    fn write_policy_is_exact_and_persisted_in_copy_operation() {
+        let mut catalog = key_catalog(Vec::new());
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("accounts").unwrap(),
+        };
+        assert_eq!(
+            postgres_write_policy(&catalog, &table).unwrap(),
+            PostgresWritePolicy::BinaryCopyWithInsertFallbackV1
+        );
+        catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap()
+            .attributes
+            .insert("identity".into(), serde_json::json!("a"));
+        assert_eq!(
+            postgres_write_policy(&catalog, &table).unwrap(),
+            PostgresWritePolicy::PlainInsertIdentityAlwaysV1
+        );
+        catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap()
+            .attributes
+            .insert("identity".into(), serde_json::json!(""));
+
+        let source = CatalogSnapshot {
+            endpoint_identity: "source".into(),
+            server_version: "17".into(),
+            server_version_num: 170000,
+            catalog,
+            unsupported: UnsupportedObjectReport::default(),
+            tls_binding: "tls-source".into(),
+        };
+        let mut target = snapshot("target", false);
+        target.catalog.format_version = CATALOG_FORMAT_VERSION;
+        let reviewed = build_plan(&source, &target).unwrap();
+        let copy = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CopyTable)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<PostgresWritePolicy>(
+                copy.parameters["postgres_write_policy"].clone()
+            )
+            .unwrap(),
+            PostgresWritePolicy::BinaryCopyWithInsertFallbackV1
+        );
     }
 }

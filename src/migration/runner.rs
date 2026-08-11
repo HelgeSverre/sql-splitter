@@ -46,12 +46,12 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 use super::postgres::{
     catalog_fingerprint, postgres_foreign_keys, postgres_generated_columns,
     postgres_partition_topologies, postgres_post_data_indexes, postgres_programmable_objects,
-    postgres_sequences, postgres_tls_binding, select_resumable_key, PostgresConsistencyMode,
-    PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
+    postgres_sequences, postgres_tls_binding, postgres_write_policy, select_resumable_key,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
     PostgresGeneratedColumnState, PostgresIndex, PostgresIndexState, PostgresPartitionTopology,
     PostgresPartitionTopologyState, PostgresProgrammableObject, PostgresProgrammableObjectState,
     PostgresResumableKey, PostgresSequence, PostgresSequenceState, PostgresSourceFactory,
-    PostgresTargetFactory, CATALOG_FORMAT_VERSION,
+    PostgresTargetFactory, PostgresWritePolicy, CATALOG_FORMAT_VERSION,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_ast::PostgresDurableAst;
@@ -193,6 +193,57 @@ fn rollback_cancelled_commit(
         Ok(()) => cancelled.into(),
         Err(rollback) => {
             anyhow!("target commit was cancelled and rollback also failed: {cancelled}; {rollback}")
+        }
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn open_postgres_batch_writer(
+    target: &dyn TargetConnectionFactory,
+    table: &QualifiedTable,
+    batch: &RowBatch,
+    policy: PostgresWritePolicy,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<Box<dyn WriteSession>> {
+    let mut writer = target.open_writer(cancellation.clone())?;
+    writer.begin()?;
+    match policy {
+        PostgresWritePolicy::PlainInsertIdentityAlwaysV1 => {
+            if let Err(error) = writer.insert(table, batch) {
+                let _ = writer.rollback();
+                return Err(error.into());
+            }
+            Ok(writer)
+        }
+        PostgresWritePolicy::BinaryCopyWithInsertFallbackV1 => {
+            match writer.bulk_write(table, batch) {
+                Ok(()) => Ok(writer),
+                Err(copy_error) => {
+                    writer.rollback().map_err(|rollback| {
+                        anyhow!(
+                            "binary COPY failed and target rollback also failed: {copy_error}; {rollback}"
+                        )
+                    })?;
+                    if copy_error == ConnectionError::Cancelled {
+                        return Err(copy_error.into());
+                    }
+                    cancellation.check()?;
+                    let mut diagnostic = target.open_writer(cancellation.clone())?;
+                    diagnostic.begin()?;
+                    if let Err(insert_error) = diagnostic.insert(table, batch) {
+                        let rollback = diagnostic.rollback();
+                        return Err(match rollback {
+                            Ok(()) => anyhow!(
+                                "binary COPY failed ({copy_error}); diagnostic INSERT failed: {insert_error}"
+                            ),
+                            Err(rollback_error) => anyhow!(
+                                "binary COPY failed ({copy_error}); diagnostic INSERT failed ({insert_error}) and rollback failed: {rollback_error}"
+                            ),
+                        });
+                    }
+                    Ok(diagnostic)
+                }
+            }
         }
     }
 }
@@ -629,6 +680,7 @@ fn resume_postgres_fenced_plan_internal(
         "typed_identifiers",
         "bound_parameters",
         "plain_insert",
+        "bulk_write",
     ])?;
 
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
@@ -716,13 +768,14 @@ fn resume_postgres_fenced_plan_internal(
             )? {
                 PreparedResolution::MarkedCommitted => {}
                 PreparedResolution::RetryRequired => {
-                    let mut writer = target.open_writer(cancellation.clone())?;
-                    writer.begin()?;
                     let writable = writable_batch(&expected, &shape)?;
-                    if let Err(error) = writer.insert(table, &writable) {
-                        let _ = writer.rollback();
-                        return Err(error.into());
-                    }
+                    let mut writer = open_postgres_batch_writer(
+                        target.as_ref(),
+                        table,
+                        &writable,
+                        shape.write_policy,
+                        &cancellation,
+                    )?;
                     check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
                     if let Err(error) = writer.commit() {
                         if error == ConnectionError::Cancelled {
@@ -779,13 +832,14 @@ fn resume_postgres_fenced_plan_internal(
                     reviewed.plan_hash, operation.id
                 ),
             })?;
-            let mut writer = target.open_writer(cancellation.clone())?;
-            writer.begin()?;
             let writable = writable_batch(&batch, &shape)?;
-            if let Err(error) = writer.insert(table, &writable) {
-                let _ = writer.rollback();
-                return Err(error.into());
-            }
+            let mut writer = open_postgres_batch_writer(
+                target.as_ref(),
+                table,
+                &writable,
+                shape.write_policy,
+                &cancellation,
+            )?;
             check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
             match writer.commit() {
                 Ok(()) => journal.commit_chunk_after_ack()?,
@@ -1095,6 +1149,7 @@ fn execute_postgres_plan_internal(
         "typed_identifiers",
         "bound_parameters",
         "plain_insert",
+        "bulk_write",
     ])?;
     target.assert_empty_and_owned()?;
 
@@ -1221,13 +1276,14 @@ fn execute_postgres_plan_internal(
             ) {
                 return Err(injected_interruption(interruption));
             }
-            let mut writer = target.open_writer(cancellation.clone())?;
-            writer.begin()?;
             let writable = writable_batch(&batch, &shape)?;
-            if let Err(error) = writer.insert(table, &writable) {
-                let _ = writer.rollback();
-                return Err(error.into());
-            }
+            let mut writer = open_postgres_batch_writer(
+                target.as_ref(),
+                table,
+                &writable,
+                shape.write_policy,
+                &cancellation,
+            )?;
             #[cfg(feature = "migration-fault-injection")]
             if let Some(ExecutionInterruption::NetworkCommitFault(port)) = interruption {
                 arm_network_commit_fault(port)?;
@@ -2758,6 +2814,7 @@ struct TableShape {
     key: Vec<Identifier>,
     key_indexes: Vec<usize>,
     writable_indexes: Vec<usize>,
+    write_policy: PostgresWritePolicy,
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -2832,6 +2889,8 @@ fn table_shape(
         .collect::<Vec<_>>();
     let selected = select_resumable_key(catalog, table)
         .map_err(|error| anyhow!("cannot select resumable key: {error}"))?;
+    let write_policy = postgres_write_policy(catalog, table)
+        .map_err(|error| anyhow!("cannot select PostgreSQL write policy: {error}"))?;
     if let Some(operation) = operation {
         let persisted: PostgresResumableKey = serde_json::from_value(
             operation
@@ -2844,6 +2903,21 @@ fn table_shape(
         if persisted != selected {
             return Err(anyhow!(
                 "copy operation resumable key differs from deterministic catalog selection"
+            ));
+        }
+        let persisted_policy: PostgresWritePolicy = serde_json::from_value(
+            operation
+                .parameters
+                .get("postgres_write_policy")
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!("copy operation has no persisted PostgreSQL write policy")
+                })?,
+        )
+        .context("copy operation has an invalid PostgreSQL write policy")?;
+        if persisted_policy != write_policy {
+            return Err(anyhow!(
+                "copy operation write policy differs from the current catalog"
             ));
         }
     }
@@ -2888,6 +2962,7 @@ fn table_shape(
         key: selected.columns,
         key_indexes,
         writable_indexes,
+        write_policy,
     })
 }
 
@@ -3710,6 +3785,7 @@ mod tests {
             key: vec![Identifier::new("id")?],
             key_indexes: vec![0],
             writable_indexes: vec![0, 1],
+            write_policy: PostgresWritePolicy::BinaryCopyWithInsertFallbackV1,
         };
         let binding = ResumeBinding {
             migration_id: "m".into(),
@@ -3967,6 +4043,7 @@ mod tests {
             key: vec![Identifier::new("id")?],
             key_indexes: vec![0],
             writable_indexes: vec![0, 2],
+            write_policy: PostgresWritePolicy::BinaryCopyWithInsertFallbackV1,
         };
         let writable = writable_batch(&batch, &shape)?;
         assert_eq!(
@@ -3982,6 +4059,67 @@ mod tests {
             &[vec![DbValue::Signed(1), DbValue::Signed(21)]]
         );
         assert_eq!(batch.rows()[0][1], DbValue::Signed(42));
+        Ok(())
+    }
+
+    #[cfg(feature = "enterprise-migration-spike")]
+    #[test]
+    fn bulk_write_falls_back_to_one_transactional_insert_attempt() -> anyhow::Result<()> {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new("accounts")?,
+        };
+        let columns = vec![column("id", 0, "bigint")?, column("name", 1, "text")?];
+        let mut batch = RowBatch::new(columns.clone(), 1, 1_024);
+        batch.try_push(vec![DbValue::Signed(1), DbValue::Text("Ada".into())], 16)?;
+        let target = InMemoryTarget::default();
+        target.add_empty_table(table.clone(), columns);
+
+        let cancellation = CancellationToken::default();
+        let mut writer = open_postgres_batch_writer(
+            &target,
+            &table,
+            &batch,
+            PostgresWritePolicy::BinaryCopyWithInsertFallbackV1,
+            &cancellation,
+        )?;
+        writer.commit()?;
+
+        assert_eq!(target.rows(&table), batch.rows());
+        Ok(())
+    }
+
+    #[cfg(feature = "enterprise-migration-spike")]
+    #[test]
+    fn failed_bulk_and_diagnostic_insert_leave_no_target_rows() -> anyhow::Result<()> {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new("accounts")?,
+        };
+        let columns = vec![column("id", 0, "bigint")?];
+        let mut batch = RowBatch::new(columns.clone(), 1, 1_024);
+        batch.try_push(vec![DbValue::Signed(1)], 8)?;
+        let target = InMemoryTarget::default();
+        target.add_empty_table(table.clone(), columns);
+        target.fail_once(FailurePoint::Insert);
+
+        let error = match open_postgres_batch_writer(
+            &target,
+            &table,
+            &batch,
+            PostgresWritePolicy::BinaryCopyWithInsertFallbackV1,
+            &CancellationToken::default(),
+        ) {
+            Ok(_) => {
+                return Err(anyhow!(
+                    "bulk write and diagnostic INSERT unexpectedly succeeded"
+                ))
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("diagnostic INSERT failed"));
+        assert!(target.rows(&table).is_empty());
         Ok(())
     }
 

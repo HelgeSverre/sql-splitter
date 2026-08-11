@@ -251,6 +251,12 @@ pub trait ReadSession {
 pub trait WriteSession {
     fn begin(&mut self) -> ConnectionResult<()>;
     fn insert(&mut self, table: &QualifiedTable, batch: &RowBatch) -> ConnectionResult<()>;
+    fn bulk_write(&mut self, _table: &QualifiedTable, _batch: &RowBatch) -> ConnectionResult<()> {
+        Err(ConnectionError::RequiredCapabilityUnavailable {
+            capability: "bulk_write",
+            reason: "adapter does not support bulk writes".into(),
+        })
+    }
     fn commit(&mut self) -> ConnectionResult<()>;
     fn rollback(&mut self) -> ConnectionResult<()>;
 }
@@ -267,6 +273,26 @@ pub trait VerificationSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct InsertOnlyWriter;
+
+    impl WriteSession for InsertOnlyWriter {
+        fn begin(&mut self) -> ConnectionResult<()> {
+            Ok(())
+        }
+
+        fn insert(&mut self, _table: &QualifiedTable, _batch: &RowBatch) -> ConnectionResult<()> {
+            Ok(())
+        }
+
+        fn commit(&mut self) -> ConnectionResult<()> {
+            Ok(())
+        }
+
+        fn rollback(&mut self) -> ConnectionResult<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn missing_and_unknown_required_capabilities_fail_closed() {
@@ -286,6 +312,23 @@ mod tests {
         assert!(matches!(
             capabilities.require(&["server_read_only"]),
             Err(ConnectionError::RequiredCapabilityUnknown { .. })
+        ));
+    }
+
+    #[test]
+    fn bulk_write_defaults_to_explicitly_unsupported() {
+        let mut writer = InsertOnlyWriter;
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("accounts").unwrap(),
+        };
+        let batch = RowBatch::new(Vec::new(), 1, 1);
+        assert!(matches!(
+            writer.bulk_write(&table, &batch),
+            Err(ConnectionError::RequiredCapabilityUnavailable {
+                capability: "bulk_write",
+                ..
+            })
         ));
     }
 

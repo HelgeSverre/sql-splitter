@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 5;
+pub const PLAN_SCHEMA_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -933,18 +933,24 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG")?)?;
     let target_config =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?)?;
-    let mut source_administrator = connect(&source_admin_config)?;
+    let mut source_administrator =
+        connect(&source_admin_config).context("connect source administrator")?;
     source_administrator.batch_execute(
-        "DROP TABLE IF EXISTS public.source_values; CREATE TABLE public.source_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); GRANT SELECT ON public.source_values TO migration_reader; INSERT INTO public.source_values (text_value, binary_value, float_value, json_value, numeric_value, timestamp_value) VALUES ('exact text', decode('00ff10', 'hex'), '-0'::double precision, '{\"b\":2,\"a\":1}'::jsonb, 1234567890123.45000, '2026-08-11 10:11:12.123456+02')",
-    )?;
-    let mut target_administrator = connect(&target_config)?;
+        "DROP TABLE IF EXISTS public.source_values; CREATE TABLE public.source_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); GRANT SELECT ON public.source_values TO migration_reader; GRANT SELECT ON SEQUENCE public.source_values_id_seq TO migration_reader; INSERT INTO public.source_values (text_value, binary_value, float_value, json_value, numeric_value, timestamp_value) VALUES ('exact text', decode('00ff10', 'hex'), '-0'::double precision, '{\"b\":2,\"a\":1}'::jsonb, 1234567890123.45000, '2026-08-11 10:11:12.123456+02')",
+    ).context("prepare source value matrix")?;
+    let mut target_administrator =
+        connect(&target_config).context("connect target administrator")?;
     target_administrator.batch_execute(
-        "DROP TABLE IF EXISTS public.target_values; CREATE TABLE public.target_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL)",
-    )?;
+        "DROP TABLE IF EXISTS public.target_values_insert, public.target_values_copy; CREATE TABLE public.target_values_insert (id bigint PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); CREATE TABLE public.target_values_copy (LIKE public.target_values_insert INCLUDING ALL)",
+    ).context("prepare target value matrices")?;
 
     let source = PostgresSourceFactory::new(source_config);
-    let snapshot = source.capture_snapshot()?;
-    let mut reader = source.open_reader(&snapshot, CancellationToken::default())?;
+    let snapshot = source
+        .capture_snapshot()
+        .context("capture source snapshot")?;
+    let mut reader = source
+        .open_reader(&snapshot, CancellationToken::default())
+        .context("open source reader")?;
     let source_table = QualifiedTable {
         namespace: Identifier::new("public")?,
         name: Identifier::new("source_values")?,
@@ -962,35 +968,63 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
     .map(Identifier::new)
     .collect::<Result<Vec<_>, _>>()?;
     let key = vec![Identifier::new("id")?];
-    let batch = reader.select_page(&KeysetPage {
-        table: source_table,
+    let batch = reader
+        .select_page(&KeysetPage {
+            table: source_table,
+            projection: projection.clone(),
+            key: key.clone(),
+            after: None,
+            limit: 10,
+        })
+        .context("read source value matrix")?;
+    assert_eq!(batch.len(), 1);
+
+    let target = sql_splitter::migration::postgres::PostgresTargetFactory::new(target_config);
+    let cancellation = CancellationToken::default();
+    let insert_table = QualifiedTable {
+        namespace: Identifier::new("public")?,
+        name: Identifier::new("target_values_insert")?,
+    };
+    let copy_table = QualifiedTable {
+        namespace: Identifier::new("public")?,
+        name: Identifier::new("target_values_copy")?,
+    };
+    let mut insert_writer = target
+        .open_writer(cancellation.clone())
+        .context("open INSERT writer")?;
+    insert_writer.begin().context("begin INSERT transaction")?;
+    insert_writer
+        .insert(&insert_table, &batch)
+        .context("plain INSERT value matrix")?;
+    insert_writer.commit().context("plain INSERT commit")?;
+    let mut copy_writer = target
+        .open_writer(cancellation.clone())
+        .context("open COPY writer")?;
+    copy_writer.begin().context("begin COPY transaction")?;
+    copy_writer
+        .bulk_write(&copy_table, &batch)
+        .context("binary COPY value matrix")?;
+    copy_writer.commit().context("binary COPY commit")?;
+
+    let mut insert_verifier = target.open_verifier(cancellation.clone())?;
+    let inserted = insert_verifier.select_page(&KeysetPage {
+        table: insert_table,
         projection: projection.clone(),
         key: key.clone(),
         after: None,
         limit: 10,
     })?;
-    assert_eq!(batch.len(), 1);
-
-    let target = sql_splitter::migration::postgres::PostgresTargetFactory::new(target_config);
-    let cancellation = CancellationToken::default();
-    let mut writer = target.open_writer(cancellation.clone())?;
-    writer.begin()?;
-    let target_table = QualifiedTable {
-        namespace: Identifier::new("public")?,
-        name: Identifier::new("target_values")?,
-    };
-    writer.insert(&target_table, &batch)?;
-    writer.commit()?;
-
-    let mut verifier = target.open_verifier(cancellation)?;
-    let observed = verifier.select_page(&KeysetPage {
-        table: target_table,
+    let mut copy_verifier = target.open_verifier(cancellation)?;
+    let copied = copy_verifier.select_page(&KeysetPage {
+        table: copy_table,
         projection,
         key,
         after: None,
         limit: 10,
     })?;
-    assert_eq!(observed.rows(), batch.rows());
+    assert_eq!(inserted.rows(), batch.rows());
+    assert_eq!(copied.rows(), batch.rows());
+    assert_eq!(copied.rows(), inserted.rows());
     Ok(())
 }
 
