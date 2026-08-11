@@ -163,10 +163,12 @@ State/report/log files are created with mode `0600`, exclusive creation,
 regular-file checks, parent ownership checks, and symlink defenses. The state
 file is a versioned append-only frame stream. Its first durable frame is the
 journal genesis: it binds the migration ID, plan hash, approval reference,
-endpoint identities, consistency-mode evidence, and recorded capabilities
-before any target effect exists. Each frame binds its sequence,
-payload digest, and previous-frame digest, and each durable transition fsyncs
-the file. Resume truncates only an incomplete final frame; internal corruption,
+endpoint identities, consistency-mode evidence, recorded capabilities, and
+the accepted outage projection when present
+([13](./13-throughput-and-copy-path.md)) before any target effect exists. Each
+frame binds its sequence, payload digest, and previous-frame digest, and each
+durable transition fsyncs the file. Resume truncates only an incomplete final
+frame; internal corruption,
 reordering, or deletion fails closed. The in-memory replay projection is bounded
 by the reviewed operation graph, one prepared chunk, and one cursor per copied
 table. It does not retain the complete chunk manifest. Implementation Phase 9's

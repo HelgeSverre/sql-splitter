@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::model::{DbValue, KeyTuple};
 use super::plan::ReviewedPlan;
 
-pub const STATE_SCHEMA_VERSION: u16 = 5;
+pub const STATE_SCHEMA_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
@@ -44,6 +44,7 @@ pub struct ResumeBinding {
     pub consistency_evidence: ConsistencyEvidence,
     pub source_schema_fingerprint: String,
     pub target_schema_fingerprint: String,
+    pub outage_projection_digest: Option<String>,
     pub conversion_policy: String,
     pub canonical_encoding_version: u16,
 }
@@ -129,6 +130,9 @@ pub enum JournalError {
         next: u64,
     },
     EmptyBindingField {
+        field: &'static str,
+    },
+    InvalidBindingDigest {
         field: &'static str,
     },
     EmptyOperationId {
@@ -275,6 +279,7 @@ impl MigrationState {
         }
         check!(source_schema_fingerprint);
         check!(target_schema_fingerprint);
+        check!(outage_projection_digest);
         check!(conversion_policy);
         check!(canonical_encoding_version);
         Ok(())
@@ -349,6 +354,17 @@ impl MigrationState {
         ] {
             if value.is_empty() {
                 return Err(JournalError::EmptyBindingField { field });
+            }
+        }
+        if let Some(digest) = &self.binding.outage_projection_digest {
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(JournalError::InvalidBindingDigest {
+                    field: "outage_projection_digest",
+                });
             }
         }
         let consistency_fields: Vec<(&'static str, &str)> = match &self.binding.consistency_evidence
@@ -947,6 +963,7 @@ mod tests {
             },
             source_schema_fingerprint: "sf".into(),
             target_schema_fingerprint: "tf".into(),
+            outage_projection_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: 1,
         }

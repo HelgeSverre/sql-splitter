@@ -6,8 +6,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
+use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 6;
+pub const PLAN_SCHEMA_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,6 +273,8 @@ pub struct MigrationPlan {
     pub consistency_mode: String,
     pub canonical_encoding_version: u16,
     pub conversion_policy: String,
+    #[serde(default)]
+    pub outage_policy: Option<ReviewedOutagePolicy>,
     pub capabilities: BTreeMap<String, String>,
     pub operations: Vec<PlanOperation>,
     pub unsupported_objects: UnsupportedObjectReport,
@@ -346,6 +349,14 @@ impl MigrationPlan {
                 return Err(PlanError::EmptyField {
                     field: "consistency_mode",
                 });
+            }
+        } else if self.outage_policy.is_some() {
+            return Err(PlanError::AssessmentContainsOutagePolicy);
+        }
+        if let Some(outage_policy) = &self.outage_policy {
+            outage_policy.validate()?;
+            if outage_policy.source_catalog_fingerprint != self.source_catalog_fingerprint {
+                return Err(PlanError::OutagePolicySourceMismatch);
             }
         }
         let mut finding_keys = BTreeSet::new();
@@ -554,6 +565,12 @@ pub enum PlanError {
     UnsupportedRequiredSemantics,
     #[error("assessment plans cannot be executed")]
     AssessmentCannotExecute,
+    #[error("assessment plan must not contain an execution outage policy")]
+    AssessmentContainsOutagePolicy,
+    #[error("outage policy source fingerprint differs from the plan")]
+    OutagePolicySourceMismatch,
+    #[error("reviewed outage policy is invalid")]
+    OutagePolicy(#[from] OutageProjectionError),
     #[error("required plan evidence {field} is absent")]
     MissingEvidence { field: &'static str },
     #[error("target assessment fields must all be assessed or all be not assessed")]
@@ -565,6 +582,10 @@ pub enum PlanError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::outage_projection::{
+        ByteBasis, ThroughputProfile, OUTAGE_PROJECTION_SCHEMA_VERSION,
+        THROUGHPUT_PROFILE_SCHEMA_VERSION,
+    };
 
     fn catalog(database: &str) -> VendorCatalog {
         VendorCatalog {
@@ -585,6 +606,7 @@ mod tests {
     fn plan() -> MigrationPlan {
         let source_catalog = catalog("source");
         let target_catalog = catalog("target");
+        let source_fingerprint = fingerprint(&source_catalog);
         MigrationPlan {
             schema_version: PLAN_SCHEMA_VERSION,
             purpose: PlanPurpose::Execution,
@@ -592,7 +614,7 @@ mod tests {
             tool_version: "test".into(),
             source_endpoint_identity: "s".into(),
             target_endpoint_identity: AssessmentStatus::Assessed("t".into()),
-            source_catalog_fingerprint: fingerprint(&source_catalog),
+            source_catalog_fingerprint: source_fingerprint.clone(),
             target_catalog_fingerprint: AssessmentStatus::Assessed(fingerprint(&target_catalog)),
             source_catalog: Some(source_catalog),
             target_catalog: AssessmentStatus::Assessed(target_catalog),
@@ -601,6 +623,26 @@ mod tests {
             consistency_mode: "consistent_snapshot".into(),
             canonical_encoding_version: 1,
             conversion_policy: "exact".into(),
+            outage_policy: Some(ReviewedOutagePolicy {
+                schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
+                assessment_digest: "a".repeat(64),
+                source_catalog_fingerprint: source_fingerprint,
+                byte_basis: ByteBasis::PostgresTotalRelationBytesV1,
+                throughput_profile: ThroughputProfile {
+                    schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
+                    measurement_reference: "run-1".into(),
+                    environment_reference: "pg17-local".into(),
+                    postgres_major_version: 17,
+                    measured_at_unix_seconds: 1_000,
+                    valid_for_seconds: 1_000,
+                    copy_bytes_per_second: 100,
+                    verification_bytes_per_second: 100,
+                },
+                reviewed_at_unix_seconds: 1_100,
+                reviewed_assessed_bytes: 0,
+                reviewed_projected_seconds: 0,
+                maximum_approved_seconds: 1,
+            }),
             capabilities: BTreeMap::new(),
             operations: vec![PlanOperation::new(
                 OperationKind::VerifySchema,
@@ -676,6 +718,7 @@ mod tests {
     fn source_only_assessment_is_structurally_valid_but_not_executable() {
         let mut plan = plan();
         plan.purpose = PlanPurpose::Assessment;
+        plan.outage_policy = None;
         plan.target_endpoint_identity = AssessmentStatus::NotAssessed;
         plan.target_catalog_fingerprint = AssessmentStatus::NotAssessed;
         plan.target_catalog = AssessmentStatus::NotAssessed;
@@ -688,6 +731,22 @@ mod tests {
             Err(PlanError::AssessmentCannotExecute)
         ));
         assert!(ReviewedPlan::new(plan).is_ok());
+    }
+
+    #[test]
+    fn execution_allows_no_outage_policy_but_assessment_rejects_one() {
+        let mut execution_plan = plan();
+        execution_plan.outage_policy = None;
+        assert!(execution_plan.validate().is_ok());
+        execution_plan.validate_for_execution().unwrap();
+
+        let mut assessment = execution_plan;
+        assessment.purpose = PlanPurpose::Assessment;
+        assessment.outage_policy = Some(plan().outage_policy.unwrap());
+        assert!(matches!(
+            assessment.validate(),
+            Err(PlanError::AssessmentContainsOutagePolicy)
+        ));
     }
 
     #[test]
@@ -737,6 +796,7 @@ mod tests {
         let reviewed = ReviewedPlan::new(plan()).unwrap();
         let mut changed = reviewed.clone();
         changed.plan.purpose = PlanPurpose::Assessment;
+        changed.plan.outage_policy = None;
         assert!(matches!(
             changed.validate(),
             Err(PlanError::HashMismatch { .. })

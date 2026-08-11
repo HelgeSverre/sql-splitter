@@ -157,11 +157,41 @@ statement requires measurements recorded in the supported deployment
 environment, and a throughput profile explicitly binds its measurement and
 environment references. This satisfies measured-gate items 1 and 2 for the
 spike environment. Gate item 3 is implemented on the assessment side:
-assessment schema version 2 accepts an optional protected throughput profile
+assessment schema version 3 accepts an optional protected throughput profile
 (separate copy and verification rates, PostgreSQL major, measurement time,
 validity period, environment reference), computes a conservative
-ceiling-summed window over `total_relation_bytes`, fails to `NotAssessed` on
-a missing, stale, future, incomplete, or wrong-major profile, and recomputes
-the result during validation to reject tampering. The execute-preflight
-projection of the same window remains open. The gate-4 matrices have passed
-on PostgreSQL 15, 16, and 17 per the [008]/[010] mailbox evidence.
+ceiling-summed window over `total_relation_bytes` for each copied physical
+`relkind = 'r'` relation exactly once, fails to `NotAssessed` on a missing,
+stale, future, incomplete, or wrong-major profile, and recomputes the result
+during validation to reject tampering. The execute-preflight
+projection follows the plan-bound outage-policy contract below. The gate-4
+matrices have passed on PostgreSQL 15, 16, and 17 per the [008]/[010]
+mailbox evidence.
+
+## Execute-preflight projection: plan-bound outage policy
+
+The selected contract (mailbox [014]/[017]) preserves one reviewed execution
+artifact; execute and resume gain no new profile inputs.
+
+- Plan creation optionally accepts a protected assessment artifact and a
+  maximum approved outage in seconds — both together or neither. A plan
+  without an outage policy carries no projection and execute enforces
+  nothing new.
+- Plan creation validates the assessment and its throughput profile and
+  embeds a typed reviewed outage policy: assessment digest, source catalog
+  fingerprint, the explicit byte basis (PostgreSQL `total_relation_bytes`),
+  the complete throughput profile, reviewed input bytes and projected
+  seconds, and the approved maximum. The plan hash covers every field.
+- Initial execute refreshes the byte basis from the same source snapshot
+  used for catalog attestation, recomputes the projection, and blocks
+  before journal creation and before any target effect when the profile is
+  stale or incompatible or the refreshed estimate exceeds the approved
+  maximum.
+- The accepted projection is stored in journal genesis and its digest in
+  the resume binding. Resume accepts no replacement assessment, profile,
+  basis, or limit. Profile expiry after initial admission never blocks
+  recovery: the outage was accepted and has already started, and blocking
+  recovery would only extend it.
+- The projection is an estimate and is labeled as one wherever rendered.
+  Exceeding it at runtime is an observability event, not an integrity
+  failure.

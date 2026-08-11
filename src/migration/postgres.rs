@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::artifact::{prepare_json_text_pair_new, write_json_new, write_json_text_pair_new};
+use super::artifact::{
+    prepare_json_text_pair_new, read_json, write_json_new, write_json_text_pair_new,
+};
 use super::assessment::{
     project_outage_window, read_throughput_profile, render_markdown, AssessmentArtifact,
     AssessmentError, EvidenceStatus, ExecutionRequirement, ScopeEstimate, SourceAssessmentEvidence,
@@ -37,6 +39,10 @@ use super::connection::{
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
     Identifier, QualifiedTable, RowBatch, RowBatchError, ValueFormat, VendorCatalog,
+};
+use super::outage_projection::{
+    projected_seconds, AcceptedOutageProjection, ByteBasis, OutageProjectionError,
+    ReviewedOutagePolicy, OUTAGE_PROJECTION_SCHEMA_VERSION,
 };
 use super::plan::{
     AssessmentStatus, MigrationPlan, OperationId, OperationKind, PlanOperation, PlanPurpose,
@@ -157,6 +163,8 @@ pub enum PostgresPlanError {
     Artifact(#[from] super::artifact::ArtifactError),
     #[error("assessment construction failed")]
     Assessment(#[from] AssessmentError),
+    #[error("outage projection validation failed")]
+    OutageProjection(#[from] OutageProjectionError),
     #[error("catalog serialization failed")]
     Serialize(#[from] serde_json::Error),
 }
@@ -523,6 +531,68 @@ impl PostgresSourceFactory {
             pending.unsupported.clone(),
             fingerprint,
         ))
+    }
+
+    /// Refresh the reviewed outage projection inside the still-active source snapshot.
+    pub fn refresh_outage_projection(
+        &self,
+        snapshot: &SnapshotToken,
+        source_catalog: &VendorCatalog,
+        policy: &ReviewedOutagePolicy,
+    ) -> ConnectionResult<AcceptedOutageProjection> {
+        self.cancellation.check()?;
+        policy
+            .validate()
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| ConnectionError::Database("snapshot factory lock is poisoned".into()))?;
+        let pending = pending.as_mut().ok_or(ConnectionError::SnapshotMismatch)?;
+        if &pending.token != snapshot {
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        let fingerprint = catalog_fingerprint(source_catalog)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        if fingerprint != policy.source_catalog_fingerprint {
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        let relation_oids = physical_business_relation_oids(source_catalog)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let assessed_bytes = query_exact_total_relation_bytes(&mut pending.client, &relation_oids)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let identity = pending
+            .client
+            .query_one(
+                "SELECT current_setting('server_version_num')::integer, extract(epoch FROM clock_timestamp())::bigint",
+                &[],
+            )
+            .map_err(database_error)?;
+        let server_version_num = u32::try_from(identity.get::<_, i32>(0)).map_err(|_| {
+            ConnectionError::InvalidRequest("negative PostgreSQL server version number".into())
+        })?;
+        let refreshed_at_unix_seconds = u64::try_from(identity.get::<_, i64>(1)).map_err(|_| {
+            ConnectionError::InvalidRequest("PostgreSQL clock is before the Unix epoch".into())
+        })?;
+        let projection = AcceptedOutageProjection {
+            schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
+            policy_hash: policy
+                .canonical_hash()
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+            source_catalog_fingerprint: fingerprint,
+            source_server_version_num: server_version_num,
+            byte_basis: ByteBasis::PostgresTotalRelationBytesV1,
+            refreshed_at_unix_seconds,
+            refreshed_assessed_bytes: assessed_bytes,
+            projected_seconds: projected_seconds(assessed_bytes, &policy.throughput_profile)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+            throughput_profile: policy.throughput_profile.clone(),
+        };
+        projection
+            .validate_against(policy)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        self.cancellation.check()?;
+        Ok(projection)
     }
 }
 
@@ -5656,6 +5726,15 @@ pub fn build_plan_with_consistency(
     target: &CatalogSnapshot,
     consistency_mode: PostgresConsistencyMode,
 ) -> Result<ReviewedPlan, PostgresPlanError> {
+    build_plan_with_consistency_and_outage_policy(source, target, consistency_mode, None)
+}
+
+pub fn build_plan_with_consistency_and_outage_policy(
+    source: &CatalogSnapshot,
+    target: &CatalogSnapshot,
+    consistency_mode: PostgresConsistencyMode,
+    outage_policy: Option<ReviewedOutagePolicy>,
+) -> Result<ReviewedPlan, PostgresPlanError> {
     let mut operations = Vec::new();
     let mut table_names = BTreeSet::new();
     let mut foreign_keys = Vec::new();
@@ -6183,6 +6262,7 @@ pub fn build_plan_with_consistency(
         consistency_mode: consistency_mode.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_same_dialect_exact".into(),
+        outage_policy,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -6874,6 +6954,19 @@ pub fn build_source_assessment_with_profile(
         .sort_by(|left, right| left.object_id.cmp(&right.object_id));
     scope_estimates.sort_by(|left, right| left.table.cmp(&right.table));
     let source_catalog_fingerprint = catalog_fingerprint(&source.catalog)?;
+    let projected_physical_tables =
+        copied_physical_relations(&projection_source.catalog, &projected.plan.operations)?
+            .into_iter()
+            .map(|(namespace, relation)| QualifiedTable {
+                namespace: namespace.name.clone(),
+                name: relation.name.clone(),
+            })
+            .collect::<BTreeSet<_>>();
+    let projection_scope_estimates = scope_estimates
+        .iter()
+        .filter(|estimate| projected_physical_tables.contains(&estimate.table))
+        .cloned()
+        .collect::<Vec<_>>();
     let operations = projected.plan.operations;
     let reviewed_plan = ReviewedPlan::new(MigrationPlan {
         schema_version: PLAN_SCHEMA_VERSION,
@@ -6891,6 +6984,7 @@ pub fn build_source_assessment_with_profile(
         consistency_mode: "not_assessed".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_source_only_assessment".into(),
+        outage_policy: None,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -6954,7 +7048,7 @@ pub fn build_source_assessment_with_profile(
             },
         ],
         projected_window: project_outage_window(
-            &scope_estimates,
+            &projection_scope_estimates,
             throughput_profile,
             u16::try_from(source.server_version_num / 10_000).unwrap_or_default(),
             assessed_at_unix_seconds,
@@ -7004,6 +7098,144 @@ pub fn write_live_assessment_with_profile(
     Ok(assessment)
 }
 
+fn relation_oid(object_id: &str) -> Result<u32, PostgresPlanError> {
+    object_id
+        .strip_prefix("relation:")
+        .and_then(|value| value.parse().ok())
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "catalog relation has an invalid object ID",
+        ))
+}
+
+fn copied_physical_relations<'a>(
+    catalog: &'a VendorCatalog,
+    operations: &[PlanOperation],
+) -> Result<Vec<(&'a CatalogNamespace, &'a CatalogObject)>, PostgresPlanError> {
+    let mut relations = BTreeMap::new();
+    for operation in operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CopyTable)
+    {
+        let table = operation
+            .table
+            .as_ref()
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "CopyTable operation has no table",
+            ))?;
+        let namespace = catalog
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.name == table.namespace)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "copied table namespace is absent from the source catalog",
+            ))?;
+        let root = namespace
+            .objects
+            .iter()
+            .find(|object| object.kind == CatalogObjectKind::Table && object.name == table.name)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "copied table is absent from the source catalog",
+            ))?;
+        match required_catalog_string(root, "relkind")? {
+            "r" => {
+                relations.insert(root.id.as_str(), (namespace, root));
+            }
+            "p" => {
+                let mut leaf_count = 0_usize;
+                for leaf_namespace in &catalog.namespaces {
+                    for leaf in &leaf_namespace.objects {
+                        if leaf.kind == CatalogObjectKind::Partition
+                            && leaf
+                                .attributes
+                                .get("partition_parent_oid")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(root.id.as_str())
+                        {
+                            if required_catalog_string(leaf, "relkind")? != "r" {
+                                return Err(PostgresPlanError::InvalidConfig(
+                                    "copied partition leaf is not a physical ordinary relation",
+                                ));
+                            }
+                            relations.insert(leaf.id.as_str(), (leaf_namespace, leaf));
+                            leaf_count += 1;
+                        }
+                    }
+                }
+                if leaf_count == 0 {
+                    return Err(PostgresPlanError::InvalidConfig(
+                        "copied partition root has no physical leaf inventory",
+                    ));
+                }
+            }
+            _ => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "CopyTable coverage contains a non-physical source relation",
+                ));
+            }
+        }
+    }
+    Ok(relations.into_values().collect())
+}
+
+fn physical_business_relation_oids(catalog: &VendorCatalog) -> Result<Vec<u32>, PostgresPlanError> {
+    let mut oids = BTreeSet::new();
+    for object in catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| &namespace.objects)
+        .filter(|object| {
+            matches!(
+                object.kind,
+                CatalogObjectKind::Table | CatalogObjectKind::Partition
+            )
+        })
+    {
+        match required_catalog_string(object, "relkind")? {
+            "r" => {
+                oids.insert(relation_oid(&object.id)?);
+            }
+            "p" if object.kind == CatalogObjectKind::Table => {}
+            _ => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "business relation catalog contains an unexpected physical kind",
+                ));
+            }
+        }
+    }
+    Ok(oids.into_iter().collect())
+}
+
+fn query_exact_total_relation_bytes(
+    client: &mut impl postgres::GenericClient,
+    expected_oids: &[u32],
+) -> Result<u64, PostgresPlanError> {
+    let rows = client.query(
+        "SELECT c.oid, pg_total_relation_size(c.oid) FROM pg_class c WHERE c.relkind='r' AND c.oid=ANY($1::oid[]) ORDER BY c.oid",
+        &[&expected_oids],
+    )?;
+    let returned_oids = rows
+        .iter()
+        .map(|row| row.get::<_, u32>(0))
+        .collect::<Vec<_>>();
+    let mut sorted_expected = expected_oids.to_vec();
+    sorted_expected.sort_unstable();
+    if returned_oids != sorted_expected {
+        return Err(PostgresPlanError::InvalidConfig(
+            "copied physical relation inventory does not match pg_class",
+        ));
+    }
+    rows.into_iter().try_fold(0_u64, |total, row| {
+        let bytes = u64::try_from(row.get::<_, i64>(1)).map_err(|_| {
+            PostgresPlanError::InvalidConfig("negative PostgreSQL total relation size")
+        })?;
+        total
+            .checked_add(bytes)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "PostgreSQL total relation size overflowed",
+            ))
+    })
+}
+
 pub fn write_live_plan_with_consistency(
     source_config: impl AsRef<Path>,
     target_config: impl AsRef<Path>,
@@ -7020,6 +7252,147 @@ pub fn write_live_plan_with_consistency(
     let source = inspect_endpoint(&source_config)?;
     let target = inspect_endpoint(&target_config)?;
     let plan = build_plan_with_consistency(&source, &target, consistency_mode)?;
+    write_json_new(output, &plan)?;
+    Ok(plan)
+}
+
+pub fn write_live_plan_with_outage_policy(
+    source_config: impl AsRef<Path>,
+    target_config: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    consistency_mode: PostgresConsistencyMode,
+    assessment_input: Option<&Path>,
+    maximum_approved_seconds: Option<u64>,
+) -> Result<ReviewedPlan, PostgresPlanError> {
+    let (assessment_input, maximum_approved_seconds) =
+        match (assessment_input, maximum_approved_seconds) {
+            (None, None) => {
+                return write_live_plan_with_consistency(
+                    source_config,
+                    target_config,
+                    output,
+                    consistency_mode,
+                );
+            }
+            (Some(assessment_input), Some(maximum_approved_seconds)) => {
+                (assessment_input, maximum_approved_seconds)
+            }
+            _ => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "assessment input and maximum outage seconds must be supplied together",
+                ));
+            }
+        };
+    let assessment: AssessmentArtifact = read_json(assessment_input)?;
+    assessment.validate()?;
+    let source_config = PostgresEndpointConfig::read(source_config)?;
+    let target_config = PostgresEndpointConfig::read(target_config)?;
+    if source_config.credential_env == target_config.credential_env {
+        return Err(PostgresPlanError::InvalidConfig(
+            "source and target must use separate credential references",
+        ));
+    }
+    let source = inspect_endpoint(&source_config)?;
+    let target = inspect_endpoint(&target_config)?;
+    let source_catalog_fingerprint = catalog_fingerprint(&source.catalog)?;
+    if assessment.reviewed_plan.plan.source_catalog_fingerprint != source_catalog_fingerprint {
+        return Err(PostgresPlanError::InvalidConfig(
+            "assessment source catalog fingerprint does not match the live source",
+        ));
+    }
+    let source_major = u16::try_from(source.server_version_num / 10_000).map_err(|_| {
+        PostgresPlanError::InvalidConfig("negative PostgreSQL server version number")
+    })?;
+    if assessment.source_evidence.server_version_num / 10_000 != u32::from(source_major) {
+        return Err(PostgresPlanError::InvalidConfig(
+            "assessment PostgreSQL major version does not match the live source",
+        ));
+    }
+    let unbound = build_plan_with_consistency(&source, &target, consistency_mode)?;
+    let physical_relations = copied_physical_relations(&source.catalog, &unbound.plan.operations)?;
+    let estimates = assessment
+        .scope_estimates
+        .iter()
+        .map(|estimate| (&estimate.table, estimate))
+        .collect::<BTreeMap<_, _>>();
+    let reviewed_assessed_bytes =
+        physical_relations
+            .into_iter()
+            .try_fold(0_u64, |total, (namespace, relation)| {
+                let table = QualifiedTable {
+                    namespace: namespace.name.clone(),
+                    name: relation.name.clone(),
+                };
+                let estimate = estimates
+                    .get(&table)
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "assessment is missing a copied physical relation estimate",
+                    ))?;
+                total.checked_add(estimate.total_relation_bytes).ok_or(
+                    PostgresPlanError::InvalidConfig("assessment physical byte total overflowed"),
+                )
+            })?;
+    let (assessed_bytes, included_relations, assessed_at_unix_seconds, throughput_profile) =
+        match &assessment.projected_window {
+            super::assessment::ProjectedWindow::Estimated {
+                assessed_bytes,
+                included_relations,
+                assessed_at_unix_seconds,
+                throughput_profile,
+                ..
+            } => (
+                *assessed_bytes,
+                included_relations,
+                *assessed_at_unix_seconds,
+                throughput_profile.clone(),
+            ),
+            super::assessment::ProjectedWindow::NotAssessed { .. } => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "assessment has no valid estimated outage profile",
+                ));
+            }
+        };
+    let expected_relations = copied_physical_relations(&source.catalog, &unbound.plan.operations)?
+        .into_iter()
+        .map(|(namespace, relation)| QualifiedTable {
+            namespace: namespace.name.clone(),
+            name: relation.name.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    if assessed_bytes != reviewed_assessed_bytes
+        || included_relations.iter().cloned().collect::<BTreeSet<_>>() != expected_relations
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "assessment byte basis does not match copied physical relations",
+        ));
+    }
+    throughput_profile.validate_at(source_major, assessed_at_unix_seconds)?;
+    let reviewed_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PostgresPlanError::InvalidConfig("system clock is before the Unix epoch"))?
+        .as_secs();
+    throughput_profile.validate_at(source_major, reviewed_at_unix_seconds)?;
+    let reviewed_projected_seconds =
+        projected_seconds(reviewed_assessed_bytes, &throughput_profile)?;
+    let assessment_digest = hex::encode(Sha256::digest(serde_json::to_vec(&assessment)?));
+    let policy = ReviewedOutagePolicy {
+        schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
+        assessment_digest,
+        source_catalog_fingerprint,
+        byte_basis: ByteBasis::PostgresTotalRelationBytesV1,
+        throughput_profile,
+        reviewed_at_unix_seconds,
+        reviewed_assessed_bytes,
+        reviewed_projected_seconds,
+        maximum_approved_seconds,
+    };
+    policy.validate()?;
+    let plan = build_plan_with_consistency_and_outage_policy(
+        &source,
+        &target,
+        consistency_mode,
+        Some(policy),
+    )?;
     write_json_new(output, &plan)?;
     Ok(plan)
 }
@@ -7065,7 +7438,7 @@ mod tests {
                 kind: CatalogObjectKind::Table,
                 name: Identifier::new("accounts").unwrap(),
                 definition: Vec::new(),
-                attributes: BTreeMap::new(),
+                attributes: BTreeMap::from([("relkind".into(), serde_json::json!("r"))]),
             });
             objects.push(CatalogObject {
                 id: "table-1:1".into(),
@@ -8351,5 +8724,39 @@ credential_env = "PGPASSWORD"
             &expected.snapshot_id,
             false,
         ));
+    }
+
+    #[test]
+    fn outage_byte_inventory_excludes_partition_roots_and_deduplicates_relations() {
+        let relation =
+            |id: &str, name: &str, kind: CatalogObjectKind, relkind: &str| CatalogObject {
+                id: id.into(),
+                kind,
+                name: Identifier::new(name).unwrap(),
+                definition: Vec::new(),
+                attributes: BTreeMap::from([("relkind".into(), serde_json::json!(relkind))]),
+            };
+        let catalog = VendorCatalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            dialect: "postgresql".into(),
+            server_version: "17.0".into(),
+            database: Identifier::new("app").unwrap(),
+            namespaces: vec![CatalogNamespace {
+                id: "namespace:1".into(),
+                name: Identifier::new("public").unwrap(),
+                owner: None,
+                charset: None,
+                collation: None,
+                objects: vec![
+                    relation("relation:10", "standalone", CatalogObjectKind::Table, "r"),
+                    relation("relation:20", "root", CatalogObjectKind::Table, "p"),
+                    relation("relation:21", "leaf", CatalogObjectKind::Partition, "r"),
+                ],
+            }],
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(physical_business_relation_oids(&catalog).unwrap(), [10, 21]);
     }
 }

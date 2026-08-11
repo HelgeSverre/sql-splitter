@@ -11,11 +11,12 @@ use thiserror::Error;
 
 use super::journal::{MigrationStatus, OperationState, ResumeBinding};
 use super::model::DbValue;
+use super::outage_projection::AcceptedOutageProjection;
 use super::plan::{OperationKind, ReviewedPlan};
 
 const FILE_MAGIC: &[u8; 8] = b"SSJNL001";
 const FRAME_MAGIC: u32 = 0x534a_4631;
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 const FILE_HEADER_LEN: u64 = 10;
 const FRAME_HEADER_LEN: usize = 84;
 const FRAME_TRAILER_LEN: usize = 32;
@@ -80,6 +81,7 @@ pub enum OperationPhase {
 pub struct Genesis {
     pub binding: ResumeBinding,
     pub reviewed_plan: ReviewedPlan,
+    pub accepted_outage_projection: Option<AcceptedOutageProjection>,
     pub operations: Vec<OperationSpec>,
 }
 
@@ -90,6 +92,28 @@ impl Genesis {
             .map_err(|_| AppendJournalError::InvalidGenesis)?;
         if self.binding.plan_hash != self.reviewed_plan.plan_hash.to_string() {
             return Err(AppendJournalError::InvalidGenesis);
+        }
+        match (
+            self.reviewed_plan.plan.outage_policy.as_ref(),
+            self.accepted_outage_projection.as_ref(),
+            self.binding.outage_projection_digest.as_ref(),
+        ) {
+            (None, None, None) => {}
+            (Some(policy), Some(accepted), Some(digest)) => {
+                accepted
+                    .validate_against(policy)
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                let accepted_digest = accepted
+                    .canonical_hash(policy)
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                if digest != &accepted_digest
+                    || accepted.source_catalog_fingerprint
+                        != self.reviewed_plan.plan.source_catalog_fingerprint
+                {
+                    return Err(AppendJournalError::InvalidGenesis);
+                }
+            }
+            _ => return Err(AppendJournalError::InvalidGenesis),
         }
         let plan_ids = self
             .reviewed_plan
@@ -1520,6 +1544,10 @@ mod tests {
     use super::*;
     use crate::migration::journal::ConsistencyEvidence;
     use crate::migration::model::{Identifier, VendorCatalog};
+    use crate::migration::outage_projection::{
+        ByteBasis, ReviewedOutagePolicy, ThroughputProfile, OUTAGE_PROJECTION_SCHEMA_VERSION,
+        THROUGHPUT_PROFILE_SCHEMA_VERSION,
+    };
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
         UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
@@ -1564,6 +1592,26 @@ mod tests {
             hex::encode(Sha256::digest(serde_json::to_vec(&source_catalog).unwrap()));
         let target_catalog_fingerprint =
             hex::encode(Sha256::digest(serde_json::to_vec(&target_catalog).unwrap()));
+        let outage_policy = ReviewedOutagePolicy {
+            schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
+            assessment_digest: "a".repeat(64),
+            source_catalog_fingerprint: source_catalog_fingerprint.clone(),
+            byte_basis: ByteBasis::PostgresTotalRelationBytesV1,
+            throughput_profile: ThroughputProfile {
+                schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
+                measurement_reference: "fixture-run".into(),
+                environment_reference: "fixture-environment".into(),
+                postgres_major_version: 17,
+                measured_at_unix_seconds: 1_000,
+                valid_for_seconds: 1_000,
+                copy_bytes_per_second: 1,
+                verification_bytes_per_second: 1,
+            },
+            reviewed_at_unix_seconds: 1_000,
+            reviewed_assessed_bytes: 1,
+            reviewed_projected_seconds: 2,
+            maximum_approved_seconds: 2,
+        };
         let reviewed_plan = ReviewedPlan::new(MigrationPlan {
             schema_version: PLAN_SCHEMA_VERSION,
             purpose: PlanPurpose::Execution,
@@ -1571,7 +1619,7 @@ mod tests {
             tool_version: "test".into(),
             source_endpoint_identity: "source".into(),
             target_endpoint_identity: AssessmentStatus::Assessed("target".into()),
-            source_catalog_fingerprint,
+            source_catalog_fingerprint: source_catalog_fingerprint.clone(),
             target_catalog_fingerprint: AssessmentStatus::Assessed(target_catalog_fingerprint),
             source_catalog: Some(source_catalog),
             target_catalog: AssessmentStatus::Assessed(target_catalog),
@@ -1580,6 +1628,7 @@ mod tests {
             consistency_mode: "consistent_snapshot".into(),
             canonical_encoding_version: 1,
             conversion_policy: "exact".into(),
+            outage_policy: Some(outage_policy.clone()),
             capabilities: BTreeMap::new(),
             operations,
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -1599,14 +1648,37 @@ mod tests {
                 snapshot_id: "snapshot".into(),
                 server_version: "17".into(),
             },
-            source_schema_fingerprint: "source-fingerprint".into(),
-            target_schema_fingerprint: "target-fingerprint".into(),
+            source_schema_fingerprint: source_catalog_fingerprint,
+            target_schema_fingerprint: reviewed_plan
+                .plan
+                .execution_target_catalog_fingerprint()
+                .unwrap()
+                .to_owned(),
+            outage_projection_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: 1,
         };
+        let accepted_outage_projection = AcceptedOutageProjection {
+            schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
+            policy_hash: outage_policy.canonical_hash().unwrap(),
+            source_catalog_fingerprint: outage_policy.source_catalog_fingerprint.clone(),
+            source_server_version_num: 170_000,
+            byte_basis: outage_policy.byte_basis,
+            refreshed_at_unix_seconds: 1_000,
+            refreshed_assessed_bytes: 1,
+            projected_seconds: 2,
+            throughput_profile: outage_policy.throughput_profile.clone(),
+        };
+        let mut binding = binding;
+        binding.outage_projection_digest = Some(
+            accepted_outage_projection
+                .canonical_hash(&outage_policy)
+                .unwrap(),
+        );
         Genesis {
             binding,
             reviewed_plan,
+            accepted_outage_projection: Some(accepted_outage_projection),
             operations: specs,
         }
     }
@@ -1867,6 +1939,28 @@ mod tests {
         let mut value = genesis();
         value.operations[0].phase = OperationPhase::Verification;
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn genesis_requires_an_exact_optional_outage_projection_tuple() {
+        let bound = genesis();
+
+        let mut unbound = bound.clone();
+        let mut plan = unbound.reviewed_plan.plan.clone();
+        plan.outage_policy = None;
+        unbound.reviewed_plan = ReviewedPlan::new(plan).unwrap();
+        unbound.binding.plan_hash = unbound.reviewed_plan.plan_hash.to_string();
+        unbound.binding.outage_projection_digest = None;
+        unbound.accepted_outage_projection = None;
+        assert!(unbound.validate().is_ok());
+
+        let mut missing_projection = bound.clone();
+        missing_projection.accepted_outage_projection = None;
+        assert!(missing_projection.validate().is_err());
+
+        let mut unexpected_projection = unbound;
+        unexpected_projection.accepted_outage_projection = bound.accepted_outage_projection;
+        assert!(unexpected_projection.validate().is_err());
     }
 
     #[test]

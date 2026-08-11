@@ -5,27 +5,14 @@ use thiserror::Error;
 
 use super::artifact::{read_json, ArtifactError};
 use super::model::{CatalogObjectKind, QualifiedTable};
+use super::outage_projection::projected_seconds;
+pub use super::outage_projection::{ThroughputProfile, THROUGHPUT_PROFILE_SCHEMA_VERSION};
 use super::plan::{
     AssessmentStatus, OperationKind, PlanError, PlanPurpose, ReviewedPlan, UnsupportedObject,
     UnsupportedObjectCode, UnsupportedObjectReport,
 };
 
-pub const ASSESSMENT_SCHEMA_VERSION: u16 = 2;
-pub const THROUGHPUT_PROFILE_SCHEMA_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThroughputProfile {
-    pub schema_version: u16,
-    pub measurement_reference: String,
-    pub environment_reference: String,
-    pub postgres_major_version: u16,
-    pub measured_at_unix_seconds: u64,
-    pub valid_for_seconds: u64,
-    pub copy_bytes_per_second: u64,
-    pub verification_bytes_per_second: u64,
-}
-
+pub const ASSESSMENT_SCHEMA_VERSION: u16 = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceStatus {
@@ -69,11 +56,16 @@ pub enum ProjectedWindow {
     Estimated {
         seconds: u64,
         assessed_bytes: u64,
+        included_relations: Vec<QualifiedTable>,
         assessed_at_unix_seconds: u64,
         throughput_profile: ThroughputProfile,
     },
 }
 
+/// Projects the outage for the supplied copied physical PostgreSQL relations.
+///
+/// The caller must supply each copied `relkind = 'r'` relation exactly once.
+/// Partition leaves replace the corresponding `relkind = 'p'` root.
 pub fn project_outage_window(
     scope_estimates: &[ScopeEstimate],
     profile: Option<&ThroughputProfile>,
@@ -83,51 +75,29 @@ pub fn project_outage_window(
     let Some(profile) = profile else {
         return not_assessed("no throughput profile was supplied");
     };
-    if profile.schema_version != THROUGHPUT_PROFILE_SCHEMA_VERSION {
-        return not_assessed("throughput profile schema version is unsupported");
+    if let Err(error) = profile.validate_at(postgres_major_version, assessed_at_unix_seconds) {
+        return not_assessed(&error.to_string());
     }
-    if profile.measurement_reference.trim().is_empty()
-        || profile.environment_reference.trim().is_empty()
-        || profile.valid_for_seconds == 0
-        || profile.copy_bytes_per_second == 0
-        || profile.verification_bytes_per_second == 0
-    {
-        return not_assessed("throughput profile is incomplete");
-    }
-    if profile.postgres_major_version != postgres_major_version {
-        return not_assessed("throughput profile is incompatible with the source assessment");
-    }
-    let Some(expires_at) = profile
-        .measured_at_unix_seconds
-        .checked_add(profile.valid_for_seconds)
-    else {
-        return not_assessed("throughput profile validity interval is invalid");
-    };
-    if profile.measured_at_unix_seconds > assessed_at_unix_seconds {
-        return not_assessed("throughput profile measurement is in the future");
-    }
-    if assessed_at_unix_seconds > expires_at {
-        return not_assessed("throughput profile is stale");
+    let mut included_relations = scope_estimates
+        .iter()
+        .map(|estimate| estimate.table.clone())
+        .collect::<Vec<_>>();
+    included_relations.sort();
+    if included_relations.windows(2).any(|pair| pair[0] == pair[1]) {
+        return not_assessed("projection relation set contains duplicate identities");
     }
     let Some(assessed_bytes) = scope_estimates.iter().try_fold(0_u64, |total, estimate| {
         total.checked_add(estimate.total_relation_bytes)
     }) else {
         return not_assessed("assessed relation byte total overflowed");
     };
-    let Some(copy_seconds) = ceiling_division(assessed_bytes, profile.copy_bytes_per_second) else {
-        return not_assessed("copy window calculation overflowed");
-    };
-    let Some(verification_seconds) =
-        ceiling_division(assessed_bytes, profile.verification_bytes_per_second)
-    else {
-        return not_assessed("verification window calculation overflowed");
-    };
-    let Some(seconds) = copy_seconds.checked_add(verification_seconds) else {
+    let Ok(seconds) = projected_seconds(assessed_bytes, profile) else {
         return not_assessed("projected window overflowed");
     };
     ProjectedWindow::Estimated {
         seconds,
         assessed_bytes,
+        included_relations,
         assessed_at_unix_seconds,
         throughput_profile: profile.clone(),
     }
@@ -137,11 +107,6 @@ pub fn read_throughput_profile(
     path: impl AsRef<std::path::Path>,
 ) -> Result<ThroughputProfile, AssessmentError> {
     Ok(read_json(path)?)
-}
-
-fn ceiling_division(dividend: u64, divisor: u64) -> Option<u64> {
-    let quotient = dividend / divisor;
-    quotient.checked_add(u64::from(!dividend.is_multiple_of(divisor)))
 }
 
 fn not_assessed(reason: &str) -> ProjectedWindow {
@@ -242,14 +207,32 @@ impl AssessmentArtifact {
         if let ProjectedWindow::Estimated {
             assessed_at_unix_seconds,
             throughput_profile,
+            included_relations,
             ..
         } = &self.projected_window
         {
+            if included_relations.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(AssessmentError::InvalidProjectedWindow);
+            }
+            let estimates_by_table = self
+                .scope_estimates
+                .iter()
+                .map(|estimate| (&estimate.table, estimate))
+                .collect::<BTreeMap<_, _>>();
+            let included_estimates = included_relations
+                .iter()
+                .map(|table| {
+                    estimates_by_table
+                        .get(table)
+                        .copied()
+                        .ok_or(AssessmentError::InvalidProjectedWindow)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let postgres_major_version =
                 u16::try_from(self.source_evidence.server_version_num / 10_000)
                     .map_err(|_| AssessmentError::InvalidProjectedWindow)?;
             let recomputed = project_outage_window(
-                &self.scope_estimates,
+                &included_estimates.into_iter().cloned().collect::<Vec<_>>(),
                 Some(throughput_profile),
                 postgres_major_version,
                 *assessed_at_unix_seconds,
@@ -697,6 +680,7 @@ mod tests {
             ProjectedWindow::Estimated {
                 seconds: 10,
                 assessed_bytes: 1_201,
+                included_relations: vec![scope_estimate(500).table, scope_estimate(501).table,],
                 assessed_at_unix_seconds: 1_100,
                 throughput_profile: profile,
             }
@@ -721,7 +705,7 @@ mod tests {
         incompatible.postgres_major_version = 16;
         assert_eq!(
             project_outage_window(&[], Some(&incompatible), 17, 1_100),
-            not_assessed("throughput profile is incompatible with the source assessment")
+            not_assessed("throughput profile PostgreSQL major version does not match")
         );
 
         let mut copy_only = throughput_profile();
@@ -771,6 +755,60 @@ mod tests {
         };
         *seconds += 1;
         throughput_profile.copy_bytes_per_second += 1;
+        assert!(matches!(
+            artifact.validate(),
+            Err(AssessmentError::InvalidProjectedWindow)
+        ));
+    }
+
+    #[test]
+    fn assessment_validation_rejects_invalid_projection_relation_manifest() {
+        let mut artifact = assessment(10);
+        let profile = throughput_profile();
+        artifact.projected_window =
+            project_outage_window(&artifact.scope_estimates, Some(&profile), 17, 1_100);
+        artifact.validate().unwrap();
+
+        let ProjectedWindow::Estimated {
+            included_relations, ..
+        } = &mut artifact.projected_window
+        else {
+            panic!("valid profile did not produce an estimate");
+        };
+        included_relations.push(included_relations[0].clone());
+        assert!(matches!(
+            artifact.validate(),
+            Err(AssessmentError::InvalidProjectedWindow)
+        ));
+
+        let mut artifact = assessment(10);
+        artifact.projected_window =
+            project_outage_window(&artifact.scope_estimates, Some(&profile), 17, 1_100);
+        let ProjectedWindow::Estimated {
+            included_relations, ..
+        } = &mut artifact.projected_window
+        else {
+            panic!("valid profile did not produce an estimate");
+        };
+        included_relations.clear();
+        assert!(matches!(
+            artifact.validate(),
+            Err(AssessmentError::InvalidProjectedWindow)
+        ));
+
+        let mut artifact = assessment(10);
+        artifact.projected_window =
+            project_outage_window(&artifact.scope_estimates, Some(&profile), 17, 1_100);
+        let ProjectedWindow::Estimated {
+            included_relations, ..
+        } = &mut artifact.projected_window
+        else {
+            panic!("valid profile did not produce an estimate");
+        };
+        included_relations[0] = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("not_assessed").unwrap(),
+        };
         assert!(matches!(
             artifact.validate(),
             Err(AssessmentError::InvalidProjectedWindow)
@@ -984,6 +1022,7 @@ mod tests {
             consistency_mode: "not_assessed".into(),
             canonical_encoding_version: 1,
             conversion_policy: "postgresql_same_dialect_exact".into(),
+            outage_policy: None,
             capabilities: BTreeMap::from([("acl.report_only".into(), "approval_required".into())]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),

@@ -52,6 +52,12 @@ enum Command {
         /// New protected plan artifact. Existing files are not replaced.
         #[arg(long)]
         plan_output: PathBuf,
+        /// Protected source assessment reviewed for this execution plan.
+        #[arg(long, requires = "max_outage_seconds")]
+        assessment_input: Option<PathBuf>,
+        /// Maximum approved copy-and-verification outage in seconds.
+        #[arg(long, requires = "assessment_input")]
+        max_outage_seconds: Option<u64>,
         /// Execution consistency contract recorded for review.
         #[arg(long, value_enum)]
         consistency: ConsistencyMode,
@@ -182,6 +188,8 @@ fn main() -> anyhow::Result<()> {
             source_config,
             target_config,
             plan_output,
+            assessment_input,
+            max_outage_seconds,
             consistency,
         } => {
             let consistency = match consistency {
@@ -192,11 +200,13 @@ fn main() -> anyhow::Result<()> {
                     sql_splitter::migration::postgres::PostgresConsistencyMode::WriteFence
                 }
             };
-            let plan = sql_splitter::migration::postgres::write_live_plan_with_consistency(
+            let plan = sql_splitter::migration::postgres::write_live_plan_with_outage_policy(
                 source_config,
                 target_config,
                 &plan_output,
                 consistency,
+                assessment_input.as_deref(),
+                max_outage_seconds,
             )?;
             println!("plan: {}", plan_output.display());
             println!("plan hash: {}", plan.plan_hash);

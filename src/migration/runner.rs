@@ -36,6 +36,7 @@ use super::model::{
     CatalogObject, CatalogObjectKind, ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch,
     VendorCatalog,
 };
+use super::outage_projection::AcceptedOutageProjection;
 use super::plan::{
     AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
     UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
@@ -510,7 +511,11 @@ fn run_verification_pipeline(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn append_journal_genesis(binding: ResumeBinding, reviewed_plan: ReviewedPlan) -> Genesis {
+fn append_journal_genesis(
+    binding: ResumeBinding,
+    reviewed_plan: ReviewedPlan,
+    accepted_outage_projection: Option<AcceptedOutageProjection>,
+) -> Genesis {
     let operations = reviewed_plan
         .plan
         .operations
@@ -531,6 +536,7 @@ fn append_journal_genesis(binding: ResumeBinding, reviewed_plan: ReviewedPlan) -
     Genesis {
         binding,
         reviewed_plan,
+        accepted_outage_projection,
         operations,
     }
 }
@@ -833,7 +839,11 @@ fn resume_postgres_fenced_plan_internal(
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
     validate_postgres_execution_operations(&reviewed)?;
-    validate_resume_binding(&journal.genesis().binding, &reviewed)?;
+    validate_resume_binding(
+        &journal.genesis().binding,
+        &reviewed,
+        journal.genesis().accepted_outage_projection.as_ref(),
+    )?;
     if journal.projection().status == MigrationStatus::Completed {
         return Err(anyhow!("completed migration state cannot be resumed"));
     }
@@ -1402,6 +1412,22 @@ fn execute_postgres_plan_internal(
         ));
     }
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
+    let accepted_outage_projection = reviewed
+        .plan
+        .outage_policy
+        .as_ref()
+        .map(|policy| -> anyhow::Result<_> {
+            let accepted = source.refresh_outage_projection(&snapshot, &source_catalog, policy)?;
+            let digest = accepted
+                .canonical_hash(policy)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            Ok((accepted, digest))
+        })
+        .transpose()?;
+    let outage_projection_digest = accepted_outage_projection
+        .as_ref()
+        .map(|(_, digest)| digest.clone());
+    let accepted_outage_projection = accepted_outage_projection.map(|(accepted, _)| accepted);
 
     let target_preflight = target.inspect_endpoint()?;
     if target_preflight.endpoint_identity != reviewed.plan.execution_target_endpoint_identity()? {
@@ -1454,10 +1480,11 @@ fn execute_postgres_plan_internal(
             .plan
             .execution_target_catalog_fingerprint()?
             .to_owned(),
+        outage_projection_digest,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
-    let genesis = append_journal_genesis(binding, reviewed.clone());
+    let genesis = append_journal_genesis(binding, reviewed.clone(), accepted_outage_projection);
     let mut journal = AppendJournal::create_new(state_path, genesis)?;
 
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
@@ -1894,7 +1921,11 @@ fn arm_network_commit_fault(port: u16) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
-fn validate_resume_binding(binding: &ResumeBinding, reviewed: &ReviewedPlan) -> anyhow::Result<()> {
+fn validate_resume_binding(
+    binding: &ResumeBinding,
+    reviewed: &ReviewedPlan,
+    accepted_outage_projection: Option<&AcceptedOutageProjection>,
+) -> anyhow::Result<()> {
     if reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str() {
         return Err(anyhow!("only a write-fence plan can be resumed"));
     }
@@ -1917,6 +1948,32 @@ fn validate_resume_binding(binding: &ResumeBinding, reviewed: &ReviewedPlan) -> 
     }
     if binding.approval_reference.trim().is_empty() {
         return Err(anyhow!("migration state has no approval reference"));
+    }
+    match (
+        reviewed.plan.outage_policy.as_ref(),
+        accepted_outage_projection,
+        binding.outage_projection_digest.as_ref(),
+    ) {
+        (None, None, None) => {}
+        (Some(policy), Some(accepted), Some(digest)) => {
+            accepted
+                .validate_against(policy)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            if digest
+                != &accepted
+                    .canonical_hash(policy)
+                    .map_err(|error| anyhow!(error.to_string()))?
+            {
+                return Err(anyhow!(
+                    "migration state outage projection differs from reviewed plan"
+                ));
+            }
+        }
+        _ => {
+            return Err(anyhow!(
+                "migration state outage projection presence differs from reviewed plan"
+            ));
+        }
     }
     let ConsistencyEvidence::WriteFence {
         endpoint_identity,
@@ -3846,6 +3903,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         consistency_mode: "consistent_snapshot".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "same-dialect-exact".into(),
+        outage_policy: None,
         capabilities: BTreeMap::from([
             ("consistent_snapshot".into(), "fixture_supported".into()),
             ("server_read_only".into(), "fixture_supported".into()),
@@ -3901,6 +3959,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
             .plan
             .execution_target_catalog_fingerprint()?
             .to_owned(),
+        outage_projection_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -4429,6 +4488,7 @@ mod tests {
             },
             source_schema_fingerprint: "source".into(),
             target_schema_fingerprint: "target".into(),
+            outage_projection_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
@@ -4630,6 +4690,7 @@ mod tests {
             consistency_mode: "write-fence".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "exact".into(),
+            outage_policy: None,
             capabilities: BTreeMap::from([("source_tls".into(), binding)]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -4767,6 +4828,7 @@ mod tests {
             },
             source_schema_fingerprint: "source".into(),
             target_schema_fingerprint: "target".into(),
+            outage_projection_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };

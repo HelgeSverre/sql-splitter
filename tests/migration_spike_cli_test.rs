@@ -26,6 +26,8 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--consistency <CONSISTENCY>"));
+    assert!(help.contains("--assessment-input <ASSESSMENT_INPUT>"));
+    assert!(help.contains("--max-outage-seconds <MAX_OUTAGE_SECONDS>"));
     assert!(help.contains("consistent-snapshot"));
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
@@ -136,6 +138,42 @@ fn plan_requires_an_explicit_consistency_contract() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("--consistency"));
+}
+
+#[test]
+fn plan_accepts_no_outage_policy_or_the_complete_pair() {
+    let base = [
+        "plan-postgres",
+        "--source-config",
+        "source.toml",
+        "--target-config",
+        "target.toml",
+        "--plan-output",
+        "plan.json",
+        "--consistency",
+        "write-fence",
+    ];
+    let output = spike().args(base).output().unwrap();
+    assert!(!String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("--assessment-input"));
+
+    for (present_flag, present_value, missing_flag) in [
+        (
+            "--assessment-input",
+            "assessment.json",
+            "--max-outage-seconds",
+        ),
+        ("--max-outage-seconds", "60", "--assessment-input"),
+    ] {
+        let mut arguments = base.to_vec();
+        arguments.extend([present_flag, present_value]);
+        let output = spike().args(arguments).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains(missing_flag));
+    }
 }
 
 #[test]

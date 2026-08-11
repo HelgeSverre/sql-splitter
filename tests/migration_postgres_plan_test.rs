@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 #[cfg(feature = "migration-fault-injection")]
 use std::net::ToSocketAddrs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "migration-fault-injection")]
 #[path = "support/postgres_commit_proxy.rs"]
@@ -21,9 +21,10 @@ use postgres::{Client, Config};
 use postgres_native_tls::MakeTlsConnector;
 use sha2::{Digest, Sha256};
 use sql_splitter::migration::append_journal::{AppendJournal, PreparedChunk};
-use sql_splitter::migration::artifact::read_json;
+use sql_splitter::migration::artifact::{read_json, write_json_new};
 use sql_splitter::migration::assessment::{
-    render_markdown, stable_report_body, AssessmentArtifact,
+    render_markdown, stable_report_body, AssessmentArtifact, ProjectedWindow, ThroughputProfile,
+    THROUGHPUT_PROFILE_SCHEMA_VERSION,
 };
 use sql_splitter::migration::canonical::{digest_rows, CanonicalRow};
 use sql_splitter::migration::connection::{
@@ -41,9 +42,10 @@ use sql_splitter::migration::plan::{
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::postgres::postgres_foreign_keys;
 use sql_splitter::migration::postgres::{
-    build_plan, collect_live_assessment, inspect_endpoint, write_live_assessment, write_live_plan,
-    write_live_plan_with_consistency, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresPlanError, PostgresSourceFactory, PostgresTargetFactory, PostgresWritePolicy,
+    build_plan, collect_live_assessment, collect_live_assessment_with_profile, inspect_endpoint,
+    write_live_assessment, write_live_plan, write_live_plan_with_outage_policy,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresPlanError, PostgresSourceFactory,
+    PostgresTargetFactory, PostgresWritePolicy,
 };
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, postgres_write_fence_is_released,
@@ -1450,12 +1452,52 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
     std::fs::write(&source, toml::to_string(&source_config)?)?;
     let plan_path = directory.path().join("reviewed-plan.json");
     let state_path = directory.path().join("migration-state.journal");
-    let reviewed = write_live_plan(&source, &target, &plan_path)?;
+    let budget_plan_path = directory.path().join("budget-plan.json");
+    let budget_assessment_path = directory.path().join("budget-assessment.json");
+    let blocked_state_path = directory.path().join("blocked-state.journal");
+    let reviewed = write_live_execution_plan(
+        &source,
+        &target,
+        &plan_path,
+        PostgresConsistencyMode::ConsistentSnapshot,
+    )?;
     assert!(
         !reviewed.plan.unsupported_objects.blocks_execution(),
         "{:#?}",
         reviewed.plan.unsupported_objects
     );
+
+    let measured_at_unix_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let source_endpoint = PostgresEndpointConfig::read(&source)?;
+    let budget_profile = ThroughputProfile {
+        schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
+        measurement_reference: "live-preflight-budget".into(),
+        environment_reference: format!("postgres-{}-docker", source_endpoint.database),
+        postgres_major_version: u16::try_from(
+            inspect_endpoint(&source_endpoint)?.server_version_num / 10_000,
+        )?,
+        measured_at_unix_seconds,
+        valid_for_seconds: 3_600,
+        copy_bytes_per_second: 1,
+        verification_bytes_per_second: 1,
+    };
+    let budget_assessment =
+        collect_live_assessment_with_profile(&source_endpoint, Some(&budget_profile))?;
+    let reviewed_seconds = match &budget_assessment.projected_window {
+        ProjectedWindow::Estimated { seconds, .. } => *seconds,
+        ProjectedWindow::NotAssessed { reason } => {
+            anyhow::bail!("live budget assessment was not projected: {reason}")
+        }
+    };
+    write_json_new(&budget_assessment_path, &budget_assessment)?;
+    write_live_plan_with_outage_policy(
+        &source,
+        &target,
+        &budget_plan_path,
+        PostgresConsistencyMode::ConsistentSnapshot,
+        Some(&budget_assessment_path),
+        Some(reviewed_seconds),
+    )?;
 
     let report = execute_postgres_plan(
         &plan_path,
@@ -1474,12 +1516,85 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
         .values()
         .all(|state| *state == OperationState::Verified));
     assert_eq!(committed_chunks(&state)?.count(), 3);
+    let accepted = state
+        .genesis()
+        .accepted_outage_projection
+        .as_ref()
+        .context("policy-bound execution did not record its accepted projection")?;
+    let policy = reviewed
+        .plan
+        .outage_policy
+        .as_ref()
+        .context("policy-bound plan did not retain its outage policy")?;
+    let accepted_digest = accepted.canonical_hash(policy)?;
+    assert_eq!(
+        state.genesis().binding.outage_projection_digest.as_deref(),
+        Some(accepted_digest.as_str())
+    );
+    assert!(accepted.projected_seconds <= policy.maximum_approved_seconds);
 
-    let mut target_client = connect(&PostgresEndpointConfig::read(target)?)?;
+    let mut target_client = connect(&PostgresEndpointConfig::read(&target)?)?;
     let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].get::<_, i64>(0), 1);
     assert_eq!(rows[2].get::<_, String>(1), "three");
+    let target_objects_before: i64 = target_client
+        .query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'",
+            &[],
+        )?
+        .get(0);
+
+    let admin_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let mut admin = connect(&admin_config)?;
+    admin.execute(
+        "UPDATE public.accounts SET name=(SELECT string_agg(md5(value::text),'') FROM generate_series(1,40000) value) WHERE id=3",
+        &[],
+    )?;
+    let blocked = execute_postgres_plan(
+        &budget_plan_path,
+        &source,
+        &target,
+        "LIVE-BUDGET-BLOCK",
+        &blocked_state_path,
+    );
+    let restore = admin.execute("UPDATE public.accounts SET name='three' WHERE id=3", &[]);
+    restore?;
+    let error = match blocked {
+        Ok(report) => {
+            anyhow::bail!("expanded source unexpectedly passed outage preflight: {report:?}")
+        }
+        Err(error) => error,
+    };
+    anyhow::ensure!(
+        error
+            .to_string()
+            .contains("projected outage exceeds the reviewed maximum"),
+        "unexpected preflight error: {error:#}"
+    );
+    anyhow::ensure!(
+        !blocked_state_path.exists(),
+        "blocked outage preflight created a migration journal"
+    );
+    let target_rows_after =
+        target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
+    anyhow::ensure!(
+        target_rows_after.len() == 3
+            && target_rows_after[0].get::<_, i64>(0) == 1
+            && target_rows_after[2].get::<_, String>(1) == "three",
+        "blocked outage preflight changed target rows"
+    );
+    let target_objects_after: i64 = target_client
+        .query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'",
+            &[],
+        )?
+        .get(0);
+    anyhow::ensure!(
+        target_objects_after == target_objects_before,
+        "blocked outage preflight changed target schema objects"
+    );
     Ok(())
 }
 
@@ -3897,6 +4012,50 @@ fn required_path(name: &str) -> anyhow::Result<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("{name} must name a PostgreSQL endpoint config"))
+}
+
+fn write_live_execution_plan(
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    consistency: PostgresConsistencyMode,
+) -> anyhow::Result<ReviewedPlan> {
+    let source_config_path = source_config_path.as_ref();
+    let target_config_path = target_config_path.as_ref();
+    let output = output.as_ref();
+    let source_config = PostgresEndpointConfig::read(source_config_path)?;
+    let source = inspect_endpoint(&source_config)?;
+    let measured_at_unix_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let profile = ThroughputProfile {
+        schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
+        measurement_reference: "live-test-profile".into(),
+        environment_reference: "disposable-postgres-live-test".into(),
+        postgres_major_version: u16::try_from(source.server_version_num / 10_000)?,
+        measured_at_unix_seconds,
+        valid_for_seconds: 3_600,
+        copy_bytes_per_second: 1,
+        verification_bytes_per_second: 1,
+    };
+    let assessment = collect_live_assessment_with_profile(&source_config, Some(&profile))?;
+    let assessment_path = output.with_extension("assessment.json");
+    write_json_new(&assessment_path, &assessment)?;
+    Ok(write_live_plan_with_outage_policy(
+        source_config_path,
+        target_config_path,
+        output,
+        consistency,
+        Some(&assessment_path),
+        Some(u64::MAX),
+    )?)
+}
+
+fn write_live_plan_with_consistency(
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    consistency: PostgresConsistencyMode,
+) -> anyhow::Result<ReviewedPlan> {
+    write_live_execution_plan(source_config_path, target_config_path, output, consistency)
 }
 
 fn private_tempdir() -> anyhow::Result<tempfile::TempDir> {
