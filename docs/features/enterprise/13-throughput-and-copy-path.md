@@ -112,3 +112,56 @@ speedup claim is made. Before the beta claim:
    assessment report ([15](./15-assessment-product.md)).
 4. The COPY path passes the same crash, commit-boundary, cancellation, and
    fault-injection matrices as the INSERT path before it becomes the default.
+
+## Recorded measurements
+
+The fixed 10,000-row release-profile harness
+(`live_insert_and_copy_throughput_matrix`, reproducible through
+`scripts/test-migration-postgres.sh <15|16|17>
+live_insert_and_copy_throughput_matrix`) drives the INSERT baseline and the
+binary COPY path through the same typed `RowBatch` and target writer and
+checks exact target row counts. One recorded run:
+
+| PostgreSQL | Shape     | INSERT rows/s | COPY rows/s | INSERT bytes/s | COPY bytes/s   |
+| ---------- | --------- | ------------: | ----------: | -------------: | -------------: |
+| 15.18      | narrow    |      9,787.56 |  952,573.74 |     156,601.01 |  15,241,179.76 |
+| 15.18      | wide text |      8,328.98 |  134,958.31 |  17,124,382.88 | 277,474,279.04 |
+| 15.18      | bytea     |      7,791.54 |   98,960.54 |  16,019,408.73 | 203,462,876.81 |
+| 16.14      | narrow    |      9,458.57 |  956,220.95 |     151,337.09 |  15,299,535.26 |
+| 16.14      | wide text |      7,839.64 |  136,648.11 |  16,118,303.86 | 280,948,518.82 |
+| 16.14      | bytea     |      7,824.83 |  100,650.54 |  16,087,859.32 | 206,937,505.39 |
+| 17.10      | narrow    |      9,898.07 |  992,748.76 |     158,369.09 |  15,883,980.23 |
+| 17.10      | wide text |      8,519.88 |  141,072.82 |  17,516,868.20 | 290,045,725.23 |
+| 17.10      | bytea     |      7,954.77 |  103,282.98 |  16,355,014.65 | 212,349,803.96 |
+
+The same harness measures the exact page-wise verification path: fresh
+verification sessions, every canonical row and digest compared, one assessed
+data byte per byte verified.
+
+| PostgreSQL | Shape     | Verification rows/s | Verification bytes/s |
+| ---------- | --------- | ------------------: | -------------------: |
+| 15.18      | narrow    |          211,423.20 |         3,382,771.12 |
+| 15.18      | wide text |           96,883.50 |       199,192,476.03 |
+| 15.18      | bytea     |           96,208.54 |       197,804,761.60 |
+| 16.14      | narrow    |          226,405.27 |         3,622,484.33 |
+| 16.14      | wide text |           97,914.30 |       201,311,806.87 |
+| 16.14      | bytea     |           97,255.88 |       199,958,098.27 |
+| 17.10      | narrow    |          197,124.12 |         3,153,985.99 |
+| 17.10      | wide text |           99,584.57 |       204,745,867.81 |
+| 17.10      | bytea     |           76,904.98 |       158,116,648.60 |
+
+Environment: Apple M2 Max, 32 GiB RAM, macOS Darwin 24.6.0, Docker Desktop
+29.4.0 Linux/arm64 engine, Rust 1.97.1. These are environment-specific
+single-run spike measurements, not product guarantees; a production support
+statement requires measurements recorded in the supported deployment
+environment, and a throughput profile explicitly binds its measurement and
+environment references. This satisfies measured-gate items 1 and 2 for the
+spike environment. Gate item 3 is implemented on the assessment side:
+assessment schema version 2 accepts an optional protected throughput profile
+(separate copy and verification rates, PostgreSQL major, measurement time,
+validity period, environment reference), computes a conservative
+ceiling-summed window over `total_relation_bytes`, fails to `NotAssessed` on
+a missing, stale, future, incomplete, or wrong-major profile, and recomputes
+the result during validation to reject tampering. The execute-preflight
+projection of the same window remains open. The gate-4 matrices have passed
+on PostgreSQL 15, 16, and 17 per the [008]/[010] mailbox evidence.

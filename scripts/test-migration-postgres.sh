@@ -26,7 +26,7 @@ mkdir -p "$build_dir"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-migration-pg.XXXXXX")"
 
 cleanup() {
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  docker rm -fv "$container" >/dev/null 2>&1 || true
   rm -rf "$test_dir"
 }
 trap cleanup EXIT INT TERM
@@ -291,8 +291,15 @@ export SQL_SPLITTER_PG_FENCE_TARGET_PASSWORD=fence-target-secret
 export SQL_SPLITTER_PG_MTLS_PASSWORD=unused
 
 if [[ -n "$only_test" ]]; then
+  test_arguments=(--ignored --exact)
+  if [[ "$only_test" == "live_insert_and_copy_throughput_matrix" ]]; then
+    test_arguments+=(--nocapture)
+    cargo test --release --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+      --test migration_postgres_plan_test "$only_test" -- "${test_arguments[@]}"
+    exit 0
+  fi
   cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
-    --test migration_postgres_plan_test "$only_test" -- --ignored --exact
+    --test migration_postgres_plan_test "$only_test" -- "${test_arguments[@]}"
   exit 0
 fi
 
@@ -323,6 +330,9 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 test_name=live_target_writer_round_trips_binary_protocol_values
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_insert_and_copy_throughput_matrix
+cargo test --release --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact --nocapture
 test_name=live_reviewed_plan_executes_and_strictly_finalizes
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

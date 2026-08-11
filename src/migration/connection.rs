@@ -237,7 +237,7 @@ pub trait ControlSession: Send {
     fn cancel_active_statement(&mut self) -> ConnectionResult<()>;
 }
 
-pub trait ReadSession {
+pub trait ReadSession: Send {
     fn read_only_evidence(&self) -> &ReadOnlyEvidence;
     fn snapshot(&self) -> &SnapshotToken;
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch>;
@@ -261,7 +261,7 @@ pub trait WriteSession {
     fn rollback(&mut self) -> ConnectionResult<()>;
 }
 
-pub trait VerificationSession {
+pub trait VerificationSession: Send {
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch>;
     fn select_page_only(&mut self, _request: &KeysetPage) -> ConnectionResult<RowBatch> {
         Err(ConnectionError::InvalidRequest(

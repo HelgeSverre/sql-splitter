@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -24,8 +24,9 @@ use thiserror::Error;
 
 use super::artifact::{prepare_json_text_pair_new, write_json_new, write_json_text_pair_new};
 use super::assessment::{
-    render_markdown, AssessmentArtifact, AssessmentError, EvidenceStatus, ExecutionRequirement,
-    ProjectedWindow, ScopeEstimate, SourceAssessmentEvidence, ASSESSMENT_SCHEMA_VERSION,
+    project_outage_window, read_throughput_profile, render_markdown, AssessmentArtifact,
+    AssessmentError, EvidenceStatus, ExecutionRequirement, ScopeEstimate, SourceAssessmentEvidence,
+    ThroughputProfile, ASSESSMENT_SCHEMA_VERSION,
 };
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::connection::{
@@ -306,18 +307,84 @@ pub(crate) fn postgres_tls_binding(
 }
 
 struct PendingSnapshot {
+    _cancel_registration: SessionRegistration<CancelToken>,
     client: Client,
+    exporter_lifetime: Arc<ExporterLifetime>,
     token: SnapshotToken,
     evidence: ReadOnlyEvidence,
     catalog: VendorCatalog,
     unsupported: UnsupportedObjectReport,
 }
 
+struct ExportedSnapshotBinding {
+    token: SnapshotToken,
+    exported_snapshot_id: String,
+    exporter_lifetime: Weak<ExporterLifetime>,
+}
+
+struct ExporterLifetime {
+    alive: Mutex<bool>,
+}
+
+struct SessionRegistry<T> {
+    next_id: AtomicU64,
+    sessions: Mutex<BTreeMap<u64, T>>,
+}
+
+impl<T> Default for SessionRegistry<T> {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            sessions: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<T: Clone> SessionRegistry<T> {
+    fn register(self: &Arc<Self>, session: T) -> ConnectionResult<SessionRegistration<T>> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.sessions
+            .lock()
+            .map_err(|_| ConnectionError::Database("session registry lock is poisoned".into()))?
+            .insert(id, session);
+        Ok(SessionRegistration {
+            registry: Arc::clone(self),
+            id,
+        })
+    }
+
+    fn sessions(&self) -> ConnectionResult<Vec<T>> {
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| ConnectionError::Database("session registry lock is poisoned".into()))?
+            .values()
+            .cloned()
+            .collect())
+    }
+}
+
+struct SessionRegistration<T> {
+    registry: Arc<SessionRegistry<T>>,
+    id: u64,
+}
+
+impl<T> Drop for SessionRegistration<T> {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = self.registry.sessions.lock() {
+            sessions.remove(&self.id);
+        }
+    }
+}
+
+type CancelRegistry = SessionRegistry<CancelToken>;
+
 /// PostgreSQL source factory that transfers ownership of one live snapshot session.
 pub struct PostgresSourceFactory {
     config: PostgresEndpointConfig,
     pending: Mutex<Option<PendingSnapshot>>,
-    active_cancel: Mutex<Option<CancelToken>>,
+    exported_snapshot: Mutex<Option<ExportedSnapshotBinding>>,
+    cancel_registry: Arc<CancelRegistry>,
     cancellation: CancellationToken,
 }
 
@@ -333,32 +400,107 @@ impl PostgresSourceFactory {
         Self {
             config,
             pending: Mutex::new(None),
-            active_cancel: Mutex::new(None),
+            exported_snapshot: Mutex::new(None),
+            cancel_registry: Arc::default(),
             cancellation,
         }
     }
 
-    fn controlled_connect(&self) -> ConnectionResult<Client> {
+    fn controlled_connect(&self) -> ConnectionResult<(Client, SessionRegistration<CancelToken>)> {
         self.cancellation.check()?;
         let client = self
             .config
             .connect()
             .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        *self
-            .active_cancel
-            .lock()
-            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))? =
-            Some(client.cancel_token());
+        let registration = self.cancel_registry.register(client.cancel_token())?;
         self.cancellation.check()?;
-        Ok(client)
+        Ok((client, registration))
     }
 
     pub fn inspect_endpoint(&self) -> ConnectionResult<CatalogSnapshot> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let snapshot = inspect_connected_endpoint(&self.config, &mut client)
             .map_err(|error| ConnectionError::Database(error.to_string()))?;
         self.cancellation.check()?;
         Ok(snapshot)
+    }
+
+    /// Open a read-only peer transaction imported from the active source snapshot.
+    pub fn open_imported_snapshot_peer(
+        &self,
+        snapshot: &SnapshotToken,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn ReadSession>> {
+        let (exported_snapshot_id, exporter_lifetime) = {
+            let exported = self.exported_snapshot.lock().map_err(|_| {
+                ConnectionError::Database("exported snapshot lock is poisoned".into())
+            })?;
+            let binding = exported.as_ref().ok_or(ConnectionError::SnapshotMismatch)?;
+            if &binding.token != snapshot {
+                return Err(ConnectionError::SnapshotMismatch);
+            }
+            let lifetime = binding
+                .exporter_lifetime
+                .upgrade()
+                .ok_or(ConnectionError::SnapshotMismatch)?;
+            (binding.exported_snapshot_id.clone(), lifetime)
+        };
+        let exporter_alive = exporter_lifetime
+            .alive
+            .lock()
+            .map_err(|_| ConnectionError::Database("exporter lifetime lock is poisoned".into()))?;
+        if !*exporter_alive {
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        cancellation.check()?;
+        let (mut client, cancel_registration) = self.controlled_connect()?;
+        client
+            .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .map_err(database_error)?;
+        client
+            .batch_execute(&import_snapshot_statement(&exported_snapshot_id)?)
+            .map_err(database_error)?;
+        let row = client
+            .query_one(
+                "SELECT current_database(), current_user, COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port(), 0), current_setting('server_version'), pg_current_snapshot()::text, current_setting('transaction_read_only')::boolean",
+                &[],
+            )
+            .map_err(database_error)?;
+        let database: String = row.get(0);
+        let user: String = row.get(1);
+        let address: String = row.get(2);
+        let port: i32 = row.get(3);
+        let server_version: String = row.get(4);
+        let snapshot_id: String = row.get(5);
+        let read_only: bool = row.get(6);
+        let endpoint_identity = format!("postgres://{address}:{port}/{database}?user={user}");
+        if !imported_snapshot_is_exact(
+            snapshot,
+            &endpoint_identity,
+            &database,
+            &server_version,
+            &snapshot_id,
+            read_only,
+        ) {
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        cancellation.check()?;
+        drop(exporter_alive);
+        Ok(Box::new(PostgresSnapshotReader {
+            client,
+            _cancel_registration: cancel_registration,
+            exporter_lifetime: None,
+            token: snapshot.clone(),
+            evidence: ReadOnlyEvidence {
+                server_enforced: true,
+                description: "read-only peer transaction imported and attested against the primary PostgreSQL snapshot".into(),
+            },
+            cancellation,
+            max_batch_rows: self.config.max_batch_rows,
+            max_batch_bytes: self.config.max_batch_bytes,
+            metadata_cache: HashMap::new(),
+            validated_keys: BTreeSet::new(),
+        }))
     }
 
     /// Return the exact catalog captured inside the pending execution snapshot.
@@ -388,6 +530,7 @@ impl SourceConnectionFactory for PostgresSourceFactory {
     fn capabilities(&self) -> CapabilitySet {
         CapabilitySet::from_entries([
             ("consistent_snapshot", Capability::Supported),
+            ("imported_snapshot_peer", Capability::Supported),
             ("server_read_only", Capability::Supported),
             ("transactions", Capability::Supported),
             ("typed_identifiers", Capability::Supported),
@@ -406,11 +549,30 @@ impl SourceConnectionFactory for PostgresSourceFactory {
                 "a snapshot is already waiting for a reader".into(),
             ));
         }
+        {
+            let exported = self.exported_snapshot.lock().map_err(|_| {
+                ConnectionError::Database("exported snapshot lock is poisoned".into())
+            })?;
+            if exported
+                .as_ref()
+                .and_then(|binding| binding.exporter_lifetime.upgrade())
+                .is_some()
+            {
+                return Err(ConnectionError::InvalidRequest(
+                    "an exported PostgreSQL snapshot is still active".into(),
+                ));
+            }
+        }
         self.cancellation.check()?;
-        let mut client = self.controlled_connect()?;
+        let (mut client, cancel_registration) = self.controlled_connect()?;
         client
             .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .map_err(database_error)?;
+        let exported_snapshot_id: String = client
+            .query_one("SELECT pg_export_snapshot()", &[])
+            .map_err(database_error)?
+            .get(0);
+        validate_exported_snapshot_id(&exported_snapshot_id)?;
         let row = client
             .query_one(
                 "SELECT current_database(), current_user, COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port(), 0), current_setting('server_version'), pg_current_snapshot()::text, current_setting('transaction_read_only')::boolean",
@@ -463,8 +625,20 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             extract_catalog(&mut client, &token.database_identity, &token.server_version)
                 .map_err(|error| ConnectionError::Database(error.to_string()))?;
         self.cancellation.check()?;
+        let exporter_lifetime = Arc::new(ExporterLifetime {
+            alive: Mutex::new(true),
+        });
+        *self.exported_snapshot.lock().map_err(|_| {
+            ConnectionError::Database("exported snapshot lock is poisoned".into())
+        })? = Some(ExportedSnapshotBinding {
+            token: token.clone(),
+            exported_snapshot_id,
+            exporter_lifetime: Arc::downgrade(&exporter_lifetime),
+        });
         *pending = Some(PendingSnapshot {
             client,
+            _cancel_registration: cancel_registration,
+            exporter_lifetime,
             token: token.clone(),
             evidence,
             catalog,
@@ -489,6 +663,8 @@ impl SourceConnectionFactory for PostgresSourceFactory {
         }
         Ok(Box::new(PostgresSnapshotReader {
             client: pending_snapshot.client,
+            _cancel_registration: pending_snapshot._cancel_registration,
+            exporter_lifetime: Some(pending_snapshot.exporter_lifetime),
             token: pending_snapshot.token,
             evidence: pending_snapshot.evidence,
             cancellation,
@@ -500,42 +676,90 @@ impl SourceConnectionFactory for PostgresSourceFactory {
     }
 
     fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
-        let token = self
-            .active_cancel
-            .lock()
-            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))?
-            .clone()
-            .ok_or_else(|| {
-                ConnectionError::InvalidRequest(
-                    "capture a PostgreSQL snapshot before opening its control session".into(),
-                )
-            })?;
+        let tokens = self.cancel_registry.sessions()?;
+        if tokens.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "capture a PostgreSQL snapshot before opening its control session".into(),
+            ));
+        }
         Ok(Box::new(PostgresControlSession {
-            token,
+            registry: Arc::clone(&self.cancel_registry),
             config: self.config.clone(),
         }))
     }
 }
 
+fn validate_exported_snapshot_id(snapshot_id: &str) -> ConnectionResult<()> {
+    let mut parts = snapshot_id.split('-');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next().unwrap_or_default();
+    let third = parts.next().unwrap_or_default();
+    let valid_hex = |part: &str| {
+        part.len() == 8
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+    };
+    if !valid_hex(first)
+        || !valid_hex(second)
+        || third.is_empty()
+        || !third.bytes().all(|byte| byte.is_ascii_digit())
+        || parts.next().is_some()
+    {
+        return Err(ConnectionError::Database(
+            "PostgreSQL returned an invalid exported snapshot identifier".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn import_snapshot_statement(snapshot_id: &str) -> ConnectionResult<String> {
+    validate_exported_snapshot_id(snapshot_id)?;
+    Ok(format!("SET TRANSACTION SNAPSHOT '{snapshot_id}'"))
+}
+
+fn imported_snapshot_is_exact(
+    expected: &SnapshotToken,
+    endpoint_identity: &str,
+    database: &str,
+    server_version: &str,
+    snapshot_id: &str,
+    read_only: bool,
+) -> bool {
+    read_only
+        && database == expected.database_identity
+        && server_version == expected.server_version
+        && endpoint_identity == expected.endpoint_identity
+        && snapshot_id == expected.snapshot_id
+}
+
 struct PostgresControlSession {
-    token: CancelToken,
+    registry: Arc<CancelRegistry>,
     config: PostgresEndpointConfig,
 }
 
 impl ControlSession for PostgresControlSession {
     fn cancel_active_statement(&mut self) -> ConnectionResult<()> {
-        let connector = self
-            .config
-            .tls_connector()
-            .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        self.token.cancel_query(connector).map_err(database_error)
+        let sessions = self.registry.sessions()?;
+        let mut first_error = None;
+        for token in &sessions {
+            let result = self
+                .config
+                .tls_connector()
+                .map_err(|error| ConnectionError::Database(error.to_string()))
+                .and_then(|connector| token.cancel_query(connector).map_err(database_error));
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
 /// PostgreSQL target factory for transactional same-dialect chunk writes.
 pub struct PostgresTargetFactory {
     config: PostgresEndpointConfig,
-    active_cancel: Mutex<Option<CancelToken>>,
+    cancel_registry: Arc<CancelRegistry>,
     cancellation: CancellationToken,
 }
 
@@ -550,33 +774,24 @@ impl PostgresTargetFactory {
     ) -> Self {
         Self {
             config,
-            active_cancel: Mutex::new(None),
+            cancel_registry: Arc::default(),
             cancellation,
         }
     }
 
-    fn remember_cancel_token(&self, client: &Client) -> ConnectionResult<()> {
-        *self
-            .active_cancel
-            .lock()
-            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))? =
-            Some(client.cancel_token());
-        Ok(())
-    }
-
-    fn controlled_connect(&self) -> ConnectionResult<Client> {
+    fn controlled_connect(&self) -> ConnectionResult<(Client, SessionRegistration<CancelToken>)> {
         self.cancellation.check()?;
         let client = self
             .config
             .connect()
             .map_err(|error| ConnectionError::Database(error.to_string()))?;
-        self.remember_cancel_token(&client)?;
+        let registration = self.cancel_registry.register(client.cancel_token())?;
         self.cancellation.check()?;
-        Ok(client)
+        Ok((client, registration))
     }
 
     pub fn inspect_endpoint(&self) -> ConnectionResult<CatalogSnapshot> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let snapshot = inspect_connected_endpoint(&self.config, &mut client)
             .map_err(|error| ConnectionError::Database(error.to_string()))?;
         self.cancellation.check()?;
@@ -585,7 +800,7 @@ impl PostgresTargetFactory {
 
     /// Recheck that the target is empty and owned by the configured role.
     pub fn assert_empty_and_owned(&self) -> ConnectionResult<()> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         assert_target_empty_and_owned(&mut client)?;
         self.cancellation.check()
     }
@@ -598,7 +813,7 @@ impl PostgresTargetFactory {
             ));
         }
         let statements = pre_data_statements(catalog)?;
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         assert_target_empty_and_owned(&mut transaction)?;
         for statement in statements {
@@ -623,7 +838,7 @@ impl PostgresTargetFactory {
         &self,
         sequence: &PostgresSequence,
     ) -> ConnectionResult<PostgresSequenceState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let state = inspect_sequence(&mut client, sequence)?;
         self.cancellation.check()?;
         Ok(state)
@@ -634,7 +849,7 @@ impl PostgresTargetFactory {
         &self,
         generated: &PostgresGeneratedColumn,
     ) -> ConnectionResult<PostgresGeneratedColumnState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let state = inspect_generated_column(&mut client, generated)?;
         self.cancellation.check()?;
         Ok(state)
@@ -644,7 +859,7 @@ impl PostgresTargetFactory {
         &self,
         expected: &PostgresProgrammableObject,
     ) -> ConnectionResult<PostgresProgrammableObjectState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let relation_kind = matches!(expected.ast, PostgresDurableAst::View(_));
         let occupied: bool = client
             .query_one(
@@ -690,7 +905,7 @@ impl PostgresTargetFactory {
             .ast
             .render_canonical()
             .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         self.cancellation.check()?;
         transaction
@@ -709,7 +924,7 @@ impl PostgresTargetFactory {
         &self,
         expected: &PostgresPartitionTopology,
     ) -> ConnectionResult<PostgresPartitionTopologyState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut expected_relations = vec![expected.root.clone()];
         expected_relations.extend(expected.leaves.iter().map(|leaf| leaf.table.clone()));
         let mut present = 0usize;
@@ -750,7 +965,7 @@ impl PostgresTargetFactory {
         &self,
         sequence: &PostgresSequence,
     ) -> ConnectionResult<PostgresSequenceState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_sequence(&mut transaction, sequence)? {
             PostgresSequenceState::ExactConfig | PostgresSequenceState::ExactState => {
@@ -796,7 +1011,7 @@ impl PostgresTargetFactory {
         &self,
         sequence: &PostgresSequence,
     ) -> ConnectionResult<PostgresSequenceState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_sequence(&mut transaction, sequence)? {
             PostgresSequenceState::ExactState => {
@@ -847,7 +1062,7 @@ impl PostgresTargetFactory {
         &self,
         foreign_key: &PostgresForeignKey,
     ) -> ConnectionResult<PostgresForeignKeyState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let state = inspect_foreign_key(&mut client, foreign_key)?;
         self.cancellation.check()?;
         Ok(state)
@@ -858,7 +1073,7 @@ impl PostgresTargetFactory {
         &self,
         foreign_key: &PostgresForeignKey,
     ) -> ConnectionResult<PostgresForeignKeyCheck> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let check = check_foreign_key(&mut client, foreign_key)?;
         self.cancellation.check()?;
         Ok(check)
@@ -872,7 +1087,7 @@ impl PostgresTargetFactory {
         &self,
         foreign_key: &PostgresForeignKey,
     ) -> ConnectionResult<PostgresForeignKeyState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_foreign_key(&mut transaction, foreign_key)? {
             PostgresForeignKeyState::ExactValidated => {
@@ -933,7 +1148,7 @@ impl PostgresTargetFactory {
 
     /// Inspect one ordinary target index against exact typed source metadata.
     pub fn inspect_index(&self, index: &PostgresIndex) -> ConnectionResult<PostgresIndexState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let state = inspect_index(&mut client, index)?;
         self.cancellation.check()?;
         Ok(state)
@@ -941,7 +1156,7 @@ impl PostgresTargetFactory {
 
     /// Create an absent ordinary index atomically and require an exact result.
     pub fn reconcile_index(&self, index: &PostgresIndex) -> ConnectionResult<PostgresIndexState> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, _registration) = self.controlled_connect()?;
         let mut transaction = client.transaction().map_err(database_error)?;
         match inspect_index(&mut transaction, index)? {
             PostgresIndexState::Exact => {
@@ -3417,9 +3632,10 @@ impl TargetConnectionFactory for PostgresTargetFactory {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn WriteSession>> {
-        let client = self.controlled_connect()?;
+        let (client, cancel_registration) = self.controlled_connect()?;
         Ok(Box::new(PostgresWriter {
             client,
+            _cancel_registration: cancel_registration,
             cancellation,
             transaction_open: false,
         }))
@@ -3429,7 +3645,7 @@ impl TargetConnectionFactory for PostgresTargetFactory {
         &self,
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn VerificationSession>> {
-        let mut client = self.controlled_connect()?;
+        let (mut client, cancel_registration) = self.controlled_connect()?;
         client
             .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .map_err(database_error)?;
@@ -3453,6 +3669,8 @@ impl TargetConnectionFactory for PostgresTargetFactory {
         Ok(Box::new(PostgresTargetVerifier {
             reader: PostgresSnapshotReader {
                 client,
+                _cancel_registration: cancel_registration,
+                exporter_lifetime: None,
                 token,
                 evidence: ReadOnlyEvidence {
                     server_enforced: true,
@@ -3468,18 +3686,14 @@ impl TargetConnectionFactory for PostgresTargetFactory {
     }
 
     fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
-        let token = self
-            .active_cancel
-            .lock()
-            .map_err(|_| ConnectionError::Database("control token lock is poisoned".into()))?
-            .clone()
-            .ok_or_else(|| {
-                ConnectionError::InvalidRequest(
-                    "open a PostgreSQL target session before its control session".into(),
-                )
-            })?;
+        let tokens = self.cancel_registry.sessions()?;
+        if tokens.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "open a PostgreSQL target session before its control session".into(),
+            ));
+        }
         Ok(Box::new(PostgresControlSession {
-            token,
+            registry: Arc::clone(&self.cancel_registry),
             config: self.config.clone(),
         }))
     }
@@ -3500,6 +3714,7 @@ impl VerificationSession for PostgresTargetVerifier {
 }
 
 struct PostgresWriter {
+    _cancel_registration: SessionRegistration<CancelToken>,
     client: Client,
     cancellation: CancellationToken,
     transaction_open: bool,
@@ -3815,7 +4030,9 @@ fn write_parameter(value: &DbValue, ty: &Type) -> ConnectionResult<Box<dyn ToSql
 }
 
 struct PostgresSnapshotReader {
+    _cancel_registration: SessionRegistration<CancelToken>,
     client: Client,
+    exporter_lifetime: Option<Arc<ExporterLifetime>>,
     token: SnapshotToken,
     evidence: ReadOnlyEvidence,
     cancellation: CancellationToken,
@@ -3823,6 +4040,16 @@ struct PostgresSnapshotReader {
     max_batch_bytes: usize,
     metadata_cache: HashMap<(QualifiedTable, Vec<Identifier>), Vec<ColumnMeta>>,
     validated_keys: BTreeSet<(QualifiedTable, Vec<Identifier>)>,
+}
+
+impl Drop for PostgresSnapshotReader {
+    fn drop(&mut self) {
+        if let Some(lifetime) = &self.exporter_lifetime {
+            if let Ok(mut alive) = lifetime.alive.lock() {
+                *alive = false;
+            }
+        }
+    }
 }
 
 impl ReadSession for PostgresSnapshotReader {
@@ -6427,6 +6654,13 @@ pub fn write_live_plan(
 pub fn collect_live_assessment(
     source_config: &PostgresEndpointConfig,
 ) -> Result<AssessmentArtifact, PostgresPlanError> {
+    collect_live_assessment_with_profile(source_config, None)
+}
+
+pub fn collect_live_assessment_with_profile(
+    source_config: &PostgresEndpointConfig,
+    throughput_profile: Option<&ThroughputProfile>,
+) -> Result<AssessmentArtifact, PostgresPlanError> {
     let mut client =
         source_config.connect_with_application_name("sql-splitter-migration-assessment")?;
     let mut transaction = client
@@ -6479,7 +6713,11 @@ pub fn collect_live_assessment(
     scope_estimates.sort_by(|left, right| left.table.cmp(&right.table));
     transaction.commit()?;
 
-    build_source_assessment(
+    let assessed_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PostgresPlanError::InvalidConfig("system clock is before the Unix epoch"))?
+        .as_secs();
+    build_source_assessment_with_profile(
         CatalogSnapshot {
             endpoint_identity: format!("postgres://{address}:{port}/{database}?user={user}"),
             server_version,
@@ -6491,6 +6729,8 @@ pub fn collect_live_assessment(
         transaction_read_only,
         direct_write_privileges_absent,
         scope_estimates,
+        throughput_profile,
+        assessed_at_unix_seconds,
     )
 }
 
@@ -6557,7 +6797,25 @@ pub fn build_source_assessment(
     source: CatalogSnapshot,
     transaction_read_only: bool,
     direct_write_privileges_absent: bool,
+    scope_estimates: Vec<ScopeEstimate>,
+) -> Result<AssessmentArtifact, PostgresPlanError> {
+    build_source_assessment_with_profile(
+        source,
+        transaction_read_only,
+        direct_write_privileges_absent,
+        scope_estimates,
+        None,
+        0,
+    )
+}
+
+pub fn build_source_assessment_with_profile(
+    source: CatalogSnapshot,
+    transaction_read_only: bool,
+    direct_write_privileges_absent: bool,
     mut scope_estimates: Vec<ScopeEstimate>,
+    throughput_profile: Option<&ThroughputProfile>,
+    assessed_at_unix_seconds: u64,
 ) -> Result<AssessmentArtifact, PostgresPlanError> {
     let sequence_objects = source
         .catalog
@@ -6624,7 +6882,7 @@ pub fn build_source_assessment(
         tool_version: env!("CARGO_PKG_VERSION").into(),
         source_endpoint_identity: source.endpoint_identity,
         target_endpoint_identity: AssessmentStatus::NotAssessed,
-        source_catalog_fingerprint,
+        source_catalog_fingerprint: source_catalog_fingerprint.clone(),
         target_catalog_fingerprint: AssessmentStatus::NotAssessed,
         source_catalog: Some(source.catalog),
         target_catalog: AssessmentStatus::NotAssessed,
@@ -6660,6 +6918,9 @@ pub fn build_source_assessment(
         reviewed_plan,
         source_evidence: SourceAssessmentEvidence {
             server_version: source.server_version,
+            server_version_num: u32::try_from(source.server_version_num).map_err(|_| {
+                PostgresPlanError::InvalidConfig("negative PostgreSQL server version number")
+            })?,
             tls_binding: source.tls_binding,
             transaction_read_only,
             direct_write_privileges_absent,
@@ -6692,10 +6953,13 @@ pub fn build_source_assessment(
                 detail: "target version, ownership, emptiness, and schema compatibility".into(),
             },
         ],
+        projected_window: project_outage_window(
+            &scope_estimates,
+            throughput_profile,
+            u16::try_from(source.server_version_num / 10_000).unwrap_or_default(),
+            assessed_at_unix_seconds,
+        ),
         scope_estimates,
-        projected_window: ProjectedWindow::NotAssessed {
-            reason: "no measured copy and verification throughput was provided".into(),
-        },
     };
     assessment.validate()?;
     Ok(assessment)
@@ -6707,6 +6971,20 @@ pub fn write_live_assessment(
     assessment_output: impl AsRef<Path>,
     report_output: impl AsRef<Path>,
 ) -> Result<AssessmentArtifact, PostgresPlanError> {
+    write_live_assessment_with_profile(
+        source_config,
+        assessment_output,
+        report_output,
+        None::<&Path>,
+    )
+}
+
+pub fn write_live_assessment_with_profile(
+    source_config: impl AsRef<Path>,
+    assessment_output: impl AsRef<Path>,
+    report_output: impl AsRef<Path>,
+    throughput_profile: Option<impl AsRef<Path>>,
+) -> Result<AssessmentArtifact, PostgresPlanError> {
     let assessment_output = assessment_output.as_ref();
     let report_output = report_output.as_ref();
     if assessment_output == report_output {
@@ -6716,7 +6994,11 @@ pub fn write_live_assessment(
     }
     prepare_json_text_pair_new(assessment_output, report_output)?;
     let source_config = PostgresEndpointConfig::read(source_config)?;
-    let assessment = collect_live_assessment(&source_config)?;
+    let throughput_profile = throughput_profile
+        .map(read_throughput_profile)
+        .transpose()?;
+    let assessment =
+        collect_live_assessment_with_profile(&source_config, throughput_profile.as_ref())?;
     let report = render_markdown(&assessment)?;
     write_json_text_pair_new(assessment_output, &assessment, report_output, &report)?;
     Ok(assessment)
@@ -6884,7 +7166,7 @@ password = "secret"
             .any(|operation| operation.kind == OperationKind::VerifySchema));
         assert!(matches!(
             assessment.projected_window,
-            ProjectedWindow::NotAssessed { .. }
+            crate::migration::assessment::ProjectedWindow::NotAssessed { .. }
         ));
         assert_eq!(assessment.scope_estimates[0].estimated_rows, 42);
         assert!(render_markdown(&assessment)
@@ -8010,5 +8292,64 @@ credential_env = "PGPASSWORD"
             .unwrap(),
             PostgresWritePolicy::BinaryCopyWithInsertFallbackV1
         );
+    }
+
+    #[test]
+    fn concurrent_session_registry_deregisters_each_session_by_raii() {
+        let registry = Arc::new(SessionRegistry::default());
+        let first = registry.register("first").unwrap();
+        let second = registry.register("second").unwrap();
+        assert_eq!(registry.sessions().unwrap(), ["first", "second"]);
+        drop(first);
+        assert_eq!(registry.sessions().unwrap(), ["second"]);
+        drop(second);
+        assert!(registry.sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imported_snapshot_statement_accepts_only_server_identifier_grammar() {
+        assert_eq!(
+            import_snapshot_statement("00000003-0000001B-1").unwrap(),
+            "SET TRANSACTION SNAPSHOT '00000003-0000001B-1'"
+        );
+        for invalid in ["", "snapshot' ; SELECT 1; --", "path/segment", "space id"] {
+            assert!(import_snapshot_statement(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn imported_snapshot_attestation_requires_exact_current_snapshot_text() {
+        let expected = SnapshotToken {
+            endpoint_identity: "postgres://127.0.0.1:5432/app?user=reader".into(),
+            database_identity: "app".into(),
+            snapshot_id: "10:20:11,12".into(),
+            consistency_mode: "postgres_repeatable_read_read_only".into(),
+            server_version: "17.5".into(),
+            lifecycle_id: "primary".into(),
+        };
+        assert!(imported_snapshot_is_exact(
+            &expected,
+            &expected.endpoint_identity,
+            &expected.database_identity,
+            &expected.server_version,
+            &expected.snapshot_id,
+            true,
+        ));
+        assert!(!imported_snapshot_is_exact(
+            &expected,
+            &expected.endpoint_identity,
+            &expected.database_identity,
+            &expected.server_version,
+            "10:21:11,12",
+            true,
+        ));
+        assert!(!imported_snapshot_is_exact(
+            &expected,
+            &expected.endpoint_identity,
+            &expected.database_identity,
+            &expected.server_version,
+            &expected.snapshot_id,
+            false,
+        ));
     }
 }

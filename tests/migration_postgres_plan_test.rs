@@ -25,25 +25,26 @@ use sql_splitter::migration::artifact::read_json;
 use sql_splitter::migration::assessment::{
     render_markdown, stable_report_body, AssessmentArtifact,
 };
+use sql_splitter::migration::canonical::{digest_rows, CanonicalRow};
 use sql_splitter::migration::connection::{
     CancellationToken, ConnectionError, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
 };
 use sql_splitter::migration::journal::{MigrationStatus, OperationState};
 use sql_splitter::migration::model::{
-    CatalogNamespace, CatalogObject, CatalogObjectKind, DbValue, Identifier, KeyTuple,
-    QualifiedTable, VendorCatalog,
+    CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue, Identifier, KeyTuple,
+    QualifiedTable, RowBatch, VendorCatalog,
 };
 use sql_splitter::migration::plan::{
     AssessmentStatus, PlanPurpose, ReviewedPlan, UnsupportedObjectCode,
 };
+#[cfg(feature = "migration-fault-injection")]
+use sql_splitter::migration::postgres::postgres_foreign_keys;
 use sql_splitter::migration::postgres::{
     build_plan, collect_live_assessment, inspect_endpoint, write_live_assessment, write_live_plan,
     write_live_plan_with_consistency, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresPlanError, PostgresSourceFactory,
+    PostgresPlanError, PostgresSourceFactory, PostgresTargetFactory, PostgresWritePolicy,
 };
-#[cfg(feature = "migration-fault-injection")]
-use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, postgres_write_fence_is_released,
     release_postgres_write_fence, InstalledPostgresFence,
@@ -583,6 +584,7 @@ fn live_snapshot_paging_is_stable_during_concurrent_writes() -> anyhow::Result<(
 
     let factory = PostgresSourceFactory::new(source_config);
     let snapshot = factory.capture_snapshot()?;
+    let mut peer = factory.open_imported_snapshot_peer(&snapshot, CancellationToken::default())?;
     let mut reader = factory.open_reader(&snapshot, CancellationToken::default())?;
     let table = QualifiedTable {
         namespace: Identifier::new("public")?,
@@ -599,23 +601,35 @@ fn live_snapshot_paging_is_stable_during_concurrent_writes() -> anyhow::Result<(
         limit: 2,
     })?;
     assert_eq!(first.len(), 2);
+    let peer_first = peer.select_page(&KeysetPage {
+        table: table.clone(),
+        projection: projection.clone(),
+        key: key.clone(),
+        after: None,
+        limit: 2,
+    })?;
+    assert_eq!(peer_first.rows(), first.rows());
     mutator.batch_execute(
         "UPDATE public.live_snapshot_rows SET payload = 'changed' WHERE id = 2;
          UPDATE public.live_snapshot_rows SET id = 30 WHERE id = 3;
          INSERT INTO public.live_snapshot_rows (id, payload) VALUES (4, 'four')",
     )?;
 
-    let second = reader.select_page(&KeysetPage {
+    let second_request = KeysetPage {
         table,
         projection,
         key,
         after: Some(KeyTuple::new(vec![DbValue::Signed(2)])),
         limit: 2,
-    })?;
+    };
+    let second = reader.select_page(&second_request)?;
+    let peer_second = peer.select_page(&second_request)?;
     assert_eq!(
         second.rows(),
         &[vec![DbValue::Signed(3), DbValue::Text("three".into())]]
     );
+    assert_eq!(peer_second.rows(), second.rows());
+    assert_eq!(peer.snapshot(), &snapshot);
     assert_eq!(reader.snapshot(), &snapshot);
     drop(reader);
 
@@ -935,14 +949,119 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?)?;
     let mut source_administrator =
         connect(&source_admin_config).context("connect source administrator")?;
-    source_administrator.batch_execute(
-        "DROP TABLE IF EXISTS public.source_values; CREATE TABLE public.source_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); GRANT SELECT ON public.source_values TO migration_reader; GRANT SELECT ON SEQUENCE public.source_values_id_seq TO migration_reader; INSERT INTO public.source_values (text_value, binary_value, float_value, json_value, numeric_value, timestamp_value) VALUES ('exact text', decode('00ff10', 'hex'), '-0'::double precision, '{\"b\":2,\"a\":1}'::jsonb, 1234567890123.45000, '2026-08-11 10:11:12.123456+02')",
-    ).context("prepare source value matrix")?;
+    source_administrator
+        .batch_execute(
+            "DROP TABLE IF EXISTS public.source_values;
+         CREATE TABLE public.source_values (
+           id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+           nullable_value text,
+           bool_value boolean,
+           int2_value smallint,
+           int4_value integer,
+           int8_value bigint,
+           oid_value oid,
+           float4_value real,
+           float8_value double precision,
+           text_value text,
+           varchar_value varchar(12),
+           bpchar_value char(6),
+           name_value name,
+           binary_value bytea,
+           json_value json,
+           jsonb_value jsonb,
+           numeric_value numeric,
+           date_value date,
+           time_value time(6),
+           time0_value time(0),
+           timetz_value time(6) with time zone,
+           timestamp_value timestamp(6),
+           timestamp0_value timestamp(0),
+           timestamptz_value timestamptz(6),
+           timestamptz0_value timestamptz(0),
+           uuid_value uuid
+         );
+         GRANT SELECT ON public.source_values TO migration_reader;
+         GRANT SELECT ON SEQUENCE public.source_values_id_seq TO migration_reader;
+         INSERT INTO public.source_values (
+           nullable_value,bool_value,int2_value,int4_value,int8_value,oid_value,
+           float4_value,float8_value,text_value,varchar_value,bpchar_value,name_value,
+           binary_value,json_value,jsonb_value,numeric_value,date_value,time_value,time0_value,
+           timetz_value,timestamp_value,timestamp0_value,timestamptz_value,timestamptz0_value,
+           uuid_value
+         ) VALUES (
+           'present',true,-32768,-2147483648,-9223372036854775808,42,
+           '-0'::real,'-0'::double precision,'exact text','varchar','xy','mixed.name',
+           decode('00ff10','hex'),'{ \"b\": 2, \"a\": 1 }'::json,
+           '{\"b\":2,\"a\":1}'::jsonb,1234567890123.45000,'2026-08-11',
+           '10:11:12.123456','10:11:13','10:11:12.123456+02',
+           '2026-08-11 10:11:12.123456','2026-08-11 10:11:13',
+           '2026-08-11 10:11:12.123456+02','2026-08-11 10:11:13+02',
+           '123e4567-e89b-12d3-a456-426614174000'
+         );
+         INSERT INTO public.source_values DEFAULT VALUES;
+         INSERT INTO public.source_values (
+           nullable_value,bool_value,int2_value,int4_value,int8_value,oid_value,
+           float4_value,float8_value,text_value,varchar_value,bpchar_value,name_value,
+           binary_value,json_value,jsonb_value,numeric_value,date_value,time_value,time0_value,
+           timetz_value,timestamp_value,timestamp0_value,timestamptz_value,timestamptz0_value,
+           uuid_value
+         ) VALUES (
+           NULL,false,32767,2147483647,9223372036854775807,4294967295,
+           'Infinity'::real,'-Infinity'::double precision,'Unicode: åß水🧪','edge','z','Upper.Name',
+           decode('00ff','hex'),'{\"duplicate\":1,\"duplicate\":2,\"number\":1.00}'::json,
+           '{\"number\":1.00,\"nested\":{\"z\":0,\"a\":1}}'::jsonb,
+           999999999999999.00001,'2000-02-29','23:59:59.999999','23:59:59',
+           '00:00:00.000001-07:30','1999-12-31 23:59:59.999999','1999-12-31 23:59:59',
+           '2000-01-01 00:00:00.000001-07:30','2000-01-01 00:00:00-07:30',
+           'ffffffff-ffff-ffff-ffff-ffffffffffff'
+         );
+         INSERT INTO public.source_values (
+           nullable_value,bool_value,int2_value,int4_value,int8_value,oid_value,
+           float4_value,float8_value,text_value,varchar_value,bpchar_value,name_value,
+           binary_value,json_value,jsonb_value,numeric_value,date_value,time_value,time0_value,
+           timetz_value,timestamp_value,timestamp0_value,timestamptz_value,timestamptz0_value,
+           uuid_value
+         ) VALUES (
+           '',true,0,0,0,0,'NaN'::real,'NaN'::double precision,
+           U&'combining: e\\0301','', '', 'n',decode('00ff00','hex'),
+           '[1,1.0,1e0,null,true,false]'::json,
+           '[1,1.0,1e0,null,true,false]'::jsonb,-0.0100,'1970-01-01',
+           '00:00:00','00:00:00','00:00:00+00','1970-01-01 00:00:00.1',
+           '1970-01-01 00:00:00','1970-01-01 00:00:00.1+00',
+           '1970-01-01 00:00:00+00','00000000-0000-0000-0000-000000000000'
+         )",
+        )
+        .context("prepare source value matrix")?;
+    let float4_nan_a = f32::from_bits(0x7fc0_0001);
+    let float8_nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+    let float4_nan_b = f32::from_bits(0xffc0_1234);
+    let float8_nan_b = f64::from_bits(0xfff8_0000_0000_1234);
+    source_administrator
+        .execute(
+            "INSERT INTO public.source_values (float4_value,float8_value) VALUES ($1,$2),($3,$4)",
+            &[&float4_nan_a, &float8_nan_a, &float4_nan_b, &float8_nan_b],
+        )
+        .context("prepare distinct floating-point NaN payloads")?;
     let mut target_administrator =
         connect(&target_config).context("connect target administrator")?;
-    target_administrator.batch_execute(
-        "DROP TABLE IF EXISTS public.target_values_insert, public.target_values_copy; CREATE TABLE public.target_values_insert (id bigint PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); CREATE TABLE public.target_values_copy (LIKE public.target_values_insert INCLUDING ALL)",
-    ).context("prepare target value matrices")?;
+    target_administrator
+        .batch_execute(
+            "DROP TABLE IF EXISTS public.target_values_insert, public.target_values_copy;
+         CREATE TABLE public.target_values_insert (
+           id bigint PRIMARY KEY, nullable_value text, bool_value boolean,
+           int2_value smallint, int4_value integer, int8_value bigint, oid_value oid,
+           float4_value real, float8_value double precision, text_value text,
+           varchar_value varchar(12), bpchar_value char(6), name_value name,
+           binary_value bytea, json_value json, jsonb_value jsonb,
+           numeric_value numeric, date_value date, time_value time(6), time0_value time(0),
+           timetz_value time(6) with time zone, timestamp_value timestamp(6),
+           timestamp0_value timestamp(0), timestamptz_value timestamptz(6),
+           timestamptz0_value timestamptz(0), uuid_value uuid
+         );
+         CREATE TABLE public.target_values_copy
+           (LIKE public.target_values_insert INCLUDING ALL)",
+        )
+        .context("prepare target value matrices")?;
 
     let source = PostgresSourceFactory::new(source_config);
     let snapshot = source
@@ -957,12 +1076,31 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
     };
     let projection = [
         "id",
+        "nullable_value",
+        "bool_value",
+        "int2_value",
+        "int4_value",
+        "int8_value",
+        "oid_value",
+        "float4_value",
+        "float8_value",
         "text_value",
+        "varchar_value",
+        "bpchar_value",
+        "name_value",
         "binary_value",
-        "float_value",
         "json_value",
+        "jsonb_value",
         "numeric_value",
+        "date_value",
+        "time_value",
+        "time0_value",
+        "timetz_value",
         "timestamp_value",
+        "timestamp0_value",
+        "timestamptz_value",
+        "timestamptz0_value",
+        "uuid_value",
     ]
     .into_iter()
     .map(Identifier::new)
@@ -977,7 +1115,7 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
             limit: 10,
         })
         .context("read source value matrix")?;
-    assert_eq!(batch.len(), 1);
+    assert_eq!(batch.len(), 6);
 
     let target = sql_splitter::migration::postgres::PostgresTargetFactory::new(target_config);
     let cancellation = CancellationToken::default();
@@ -1025,7 +1163,264 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
     assert_eq!(inserted.rows(), batch.rows());
     assert_eq!(copied.rows(), batch.rows());
     assert_eq!(copied.rows(), inserted.rows());
+    let expected_digest = canonical_value_matrix_digest(&batch)?;
+    assert_eq!(canonical_value_matrix_digest(&inserted)?, expected_digest);
+    assert_eq!(canonical_value_matrix_digest(&copied)?, expected_digest);
     Ok(())
+}
+
+fn canonical_value_matrix_digest(batch: &RowBatch) -> anyhow::Result<String> {
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    let keys = batch
+        .rows()
+        .iter()
+        .map(|row| {
+            row.first()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("value-matrix row has no key"))
+                .map(|key| vec![key])
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let rows = batch
+        .rows()
+        .iter()
+        .zip(&keys)
+        .map(|(values, key)| CanonicalRow {
+            table: "public.value_matrix",
+            columns: &columns,
+            key,
+            values,
+        })
+        .collect::<Vec<_>>();
+    Ok(hex::encode(digest_rows(rows.iter())))
+}
+
+#[test]
+#[ignore = "requires an empty TLS-enabled PostgreSQL target for reproducible throughput measurements"]
+fn live_insert_and_copy_throughput_matrix() -> anyhow::Result<()> {
+    const ROWS: usize = 10_000;
+    const WIDE_BYTES: usize = 2_048;
+
+    let target_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?)?;
+    let mut administrator = connect(&target_config)?;
+    administrator.batch_execute(
+        "DROP TABLE IF EXISTS
+            public.throughput_narrow_insert,
+            public.throughput_narrow_copy,
+            public.throughput_wide_insert,
+            public.throughput_wide_copy,
+            public.throughput_bytea_insert,
+            public.throughput_bytea_copy;
+         CREATE TABLE public.throughput_narrow_insert (id bigint PRIMARY KEY, payload bigint NOT NULL);
+         CREATE TABLE public.throughput_narrow_copy (LIKE public.throughput_narrow_insert INCLUDING ALL);
+         CREATE TABLE public.throughput_wide_insert (id bigint PRIMARY KEY, payload text NOT NULL);
+         CREATE TABLE public.throughput_wide_copy (LIKE public.throughput_wide_insert INCLUDING ALL);
+         CREATE TABLE public.throughput_bytea_insert (id bigint PRIMARY KEY, payload bytea NOT NULL);
+         CREATE TABLE public.throughput_bytea_copy (LIKE public.throughput_bytea_insert INCLUDING ALL)",
+    )?;
+    let server_version: String = administrator
+        .query_one("SELECT current_setting('server_version')", &[])?
+        .get(0);
+
+    let column = |name: &str, ordinal, vendor_type: &str| -> anyhow::Result<ColumnMeta> {
+        Ok(ColumnMeta {
+            name: Identifier::new(name)?,
+            ordinal,
+            vendor_type: vendor_type.into(),
+            nullable: false,
+            collation: None,
+            precision: None,
+            scale: None,
+            timezone_semantics: None,
+        })
+    };
+    let mut narrow = RowBatch::new(
+        vec![column("id", 0, "bigint")?, column("payload", 1, "bigint")?],
+        ROWS,
+        usize::MAX,
+    );
+    let mut wide = RowBatch::new(
+        vec![column("id", 0, "bigint")?, column("payload", 1, "text")?],
+        ROWS,
+        usize::MAX,
+    );
+    let mut bytea = RowBatch::new(
+        vec![column("id", 0, "bigint")?, column("payload", 1, "bytea")?],
+        ROWS,
+        usize::MAX,
+    );
+    let wide_value = "x".repeat(WIDE_BYTES);
+    let bytea_value = (0..WIDE_BYTES)
+        .map(|index| u8::try_from(index % 251))
+        .collect::<Result<Vec<_>, _>>()?;
+    for id in 1..=ROWS {
+        let id = i128::try_from(id)?;
+        narrow.try_push(vec![DbValue::Signed(id), DbValue::Signed(-id)], 16)?;
+        wide.try_push(
+            vec![DbValue::Signed(id), DbValue::Text(wide_value.clone())],
+            8 + WIDE_BYTES,
+        )?;
+        bytea.try_push(
+            vec![DbValue::Signed(id), DbValue::Bytes(bytea_value.clone())],
+            8 + WIDE_BYTES,
+        )?;
+    }
+
+    let target = PostgresTargetFactory::new(target_config.clone());
+    let build_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    for (shape, batch) in [("narrow", &narrow), ("wide", &wide), ("bytea", &bytea)] {
+        let insert_table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new(format!("throughput_{shape}_insert"))?,
+        };
+        let copy_table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new(format!("throughput_{shape}_copy"))?,
+        };
+        let insert_elapsed = measure_target_write(&target, &insert_table, batch, false)?;
+        let copy_elapsed = measure_target_write(&target, &copy_table, batch, true)?;
+        for (method, elapsed) in [("insert", insert_elapsed), ("copy", copy_elapsed)] {
+            let seconds = elapsed.as_secs_f64();
+            eprintln!(
+                "MIGRATION_THROUGHPUT postgres={} profile={} shape={} method={} rows={} encoded_bytes={} elapsed_seconds={:.6} rows_per_second={:.2} bytes_per_second={:.2}",
+                server_version,
+                build_profile,
+                shape,
+                method,
+                batch.len(),
+                batch.encoded_bytes(),
+                seconds,
+                batch.len() as f64 / seconds,
+                batch.encoded_bytes() as f64 / seconds,
+            );
+        }
+        let verify_elapsed = measure_target_verification(
+            &target,
+            &insert_table,
+            &copy_table,
+            batch,
+            u32::try_from(ROWS.min(1_000))?,
+        )?;
+        let verify_seconds = verify_elapsed.as_secs_f64();
+        eprintln!(
+            "MIGRATION_THROUGHPUT postgres={} profile={} shape={} method=verify rows={} encoded_bytes={} elapsed_seconds={:.6} rows_per_second={:.2} bytes_per_second={:.2}",
+            server_version,
+            build_profile,
+            shape,
+            batch.len(),
+            batch.encoded_bytes(),
+            verify_seconds,
+            batch.len() as f64 / verify_seconds,
+            batch.encoded_bytes() as f64 / verify_seconds,
+        );
+        let insert_count: i64 = administrator
+            .query_one(
+                &format!("SELECT count(*) FROM public.throughput_{shape}_insert"),
+                &[],
+            )?
+            .get(0);
+        let copy_count: i64 = administrator
+            .query_one(
+                &format!("SELECT count(*) FROM public.throughput_{shape}_copy"),
+                &[],
+            )?
+            .get(0);
+        assert_eq!(insert_count, i64::try_from(ROWS)?);
+        assert_eq!(copy_count, insert_count);
+    }
+    Ok(())
+}
+
+fn measure_target_write(
+    target: &PostgresTargetFactory,
+    table: &QualifiedTable,
+    batch: &RowBatch,
+    bulk: bool,
+) -> anyhow::Result<Duration> {
+    let mut writer = target.open_writer(CancellationToken::default())?;
+    writer.begin()?;
+    let started = Instant::now();
+    if bulk {
+        writer.bulk_write(table, batch)?;
+    } else {
+        writer.insert(table, batch)?;
+    }
+    writer.commit()?;
+    Ok(started.elapsed())
+}
+
+fn measure_target_verification(
+    target: &PostgresTargetFactory,
+    insert_table: &QualifiedTable,
+    copy_table: &QualifiedTable,
+    expected: &RowBatch,
+    page_limit: u32,
+) -> anyhow::Result<Duration> {
+    let started = Instant::now();
+    let cancellation = CancellationToken::default();
+    let mut insert_verifier = target.open_verifier(cancellation.clone())?;
+    let mut copy_verifier = target.open_verifier(cancellation)?;
+    let projection = expected
+        .columns()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let key = vec![Identifier::new("id")?];
+    let mut after = None;
+    let mut verified_rows = 0usize;
+    loop {
+        let inserted = insert_verifier.select_page(&KeysetPage {
+            table: insert_table.clone(),
+            projection: projection.clone(),
+            key: key.clone(),
+            after: after.clone(),
+            limit: page_limit,
+        })?;
+        let copied = copy_verifier.select_page(&KeysetPage {
+            table: copy_table.clone(),
+            projection: projection.clone(),
+            key: key.clone(),
+            after: after.clone(),
+            limit: page_limit,
+        })?;
+        assert_eq!(copied.rows(), inserted.rows());
+        assert_eq!(
+            canonical_value_matrix_digest(&copied)?,
+            canonical_value_matrix_digest(&inserted)?
+        );
+        if inserted.is_empty() {
+            break;
+        }
+        let end = verified_rows
+            .checked_add(inserted.len())
+            .ok_or_else(|| anyhow::anyhow!("verification row count overflow"))?;
+        assert_eq!(
+            inserted.rows(),
+            expected
+                .rows()
+                .get(verified_rows..end)
+                .ok_or_else(|| anyhow::anyhow!("verification returned excess rows"))?
+        );
+        let final_key = inserted
+            .rows()
+            .last()
+            .and_then(|row| row.first())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("verification page has no final key"))?;
+        after = Some(KeyTuple::new(vec![final_key]));
+        verified_rows = end;
+    }
+    assert_eq!(verified_rows, expected.len());
+    Ok(started.elapsed())
 }
 
 #[test]
@@ -1046,9 +1441,13 @@ fn live_pre_data_ddl_is_create_only_and_rechecks_emptiness() -> anyhow::Result<(
 #[test]
 #[ignore = "requires dedicated TLS-enabled PostgreSQL execution databases"]
 fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
-    let source = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
+    let source_template = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
     let target = required_path("SQL_SPLITTER_PG_RUN_TARGET_CONFIG")?;
     let directory = private_tempdir()?;
+    let source = directory.path().join("source.toml");
+    let mut source_config = PostgresEndpointConfig::read(source_template)?;
+    source_config.max_batch_rows = 1;
+    std::fs::write(&source, toml::to_string(&source_config)?)?;
     let plan_path = directory.path().join("reviewed-plan.json");
     let state_path = directory.path().join("migration-state.journal");
     let reviewed = write_live_plan(&source, &target, &plan_path)?;
@@ -1066,7 +1465,7 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
         &state_path,
     )?;
     assert_eq!(report.copied_rows, 3);
-    assert!(report.committed_chunks >= 1);
+    assert_eq!(report.committed_chunks, 3);
     let state = AppendJournal::open_resume(&state_path)?;
     assert_eq!(state.projection().status, MigrationStatus::Completed);
     assert!(state
@@ -1074,7 +1473,7 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
         .operations
         .values()
         .all(|state| *state == OperationState::Verified));
-    assert!(committed_chunks(&state)?.next().is_some());
+    assert_eq!(committed_chunks(&state)?.count(), 3);
 
     let mut target_client = connect(&PostgresEndpointConfig::read(target)?)?;
     let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
@@ -1243,6 +1642,7 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
         PostgresExecutionInterruption::CommitUnknownAfterApply,
         PostgresExecutionInterruption::TornChunkCommittedEnospc,
         PostgresExecutionInterruption::ChunkCommittedSyncAckLost,
+        PostgresExecutionInterruption::AfterPipelinedEvidence,
         PostgresExecutionInterruption::AfterAllVerified,
         PostgresExecutionInterruption::AfterFenceReleased,
     ];
@@ -1347,6 +1747,15 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
             );
             drop(committed);
         }
+        if interruption == PostgresExecutionInterruption::AfterPipelinedEvidence {
+            let pipelined = AppendJournal::open_resume(&state_path)?;
+            assert!(pipelined.projection().prepared_chunk.is_none());
+            assert!(pipelined.projection().last_chunk_id > 0);
+            assert!(!pipelined.projection().copy_cursors.is_empty());
+            assert!(pipelined.projection().table_verifications.is_empty());
+            assert!(!pipelined.projection().schema_verified);
+            drop(pipelined);
+        }
 
         let report = resume_postgres_fenced_plan(
             &state_path,
@@ -1370,6 +1779,10 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
             .operations
             .values()
             .all(|state| *state == OperationState::Verified));
+        if interruption == PostgresExecutionInterruption::AfterPipelinedEvidence {
+            assert!(!state.projection().table_verifications.is_empty());
+            assert!(state.projection().schema_verified);
+        }
         let mut target_client = connect(&target)?;
         let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
         let actual = rows
@@ -1495,7 +1908,7 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
                 let state = AppendJournal::read_snapshot(&state_path)?;
                 let transaction_is_active: bool = observer
                     .query_one(
-                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND usename='migration_fence_target_owner' AND xact_start IS NOT NULL AND query LIKE 'INSERT INTO%')",
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND usename='migration_fence_target_owner' AND xact_start IS NOT NULL AND (query LIKE 'COPY %' OR query LIKE 'INSERT INTO%'))",
                         &[&target_database],
                     )?
                     .get(0);
@@ -1506,7 +1919,9 @@ fn live_runner_cancellation_rolls_back_and_resumes_exactly() -> anyhow::Result<(
                 }
             }
             if Instant::now() >= deadline {
-                anyhow::bail!("target INSERT transaction did not become observable before timeout");
+                anyhow::bail!(
+                    "target COPY or INSERT transaction did not become observable before timeout"
+                );
             }
             thread::sleep(Duration::from_millis(5));
         }
@@ -2224,6 +2639,24 @@ fn run_live_sequence_recovery_case(
         PostgresConsistencyMode::WriteFence,
     )?;
     assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    let copy = reviewed
+        .plan
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind == sql_splitter::migration::plan::OperationKind::CopyTable
+                && operation
+                    .table
+                    .as_ref()
+                    .is_some_and(|table| table.name.as_str() == "accounts")
+        })
+        .ok_or_else(|| anyhow::anyhow!("accounts CopyTable operation is absent"))?;
+    assert_eq!(
+        serde_json::from_value::<PostgresWritePolicy>(
+            copy.parameters["postgres_write_policy"].clone()
+        )?,
+        PostgresWritePolicy::PlainInsertIdentityAlwaysV1
+    );
     let restore_count = reviewed
         .plan
         .operations
@@ -2277,6 +2710,7 @@ fn run_live_sequence_recovery_case(
         &admin_path,
         &fence_path,
     );
+    assert_target_table_used_insert_not_copy(&mut control, &target_database, "accounts")?;
     if inject_conflict {
         let error = resumed.unwrap_err();
         assert!(
@@ -2325,6 +2759,15 @@ fn run_live_sequence_recovery_case(
             .query_one("SELECT nextval('public.never_called_seq')", &[])?
             .get::<_, i64>(0),
         7
+    );
+    assert_eq!(
+        target_client
+            .query_one(
+                "SELECT last_value,is_called FROM public.accounts_id_seq",
+                &[],
+            )
+            .map(|row| (row.get::<_, i64>(0), row.get::<_, bool>(1)))?,
+        (115, true)
     );
     assert_eq!(
         target_client
@@ -3214,6 +3657,52 @@ fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
         dependencies: Vec::new(),
         vendor_metadata: BTreeMap::new(),
     })
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn assert_target_table_used_insert_not_copy(
+    admin: &mut Client,
+    database: &str,
+    table: &str,
+) -> anyhow::Result<()> {
+    let insert_marker = format!("INSERT INTO \"public\".\"{table}\"");
+    let copy_marker = format!("COPY \"public\".\"{table}\"");
+    for _ in 0..40 {
+        let path: String = admin
+            .query_one("SELECT pg_current_logfile('jsonlog')", &[])?
+            .get(0);
+        let log: String = admin.query_one("SELECT pg_read_file($1)", &[&path])?.get(0);
+        let statements = log
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|entry| {
+                entry.get("dbname").and_then(serde_json::Value::as_str) == Some(database)
+            })
+            .filter_map(|entry| {
+                entry
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            statements
+                .iter()
+                .all(|statement| !statement.contains(&copy_marker)),
+            "identity-ALWAYS table was written through COPY: {statements:?}"
+        );
+        if statements
+            .iter()
+            .any(|statement| statement.contains(&insert_marker))
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!("no INSERT statement for identity-ALWAYS table reached the PostgreSQL log")
 }
 
 fn assert_assessment_statement_log(

@@ -40,7 +40,12 @@ fn assessment_is_source_only_and_has_no_mutation_flags() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for required in ["--source-config", "--assessment-output", "--report-output"] {
+    for required in [
+        "--source-config",
+        "--assessment-output",
+        "--report-output",
+        "--throughput-profile",
+    ] {
         assert!(help.contains(required));
     }
     for forbidden in [

@@ -3,13 +3,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::artifact::{read_json, ArtifactError};
 use super::model::{CatalogObjectKind, QualifiedTable};
 use super::plan::{
     AssessmentStatus, OperationKind, PlanError, PlanPurpose, ReviewedPlan, UnsupportedObject,
     UnsupportedObjectCode, UnsupportedObjectReport,
 };
 
-pub const ASSESSMENT_SCHEMA_VERSION: u16 = 1;
+pub const ASSESSMENT_SCHEMA_VERSION: u16 = 2;
+pub const THROUGHPUT_PROFILE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThroughputProfile {
+    pub schema_version: u16,
+    pub measurement_reference: String,
+    pub environment_reference: String,
+    pub postgres_major_version: u16,
+    pub measured_at_unix_seconds: u64,
+    pub valid_for_seconds: u64,
+    pub copy_bytes_per_second: u64,
+    pub verification_bytes_per_second: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +37,7 @@ pub enum EvidenceStatus {
 #[serde(deny_unknown_fields)]
 pub struct SourceAssessmentEvidence {
     pub server_version: String,
+    pub server_version_num: u32,
     pub tls_binding: String,
     pub transaction_read_only: bool,
     pub direct_write_privileges_absent: bool,
@@ -52,8 +68,86 @@ pub enum ProjectedWindow {
     },
     Estimated {
         seconds: u64,
-        measurement_reference: String,
+        assessed_bytes: u64,
+        assessed_at_unix_seconds: u64,
+        throughput_profile: ThroughputProfile,
     },
+}
+
+pub fn project_outage_window(
+    scope_estimates: &[ScopeEstimate],
+    profile: Option<&ThroughputProfile>,
+    postgres_major_version: u16,
+    assessed_at_unix_seconds: u64,
+) -> ProjectedWindow {
+    let Some(profile) = profile else {
+        return not_assessed("no throughput profile was supplied");
+    };
+    if profile.schema_version != THROUGHPUT_PROFILE_SCHEMA_VERSION {
+        return not_assessed("throughput profile schema version is unsupported");
+    }
+    if profile.measurement_reference.trim().is_empty()
+        || profile.environment_reference.trim().is_empty()
+        || profile.valid_for_seconds == 0
+        || profile.copy_bytes_per_second == 0
+        || profile.verification_bytes_per_second == 0
+    {
+        return not_assessed("throughput profile is incomplete");
+    }
+    if profile.postgres_major_version != postgres_major_version {
+        return not_assessed("throughput profile is incompatible with the source assessment");
+    }
+    let Some(expires_at) = profile
+        .measured_at_unix_seconds
+        .checked_add(profile.valid_for_seconds)
+    else {
+        return not_assessed("throughput profile validity interval is invalid");
+    };
+    if profile.measured_at_unix_seconds > assessed_at_unix_seconds {
+        return not_assessed("throughput profile measurement is in the future");
+    }
+    if assessed_at_unix_seconds > expires_at {
+        return not_assessed("throughput profile is stale");
+    }
+    let Some(assessed_bytes) = scope_estimates.iter().try_fold(0_u64, |total, estimate| {
+        total.checked_add(estimate.total_relation_bytes)
+    }) else {
+        return not_assessed("assessed relation byte total overflowed");
+    };
+    let Some(copy_seconds) = ceiling_division(assessed_bytes, profile.copy_bytes_per_second) else {
+        return not_assessed("copy window calculation overflowed");
+    };
+    let Some(verification_seconds) =
+        ceiling_division(assessed_bytes, profile.verification_bytes_per_second)
+    else {
+        return not_assessed("verification window calculation overflowed");
+    };
+    let Some(seconds) = copy_seconds.checked_add(verification_seconds) else {
+        return not_assessed("projected window overflowed");
+    };
+    ProjectedWindow::Estimated {
+        seconds,
+        assessed_bytes,
+        assessed_at_unix_seconds,
+        throughput_profile: profile.clone(),
+    }
+}
+
+pub fn read_throughput_profile(
+    path: impl AsRef<std::path::Path>,
+) -> Result<ThroughputProfile, AssessmentError> {
+    Ok(read_json(path)?)
+}
+
+fn ceiling_division(dividend: u64, divisor: u64) -> Option<u64> {
+    let quotient = dividend / divisor;
+    quotient.checked_add(u64::from(!dividend.is_multiple_of(divisor)))
+}
+
+fn not_assessed(reason: &str) -> ProjectedWindow {
+    ProjectedWindow::NotAssessed {
+        reason: reason.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +186,7 @@ impl AssessmentArtifact {
             return Err(AssessmentError::SourceRoleHasDirectWritePrivilege);
         }
         if self.source_evidence.server_version.trim().is_empty()
+            || self.source_evidence.server_version_num == 0
             || self.source_evidence.tls_binding.trim().is_empty()
             || self.source_evidence.tls_binding != plan.source_tls_binding
             || plan
@@ -144,6 +239,25 @@ impl AssessmentArtifact {
         if estimated_tables != catalog_tables.iter().collect::<BTreeSet<_>>() {
             return Err(AssessmentError::InvalidScopeEstimate);
         }
+        if let ProjectedWindow::Estimated {
+            assessed_at_unix_seconds,
+            throughput_profile,
+            ..
+        } = &self.projected_window
+        {
+            let postgres_major_version =
+                u16::try_from(self.source_evidence.server_version_num / 10_000)
+                    .map_err(|_| AssessmentError::InvalidProjectedWindow)?;
+            let recomputed = project_outage_window(
+                &self.scope_estimates,
+                Some(throughput_profile),
+                postgres_major_version,
+                *assessed_at_unix_seconds,
+            );
+            if recomputed != self.projected_window {
+                return Err(AssessmentError::InvalidProjectedWindow);
+            }
+        }
         Ok(())
     }
 }
@@ -166,8 +280,12 @@ pub enum AssessmentError {
     MissingAclReviewCapability,
     #[error("assessment contains an invalid scope estimate")]
     InvalidScopeEstimate,
+    #[error("assessment contains an invalid projected outage window")]
+    InvalidProjectedWindow,
     #[error("assessment source catalog is missing")]
     MissingSourceCatalog,
+    #[error("throughput profile artifact is invalid")]
+    ThroughputProfileArtifact(#[from] ArtifactError),
     #[error("assessment catalog contains an unclassified vendor object kind {kind}")]
     UnclassifiedVendorObject { kind: String },
     #[error("assessment report formatting failed")]
@@ -378,11 +496,14 @@ pub fn render_markdown(assessment: &AssessmentArtifact) -> Result<String, Assess
         )?,
         ProjectedWindow::Estimated {
             seconds,
-            measurement_reference,
+            assessed_bytes,
+            throughput_profile,
+            ..
         } => writeln!(
             output,
-            "\nProjected migration window: approximately {seconds} seconds using `{}`",
-            markdown_code(measurement_reference)
+            "\nProjected copy-plus-verification window: approximately {seconds} seconds for {assessed_bytes} assessed relation bytes using `{}` measured in environment `{}`; actual throughput can differ",
+            markdown_code(&throughput_profile.measurement_reference),
+            markdown_code(&throughput_profile.environment_reference)
         )?,
     }
     writeln!(output, "<!-- sql-splitter:volatile-end -->")?;
@@ -565,6 +686,120 @@ mod tests {
         let first = "stable\n<!-- sql-splitter:volatile-begin -->\none\n<!-- sql-splitter:volatile-end -->\nend";
         let second = "stable\n<!-- sql-splitter:volatile-begin -->\ntwo\n<!-- sql-splitter:volatile-end -->\nend";
         assert_eq!(stable_report_body(first), stable_report_body(second));
+    }
+
+    #[test]
+    fn throughput_profile_projects_copy_plus_verification_with_ceiling_rounding() {
+        let estimates = vec![scope_estimate(501), scope_estimate(500)];
+        let profile = throughput_profile();
+        assert_eq!(
+            project_outage_window(&estimates, Some(&profile), 17, 1_100),
+            ProjectedWindow::Estimated {
+                seconds: 10,
+                assessed_bytes: 1_201,
+                assessed_at_unix_seconds: 1_100,
+                throughput_profile: profile,
+            }
+        );
+    }
+
+    #[test]
+    fn throughput_profile_fails_safe_when_missing_stale_or_incompatible() {
+        assert!(matches!(
+            project_outage_window(&[], None, 17, 1_100),
+            ProjectedWindow::NotAssessed { .. }
+        ));
+
+        let mut stale = throughput_profile();
+        stale.valid_for_seconds = 50;
+        assert_eq!(
+            project_outage_window(&[], Some(&stale), 17, 1_100),
+            not_assessed("throughput profile is stale")
+        );
+
+        let mut incompatible = throughput_profile();
+        incompatible.postgres_major_version = 16;
+        assert_eq!(
+            project_outage_window(&[], Some(&incompatible), 17, 1_100),
+            not_assessed("throughput profile is incompatible with the source assessment")
+        );
+
+        let mut copy_only = throughput_profile();
+        copy_only.verification_bytes_per_second = 0;
+        assert_eq!(
+            project_outage_window(&[], Some(&copy_only), 17, 1_100),
+            not_assessed("throughput profile is incomplete")
+        );
+    }
+
+    #[test]
+    fn throughput_profile_loader_uses_protected_artifact_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("throughput.json");
+        super::super::artifact::write_json_new(&path, &throughput_profile()).unwrap();
+        assert_eq!(
+            read_throughput_profile(&path).unwrap(),
+            throughput_profile()
+        );
+
+        let link = directory.path().join("throughput-link.json");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(matches!(
+                read_throughput_profile(&link),
+                Err(AssessmentError::ThroughputProfileArtifact(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn assessment_validation_recomputes_embedded_projection() {
+        let mut artifact = assessment(10);
+        let profile = throughput_profile();
+        artifact.projected_window =
+            project_outage_window(&artifact.scope_estimates, Some(&profile), 17, 1_100);
+        artifact.validate().unwrap();
+
+        let ProjectedWindow::Estimated {
+            seconds,
+            throughput_profile,
+            ..
+        } = &mut artifact.projected_window
+        else {
+            panic!("valid profile did not produce an estimate");
+        };
+        *seconds += 1;
+        throughput_profile.copy_bytes_per_second += 1;
+        assert!(matches!(
+            artifact.validate(),
+            Err(AssessmentError::InvalidProjectedWindow)
+        ));
+    }
+
+    fn throughput_profile() -> ThroughputProfile {
+        ThroughputProfile {
+            schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
+            measurement_reference: "benchmark-17-a".into(),
+            environment_reference: "pg17-local-ssd".into(),
+            postgres_major_version: 17,
+            measured_at_unix_seconds: 1_000,
+            valid_for_seconds: 200,
+            copy_bytes_per_second: 200,
+            verification_bytes_per_second: 500,
+        }
+    }
+
+    fn scope_estimate(relation_bytes: u64) -> ScopeEstimate {
+        ScopeEstimate {
+            table: QualifiedTable {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new(format!("table_{relation_bytes}")).unwrap(),
+            },
+            estimated_rows: 1,
+            relation_bytes,
+            total_relation_bytes: relation_bytes + 100,
+        }
     }
 
     #[test]
@@ -759,6 +994,7 @@ mod tests {
             reviewed_plan,
             source_evidence: SourceAssessmentEvidence {
                 server_version: "17".into(),
+                server_version_num: 170_000,
                 tls_binding: "hostname_verified".into(),
                 transaction_read_only: true,
                 direct_write_privileges_absent: true,

@@ -37,6 +37,9 @@ enum Command {
         /// New protected deterministic Markdown report.
         #[arg(long)]
         report_output: PathBuf,
+        /// Protected versioned copy-and-verification throughput profile.
+        #[arg(long)]
+        throughput_profile: Option<PathBuf>,
     },
     /// Inspect two live PostgreSQL catalogs and write a deterministic plan.
     PlanPostgres {
@@ -149,11 +152,13 @@ fn main() -> anyhow::Result<()> {
             source_config,
             assessment_output,
             report_output,
+            throughput_profile,
         } => {
-            let assessment = sql_splitter::migration::postgres::write_live_assessment(
+            let assessment = sql_splitter::migration::postgres::write_live_assessment_with_profile(
                 source_config,
                 &assessment_output,
                 &report_output,
+                throughput_profile.as_ref(),
             )?;
             println!("assessment: {}", assessment_output.display());
             println!("report: {}", report_output.display());

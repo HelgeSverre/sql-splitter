@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "enterprise-migration-spike")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "enterprise-migration-spike")]
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 #[cfg(feature = "enterprise-migration-spike")]
 use std::thread::{self, JoinHandle};
 #[cfg(feature = "enterprise-migration-spike")]
@@ -24,8 +24,8 @@ use super::append_journal::{
 use super::artifact::{read_json, replace_json, write_json_new};
 use super::canonical::{digest_rows, encode_row, CanonicalRow, CANONICAL_ENCODING_VERSION};
 use super::connection::{
-    CancellationToken, ConnectionError, KeyTuple, KeysetPage, ReadSession, SourceConnectionFactory,
-    TargetConnectionFactory, WriteSession,
+    CancellationToken, ConnectionError, KeyTuple, KeysetPage, ReadSession, SnapshotToken,
+    SourceConnectionFactory, TargetConnectionFactory, WriteSession,
 };
 use super::fixture::{InMemorySource, InMemoryTarget};
 use super::journal::{
@@ -188,11 +188,13 @@ fn check_cancellation_before_commit(
 fn rollback_cancelled_commit(
     writer: &mut dyn WriteSession,
     cancelled: ConnectionError,
+    cancellation: &CancellationToken,
 ) -> anyhow::Error {
+    let cause = cancellation.check().err().unwrap_or(cancelled);
     match writer.rollback() {
-        Ok(()) => cancelled.into(),
+        Ok(()) => cause.into(),
         Err(rollback) => {
-            anyhow!("target commit was cancelled and rollback also failed: {cancelled}; {rollback}")
+            anyhow!("target commit was cancelled and rollback also failed: {cause}; {rollback}")
         }
     }
 }
@@ -211,6 +213,9 @@ fn open_postgres_batch_writer(
         PostgresWritePolicy::PlainInsertIdentityAlwaysV1 => {
             if let Err(error) = writer.insert(table, batch) {
                 let _ = writer.rollback();
+                if error == ConnectionError::Cancelled {
+                    return Err(cancellation.check().err().unwrap_or(error).into());
+                }
                 return Err(error.into());
             }
             Ok(writer)
@@ -225,7 +230,7 @@ fn open_postgres_batch_writer(
                         )
                     })?;
                     if copy_error == ConnectionError::Cancelled {
-                        return Err(copy_error.into());
+                        return Err(cancellation.check().err().unwrap_or(copy_error).into());
                     }
                     cancellation.check()?;
                     let mut diagnostic = target.open_writer(cancellation.clone())?;
@@ -246,6 +251,262 @@ fn open_postgres_batch_writer(
             }
         }
     }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+enum VerificationPipelineCommand {
+    StartTable {
+        operation_id: String,
+        table: QualifiedTable,
+        shape: TableShape,
+        page_limit: u32,
+    },
+    Chunk(PreparedChunk),
+    FinishTable,
+    Finish,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+struct PipelinedTableEvidence {
+    operation_id: String,
+    chunk_count: u64,
+    row_count: u64,
+    manifest_hash: String,
+    source_hash: String,
+    target_hash: String,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+struct VerificationPipeline {
+    sender: Option<mpsc::SyncSender<VerificationPipelineCommand>>,
+    worker: Option<JoinHandle<anyhow::Result<Vec<PipelinedTableEvidence>>>>,
+    cancellation: CancellationToken,
+}
+
+#[cfg(feature = "migration-fault-injection")]
+#[derive(Clone, Default)]
+struct VerificationPipelineHooks {
+    before_chunk_verification: Option<Arc<dyn Fn(u64) -> anyhow::Result<()> + Send + Sync>>,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl VerificationPipeline {
+    fn start(
+        source: Arc<PostgresSourceFactory>,
+        target: Arc<PostgresTargetFactory>,
+        snapshot: SnapshotToken,
+        cancellation: CancellationToken,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::start_with_import(
+            target,
+            cancellation.clone(),
+            move || source.open_imported_snapshot_peer(&snapshot, cancellation),
+            #[cfg(feature = "migration-fault-injection")]
+            VerificationPipelineHooks::default(),
+        )
+    }
+
+    fn start_with_import<F>(
+        target: Arc<dyn TargetConnectionFactory>,
+        cancellation: CancellationToken,
+        import: F,
+        #[cfg(feature = "migration-fault-injection")] hooks: VerificationPipelineHooks,
+    ) -> anyhow::Result<Option<Self>>
+    where
+        F: FnOnce() -> Result<Box<dyn ReadSession>, ConnectionError> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
+        let worker_cancellation = cancellation.clone();
+        let worker = thread::spawn(move || {
+            let reader = import();
+            match reader {
+                Ok(reader) => {
+                    ready_sender.send(Ok(())).map_err(|_| {
+                        anyhow!("verification pipeline readiness receiver was dropped")
+                    })?;
+                    let result = run_verification_pipeline(
+                        reader,
+                        target,
+                        receiver,
+                        worker_cancellation.clone(),
+                        #[cfg(feature = "migration-fault-injection")]
+                        hooks,
+                    );
+                    if let Err(error) = &result {
+                        worker_cancellation.record_control_error(format!(
+                            "pipelined verification failed: {error:#}"
+                        ));
+                        worker_cancellation.cancel();
+                    }
+                    result
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = ready_sender.send(Err(message.clone()));
+                    Err(anyhow!("cannot import PostgreSQL snapshot peer: {message}"))
+                }
+            }
+        });
+        match ready_receiver.recv() {
+            Ok(Ok(())) => Ok(Some(Self {
+                sender: Some(sender),
+                worker: Some(worker),
+                cancellation,
+            })),
+            Ok(Err(_)) => {
+                drop(sender);
+                let _ = worker.join();
+                Ok(None)
+            }
+            Err(_) => {
+                drop(sender);
+                let result = worker
+                    .join()
+                    .map_err(|_| anyhow!("verification pipeline worker panicked before startup"))?;
+                result?;
+                Err(anyhow!(
+                    "verification pipeline stopped without reporting readiness"
+                ))
+            }
+        }
+    }
+
+    fn send(&self, command: VerificationPipelineCommand) -> anyhow::Result<()> {
+        self.sender
+            .as_ref()
+            .ok_or_else(|| anyhow!("verification pipeline is closed"))?
+            .send(command)
+            .map_err(|_| anyhow!("verification pipeline worker stopped unexpectedly"))
+    }
+
+    fn finish(mut self) -> anyhow::Result<Vec<PipelinedTableEvidence>> {
+        self.send(VerificationPipelineCommand::Finish)?;
+        self.sender.take();
+        self.worker
+            .take()
+            .ok_or_else(|| anyhow!("verification pipeline worker is absent"))?
+            .join()
+            .map_err(|_| anyhow!("verification pipeline worker panicked"))?
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl Drop for VerificationPipeline {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.cancellation.cancel();
+            self.sender.take();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn run_verification_pipeline(
+    mut reader: Box<dyn ReadSession>,
+    target: Arc<dyn TargetConnectionFactory>,
+    receiver: mpsc::Receiver<VerificationPipelineCommand>,
+    cancellation: CancellationToken,
+    #[cfg(feature = "migration-fault-injection")] hooks: VerificationPipelineHooks,
+) -> anyhow::Result<Vec<PipelinedTableEvidence>> {
+    struct ActiveTable {
+        operation_id: String,
+        table: QualifiedTable,
+        shape: TableShape,
+        page_limit: u32,
+        chunk_count: u64,
+        row_count: u64,
+        accumulator: TableVerificationAccumulator,
+    }
+
+    let mut current: Option<ActiveTable> = None;
+    let mut evidence = Vec::new();
+    while let Ok(command) = receiver.recv() {
+        cancellation.check()?;
+        match command {
+            VerificationPipelineCommand::StartTable {
+                operation_id,
+                table,
+                shape,
+                page_limit,
+            } => {
+                if current.is_some() {
+                    return Err(anyhow!("verification pipeline received overlapping tables"));
+                }
+                current = Some(ActiveTable {
+                    operation_id,
+                    table,
+                    shape,
+                    page_limit,
+                    chunk_count: 0,
+                    row_count: 0,
+                    accumulator: TableVerificationAccumulator::new(),
+                });
+            }
+            VerificationPipelineCommand::Chunk(chunk) => {
+                let active = current
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("verification chunk has no active table"))?;
+                #[cfg(feature = "migration-fault-injection")]
+                if let Some(before_chunk_verification) = &hooks.before_chunk_verification {
+                    before_chunk_verification(chunk.chunk_id)?;
+                }
+                let mut verifier = target.open_verifier(cancellation.clone())?;
+                active.accumulator.verify_chunk(
+                    reader.as_mut(),
+                    verifier.as_mut(),
+                    &chunk,
+                    &ChunkVerificationContext {
+                        operation_id: active.operation_id.as_str(),
+                        table: &active.table,
+                        shape: &active.shape,
+                        page_limit: active.page_limit,
+                    },
+                )?;
+                active.chunk_count = active
+                    .chunk_count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("verification chunk count overflow"))?;
+                active.row_count = active
+                    .row_count
+                    .checked_add(chunk.row_count)
+                    .ok_or_else(|| anyhow!("verification row count overflow"))?;
+            }
+            VerificationPipelineCommand::FinishTable => {
+                let mut active = current
+                    .take()
+                    .ok_or_else(|| anyhow!("verification table finish has no active table"))?;
+                let mut verifier = target.open_verifier(cancellation.clone())?;
+                active.accumulator.verify_tail(
+                    reader.as_mut(),
+                    verifier.as_mut(),
+                    &active.table,
+                    &active.shape,
+                )?;
+                let (manifest_hash, source_hash, target_hash) = active.accumulator.finish();
+                evidence.push(PipelinedTableEvidence {
+                    operation_id: active.operation_id,
+                    chunk_count: active.chunk_count,
+                    row_count: active.row_count,
+                    manifest_hash,
+                    source_hash,
+                    target_hash,
+                });
+            }
+            VerificationPipelineCommand::Finish => {
+                if current.is_some() {
+                    return Err(anyhow!(
+                        "verification pipeline finished with an active table"
+                    ));
+                }
+                return Ok(evidence);
+            }
+        }
+    }
+    Err(anyhow!("verification pipeline command channel closed"))
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -329,6 +590,8 @@ enum ExecutionInterruption {
     TornChunkCommittedEnospc,
     #[cfg(feature = "migration-fault-injection")]
     ChunkCommittedSyncAckLost,
+    #[cfg(feature = "migration-fault-injection")]
+    AfterPipelinedEvidence,
 }
 
 /// Deterministic failure boundaries used by the opt-in real-engine matrix.
@@ -352,6 +615,7 @@ pub enum PostgresExecutionInterruption {
     NetworkCommitFault(u16),
     TornChunkCommittedEnospc,
     ChunkCommittedSyncAckLost,
+    AfterPipelinedEvidence,
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -385,6 +649,7 @@ impl From<PostgresExecutionInterruption> for ExecutionInterruption {
             PostgresExecutionInterruption::ChunkCommittedSyncAckLost => {
                 Self::ChunkCommittedSyncAckLost
             }
+            PostgresExecutionInterruption::AfterPipelinedEvidence => Self::AfterPipelinedEvidence,
         }
     }
 }
@@ -779,7 +1044,11 @@ fn resume_postgres_fenced_plan_internal(
                     check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
                     if let Err(error) = writer.commit() {
                         if error == ConnectionError::Cancelled {
-                            return Err(rollback_cancelled_commit(writer.as_mut(), error));
+                            return Err(rollback_cancelled_commit(
+                                writer.as_mut(),
+                                error,
+                                &cancellation,
+                            ));
                         }
                         return Err(error.into());
                     }
@@ -865,7 +1134,11 @@ fn resume_postgres_fenced_plan_internal(
                 }
                 Err(error) => {
                     if error == ConnectionError::Cancelled {
-                        return Err(rollback_cancelled_commit(writer.as_mut(), error));
+                        return Err(rollback_cancelled_commit(
+                            writer.as_mut(),
+                            error,
+                            &cancellation,
+                        ));
                     }
                     return Err(error.into());
                 }
@@ -1152,6 +1425,12 @@ fn execute_postgres_plan_internal(
         "bulk_write",
     ])?;
     target.assert_empty_and_owned()?;
+    let mut verification_pipeline = VerificationPipeline::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        snapshot.clone(),
+        cancellation.clone(),
+    )?;
 
     let binding = ResumeBinding {
         migration_id: reviewed.plan.migration_id.clone(),
@@ -1236,6 +1515,14 @@ fn execute_postgres_plan_internal(
             .as_ref()
             .ok_or_else(|| anyhow!("copy operation has no table"))?;
         let shape = table_shape(&source_catalog, table, Some(operation))?;
+        if let Some(pipeline) = &verification_pipeline {
+            pipeline.send(VerificationPipelineCommand::StartTable {
+                operation_id: operation.id.to_string(),
+                table: table.clone(),
+                shape: shape.clone(),
+                page_limit: execution_page_limit(&source_config)?,
+            })?;
+        }
         cancellation.check()?;
         journal.transition_operation(operation.id.as_str(), OperationState::Running)?;
         let mut after = None;
@@ -1258,7 +1545,7 @@ fn execute_postgres_plan_internal(
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("chunk identifier overflow"))?;
             cancellation.check()?;
-            journal.prepare_chunk(PreparedChunk {
+            let prepared_chunk = PreparedChunk {
                 chunk_id,
                 operation_id: operation.id.to_string(),
                 start_key: after.as_ref().map(|key: &KeyTuple| key.0.clone()),
@@ -1269,7 +1556,8 @@ fn execute_postgres_plan_internal(
                     "{}:{}:{chunk_id}",
                     reviewed.plan_hash, operation.id
                 ),
-            })?;
+            };
+            journal.prepare_chunk(prepared_chunk.clone())?;
             if matches!(
                 interruption,
                 Some(ExecutionInterruption::AfterChunkPrepared)
@@ -1291,7 +1579,11 @@ fn execute_postgres_plan_internal(
             check_cancellation_before_commit(writer.as_mut(), &cancellation)?;
             if let Err(error) = writer.commit() {
                 if error == ConnectionError::Cancelled {
-                    return Err(rollback_cancelled_commit(writer.as_mut(), error));
+                    return Err(rollback_cancelled_commit(
+                        writer.as_mut(),
+                        error,
+                        &cancellation,
+                    ));
                 }
                 if !matches!(error, ConnectionError::CommitOutcomeUnknown(_)) {
                     return Err(error.into());
@@ -1327,6 +1619,9 @@ fn execute_postgres_plan_internal(
                 }
                 journal.commit_chunk_after_ack()?;
             }
+            if let Some(pipeline) = &verification_pipeline {
+                pipeline.send(VerificationPipelineCommand::Chunk(prepared_chunk))?;
+            }
             copied_rows = copied_rows
                 .checked_add(u64::try_from(batch.len()).context("batch size exceeds u64")?)
                 .ok_or_else(|| anyhow!("copied row count overflow"))?;
@@ -1345,7 +1640,15 @@ fn execute_postgres_plan_internal(
         journal.transition_operation(operation.id.as_str(), OperationState::Prepared)?;
         journal.transition_operation(operation.id.as_str(), OperationState::Committed)?;
         journal.transition_operation(operation.id.as_str(), OperationState::Verified)?;
+        if let Some(pipeline) = &verification_pipeline {
+            pipeline.send(VerificationPipelineCommand::FinishTable)?;
+        }
     }
+    let pipelined_evidence = verification_pipeline
+        .take()
+        .map(VerificationPipeline::finish)
+        .transpose()?;
+    interrupt_after_pipelined_evidence(interruption)?;
 
     process_postgres_sequences(
         &reviewed,
@@ -1384,53 +1687,100 @@ fn execute_postgres_plan_internal(
     )?;
     journal.transition_status(MigrationStatus::Verifying)?;
     attest_fence_if_present(fenced.as_ref())?;
-    let mut verifier = target.open_verifier(cancellation.clone())?;
-    let mut committed_chunks = journal.all_committed_chunks()?.peekable();
-    for operation in reviewed
-        .plan
-        .operations
-        .iter()
-        .filter(|operation| operation.kind == OperationKind::CopyTable)
-    {
-        let table = operation
-            .table
-            .as_ref()
-            .ok_or_else(|| anyhow!("validated copy operation lost its table"))?;
-        let shape = table_shape(&source_catalog, table, Some(operation))?;
-        let (manifest_hash, source_hash, target_hash) = verify_live_table(
-            reader.as_mut(),
-            verifier.as_mut(),
-            &mut committed_chunks,
-            operation.id.as_str(),
-            table,
-            &shape,
-            execution_page_limit(&source_config)?,
-        )?;
-        journal.verify_table(
-            operation.id.as_str(),
-            manifest_hash,
-            source_hash,
-            target_hash,
-        )?;
-        let verify_operation = reviewed
+    if let Some(evidence) = pipelined_evidence {
+        let mut evidence = evidence.into_iter();
+        for operation in reviewed
             .plan
             .operations
             .iter()
-            .find(|candidate| {
-                candidate.kind == OperationKind::VerifyTable
-                    && candidate.table.as_ref() == Some(table)
-            })
-            .ok_or_else(|| anyhow!("table has no reviewed verification operation"))?;
-        complete_operation_if_needed(&mut journal, verify_operation.id.as_str())?;
+            .filter(|operation| operation.kind == OperationKind::CopyTable)
+        {
+            let table = operation
+                .table
+                .as_ref()
+                .ok_or_else(|| anyhow!("validated copy operation lost its table"))?;
+            let observed = evidence
+                .next()
+                .ok_or_else(|| anyhow!("pipelined table evidence is incomplete"))?;
+            if observed.operation_id != operation.id.as_str() {
+                return Err(anyhow!("pipelined table evidence is out of order"));
+            }
+            let cursor = journal.projection().copy_cursors.get(operation.id.as_str());
+            if observed.chunk_count != cursor.map_or(0, |cursor| cursor.chunks)
+                || observed.row_count != cursor.map_or(0, |cursor| cursor.rows)
+            {
+                return Err(anyhow!(
+                    "pipelined table evidence differs from the durable chunk manifest"
+                ));
+            }
+            journal.verify_table(
+                operation.id.as_str(),
+                observed.manifest_hash,
+                observed.source_hash,
+                observed.target_hash,
+            )?;
+            let verify_operation = reviewed
+                .plan
+                .operations
+                .iter()
+                .find(|candidate| {
+                    candidate.kind == OperationKind::VerifyTable
+                        && candidate.table.as_ref() == Some(table)
+                })
+                .ok_or_else(|| anyhow!("table has no reviewed verification operation"))?;
+            complete_operation_if_needed(&mut journal, verify_operation.id.as_str())?;
+        }
+        if evidence.next().is_some() {
+            return Err(anyhow!("pipelined table evidence contains an extra table"));
+        }
+    } else {
+        let mut verifier = target.open_verifier(cancellation.clone())?;
+        let mut committed_chunks = journal.all_committed_chunks()?.peekable();
+        for operation in reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == OperationKind::CopyTable)
+        {
+            let table = operation
+                .table
+                .as_ref()
+                .ok_or_else(|| anyhow!("validated copy operation lost its table"))?;
+            let shape = table_shape(&source_catalog, table, Some(operation))?;
+            let (manifest_hash, source_hash, target_hash) = verify_live_table(
+                reader.as_mut(),
+                verifier.as_mut(),
+                &mut committed_chunks,
+                operation.id.as_str(),
+                table,
+                &shape,
+                execution_page_limit(&source_config)?,
+            )?;
+            journal.verify_table(
+                operation.id.as_str(),
+                manifest_hash,
+                source_hash,
+                target_hash,
+            )?;
+            let verify_operation = reviewed
+                .plan
+                .operations
+                .iter()
+                .find(|candidate| {
+                    candidate.kind == OperationKind::VerifyTable
+                        && candidate.table.as_ref() == Some(table)
+                })
+                .ok_or_else(|| anyhow!("table has no reviewed verification operation"))?;
+            complete_operation_if_needed(&mut journal, verify_operation.id.as_str())?;
+        }
+        if let Some(chunk) = committed_chunks.next() {
+            let chunk = chunk?;
+            return Err(anyhow!(
+                "journal contains an unexpected committed chunk for operation {}",
+                chunk.operation_id
+            ));
+        }
     }
-    if let Some(chunk) = committed_chunks.next() {
-        let chunk = chunk?;
-        return Err(anyhow!(
-            "journal contains an unexpected committed chunk for operation {}",
-            chunk.operation_id
-        ));
-    }
-    drop(verifier);
     let mut verifier = target.open_verifier(cancellation.clone())?;
     verify_postgres_partition_topologies(
         &reviewed,
@@ -1509,6 +1859,17 @@ fn interrupt_if(
 #[cfg(feature = "enterprise-migration-spike")]
 fn injected_interruption(configured: Option<ExecutionInterruption>) -> anyhow::Error {
     anyhow!("injected interruption at PostgreSQL execution boundary {configured:?}")
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn interrupt_after_pipelined_evidence(
+    interruption: Option<ExecutionInterruption>,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "migration-fault-injection")]
+    interrupt_if(interruption, ExecutionInterruption::AfterPipelinedEvidence)?;
+    #[cfg(not(feature = "migration-fault-injection"))]
+    let _ = interruption;
+    Ok(())
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -3061,6 +3422,117 @@ fn batch_digest(
     Ok(hex::encode(digest_rows(canonical.iter())))
 }
 
+#[cfg(feature = "enterprise-migration-spike")]
+struct TableVerificationAccumulator {
+    after: Option<KeyTuple>,
+    manifest: Sha256,
+    source: Sha256,
+    target: Sha256,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+struct ChunkVerificationContext<'a> {
+    operation_id: &'a str,
+    table: &'a QualifiedTable,
+    shape: &'a TableShape,
+    page_limit: u32,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+impl TableVerificationAccumulator {
+    fn new() -> Self {
+        Self {
+            after: None,
+            manifest: Sha256::new(),
+            source: Sha256::new(),
+            target: Sha256::new(),
+        }
+    }
+
+    fn verify_chunk(
+        &mut self,
+        reader: &mut dyn ReadSession,
+        verifier: &mut dyn super::connection::VerificationSession,
+        chunk: &PreparedChunk,
+        context: &ChunkVerificationContext<'_>,
+    ) -> anyhow::Result<()> {
+        if chunk.operation_id != context.operation_id {
+            return Err(anyhow!("committed chunk belongs to a different operation"));
+        }
+        if chunk.start_key != self.after.as_ref().map(|key| key.0.clone()) {
+            return Err(anyhow!("chunk manifest has a keyspace gap"));
+        }
+        let limit = u32::try_from(chunk.row_count).context("chunk row count exceeds u32")?;
+        if limit == 0 || limit > context.page_limit {
+            return Err(anyhow!("chunk row count exceeds the reviewed page limit"));
+        }
+        let request = KeysetPage {
+            table: context.table.clone(),
+            projection: context.shape.projection.clone(),
+            key: context.shape.key.clone(),
+            after: self.after.clone(),
+            limit,
+        };
+        let expected = reader.select_page(&request)?;
+        let actual = verifier.select_page(&request)?;
+        if expected.len() as u64 != chunk.row_count || actual.len() as u64 != chunk.row_count {
+            return Err(anyhow!("chunk row count differs during verification"));
+        }
+        let expected_final = batch_final_key(&expected, context.shape)?;
+        let actual_final = batch_final_key(&actual, context.shape)?;
+        if expected_final.0 != chunk.final_key || actual_final.0 != chunk.final_key {
+            return Err(anyhow!("chunk final key differs during verification"));
+        }
+        let expected_digest = batch_digest(context.table, context.shape, &expected)?;
+        let actual_digest = batch_digest(context.table, context.shape, &actual)?;
+        if expected_digest != chunk.canonical_digest
+            || actual_digest != chunk.canonical_digest
+            || expected.rows() != actual.rows()
+        {
+            return Err(anyhow!("canonical chunk verification failed"));
+        }
+        let encoded_chunk = serde_json::to_vec(chunk)?;
+        self.manifest
+            .update(u64::try_from(encoded_chunk.len())?.to_be_bytes());
+        self.manifest.update(encoded_chunk);
+        self.source.update(expected_digest.as_bytes());
+        self.target.update(actual_digest.as_bytes());
+        self.after = Some(expected_final);
+        Ok(())
+    }
+
+    fn verify_tail(
+        &mut self,
+        reader: &mut dyn ReadSession,
+        verifier: &mut dyn super::connection::VerificationSession,
+        table: &QualifiedTable,
+        shape: &TableShape,
+    ) -> anyhow::Result<()> {
+        let request = KeysetPage {
+            table: table.clone(),
+            projection: shape.projection.clone(),
+            key: shape.key.clone(),
+            after: self.after.clone(),
+            limit: 1,
+        };
+        if !reader.select_page(&request)?.is_empty() || !verifier.select_page(&request)?.is_empty()
+        {
+            return Err(anyhow!(
+                "source or target contains rows outside committed intervals"
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> (String, String, String) {
+        (
+            hex::encode(self.manifest.finalize()),
+            hex::encode(self.source.finalize()),
+            hex::encode(self.target.finalize()),
+        )
+    }
+}
+
 fn verify_live_table(
     reader: &mut dyn ReadSession,
     verifier: &mut dyn super::connection::VerificationSession,
@@ -3070,10 +3542,7 @@ fn verify_live_table(
     shape: &TableShape,
     page_limit: u32,
 ) -> anyhow::Result<(String, String, String)> {
-    let mut after = None;
-    let mut manifest = Sha256::new();
-    let mut source = Sha256::new();
-    let mut target = Sha256::new();
+    let mut accumulator = TableVerificationAccumulator::new();
     while let Some(chunk) = chunks.peek() {
         let chunk = chunk.as_ref().map_err(|error| anyhow!(error.to_string()))?;
         if chunk.operation_id != operation_id {
@@ -3082,64 +3551,20 @@ fn verify_live_table(
         let chunk = chunks
             .next()
             .ok_or_else(|| anyhow!("committed chunk stream ended unexpectedly"))??;
-        if chunk.start_key != after.as_ref().map(|key: &KeyTuple| key.0.clone()) {
-            return Err(anyhow!("chunk manifest has a keyspace gap"));
-        }
-        let limit = u32::try_from(chunk.row_count).context("chunk row count exceeds u32")?;
-        if limit == 0 || limit > page_limit {
-            return Err(anyhow!("chunk row count exceeds the reviewed page limit"));
-        }
-        let request = KeysetPage {
-            table: table.clone(),
-            projection: shape.projection.clone(),
-            key: shape.key.clone(),
-            after: after.clone(),
-            limit,
-        };
-        let expected = reader.select_page(&request)?;
-        let actual = verifier.select_page(&request)?;
-        if expected.len() as u64 != chunk.row_count || actual.len() as u64 != chunk.row_count {
-            return Err(anyhow!("chunk row count differs during verification"));
-        }
-        let expected_final = batch_final_key(&expected, shape)?;
-        let actual_final = batch_final_key(&actual, shape)?;
-        if expected_final.0 != chunk.final_key || actual_final.0 != chunk.final_key {
-            return Err(anyhow!("chunk final key differs during verification"));
-        }
-        let expected_digest = batch_digest(table, shape, &expected)?;
-        let actual_digest = batch_digest(table, shape, &actual)?;
-        if expected_digest != chunk.canonical_digest
-            || actual_digest != chunk.canonical_digest
-            || expected.rows() != actual.rows()
-        {
-            return Err(anyhow!("canonical chunk verification failed"));
-        }
-        let encoded_chunk = serde_json::to_vec(&chunk)?;
-        manifest.update(u64::try_from(encoded_chunk.len())?.to_be_bytes());
-        manifest.update(encoded_chunk);
-        source.update(expected_digest.as_bytes());
-        target.update(actual_digest.as_bytes());
-        after = Some(expected_final);
+        accumulator.verify_chunk(
+            reader,
+            verifier,
+            &chunk,
+            &ChunkVerificationContext {
+                operation_id,
+                table,
+                shape,
+                page_limit,
+            },
+        )?;
     }
-    let tail_request = KeysetPage {
-        table: table.clone(),
-        projection: shape.projection.clone(),
-        key: shape.key.clone(),
-        after,
-        limit: 1,
-    };
-    if !reader.select_page(&tail_request)?.is_empty()
-        || !verifier.select_page(&tail_request)?.is_empty()
-    {
-        return Err(anyhow!(
-            "source or target contains rows outside committed intervals"
-        ));
-    }
-    Ok((
-        hex::encode(manifest.finalize()),
-        hex::encode(source.finalize()),
-        hex::encode(target.finalize()),
-    ))
+    accumulator.verify_tail(reader, verifier, table, shape)?;
+    Ok(accumulator.finish())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -3737,6 +4162,207 @@ fn verify_manifest(state: &MigrationState, rows: &[Vec<DbValue>]) -> anyhow::Res
 mod tests {
     use super::*;
     use crate::migration::fixture::FailurePoint;
+
+    #[cfg(feature = "migration-fault-injection")]
+    fn pipeline_fixture() -> anyhow::Result<(
+        InMemorySource,
+        InMemoryTarget,
+        SnapshotToken,
+        QualifiedTable,
+        TableShape,
+        Vec<PreparedChunk>,
+    )> {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new("accounts")?,
+        };
+        let columns = vec![column("id", 0, "bigint")?, column("name", 1, "text")?];
+        let rows = vec![
+            vec![DbValue::Signed(1), DbValue::Text("Ada".into())],
+            vec![DbValue::Signed(2), DbValue::Text("Grace".into())],
+        ];
+        let source = InMemorySource::new("source", "database");
+        source.add_table(table.clone(), columns.clone(), rows.clone());
+        let snapshot = source.capture_snapshot()?;
+        let target = InMemoryTarget::default();
+        target.add_empty_table(table.clone(), columns.clone());
+        let mut batch = RowBatch::new(columns, rows.len(), 1_024);
+        for row in &rows {
+            batch.try_push(row.clone(), 32)?;
+        }
+        let mut writer = target.open_writer(CancellationToken::default())?;
+        writer.begin()?;
+        writer.insert(&table, &batch)?;
+        writer.commit()?;
+        let shape = TableShape {
+            projection: vec![Identifier::new("id")?, Identifier::new("name")?],
+            key: vec![Identifier::new("id")?],
+            key_indexes: vec![0],
+            writable_indexes: vec![0, 1],
+            write_policy: PostgresWritePolicy::BinaryCopyWithInsertFallbackV1,
+        };
+        let chunks = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let mut one = RowBatch::new(batch.columns().to_vec(), 1, 1_024);
+                one.try_push(row.clone(), 32)?;
+                Ok(PreparedChunk {
+                    chunk_id: u64::try_from(index + 1)?,
+                    operation_id: "copy-accounts".into(),
+                    start_key: (index > 0).then(|| vec![rows[index - 1][0].clone()]),
+                    final_key: vec![row[0].clone()],
+                    row_count: 1,
+                    canonical_digest: batch_digest(&table, &shape, &one)?,
+                    target_transaction_intent: format!("intent-{index}"),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok((source, target, snapshot, table, shape, chunks))
+    }
+
+    #[cfg(feature = "migration-fault-injection")]
+    #[test]
+    fn pipeline_import_failure_selects_fallback_before_effects() -> anyhow::Result<()> {
+        let target: Arc<dyn TargetConnectionFactory> = Arc::new(InMemoryTarget::default());
+        let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pipeline = VerificationPipeline::start_with_import(
+            target,
+            CancellationToken::default(),
+            || Err(ConnectionError::SnapshotMismatch),
+            VerificationPipelineHooks::default(),
+        )?;
+        if pipeline.is_some() {
+            effects.fetch_add(1, Ordering::Release);
+        }
+        assert!(pipeline.is_none());
+        assert_eq!(effects.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "migration-fault-injection")]
+    #[test]
+    fn capacity_one_pipeline_overlaps_copy_and_applies_backpressure() -> anyhow::Result<()> {
+        let (source, target, snapshot, table, shape, chunks) = pipeline_fixture()?;
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let hooks = VerificationPipelineHooks {
+            before_chunk_verification: Some(Arc::new(move |chunk_id| {
+                if chunk_id == 1 {
+                    entered_tx
+                        .send(())
+                        .map_err(|_| anyhow!("barrier receiver dropped"))?;
+                    release_rx
+                        .lock()
+                        .map_err(|_| anyhow!("barrier lock poisoned"))?
+                        .recv()
+                        .map_err(|_| anyhow!("barrier sender dropped"))?;
+                }
+                Ok(())
+            })),
+        };
+        let imported_source = source.clone();
+        let imported_snapshot = snapshot.clone();
+        let target: Arc<dyn TargetConnectionFactory> = Arc::new(target);
+        let pipeline = VerificationPipeline::start_with_import(
+            target,
+            CancellationToken::default(),
+            move || imported_source.open_reader(&imported_snapshot, CancellationToken::default()),
+            hooks,
+        )?
+        .ok_or_else(|| anyhow!("fixture pipeline unexpectedly selected fallback"))?;
+        pipeline.send(VerificationPipelineCommand::StartTable {
+            operation_id: "copy-accounts".into(),
+            table,
+            shape,
+            page_limit: 1,
+        })?;
+        pipeline.send(VerificationPipelineCommand::Chunk(chunks[0].clone()))?;
+        entered_rx.recv()?;
+        pipeline.send(VerificationPipelineCommand::Chunk(chunks[1].clone()))?;
+        let finish_sender = pipeline.sender.as_ref().unwrap().clone();
+        let (attempted_tx, attempted_rx) = mpsc::sync_channel(0);
+        let (sent_tx, sent_rx) = mpsc::sync_channel(0);
+        let blocked = thread::spawn(move || {
+            let _ = attempted_tx.send(());
+            let result = finish_sender.send(VerificationPipelineCommand::FinishTable);
+            let _ = sent_tx.send(result);
+        });
+        attempted_rx.recv()?;
+        assert!(matches!(sent_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        release_tx.send(())?;
+        sent_rx.recv()??;
+        blocked.join().map_err(|_| anyhow!("producer panicked"))?;
+        let evidence = pipeline.finish()?;
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].chunk_count, 2);
+        assert_eq!(evidence[0].row_count, 2);
+        Ok(())
+    }
+
+    #[cfg(feature = "migration-fault-injection")]
+    #[test]
+    fn interruption_after_pipeline_evidence_publishes_nothing_and_allows_sequential_retry(
+    ) -> anyhow::Result<()> {
+        let (source, target, snapshot, table, shape, chunks) = pipeline_fixture()?;
+        let imported_source = source.clone();
+        let imported_snapshot = snapshot.clone();
+        let target_factory: Arc<dyn TargetConnectionFactory> = Arc::new(target.clone());
+        let pipeline = VerificationPipeline::start_with_import(
+            Arc::clone(&target_factory),
+            CancellationToken::default(),
+            move || imported_source.open_reader(&imported_snapshot, CancellationToken::default()),
+            VerificationPipelineHooks::default(),
+        )?
+        .ok_or_else(|| anyhow!("fixture pipeline unexpectedly selected fallback"))?;
+        pipeline.send(VerificationPipelineCommand::StartTable {
+            operation_id: "copy-accounts".into(),
+            table: table.clone(),
+            shape: shape.clone(),
+            page_limit: 1,
+        })?;
+        for chunk in &chunks {
+            pipeline.send(VerificationPipelineCommand::Chunk(chunk.clone()))?;
+        }
+        pipeline.send(VerificationPipelineCommand::FinishTable)?;
+        let pipelined = pipeline.finish()?;
+        assert_eq!(pipelined.len(), 1);
+
+        let durable_verification_events = std::sync::atomic::AtomicUsize::new(0);
+        let interrupted = (|| -> anyhow::Result<()> {
+            interrupt_after_pipelined_evidence(Some(
+                ExecutionInterruption::AfterPipelinedEvidence,
+            ))?;
+            durable_verification_events.fetch_add(1, Ordering::Release);
+            Ok(())
+        })();
+        assert!(interrupted.is_err());
+        assert_eq!(durable_verification_events.load(Ordering::Acquire), 0);
+
+        let mut reader = source.open_reader(&snapshot, CancellationToken::default())?;
+        let mut verifier = target_factory.open_verifier(CancellationToken::default())?;
+        let mut sequential = TableVerificationAccumulator::new();
+        for chunk in &chunks {
+            sequential.verify_chunk(
+                reader.as_mut(),
+                verifier.as_mut(),
+                chunk,
+                &ChunkVerificationContext {
+                    operation_id: "copy-accounts",
+                    table: &table,
+                    shape: &shape,
+                    page_limit: 1,
+                },
+            )?;
+        }
+        sequential.verify_tail(reader.as_mut(), verifier.as_mut(), &table, &shape)?;
+        let (manifest_hash, source_hash, target_hash) = sequential.finish();
+        assert_eq!(manifest_hash, pipelined[0].manifest_hash);
+        assert_eq!(source_hash, pipelined[0].source_hash);
+        assert_eq!(target_hash, pipelined[0].target_hash);
+        Ok(())
+    }
 
     #[test]
     fn vertical_spike_copies_journals_and_verifies() {
