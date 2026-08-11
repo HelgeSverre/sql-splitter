@@ -186,7 +186,7 @@ pub fn install_postgres_write_fence(
     let mut transaction = client.transaction()?;
 
     reject_prepared_transactions(&mut transaction)?;
-    reject_existing_fence(&mut transaction)?;
+    let storage = inspect_install_storage(&mut transaction)?;
     let admin_role: String = transaction.query_one("SELECT current_user", &[])?.get(0);
     let mut inventory =
         lock_and_resolve_tables(&mut transaction, &tables, &generation, &admin_role)?;
@@ -216,7 +216,10 @@ pub fn install_postgres_write_fence(
     let endpoint_identity = reviewed.plan.source_endpoint_identity.clone();
     let business_catalog_fingerprint = reviewed.plan.source_catalog_fingerprint.clone();
 
-    install_protected_registry(&mut transaction)?;
+    match storage {
+        FenceInstallStorage::Fresh => install_protected_registry(&mut transaction)?,
+        FenceInstallStorage::Rearm => prepare_rearm_registry(&mut transaction, &admin_role)?,
+    }
     install_guard_functions(&mut transaction)?;
     install_table_guards(&mut transaction, &inventory)?;
     install_ddl_guard(&mut transaction)?;
