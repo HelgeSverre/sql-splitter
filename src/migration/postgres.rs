@@ -556,6 +556,51 @@ impl PostgresTargetFactory {
         inspect_generated_column(&mut client, generated)
     }
 
+    /// Inspect an entire partition root/leaf topology by semantic identity.
+    pub fn inspect_partition_topology(
+        &self,
+        expected: &PostgresPartitionTopology,
+    ) -> ConnectionResult<PostgresPartitionTopologyState> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut expected_relations = vec![expected.root.clone()];
+        expected_relations.extend(expected.leaves.iter().map(|leaf| leaf.table.clone()));
+        let mut present = 0usize;
+        for table in &expected_relations {
+            let exists: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2)",
+                    &[&table.namespace.as_str(), &table.name.as_str()],
+                )
+                .map_err(database_error)?
+                .get(0);
+            present += usize::from(exists);
+        }
+        if present == 0 {
+            return Ok(PostgresPartitionTopologyState::Absent);
+        }
+        if present != expected_relations.len() {
+            return Ok(PostgresPartitionTopologyState::Partial);
+        }
+        drop(client);
+        let target = inspect_endpoint(&self.config)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let topologies = postgres_partition_topologies(&target.catalog)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        Ok(
+            if topologies
+                .iter()
+                .any(|actual| partition_topology_semantically_equal(expected, actual))
+            {
+                PostgresPartitionTopologyState::Exact
+            } else {
+                PostgresPartitionTopologyState::Different
+            },
+        )
+    }
+
     /// Create an absent sequence contract or accept an exact existing configuration.
     pub fn reconcile_sequence_config(
         &self,
@@ -848,6 +893,461 @@ pub enum PostgresGeneratedColumnState {
     Absent,
     Exact,
     Different,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresPartitionStrategy {
+    Range,
+    List,
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresPartitionBoundValue {
+    MinValue,
+    Value(i64),
+    MaxValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresPartitionBound {
+    Range {
+        lower: PostgresPartitionBoundValue,
+        upper: PostgresPartitionBoundValue,
+    },
+    List {
+        values: Vec<Option<i64>>,
+    },
+    Hash {
+        modulus: u32,
+        remainder: u32,
+    },
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresPartitionLeaf {
+    pub catalog_object_id: String,
+    pub table: QualifiedTable,
+    pub bound: PostgresPartitionBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresPartitionTopology {
+    pub root_catalog_object_id: String,
+    pub root: QualifiedTable,
+    pub key_column: Identifier,
+    pub key_type: String,
+    pub strategy: PostgresPartitionStrategy,
+    pub leaves: Vec<PostgresPartitionLeaf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresPartitionTopologyState {
+    Absent,
+    Exact,
+    Partial,
+    Different,
+}
+
+/// Parse and validate supported single-level PostgreSQL partition topologies.
+pub fn postgres_partition_topologies(
+    catalog: &VendorCatalog,
+) -> Result<Vec<PostgresPartitionTopology>, PostgresPlanError> {
+    if catalog.dialect != "postgresql" {
+        return Err(PostgresPlanError::InvalidConfig(
+            "partition metadata requires a PostgreSQL catalog",
+        ));
+    }
+    let mut topologies = Vec::new();
+    for namespace in &catalog.namespaces {
+        for root in namespace.objects.iter().filter(|object| {
+            object.kind == CatalogObjectKind::Table
+                && object
+                    .attributes
+                    .get("relkind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("p")
+        }) {
+            let strategy = match required_catalog_string(root, "partition_strategy")? {
+                "r" => PostgresPartitionStrategy::Range,
+                "l" => PostgresPartitionStrategy::List,
+                "h" => PostgresPartitionStrategy::Hash,
+                _ => {
+                    return Err(PostgresPlanError::InvalidConfig(
+                        "partition strategy is unsupported",
+                    ));
+                }
+            };
+            let key_column =
+                Identifier::new(required_catalog_string(root, "partition_key_column")?)?;
+            let key_type = required_catalog_string(root, "partition_key_type")?.to_owned();
+            if !matches!(key_type.as_str(), "smallint" | "integer" | "bigint") {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "partition key is not a built-in integer",
+                ));
+            }
+            if required_catalog_string(root, "persistence")? != "p" {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "partition root is not a logged relation",
+                ));
+            }
+            let root_columns = namespace.objects.iter().filter(|object| {
+                object.kind == CatalogObjectKind::Column
+                    && object
+                        .attributes
+                        .get("table_oid")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(root.id.as_str())
+            });
+            for column in root_columns {
+                if column
+                    .attributes
+                    .get("generated")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+                    || column
+                        .attributes
+                        .get("identity")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.is_empty())
+                    || column
+                        .attributes
+                        .get("sequence_default_oid")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                {
+                    return Err(PostgresPlanError::InvalidConfig(
+                        "partition topology contains generated, identity, or sequence-backed columns",
+                    ));
+                }
+            }
+            let default_partition_id = root
+                .attributes
+                .get("default_partition_oid")
+                .and_then(serde_json::Value::as_str);
+            let mut leaves = catalog
+                .namespaces
+                .iter()
+                .flat_map(|leaf_namespace| {
+                    leaf_namespace.objects.iter().filter_map(move |leaf| {
+                        (leaf.kind == CatalogObjectKind::Partition
+                            && leaf
+                                .attributes
+                                .get("partition_parent_oid")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(root.id.as_str()))
+                        .then_some((leaf_namespace, leaf))
+                    })
+                })
+                .map(|(leaf_namespace, leaf)| {
+                    if required_catalog_string(leaf, "relkind")? != "r"
+                        || required_catalog_string(leaf, "persistence")? != "p"
+                    {
+                        return Err(PostgresPlanError::InvalidConfig(
+                            "partition leaf is not an ordinary logged relation",
+                        ));
+                    }
+                    let bound_text = required_catalog_string(leaf, "partition_bound")?;
+                    let bound = parse_partition_bound(bound_text, strategy)?;
+                    if matches!(bound, PostgresPartitionBound::Default)
+                        != (default_partition_id == Some(leaf.id.as_str()))
+                    {
+                        return Err(PostgresPlanError::InvalidConfig(
+                            "default partition identity differs from its bound",
+                        ));
+                    }
+                    Ok(PostgresPartitionLeaf {
+                        catalog_object_id: leaf.id.clone(),
+                        table: QualifiedTable {
+                            namespace: leaf_namespace.name.clone(),
+                            name: leaf.name.clone(),
+                        },
+                        bound,
+                    })
+                })
+                .collect::<Result<Vec<_>, PostgresPlanError>>()?;
+            leaves.sort_by(|left, right| left.table.cmp(&right.table));
+            validate_partition_bounds(strategy, &leaves)?;
+            if leaves.is_empty() {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "partition topology has no leaves",
+                ));
+            }
+            let mut topology_relation_ids = BTreeSet::from([root.id.as_str()]);
+            topology_relation_ids.extend(leaves.iter().map(|leaf| leaf.catalog_object_id.as_str()));
+            for object in catalog
+                .namespaces
+                .iter()
+                .flat_map(|catalog_namespace| catalog_namespace.objects.iter())
+            {
+                let table_id = object
+                    .attributes
+                    .get("table_oid")
+                    .and_then(serde_json::Value::as_str);
+                let referenced_table_id = object
+                    .attributes
+                    .get("referenced_table_oid")
+                    .and_then(serde_json::Value::as_str);
+                if (matches!(
+                    object.kind,
+                    CatalogObjectKind::ForeignKey | CatalogObjectKind::Trigger
+                ) && (table_id.is_some_and(|id| topology_relation_ids.contains(id))
+                    || referenced_table_id.is_some_and(|id| topology_relation_ids.contains(id))))
+                    || (matches!(
+                        object.kind,
+                        CatalogObjectKind::PrimaryKey
+                            | CatalogObjectKind::UniqueConstraint
+                            | CatalogObjectKind::CheckConstraint
+                    ) && table_id
+                        .is_some_and(|id| id != root.id && topology_relation_ids.contains(id))
+                        && object
+                            .attributes
+                            .get("parent_constraint_oid")
+                            .is_none_or(serde_json::Value::is_null))
+                {
+                    return Err(PostgresPlanError::InvalidConfig(
+                        "partition topology contains excluded foreign-key, trigger, or local leaf constraint semantics",
+                    ));
+                }
+            }
+            topologies.push(PostgresPartitionTopology {
+                root_catalog_object_id: root.id.clone(),
+                root: QualifiedTable {
+                    namespace: namespace.name.clone(),
+                    name: root.name.clone(),
+                },
+                key_column,
+                key_type,
+                strategy,
+                leaves,
+            });
+        }
+    }
+    topologies.sort_by(|left, right| left.root.cmp(&right.root));
+    Ok(topologies)
+}
+
+fn parse_partition_bound(
+    text: &str,
+    strategy: PostgresPartitionStrategy,
+) -> Result<PostgresPartitionBound, PostgresPlanError> {
+    let text = text.trim();
+    if text == "DEFAULT" {
+        return Ok(PostgresPartitionBound::Default);
+    }
+    match strategy {
+        PostgresPartitionStrategy::Range => {
+            let body = text
+                .strip_prefix("FOR VALUES FROM (")
+                .and_then(|value| value.strip_suffix(')'))
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "range partition bound is malformed",
+                ))?;
+            let (lower, upper) =
+                body.split_once(") TO (")
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "range partition bound is malformed",
+                    ))?;
+            Ok(PostgresPartitionBound::Range {
+                lower: parse_partition_bound_value(lower)?,
+                upper: parse_partition_bound_value(upper)?,
+            })
+        }
+        PostgresPartitionStrategy::List => {
+            let body = text
+                .strip_prefix("FOR VALUES IN (")
+                .and_then(|value| value.strip_suffix(')'))
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "list partition bound is malformed",
+                ))?;
+            let values = body
+                .split(',')
+                .map(|value| {
+                    if value.trim() == "NULL" {
+                        Ok(None)
+                    } else {
+                        parse_partition_integer(value).map(Some)
+                    }
+                })
+                .collect::<Result<Vec<_>, PostgresPlanError>>()?;
+            if values.is_empty() {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "list partition bound is empty",
+                ));
+            }
+            Ok(PostgresPartitionBound::List { values })
+        }
+        PostgresPartitionStrategy::Hash => {
+            let body = text
+                .strip_prefix("FOR VALUES WITH (modulus ")
+                .and_then(|value| value.strip_suffix(')'))
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "hash partition bound is malformed",
+                ))?;
+            let (modulus, remainder) =
+                body.split_once(", remainder ")
+                    .ok_or(PostgresPlanError::InvalidConfig(
+                        "hash partition bound is malformed",
+                    ))?;
+            let modulus = modulus.parse::<u32>().map_err(|_| {
+                PostgresPlanError::InvalidConfig("hash partition modulus is malformed")
+            })?;
+            let remainder = remainder.parse::<u32>().map_err(|_| {
+                PostgresPlanError::InvalidConfig("hash partition remainder is malformed")
+            })?;
+            if modulus == 0 || remainder >= modulus {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "hash partition bound is out of range",
+                ));
+            }
+            Ok(PostgresPartitionBound::Hash { modulus, remainder })
+        }
+    }
+}
+
+fn parse_partition_bound_value(
+    value: &str,
+) -> Result<PostgresPartitionBoundValue, PostgresPlanError> {
+    match value.trim() {
+        "MINVALUE" => Ok(PostgresPartitionBoundValue::MinValue),
+        "MAXVALUE" => Ok(PostgresPartitionBoundValue::MaxValue),
+        value => parse_partition_integer(value).map(PostgresPartitionBoundValue::Value),
+    }
+}
+
+fn parse_partition_integer(value: &str) -> Result<i64, PostgresPlanError> {
+    let value = value.trim();
+    let value = value.split_once("::").map_or(value, |(literal, cast)| {
+        if matches!(cast.trim(), "smallint" | "integer" | "bigint") {
+            literal.trim()
+        } else {
+            ""
+        }
+    });
+    let value = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .unwrap_or(value);
+    value
+        .parse()
+        .map_err(|_| PostgresPlanError::InvalidConfig("partition integer bound is malformed"))
+}
+
+fn validate_partition_bounds(
+    strategy: PostgresPartitionStrategy,
+    leaves: &[PostgresPartitionLeaf],
+) -> Result<(), PostgresPlanError> {
+    let defaults = leaves
+        .iter()
+        .filter(|leaf| matches!(leaf.bound, PostgresPartitionBound::Default))
+        .count();
+    if defaults > 1 {
+        return Err(PostgresPlanError::InvalidConfig(
+            "partition topology has multiple default leaves",
+        ));
+    }
+    match strategy {
+        PostgresPartitionStrategy::Range => {
+            let mut ranges = leaves
+                .iter()
+                .filter_map(|leaf| match &leaf.bound {
+                    PostgresPartitionBound::Range { lower, upper } => {
+                        Some((lower.clone(), upper.clone()))
+                    }
+                    PostgresPartitionBound::Default => None,
+                    _ => Some((
+                        PostgresPartitionBoundValue::MaxValue,
+                        PostgresPartitionBoundValue::MinValue,
+                    )),
+                })
+                .collect::<Vec<_>>();
+            ranges.sort();
+            if ranges.iter().any(|(lower, upper)| lower >= upper)
+                || ranges.windows(2).any(|pair| pair[0].1 > pair[1].0)
+            {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "range partition bounds overlap or are invalid",
+                ));
+            }
+        }
+        PostgresPartitionStrategy::List => {
+            let mut values = BTreeSet::new();
+            for bound in leaves.iter().map(|leaf| &leaf.bound) {
+                match bound {
+                    PostgresPartitionBound::List {
+                        values: leaf_values,
+                    } => {
+                        if leaf_values.iter().any(|value| !values.insert(*value)) {
+                            return Err(PostgresPlanError::InvalidConfig(
+                                "list partition bounds overlap",
+                            ));
+                        }
+                    }
+                    PostgresPartitionBound::Default => {}
+                    _ => {
+                        return Err(PostgresPlanError::InvalidConfig(
+                            "partition bound does not match list strategy",
+                        ));
+                    }
+                }
+            }
+        }
+        PostgresPartitionStrategy::Hash => {
+            let mut modulus = None;
+            let mut remainders = BTreeSet::new();
+            for bound in leaves.iter().map(|leaf| &leaf.bound) {
+                match bound {
+                    PostgresPartitionBound::Hash {
+                        modulus: leaf_modulus,
+                        remainder,
+                    } => {
+                        if modulus
+                            .replace(*leaf_modulus)
+                            .is_some_and(|value| value != *leaf_modulus)
+                            || !remainders.insert(*remainder)
+                        {
+                            return Err(PostgresPlanError::InvalidConfig(
+                                "hash partition bounds have mixed moduli or duplicate remainders",
+                            ));
+                        }
+                    }
+                    PostgresPartitionBound::Default => {
+                        return Err(PostgresPlanError::InvalidConfig(
+                            "hash partitioning does not support a default leaf",
+                        ));
+                    }
+                    _ => {
+                        return Err(PostgresPlanError::InvalidConfig(
+                            "partition bound does not match hash strategy",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn partition_topology_semantically_equal(
+    expected: &PostgresPartitionTopology,
+    actual: &PostgresPartitionTopology,
+) -> bool {
+    expected.root == actual.root
+        && expected.key_column == actual.key_column
+        && expected.key_type == actual.key_type
+        && expected.strategy == actual.strategy
+        && expected.leaves.len() == actual.leaves.len()
+        && expected.leaves.iter().all(|expected_leaf| {
+            actual.leaves.iter().any(|actual_leaf| {
+                expected_leaf.table == actual_leaf.table && expected_leaf.bound == actual_leaf.bound
+            })
+        })
 }
 
 /// Parse the conservative stored-generated-column subset from a catalog.
@@ -2091,6 +2591,8 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
         .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
     let generated_columns = postgres_generated_columns(catalog)
         .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    let partition_topologies = postgres_partition_topologies(catalog)
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
     for namespace in &catalog.namespaces {
         if namespace.name.as_str() != "public" {
             statements.push(format!(
@@ -2116,14 +2618,14 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
             .collect::<Vec<_>>();
         tables.sort_by(|left, right| left.name.cmp(&right.name));
         for table in tables {
-            if table
+            let relkind = table
                 .attributes
                 .get("relkind")
                 .and_then(serde_json::Value::as_str)
-                != Some("r")
-            {
+                .unwrap_or_default();
+            if !matches!(relkind, "r" | "p") {
                 return Err(ConnectionError::InvalidRequest(format!(
-                    "table {}.{} is not an ordinary PostgreSQL table",
+                    "table {}.{} is not an ordinary or supported partitioned PostgreSQL table",
                     namespace.name, table.name
                 )));
             }
@@ -2151,12 +2653,37 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
                     namespace.name, table.name
                 )));
             }
+            let partition_clause = if relkind == "p" {
+                let topology = partition_topologies
+                    .iter()
+                    .find(|topology| {
+                        topology.root.namespace == namespace.name
+                            && topology.root.name == table.name
+                    })
+                    .ok_or_else(|| {
+                        ConnectionError::InvalidRequest(
+                            "partition root has no validated topology".into(),
+                        )
+                    })?;
+                format!(
+                    " PARTITION BY {} ({})",
+                    partition_strategy_sql(topology.strategy),
+                    quote_identifier(&topology.key_column)
+                )
+            } else {
+                String::new()
+            };
             statements.push(format!(
-                "{create} {}.{} ({})",
+                "{create} {}.{} ({}){partition_clause}",
                 quote_identifier(&namespace.name),
                 quote_identifier(&table.name),
                 definitions.join(", ")
             ));
+        }
+    }
+    for topology in &partition_topologies {
+        for leaf in &topology.leaves {
+            statements.push(partition_leaf_create_statement(topology, leaf));
         }
     }
     for sequence in &sequences {
@@ -2206,6 +2733,58 @@ fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>>
         }
     }
     Ok(statements)
+}
+
+fn partition_strategy_sql(strategy: PostgresPartitionStrategy) -> &'static str {
+    match strategy {
+        PostgresPartitionStrategy::Range => "RANGE",
+        PostgresPartitionStrategy::List => "LIST",
+        PostgresPartitionStrategy::Hash => "HASH",
+    }
+}
+
+fn partition_leaf_create_statement(
+    topology: &PostgresPartitionTopology,
+    leaf: &PostgresPartitionLeaf,
+) -> String {
+    format!(
+        "CREATE TABLE {}.{} PARTITION OF {}.{} {}",
+        quote_identifier(&leaf.table.namespace),
+        quote_identifier(&leaf.table.name),
+        quote_identifier(&topology.root.namespace),
+        quote_identifier(&topology.root.name),
+        render_partition_bound(&leaf.bound)
+    )
+}
+
+fn render_partition_bound(bound: &PostgresPartitionBound) -> String {
+    match bound {
+        PostgresPartitionBound::Range { lower, upper } => format!(
+            "FOR VALUES FROM ({}) TO ({})",
+            render_partition_bound_value(lower),
+            render_partition_bound_value(upper)
+        ),
+        PostgresPartitionBound::List { values } => format!(
+            "FOR VALUES IN ({})",
+            values
+                .iter()
+                .map(|value| value.map_or_else(|| "NULL".into(), |value| value.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PostgresPartitionBound::Hash { modulus, remainder } => {
+            format!("FOR VALUES WITH (modulus {modulus}, remainder {remainder})")
+        }
+        PostgresPartitionBound::Default => "DEFAULT".into(),
+    }
+}
+
+fn render_partition_bound_value(value: &PostgresPartitionBoundValue) -> String {
+    match value {
+        PostgresPartitionBoundValue::MinValue => "MINVALUE".into(),
+        PostgresPartitionBoundValue::Value(value) => value.to_string(),
+        PostgresPartitionBoundValue::MaxValue => "MAXVALUE".into(),
+    }
 }
 
 fn table_column_definitions(
@@ -2527,6 +3106,10 @@ impl VerificationSession for PostgresTargetVerifier {
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
         self.reader.select_page(request)
     }
+
+    fn select_page_only(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        self.reader.select_page_only(request)
+    }
 }
 
 struct PostgresWriter {
@@ -2765,6 +3348,20 @@ impl ReadSession for PostgresSnapshotReader {
     }
 
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        self.select_page_scoped(request, false)
+    }
+
+    fn select_page_only(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        self.select_page_scoped(request, true)
+    }
+}
+
+impl PostgresSnapshotReader {
+    fn select_page_scoped(
+        &mut self,
+        request: &KeysetPage,
+        only: bool,
+    ) -> ConnectionResult<RowBatch> {
         self.cancellation.check()?;
         validate_page(request, self.max_batch_rows)?;
         let key_cache_entry = (request.table.clone(), request.key.clone());
@@ -2794,7 +3391,8 @@ impl ReadSession for PostgresSnapshotReader {
             .collect::<Vec<_>>()
             .join(", ");
         let table = format!(
-            "{}.{}",
+            "{}{}.{}",
+            if only { "ONLY " } else { "" },
             quote_identifier(&request.table.namespace),
             quote_identifier(&request.table.name)
         );
@@ -3258,7 +3856,7 @@ fn extract_catalog(
     }
 
     let relation_rows = transaction.query(
-        "SELECT 'relation:' || c.oid::text, n.nspname, c.relname, c.relkind::text, pg_get_userbyid(c.relowner), c.relpersistence::text, c.relrowsecurity, CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid, true) ELSE NULL END, seq.seqstart::text, seq.seqincrement::text, seq.seqmax::text, seq.seqmin::text, seq.seqcache::text, seq.seqcycle, CASE WHEN seq.seqtypid IS NULL THEN NULL ELSE pg_catalog.format_type(seq.seqtypid, NULL) END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_sequence seq ON seq.seqrelid = c.oid WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','S','v','m') ORDER BY n.nspname, c.relname, c.relkind",
+        "SELECT 'relation:' || c.oid::text, n.nspname, c.relname, c.relkind::text, pg_get_userbyid(c.relowner), c.relpersistence::text, c.relrowsecurity, CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid, true) ELSE NULL END, seq.seqstart::text, seq.seqincrement::text, seq.seqmax::text, seq.seqmin::text, seq.seqcache::text, seq.seqcycle, CASE WHEN seq.seqtypid IS NULL THEN NULL ELSE pg_catalog.format_type(seq.seqtypid, NULL) END, c.relispartition, CASE WHEN parent.oid IS NULL THEN NULL ELSE 'relation:' || parent.oid::text END, CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid, false) END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_sequence seq ON seq.seqrelid = c.oid LEFT JOIN pg_inherits inh ON inh.inhrelid = c.oid LEFT JOIN pg_class parent ON parent.oid = inh.inhparent WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','S','v','m') ORDER BY n.nspname, c.relname, c.relkind",
         &[],
     )?;
     let mut unsupported = Vec::new();
@@ -3269,7 +3867,9 @@ fn extract_catalog(
         let kind: String = row.get(3);
         let relrowsecurity: bool = row.get(6);
         let definition: Option<String> = row.get(7);
+        let is_partition: bool = row.get(15);
         let object_kind = match kind.as_str() {
+            "r" if is_partition => CatalogObjectKind::Partition,
             "r" | "p" => CatalogObjectKind::Table,
             "S" => CatalogObjectKind::Sequence,
             "v" | "m" => CatalogObjectKind::View,
@@ -3283,6 +3883,21 @@ fn extract_catalog(
             "row_security".into(),
             serde_json::Value::Bool(relrowsecurity),
         );
+        attributes.insert("is_partition".into(), serde_json::Value::Bool(is_partition));
+        if is_partition {
+            attributes.insert(
+                "partition_parent_oid".into(),
+                row.get::<_, Option<String>>(16)
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            attributes.insert(
+                "partition_bound".into(),
+                row.get::<_, Option<String>>(17)
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
         if kind == "S" {
             for (index, attribute) in [
                 (8, "start"),
@@ -3309,7 +3924,7 @@ fn extract_catalog(
                 });
             }
         }
-        if kind == "p" || kind == "m" || kind == "v" || relrowsecurity {
+        if kind == "m" || kind == "v" || relrowsecurity {
             unsupported.push(UnsupportedObject {
                 object_id: id.clone(),
                 object_kind: if relrowsecurity {
@@ -3337,6 +3952,102 @@ fn extract_catalog(
                 attributes,
             },
         )?;
+    }
+
+    let partition_root_rows = transaction.query(
+        "SELECT 'relation:' || root.oid::text, pt.partstrat::text, pt.partnatts, pt.partattrs::smallint[], pt.partexprs IS NULL, a.attname, tn.nspname, t.typname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attcollation = 0 AND NOT EXISTS (SELECT 1 FROM unnest(pt.partcollation::oid[]) coll(oid) WHERE coll.oid<>0), CASE WHEN pt.partdefid = 0 THEN NULL ELSE 'relation:' || pt.partdefid::text END, NOT root.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits nested JOIN pg_class nested_root ON nested_root.oid=nested.inhrelid WHERE nested.inhparent=root.oid AND nested_root.relkind='p'), NOT EXISTS (SELECT 1 FROM unnest(pt.partclass::oid[]) cls(oid) JOIN pg_opclass opc ON opc.oid=cls.oid JOIN pg_namespace onsp ON onsp.oid=opc.opcnamespace WHERE onsp.nspname<>'pg_catalog' OR NOT opc.opcdefault) FROM pg_partitioned_table pt JOIN pg_class root ON root.oid=pt.partrelid JOIN pg_namespace rn ON rn.oid=root.relnamespace LEFT JOIN pg_attribute a ON a.attrelid=root.oid AND a.attnum=(pt.partattrs::smallint[])[0] LEFT JOIN pg_type t ON t.oid=a.atttypid LEFT JOIN pg_namespace tn ON tn.oid=t.typnamespace WHERE rn.nspname <> 'information_schema' AND rn.nspname !~ '^pg_' ORDER BY root.oid",
+        &[],
+    )?;
+    let mut unsafe_partition_roots = BTreeSet::new();
+    for row in partition_root_rows {
+        let root_id: String = row.get(0);
+        let strategy: String = row.get(1);
+        let key_count: i16 = row.get(2);
+        let key_attributes: Vec<i16> = row.get(3);
+        let no_expressions: bool = row.get(4);
+        let key_column: Option<String> = row.get(5);
+        let type_schema: Option<String> = row.get(6);
+        let type_name: Option<String> = row.get(7);
+        let key_type: Option<String> = row.get(8);
+        let no_collation: bool = row.get(9);
+        let default_partition: Option<String> = row.get(10);
+        let single_level: bool = row.get(11);
+        let default_opclasses: bool = row.get(12);
+        let supported = matches!(strategy.as_str(), "r" | "l" | "h")
+            && key_count == 1
+            && key_attributes.len() == 1
+            && key_attributes[0] > 0
+            && no_expressions
+            && type_schema.as_deref() == Some("pg_catalog")
+            && matches!(type_name.as_deref(), Some("int2" | "int4" | "int8"))
+            && no_collation
+            && single_level
+            && default_opclasses;
+        if !supported {
+            unsafe_partition_roots.insert(root_id.clone());
+        }
+        let Some((namespace_name, object)) = namespaces.iter_mut().find_map(|(name, namespace)| {
+            namespace
+                .objects
+                .iter_mut()
+                .find(|object| object.id == root_id && object.kind == CatalogObjectKind::Table)
+                .map(|object| (name.clone(), object))
+        }) else {
+            return Err(PostgresPlanError::InvalidConfig(
+                "partition root catalog object is absent",
+            ));
+        };
+        let _ = namespace_name;
+        object.attributes.insert(
+            "partition_strategy".into(),
+            serde_json::Value::String(strategy),
+        );
+        object.attributes.insert(
+            "partition_key_column".into(),
+            key_column
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        object.attributes.insert(
+            "partition_key_type".into(),
+            key_type
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        object.attributes.insert(
+            "default_partition_oid".into(),
+            default_partition
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    for root_id in unsafe_partition_roots {
+        unsupported.push(UnsupportedObject {
+            object_id: root_id,
+            object_kind: "partition_topology".into(),
+            reason: "partition root is not a single-level RANGE/LIST/HASH topology on one built-in integer column".into(),
+            required_semantics: true,
+        });
+    }
+    let unsupported_partition_rows = transaction.query(
+        "SELECT object_id, reason FROM (
+           SELECT 'partition-local-index:' || i.indexrelid::text AS object_id, 'partition leaf has a local or unattached index' AS reason FROM pg_index i JOIN pg_class leaf ON leaf.oid=i.indrelid WHERE leaf.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid=i.indexrelid)
+           UNION ALL SELECT 'partition-child-index-storage:' || idx.oid::text, 'attached partition child index has custom storage options or tablespace' FROM pg_class idx JOIN pg_index i ON i.indexrelid=idx.oid JOIN pg_class leaf ON leaf.oid=i.indrelid WHERE leaf.relispartition AND EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid=idx.oid) AND (idx.reloptions IS NOT NULL OR idx.reltablespace<>0)
+           UNION ALL SELECT 'partition-child-index-name:' || child_idx.oid::text, 'attached partition child index name is not reproducible from its parent index' FROM pg_inherits child_inh JOIN pg_class child_idx ON child_idx.oid=child_inh.inhrelid JOIN pg_class parent_idx ON parent_idx.oid=child_inh.inhparent JOIN pg_index child_i ON child_i.indexrelid=child_idx.oid JOIN pg_class leaf ON leaf.oid=child_i.indrelid JOIN pg_inherits leaf_inh ON leaf_inh.inhrelid=leaf.oid JOIN pg_class root ON root.oid=leaf_inh.inhparent WHERE child_idx.relkind='i' AND parent_idx.relkind='I' AND (left(parent_idx.relname,length(root.relname))<>root.relname OR child_idx.relname<>leaf.relname || substring(parent_idx.relname FROM length(root.relname)+1))
+           UNION ALL SELECT 'partition-local-constraint:' || con.oid::text, 'partition leaf has a local constraint' FROM pg_constraint con JOIN pg_class leaf ON leaf.oid=con.conrelid WHERE leaf.relispartition AND con.conparentid=0
+           UNION ALL SELECT 'partition-storage:' || leaf.oid::text, 'partition leaf has custom storage options or tablespace' FROM pg_class leaf WHERE leaf.relispartition AND (leaf.reloptions IS NOT NULL OR leaf.reltablespace<>0)
+           UNION ALL SELECT 'partition-trigger:' || t.oid::text, 'partition leaf has a user trigger' FROM pg_trigger t JOIN pg_class leaf ON leaf.oid=t.tgrelid WHERE leaf.relispartition AND NOT t.tgisinternal
+           UNION ALL SELECT 'table-inheritance:' || child.oid::text, 'traditional table inheritance is not implemented' FROM pg_inherits inh JOIN pg_class child ON child.oid=inh.inhrelid WHERE child.relkind IN ('r','p') AND NOT child.relispartition
+         ) excluded ORDER BY object_id",
+        &[],
+    )?;
+    for row in unsupported_partition_rows {
+        unsupported.push(UnsupportedObject {
+            object_id: row.get(0),
+            object_kind: "partition_excluded_semantics".into(),
+            reason: row.get(1),
+            required_semantics: true,
+        });
     }
 
     let sequence_ownership_rows = transaction.query(
@@ -3659,7 +4370,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT 'constraint:' || con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', 'relation:' || con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'referenced_table_oid', CASE WHEN con.confrelid = 0 THEN NULL ELSE 'relation:' || con.confrelid::text END, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text, 'delete_set_columns', to_jsonb(con)->'confdelsetcols')::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
+        "SELECT 'constraint:' || con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', 'relation:' || con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'parent_constraint_oid', CASE WHEN con.conparentid = 0 THEN NULL ELSE 'constraint:' || con.conparentid::text END, 'referenced_table_oid', CASE WHEN con.confrelid = 0 THEN NULL ELSE 'relation:' || con.confrelid::text END, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text, 'delete_set_columns', to_jsonb(con)->'confdelsetcols')::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
         CatalogObjectKind::CheckConstraint,
     )?;
     append_query_objects(
@@ -3923,6 +4634,7 @@ fn catalog_dependencies(namespaces: &BTreeMap<String, CatalogNamespace>) -> Vec<
         for (attribute, dependency_type) in [
             ("table_oid", "owned_by_table"),
             ("referenced_table_oid", "references_table"),
+            ("partition_parent_oid", "partition_of"),
         ] {
             if let Some(target) = object
                 .attributes
@@ -3971,6 +4683,7 @@ pub fn build_plan_with_consistency(
     let mut post_data_indexes = Vec::new();
     let sequences = postgres_sequences(&source.catalog)?;
     let generated_columns = postgres_generated_columns(&source.catalog)?;
+    let partition_topologies = postgres_partition_topologies(&source.catalog)?;
     for namespace in &source.catalog.namespaces {
         for object in &namespace.objects {
             if object.kind == CatalogObjectKind::Table {
@@ -3983,6 +4696,7 @@ pub fn build_plan_with_consistency(
             } else if object.kind == CatalogObjectKind::ForeignKey {
                 foreign_keys.push(object.clone());
             } else if object.kind == CatalogObjectKind::Index
+                && !catalog_object_targets_partition_leaf(&source.catalog, object)
                 && object
                     .attributes
                     .get("constraint_oid")
@@ -3991,6 +4705,7 @@ pub fn build_plan_with_consistency(
             {
                 standalone_indexes.push((namespace.name.clone(), object.clone()));
             } else if object.kind == CatalogObjectKind::Index
+                && !catalog_object_targets_partition_leaf(&source.catalog, object)
                 && object
                     .attributes
                     .get("constraint_oid")
@@ -4014,14 +4729,48 @@ pub fn build_plan_with_consistency(
                 required_semantics: true,
             });
         }
-        let parameters = table_parameters(&source.catalog, &table)?;
+        let topology = partition_topologies
+            .iter()
+            .find(|topology| topology.root == table);
+        let mut parameters = table_parameters(&source.catalog, &table)?;
+        if let Some(topology) = topology {
+            parameters.insert(
+                "postgres_partition_topology".into(),
+                serde_json::to_value(topology)?,
+            );
+        }
         let create = PlanOperation::new(
-            OperationKind::CreateTable,
+            topology.map_or(OperationKind::CreateTable, |_| {
+                OperationKind::Vendor("create_postgres_partitioned_table".into())
+            }),
             Some(table.clone()),
             Vec::new(),
             parameters,
         )?;
         create_table_operations.insert(table.clone(), create.id.clone());
+        let mut copy_dependencies = vec![create.id.clone()];
+        let mut leaf_creates = Vec::new();
+        if let Some(topology) = topology {
+            for leaf in &topology.leaves {
+                let leaf_create = PlanOperation::new(
+                    OperationKind::Vendor("create_postgres_partition".into()),
+                    Some(leaf.table.clone()),
+                    vec![create.id.clone()],
+                    BTreeMap::from([
+                        (
+                            "root_catalog_object_id".into(),
+                            serde_json::json!(topology.root_catalog_object_id),
+                        ),
+                        (
+                            "postgres_partition_leaf".into(),
+                            serde_json::to_value(leaf)?,
+                        ),
+                    ]),
+                )?;
+                copy_dependencies.push(leaf_create.id.clone());
+                leaf_creates.push(leaf_create);
+            }
+        }
         let copy_parameters = resumable_key
             .map(|key| {
                 BTreeMap::from([(
@@ -4033,7 +4782,7 @@ pub fn build_plan_with_consistency(
         let copy = PlanOperation::new(
             OperationKind::CopyTable,
             Some(table.clone()),
-            vec![create.id.clone()],
+            copy_dependencies,
             copy_parameters,
         )?;
         let verify = PlanOperation::new(
@@ -4043,7 +4792,9 @@ pub fn build_plan_with_consistency(
             BTreeMap::new(),
         )?;
         copy_operations.insert(table.clone(), copy.id.clone());
-        operations.extend([create, copy, verify]);
+        operations.push(create);
+        operations.extend(leaf_creates);
+        operations.extend([copy, verify]);
     }
     standalone_indexes.sort_by(|left, right| {
         left.0
@@ -4295,6 +5046,26 @@ pub fn build_plan_with_consistency(
             BTreeMap::from([("catalog_object".into(), serde_json::to_value(object)?)]),
         )?);
     }
+    for topology in &partition_topologies {
+        let verify = operations
+            .iter()
+            .find(|operation| {
+                operation.kind == OperationKind::VerifyTable
+                    && operation.table.as_ref() == Some(&topology.root)
+            })
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "partition root has no final table-verification operation",
+            ))?;
+        operations.push(PlanOperation::new(
+            OperationKind::Vendor("verify_postgres_partition_topology".into()),
+            Some(topology.root.clone()),
+            vec![verify.id.clone()],
+            BTreeMap::from([(
+                "postgres_partition_topology".into(),
+                serde_json::to_value(topology)?,
+            )]),
+        )?);
+    }
     let verify_schema = PlanOperation::new(
         OperationKind::VerifySchema,
         None,
@@ -4375,6 +5146,21 @@ pub fn build_plan_with_consistency(
         unsupported_objects: unsupported,
     })
     .map_err(PostgresPlanError::from)
+}
+
+fn catalog_object_targets_partition_leaf(catalog: &VendorCatalog, object: &CatalogObject) -> bool {
+    let Some(table_oid) = object
+        .attributes
+        .get("table_oid")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    catalog.namespaces.iter().any(|namespace| {
+        namespace.objects.iter().any(|candidate| {
+            candidate.kind == CatalogObjectKind::Partition && candidate.id == table_oid
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5431,6 +6217,142 @@ credential_env = "PGPASSWORD"
             name: Identifier::new("accounts").unwrap(),
         };
         assert!(select_resumable_key(&catalog, &table).is_err());
+    }
+
+    fn range_partition_catalog() -> VendorCatalog {
+        let mut catalog = key_catalog(vec![CatalogObject {
+            id: "constraint:root-key".into(),
+            kind: CatalogObjectKind::PrimaryKey,
+            name: Identifier::new("accounts_pkey").unwrap(),
+            definition: b"PRIMARY KEY (id)".to_vec(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("validated".into(), serde_json::json!(true)),
+                ("columns".into(), serde_json::json!(["id"])),
+            ]),
+        }]);
+        let root = catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.id == "relation:1")
+            .unwrap();
+        root.attributes
+            .insert("relkind".into(), serde_json::json!("p"));
+        root.attributes
+            .insert("is_partition".into(), serde_json::json!(false));
+        root.attributes
+            .insert("partition_strategy".into(), serde_json::json!("r"));
+        root.attributes
+            .insert("partition_key_column".into(), serde_json::json!("id"));
+        root.attributes
+            .insert("partition_key_type".into(), serde_json::json!("bigint"));
+        root.attributes
+            .insert("default_partition_oid".into(), serde_json::Value::Null);
+        for (id, name, bound) in [
+            (
+                "relation:10",
+                "accounts_negative",
+                "FOR VALUES FROM (MINVALUE) TO (0)",
+            ),
+            (
+                "relation:11",
+                "accounts_positive",
+                "FOR VALUES FROM (0) TO (MAXVALUE)",
+            ),
+        ] {
+            catalog.namespaces[0].objects.push(CatalogObject {
+                id: id.into(),
+                kind: CatalogObjectKind::Partition,
+                name: Identifier::new(name).unwrap(),
+                definition: Vec::new(),
+                attributes: BTreeMap::from([
+                    ("relkind".into(), serde_json::json!("r")),
+                    ("persistence".into(), serde_json::json!("p")),
+                    ("is_partition".into(), serde_json::json!(true)),
+                    (
+                        "partition_parent_oid".into(),
+                        serde_json::json!("relation:1"),
+                    ),
+                    ("partition_bound".into(), serde_json::json!(bound)),
+                ]),
+            });
+        }
+        catalog
+    }
+
+    #[test]
+    fn typed_partition_bounds_parse_validate_and_render() {
+        let catalog = range_partition_catalog();
+        let topologies = postgres_partition_topologies(&catalog).unwrap();
+        assert_eq!(topologies.len(), 1);
+        assert_eq!(topologies[0].strategy, PostgresPartitionStrategy::Range);
+        assert_eq!(
+            partition_leaf_create_statement(&topologies[0], &topologies[0].leaves[0]),
+            "CREATE TABLE \"public\".\"accounts_negative\" PARTITION OF \"public\".\"accounts\" FOR VALUES FROM (MINVALUE) TO (0)"
+        );
+        assert_eq!(
+            parse_partition_bound(
+                "FOR VALUES IN ('-2'::integer, 0, NULL)",
+                PostgresPartitionStrategy::List
+            )
+            .unwrap(),
+            PostgresPartitionBound::List {
+                values: vec![Some(-2), Some(0), None]
+            }
+        );
+        assert!(parse_partition_bound(
+            "FOR VALUES WITH (modulus 2, remainder 2)",
+            PostgresPartitionStrategy::Hash
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn partition_plan_copies_only_root_after_every_leaf_exists() {
+        let source = CatalogSnapshot {
+            endpoint_identity: "source".into(),
+            server_version: "17".into(),
+            server_version_num: 170000,
+            catalog: range_partition_catalog(),
+            unsupported: UnsupportedObjectReport::default(),
+            tls_binding: "tls-source".into(),
+        };
+        let mut target = snapshot("target", false);
+        target.catalog.format_version = CATALOG_FORMAT_VERSION;
+        let reviewed = build_plan(&source, &target).unwrap();
+        let copies = reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == OperationKind::CopyTable)
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].table.as_ref().unwrap().name.as_str(), "accounts");
+        let leaf_creates = reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                operation.kind == OperationKind::Vendor("create_postgres_partition".into())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(leaf_creates.len(), 2);
+        assert!(leaf_creates
+            .iter()
+            .all(|leaf| copies[0].dependencies.contains(&leaf.id)));
+        let statements = pre_data_statements(&source.catalog).unwrap();
+        let root_position = statements
+            .iter()
+            .position(|statement| statement.contains("PARTITION BY RANGE"))
+            .unwrap();
+        assert!(
+            statements
+                .iter()
+                .skip(root_position + 1)
+                .filter(|statement| statement.contains("PARTITION OF"))
+                .count()
+                == 2
+        );
     }
 
     #[test]

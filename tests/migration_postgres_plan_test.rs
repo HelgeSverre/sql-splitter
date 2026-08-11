@@ -538,7 +538,11 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
     let plan_path = directory.path().join("reviewed-plan.json");
     let state_path = directory.path().join("migration-state.json");
     let reviewed = write_live_plan(&source, &target, &plan_path)?;
-    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    assert!(
+        !reviewed.plan.unsupported_objects.blocks_execution(),
+        "{:#?}",
+        reviewed.plan.unsupported_objects
+    );
 
     let report = execute_postgres_plan(
         &plan_path,
@@ -1065,6 +1069,233 @@ fn live_generated_columns_are_recomputed_and_reconciled() -> anyhow::Result<()> 
         run_live_generated_column_case(suffix, interruption, applied, conflict)
             .with_context(|| format!("generated-column recovery case {suffix}"))?;
     }
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_partition_topologies_route_and_resume_exactly() -> anyhow::Result<()> {
+    for (strategy, interruption) in [
+        ("range", PostgresExecutionInterruption::AfterDdlPrepared),
+        ("list", PostgresExecutionInterruption::AfterDdlCommitted),
+        (
+            "hash",
+            PostgresExecutionInterruption::AfterCommittedChunks(1),
+        ),
+    ] {
+        run_live_partition_case(strategy, interruption)
+            .with_context(|| format!("partition topology case {strategy}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn run_live_partition_case(
+    strategy: &str,
+    interruption: PostgresExecutionInterruption,
+) -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let mut target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    source.max_batch_rows = 2;
+    target.max_batch_rows = 2;
+    let control_config = admin.clone();
+    let source_database = format!("migration_partition_{strategy}_source");
+    let target_database = format!("migration_partition_{strategy}_target");
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    target.database.clone_from(&target_database);
+    admin.database.clone_from(&source_database);
+    let partition_ddl = match strategy {
+        "range" => "
+            CREATE TABLE public.accounts (id bigint PRIMARY KEY, payload text NOT NULL) PARTITION BY RANGE (id);
+            CREATE TABLE public.accounts_low PARTITION OF public.accounts FOR VALUES FROM (MINVALUE) TO (0);
+            CREATE TABLE public.accounts_mid PARTITION OF public.accounts FOR VALUES FROM (0) TO (10);
+            CREATE TABLE public.accounts_default PARTITION OF public.accounts DEFAULT;",
+        "list" => "
+            CREATE TABLE public.accounts (id bigint PRIMARY KEY, payload text NOT NULL) PARTITION BY LIST (id);
+            CREATE TABLE public.accounts_low PARTITION OF public.accounts FOR VALUES IN (-2,0);
+            CREATE TABLE public.accounts_mid PARTITION OF public.accounts FOR VALUES IN (9);
+            CREATE TABLE public.accounts_default PARTITION OF public.accounts DEFAULT;",
+        "hash" => "
+            CREATE TABLE public.accounts (id bigint PRIMARY KEY, payload text NOT NULL) PARTITION BY HASH (id);
+            CREATE TABLE public.accounts_h0 PARTITION OF public.accounts FOR VALUES WITH (modulus 4, remainder 0);
+            CREATE TABLE public.accounts_h1 PARTITION OF public.accounts FOR VALUES WITH (modulus 4, remainder 1);
+            CREATE TABLE public.accounts_h2 PARTITION OF public.accounts FOR VALUES WITH (modulus 4, remainder 2);
+            CREATE TABLE public.accounts_h3 PARTITION OF public.accounts FOR VALUES WITH (modulus 4, remainder 3);",
+        _ => unreachable!("fixed strategy matrix"),
+    };
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         SET ROLE migration_mutator;
+         {partition_ddl}
+         INSERT INTO public.accounts VALUES (-2,'negative'),(0,'zero'),(9,'nine'),(10,'ten'),(17,'seventeen');
+         RESET ROLE;
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO migration_reader"
+    ))?;
+    drop(setup);
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    if strategy == "range" {
+        let mut source_admin = connect(&admin)?;
+        source_admin.batch_execute(
+            "SET ROLE migration_mutator;
+             ALTER INDEX public.accounts_low_pkey RENAME TO accounts_low_renamed_pkey;
+             RESET ROLE",
+        )?;
+        drop(source_admin);
+        let renamed_path = directory.path().join("renamed-index-plan.json");
+        let blocked = write_live_plan_with_consistency(
+            &source_path,
+            &target_path,
+            &renamed_path,
+            PostgresConsistencyMode::WriteFence,
+        )?;
+        assert!(blocked
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .any(|object| {
+                object.required_semantics
+                    && object.object_id.starts_with("partition-child-index-name:")
+            }));
+        let mut source_admin = connect(&admin)?;
+        source_admin.batch_execute(
+            "SET ROLE migration_mutator;
+             ALTER INDEX public.accounts_low_renamed_pkey RENAME TO accounts_low_pkey;
+             CREATE INDEX accounts_low_payload_local_idx ON public.accounts_low(payload);
+             RESET ROLE",
+        )?;
+        drop(source_admin);
+        let blocked_path = directory.path().join("blocked-plan.json");
+        let blocked = write_live_plan_with_consistency(
+            &source_path,
+            &target_path,
+            &blocked_path,
+            PostgresConsistencyMode::WriteFence,
+        )?;
+        assert!(blocked
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .any(|object| {
+                object.required_semantics && object.object_id.starts_with("partition-local-index:")
+            }));
+        let mut source_admin = connect(&admin)?;
+        source_admin.batch_execute(
+            "SET ROLE migration_mutator;
+             DROP INDEX public.accounts_low_payload_local_idx;
+             RESET ROLE",
+        )?;
+    }
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    assert!(
+        !reviewed.plan.unsupported_objects.blocks_execution(),
+        "{:#?}",
+        reviewed.plan.unsupported_objects
+    );
+    assert_eq!(
+        reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| operation.kind
+                == sql_splitter::migration::plan::OperationKind::CopyTable)
+            .count(),
+        1
+    );
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+    let mut mutator = source.clone();
+    mutator.user = "migration_mutator".into();
+    mutator.credential_env = "SQL_SPLITTER_PG_MUTATOR_PASSWORD".into();
+    let mut blocked = connect(&mutator)?;
+    assert!(blocked
+        .batch_execute("INSERT INTO public.accounts VALUES (99,'blocked-root')")
+        .is_err());
+    let leaf = if strategy == "hash" {
+        "accounts_h0"
+    } else {
+        "accounts_low"
+    };
+    assert!(blocked
+        .batch_execute(&format!("TRUNCATE TABLE public.{leaf}"))
+        .is_err());
+    drop(blocked);
+    let error = execute_postgres_interrupted(PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-partition",
+        state_path: &state_path,
+        interruption,
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("injected interruption"),
+        "{error:#}"
+    );
+    resume_postgres_fenced_plan(
+        &state_path,
+        &source_path,
+        &target_path,
+        &admin_path,
+        &fence_path,
+    )?;
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    assert!(state
+        .operations
+        .iter()
+        .all(|operation| operation.state
+            == sql_splitter::migration::journal::OperationState::Verified));
+    let mut source_client = connect(&source)?;
+    let mut target_client = connect(&target)?;
+    let query = "SELECT tableoid::regclass::text,id,payload FROM public.accounts ORDER BY id";
+    let physical = |client: &mut Client| -> anyhow::Result<Vec<(String, i64, String)>> {
+        Ok(client
+            .query(query, &[])?
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
+            .collect())
+    };
+    assert_eq!(physical(&mut target_client)?, physical(&mut source_client)?);
+    cleanup.run()?;
     Ok(())
 }
 

@@ -29,11 +29,12 @@ use super::verify::{verify_keyed_rows, KeyedRow};
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres::{
     catalog_fingerprint, inspect_endpoint, postgres_foreign_keys, postgres_generated_columns,
-    postgres_post_data_indexes, postgres_sequences, postgres_tls_binding, select_resumable_key,
-    PostgresConsistencyMode, PostgresEndpointConfig, PostgresForeignKey, PostgresForeignKeyState,
-    PostgresGeneratedColumnState, PostgresIndex, PostgresIndexState, PostgresResumableKey,
-    PostgresSequence, PostgresSequenceState, PostgresSourceFactory, PostgresTargetFactory,
-    CATALOG_FORMAT_VERSION,
+    postgres_partition_topologies, postgres_post_data_indexes, postgres_sequences,
+    postgres_tls_binding, select_resumable_key, PostgresConsistencyMode, PostgresEndpointConfig,
+    PostgresForeignKey, PostgresForeignKeyState, PostgresGeneratedColumnState, PostgresIndex,
+    PostgresIndexState, PostgresPartitionTopology, PostgresPartitionTopologyState,
+    PostgresResumableKey, PostgresSequence, PostgresSequenceState, PostgresSourceFactory,
+    PostgresTargetFactory, CATALOG_FORMAT_VERSION,
 };
 #[cfg(feature = "enterprise-migration-spike")]
 use super::postgres_fence::{
@@ -620,6 +621,16 @@ fn resume_postgres_fenced_plan_internal(
         None,
         || attest_exact_fence(&admin_config, &installed, &fence_inventory),
     )?;
+    verify_postgres_partition_topologies(
+        &reviewed,
+        &source_catalog,
+        &target,
+        reader.as_mut(),
+        verifier.as_mut(),
+        &mut state,
+        state_path,
+        execution_page_limit(&source_config)?,
+    )?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_postgres_generated_columns(&source_catalog, &target)?;
     verify_schema_projection(&source_catalog, &target_config)?;
@@ -823,13 +834,7 @@ fn execute_postgres_plan_internal(
         .plan
         .operations
         .iter()
-        .filter(|operation| {
-            matches!(
-                operation.kind,
-                OperationKind::CreateTable | OperationKind::CreateSequence
-            ) || (operation.kind == OperationKind::CreateIndex
-                && !operation.parameters.contains_key("postgres_index"))
-        })
+        .filter(|operation| is_postgres_pre_data_operation(operation))
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
     state.prepare_operations_atomic(create_operation_ids.iter().copied())?;
@@ -1045,6 +1050,16 @@ fn execute_postgres_plan_internal(
         state_path,
         interruption,
         || attest_fence_if_present(fenced.as_ref()),
+    )?;
+    verify_postgres_partition_topologies(
+        &reviewed,
+        &source_catalog,
+        &target,
+        reader.as_mut(),
+        verifier.as_mut(),
+        &mut state,
+        state_path,
+        execution_page_limit(&source_config)?,
     )?;
     verify_postgres_sequence_states(&source_catalog, &target)?;
     verify_postgres_generated_columns(&source_catalog, &target)?;
@@ -1313,13 +1328,7 @@ fn resume_pre_data_schema(
         .plan
         .operations
         .iter()
-        .filter(|operation| {
-            matches!(
-                operation.kind,
-                OperationKind::CreateTable | OperationKind::CreateSequence
-            ) || (operation.kind == OperationKind::CreateIndex
-                && !operation.parameters.contains_key("postgres_index"))
-        })
+        .filter(|operation| is_postgres_pre_data_operation(operation))
         .map(|operation| operation.id.as_str())
         .collect::<Vec<_>>();
     let states = create_ids
@@ -1391,6 +1400,21 @@ fn resume_pre_data_schema(
     }
     replace_json(state_path, state)?;
     Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn is_postgres_pre_data_operation(operation: &PlanOperation) -> bool {
+    matches!(
+        operation.kind,
+        OperationKind::CreateTable | OperationKind::CreateSequence
+    ) || (operation.kind == OperationKind::CreateIndex
+        && !operation.parameters.contains_key("postgres_index"))
+        || matches!(
+            &operation.kind,
+            OperationKind::Vendor(name)
+                if name == "create_postgres_partitioned_table"
+                    || name == "create_postgres_partition"
+        )
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1541,6 +1565,120 @@ fn verify_postgres_generated_columns(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+#[allow(clippy::too_many_arguments)]
+fn verify_postgres_partition_topologies(
+    reviewed: &ReviewedPlan,
+    catalog: &VendorCatalog,
+    target: &PostgresTargetFactory,
+    reader: &mut dyn ReadSession,
+    verifier: &mut dyn super::connection::VerificationSession,
+    state: &mut MigrationState,
+    state_path: &Path,
+    page_limit: u32,
+) -> anyhow::Result<()> {
+    let catalog_topologies = postgres_partition_topologies(catalog)?;
+    for operation in reviewed.plan.operations.iter().filter(|operation| {
+        matches!(&operation.kind, OperationKind::Vendor(name) if name == "verify_postgres_partition_topology")
+    }) {
+        let reviewed_topology: PostgresPartitionTopology = serde_json::from_value(
+            operation
+                .parameters
+                .get("postgres_partition_topology")
+                .cloned()
+                .ok_or_else(|| anyhow!("partition verification omits its topology contract"))?,
+        )?;
+        if !catalog_topologies
+            .iter()
+            .any(|topology| topology == &reviewed_topology)
+        {
+            return Err(anyhow!(
+                "partition verification differs from the reviewed source catalog"
+            ));
+        }
+        if target.inspect_partition_topology(&reviewed_topology)?
+            != PostgresPartitionTopologyState::Exact
+        {
+            return Err(anyhow!(
+                "target partition topology for {}.{} is not exact",
+                reviewed_topology.root.namespace,
+                reviewed_topology.root.name
+            ));
+        }
+        let copy = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|candidate| {
+                candidate.kind == OperationKind::CopyTable
+                    && candidate.table.as_ref() == Some(&reviewed_topology.root)
+            })
+            .ok_or_else(|| anyhow!("partition root has no reviewed copy operation"))?;
+        let shape = table_shape(catalog, &reviewed_topology.root, Some(copy))?;
+        for leaf in &reviewed_topology.leaves {
+            verify_physical_partition_leaf(
+                reader,
+                verifier,
+                &leaf.table,
+                &shape,
+                page_limit,
+            )?;
+        }
+        complete_operation_if_needed(state, operation.id.as_str())?;
+        replace_json(state_path, state)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn verify_physical_partition_leaf(
+    reader: &mut dyn ReadSession,
+    verifier: &mut dyn super::connection::VerificationSession,
+    leaf: &QualifiedTable,
+    shape: &TableShape,
+    page_limit: u32,
+) -> anyhow::Result<()> {
+    let mut after = None;
+    loop {
+        let request = KeysetPage {
+            table: leaf.clone(),
+            projection: shape.projection.clone(),
+            key: shape.key.clone(),
+            after: after.clone(),
+            limit: page_limit,
+        };
+        let expected = reader.select_page_only(&request)?;
+        let actual = verifier.select_page_only(&request)?;
+        if expected.rows() != actual.rows() {
+            return Err(anyhow!(
+                "physical partition {}.{} differs from the reviewed source",
+                leaf.namespace,
+                leaf.name
+            ));
+        }
+        if expected.is_empty() {
+            return Ok(());
+        }
+        if expected.len() > page_limit as usize {
+            return Err(anyhow!("physical partition page exceeds its limit"));
+        }
+        after = Some(batch_final_key(&expected, shape)?);
+        if expected.len() < page_limit as usize {
+            let tail = KeysetPage {
+                after: after.clone(),
+                limit: 1,
+                ..request
+            };
+            if !reader.select_page_only(&tail)?.is_empty()
+                || !verifier.select_page_only(&tail)?.is_empty()
+            {
+                return Err(anyhow!("physical partition has an unverified tail"));
+            }
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -1839,7 +1977,11 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
                 | OperationKind::VerifySchema
         ) && !matches!(
             &operation.kind,
-            OperationKind::Vendor(name) if name == "restore_postgres_sequence"
+            OperationKind::Vendor(name)
+                if name == "restore_postgres_sequence"
+                    || name == "create_postgres_partitioned_table"
+                    || name == "create_postgres_partition"
+                    || name == "verify_postgres_partition_topology"
         ) {
             return Err(anyhow!(
                 "PostgreSQL live runner does not implement operation {:?}",
@@ -1881,6 +2023,59 @@ fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Re
         .source_catalog
         .as_ref()
         .ok_or_else(|| anyhow!("reviewed PostgreSQL plan has no embedded source catalog"))?;
+    let expected_topologies = postgres_partition_topologies(source_catalog)?;
+    for topology in &expected_topologies {
+        let root_creates = reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(&operation.kind, OperationKind::Vendor(name) if name == "create_postgres_partitioned_table")
+                    && operation.table.as_ref() == Some(&topology.root)
+                    && operation.parameters.get("postgres_partition_topology")
+                        == Some(&serde_json::to_value(topology).expect("topology serialization cannot fail"))
+            })
+            .count();
+        let leaf_creates = reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(&operation.kind, OperationKind::Vendor(name) if name == "create_postgres_partition")
+                    && topology.leaves.iter().any(|leaf| {
+                        operation.table.as_ref() == Some(&leaf.table)
+                            && operation.parameters.get("postgres_partition_leaf")
+                                == Some(&serde_json::to_value(leaf).expect("leaf serialization cannot fail"))
+                    })
+            })
+            .count();
+        let verifies = reviewed
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(&operation.kind, OperationKind::Vendor(name) if name == "verify_postgres_partition_topology")
+                    && operation.table.as_ref() == Some(&topology.root)
+                    && operation.parameters.get("postgres_partition_topology")
+                        == Some(&serde_json::to_value(topology).expect("topology serialization cannot fail"))
+            })
+            .count();
+        if root_creates != 1 || leaf_creates != topology.leaves.len() || verifies != 1 {
+            return Err(anyhow!(
+                "partition topology operation set differs from the reviewed catalog"
+            ));
+        }
+        if topology
+            .leaves
+            .iter()
+            .any(|leaf| copy_tables.contains(&leaf.table))
+            || !copy_tables.contains(&topology.root)
+        {
+            return Err(anyhow!(
+                "partition topology must copy exactly once through its root"
+            ));
+        }
+    }
     let expected_sequences = postgres_sequences(source_catalog)?
         .into_iter()
         .map(|sequence| sequence.catalog_object_id)
@@ -2315,7 +2510,12 @@ fn schema_projection(
             namespace
                 .objects
                 .iter()
-                .filter(|object| object.kind == CatalogObjectKind::Table)
+                .filter(|object| {
+                    matches!(
+                        object.kind,
+                        CatalogObjectKind::Table | CatalogObjectKind::Partition
+                    )
+                })
                 .map(|table| {
                     (
                         table.id.as_str(),
@@ -2333,6 +2533,7 @@ fn schema_projection(
                 matches!(
                     object.kind,
                     CatalogObjectKind::Table
+                        | CatalogObjectKind::Partition
                         | CatalogObjectKind::Sequence
                         | CatalogObjectKind::Column
                         | CatalogObjectKind::PrimaryKey
@@ -2358,6 +2559,22 @@ fn schema_projection(
                     CatalogObjectKind::Table => serde_json::json!({
                         "relkind": object.attributes.get("relkind"),
                         "persistence": object.attributes.get("persistence"),
+                        "partition_strategy": object.attributes.get("partition_strategy"),
+                        "partition_key_column": object.attributes.get("partition_key_column"),
+                        "partition_key_type": object.attributes.get("partition_key_type"),
+                        "default_partition": object.attributes
+                            .get("default_partition_oid")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|oid| table_names.get(oid)),
+                    }),
+                    CatalogObjectKind::Partition => serde_json::json!({
+                        "relkind": object.attributes.get("relkind"),
+                        "persistence": object.attributes.get("persistence"),
+                        "parent": object.attributes
+                            .get("partition_parent_oid")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|oid| table_names.get(oid)),
+                        "bound": object.attributes.get("partition_bound"),
                     }),
                     CatalogObjectKind::Sequence => serde_json::json!({
                         "persistence": object.attributes.get("persistence"),
@@ -2378,6 +2595,8 @@ fn schema_projection(
                         "default": object.attributes.get("default"),
                         "identity": object.attributes.get("identity"),
                         "generated": object.attributes.get("generated"),
+                        "generated_expression": object.attributes.get("generated_expression"),
+                        "generated_dependencies": object.attributes.get("generated_dependencies"),
                         "collation": object.attributes.get("collation"),
                         "collation_schema": object.attributes.get("collation_schema"),
                         "collation_provider": object.attributes.get("collation_provider"),

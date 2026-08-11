@@ -129,6 +129,18 @@ generated pagination key, cross-major migration, mutable or external function,
 unknown dependency, generated-on-generated reference, and unsupported mode all
 fail closed. PostgreSQL 15, 16, and 17 pass this matrix.
 
+The adapter supports a conservative declarative partition subset: one logged
+partitioned root, one built-in integer partition key, one level of logged
+ordinary leaves, and typed `RANGE`, `LIST`, `HASH`, or `DEFAULT` bounds. It
+creates the root and every leaf in one durable pre-data intent and copies data
+exactly once through the root so PostgreSQL performs routing. The write fence
+guards the root and every leaf and attests the exact parent, strategy, key, and
+bound topology. Final verification compares the logical root and pages every
+source and target leaf through `ONLY`, including empty leaves. Expression and
+multi-column keys, subpartitions, custom leaf objects/storage, traditional
+inheritance, and non-integer bounds fail closed. PostgreSQL 15, 16, and 17 pass
+the range/list/hash DDL and resume matrix.
+
 ## Configuration and security
 
 Endpoint files contain host, port, database, user, a credential environment
@@ -181,6 +193,8 @@ The adapter does not yet prove:
 - the full generated-column expression, collation, hostile-identifier, large-
   value, cancellation, and network-response-loss matrix beyond the current
   exact recovery cases;
+- composite and expression partition keys, broader bound types, subpartitions,
+  and the complete partition topology tamper/cancellation/network-loss matrix;
 - unsupported foreign-key variants beyond the explicitly modeled subset;
 - complete real-engine acceptance matrices in CI.
 

@@ -34,8 +34,8 @@ const DDL_FUNCTION: &str = "reject_source_ddl";
 const DDL_TRIGGER: &str = "sql_splitter_migration_fence_ddl";
 const HISTORY_FUNCTION: &str = "reject_history_mutation";
 const HISTORY_TRIGGER: &str = "sql_splitter_migration_fence_history_immutable";
-const FENCE_FORMAT_VERSION: i32 = 2;
-pub(crate) const POSTGRES_FENCE_ARTIFACT_VERSION: u32 = 3;
+const FENCE_FORMAT_VERSION: i32 = 3;
+pub(crate) const POSTGRES_FENCE_ARTIFACT_VERSION: u32 = 4;
 const DML_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source is protected by sql-splitter migration write fence'; END";
 const DDL_FUNCTION_BODY: &str = "BEGIN IF EXISTS (SELECT 1 FROM sql_splitter_migration_fence.registry WHERE singleton AND state = 'Released' AND admin_role = session_user) THEN RETURN; END IF; RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source DDL is protected by sql-splitter migration write fence'; END";
 const HISTORY_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'sql-splitter migration fence history is immutable'; END";
@@ -122,6 +122,22 @@ pub struct FencedTable {
     pub relation_oid: u32,
     pub trigger_oid: u32,
     pub trigger_name: String,
+    /// PostgreSQL `pg_class.relkind` (`r` for a stored table, `p` for a
+    /// partitioned table).
+    #[serde(default)]
+    pub relation_kind: String,
+    #[serde(default)]
+    pub is_partition: bool,
+    #[serde(default)]
+    pub parent_relation_oid: Option<u32>,
+    /// Exact deparsed partition strategy (`r`, `l`, or `h`) for partitioned
+    /// relations. The migration catalog separately owns the typed form.
+    #[serde(default)]
+    pub partition_strategy: Option<String>,
+    #[serde(default)]
+    pub partition_key_definition: Option<String>,
+    #[serde(default)]
+    pub partition_bound: Option<String>,
 }
 
 /// Exact source sequence contract protected by one fence generation.
@@ -187,7 +203,7 @@ pub enum PostgresFenceError {
     Artifact(#[from] super::artifact::ArtifactError),
     #[error("write-fence installation requires consistency_mode write-fence")]
     WrongConsistencyMode,
-    #[error("reviewed plan contains no copied ordinary tables")]
+    #[error("reviewed plan contains no copied PostgreSQL tables")]
     NoTables,
     #[error("credential environment variable {0} is not set or is not Unicode")]
     MissingCredential(String),
@@ -205,7 +221,7 @@ pub enum PostgresFenceError {
     Serialization(#[from] serde_json::Error),
     #[error("a prepared transaction exists in the source database")]
     PreparedTransaction,
-    #[error("source table {namespace}.{table} is absent or is not an ordinary table")]
+    #[error("source table {namespace}.{table} is absent or is not fenceable")]
     InvalidSourceTable { namespace: String, table: String },
     #[error("a source fence is already installed")]
     AlreadyInstalled,
@@ -493,7 +509,7 @@ fn normalize_sequence_fence_changes(
 }
 
 fn fence_unsupported_ids(inventory: &FenceInventory) -> BTreeSet<String> {
-    [
+    let mut ids = [
         format!("namespace-acl:{}", inventory.schema_oid),
         format!("relation-acl:{}", inventory.registry_oid),
         format!("relation-acl:{}", inventory.history_oid),
@@ -504,7 +520,14 @@ fn fence_unsupported_ids(inventory: &FenceInventory) -> BTreeSet<String> {
         format!("event-trigger:{}", inventory.event_trigger_oid),
     ]
     .into_iter()
-    .collect()
+    .collect::<BTreeSet<_>>();
+    ids.extend(
+        inventory
+            .tables
+            .iter()
+            .map(|table| format!("partition-trigger:{}", table.trigger_oid)),
+    );
+    ids
 }
 
 /// Attest that the database still has exactly the guards recorded in evidence.
@@ -533,7 +556,7 @@ pub fn attest_postgres_write_fence(
     let registry = load_registry(&mut transaction)?;
     if registry.format_version != FENCE_FORMAT_VERSION {
         return Err(PostgresFenceError::Attestation(
-            "active registry format does not prove sequence exclusion",
+            "active registry format does not prove current fence coverage",
         ));
     }
     if registry.state != "Active" {
@@ -844,6 +867,9 @@ fn inspect_install_storage(
     let history_storage = history_guard_storage(&registry.inventory)?;
     let expected_inventory_fingerprint = match (registry.format_version, history_storage) {
         (FENCE_FORMAT_VERSION, HistoryGuardStorage::Current) => registry.inventory.fingerprint()?,
+        (2, HistoryGuardStorage::Current) => {
+            pre_partition_inventory_fingerprint(&registry.inventory)?
+        }
         (1, HistoryGuardStorage::Current) => {
             pre_sequence_inventory_fingerprint(&registry.inventory)?
         }
@@ -880,6 +906,7 @@ fn inspect_install_storage(
 }
 
 fn legacy_inventory_fingerprint(inventory: &FenceInventory) -> Result<String, PostgresFenceError> {
+    let tables = prior_fenced_tables(&inventory.tables);
     #[derive(Serialize)]
     struct LegacyInventory<'a> {
         generation: &'a str,
@@ -891,7 +918,7 @@ fn legacy_inventory_fingerprint(inventory: &FenceInventory) -> Result<String, Po
         dml_function_oid: u32,
         ddl_function_oid: u32,
         event_trigger_oid: u32,
-        tables: &'a [FencedTable],
+        tables: &'a [PriorFencedTable<'a>],
     }
     let legacy = LegacyInventory {
         generation: &inventory.generation,
@@ -903,7 +930,7 @@ fn legacy_inventory_fingerprint(inventory: &FenceInventory) -> Result<String, Po
         dml_function_oid: inventory.dml_function_oid,
         ddl_function_oid: inventory.ddl_function_oid,
         event_trigger_oid: inventory.event_trigger_oid,
-        tables: &inventory.tables,
+        tables: &tables,
     };
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&legacy)?)))
 }
@@ -911,6 +938,7 @@ fn legacy_inventory_fingerprint(inventory: &FenceInventory) -> Result<String, Po
 fn pre_sequence_inventory_fingerprint(
     inventory: &FenceInventory,
 ) -> Result<String, PostgresFenceError> {
+    let tables = prior_fenced_tables(&inventory.tables);
     #[derive(Serialize)]
     struct PreSequenceInventory<'a> {
         generation: &'a str,
@@ -924,7 +952,7 @@ fn pre_sequence_inventory_fingerprint(
         dml_function_oid: u32,
         ddl_function_oid: u32,
         event_trigger_oid: u32,
-        tables: &'a [FencedTable],
+        tables: &'a [PriorFencedTable<'a>],
     }
     let prior = PreSequenceInventory {
         generation: &inventory.generation,
@@ -938,9 +966,69 @@ fn pre_sequence_inventory_fingerprint(
         dml_function_oid: inventory.dml_function_oid,
         ddl_function_oid: inventory.ddl_function_oid,
         event_trigger_oid: inventory.event_trigger_oid,
-        tables: &inventory.tables,
+        tables: &tables,
     };
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&prior)?)))
+}
+
+fn pre_partition_inventory_fingerprint(
+    inventory: &FenceInventory,
+) -> Result<String, PostgresFenceError> {
+    let tables = prior_fenced_tables(&inventory.tables);
+    #[derive(Serialize)]
+    struct PrePartitionInventory<'a> {
+        generation: &'a str,
+        admin_role: &'a str,
+        schema_oid: u32,
+        registry_oid: u32,
+        history_oid: u32,
+        history_sequence_oid: u32,
+        history_function_oid: u32,
+        history_trigger_oid: u32,
+        dml_function_oid: u32,
+        ddl_function_oid: u32,
+        event_trigger_oid: u32,
+        tables: &'a [PriorFencedTable<'a>],
+        sequences: &'a [FencedSequence],
+    }
+    let prior = PrePartitionInventory {
+        generation: &inventory.generation,
+        admin_role: &inventory.admin_role,
+        schema_oid: inventory.schema_oid,
+        registry_oid: inventory.registry_oid,
+        history_oid: inventory.history_oid,
+        history_sequence_oid: inventory.history_sequence_oid,
+        history_function_oid: inventory.history_function_oid,
+        history_trigger_oid: inventory.history_trigger_oid,
+        dml_function_oid: inventory.dml_function_oid,
+        ddl_function_oid: inventory.ddl_function_oid,
+        event_trigger_oid: inventory.event_trigger_oid,
+        tables: &tables,
+        sequences: &inventory.sequences,
+    };
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&prior)?)))
+}
+
+#[derive(Serialize)]
+struct PriorFencedTable<'a> {
+    namespace: &'a str,
+    table: &'a str,
+    relation_oid: u32,
+    trigger_oid: u32,
+    trigger_name: &'a str,
+}
+
+fn prior_fenced_tables(tables: &[FencedTable]) -> Vec<PriorFencedTable<'_>> {
+    tables
+        .iter()
+        .map(|table| PriorFencedTable {
+            namespace: &table.namespace,
+            table: &table.table,
+            relation_oid: table.relation_oid,
+            trigger_oid: table.trigger_oid,
+            trigger_name: &table.trigger_name,
+        })
+        .collect()
 }
 
 fn prepare_rearm_registry(
@@ -1203,27 +1291,81 @@ fn lock_and_resolve_tables(
     generation: &str,
     admin_role: &str,
 ) -> Result<FenceInventory, PostgresFenceError> {
-    let mut inventory = Vec::with_capacity(tables.len());
-    for (index, table) in tables.iter().enumerate() {
-        let qualified = format!(
-            "{}.{}",
-            quote_ident(table.namespace.as_str()),
-            quote_ident(table.name.as_str())
+    let mut roots = BTreeMap::new();
+    for table in tables {
+        let row = transaction
+            .query_opt(
+                "SELECT root.oid::bigint, rn.nspname, root.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL (SELECT CASE WHEN c.relispartition THEN pg_partition_root(c.oid) ELSE c.oid END AS oid) selected JOIN pg_class root ON root.oid=selected.oid JOIN pg_namespace rn ON rn.oid=root.relnamespace WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind IN ('r','p') AND root.relkind IN ('r','p')",
+                &[&table.namespace.as_str(), &table.name.as_str()],
+            )?
+            .ok_or_else(|| PostgresFenceError::InvalidSourceTable {
+                namespace: table.namespace.to_string(),
+                table: table.name.to_string(),
+            })?;
+        roots.insert(
+            oid_from_i64(row.get(0))?,
+            (row.get::<_, String>(1), row.get::<_, String>(2)),
         );
-        transaction.batch_execute(&format!("LOCK TABLE {qualified} IN ACCESS EXCLUSIVE MODE"))?;
-        let row = transaction.query_opt("SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'", &[&table.namespace.as_str(), &table.name.as_str()])?
-            .ok_or_else(|| PostgresFenceError::InvalidSourceTable { namespace: table.namespace.to_string(), table: table.name.to_string() })?;
-        let relation_oid = u32::try_from(row.get::<_, i64>(0))
-            .map_err(|_| PostgresFenceError::Attestation("relation OID is out of range"))?;
-        inventory.push(FencedTable {
-            namespace: table.namespace.to_string(),
-            table: table.name.to_string(),
-            relation_oid,
-            trigger_oid: 0,
-            trigger_name: trigger_name(index, table),
-        });
     }
-    Ok(FenceInventory {
+
+    let mut by_oid = BTreeMap::new();
+    for (root_oid, (namespace, table)) in roots {
+        transaction.batch_execute(&format!(
+            "LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE",
+            quote_ident(&namespace),
+            quote_ident(&table)
+        ))?;
+        let kind: String = transaction
+            .query_one(
+                "SELECT relkind::text FROM pg_class WHERE oid=$1::oid",
+                &[&root_oid],
+            )?
+            .get(0);
+        let rows = if kind == "p" {
+            transaction.query(
+                "SELECT tree.relid::bigint, tree.parentrelid::bigint, n.nspname, c.relname, c.relkind::text, c.relispartition, pt.partstrat::text, CASE WHEN c.relkind='p' THEN pg_get_partkeydef(c.oid) END, CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid, true) END FROM pg_partition_tree($1::oid) tree JOIN pg_class c ON c.oid=tree.relid JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_partitioned_table pt ON pt.partrelid=c.oid ORDER BY tree.relid",
+                &[&root_oid],
+            )?
+        } else {
+            transaction.query(
+                "SELECT c.oid::bigint, NULL::bigint, n.nspname, c.relname, c.relkind::text, c.relispartition, NULL::text, NULL::text, NULL::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=$1::oid",
+                &[&root_oid],
+            )?
+        };
+        for row in rows {
+            let relation_oid = oid_from_i64(row.get(0))?;
+            let parent_relation_oid = row.get::<_, Option<i64>>(1).map(oid_from_i64).transpose()?;
+            let observed = FencedTable {
+                namespace: row.get(2),
+                table: row.get(3),
+                relation_oid,
+                trigger_oid: 0,
+                trigger_name: String::new(),
+                relation_kind: row.get(4),
+                is_partition: row.get(5),
+                parent_relation_oid,
+                partition_strategy: row.get(6),
+                partition_key_definition: row.get(7),
+                partition_bound: row.get(8),
+            };
+            if by_oid.insert(relation_oid, observed).is_some() {
+                return Err(PostgresFenceError::Attestation(
+                    "planned partition trees overlap",
+                ));
+            }
+        }
+    }
+    let mut inventory = by_oid.into_values().collect::<Vec<_>>();
+    for (index, table) in inventory.iter_mut().enumerate() {
+        let qualified = QualifiedTable {
+            namespace: super::model::Identifier::new(table.namespace.clone())
+                .map_err(|_| PostgresFenceError::Attestation("invalid live namespace"))?,
+            name: super::model::Identifier::new(table.table.clone())
+                .map_err(|_| PostgresFenceError::Attestation("invalid live table"))?,
+        };
+        table.trigger_name = trigger_name(index, &qualified);
+    }
+    let result = FenceInventory {
         generation: generation.to_owned(),
         admin_role: admin_role.to_owned(),
         schema_oid: 0,
@@ -1237,7 +1379,9 @@ fn lock_and_resolve_tables(
         event_trigger_oid: 0,
         tables: inventory,
         sequences: Vec::new(),
-    })
+    };
+    validate_table_topology_inventory(&result)?;
+    Ok(result)
 }
 
 fn inventory_business_sequences(
@@ -1623,15 +1767,165 @@ fn lock_inventory_tables(
             quote_ident(&table.namespace),
             quote_ident(&table.table)
         ))?;
-        let oid: i64 = transaction
-            .query_one(
-                "SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='r'",
-                &[&table.namespace, &table.table],
+    }
+    attest_table_topology(transaction, inventory)?;
+    Ok(())
+}
+
+fn attest_table_topology(
+    transaction: &mut Transaction<'_>,
+    inventory: &FenceInventory,
+) -> Result<(), PostgresFenceError> {
+    validate_table_topology_inventory(inventory)?;
+    let expected_oids = inventory
+        .tables
+        .iter()
+        .map(|table| table.relation_oid)
+        .collect::<BTreeSet<_>>();
+    if expected_oids.len() != inventory.tables.len() {
+        return Err(PostgresFenceError::Attestation(
+            "fenced relation identities are duplicated",
+        ));
+    }
+    for table in &inventory.tables {
+        let row = transaction
+            .query_opt(
+                "SELECT n.nspname, c.relname, c.relkind::text, c.relispartition, parent.inhparent::bigint, pt.partstrat::text, CASE WHEN c.relkind='p' THEN pg_get_partkeydef(c.oid) END, CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid, true) END FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN LATERAL (SELECT i.inhparent FROM pg_inherits i WHERE i.inhrelid=c.oid ORDER BY i.inhseqno LIMIT 1) parent ON true LEFT JOIN pg_partitioned_table pt ON pt.partrelid=c.oid WHERE c.oid=$1::oid AND c.relkind IN ('r','p')",
+                &[&table.relation_oid],
             )?
-            .get(0);
-        if u32::try_from(oid).ok() != Some(table.relation_oid) {
+            .ok_or(PostgresFenceError::Attestation(
+                "a fenced relation identity is absent",
+            ))?;
+        let parent_relation_oid = row.get::<_, Option<i64>>(4).map(oid_from_i64).transpose()?;
+        if row.get::<_, String>(0) != table.namespace
+            || row.get::<_, String>(1) != table.table
+            || row.get::<_, String>(2) != table.relation_kind
+            || row.get::<_, bool>(3) != table.is_partition
+            || parent_relation_oid != table.parent_relation_oid
+            || row.get::<_, Option<String>>(5) != table.partition_strategy
+            || row.get::<_, Option<String>>(6) != table.partition_key_definition
+            || row.get::<_, Option<String>>(7) != table.partition_bound
+        {
             return Err(PostgresFenceError::Attestation(
-                "a fenced relation identity changed during drain",
+                "a fenced table or partition topology changed",
+            ));
+        }
+        if table.is_partition != table.parent_relation_oid.is_some() {
+            return Err(PostgresFenceError::Attestation(
+                "partition parent evidence is inconsistent",
+            ));
+        }
+        if table
+            .parent_relation_oid
+            .is_some_and(|parent| !expected_oids.contains(&parent))
+        {
+            return Err(PostgresFenceError::Attestation(
+                "partition parent is outside the fence inventory",
+            ));
+        }
+    }
+
+    let roots = inventory
+        .tables
+        .iter()
+        .filter(|table| table.relation_kind == "p" && table.parent_relation_oid.is_none());
+    for root in roots {
+        let observed = transaction
+            .query(
+                "SELECT relid::bigint FROM pg_partition_tree($1::oid) ORDER BY relid",
+                &[&root.relation_oid],
+            )?
+            .into_iter()
+            .map(|row| oid_from_i64(row.get(0)))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut expected = BTreeSet::from([root.relation_oid]);
+        loop {
+            let previous = expected.len();
+            let additions = inventory
+                .tables
+                .iter()
+                .filter_map(|table| {
+                    table
+                        .parent_relation_oid
+                        .filter(|parent| expected.contains(parent))
+                        .map(|_| table.relation_oid)
+                })
+                .collect::<Vec<_>>();
+            expected.extend(additions);
+            if expected.len() == previous {
+                break;
+            }
+        }
+        if observed != expected {
+            return Err(PostgresFenceError::Attestation(
+                "partition tree membership changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_table_topology_inventory(inventory: &FenceInventory) -> Result<(), PostgresFenceError> {
+    let by_oid = inventory
+        .tables
+        .iter()
+        .map(|table| (table.relation_oid, table))
+        .collect::<BTreeMap<_, _>>();
+    let names = inventory
+        .tables
+        .iter()
+        .map(|table| (&table.namespace, &table.table))
+        .collect::<BTreeSet<_>>();
+    if by_oid.len() != inventory.tables.len() || names.len() != inventory.tables.len() {
+        return Err(PostgresFenceError::Attestation(
+            "fenced relation identities are duplicated",
+        ));
+    }
+    for table in &inventory.tables {
+        if !matches!(table.relation_kind.as_str(), "r" | "p") {
+            return Err(PostgresFenceError::Attestation(
+                "fenced relation kind is unsupported",
+            ));
+        }
+        if table.relation_kind == "p"
+            && (table.partition_strategy.is_none() || table.partition_key_definition.is_none())
+        {
+            return Err(PostgresFenceError::Attestation(
+                "partitioned table key evidence is incomplete",
+            ));
+        }
+        if table.relation_kind == "r"
+            && (table.partition_strategy.is_some() || table.partition_key_definition.is_some())
+        {
+            return Err(PostgresFenceError::Attestation(
+                "stored table has partitioned-table key evidence",
+            ));
+        }
+        if table.is_partition
+            != (table.parent_relation_oid.is_some() && table.partition_bound.is_some())
+        {
+            return Err(PostgresFenceError::Attestation(
+                "partition parent or bound evidence is inconsistent",
+            ));
+        }
+        let mut current = table;
+        let mut visited = BTreeSet::new();
+        while let Some(parent_oid) = current.parent_relation_oid {
+            if !visited.insert(current.relation_oid) {
+                return Err(PostgresFenceError::Attestation(
+                    "partition topology contains a cycle",
+                ));
+            }
+            current = by_oid
+                .get(&parent_oid)
+                .copied()
+                .ok_or(PostgresFenceError::Attestation(
+                    "partition parent is outside the fence inventory",
+                ))?;
+        }
+        if table.is_partition && current.relation_kind != "p" {
+            return Err(PostgresFenceError::Attestation(
+                "partition topology does not terminate at a partitioned root",
             ));
         }
     }
@@ -1751,6 +2045,7 @@ fn attest_transaction(
     let (format_version, stored_fingerprint) = load_inventory_fingerprint(transaction)?;
     let observed_fingerprint = match format_version {
         FENCE_FORMAT_VERSION => inventory.fingerprint()?,
+        2 => pre_partition_inventory_fingerprint(inventory)?,
         1 => match history_guard_storage(inventory)? {
             HistoryGuardStorage::Current => pre_sequence_inventory_fingerprint(inventory)?,
             HistoryGuardStorage::Legacy => legacy_inventory_fingerprint(inventory)?,
@@ -1780,9 +2075,12 @@ fn attest_transaction(
         return Err(PostgresFenceError::Attestation("token digest differs"));
     }
     attest_owners_and_acl(transaction, &inventory.admin_role)?;
-    if format_version == FENCE_FORMAT_VERSION {
+    if format_version >= 2 {
         attest_protected_sequences(transaction, inventory)?;
         attest_sequence_exclusion(transaction, inventory)?;
+    }
+    if format_version == FENCE_FORMAT_VERSION {
+        attest_table_topology(transaction, inventory)?;
     }
     attest_protected_object_ids(transaction, inventory, expected_state)?;
     let event: Option<i64> = transaction.query_opt("SELECT e.oid::bigint FROM pg_event_trigger e JOIN pg_proc p ON p.oid=e.evtfoid JOIN pg_namespace n ON n.oid=p.pronamespace WHERE e.evtname=$1 AND e.evtevent='ddl_command_start' AND e.evtenabled='O' AND n.nspname=$2 AND p.proname=$3", &[&DDL_TRIGGER, &FENCE_SCHEMA, &DDL_FUNCTION])?.map(|row| row.get(0));
@@ -2147,6 +2445,12 @@ mod tests {
                 relation_oid: 1,
                 trigger_oid: 8,
                 trigger_name: "t1".into(),
+                relation_kind: "r".into(),
+                is_partition: false,
+                parent_relation_oid: None,
+                partition_strategy: None,
+                partition_key_definition: None,
+                partition_bound: None,
             }],
             sequences: Vec::new(),
         };
@@ -2351,6 +2655,12 @@ insecure = true
                 relation_oid: 8,
                 trigger_oid: 9,
                 trigger_name: "legacy-trigger".into(),
+                relation_kind: String::new(),
+                is_partition: false,
+                parent_relation_oid: None,
+                partition_strategy: None,
+                partition_key_definition: None,
+                partition_bound: None,
             }],
             sequences: Vec::new(),
         };
@@ -2369,5 +2679,123 @@ insecure = true
         let mut malformed = inventory;
         malformed.history_function_oid = 10;
         assert!(history_guard_storage(&malformed).is_err());
+    }
+
+    #[test]
+    fn partition_topology_is_part_of_the_current_inventory_fingerprint() {
+        let root = FencedTable {
+            namespace: "ledger".into(),
+            table: "entries".into(),
+            relation_oid: 20,
+            trigger_oid: 30,
+            trigger_name: "root_guard".into(),
+            relation_kind: "p".into(),
+            is_partition: false,
+            parent_relation_oid: None,
+            partition_strategy: Some("r".into()),
+            partition_key_definition: Some("RANGE (account_id)".into()),
+            partition_bound: None,
+        };
+        let leaf = FencedTable {
+            namespace: "ledger".into(),
+            table: "entries_low".into(),
+            relation_oid: 21,
+            trigger_oid: 31,
+            trigger_name: "leaf_guard".into(),
+            relation_kind: "r".into(),
+            is_partition: true,
+            parent_relation_oid: Some(20),
+            partition_strategy: None,
+            partition_key_definition: None,
+            partition_bound: Some("FOR VALUES FROM (MINVALUE) TO (1000)".into()),
+        };
+        let inventory = FenceInventory {
+            generation: "partition-generation".into(),
+            admin_role: "admin".into(),
+            schema_oid: 1,
+            registry_oid: 2,
+            history_oid: 3,
+            history_sequence_oid: 4,
+            history_function_oid: 5,
+            history_trigger_oid: 6,
+            dml_function_oid: 7,
+            ddl_function_oid: 8,
+            event_trigger_oid: 9,
+            tables: vec![root, leaf],
+            sequences: Vec::new(),
+        };
+        assert!(validate_table_topology_inventory(&inventory).is_ok());
+
+        let prior_fingerprint = pre_partition_inventory_fingerprint(&inventory).unwrap();
+        let mut changed = inventory.clone();
+        changed.tables[1].partition_bound = Some("FOR VALUES FROM (MINVALUE) TO (999)".into());
+        assert_ne!(
+            inventory.fingerprint().unwrap(),
+            changed.fingerprint().unwrap()
+        );
+        assert_eq!(
+            prior_fingerprint,
+            pre_partition_inventory_fingerprint(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_partition_topology_fails_closed() {
+        let root = FencedTable {
+            namespace: "public".into(),
+            table: "root".into(),
+            relation_oid: 1,
+            trigger_oid: 3,
+            trigger_name: "root_guard".into(),
+            relation_kind: "p".into(),
+            is_partition: false,
+            parent_relation_oid: None,
+            partition_strategy: Some("l".into()),
+            partition_key_definition: Some("LIST (tenant_id)".into()),
+            partition_bound: None,
+        };
+        let leaf = FencedTable {
+            namespace: "public".into(),
+            table: "leaf".into(),
+            relation_oid: 2,
+            trigger_oid: 4,
+            trigger_name: "leaf_guard".into(),
+            relation_kind: "r".into(),
+            is_partition: true,
+            parent_relation_oid: Some(1),
+            partition_strategy: None,
+            partition_key_definition: None,
+            partition_bound: Some("FOR VALUES IN (1)".into()),
+        };
+        let inventory = FenceInventory {
+            generation: "g".into(),
+            admin_role: "admin".into(),
+            schema_oid: 5,
+            registry_oid: 6,
+            history_oid: 7,
+            history_sequence_oid: 8,
+            history_function_oid: 9,
+            history_trigger_oid: 10,
+            dml_function_oid: 11,
+            ddl_function_oid: 12,
+            event_trigger_oid: 13,
+            tables: vec![root, leaf],
+            sequences: Vec::new(),
+        };
+        assert!(validate_table_topology_inventory(&inventory).is_ok());
+
+        let mut missing_parent = inventory.clone();
+        missing_parent.tables.remove(0);
+        assert!(validate_table_topology_inventory(&missing_parent).is_err());
+
+        let mut missing_bound = inventory.clone();
+        missing_bound.tables[1].partition_bound = None;
+        assert!(validate_table_topology_inventory(&missing_bound).is_err());
+
+        let mut cycle = inventory;
+        cycle.tables[0].is_partition = true;
+        cycle.tables[0].parent_relation_oid = Some(2);
+        cycle.tables[0].partition_bound = Some("FOR VALUES IN (2)".into());
+        assert!(validate_table_topology_inventory(&cycle).is_err());
     }
 }

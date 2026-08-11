@@ -160,6 +160,11 @@ pub trait ReadSession {
     fn read_only_evidence(&self) -> &ReadOnlyEvidence;
     fn snapshot(&self) -> &SnapshotToken;
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch>;
+    fn select_page_only(&mut self, _request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        Err(ConnectionError::InvalidRequest(
+            "adapter does not support physical-relation paging".into(),
+        ))
+    }
 }
 
 pub trait WriteSession {
@@ -171,6 +176,11 @@ pub trait WriteSession {
 
 pub trait VerificationSession {
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch>;
+    fn select_page_only(&mut self, _request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        Err(ConnectionError::InvalidRequest(
+            "adapter does not support physical-relation paging".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
