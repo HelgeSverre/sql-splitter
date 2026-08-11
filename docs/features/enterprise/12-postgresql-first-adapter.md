@@ -12,9 +12,11 @@ The target adapter also proves database ownership and emptiness immediately
 before an atomic create-only transaction for supported namespaces, ordinary
 tables, columns, primary keys, unique constraints, and check constraints.
 
-These execution contracts are library-only spike code. The CLI remains
-plan-only. There is no operation scheduler, durable live runner, or resume
-command, so the spike cannot migrate a database yet. Sequences, generated
+The feature-gated spike CLI can execute a reviewed same-dialect plan for the
+supported table subset. It durably records operation and chunk transitions,
+uses bounded keyset pages, and performs exact source/target verification before
+finalization. It is not production-ready. There is no resume command, foreign-
+key installation, or complete crash-reconciliation path. Sequences, generated
 columns, user-defined types, extensions, and other unsupported semantics fail
 before DDL.
 
@@ -45,8 +47,9 @@ TLS-enabled source and empty target databases. The reproducible
 and verifies snapshot stability during concurrent writes, native query
 cancellation, source-role write rejection, create-only DDL and empty-target
 rechecks, identity-value insertion, and exact binary-protocol round trips for
-text, bytes, floats, JSONB, numeric, and temporal values. This is spike evidence,
-not a production support statement.
+text, bytes, floats, JSONB, numeric, and temporal values. It also executes and
+strictly finalizes a three-row reviewed plan. This is spike evidence, not a
+production support statement.
 
 ## Configuration and security
 
@@ -86,7 +89,7 @@ the complete report.
 The adapter does not yet prove:
 
 - complete table-key suitability and pagination matrices;
-- snapshot lifetime through a durable copy and final source verification;
+- restartable snapshot or continuous write-fence evidence for resume;
 - post-data indexes and broader DDL coverage;
 - foreign-key anti-joins and constraint validation;
 - crash recovery or full resume;

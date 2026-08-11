@@ -1908,7 +1908,7 @@ pub fn build_plan(
         target_catalog_fingerprint: catalog_fingerprint(&target.catalog)?,
         source_catalog: Some(source.catalog.clone()),
         target_catalog: Some(target.catalog.clone()),
-        consistency_mode: "repeatable_read_read_only_catalog_snapshot".into(),
+        consistency_mode: "postgres_repeatable_read_read_only".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_same_dialect_exact".into(),
         capabilities: BTreeMap::from([

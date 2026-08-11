@@ -4,15 +4,17 @@
 > contains a fixture-backed spike for selected contracts needed by
 > Implementation Phases 1–5: typed values, bounded batches, deterministic
 > plans, snapshot-bound keyset paging, journal ordering, ambiguous-commit
-> classification, and exact row comparison. It does not implement a live
-> operation runner, FK validation, complete resume orchestration, or production
-> finalization, and it does not satisfy the complete real-engine acceptance
+> classification, and exact row comparison. It includes an internal live
+> PostgreSQL runner for the currently supported table subset. It does not
+> implement FK validation, complete resume orchestration, or production
+> recovery, and it does not satisfy the complete real-engine acceptance
 > gates in [08](./08-implementation-prerequisites.md).
 >
 > A PostgreSQL plan adapter, snapshot-bound source reader, native control
 > session, create-only pre-data DDL transaction, transactional plain-INSERT
-> writer, and read-only target verifier are available as internal spike
-> contracts. There is no live execution or resume command. See
+> writer, read-only target verifier, and strict finalization path are available
+> as internal spike contracts. A feature-gated spike command can execute this
+> narrow path. There is no resume command. See
 > [12](./12-postgresql-first-adapter.md) for the exact boundary and support
 > matrix.
 

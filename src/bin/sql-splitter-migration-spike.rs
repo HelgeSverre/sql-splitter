@@ -32,6 +32,30 @@ enum Command {
         #[arg(long)]
         plan_output: PathBuf,
     },
+    /// Execute one reviewed same-dialect PostgreSQL plan into an empty target.
+    ExecutePostgres {
+        /// Exact protected reviewed plan artifact.
+        #[arg(long)]
+        plan_input: PathBuf,
+        /// Source endpoint TOML with a server-enforced read-only role.
+        #[arg(long)]
+        source_config: PathBuf,
+        /// Empty migration-owned target endpoint TOML.
+        #[arg(long)]
+        target_config: PathBuf,
+        /// External approval or change-record reference bound into state.
+        #[arg(long)]
+        approval_ref: String,
+        /// Explicit write authorization gate.
+        #[arg(long, required = true)]
+        execute: bool,
+        /// Required exact schema and canonical row verification gate.
+        #[arg(long, required = true)]
+        strict_verification: bool,
+        /// New protected durable migration state artifact.
+        #[arg(long)]
+        state_output: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -65,6 +89,29 @@ fn main() -> anyhow::Result<()> {
                 plan.plan.unsupported_objects.objects.len(),
                 plan.plan.unsupported_objects.blocks_execution()
             );
+        }
+        Command::ExecutePostgres {
+            plan_input,
+            source_config,
+            target_config,
+            approval_ref,
+            execute,
+            strict_verification,
+            state_output,
+        } => {
+            if !execute || !strict_verification {
+                anyhow::bail!("--execute and --strict-verification are required");
+            }
+            let report = sql_splitter::migration::runner::execute_postgres_plan(
+                plan_input,
+                source_config,
+                target_config,
+                &approval_ref,
+                &state_output,
+            )?;
+            println!("state: {}", report.state.display());
+            println!("copied rows: {}", report.copied_rows);
+            println!("committed chunks: {}", report.committed_chunks);
         }
     }
     Ok(())

@@ -52,7 +52,10 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "CREATE ROLE migration_reader LOGIN PASSWORD 'reader-secret'" \
   -c "CREATE ROLE migration_mutator LOGIN PASSWORD 'mutator-secret'" \
   -c "CREATE ROLE migration_target_owner LOGIN PASSWORD 'target-secret'" \
+  -c "CREATE ROLE migration_run_target_owner LOGIN PASSWORD 'run-target-secret'" \
   -c "CREATE DATABASE migration_target OWNER migration_target_owner" \
+  -c "CREATE DATABASE migration_run_source OWNER migration_mutator" \
+  -c "CREATE DATABASE migration_run_target OWNER migration_run_target_owner" \
   -c "GRANT CONNECT ON DATABASE postgres TO migration_reader, migration_mutator" \
   -c "GRANT USAGE ON SCHEMA public TO migration_reader" \
   -c "GRANT ALL ON SCHEMA public TO migration_mutator" \
@@ -61,6 +64,15 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "GRANT ALL ON public.live_snapshot_rows TO migration_mutator" \
   -c "CREATE VIEW public.slow_rows AS SELECT g::bigint AS id, repeat('x',16)::text AS payload FROM generate_series(1,100) AS g CROSS JOIN LATERAL pg_sleep(0.05 + g * 0)" \
   -c "GRANT SELECT ON public.slow_rows TO migration_reader" >/dev/null
+
+docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -d migration_run_source -v ON_ERROR_STOP=1 \
+  -c "REVOKE CREATE,TEMP ON DATABASE migration_run_source FROM PUBLIC" \
+  -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC" \
+  -c "GRANT CONNECT ON DATABASE migration_run_source TO migration_reader" \
+  -c "GRANT USAGE ON SCHEMA public TO migration_reader" \
+  -c "CREATE TABLE public.accounts (id bigint PRIMARY KEY, name text NOT NULL)" \
+  -c "INSERT INTO public.accounts VALUES (1, 'one'), (2, 'two'), (3, 'three')" \
+  -c "GRANT SELECT ON public.accounts TO migration_reader" >/dev/null
 
 cat >"$test_dir/source.toml" <<EOF
 host = "localhost"
@@ -95,12 +107,37 @@ credential_env = "SQL_SPLITTER_PG_TARGET_PASSWORD"
 ca_certificate = "$test_dir/ca.crt"
 EOF
 
+cat >"$test_dir/run-source.toml" <<EOF
+host = "localhost"
+port = $port
+database = "migration_run_source"
+user = "migration_reader"
+credential_env = "SQL_SPLITTER_PG_READER_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+
+cat >"$test_dir/run-target.toml" <<EOF
+host = "localhost"
+port = $port
+database = "migration_run_target"
+user = "migration_run_target_owner"
+credential_env = "SQL_SPLITTER_PG_RUN_TARGET_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+
 export SQL_SPLITTER_PG_TEST_SOURCE_CONFIG="$test_dir/source.toml"
 export SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG="$test_dir/mutator.toml"
 export SQL_SPLITTER_PG_TEST_TARGET_CONFIG="$test_dir/target.toml"
+export SQL_SPLITTER_PG_RUN_SOURCE_CONFIG="$test_dir/run-source.toml"
+export SQL_SPLITTER_PG_RUN_TARGET_CONFIG="$test_dir/run-target.toml"
 export SQL_SPLITTER_PG_READER_PASSWORD=reader-secret
 export SQL_SPLITTER_PG_MUTATOR_PASSWORD=mutator-secret
 export SQL_SPLITTER_PG_TARGET_PASSWORD=target-secret
+export SQL_SPLITTER_PG_RUN_TARGET_PASSWORD=run-target-secret
 
 test_name=live_snapshot_paging_is_stable_during_concurrent_writes
 cargo test --no-default-features --features enterprise-migration-spike \
@@ -112,5 +149,8 @@ test_name=live_pre_data_ddl_is_create_only_and_rechecks_emptiness
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_target_writer_round_trips_binary_protocol_values
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_reviewed_plan_executes_and_strictly_finalizes
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

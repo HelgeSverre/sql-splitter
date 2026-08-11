@@ -14,6 +14,7 @@ use sql_splitter::migration::connection::{
     CancellationToken, ConnectionError, KeysetPage, SourceConnectionFactory,
     TargetConnectionFactory,
 };
+use sql_splitter::migration::journal::{MigrationState, MigrationStatus};
 use sql_splitter::migration::model::{
     CatalogNamespace, CatalogObject, CatalogObjectKind, DbValue, Identifier, KeyTuple,
     QualifiedTable, VendorCatalog,
@@ -22,6 +23,7 @@ use sql_splitter::migration::plan::ReviewedPlan;
 use sql_splitter::migration::postgres::{
     write_live_plan, PostgresEndpointConfig, PostgresSourceFactory,
 };
+use sql_splitter::migration::runner::execute_postgres_plan;
 
 #[test]
 #[ignore = "requires TLS-enabled PostgreSQL source and empty target databases"]
@@ -219,6 +221,46 @@ fn live_pre_data_ddl_is_create_only_and_rechecks_emptiness() -> anyhow::Result<(
         target.create_pre_data_schema(&ddl_catalog()?),
         Err(ConnectionError::InvalidRequest(message)) if message.contains("not empty")
     ));
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires dedicated TLS-enabled PostgreSQL execution databases"]
+fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
+    let source = required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?;
+    let target = required_path("SQL_SPLITTER_PG_RUN_TARGET_CONFIG")?;
+    let directory = tempfile::tempdir()?;
+    let plan_path = directory.path().join("reviewed-plan.json");
+    let state_path = directory.path().join("migration-state.json");
+    let reviewed = write_live_plan(&source, &target, &plan_path)?;
+    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+
+    let report = execute_postgres_plan(
+        &plan_path,
+        &source,
+        &target,
+        "LIVE-TEST-APPROVAL",
+        &state_path,
+    )?;
+    assert_eq!(report.copied_rows, 3);
+    assert!(report.committed_chunks >= 1);
+    let state: MigrationState = read_json(&state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    assert!(state
+        .operations
+        .iter()
+        .all(|operation| operation.state
+            == sql_splitter::migration::journal::OperationState::Verified));
+    assert!(state
+        .chunks
+        .iter()
+        .all(|chunk| chunk.state == sql_splitter::migration::journal::ChunkState::Committed));
+
+    let mut target_client = connect(&PostgresEndpointConfig::read(target)?)?;
+    let rows = target_client.query("SELECT id, name FROM public.accounts ORDER BY id", &[])?;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get::<_, i64>(0), 1);
+    assert_eq!(rows[2].get::<_, String>(1), "three");
     Ok(())
 }
 
