@@ -20,6 +20,7 @@ const FILE_HEADER_LEN: u64 = 10;
 const FRAME_HEADER_LEN: usize = 84;
 const FRAME_TRAILER_LEN: usize = 32;
 pub const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
+pub const MAX_GENESIS_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum AppendJournalError {
@@ -419,15 +420,19 @@ impl JournalProjection {
     ) -> Result<(), AppendJournalError> {
         if self.status != MigrationStatus::Running
             || self.prepared_chunk.is_some()
-            || self.operations.values().any(|state| {
-                matches!(state, OperationState::Running | OperationState::Prepared)
-            })
+            || self
+                .operations
+                .values()
+                .any(|state| matches!(state, OperationState::Running | OperationState::Prepared))
         {
             return Err(AppendJournalError::InvalidTransition(
                 "atomic operation prepare phase",
             ));
         }
-        let group = operation_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let group = operation_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         if group.is_empty() || group.len() != operation_ids.len() {
             return Err(AppendJournalError::InvalidTransition(
                 "atomic operation prepare set",
@@ -957,6 +962,7 @@ fn encode_event_frame(
 ) -> Result<Vec<u8>, AppendJournalError> {
     let (kind, payload) = match event {
         JournalEvent::ChunkPrepared(chunk) => (1, serde_json::to_vec(chunk)?),
+        JournalEvent::Genesis(genesis) => (2, serde_json::to_vec(genesis)?),
         event => (0, serde_json::to_vec(event)?),
     };
     encode_frame(sequence, previous_hash, kind, &payload)
@@ -968,7 +974,7 @@ fn encode_frame(
     kind: u16,
     payload: &[u8],
 ) -> Result<Vec<u8>, AppendJournalError> {
-    if payload.len() > MAX_PAYLOAD_LEN {
+    if payload.len() > maximum_payload_len(kind) {
         return Err(AppendJournalError::PayloadTooLarge);
     }
     let payload_len =
@@ -1030,7 +1036,7 @@ fn read_frame(
     if magic != FRAME_MAGIC || version != FORMAT_VERSION || sequence != expected_sequence {
         return Err(AppendJournalError::CorruptFrame { offset });
     }
-    if payload_len > MAX_PAYLOAD_LEN || header[20..52] != previous_hash {
+    if payload_len > maximum_payload_len(kind) || header[20..52] != previous_hash {
         return Err(AppendJournalError::CorruptFrame { offset });
     }
     let mut payload = vec![0; payload_len];
@@ -1051,6 +1057,7 @@ fn read_frame(
     let event = match kind {
         0 => serde_json::from_slice(&payload),
         1 => serde_json::from_slice(&payload).map(JournalEvent::ChunkPrepared),
+        2 => serde_json::from_slice(&payload).map(JournalEvent::Genesis),
         _ => return Err(AppendJournalError::CorruptFrame { offset }),
     }
     .map_err(|_| AppendJournalError::CorruptFrame { offset })?;
@@ -1065,7 +1072,12 @@ fn frame_end_at(file: &File, offset: u64, snapshot_end: u64) -> Result<u64, Appe
             .try_into()
             .map_err(|_| AppendJournalError::CorruptFrame { offset })?,
     ) as u64;
-    if payload_len > MAX_PAYLOAD_LEN as u64 {
+    let kind = u16::from_le_bytes(
+        prefix[6..8]
+            .try_into()
+            .map_err(|_| AppendJournalError::CorruptFrame { offset })?,
+    );
+    if payload_len > maximum_payload_len(kind) as u64 {
         return Err(AppendJournalError::CorruptFrame { offset });
     }
     let end = offset
@@ -1138,10 +1150,19 @@ fn read_frame_at(
     let event = match kind {
         0 => serde_json::from_slice(payload),
         1 => serde_json::from_slice(payload).map(JournalEvent::ChunkPrepared),
+        2 => serde_json::from_slice(payload).map(JournalEvent::Genesis),
         _ => return Err(AppendJournalError::CorruptFrame { offset }),
     }
     .map_err(|_| AppendJournalError::CorruptFrame { offset })?;
     Ok(Some((event, stored_hash, end)))
+}
+
+fn maximum_payload_len(kind: u16) -> usize {
+    if kind == 2 {
+        MAX_GENESIS_PAYLOAD_LEN
+    } else {
+        MAX_PAYLOAD_LEN
+    }
 }
 
 #[cfg(unix)]
@@ -1315,7 +1336,11 @@ mod tests {
             .iter()
             .map(|operation| OperationSpec {
                 operation_id: operation.id.to_string(),
-                dependencies: operation.dependencies.iter().map(ToString::to_string).collect(),
+                dependencies: operation
+                    .dependencies
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
                 is_copy: operation.kind == OperationKind::CopyTable,
                 phase: operation_phase(&operation.kind),
             })
