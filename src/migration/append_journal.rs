@@ -44,6 +44,17 @@ pub enum AppendJournalError {
     InvalidGenesis,
     #[error("journal already exists: {0}")]
     AlreadyExists(PathBuf),
+    #[error("journal cannot be reused after an append failure")]
+    Poisoned,
+}
+
+/// One-shot journal failures available only to the explicit fault-test build.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendJournalFault {
+    /// Persist a proper prefix of `ChunkCommitted`, then report `ENOSPC`.
+    TornChunkCommittedEnospc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +552,9 @@ pub struct AppendJournal {
     projection: JournalProjection,
     next_sequence: u64,
     head_hash: [u8; 32],
+    poisoned: bool,
+    #[cfg(feature = "migration-fault-injection")]
+    fault: Option<AppendJournalFault>,
 }
 
 impl std::fmt::Debug for AppendJournal {
@@ -610,6 +624,9 @@ impl AppendJournal {
             projection,
             next_sequence: 1,
             head_hash: [0; 32],
+            poisoned: false,
+            #[cfg(feature = "migration-fault-injection")]
+            fault: None,
         };
         journal.append_event(&JournalEvent::Genesis(Box::new(genesis)))?;
         Ok(journal)
@@ -648,7 +665,21 @@ impl AppendJournal {
                 .checked_add(1)
                 .ok_or(AppendJournalError::SequenceOverflow)?,
             head_hash: scan.head_hash,
+            poisoned: false,
+            #[cfg(feature = "migration-fault-injection")]
+            fault: None,
         })
+    }
+
+    /// Arms one deterministic, one-shot append failure for a fault test.
+    #[doc(hidden)]
+    #[cfg(feature = "migration-fault-injection")]
+    pub fn arm_fault(&mut self, fault: AppendJournalFault) -> Result<(), AppendJournalError> {
+        if self.poisoned {
+            return Err(AppendJournalError::Poisoned);
+        }
+        self.fault = Some(fault);
+        Ok(())
     }
 
     pub fn genesis(&self) -> &Genesis {
@@ -787,9 +818,34 @@ impl AppendJournal {
     }
 
     fn append_event(&mut self, event: &JournalEvent) -> Result<(), AppendJournalError> {
+        if self.poisoned {
+            return Err(AppendJournalError::Poisoned);
+        }
         let frame = encode_event_frame(self.next_sequence, self.head_hash, event)?;
-        self.file.write_all(&frame)?;
-        self.file.sync_all()?;
+        #[cfg(feature = "migration-fault-injection")]
+        if matches!(event, JournalEvent::ChunkCommitted { .. })
+            && self.fault.take() == Some(AppendJournalFault::TornChunkCommittedEnospc)
+        {
+            let prefix_len = (frame.len() / 2).clamp(1, frame.len() - 1);
+            if let Err(error) = self
+                .file
+                .write_all(&frame[..prefix_len])
+                .and_then(|()| self.file.sync_all())
+            {
+                self.poisoned = true;
+                return Err(error.into());
+            }
+            self.poisoned = true;
+            return Err(io::Error::from_raw_os_error(libc::ENOSPC).into());
+        }
+        if let Err(error) = self
+            .file
+            .write_all(&frame)
+            .and_then(|()| self.file.sync_all())
+        {
+            self.poisoned = true;
+            return Err(error.into());
+        }
         self.head_hash.copy_from_slice(&frame[frame.len() - 32..]);
         self.next_sequence = self
             .next_sequence
@@ -1656,6 +1712,51 @@ mod tests {
             .unwrap();
         let journal = AppendJournal::open_resume(&path).unwrap();
         assert_eq!(journal.file.metadata().unwrap().len(), valid_len);
+    }
+
+    #[cfg(feature = "migration-fault-injection")]
+    #[test]
+    fn torn_committed_enospc_preserves_prepared_intent_for_reconciliation() {
+        let directory = private_tempdir();
+        let path = directory.path().join("state");
+        let mut journal = AppendJournal::create_new(&path, genesis()).unwrap();
+        let operation_id = journal.genesis.operations[0].operation_id.clone();
+        journal
+            .transition_operation(&operation_id, OperationState::Running)
+            .unwrap();
+        journal
+            .prepare_chunk(PreparedChunk {
+                chunk_id: 1,
+                operation_id: operation_id.clone(),
+                start_key: None,
+                final_key: vec![DbValue::Signed(1)],
+                row_count: 1,
+                canonical_digest: hash(),
+                target_transaction_intent: "intent-1".into(),
+            })
+            .unwrap();
+        journal
+            .arm_fault(AppendJournalFault::TornChunkCommittedEnospc)
+            .unwrap();
+
+        let error = journal.commit_chunk_after_ack().unwrap_err();
+        assert!(matches!(
+            error,
+            AppendJournalError::Io(ref error) if error.raw_os_error() == Some(libc::ENOSPC)
+        ));
+        assert!(journal.projection().prepared_chunk.is_some());
+        assert!(matches!(
+            journal.commit_chunk_after_ack(),
+            Err(AppendJournalError::Poisoned)
+        ));
+        drop(journal);
+
+        let mut resumed = AppendJournal::open_resume(&path).unwrap();
+        assert!(resumed.projection().prepared_chunk.is_some());
+        assert_eq!(resumed.projection().last_chunk_id, 0);
+        resumed.commit_chunk_after_ack().unwrap();
+        assert!(resumed.projection().prepared_chunk.is_none());
+        assert_eq!(resumed.projection().copy_cursors[&operation_id].rows, 1);
     }
 
     #[test]
