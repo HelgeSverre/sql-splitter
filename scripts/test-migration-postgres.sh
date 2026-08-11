@@ -51,6 +51,8 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "REVOKE CREATE,TEMP ON DATABASE postgres FROM PUBLIC" \
   -c "CREATE ROLE migration_reader LOGIN PASSWORD 'reader-secret'" \
   -c "CREATE ROLE migration_mutator LOGIN PASSWORD 'mutator-secret'" \
+  -c "CREATE ROLE migration_target_owner LOGIN PASSWORD 'target-secret'" \
+  -c "CREATE DATABASE migration_target OWNER migration_target_owner" \
   -c "GRANT CONNECT ON DATABASE postgres TO migration_reader, migration_mutator" \
   -c "GRANT USAGE ON SCHEMA public TO migration_reader" \
   -c "GRANT ALL ON SCHEMA public TO migration_mutator" \
@@ -82,15 +84,31 @@ credential_env = "SQL_SPLITTER_PG_MUTATOR_PASSWORD"
 ca_certificate = "$test_dir/ca.crt"
 EOF
 
+cat >"$test_dir/target.toml" <<EOF
+host = "localhost"
+port = $port
+database = "migration_target"
+user = "migration_target_owner"
+credential_env = "SQL_SPLITTER_PG_TARGET_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+
 export SQL_SPLITTER_PG_TEST_SOURCE_CONFIG="$test_dir/source.toml"
 export SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG="$test_dir/mutator.toml"
+export SQL_SPLITTER_PG_TEST_TARGET_CONFIG="$test_dir/target.toml"
 export SQL_SPLITTER_PG_READER_PASSWORD=reader-secret
 export SQL_SPLITTER_PG_MUTATOR_PASSWORD=mutator-secret
+export SQL_SPLITTER_PG_TARGET_PASSWORD=target-secret
 
 test_name=live_snapshot_paging_is_stable_during_concurrent_writes
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_control_session_cancels_the_active_query
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_pre_data_ddl_is_create_only_and_rechecks_emptiness
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_target_writer_round_trips_binary_protocol_values

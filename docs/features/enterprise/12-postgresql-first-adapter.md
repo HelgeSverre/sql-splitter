@@ -8,10 +8,15 @@ writer contracts. The source reader owns one `REPEATABLE READ READ ONLY`
 transaction across bounded keyset pages and supports driver-native
 cancellation. The target writer uses plain parameterized `INSERT` statements
 inside an explicit transaction and a separate read-only verification session.
+The target adapter also proves database ownership and emptiness immediately
+before an atomic create-only transaction for supported namespaces, ordinary
+tables, columns, primary keys, unique constraints, and check constraints.
 
 These execution contracts are library-only spike code. The CLI remains
-plan-only. There is no operation scheduler, DDL executor, durable live runner,
-or resume command, so the spike cannot migrate a database yet.
+plan-only. There is no operation scheduler, durable live runner, or resume
+command, so the spike cannot migrate a database yet. Sequences, generated
+columns, user-defined types, extensions, and other unsupported semantics fail
+before DDL.
 
 ## Reasons
 
@@ -38,9 +43,10 @@ The ignored `migration_postgres_plan_test` exercises plan determinism against
 TLS-enabled source and empty target databases. The reproducible
 `just migration-postgres-live <version>` test creates a disposable TLS container
 and verifies snapshot stability during concurrent writes, native query
-cancellation, source-role write rejection, identity-value insertion, and exact
-binary-protocol round trips for text, bytes, floats, JSONB, numeric, and temporal
-values. This is spike evidence, not a production support statement.
+cancellation, source-role write rejection, create-only DDL and empty-target
+rechecks, identity-value insertion, and exact binary-protocol round trips for
+text, bytes, floats, JSONB, numeric, and temporal values. This is spike evidence,
+not a production support statement.
 
 ## Configuration and security
 
@@ -79,10 +85,9 @@ the complete report.
 
 The adapter does not yet prove:
 
-- target emptiness or migration ownership;
 - complete table-key suitability and pagination matrices;
 - snapshot lifetime through a durable copy and final source verification;
-- DDL rendering or execution;
+- post-data indexes and broader DDL coverage;
 - foreign-key anti-joins and constraint validation;
 - crash recovery or full resume;
 - complete real-engine acceptance matrices in CI.

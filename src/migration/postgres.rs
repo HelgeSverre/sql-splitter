@@ -12,7 +12,7 @@ use fallible_iterator::FallibleIterator;
 use native_tls::{Certificate, TlsConnector};
 use postgres::config::SslMode;
 use postgres::types::{FromSql, IsNull, ToSql, Type};
-use postgres::{CancelToken, Client, Config, IsolationLevel, Transaction};
+use postgres::{CancelToken, Client, Config, IsolationLevel};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -182,6 +182,8 @@ struct PendingSnapshot {
     client: Client,
     token: SnapshotToken,
     evidence: ReadOnlyEvidence,
+    catalog: VendorCatalog,
+    unsupported: UnsupportedObjectReport,
 }
 
 /// PostgreSQL source factory that transfers ownership of one live snapshot session.
@@ -198,6 +200,28 @@ impl PostgresSourceFactory {
             pending: Mutex::new(None),
             active_cancel: Mutex::new(None),
         }
+    }
+
+    /// Return the exact catalog captured inside the pending execution snapshot.
+    pub fn captured_catalog(
+        &self,
+        snapshot: &SnapshotToken,
+    ) -> ConnectionResult<(VendorCatalog, UnsupportedObjectReport, String)> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| ConnectionError::Database("snapshot factory lock is poisoned".into()))?;
+        let pending = pending.as_ref().ok_or(ConnectionError::SnapshotMismatch)?;
+        if &pending.token != snapshot {
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        let fingerprint = catalog_fingerprint(&pending.catalog)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        Ok((
+            pending.catalog.clone(),
+            pending.unsupported.clone(),
+            fingerprint,
+        ))
     }
 }
 
@@ -278,6 +302,9 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             server_enforced: true,
             description: "read-only transaction and source role ACL probe deny database, schema, relation, sequence, and privileged-role writes".into(),
         };
+        let (catalog, unsupported) =
+            extract_catalog(&mut client, &token.database_identity, &token.server_version)
+                .map_err(|error| ConnectionError::Database(error.to_string()))?;
         let cancel_token = client.cancel_token();
         *self
             .active_cancel
@@ -288,6 +315,8 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             client,
             token: token.clone(),
             evidence,
+            catalog,
+            unsupported,
         });
         Ok(token)
     }
@@ -372,6 +401,293 @@ impl PostgresTargetFactory {
             Some(client.cancel_token());
         Ok(())
     }
+
+    /// Recheck that the target is empty and owned by the configured role.
+    pub fn assert_empty_and_owned(&self) -> ConnectionResult<()> {
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        assert_target_empty_and_owned(&mut client)
+    }
+
+    /// Create supported namespaces and tables in one atomic PostgreSQL transaction.
+    pub fn create_pre_data_schema(&self, catalog: &VendorCatalog) -> ConnectionResult<()> {
+        if catalog.dialect != "postgresql" {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL target requires a PostgreSQL vendor catalog".into(),
+            ));
+        }
+        let statements = pre_data_statements(catalog)?;
+        let mut client = self
+            .config
+            .connect()
+            .map_err(|error| ConnectionError::Database(error.to_string()))?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        assert_target_empty_and_owned(&mut transaction)?;
+        for statement in statements {
+            transaction
+                .batch_execute(&statement)
+                .map_err(database_error)?;
+        }
+        transaction.commit().map_err(database_error)
+    }
+}
+
+fn assert_target_empty_and_owned(
+    client: &mut impl postgres::GenericClient,
+) -> ConnectionResult<()> {
+    let row = client
+        .query_one(
+            "SELECT COALESCE(pg_has_role(current_user, d.datdba, 'MEMBER') AND has_database_privilege(current_user, current_database(), 'CREATE') AND has_schema_privilege(current_user, 'public', 'CREATE'), false), EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname <> 'public' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'), EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','S','v','m','f')), EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'), EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND t.typtype IN ('c','d','e','r')), EXISTS (SELECT 1 FROM pg_extension WHERE extname <> 'plpgsql'), EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtenabled <> 'D') FROM pg_database d WHERE d.datname = current_database()",
+            &[],
+        )
+        .map_err(database_error)?;
+    let owned: bool = row.get(0);
+    let has_extra_namespace: bool = row.get(1);
+    let has_relation: bool = row.get(2);
+    let has_routine: bool = row.get(3);
+    let has_type: bool = row.get(4);
+    let has_extension: bool = row.get(5);
+    let has_event_trigger: bool = row.get(6);
+    if !owned {
+        return Err(ConnectionError::InvalidRequest(
+            "target role does not own the database or lacks create privileges".into(),
+        ));
+    }
+    if has_extra_namespace
+        || has_relation
+        || has_routine
+        || has_type
+        || has_extension
+        || has_event_trigger
+    {
+        return Err(ConnectionError::InvalidRequest(
+            "target database is not empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn pre_data_statements(catalog: &VendorCatalog) -> ConnectionResult<Vec<String>> {
+    if catalog.namespaces.iter().any(|namespace| {
+        namespace
+            .objects
+            .iter()
+            .any(|object| object.kind == CatalogObjectKind::Sequence)
+    }) {
+        return Err(ConnectionError::InvalidRequest(
+            "sequence creation, ownership, and state restoration are not implemented".into(),
+        ));
+    }
+    let mut statements = Vec::new();
+    for namespace in &catalog.namespaces {
+        if namespace.name.as_str() != "public" {
+            statements.push(format!(
+                "CREATE SCHEMA {}",
+                quote_identifier(&namespace.name)
+            ));
+        }
+    }
+    for namespace in &catalog.namespaces {
+        let mut tables = namespace
+            .objects
+            .iter()
+            .filter(|object| object.kind == CatalogObjectKind::Table)
+            .collect::<Vec<_>>();
+        tables.sort_by(|left, right| left.name.cmp(&right.name));
+        for table in tables {
+            if table
+                .attributes
+                .get("relkind")
+                .and_then(serde_json::Value::as_str)
+                != Some("r")
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "table {}.{} is not an ordinary PostgreSQL table",
+                    namespace.name, table.name
+                )));
+            }
+            let persistence = table
+                .attributes
+                .get("persistence")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("p");
+            let create = match persistence {
+                "p" => "CREATE TABLE",
+                "u" => "CREATE UNLOGGED TABLE",
+                _ => {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "unsupported table persistence {persistence} for {}.{}",
+                        namespace.name, table.name
+                    )));
+                }
+            };
+            let mut definitions = table_column_definitions(namespace, table)?;
+            definitions.extend(table_constraint_definitions(namespace, table)?);
+            if definitions.is_empty() {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "table {}.{} has no catalog columns",
+                    namespace.name, table.name
+                )));
+            }
+            statements.push(format!(
+                "{create} {}.{} ({})",
+                quote_identifier(&namespace.name),
+                quote_identifier(&table.name),
+                definitions.join(", ")
+            ));
+        }
+    }
+    Ok(statements)
+}
+
+fn table_column_definitions(
+    namespace: &CatalogNamespace,
+    table: &CatalogObject,
+) -> ConnectionResult<Vec<String>> {
+    let mut columns = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == CatalogObjectKind::Column
+                && object
+                    .attributes
+                    .get("table_oid")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(table.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|column| {
+        column
+            .attributes
+            .get("ordinal")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(i64::MAX)
+    });
+    columns
+        .into_iter()
+        .map(|column| {
+            let type_declaration = std::str::from_utf8(&column.definition).map_err(|_| {
+                ConnectionError::InvalidRequest(format!(
+                    "column {} has a non-UTF-8 type declaration",
+                    column.name
+                ))
+            })?;
+            if column
+                .attributes
+                .get("type_schema")
+                .and_then(serde_json::Value::as_str)
+                != Some("pg_catalog")
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "column {} uses an unsupported user-defined type",
+                    column.name
+                )));
+            }
+            let mut definition = format!("{} {type_declaration}", quote_identifier(&column.name));
+            if column
+                .attributes
+                .get("generated")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "column {} is generated and cannot be created by the current executor",
+                    column.name
+                )));
+            }
+            if let Some(collation) = column
+                .attributes
+                .get("collation")
+                .and_then(serde_json::Value::as_str)
+            {
+                definition.push_str(" COLLATE ");
+                definition
+                    .push_str(&quote_identifier(&Identifier::new(collation).map_err(
+                        |error| ConnectionError::InvalidRequest(error.to_string()),
+                    )?));
+            }
+            let identity = column
+                .attributes
+                .get("identity")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            match identity {
+                "a" => definition.push_str(" GENERATED ALWAYS AS IDENTITY"),
+                "d" => definition.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
+                "" => {
+                    if let Some(default) = column
+                        .attributes
+                        .get("default")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        if default.contains("nextval(") {
+                            return Err(ConnectionError::InvalidRequest(format!(
+                                "column {} uses an unsupported serial sequence default",
+                                column.name
+                            )));
+                        }
+                        definition.push_str(" DEFAULT ");
+                        definition.push_str(default);
+                    }
+                }
+                value => {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "column {} has unknown identity mode {value}",
+                        column.name
+                    )));
+                }
+            }
+            if !column
+                .attributes
+                .get("nullable")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            {
+                definition.push_str(" NOT NULL");
+            }
+            Ok(definition)
+        })
+        .collect()
+}
+
+fn table_constraint_definitions(
+    namespace: &CatalogNamespace,
+    table: &CatalogObject,
+) -> ConnectionResult<Vec<String>> {
+    let mut constraints = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            matches!(
+                object.kind,
+                CatalogObjectKind::PrimaryKey
+                    | CatalogObjectKind::UniqueConstraint
+                    | CatalogObjectKind::CheckConstraint
+            ) && object
+                .attributes
+                .get("table_oid")
+                .and_then(serde_json::Value::as_str)
+                == Some(table.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    constraints.sort_by(|left, right| left.name.cmp(&right.name));
+    constraints
+        .into_iter()
+        .map(|constraint| {
+            let definition = std::str::from_utf8(&constraint.definition).map_err(|_| {
+                ConnectionError::InvalidRequest(format!(
+                    "constraint {} has a non-UTF-8 definition",
+                    constraint.name
+                ))
+            })?;
+            Ok(format!(
+                "CONSTRAINT {} {definition}",
+                quote_identifier(&constraint.name)
+            ))
+        })
+        .collect()
 }
 
 impl TargetConnectionFactory for PostgresTargetFactory {
@@ -1046,7 +1362,7 @@ pub fn inspect_endpoint(
 }
 
 fn extract_catalog(
-    transaction: &mut Transaction<'_>,
+    transaction: &mut impl postgres::GenericClient,
     database: &str,
     server_version: &str,
 ) -> Result<(VendorCatalog, UnsupportedObjectReport), PostgresPlanError> {
@@ -1150,16 +1466,133 @@ fn extract_catalog(
         )?;
     }
 
+    let user_type_rows = transaction.query(
+        "SELECT t.oid::text, n.nspname, t.typname, t.typtype::text, pg_catalog.format_type(t.oid, NULL) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND t.typtype IN ('c','d','e','r') AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid) ORDER BY n.nspname, t.typname",
+        &[],
+    )?;
+    for row in user_type_rows {
+        let id: String = row.get(0);
+        let namespace: String = row.get(1);
+        let name: String = row.get(2);
+        let type_kind: String = row.get(3);
+        let definition: String = row.get(4);
+        unsupported.push(UnsupportedObject {
+            object_id: id.clone(),
+            object_kind: format!("postgres_type:{type_kind}"),
+            reason: "user-defined PostgreSQL type DDL is not implemented".into(),
+            required_semantics: true,
+        });
+        push_object(
+            &mut namespaces,
+            &namespace,
+            CatalogObject {
+                id,
+                kind: CatalogObjectKind::Vendor(format!("postgres_type:{type_kind}")),
+                name: Identifier::new(name)?,
+                definition: definition.into_bytes(),
+                attributes: BTreeMap::from([(
+                    "type_kind".into(),
+                    serde_json::Value::String(type_kind),
+                )]),
+            },
+        )?;
+    }
+
+    let extension_rows = transaction.query(
+        "SELECT e.oid::text, n.nspname, e.extname, e.extversion FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname <> 'plpgsql' ORDER BY e.extname",
+        &[],
+    )?;
+    for row in extension_rows {
+        let id: String = row.get(0);
+        let namespace: String = row.get(1);
+        let name: String = row.get(2);
+        let version: String = row.get(3);
+        unsupported.push(UnsupportedObject {
+            object_id: id.clone(),
+            object_kind: "extension".into(),
+            reason: "PostgreSQL extension installation and version validation are not implemented"
+                .into(),
+            required_semantics: true,
+        });
+        if namespaces.contains_key(&namespace) {
+            push_object(
+                &mut namespaces,
+                &namespace,
+                CatalogObject {
+                    id,
+                    kind: CatalogObjectKind::Vendor("extension".into()),
+                    name: Identifier::new(name)?,
+                    definition: Vec::new(),
+                    attributes: BTreeMap::from([(
+                        "version".into(),
+                        serde_json::Value::String(version),
+                    )]),
+                },
+            )?;
+        }
+    }
+
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT (a.attrelid::text || ':' || a.attnum::text), n.nspname, (c.relname || '.' || a.attname), 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
+        "SELECT (a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', pg_get_expr(ad.adbin, ad.adrelid), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
         CatalogObjectKind::Column,
     )?;
+    for object in namespaces
+        .values()
+        .flat_map(|namespace| namespace.objects.iter())
+        .filter(|object| object.kind == CatalogObjectKind::Column)
+    {
+        if object
+            .attributes
+            .get("generated")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            unsupported.push(UnsupportedObject {
+                object_id: object.id.clone(),
+                object_kind: "generated_column".into(),
+                reason: "generated-column DDL and value verification are not implemented".into(),
+                required_semantics: true,
+            });
+        }
+        if object
+            .attributes
+            .get("type_schema")
+            .and_then(serde_json::Value::as_str)
+            != Some("pg_catalog")
+        {
+            unsupported.push(UnsupportedObject {
+                object_id: object.id.clone(),
+                object_kind: "user_defined_column_type".into(),
+                reason: "user-defined PostgreSQL types are not reproduced by the executor".into(),
+                required_semantics: true,
+            });
+        }
+        let identity = object
+            .attributes
+            .get("identity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if identity.is_empty()
+            && object
+                .attributes
+                .get("default")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.contains("nextval("))
+        {
+            unsupported.push(UnsupportedObject {
+                object_id: object.id.clone(),
+                object_kind: "serial_sequence_default".into(),
+                reason: "serial sequence ownership and state are not implemented".into(),
+                required_semantics: true,
+            });
+        }
+    }
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'referenced_table_oid', NULLIF(con.confrelid, 0)::text)::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
+        "SELECT con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'referenced_table_oid', NULLIF(con.confrelid, 0)::text, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text)::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
         CatalogObjectKind::CheckConstraint,
     )?;
     append_query_objects(
@@ -1277,7 +1710,7 @@ fn extract_catalog(
 }
 
 fn append_query_objects(
-    transaction: &mut Transaction<'_>,
+    transaction: &mut impl postgres::GenericClient,
     namespaces: &mut BTreeMap<String, CatalogNamespace>,
     query: &str,
     kind: CatalogObjectKind,

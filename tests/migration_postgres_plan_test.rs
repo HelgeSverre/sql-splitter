@@ -1,5 +1,6 @@
 #![cfg(feature = "enterprise-migration-spike")]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -13,7 +14,10 @@ use sql_splitter::migration::connection::{
     CancellationToken, ConnectionError, KeysetPage, SourceConnectionFactory,
     TargetConnectionFactory,
 };
-use sql_splitter::migration::model::{DbValue, Identifier, KeyTuple, QualifiedTable};
+use sql_splitter::migration::model::{
+    CatalogNamespace, CatalogObject, CatalogObjectKind, DbValue, Identifier, KeyTuple,
+    QualifiedTable, VendorCatalog,
+};
 use sql_splitter::migration::plan::ReviewedPlan;
 use sql_splitter::migration::postgres::{
     write_live_plan, PostgresEndpointConfig, PostgresSourceFactory,
@@ -138,11 +142,17 @@ fn live_control_session_cancels_the_active_query() -> anyhow::Result<()> {
 fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()> {
     let source_config =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?)?;
-    let target_config =
+    let source_admin_config =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG")?)?;
-    let mut administrator = connect(&target_config)?;
-    administrator.batch_execute(
-        "DROP TABLE IF EXISTS public.target_values; DROP TABLE IF EXISTS public.source_values; CREATE TABLE public.source_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); CREATE TABLE public.target_values (LIKE public.source_values INCLUDING ALL); GRANT SELECT ON public.source_values TO migration_reader; INSERT INTO public.source_values (text_value, binary_value, float_value, json_value, numeric_value, timestamp_value) VALUES ('exact text', decode('00ff10', 'hex'), '-0'::double precision, '{\"b\":2,\"a\":1}'::jsonb, 1234567890123.45000, '2026-08-11 10:11:12.123456+02')",
+    let target_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?)?;
+    let mut source_administrator = connect(&source_admin_config)?;
+    source_administrator.batch_execute(
+        "DROP TABLE IF EXISTS public.source_values; CREATE TABLE public.source_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL); GRANT SELECT ON public.source_values TO migration_reader; INSERT INTO public.source_values (text_value, binary_value, float_value, json_value, numeric_value, timestamp_value) VALUES ('exact text', decode('00ff10', 'hex'), '-0'::double precision, '{\"b\":2,\"a\":1}'::jsonb, 1234567890123.45000, '2026-08-11 10:11:12.123456+02')",
+    )?;
+    let mut target_administrator = connect(&target_config)?;
+    target_administrator.batch_execute(
+        "DROP TABLE IF EXISTS public.target_values; CREATE TABLE public.target_values (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, text_value text NOT NULL, binary_value bytea NOT NULL, float_value double precision NOT NULL, json_value jsonb NOT NULL, numeric_value numeric(20,5) NOT NULL, timestamp_value timestamptz NOT NULL)",
     )?;
 
     let source = PostgresSourceFactory::new(source_config);
@@ -195,6 +205,90 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
     })?;
     assert_eq!(observed.rows(), batch.rows());
     Ok(())
+}
+
+#[test]
+#[ignore = "requires an empty TLS-enabled PostgreSQL target owned by the target role"]
+fn live_pre_data_ddl_is_create_only_and_rechecks_emptiness() -> anyhow::Result<()> {
+    let target_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?)?;
+    let target = sql_splitter::migration::postgres::PostgresTargetFactory::new(target_config);
+    target.assert_empty_and_owned()?;
+    target.create_pre_data_schema(&ddl_catalog()?)?;
+    assert!(matches!(
+        target.create_pre_data_schema(&ddl_catalog()?),
+        Err(ConnectionError::InvalidRequest(message)) if message.contains("not empty")
+    ));
+    Ok(())
+}
+
+fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
+    let table_id = "table-accounts";
+    let table = CatalogObject {
+        id: table_id.into(),
+        kind: CatalogObjectKind::Table,
+        name: Identifier::new("accounts")?,
+        definition: Vec::new(),
+        attributes: BTreeMap::from([
+            ("relkind".into(), serde_json::Value::String("r".into())),
+            ("persistence".into(), serde_json::Value::String("p".into())),
+        ]),
+    };
+    let column = |id: &str, name: &str, ordinal: i64, ty: &str, identity: &str| {
+        Ok::<_, anyhow::Error>(CatalogObject {
+            id: id.into(),
+            kind: CatalogObjectKind::Column,
+            name: Identifier::new(name)?,
+            definition: ty.as_bytes().to_vec(),
+            attributes: BTreeMap::from([
+                (
+                    "table_oid".into(),
+                    serde_json::Value::String(table_id.into()),
+                ),
+                ("ordinal".into(), serde_json::Value::Number(ordinal.into())),
+                ("nullable".into(), serde_json::Value::Bool(false)),
+                (
+                    "identity".into(),
+                    serde_json::Value::String(identity.into()),
+                ),
+                ("generated".into(), serde_json::Value::String(String::new())),
+                (
+                    "type_schema".into(),
+                    serde_json::Value::String("pg_catalog".into()),
+                ),
+            ]),
+        })
+    };
+    let primary_key = CatalogObject {
+        id: "pk-accounts".into(),
+        kind: CatalogObjectKind::PrimaryKey,
+        name: Identifier::new("accounts_pkey")?,
+        definition: b"PRIMARY KEY (id)".to_vec(),
+        attributes: BTreeMap::from([(
+            "table_oid".into(),
+            serde_json::Value::String(table_id.into()),
+        )]),
+    };
+    Ok(VendorCatalog {
+        format_version: 1,
+        dialect: "postgresql".into(),
+        server_version: "17".into(),
+        database: Identifier::new("source")?,
+        namespaces: vec![CatalogNamespace {
+            name: Identifier::new("public")?,
+            owner: None,
+            charset: Some("UTF8".into()),
+            collation: None,
+            objects: vec![
+                table,
+                column("column-id", "id", 1, "bigint", "a")?,
+                column("column-name", "name", 2, "text", "")?,
+                primary_key,
+            ],
+        }],
+        dependencies: Vec::new(),
+        vendor_metadata: BTreeMap::new(),
+    })
 }
 
 fn connect(config: &PostgresEndpointConfig) -> anyhow::Result<Client> {
