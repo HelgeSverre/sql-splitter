@@ -49,6 +49,8 @@ This roadmap outlines the feature development plan with dependency-aware orderin
 - v1.18.0: Enum Conversion — Proper PG↔MySQL enum type conversion
 - v1.19.0: Migrate — Schema migration generation
 - v1.20.0: DBML — Import/export DBML schema definitions
+- Enterprise Migration Track (separate, feature-gated): assessment → offline
+  copy beta — see [Enterprise Migration Track](#enterprise-migration-track)
 
 **Future (v2.x):**
 
@@ -1077,10 +1079,15 @@ tests/
 ## Non-Goals (Out of Scope)
 
 - **GUI interface** — CLI only
-- **Database connection** — File-based only
+- **Database connection** — File-based only, with one exception: the
+  feature-gated [Enterprise Migration Track](#enterprise-migration-track).
+  Every other command remains file-based
 - **Binary backup formats** — No .bak (MSSQL)
 - **Stored procedure conversion** — Too complex, warn and skip
-- **Real-time streaming** — Batch processing only
+- **Real-time streaming** — Batch processing only. Stage 3 of the
+  [Enterprise Migration Track](#enterprise-migration-track) (CDC/online)
+  would require amending this non-goal and stays deferred until it is
+  amended
 - **Cloud storage integration** — Use pipes
 
 ---
@@ -1100,11 +1107,36 @@ These follow the core roadmap (v1.16–v2.1) and require user demand validation 
 
 ---
 
+## Enterprise Migration Track
+
+A separate track from the versioned CLI roadmap, and distinct from v1.19.0
+Migration Generation (which generates ALTER scripts from two dump files —
+a different feature). This track moves live databases: plan, copy, verify,
+resume, with an evidence trail. It is currently a feature-gated spike
+(`enterprise-migration-spike` Cargo feature) labeled not for production;
+branch `spike/enterprise-migration-phases-1-5` implements part of the design.
+
+| Stage | Product                                                                                                            | Status                                                                                                                                                    |
+| ----- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | **Assessment** — read-only plan plus human-readable report ([15](features/enterprise/15-assessment-product.md))    | **First shippable milestone**                                                                                                                             |
+| 2     | Offline bulk copy beta — fenced or quiesced source, empty target, exact verification                               | Spike partially implements; gated on throughput ([13](features/enterprise/13-throughput-and-copy-path.md)) and managed-source profiles ([14](features/enterprise/14-managed-source-profiles.md)) |
+| 3     | Online migration — CDC, catch-up, cutover                                                                          | Deferred; no zero-downtime claim is made                                                                                                                  |
+
+Design authority lives in [docs/features/enterprise/](features/enterprise/README.md)
+(README plus documents 01–15). Market requirements and the gap list are in
+[the 2026-08-11 market-alignment plan](superpowers/plans/2026-08-11-enterprise-migration-market-alignment.md).
+Done-ness is decided by the acceptance gates in
+[08](features/enterprise/08-implementation-prerequisites.md), not by this table.
+
+---
+
 ## Related Documents
 
 ### Active
 
 - [Synthetic Data Generation](superpowers/specs/2026-07-16-synthetic-data-generation-design.md)
+- [Enterprise Migration Plan](features/enterprise/README.md) — separate track
+- [Enterprise Migration Market Alignment](superpowers/plans/2026-08-11-enterprise-migration-market-alignment.md) — gap list and course correction
 - [Additional Ideas](features/ADDITIONAL_IDEAS.md)
 - [Competitive Analysis](COMPETITIVE_ANALYSIS.md)
 - [Integration Opportunities](INTEGRATION_OPPORTUNITIES.md)

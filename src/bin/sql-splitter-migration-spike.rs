@@ -26,6 +26,18 @@ enum Command {
         #[arg(long)]
         artifact_dir: PathBuf,
     },
+    /// Inspect one PostgreSQL source and write a read-only assessment and report.
+    AssessPostgres {
+        /// Source endpoint TOML with a server-enforced read-only role.
+        #[arg(long)]
+        source_config: PathBuf,
+        /// New protected machine-readable assessment artifact.
+        #[arg(long)]
+        assessment_output: PathBuf,
+        /// New protected deterministic Markdown report.
+        #[arg(long)]
+        report_output: PathBuf,
+    },
     /// Inspect two live PostgreSQL catalogs and write a deterministic plan.
     PlanPostgres {
         /// Source endpoint TOML. Credentials are referenced through an environment variable.
@@ -132,6 +144,34 @@ fn main() -> anyhow::Result<()> {
             println!("plan: {}", result.plan.display());
             println!("state: {}", result.state.display());
             println!("plan hash: {}", result.plan_hash);
+        }
+        Command::AssessPostgres {
+            source_config,
+            assessment_output,
+            report_output,
+        } => {
+            let assessment = sql_splitter::migration::postgres::write_live_assessment(
+                source_config,
+                &assessment_output,
+                &report_output,
+            )?;
+            println!("assessment: {}", assessment_output.display());
+            println!("report: {}", report_output.display());
+            println!("plan hash: {}", assessment.reviewed_plan.plan_hash);
+            println!(
+                "unsupported objects: {} (execution-blocking: {})",
+                assessment
+                    .reviewed_plan
+                    .plan
+                    .unsupported_objects
+                    .objects
+                    .len(),
+                assessment
+                    .reviewed_plan
+                    .plan
+                    .unsupported_objects
+                    .blocks_execution()
+            );
         }
         Command::PlanPostgres {
             source_config,

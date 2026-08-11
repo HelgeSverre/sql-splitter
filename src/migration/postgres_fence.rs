@@ -242,6 +242,7 @@ pub fn install_postgres_write_fence(
     artifact_path: impl AsRef<Path>,
 ) -> Result<InstalledPostgresFence, PostgresFenceError> {
     reviewed.validate()?;
+    reviewed.plan.validate_for_execution()?;
     if admin.tls.insecure {
         return Err(PostgresFenceError::Attestation(
             "fence administration requires authenticated TLS",

@@ -12,13 +12,52 @@ descriptive stages in [04](./04-execution-design.md).
 | **Implementation Phase 3 — Read Path & Consistency**           | Factories/sessions, cancellation, source read-only proof, snapshot token and lifecycle, typed keyset requests                                                         | Sequential snapshot concurrency tests pass for first dialect |
 | **Implementation Phase 4 — Sequential Same-Dialect Execution** | Empty-target checks, create-only pre-data DDL, transactional plain INSERT chunks, durable journal, post-data DDL                                                      | First-dialect offline beta execution passes crash tests      |
 | **Implementation Phase 5 — Verification & Recovery**           | Canonical comparison, FK anti-joins, constraint validation, ambiguous-commit reconciliation, strict finalize                                                          | No-success-with-skips and resume drift gates pass            |
-| **Implementation Phase 6 — Second Dialect**                    | Equivalent catalog, snapshot, DDL, value, and verification adapter                                                                                                    | Same real-engine matrix passes for second dialect            |
+| **Implementation Phase 5a — PostgreSQL Throughput**            | COPY-protocol chunk writer and pipelined chunk verification over an exported snapshot ([13](./13-throughput-and-copy-path.md))                                        | COPY path passes the same crash and equivalence matrices; measured throughput published |
+| **Implementation Phase 5b — Managed Source Profiles**          | Privilege probe suite, execution-time attestation, sequence-stability evidence ([14](./14-managed-source-profiles.md))                                                | Probe, attestation-stop, and sequence-equality matrices pass against at least one managed provider |
+| **Implementation Phase 6 — Second Dialect (MySQL)**            | Equivalent catalog, snapshot, DDL, value, and verification adapter; scope below                                                                                       | Same real-engine matrix passes for second dialect            |
 | **Implementation Phase 7 — Cross-Dialect**                     | Explicit conversion policies and `RowTypeConverter` over canonical values                                                                                             | Every approved conversion has exact expected-value vectors   |
 | **Implementation Phase 8 — Warm Target/Staging**               | Ownership model, merge/conflict policy, staging state machine, write-fence and recovery gates                                                                         | Destructive and metadata-lock fault tests pass               |
-| **Implementation Phase 9 — Parallelism**                       | Shareable/exported snapshots, per-worker sessions, deterministic manifests                                                                                            | Snapshot-sharing and concurrent crash matrix passes          |
-| **Implementation Phase 10 — Dialect Optimizations**            | COPY, cursor, direct-copy, concurrent-index, and partition optimizations where proven                                                                                 | Optimization is equivalent to baseline canonical output      |
+| **Implementation Phase 9 — Parallelism**                       | Shareable/exported snapshots, per-worker sessions, deterministic manifests, table-level parallel copy under a per-table prepared-chunk journal format ([13](./13-throughput-and-copy-path.md)) | Snapshot-sharing and concurrent crash matrix passes          |
+| **Implementation Phase 10 — Dialect Optimizations**            | Cursor, direct-copy, concurrent-index, partition, and non-PostgreSQL COPY optimizations where proven                                                                  | Optimization is equivalent to baseline canonical output      |
 
 Managed service automation and CDC remain deferred after this sequence.
+
+## Second-dialect scope: MySQL
+
+Implementation Phase 6's dialect is MySQL. Scope for its adapter proof:
+
+- **InnoDB only first.** The consistent read path is one `REPEATABLE READ`
+  transaction opened with `START TRANSACTION WITH CONSISTENT SNAPSHOT`.
+  Tables using a storage engine without MVCC (MyISAM, MEMORY, and similar)
+  are blocking unsupported objects.
+- **DDL is outside the snapshot.** MySQL DDL is at most atomic per statement
+  (8.0+), and no transaction protects catalog reads against concurrent DDL.
+  A fence-equivalent DML/DDL freeze must be proven before live execution.
+  Candidate mechanisms are evaluated as
+  [14](./14-managed-source-profiles.md)-style profiles with privilege
+  probes, not assumed from documentation: `super_read_only` or
+  `LOCK TABLES ... READ` for the DML half, paired with a DDL freeze.
+  `LOCK INSTANCE FOR BACKUP` blocks only DDL and file-affecting operations
+  and explicitly permits DML, so it can only ever be the DDL half of a
+  fence equivalent.
+- **`AUTO_INCREMENT` counters** are the sequence analogue: outside MVCC,
+  captured and restored only under a proven freeze or the
+  [14](./14-managed-source-profiles.md) equality re-read rule. Counter reads
+  must bypass the cached statistics behind `information_schema.TABLES`
+  (`information_schema_stats_expiry = 0`, recorded as evidence): with the
+  default 86400-second expiry, two reads can return one stale cached value
+  while the live counter advances. Restoration runs after data load, because
+  InnoDB clamps `ALTER TABLE ... AUTO_INCREMENT` to the column maximum and
+  bumps the counter on explicit-value inserts.
+- **Collation binding.** Keyset text keys bind collation identity exactly as
+  in PostgreSQL. Case-insensitive or otherwise non-deterministic collations
+  are rejected as pagination keys.
+- **Version matrix:** MySQL 8.0 and 8.4 LTS over TLS, with the same
+  reproducible disposable-container posture as
+  [12](./12-postgresql-first-adapter.md).
+- **Carried over unchanged:** plan schema, journal, canonical values and
+  vectors, verification, and artifact I/O. Implementation Phase 1–5
+  contracts are adapter-neutral by construction; MySQL must not fork them.
 
 ## Planning ranges
 

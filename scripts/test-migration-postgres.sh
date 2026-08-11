@@ -97,7 +97,14 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "ALTER SYSTEM SET ssl = 'on'" \
   -c "ALTER SYSTEM SET ssl_cert_file = 'server.crt'" \
   -c "ALTER SYSTEM SET ssl_key_file = 'server.key'" \
-  -c "ALTER SYSTEM SET ssl_ca_file = '/tmp/ca.crt'" >/dev/null
+  -c "ALTER SYSTEM SET ssl_ca_file = '/tmp/ca.crt'" \
+  -c "ALTER SYSTEM SET logging_collector = 'on'" \
+  -c "ALTER SYSTEM SET log_destination = 'jsonlog'" \
+  -c "ALTER SYSTEM SET log_statement = 'all'" \
+  -c "ALTER SYSTEM SET log_directory = 'log'" \
+  -c "ALTER SYSTEM SET log_filename = 'migration-assessment'" \
+  -c "ALTER SYSTEM SET log_rotation_age = 0" \
+  -c "ALTER SYSTEM SET log_rotation_size = 0" >/dev/null
 docker exec -u 0 "$container" sh -c \
   "sed -i '1i hostssl migration_mtls_source migration_mtls_reader 0.0.0.0/0 cert clientcert=verify-full' /var/lib/postgresql/data/pg_hba.conf"
 docker restart "$container" >/dev/null
@@ -135,6 +142,8 @@ docker exec -e PGPASSWORD=admin-secret "$container" psql -U postgres -v ON_ERROR
   -c "CREATE TABLE public.live_snapshot_rows (id bigint PRIMARY KEY, payload text NOT NULL)" \
   -c "GRANT SELECT ON public.live_snapshot_rows TO migration_reader" \
   -c "GRANT ALL ON public.live_snapshot_rows TO migration_mutator" \
+  -c "CREATE SEQUENCE public.assessment_sequence CACHE 1" \
+  -c "GRANT SELECT ON SEQUENCE public.assessment_sequence TO migration_reader" \
   -c "CREATE TABLE public.slow_rows (id bigint PRIMARY KEY, payload text NOT NULL)" \
   -c "INSERT INTO public.slow_rows SELECT g, repeat('x',16) FROM generate_series(1,1000000) AS g" \
   -c "GRANT SELECT ON public.slow_rows TO migration_reader" >/dev/null
@@ -174,6 +183,17 @@ port = $port
 database = "postgres"
 user = "migration_mutator"
 credential_env = "SQL_SPLITTER_PG_MUTATOR_PASSWORD"
+
+[tls]
+ca_certificate = "$test_dir/ca.crt"
+EOF
+
+cat >"$test_dir/log-admin.toml" <<EOF
+host = "127.0.0.1"
+port = $port
+database = "postgres"
+user = "postgres"
+credential_env = "SQL_SPLITTER_PG_ADMIN_PASSWORD"
 
 [tls]
 ca_certificate = "$test_dir/ca.crt"
@@ -249,6 +269,8 @@ EOF
 
 export SQL_SPLITTER_PG_TEST_SOURCE_CONFIG="$test_dir/source.toml"
 export SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG="$test_dir/mutator.toml"
+export SQL_SPLITTER_PG_TEST_LOG_ADMIN_CONFIG="$test_dir/log-admin.toml"
+export SQL_SPLITTER_PG_TEST_ADMIN_CONFIG="$test_dir/log-admin.toml"
 export SQL_SPLITTER_PG_TEST_TARGET_CONFIG="$test_dir/target.toml"
 export SQL_SPLITTER_PG_RUN_SOURCE_CONFIG="$test_dir/run-source.toml"
 export SQL_SPLITTER_PG_RUN_TARGET_CONFIG="$test_dir/run-target.toml"
@@ -261,6 +283,7 @@ export SQL_SPLITTER_PG_FENCE_PLAN="$test_dir/fence-plan.json"
 export SQL_SPLITTER_PG_FENCE_STATE="$test_dir/fence-state.json"
 export SQL_SPLITTER_PG_READER_PASSWORD=reader-secret
 export SQL_SPLITTER_PG_MUTATOR_PASSWORD=mutator-secret
+export SQL_SPLITTER_PG_ADMIN_PASSWORD=admin-secret
 export SQL_SPLITTER_PG_TARGET_PASSWORD=target-secret
 export SQL_SPLITTER_PG_RUN_TARGET_PASSWORD=run-target-secret
 export SQL_SPLITTER_PG_FENCE_ADMIN_PASSWORD=fence-admin-secret
@@ -273,6 +296,15 @@ if [[ -n "$only_test" ]]; then
   exit 0
 fi
 
+test_name=live_source_only_assessment_is_read_only_and_deterministic
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_assessment_rejects_direct_write_privileges
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_postgres_blocking_code_registry_matrix
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_mutual_tls_requires_valid_client_identity
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

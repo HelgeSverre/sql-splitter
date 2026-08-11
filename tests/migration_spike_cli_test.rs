@@ -12,6 +12,7 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("EXPERIMENTAL SPIKE"));
+    assert!(help.contains("assess-postgres"));
     assert!(help.contains("plan-postgres"));
     assert!(help.contains("execute-postgres"));
     assert!(help.contains("fence-install-postgres"));
@@ -29,6 +30,28 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn assessment_is_source_only_and_has_no_mutation_flags() {
+    let output = spike()
+        .args(["assess-postgres", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for required in ["--source-config", "--assessment-output", "--report-output"] {
+        assert!(help.contains(required));
+    }
+    for forbidden in [
+        "--target-config",
+        "--consistency",
+        "--approval-ref",
+        "--execute",
+        "--fence",
+    ] {
+        assert!(!help.contains(forbidden));
+    }
 }
 
 #[test]

@@ -15,6 +15,13 @@
 > and validated by PostgreSQL. It does not implement the complete crash matrix
 > or production recovery, and it does not satisfy the complete real-engine
 > acceptance gates in [08](./08-implementation-prerequisites.md).
+> The feature-gated command also contains a source-only PostgreSQL assessment
+> increment. It records typed target-not-assessed state, server-enforced
+> read-only evidence, scope estimates, a projected source operation graph, and
+> a protected deterministic Markdown report. Its PostgreSQL 15–17 matrix passes
+> the current assessment acceptance gates, including blocking-code coverage and
+> statement auditing. It remains an experimental feature-gated command, not a
+> production release.
 >
 > A PostgreSQL plan adapter, snapshot-bound source reader, native control
 > session, create-only pre-data DDL transaction, transactional plain-INSERT
@@ -52,7 +59,7 @@ This plan distinguishes three products:
 
 ## Document index
 
-This directory contains 15 documents:
+This directory contains 19 documents:
 
 | Document                                            | Purpose                                                               |
 | --------------------------------------------------- | --------------------------------------------------------------------- |
@@ -68,6 +75,10 @@ This directory contains 15 documents:
 | [10](./10-round-2-review-findings.md)               | Round-2 resolution ledger                                             |
 | [11](./11-round-3-review-findings.md)               | Round-3 resolution ledger                                             |
 | [12](./12-postgresql-first-adapter.md)              | First live-dialect decision and plan-only boundary                    |
+| [13](./13-throughput-and-copy-path.md)              | COPY fast path, pipelined verification, parallel copy, measured gates |
+| [14](./14-managed-source-profiles.md)               | Fence privilege probes, managed profiles, quiesce evidence            |
+| [15](./15-assessment-product.md)                    | Standalone read-only assessment product and report                    |
+| [16](./16-round-4-review-findings.md)               | Round-4 resolution ledger                                             |
 | [Competitive landscape](./competitive-landscape.md) | Tool categories and scoped positioning                                |
 | [Observability](./observability-and-operations.md)  | Metrics, logs, alerts, and operations                                 |
 | This README                                         | Scope and navigation                                                  |

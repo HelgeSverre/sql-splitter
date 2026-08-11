@@ -37,8 +37,8 @@ use super::model::{
     VendorCatalog,
 };
 use super::plan::{
-    MigrationPlan, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObjectReport,
-    PLAN_SCHEMA_VERSION,
+    AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
+    UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
 };
 use super::verify::{verify_keyed_rows, KeyedRow};
 
@@ -542,8 +542,6 @@ fn resume_postgres_fenced_plan_internal(
     validate_reviewed_tls(&reviewed, "target_tls", &target_config)?;
     let admin_config = PostgresEndpointConfig::read(fence_admin_config_path)?;
     validate_separate_postgres_credentials(&source_config, &target_config, &admin_config)?;
-    validate_reviewed_tls(&reviewed, "source_tls", &source_config)?;
-    validate_reviewed_tls(&reviewed, "target_tls", &target_config)?;
     if admin_config.tls.insecure {
         return Err(anyhow!(
             "fence administration cannot resume with insecure TLS"
@@ -620,7 +618,8 @@ fn resume_postgres_fenced_plan_internal(
 
     let target_snapshot = target.inspect_endpoint()?;
     if target_snapshot.endpoint_identity != journal.genesis().binding.target_endpoint
-        || target_snapshot.endpoint_identity != reviewed.plan.target_endpoint_identity
+        || target_snapshot.endpoint_identity
+            != reviewed.plan.execution_target_endpoint_identity()?
     {
         return Err(anyhow!("target endpoint differs from durable binding"));
     }
@@ -982,6 +981,8 @@ fn execute_postgres_plan_internal(
     validate_postgres_execution_operations(&reviewed)?;
     let source_config = PostgresEndpointConfig::read(source_config_path)?;
     let target_config = PostgresEndpointConfig::read(target_config_path)?;
+    validate_reviewed_tls(&reviewed, "source_tls", &source_config)?;
+    validate_reviewed_tls(&reviewed, "target_tls", &target_config)?;
     if source_config.credential_env == target_config.credential_env {
         return Err(anyhow!(
             "source and target must use separate credential references"
@@ -1076,12 +1077,14 @@ fn execute_postgres_plan_internal(
     validate_copy_table_shapes(&reviewed, &source_catalog)?;
 
     let target_preflight = target.inspect_endpoint()?;
-    if target_preflight.endpoint_identity != reviewed.plan.target_endpoint_identity {
+    if target_preflight.endpoint_identity != reviewed.plan.execution_target_endpoint_identity()? {
         return Err(anyhow!(
             "target endpoint identity differs from reviewed plan"
         ));
     }
-    if catalog_fingerprint(&target_preflight.catalog)? != reviewed.plan.target_catalog_fingerprint {
+    if catalog_fingerprint(&target_preflight.catalog)?
+        != reviewed.plan.execution_target_catalog_fingerprint()?
+    {
         return Err(anyhow!(
             "target catalog fingerprint changed after plan review"
         ));
@@ -1113,7 +1116,10 @@ fn execute_postgres_plan_internal(
             |(_, installed, _)| installed.evidence.clone(),
         ),
         source_schema_fingerprint: source_fingerprint,
-        target_schema_fingerprint: reviewed.plan.target_catalog_fingerprint.clone(),
+        target_schema_fingerprint: reviewed
+            .plan
+            .execution_target_catalog_fingerprint()?
+            .to_owned(),
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -1479,9 +1485,10 @@ fn validate_resume_binding(binding: &ResumeBinding, reviewed: &ReviewedPlan) -> 
         || binding.plan_hash != reviewed.plan_hash.to_string()
         || binding.tool_version != reviewed.plan.tool_version
         || binding.source_endpoint != reviewed.plan.source_endpoint_identity
-        || binding.target_endpoint != reviewed.plan.target_endpoint_identity
+        || binding.target_endpoint != reviewed.plan.execution_target_endpoint_identity()?
         || binding.source_schema_fingerprint != reviewed.plan.source_catalog_fingerprint
-        || binding.target_schema_fingerprint != reviewed.plan.target_catalog_fingerprint
+        || binding.target_schema_fingerprint
+            != reviewed.plan.execution_target_catalog_fingerprint()?
         || binding.conversion_policy != reviewed.plan.conversion_policy
         || binding.canonical_encoding_version != CANONICAL_ENCODING_VERSION
         || reviewed.plan.canonical_encoding_version != CANONICAL_ENCODING_VERSION
@@ -1538,13 +1545,28 @@ fn validate_reviewed_tls(
     capability: &str,
     config: &PostgresEndpointConfig,
 ) -> anyhow::Result<()> {
-    let expected = reviewed
+    let typed_expected = match capability {
+        "source_tls" => reviewed.plan.source_tls_binding.as_str(),
+        "target_tls" => reviewed
+            .plan
+            .target_tls_binding
+            .as_assessed()
+            .map(String::as_str)
+            .ok_or_else(|| anyhow!("reviewed plan omits target TLS evidence"))?,
+        _ => return Err(anyhow!("unknown reviewed TLS capability {capability}")),
+    };
+    let legacy_expected = reviewed
         .plan
         .capabilities
         .get(capability)
         .ok_or_else(|| anyhow!("reviewed plan omits {capability}"))?;
+    if legacy_expected != typed_expected {
+        return Err(anyhow!(
+            "{capability} typed evidence differs from the reviewed capability"
+        ));
+    }
     let observed = postgres_tls_binding(config)?;
-    if expected != &observed {
+    if typed_expected != observed {
         return Err(anyhow!("{capability} differs from the reviewed TLS policy"));
     }
     Ok(())
@@ -3291,16 +3313,36 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         vec![copy.id.clone()],
         BTreeMap::new(),
     )?;
+    let source_catalog = VendorCatalog {
+        format_version: 1,
+        dialect: "fixture".into(),
+        server_version: "1".into(),
+        database: Identifier::new("source")?,
+        namespaces: Vec::new(),
+        dependencies: Vec::new(),
+        vendor_metadata: BTreeMap::new(),
+    };
+    let target_catalog = VendorCatalog {
+        database: Identifier::new("target")?,
+        ..source_catalog.clone()
+    };
+    let source_catalog_fingerprint =
+        hex::encode(Sha256::digest(serde_json::to_vec(&source_catalog)?));
+    let target_catalog_fingerprint =
+        hex::encode(Sha256::digest(serde_json::to_vec(&target_catalog)?));
     let reviewed = ReviewedPlan::new(MigrationPlan {
         schema_version: PLAN_SCHEMA_VERSION,
+        purpose: PlanPurpose::Execution,
         migration_id: "fixture-phase-1-5".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
         source_endpoint_identity: "fixture-source".into(),
-        target_endpoint_identity: "fixture-target".into(),
-        source_catalog_fingerprint: "fixture-source-schema-v1".into(),
-        target_catalog_fingerprint: "empty-target-v1".into(),
-        source_catalog: None,
-        target_catalog: None,
+        target_endpoint_identity: AssessmentStatus::Assessed("fixture-target".into()),
+        source_catalog_fingerprint,
+        target_catalog_fingerprint: AssessmentStatus::Assessed(target_catalog_fingerprint),
+        source_catalog: Some(source_catalog),
+        target_catalog: AssessmentStatus::Assessed(target_catalog),
+        source_tls_binding: "fixture-source-tls".into(),
+        target_tls_binding: AssessmentStatus::Assessed("fixture-target-tls".into()),
         consistency_mode: "consistent_snapshot".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "same-dialect-exact".into(),
@@ -3343,7 +3385,10 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         approval_reference: "fixture-spike-only".into(),
         tool_version: reviewed.plan.tool_version.clone(),
         source_endpoint: reviewed.plan.source_endpoint_identity.clone(),
-        target_endpoint: reviewed.plan.target_endpoint_identity.clone(),
+        target_endpoint: reviewed
+            .plan
+            .execution_target_endpoint_identity()?
+            .to_owned(),
         consistency_evidence: ConsistencyEvidence::NativeSnapshot {
             endpoint_identity: snapshot.endpoint_identity.clone(),
             database_identity: snapshot.database_identity.clone(),
@@ -3352,7 +3397,10 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
             server_version: snapshot.server_version.clone(),
         },
         source_schema_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
-        target_schema_fingerprint: reviewed.plan.target_catalog_fingerprint.clone(),
+        target_schema_fingerprint: reviewed
+            .plan
+            .execution_target_catalog_fingerprint()?
+            .to_owned(),
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -3802,6 +3850,19 @@ mod tests {
     }
 
     #[cfg(feature = "enterprise-migration-spike")]
+    fn empty_test_catalog(database: &str) -> VendorCatalog {
+        VendorCatalog {
+            format_version: 1,
+            dialect: "postgresql".into(),
+            server_version: "17".into(),
+            database: Identifier::new(database).unwrap(),
+            namespaces: Vec::new(),
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(feature = "enterprise-migration-spike")]
     #[test]
     fn resume_rejects_every_shared_credential_pair() {
         assert!(validate_separate_postgres_credentials(
@@ -3847,16 +3908,23 @@ mod tests {
         config.tls.client_certificate = Some(certificate.to_string_lossy().into_owned());
         config.tls.client_private_key = Some(private_key.to_string_lossy().into_owned());
         let binding = postgres_tls_binding(&config).unwrap();
+        let source_catalog = empty_test_catalog("source");
+        let target_catalog = empty_test_catalog("target");
         let reviewed = ReviewedPlan::new(MigrationPlan {
             schema_version: PLAN_SCHEMA_VERSION,
+            purpose: PlanPurpose::Execution,
             migration_id: "tls-policy".into(),
             tool_version: env!("CARGO_PKG_VERSION").into(),
             source_endpoint_identity: "source".into(),
-            target_endpoint_identity: "target".into(),
-            source_catalog_fingerprint: "source-catalog".into(),
-            target_catalog_fingerprint: "target-catalog".into(),
-            source_catalog: None,
-            target_catalog: None,
+            target_endpoint_identity: AssessmentStatus::Assessed("target".into()),
+            source_catalog_fingerprint: catalog_fingerprint(&source_catalog).unwrap(),
+            target_catalog_fingerprint: AssessmentStatus::Assessed(
+                catalog_fingerprint(&target_catalog).unwrap(),
+            ),
+            source_catalog: Some(source_catalog),
+            target_catalog: AssessmentStatus::Assessed(target_catalog),
+            source_tls_binding: binding.clone(),
+            target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: "write-fence".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "exact".into(),

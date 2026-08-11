@@ -128,7 +128,10 @@ only absence or an exact semantic match; any different observed index requires
 manual reconciliation.
 
 Sequence execution is write-fence-only because PostgreSQL sequence state is
-outside table MVCC. Fence installation transfers sequence ownership to the
+outside table MVCC. A planned relaxation in
+[14](./14-managed-source-profiles.md) admits `CACHE 1` sequences under
+snapshot modes through a start/end state-equality proof; it is not
+implemented and its gates have not run. Fence installation transfers sequence ownership to the
 administrator, removes effective `USAGE` and `UPDATE` from non-superuser login
 roles, terminates old sessions that can hold cached values, and records the
 post-drain state. Resume re-attests this state and the exact ownership link.
@@ -219,6 +222,16 @@ security, and policies. Unsupported semantics remain visible in the plan and
 block later execution. Plan generation can succeed so reviewers can inspect
 the complete report.
 
+The spike also implements the initial source-only assessment contract from
+[15](./15-assessment-product.md): one `REPEATABLE READ READ ONLY` transaction,
+typed target-not-assessed state, protected JSON and Markdown artifacts, scope
+estimates isolated from the stable report body, and an execution-plan type gate
+that rejects assessment artifacts. Focused live tests pass on PostgreSQL 15–17.
+The current PostgreSQL 15–17 assessment contract passes the statement-audit,
+source-only CLI, deterministic-report, artifact-protection, and exhaustive
+supported-version blocking-code gates. The command remains feature-gated and
+experimental while product packaging and release work remain incomplete.
+
 ### Extensions
 
 Extensions remain blocking today. The admission contract for lifting one
@@ -238,8 +251,10 @@ The beta does not migrate grants, and this is no longer silent. Namespace,
 relation, routine, and default-privilege findings are elevated from
 non-blocking notes to one mandatory reviewed capability, `acl.report_only`.
 It appears in the plan and in the assessment report
-([15](./15-assessment-product.md)), must be acknowledged during plan review,
-and the acknowledgement is bound into the durable genesis record. Migrating a
+([15](./15-assessment-product.md)). Approving the plan through the existing
+`--approval-ref` review acknowledges every recorded capability, including
+this one, and the approval reference is durably bound at journal genesis
+([04](./04-execution-design.md)). Migrating a
 conservative grant subset is future work; silent omission is removed.
 
 The adapter does not yet prove:

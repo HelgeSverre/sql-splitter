@@ -161,12 +161,18 @@ The durable state schema contains:
 
 State/report/log files are created with mode `0600`, exclusive creation,
 regular-file checks, parent ownership checks, and symlink defenses. The state
-file is a versioned append-only frame stream. Each frame binds its sequence,
+file is a versioned append-only frame stream. Its first durable frame is the
+journal genesis: it binds the migration ID, plan hash, approval reference,
+endpoint identities, consistency-mode evidence, and recorded capabilities
+before any target effect exists. Each frame binds its sequence,
 payload digest, and previous-frame digest, and each durable transition fsyncs
 the file. Resume truncates only an incomplete final frame; internal corruption,
 reordering, or deletion fails closed. The in-memory replay projection is bounded
 by the reviewed operation graph, one prepared chunk, and one cursor per copied
-table. It does not retain the complete chunk manifest.
+table. It does not retain the complete chunk manifest. Implementation Phase 9's
+table-level parallel copy relaxes this to one prepared chunk per table under a
+bumped journal format ([13](./13-throughput-and-copy-path.md)); older journals
+are rejected for automatic resume.
 
 `--resume` does not regenerate intent. It loads state, verifies versions, plan
 hash, endpoint identities, snapshot/dump identity, schema fingerprints,

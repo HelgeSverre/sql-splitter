@@ -21,7 +21,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::artifact::write_json_new;
+use super::artifact::{prepare_json_text_pair_new, write_json_new, write_json_text_pair_new};
+use super::assessment::{
+    render_markdown, AssessmentArtifact, AssessmentError, EvidenceStatus, ExecutionRequirement,
+    ProjectedWindow, ScopeEstimate, SourceAssessmentEvidence, ASSESSMENT_SCHEMA_VERSION,
+};
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::connection::{
     CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
@@ -33,8 +37,9 @@ use super::model::{
     Identifier, QualifiedTable, RowBatch, RowBatchError, ValueFormat, VendorCatalog,
 };
 use super::plan::{
-    MigrationPlan, OperationId, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObject,
-    UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
+    AssessmentStatus, MigrationPlan, OperationId, OperationKind, PlanOperation, PlanPurpose,
+    ReviewedPlan, UnsupportedObject, UnsupportedObjectCode, UnsupportedObjectReport,
+    PLAN_SCHEMA_VERSION,
 };
 use super::postgres_ast::{
     parse_postgres_create_view, parse_postgres_sql_function, PostgresDurableAst,
@@ -117,6 +122,10 @@ pub enum PostgresPlanError {
     ParseConfig(#[from] toml::de::Error),
     #[error("invalid endpoint configuration: {0}")]
     InvalidConfig(&'static str),
+    #[error("assessment source transaction is not server-side read-only")]
+    SourceNotReadOnly,
+    #[error("assessment source role holds a direct database-object write privilege")]
+    SourceRoleHoldsDirectWritePrivilege,
     #[error("unsupported generated-column dependency: {0}")]
     UnsupportedGeneratedDependency(String),
     #[error("credential environment variable {0} is not set or is not Unicode")]
@@ -137,6 +146,8 @@ pub enum PostgresPlanError {
     Plan(#[from] super::plan::PlanError),
     #[error("artifact publication failed")]
     Artifact(#[from] super::artifact::ArtifactError),
+    #[error("assessment construction failed")]
+    Assessment(#[from] AssessmentError),
     #[error("catalog serialization failed")]
     Serialize(#[from] serde_json::Error),
 }
@@ -188,6 +199,13 @@ impl PostgresEndpointConfig {
     }
 
     fn connect(&self) -> Result<Client, PostgresPlanError> {
+        self.connect_with_application_name("sql-splitter-migration-plan")
+    }
+
+    fn connect_with_application_name(
+        &self,
+        application_name: &str,
+    ) -> Result<Client, PostgresPlanError> {
         self.validate()?;
         let password = std::env::var(&self.credential_env)
             .map_err(|_| PostgresPlanError::MissingCredential(self.credential_env.clone()))?;
@@ -198,7 +216,7 @@ impl PostgresEndpointConfig {
             .dbname(&self.database)
             .user(&self.user)
             .password(password)
-            .application_name("sql-splitter-migration-plan")
+            .application_name(application_name)
             .ssl_mode(SslMode::Require)
             .connect_timeout(Duration::from_secs(self.connect_timeout_seconds));
 
@@ -1890,6 +1908,11 @@ fn unsupported_view_security(
         return None;
     }
     Some(UnsupportedObject {
+        code: if column_acl_clear {
+            UnsupportedObjectCode::ViewSecurity
+        } else {
+            UnsupportedObjectCode::ViewColumnAcl
+        },
         object_id: object_id.to_owned(),
         object_kind: if column_acl_clear {
             "view_security"
@@ -4281,6 +4304,7 @@ fn extract_catalog(
             );
             if row.get::<_, String>(5) != "p" {
                 unsupported.push(UnsupportedObject {
+                    code: UnsupportedObjectCode::SequencePersistence,
                     object_id: id.clone(),
                     object_kind: "sequence_persistence".into(),
                     reason: "unlogged or temporary sequence persistence is not implemented".into(),
@@ -4341,6 +4365,7 @@ fn extract_catalog(
                     ))?,
                 ),
                 Err(error) => unsupported.push(UnsupportedObject {
+                    code: UnsupportedObjectCode::ViewAst,
                     object_id: id.clone(),
                     object_kind: "view".into(),
                     reason: format!("view is outside the strict ordinary AST subset: {error}"),
@@ -4350,6 +4375,11 @@ fn extract_catalog(
         }
         if kind == "m" || relrowsecurity {
             unsupported.push(UnsupportedObject {
+                code: if relrowsecurity {
+                    UnsupportedObjectCode::RowSecurity
+                } else {
+                    UnsupportedObjectCode::MaterializedView
+                },
                 object_id: id.clone(),
                 object_kind: if relrowsecurity {
                     "row_security"
@@ -4445,6 +4475,7 @@ fn extract_catalog(
     }
     for root_id in unsafe_partition_roots {
         unsupported.push(UnsupportedObject {
+            code: UnsupportedObjectCode::PartitionTopology,
             object_id: root_id,
             object_kind: "partition_topology".into(),
             reason: "partition root is not a single-level RANGE/LIST/HASH topology on one built-in integer column".into(),
@@ -4452,22 +4483,38 @@ fn extract_catalog(
         });
     }
     let unsupported_partition_rows = transaction.query(
-        "SELECT object_id, reason FROM (
-           SELECT 'partition-local-index:' || i.indexrelid::text AS object_id, 'partition leaf has a local or unattached index' AS reason FROM pg_index i JOIN pg_class leaf ON leaf.oid=i.indrelid WHERE leaf.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid=i.indexrelid)
-           UNION ALL SELECT 'partition-child-index-storage:' || idx.oid::text, 'attached partition child index has custom storage options or tablespace' FROM pg_class idx JOIN pg_index i ON i.indexrelid=idx.oid JOIN pg_class leaf ON leaf.oid=i.indrelid WHERE leaf.relispartition AND EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid=idx.oid) AND (idx.reloptions IS NOT NULL OR idx.reltablespace<>0)
-           UNION ALL SELECT 'partition-child-index-name:' || child_idx.oid::text, 'attached partition child index name is not reproducible from its parent index' FROM pg_inherits child_inh JOIN pg_class child_idx ON child_idx.oid=child_inh.inhrelid JOIN pg_class parent_idx ON parent_idx.oid=child_inh.inhparent JOIN pg_index child_i ON child_i.indexrelid=child_idx.oid JOIN pg_class leaf ON leaf.oid=child_i.indrelid JOIN pg_inherits leaf_inh ON leaf_inh.inhrelid=leaf.oid JOIN pg_class root ON root.oid=leaf_inh.inhparent WHERE child_idx.relkind='i' AND parent_idx.relkind='I' AND (left(parent_idx.relname,length(root.relname))<>root.relname OR child_idx.relname<>leaf.relname || substring(parent_idx.relname FROM length(root.relname)+1))
-           UNION ALL SELECT 'partition-local-constraint:' || con.oid::text, 'partition leaf has a local constraint' FROM pg_constraint con JOIN pg_class leaf ON leaf.oid=con.conrelid WHERE leaf.relispartition AND con.conparentid=0
-           UNION ALL SELECT 'partition-storage:' || leaf.oid::text, 'partition leaf has custom storage options or tablespace' FROM pg_class leaf WHERE leaf.relispartition AND (leaf.reloptions IS NOT NULL OR leaf.reltablespace<>0)
-           UNION ALL SELECT 'partition-trigger:' || t.oid::text, 'partition leaf has a user trigger' FROM pg_trigger t JOIN pg_class leaf ON leaf.oid=t.tgrelid WHERE leaf.relispartition AND NOT t.tgisinternal
-           UNION ALL SELECT 'table-inheritance:' || child.oid::text, 'traditional table inheritance is not implemented' FROM pg_inherits inh JOIN pg_class child ON child.oid=inh.inhrelid WHERE child.relkind IN ('r','p') AND NOT child.relispartition
+        "SELECT object_id, code, reason FROM (
+           SELECT 'index:' || i.indexrelid::text AS object_id, 'partition_local_index' AS code, 'partition leaf has a local or unattached index' AS reason FROM pg_index i JOIN pg_class leaf ON leaf.oid=i.indrelid WHERE leaf.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid=i.indexrelid)
+           UNION ALL SELECT 'index:' || idx.oid::text, 'partition_child_index_storage', 'attached partition child index has custom storage options or tablespace' FROM pg_class idx JOIN pg_index i ON i.indexrelid=idx.oid JOIN pg_class leaf ON leaf.oid=i.indrelid WHERE leaf.relispartition AND EXISTS (SELECT 1 FROM pg_inherits inh WHERE inh.inhrelid=idx.oid) AND (idx.reloptions IS NOT NULL OR idx.reltablespace<>0)
+           UNION ALL SELECT 'index:' || child_idx.oid::text, 'partition_child_index_name', 'attached partition child index name is not reproducible from its parent index' FROM pg_inherits child_inh JOIN pg_class child_idx ON child_idx.oid=child_inh.inhrelid JOIN pg_class parent_idx ON parent_idx.oid=child_inh.inhparent JOIN pg_index child_i ON child_i.indexrelid=child_idx.oid JOIN pg_class leaf ON leaf.oid=child_i.indrelid JOIN pg_inherits leaf_inh ON leaf_inh.inhrelid=leaf.oid JOIN pg_class root ON root.oid=leaf_inh.inhparent WHERE child_idx.relkind='i' AND parent_idx.relkind='I' AND (left(parent_idx.relname,length(root.relname))<>root.relname OR child_idx.relname<>leaf.relname || substring(parent_idx.relname FROM length(root.relname)+1))
+           UNION ALL SELECT 'constraint:' || con.oid::text, 'partition_local_constraint', 'partition leaf has a local constraint' FROM pg_constraint con JOIN pg_class leaf ON leaf.oid=con.conrelid WHERE leaf.relispartition AND con.conparentid=0
+           UNION ALL SELECT 'relation:' || leaf.oid::text, 'partition_storage', 'partition leaf has custom storage options or tablespace' FROM pg_class leaf WHERE leaf.relispartition AND (leaf.reloptions IS NOT NULL OR leaf.reltablespace<>0)
+           UNION ALL SELECT 'trigger:' || t.oid::text, 'partition_trigger', 'partition leaf has a user trigger' FROM pg_trigger t JOIN pg_class leaf ON leaf.oid=t.tgrelid WHERE leaf.relispartition AND NOT t.tgisinternal
+           UNION ALL SELECT 'relation:' || child.oid::text, 'traditional_inheritance', 'traditional table inheritance is not implemented' FROM pg_inherits inh JOIN pg_class child ON child.oid=inh.inhrelid WHERE child.relkind IN ('r','p') AND NOT child.relispartition
          ) excluded ORDER BY object_id",
         &[],
     )?;
     for row in unsupported_partition_rows {
+        let object_id: String = row.get(0);
+        let code = match row.get::<_, String>(1).as_str() {
+            "partition_local_index" => UnsupportedObjectCode::PartitionLocalIndex,
+            "partition_child_index_storage" => UnsupportedObjectCode::PartitionChildIndexStorage,
+            "partition_child_index_name" => UnsupportedObjectCode::PartitionChildIndexName,
+            "partition_local_constraint" => UnsupportedObjectCode::PartitionLocalConstraint,
+            "partition_storage" => UnsupportedObjectCode::PartitionStorage,
+            "partition_trigger" => UnsupportedObjectCode::PartitionTrigger,
+            "traditional_inheritance" => UnsupportedObjectCode::TraditionalInheritance,
+            _ => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "unknown partition exclusion class",
+                ));
+            }
+        };
         unsupported.push(UnsupportedObject {
-            object_id: row.get(0),
+            code,
+            object_id,
             object_kind: "partition_excluded_semantics".into(),
-            reason: row.get(1),
+            reason: row.get(2),
             required_semantics: true,
         });
     }
@@ -4558,6 +4605,7 @@ fn extract_catalog(
             }
             if owners.len() > 1 || malformed_sequence_ownership.contains(&object.id) {
                 unsupported.push(UnsupportedObject {
+                    code: UnsupportedObjectCode::SequenceOwnership,
                     object_id: object.id.clone(),
                     object_kind: "sequence_ownership".into(),
                     reason: "sequence ownership is malformed, dangling, or multiply defined".into(),
@@ -4578,6 +4626,7 @@ fn extract_catalog(
         let type_kind: String = row.get(3);
         let definition: String = row.get(4);
         unsupported.push(UnsupportedObject {
+            code: UnsupportedObjectCode::UserTypeDdl,
             object_id: id.clone(),
             object_kind: format!("postgres_type:{type_kind}"),
             reason: "user-defined PostgreSQL type DDL is not implemented".into(),
@@ -4609,6 +4658,7 @@ fn extract_catalog(
         let name: String = row.get(2);
         let version: String = row.get(3);
         unsupported.push(UnsupportedObject {
+            code: UnsupportedObjectCode::Extension,
             object_id: id.clone(),
             object_kind: "extension".into(),
             reason: "PostgreSQL extension installation and version validation are not implemented"
@@ -4730,6 +4780,7 @@ fn extract_catalog(
             );
             if unsafe_generated_columns.contains(&object.id) {
                 unsupported.push(UnsupportedObject {
+                    code: UnsupportedObjectCode::GeneratedDependency,
                     object_id: object.id.clone(),
                     object_kind: "generated_column_dependency".into(),
                     reason: "generated expression has a non-pg_catalog, mutable, generated-column, or unknown dependency".into(),
@@ -4750,6 +4801,7 @@ fn extract_catalog(
             .is_some_and(|value| value != "s" && !value.is_empty())
         {
             unsupported.push(UnsupportedObject {
+                code: UnsupportedObjectCode::GeneratedMode,
                 object_id: object.id.clone(),
                 object_kind: "generated_column".into(),
                 reason: "only stored PostgreSQL generated columns are implemented".into(),
@@ -4763,6 +4815,7 @@ fn extract_catalog(
             != Some("pg_catalog")
         {
             unsupported.push(UnsupportedObject {
+                code: UnsupportedObjectCode::UserDefinedColumnType,
                 object_id: object.id.clone(),
                 object_kind: "user_defined_column_type".into(),
                 reason: "user-defined PostgreSQL types are not reproduced by the executor".into(),
@@ -4781,6 +4834,7 @@ fn extract_catalog(
             && recorded_collation_version != actual_collation_version
         {
             unsupported.push(UnsupportedObject {
+                code: UnsupportedObjectCode::CollationVersion,
                 object_id: object.id.clone(),
                 object_kind: "collation_version_mismatch".into(),
                 reason: "recorded collation version differs from the provider's actual version"
@@ -4814,6 +4868,7 @@ fn extract_catalog(
                 ordinary_index_columns(object, Some(namespace)),
             ) {
                 unsupported.push(UnsupportedObject {
+                    code: UnsupportedObjectCode::StandaloneIndex,
                     object_id: object.id.clone(),
                     object_kind: "standalone_index".into(),
                     reason: format!(
@@ -4836,6 +4891,7 @@ fn extract_catalog(
         let definition: String = row.get(3);
         let table_oid: String = row.get(4);
         unsupported.push(UnsupportedObject {
+            code: UnsupportedObjectCode::Trigger,
             object_id: id.clone(),
             object_kind: "trigger".into(),
             reason: "trigger execution semantics are not implemented".into(),
@@ -4907,6 +4963,7 @@ fn extract_catalog(
                 );
             }
             _ => unsupported.push(UnsupportedObject {
+                code: UnsupportedObjectCode::Routine,
                 object_id: id.clone(),
                 object_kind: "routine".into(),
                 reason: "routine is outside the immutable SQL scalar create-only AST subset".into(),
@@ -4932,6 +4989,7 @@ fn extract_catalog(
     )?;
     for row in policy_rows {
         unsupported.push(UnsupportedObject {
+            code: UnsupportedObjectCode::RowSecurityPolicy,
             object_id: row.get(0),
             object_kind: "row_security_policy".into(),
             reason: format!(
@@ -4961,7 +5019,26 @@ fn extract_catalog(
     )?;
     for row in unsupported_catalog_rows {
         let object_kind: String = row.get(1);
+        let code = match object_kind.as_str() {
+            "namespace_acl" => UnsupportedObjectCode::NamespaceAcl,
+            "relation_acl" => UnsupportedObjectCode::RelationAcl,
+            "routine_acl" => UnsupportedObjectCode::RoutineAcl,
+            "default_privileges" => UnsupportedObjectCode::DefaultPrivileges,
+            "event_trigger" => UnsupportedObjectCode::EventTrigger,
+            "rewrite_rule" => UnsupportedObjectCode::RewriteRule,
+            "logical_replication_publication" => UnsupportedObjectCode::Publication,
+            "foreign_server" => UnsupportedObjectCode::ForeignServer,
+            "foreign_table" => UnsupportedObjectCode::ForeignTable,
+            "extended_statistics" => UnsupportedObjectCode::ExtendedStatistics,
+            "user_collation" => UnsupportedObjectCode::UserCollation,
+            _ => {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "unknown unsupported PostgreSQL catalog class",
+                ));
+            }
+        };
         unsupported.push(UnsupportedObject {
+            code,
             object_id: row.get(0),
             required_semantics: !matches!(
                 object_kind.as_str(),
@@ -5287,8 +5364,24 @@ pub fn build_plan_with_consistency(
     for table in table_names {
         let resumable_key = select_resumable_key(&source.catalog, &table);
         if resumable_key.is_err() {
+            let table_object_id = source
+                .catalog
+                .namespaces
+                .iter()
+                .find(|namespace| namespace.name == table.namespace)
+                .and_then(|namespace| {
+                    namespace.objects.iter().find(|object| {
+                        object.kind == CatalogObjectKind::Table && object.name == table.name
+                    })
+                })
+                .ok_or(PostgresPlanError::InvalidConfig(
+                    "planned table is absent from the source catalog",
+                ))?
+                .id
+                .clone();
             key_unsupported.push(UnsupportedObject {
-                object_id: format!("resumable-key:{}.{}", table.namespace, table.name),
+                code: UnsupportedObjectCode::ResumableKey,
+                object_id: table_object_id,
                 object_kind: "resumable_key".into(),
                 reason: "table has no complete validated non-null primary key, unique constraint, or supported standalone unique index".into(),
                 required_semantics: true,
@@ -5692,6 +5785,7 @@ pub fn build_plan_with_consistency(
     unsupported.objects.extend(key_unsupported);
     if !sequences.is_empty() && consistency_mode != PostgresConsistencyMode::WriteFence {
         unsupported.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::SequenceConsistency,
             object_id: "postgres-sequence-write-fence-required".into(),
             object_kind: "sequence_consistency".into(),
             reason: "sequence migration requires an attested write fence that blocks nextval and setval, followed by an exact post-drain catalog recapture".into(),
@@ -5702,6 +5796,7 @@ pub fn build_plan_with_consistency(
         && source.server_version_num / 10_000 != target.server_version_num / 10_000
     {
         unsupported.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::GeneratedCrossMajor,
             object_id: "postgres-generated-column-major-version".into(),
             object_kind: "generated_column_compatibility".into(),
             reason: "stored generated columns require the same PostgreSQL major version".into(),
@@ -5716,6 +5811,7 @@ pub fn build_plan_with_consistency(
         .sum();
     if target_object_count > 0 {
         unsupported.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::TargetNotEmpty,
             object_id: "target-catalog-not-empty".into(),
             object_kind: "target_precondition".into(),
             reason: format!("target catalog contains {target_object_count} user objects"),
@@ -5724,6 +5820,7 @@ pub fn build_plan_with_consistency(
     }
     if source.endpoint_identity == target.endpoint_identity {
         unsupported.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::SameEndpoint,
             object_id: "source-target-endpoint-collision".into(),
             object_kind: "endpoint_precondition".into(),
             reason: "source and target resolve to the same endpoint identity".into(),
@@ -5735,14 +5832,19 @@ pub fn build_plan_with_consistency(
         .sort_by(|left, right| left.object_id.cmp(&right.object_id));
     ReviewedPlan::new(MigrationPlan {
         schema_version: PLAN_SCHEMA_VERSION,
+        purpose: PlanPurpose::Execution,
         migration_id: format!("pg-{}", &catalog_fingerprint(&source.catalog)?[..16]),
         tool_version: env!("CARGO_PKG_VERSION").into(),
         source_endpoint_identity: source.endpoint_identity.clone(),
-        target_endpoint_identity: target.endpoint_identity.clone(),
+        target_endpoint_identity: AssessmentStatus::Assessed(target.endpoint_identity.clone()),
         source_catalog_fingerprint: catalog_fingerprint(&source.catalog)?,
-        target_catalog_fingerprint: catalog_fingerprint(&target.catalog)?,
+        target_catalog_fingerprint: AssessmentStatus::Assessed(catalog_fingerprint(
+            &target.catalog,
+        )?),
         source_catalog: Some(source.catalog.clone()),
-        target_catalog: Some(target.catalog.clone()),
+        target_catalog: AssessmentStatus::Assessed(target.catalog.clone()),
+        source_tls_binding: source.tls_binding.clone(),
+        target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
         consistency_mode: consistency_mode.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: "postgresql_same_dialect_exact".into(),
@@ -5753,6 +5855,7 @@ pub fn build_plan_with_consistency(
             ),
             ("source_tls".into(), source.tls_binding.clone()),
             ("target_tls".into(), target.tls_binding.clone()),
+            ("acl.report_only".into(), "approval_required".into()),
         ]),
         operations,
         unsupported_objects: unsupported,
@@ -6155,6 +6258,305 @@ pub fn write_live_plan(
     )
 }
 
+/// Collect a source-only assessment in exactly one read-only repeatable-read transaction.
+pub fn collect_live_assessment(
+    source_config: &PostgresEndpointConfig,
+) -> Result<AssessmentArtifact, PostgresPlanError> {
+    let mut client =
+        source_config.connect_with_application_name("sql-splitter-migration-assessment")?;
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()?;
+    let identity = transaction.query_one(
+        "SELECT current_database(),current_user,COALESCE(inet_server_addr()::text,'local'),COALESCE(inet_server_port(),0),current_setting('server_version'),current_setting('server_version_num')::integer,current_setting('transaction_read_only')::boolean",
+        &[],
+    )?;
+    let database: String = identity.get(0);
+    let user: String = identity.get(1);
+    let address: String = identity.get(2);
+    let port: i32 = identity.get(3);
+    let server_version: String = identity.get(4);
+    let server_version_num: i32 = identity.get(5);
+    let transaction_read_only: bool = identity.get(6);
+    let direct_write_privileges_absent: bool = transaction
+        .query_one(
+            "SELECT NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication AND NOT r.rolbypassrls AND NOT has_database_privilege(current_user,current_database(),'CREATE,TEMP') AND NOT EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND has_schema_privilege(current_user,n.oid,'CREATE')) AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND c.relkind IN ('r','p','f','v') AND has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND c.relkind='S' AND has_sequence_privilege(current_user,c.oid,'USAGE,UPDATE')) AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND p.prosecdef AND has_function_privilege(current_user,p.oid,'EXECUTE')) FROM pg_roles r WHERE r.rolname=current_user",
+            &[],
+        )?
+        .get(0);
+    validate_assessment_source_security(transaction_read_only, direct_write_privileges_absent)?;
+    let (catalog, unsupported_objects) =
+        extract_catalog(&mut transaction, &database, &server_version)?;
+    let estimate_rows = transaction.query(
+        "SELECT n.nspname,c.relname,GREATEST(c.reltuples::bigint,0),pg_relation_size(c.oid),pg_total_relation_size(c.oid) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND c.relkind IN ('r','p') ORDER BY n.nspname,c.relname,c.oid",
+        &[],
+    )?;
+    let mut scope_estimates = estimate_rows
+        .into_iter()
+        .map(|row| {
+            Ok(ScopeEstimate {
+                table: QualifiedTable {
+                    namespace: Identifier::new(row.get::<_, String>(0))?,
+                    name: Identifier::new(row.get::<_, String>(1))?,
+                },
+                estimated_rows: row.get(2),
+                relation_bytes: u64::try_from(row.get::<_, i64>(3)).map_err(|_| {
+                    PostgresPlanError::InvalidConfig("negative PostgreSQL relation size")
+                })?,
+                total_relation_bytes: u64::try_from(row.get::<_, i64>(4)).map_err(|_| {
+                    PostgresPlanError::InvalidConfig("negative PostgreSQL total relation size")
+                })?,
+            })
+        })
+        .collect::<Result<Vec<_>, PostgresPlanError>>()?;
+    scope_estimates.sort_by(|left, right| left.table.cmp(&right.table));
+    transaction.commit()?;
+
+    build_source_assessment(
+        CatalogSnapshot {
+            endpoint_identity: format!("postgres://{address}:{port}/{database}?user={user}"),
+            server_version,
+            server_version_num,
+            catalog,
+            unsupported: unsupported_objects,
+            tls_binding: postgres_tls_binding(source_config)?,
+        },
+        transaction_read_only,
+        direct_write_privileges_absent,
+        scope_estimates,
+    )
+}
+
+fn validate_assessment_source_security(
+    transaction_read_only: bool,
+    direct_write_privileges_absent: bool,
+) -> Result<(), PostgresPlanError> {
+    if !transaction_read_only {
+        return Err(PostgresPlanError::SourceNotReadOnly);
+    }
+    if !direct_write_privileges_absent {
+        return Err(PostgresPlanError::SourceRoleHoldsDirectWritePrivilege);
+    }
+    Ok(())
+}
+
+fn assessment_projection_source(source: &CatalogSnapshot) -> CatalogSnapshot {
+    let mut blocked = source
+        .unsupported
+        .objects
+        .iter()
+        .filter(|finding| finding.required_semantics)
+        .map(|finding| finding.object_id.as_str())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let previous_len = blocked.len();
+        for dependency in &source.catalog.dependencies {
+            if blocked.contains(dependency.to_object_id.as_str()) {
+                blocked.insert(dependency.from_object_id.as_str());
+            }
+            if dependency.dependency_type == "partition_of"
+                && blocked.contains(dependency.from_object_id.as_str())
+            {
+                blocked.insert(dependency.to_object_id.as_str());
+            }
+        }
+        if blocked.len() == previous_len {
+            break;
+        }
+    }
+    let mut projected = source.clone();
+    for namespace in &mut projected.catalog.namespaces {
+        namespace
+            .objects
+            .retain(|object| !blocked.contains(object.id.as_str()));
+    }
+    let retained = projected
+        .catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| &namespace.objects)
+        .map(|object| object.id.as_str())
+        .collect::<BTreeSet<_>>();
+    projected.catalog.dependencies.retain(|dependency| {
+        retained.contains(dependency.from_object_id.as_str())
+            && retained.contains(dependency.to_object_id.as_str())
+    });
+    projected.unsupported = UnsupportedObjectReport::default();
+    projected
+}
+
+/// Build a durable source-only assessment from evidence collected in one snapshot.
+pub fn build_source_assessment(
+    source: CatalogSnapshot,
+    transaction_read_only: bool,
+    direct_write_privileges_absent: bool,
+    mut scope_estimates: Vec<ScopeEstimate>,
+) -> Result<AssessmentArtifact, PostgresPlanError> {
+    let sequence_objects = source
+        .catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| &namespace.objects)
+        .filter(|object| object.kind == CatalogObjectKind::Sequence)
+        .collect::<Vec<_>>();
+    let has_sequences = !sequence_objects.is_empty();
+    let sequence_cache_requires_fence = sequence_objects.iter().any(|sequence| {
+        sequence
+            .attributes
+            .get("cache")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<i64>().ok())
+            .is_none_or(|cache| cache > 1)
+    });
+    let projection_source = assessment_projection_source(&source);
+    let projection_target = CatalogSnapshot {
+        endpoint_identity: "assessment://target-not-assessed".into(),
+        server_version: source.server_version.clone(),
+        server_version_num: source.server_version_num,
+        catalog: VendorCatalog {
+            format_version: source.catalog.format_version,
+            dialect: source.catalog.dialect.clone(),
+            server_version: source.catalog.server_version.clone(),
+            database: source.catalog.database.clone(),
+            namespaces: Vec::new(),
+            dependencies: Vec::new(),
+            vendor_metadata: source.catalog.vendor_metadata.clone(),
+        },
+        unsupported: UnsupportedObjectReport::default(),
+        tls_binding: "not_assessed".into(),
+    };
+    let projected = build_plan_with_consistency(
+        &projection_source,
+        &projection_target,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    let mut unsupported_objects = source.unsupported.clone();
+    unsupported_objects.objects.extend(
+        projected
+            .plan
+            .unsupported_objects
+            .objects
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    finding.object_kind.as_str(),
+                    "target_precondition" | "endpoint_precondition"
+                )
+            }),
+    );
+    unsupported_objects
+        .objects
+        .sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    scope_estimates.sort_by(|left, right| left.table.cmp(&right.table));
+    let source_catalog_fingerprint = catalog_fingerprint(&source.catalog)?;
+    let operations = projected.plan.operations;
+    let reviewed_plan = ReviewedPlan::new(MigrationPlan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        purpose: PlanPurpose::Assessment,
+        migration_id: format!("pg-assessment-{}", &source_catalog_fingerprint[..16]),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+        source_endpoint_identity: source.endpoint_identity,
+        target_endpoint_identity: AssessmentStatus::NotAssessed,
+        source_catalog_fingerprint,
+        target_catalog_fingerprint: AssessmentStatus::NotAssessed,
+        source_catalog: Some(source.catalog),
+        target_catalog: AssessmentStatus::NotAssessed,
+        source_tls_binding: source.tls_binding.clone(),
+        target_tls_binding: AssessmentStatus::NotAssessed,
+        consistency_mode: "not_assessed".into(),
+        canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+        conversion_policy: "postgresql_source_only_assessment".into(),
+        capabilities: BTreeMap::from([
+            (
+                "catalog_snapshot".into(),
+                "repeatable_read_read_only".into(),
+            ),
+            ("source_tls".into(), source.tls_binding.clone()),
+            ("acl.report_only".into(), "approval_required".into()),
+        ]),
+        operations,
+        unsupported_objects,
+    })?;
+    let consistent_snapshot_status = if !has_sequences {
+        EvidenceStatus::Proven
+    } else {
+        EvidenceStatus::NotAssessed {
+            reason: if sequence_cache_requires_fence {
+                "one or more sequences use CACHE greater than 1 and require a write fence".into()
+            } else {
+                "CACHE 1 sequence equality is planned but its execution gates have not run".into()
+            },
+        }
+    };
+    let assessment = AssessmentArtifact {
+        schema_version: ASSESSMENT_SCHEMA_VERSION,
+        reviewed_plan,
+        source_evidence: SourceAssessmentEvidence {
+            server_version: source.server_version,
+            tls_binding: source.tls_binding,
+            transaction_read_only,
+            direct_write_privileges_absent,
+        },
+        execution_requirements: vec![
+            ExecutionRequirement {
+                name: "consistent_snapshot".into(),
+                status: consistent_snapshot_status,
+                detail: "table data uses one REPEATABLE READ READ ONLY snapshot; sequence state requires separate evidence".into(),
+            },
+            ExecutionRequirement {
+                name: "write_fence".into(),
+                status: EvidenceStatus::NotAssessed {
+                    reason: "source-only assessment does not install or probe a write fence".into(),
+                },
+                detail: "required for sequence-bearing online execution".into(),
+            },
+            ExecutionRequirement {
+                name: "attested_external_quiesce".into(),
+                status: EvidenceStatus::NotAssessed {
+                    reason: "operator attestation is supplied only at execution time".into(),
+                },
+                detail: "the tool does not enforce the external source freeze".into(),
+            },
+            ExecutionRequirement {
+                name: "target_compatibility".into(),
+                status: EvidenceStatus::NotAssessed {
+                    reason: "no target endpoint was provided".into(),
+                },
+                detail: "target version, ownership, emptiness, and schema compatibility".into(),
+            },
+        ],
+        scope_estimates,
+        projected_window: ProjectedWindow::NotAssessed {
+            reason: "no measured copy and verification throughput was provided".into(),
+        },
+    };
+    assessment.validate()?;
+    Ok(assessment)
+}
+
+/// Collect and publish protected machine-readable and Markdown assessment artifacts.
+pub fn write_live_assessment(
+    source_config: impl AsRef<Path>,
+    assessment_output: impl AsRef<Path>,
+    report_output: impl AsRef<Path>,
+) -> Result<AssessmentArtifact, PostgresPlanError> {
+    let assessment_output = assessment_output.as_ref();
+    let report_output = report_output.as_ref();
+    if assessment_output == report_output {
+        return Err(PostgresPlanError::InvalidConfig(
+            "assessment JSON and Markdown outputs must be different paths",
+        ));
+    }
+    prepare_json_text_pair_new(assessment_output, report_output)?;
+    let source_config = PostgresEndpointConfig::read(source_config)?;
+    let assessment = collect_live_assessment(&source_config)?;
+    let report = render_markdown(&assessment)?;
+    write_json_text_pair_new(assessment_output, &assessment, report_output, &report)?;
+    Ok(assessment)
+}
+
 pub fn write_live_plan_with_consistency(
     source_config: impl AsRef<Path>,
     target_config: impl AsRef<Path>,
@@ -6178,6 +6580,35 @@ pub fn write_live_plan_with_consistency(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assessment_outputs_must_be_distinct() {
+        let error = write_live_assessment("missing.toml", "same.out", "same.out").unwrap_err();
+        assert!(matches!(error, PostgresPlanError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn assessment_preflights_both_outputs_before_reading_the_source_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let assessment = directory.path().join("assessment.json");
+        let report = directory.path().join("assessment.md");
+        std::fs::write(&report, "existing").unwrap();
+        let error = write_live_assessment("missing.toml", &assessment, &report).unwrap_err();
+        assert!(matches!(error, PostgresPlanError::Artifact(_)));
+        assert!(!assessment.exists());
+    }
+
+    #[test]
+    fn assessment_security_failures_have_typed_errors() {
+        assert!(matches!(
+            validate_assessment_source_security(false, true),
+            Err(PostgresPlanError::SourceNotReadOnly)
+        ));
+        assert!(matches!(
+            validate_assessment_source_security(true, false),
+            Err(PostgresPlanError::SourceRoleHoldsDirectWritePrivilege)
+        ));
+    }
 
     fn snapshot(endpoint: &str, with_table: bool) -> CatalogSnapshot {
         let mut objects = Vec::new();
@@ -6235,6 +6666,72 @@ credential_env = "PGPASSWORD"
 password = "secret"
 "#;
         assert!(toml::from_str::<PostgresEndpointConfig>(inline).is_err());
+    }
+
+    #[test]
+    fn source_assessment_marks_every_target_field_not_assessed() {
+        let source = snapshot("postgres://source/app?user=reader", true);
+        let assessment = build_source_assessment(
+            source,
+            true,
+            true,
+            vec![ScopeEstimate {
+                table: QualifiedTable {
+                    namespace: Identifier::new("public").unwrap(),
+                    name: Identifier::new("accounts").unwrap(),
+                },
+                estimated_rows: 42,
+                relation_bytes: 4096,
+                total_relation_bytes: 8192,
+            }],
+        )
+        .unwrap();
+        let plan = &assessment.reviewed_plan.plan;
+        assert_eq!(plan.purpose, PlanPurpose::Assessment);
+        assert_eq!(plan.target_endpoint_identity, AssessmentStatus::NotAssessed);
+        assert_eq!(
+            plan.target_catalog_fingerprint,
+            AssessmentStatus::NotAssessed
+        );
+        assert_eq!(plan.target_catalog, AssessmentStatus::NotAssessed);
+        assert_eq!(plan.target_tls_binding, AssessmentStatus::NotAssessed);
+        assert_eq!(plan.capabilities["acl.report_only"], "approval_required");
+        assert!(plan.unsupported_objects.objects.iter().all(|finding| {
+            !matches!(
+                finding.object_kind.as_str(),
+                "target_precondition" | "endpoint_precondition"
+            )
+        }));
+        assert!(plan
+            .operations
+            .iter()
+            .any(|operation| operation.kind == OperationKind::CreateTable));
+        assert!(plan
+            .operations
+            .iter()
+            .any(|operation| operation.kind == OperationKind::CopyTable));
+        assert!(plan
+            .operations
+            .iter()
+            .any(|operation| operation.kind == OperationKind::VerifySchema));
+        assert!(matches!(
+            assessment.projected_window,
+            ProjectedWindow::NotAssessed { .. }
+        ));
+        assert_eq!(assessment.scope_estimates[0].estimated_rows, 42);
+        assert!(render_markdown(&assessment)
+            .unwrap()
+            .contains("Target endpoint: **not assessed**"));
+    }
+
+    #[test]
+    fn source_assessment_requires_proven_read_only_role() {
+        let error = build_source_assessment(snapshot("source", false), true, false, Vec::new())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PostgresPlanError::Assessment(AssessmentError::SourceRoleHasDirectWritePrivilege)
+        ));
     }
 
     #[test]

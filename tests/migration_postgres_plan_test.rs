@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 #[cfg(feature = "migration-fault-injection")]
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,12 @@ use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::config::SslMode;
 use postgres::{Client, Config};
 use postgres_native_tls::MakeTlsConnector;
+use sha2::{Digest, Sha256};
 use sql_splitter::migration::append_journal::{AppendJournal, PreparedChunk};
 use sql_splitter::migration::artifact::read_json;
+use sql_splitter::migration::assessment::{
+    render_markdown, stable_report_body, AssessmentArtifact,
+};
 use sql_splitter::migration::connection::{
     CancellationToken, ConnectionError, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
@@ -29,10 +34,13 @@ use sql_splitter::migration::model::{
     CatalogNamespace, CatalogObject, CatalogObjectKind, DbValue, Identifier, KeyTuple,
     QualifiedTable, VendorCatalog,
 };
-use sql_splitter::migration::plan::ReviewedPlan;
+use sql_splitter::migration::plan::{
+    AssessmentStatus, PlanPurpose, ReviewedPlan, UnsupportedObjectCode,
+};
 use sql_splitter::migration::postgres::{
-    build_plan, inspect_endpoint, write_live_plan, write_live_plan_with_consistency,
-    PostgresConsistencyMode, PostgresEndpointConfig, PostgresSourceFactory,
+    build_plan, collect_live_assessment, inspect_endpoint, write_live_assessment, write_live_plan,
+    write_live_plan_with_consistency, PostgresConsistencyMode, PostgresEndpointConfig,
+    PostgresPlanError, PostgresSourceFactory,
 };
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
@@ -62,17 +70,480 @@ fn live_plan_is_read_only_self_contained_and_deterministic() -> anyhow::Result<(
     assert_eq!(first, second);
     assert_eq!(std::fs::read(&first_path)?, std::fs::read(&second_path)?);
     assert!(first.plan.source_catalog.is_some());
-    assert!(first.plan.target_catalog.is_some());
+    assert!(first.plan.target_catalog.is_assessed());
     assert!(first
         .plan
         .target_catalog
-        .as_ref()
+        .as_assessed()
         .is_some_and(|catalog| catalog
             .namespaces
             .iter()
             .all(|namespace| namespace.objects.is_empty())));
     assert!(!first.plan.operations.is_empty());
     assert_eq!(read_json::<ReviewedPlan>(first_path)?, first);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a TLS-enabled PostgreSQL source with a read-only assessment role"]
+fn live_source_only_assessment_is_read_only_and_deterministic() -> anyhow::Result<()> {
+    let source = required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?;
+    let source_config = PostgresEndpointConfig::read(&source)?;
+    let log_admin_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_LOG_ADMIN_CONFIG")?)?;
+    let mut log_admin = connect(&log_admin_config)?;
+    let before_rows: i64 = log_admin
+        .query_one("SELECT count(*) FROM public.live_snapshot_rows", &[])?
+        .get(0);
+    let before_objects: i64 = log_admin
+        .query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_'",
+            &[],
+        )?
+        .get(0);
+    let before_sequence_row = log_admin.query_one(
+        "SELECT last_value,is_called FROM public.assessment_sequence",
+        &[],
+    )?;
+    let before_sequence = (
+        before_sequence_row.get::<_, i64>(0),
+        before_sequence_row.get::<_, bool>(1),
+    );
+    let directory = private_tempdir()?;
+    let first_artifact_path = directory.path().join("assessment-first.json");
+    let first_report_path = directory.path().join("assessment-first.md");
+    let second_artifact_path = directory.path().join("assessment-second.json");
+    let second_report_path = directory.path().join("assessment-second.md");
+    let cli_artifact_path = directory.path().join("assessment-cli.json");
+    let cli_report_path = directory.path().join("assessment-cli.md");
+
+    let first = write_live_assessment(&source, &first_artifact_path, &first_report_path)?;
+    let second = write_live_assessment(&source, &second_artifact_path, &second_report_path)?;
+    let cli_output = Command::new(env!("CARGO_BIN_EXE_sql-splitter-migration-spike"))
+        .args([
+            "assess-postgres",
+            "--source-config",
+            source.to_str().context("source config path is not UTF-8")?,
+            "--assessment-output",
+            cli_artifact_path
+                .to_str()
+                .context("CLI assessment path is not UTF-8")?,
+            "--report-output",
+            cli_report_path
+                .to_str()
+                .context("CLI report path is not UTF-8")?,
+        ])
+        .env_remove("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")
+        .env_remove("SQL_SPLITTER_PG_TARGET_PASSWORD")
+        .env_remove("SQL_SPLITTER_PG_RUN_TARGET_CONFIG")
+        .env_remove("SQL_SPLITTER_PG_RUN_TARGET_PASSWORD")
+        .output()?;
+    assert!(
+        cli_output.status.success(),
+        "source-only assessment CLI failed: {}",
+        String::from_utf8_lossy(&cli_output.stderr)
+    );
+    let cli_assessment = read_json::<AssessmentArtifact>(&cli_artifact_path)?;
+    assert_eq!(cli_assessment.reviewed_plan, first.reviewed_plan);
+    assert_eq!(
+        stable_report_body(&std::fs::read_to_string(cli_report_path)?),
+        stable_report_body(&std::fs::read_to_string(&first_report_path)?)
+    );
+    assert_eq!(first.reviewed_plan.plan.purpose, PlanPurpose::Assessment);
+    assert_eq!(
+        first.reviewed_plan.plan.target_endpoint_identity,
+        AssessmentStatus::NotAssessed
+    );
+    assert_eq!(
+        first.reviewed_plan.plan.target_catalog,
+        AssessmentStatus::NotAssessed
+    );
+    assert!(first.source_evidence.transaction_read_only);
+    assert!(first.source_evidence.direct_write_privileges_absent);
+    assert!(first.reviewed_plan.plan.validate_for_execution().is_err());
+    assert_eq!(
+        read_json::<AssessmentArtifact>(&first_artifact_path)?,
+        first
+    );
+
+    let first_report = std::fs::read_to_string(first_report_path)?;
+    let second_report = std::fs::read_to_string(second_report_path)?;
+    assert_eq!(
+        stable_report_body(&first_report),
+        stable_report_body(&second_report)
+    );
+    assert!(first_report.contains("Target endpoint: **not assessed**"));
+    assert!(first_report.contains("Direct database-object write privileges: `absent`"));
+    assert!(first_report.contains("Executable routine side effects: `not proven`"));
+    assert!(first_report.contains("`acl.report_only`: `approval_required`"));
+    assert_eq!(first.reviewed_plan, second.reviewed_plan);
+    assert_eq!(
+        log_admin
+            .query_one("SELECT count(*) FROM public.live_snapshot_rows", &[])?
+            .get::<_, i64>(0),
+        before_rows
+    );
+    assert_eq!(
+        log_admin
+            .query_one(
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_'",
+                &[],
+            )?
+            .get::<_, i64>(0),
+        before_objects
+    );
+    let after_sequence = log_admin.query_one(
+        "SELECT last_value,is_called FROM public.assessment_sequence",
+        &[],
+    )?;
+    assert_eq!(
+        (
+            after_sequence.get::<_, i64>(0),
+            after_sequence.get::<_, bool>(1)
+        ),
+        before_sequence
+    );
+    assert_assessment_statement_log(&mut log_admin, 3)?;
+    let assessment_locks: i64 = log_admin
+        .query_one(
+            "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.application_name='sql-splitter-migration-assessment'",
+            &[],
+        )?
+        .get(0);
+    assert_eq!(assessment_locks, 0);
+
+    let mut reader = connect(&source_config)?;
+    let large_object_oid: u32 = reader.query_one("SELECT lo_create(0)", &[])?.get(0);
+    let removed: i32 = reader
+        .query_one("SELECT lo_unlink($1)", &[&large_object_oid])?
+        .get(0);
+    assert_eq!(removed, 1, "large-object fixture cleanup failed");
+    // PostgreSQL versions do not uniformly reject every state-changing
+    // function from a READ ONLY transaction. The assessment therefore relies
+    // on its audited statement allowlist as well as transaction restrictions;
+    // it does not treat READ ONLY as a routine-side-effect sandbox.
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the PG15-17 Docker blocking-code fixture role"]
+fn live_postgres_blocking_code_registry_matrix() -> anyhow::Result<()> {
+    const LIVE_ASSESSMENT_REQUIRED: &[UnsupportedObjectCode] = &[
+        UnsupportedObjectCode::SequencePersistence,
+        UnsupportedObjectCode::ViewSecurity,
+        UnsupportedObjectCode::ViewColumnAcl,
+        UnsupportedObjectCode::ViewAst,
+        UnsupportedObjectCode::MaterializedView,
+        UnsupportedObjectCode::RowSecurity,
+        UnsupportedObjectCode::PartitionTopology,
+        UnsupportedObjectCode::PartitionLocalIndex,
+        UnsupportedObjectCode::PartitionChildIndexStorage,
+        UnsupportedObjectCode::PartitionChildIndexName,
+        UnsupportedObjectCode::PartitionLocalConstraint,
+        UnsupportedObjectCode::PartitionStorage,
+        UnsupportedObjectCode::PartitionTrigger,
+        UnsupportedObjectCode::TraditionalInheritance,
+        UnsupportedObjectCode::SequenceOwnership,
+        UnsupportedObjectCode::UserTypeDdl,
+        UnsupportedObjectCode::Extension,
+        UnsupportedObjectCode::GeneratedDependency,
+        UnsupportedObjectCode::UserDefinedColumnType,
+        UnsupportedObjectCode::CollationVersion,
+        UnsupportedObjectCode::StandaloneIndex,
+        UnsupportedObjectCode::Trigger,
+        UnsupportedObjectCode::Routine,
+        UnsupportedObjectCode::RowSecurityPolicy,
+        UnsupportedObjectCode::EventTrigger,
+        UnsupportedObjectCode::RewriteRule,
+        UnsupportedObjectCode::Publication,
+        UnsupportedObjectCode::ForeignServer,
+        UnsupportedObjectCode::ForeignTable,
+        UnsupportedObjectCode::ExtendedStatistics,
+        UnsupportedObjectCode::UserCollation,
+        UnsupportedObjectCode::ResumableKey,
+    ];
+    const LIVE_EXECUTION_ONLY: &[(UnsupportedObjectCode, &str)] = &[
+        (
+            UnsupportedObjectCode::SequenceConsistency,
+            "source-only assessment records the write-fence requirement instead of selecting an execution consistency mode",
+        ),
+        (
+            UnsupportedObjectCode::TargetNotEmpty,
+            "source-only assessment has no target endpoint",
+        ),
+        (
+            UnsupportedObjectCode::SameEndpoint,
+            "source-only assessment has no target endpoint",
+        ),
+    ];
+    const ASSESSMENT_UNREACHABLE: &[(UnsupportedObjectCode, &str)] = &[
+        (
+            UnsupportedObjectCode::GeneratedMode,
+            "virtual generated columns require PostgreSQL 18 and are outside the PostgreSQL 15-17 contract",
+        ),
+        (
+            UnsupportedObjectCode::GeneratedCrossMajor,
+            "cross-major compatibility requires both source and target endpoints",
+        ),
+    ];
+    const NONBLOCKING_REPORT_REQUIRED: &[UnsupportedObjectCode] = &[
+        UnsupportedObjectCode::NamespaceAcl,
+        UnsupportedObjectCode::RelationAcl,
+        UnsupportedObjectCode::RoutineAcl,
+        UnsupportedObjectCode::DefaultPrivileges,
+    ];
+    let classified = LIVE_ASSESSMENT_REQUIRED
+        .iter()
+        .copied()
+        .chain(LIVE_EXECUTION_ONLY.iter().map(|(code, _)| *code))
+        .chain(ASSESSMENT_UNREACHABLE.iter().map(|(code, _)| *code))
+        .chain(NONBLOCKING_REPORT_REQUIRED.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        classified.len(),
+        LIVE_ASSESSMENT_REQUIRED.len()
+            + LIVE_EXECUTION_ONLY.len()
+            + ASSESSMENT_UNREACHABLE.len()
+            + NONBLOCKING_REPORT_REQUIRED.len(),
+        "blocking-code registry categories overlap"
+    );
+    assert_eq!(
+        classified,
+        UnsupportedObjectCode::ALL.iter().copied().collect(),
+        "every unsupported-object code must have an explicit live-test classification"
+    );
+
+    let source_path = required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_PG_TEST_TARGET_CONFIG")?;
+    let admin = PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_ADMIN_CONFIG")?)?;
+    let source_config = PostgresEndpointConfig::read(&source_path)?;
+    let mut admin_client = connect(&admin)?;
+    let mut observed = std::collections::BTreeSet::new();
+
+    admin_client.batch_execute(
+        "CREATE SCHEMA blocking_key;
+         CREATE TABLE blocking_key.no_key(id bigint,payload text);
+         GRANT USAGE ON SCHEMA blocking_key TO migration_reader;
+         GRANT SELECT ON blocking_key.no_key TO migration_reader",
+    )?;
+    let key_snapshot = inspect_endpoint(&source_config)?;
+    let empty_target = inspect_endpoint(&PostgresEndpointConfig::read(&target_path)?)?;
+    let assessment = build_plan(&key_snapshot, &empty_target)?;
+    observed.extend(
+        assessment
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .filter(|finding| finding.required_semantics)
+            .map(|finding| finding.code),
+    );
+    admin_client.batch_execute("DROP SCHEMA blocking_key CASCADE")?;
+
+    admin_client.batch_execute(
+        "CREATE SCHEMA blocking_sequence;
+         CREATE SEQUENCE blocking_sequence.needs_fence;
+         GRANT USAGE ON SCHEMA blocking_sequence TO migration_reader;
+         GRANT SELECT ON SEQUENCE blocking_sequence.needs_fence TO migration_reader",
+    )?;
+    let sequence_source = inspect_endpoint(&source_config)?;
+    let sequence_plan = build_plan(&sequence_source, &empty_target)?;
+    observed.extend(
+        sequence_plan
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .filter(|finding| finding.required_semantics)
+            .map(|finding| finding.code),
+    );
+    let same_endpoint = build_plan(&sequence_source, &sequence_source)?;
+    observed.extend(
+        same_endpoint
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .filter(|finding| finding.required_semantics)
+            .map(|finding| finding.code),
+    );
+    admin_client.batch_execute("DROP SCHEMA blocking_sequence CASCADE")?;
+
+    admin_client.batch_execute(
+        "CREATE SCHEMA blocking_matrix;
+         GRANT USAGE ON SCHEMA blocking_matrix TO migration_reader;
+         CREATE TABLE blocking_matrix.base(id integer,payload text,extra text);
+         ALTER TABLE blocking_matrix.base ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY base_policy ON blocking_matrix.base USING (true);
+         CREATE UNLOGGED SEQUENCE blocking_matrix.unlogged_seq;
+         CREATE SEQUENCE blocking_matrix.bad_owner OWNED BY blocking_matrix.base.id;
+         GRANT SELECT ON ALL SEQUENCES IN SCHEMA blocking_matrix TO migration_reader;
+         CREATE VIEW blocking_matrix.secure_view WITH (security_barrier=true) AS SELECT id FROM blocking_matrix.base;
+         CREATE VIEW blocking_matrix.column_acl_view AS SELECT id FROM blocking_matrix.base;
+         GRANT SELECT(id) ON blocking_matrix.column_acl_view TO migration_reader;
+         CREATE COLLATION blocking_matrix.custom_collation (provider=icu,locale='en-US',version='wrong');
+         CREATE TABLE blocking_matrix.collated(id integer PRIMARY KEY,payload text COLLATE blocking_matrix.custom_collation);
+         CREATE VIEW blocking_matrix.ast_view AS SELECT payload COLLATE blocking_matrix.custom_collation AS payload FROM blocking_matrix.base;
+         CREATE MATERIALIZED VIEW blocking_matrix.materialized AS SELECT id FROM blocking_matrix.base;
+         CREATE TABLE blocking_matrix.bad_partition(id text) PARTITION BY RANGE(id);
+         CREATE TABLE blocking_matrix.bad_partition_leaf PARTITION OF blocking_matrix.bad_partition FOR VALUES FROM ('a') TO ('z');
+         CREATE TABLE blocking_matrix.part_root(id integer,payload text) PARTITION BY RANGE(id);
+         CREATE TABLE blocking_matrix.part_leaf PARTITION OF blocking_matrix.part_root FOR VALUES FROM (0) TO (100);
+         CREATE INDEX part_root_payload_idx ON blocking_matrix.part_root(payload);
+         ALTER INDEX blocking_matrix.part_leaf_payload_idx RENAME TO unexpected_child_idx;
+         ALTER INDEX blocking_matrix.unexpected_child_idx SET (fillfactor=70);
+         CREATE INDEX part_leaf_local_idx ON blocking_matrix.part_leaf(id);
+         ALTER TABLE blocking_matrix.part_leaf ADD CONSTRAINT leaf_local_check CHECK(id>=0);
+         ALTER TABLE blocking_matrix.part_leaf SET (fillfactor=70);
+         CREATE TABLE blocking_matrix.inheritance_parent(id integer);
+         CREATE TABLE blocking_matrix.inheritance_child() INHERITS(blocking_matrix.inheritance_parent);
+         CREATE TYPE blocking_matrix.mood AS ENUM('ok','bad');
+         CREATE DOMAIN blocking_matrix.account_id AS bigint;
+         CREATE TABLE blocking_matrix.typed(id blocking_matrix.account_id);
+         CREATE FUNCTION blocking_matrix.bump(value integer) RETURNS integer LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE RETURN value+1;
+         REVOKE ALL ON FUNCTION blocking_matrix.bump(integer) FROM PUBLIC;
+         GRANT EXECUTE ON FUNCTION blocking_matrix.bump(integer) TO migration_reader;
+         ALTER DEFAULT PRIVILEGES IN SCHEMA blocking_matrix GRANT SELECT ON TABLES TO migration_reader;
+         CREATE TABLE blocking_matrix.generated(id integer,derived integer GENERATED ALWAYS AS (blocking_matrix.bump(id)) STORED);
+         CREATE INDEX base_payload_hash ON blocking_matrix.base USING hash(payload);
+         CREATE FUNCTION blocking_matrix.trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+         CREATE TRIGGER base_trigger BEFORE INSERT ON blocking_matrix.base FOR EACH ROW EXECUTE FUNCTION blocking_matrix.trigger_fn();
+         CREATE TRIGGER leaf_trigger BEFORE INSERT ON blocking_matrix.part_leaf FOR EACH ROW EXECUTE FUNCTION blocking_matrix.trigger_fn();
+         CREATE FUNCTION blocking_matrix.event_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$;
+         CREATE EVENT TRIGGER blocking_matrix_event ON ddl_command_end EXECUTE FUNCTION blocking_matrix.event_fn();
+         CREATE RULE base_insert_rule AS ON INSERT TO blocking_matrix.base DO INSTEAD NOTHING;
+         CREATE PUBLICATION blocking_matrix_publication FOR TABLE blocking_matrix.base;
+         CREATE EXTENSION hstore;
+         CREATE EXTENSION postgres_fdw;
+         CREATE SERVER blocking_matrix_server FOREIGN DATA WRAPPER postgres_fdw OPTIONS(host '127.0.0.1',dbname 'postgres');
+         CREATE FOREIGN TABLE blocking_matrix.foreign_rows(id integer) SERVER blocking_matrix_server OPTIONS(table_name 'base');
+         CREATE STATISTICS blocking_matrix.base_stats ON payload,extra FROM blocking_matrix.base;
+         GRANT SELECT ON ALL TABLES IN SCHEMA blocking_matrix TO migration_reader",
+    )?;
+    let snapshot = inspect_endpoint(&source_config)?;
+    observed.extend(
+        snapshot
+            .unsupported
+            .objects
+            .iter()
+            .filter(|finding| finding.required_semantics)
+            .map(|finding| finding.code),
+    );
+    let assessment = collect_live_assessment(&source_config)?;
+    let assessment_codes = assessment
+        .reviewed_plan
+        .plan
+        .unsupported_objects
+        .objects
+        .iter()
+        .map(|finding| finding.code)
+        .collect::<std::collections::BTreeSet<_>>();
+    let report = render_markdown(&assessment)?;
+    for code in LIVE_ASSESSMENT_REQUIRED {
+        assert!(
+            assessment_codes.contains(code),
+            "source assessment omitted live-required code {code:?}"
+        );
+        assert!(
+            report.contains(code.as_str()),
+            "assessment Markdown omitted live-required code {code:?}"
+        );
+    }
+    for code in NONBLOCKING_REPORT_REQUIRED {
+        assert!(
+            assessment_codes.contains(code),
+            "source assessment omitted report-only code {code:?}"
+        );
+        assert!(
+            report.contains(code.as_str()),
+            "assessment Markdown omitted report-only code {code:?}"
+        );
+    }
+    admin_client.batch_execute(
+        "DROP EVENT TRIGGER blocking_matrix_event;
+         DROP PUBLICATION blocking_matrix_publication;
+         DROP SERVER blocking_matrix_server CASCADE;
+         DROP EXTENSION postgres_fdw CASCADE;
+         DROP EXTENSION hstore CASCADE;
+         DROP SCHEMA blocking_matrix CASCADE",
+    )?;
+
+    let required = LIVE_ASSESSMENT_REQUIRED
+        .iter()
+        .copied()
+        .chain(LIVE_EXECUTION_ONLY.iter().map(|(code, _)| *code))
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing = required.difference(&observed).copied().collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "live blocking-code cases are missing: {missing:?}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a TLS-enabled PostgreSQL source with a read-only assessment role"]
+fn live_assessment_rejects_direct_write_privileges() -> anyhow::Result<()> {
+    let source = required_path("SQL_SPLITTER_PG_TEST_SOURCE_CONFIG")?;
+    let source_config = PostgresEndpointConfig::read(&source)?;
+    let mutator_config =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_TEST_MUTATOR_CONFIG")?)?;
+    let directory = private_tempdir()?;
+    let mut mutator = connect(&mutator_config)?;
+    let mut reader = connect(&source_config)?;
+
+    mutator.batch_execute(
+        "CREATE OR REPLACE FUNCTION public.assessment_write_escape() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ INSERT INTO public.live_snapshot_rows(id,payload) VALUES (999999,'escape') ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload $$; GRANT EXECUTE ON FUNCTION public.assessment_write_escape() TO PUBLIC",
+    )?;
+    reader.batch_execute("SELECT public.assessment_write_escape()")?;
+    let escaped: bool = mutator
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM public.live_snapshot_rows WHERE id=999999 AND payload='escape')",
+            &[],
+        )?
+        .get(0);
+    assert!(
+        escaped,
+        "fixture did not prove the SECURITY DEFINER write path"
+    );
+    let rejected = write_live_assessment(
+        &source,
+        directory.path().join("unsafe-assessment.json"),
+        directory.path().join("unsafe-assessment.md"),
+    );
+    mutator.batch_execute(
+        "DELETE FROM public.live_snapshot_rows WHERE id=999999; DROP FUNCTION public.assessment_write_escape()",
+    )?;
+    assert!(matches!(
+        rejected,
+        Err(PostgresPlanError::SourceRoleHoldsDirectWritePrivilege)
+    ));
+
+    mutator.batch_execute(
+        "CREATE VIEW public.assessment_write_view AS SELECT id,payload FROM public.live_snapshot_rows; GRANT INSERT,UPDATE,DELETE ON public.assessment_write_view TO migration_reader",
+    )?;
+    reader.batch_execute(
+        "INSERT INTO public.assessment_write_view(id,payload) VALUES (999998,'view-escape')",
+    )?;
+    let view_escaped: bool = mutator
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM public.live_snapshot_rows WHERE id=999998 AND payload='view-escape')",
+            &[],
+        )?
+        .get(0);
+    assert!(view_escaped, "fixture did not prove the writable-view path");
+    let view_rejected = write_live_assessment(
+        &source,
+        directory.path().join("writable-view-assessment.json"),
+        directory.path().join("writable-view-assessment.md"),
+    );
+    mutator.batch_execute(
+        "DELETE FROM public.live_snapshot_rows WHERE id=999998; DROP VIEW public.assessment_write_view",
+    )?;
+    assert!(matches!(
+        view_rejected,
+        Err(PostgresPlanError::SourceRoleHoldsDirectWritePrivilege)
+    ));
     Ok(())
 }
 
@@ -345,13 +816,20 @@ fn live_key_pagination_matrix_is_exact_and_bounded() -> anyhow::Result<()> {
     assert!(text_key.attributes.contains_key("collation_provider"));
     assert!(!source_catalog.server_version.is_empty());
     for table in ["migration_key_nullable", "migration_key_nonunique"] {
+        let table_id = source_catalog
+            .namespaces
+            .iter()
+            .flat_map(|namespace| &namespace.objects)
+            .find(|object| object.kind == CatalogObjectKind::Table && object.name.as_str() == table)
+            .map(|object| object.id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("table {table} is absent from source catalog"))?;
         assert!(reviewed
             .plan
             .unsupported_objects
             .objects
             .iter()
             .any(|object| {
-                object.object_kind == "resumable_key" && object.object_id.ends_with(table)
+                object.code == UnsupportedObjectCode::ResumableKey && object.object_id == table_id
             }));
     }
     assert!(reviewed.plan.validate_for_execution().is_err());
@@ -2702,6 +3180,115 @@ fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
         dependencies: Vec::new(),
         vendor_metadata: BTreeMap::new(),
     })
+}
+
+fn assert_assessment_statement_log(
+    admin: &mut Client,
+    expected_sessions: usize,
+) -> anyhow::Result<()> {
+    let mut last_session_count = 0;
+    for _ in 0..40 {
+        let path: String = admin
+            .query_one("SELECT pg_current_logfile('jsonlog')", &[])?
+            .get(0);
+        let log: String = admin.query_one("SELECT pg_read_file($1)", &[&path])?.get(0);
+        let mut sessions = BTreeMap::<String, Vec<String>>::new();
+        let mut errors = Vec::new();
+        for line in log.lines().filter(|line| !line.trim().is_empty()) {
+            let entry: serde_json::Value = serde_json::from_str(line)?;
+            if entry
+                .get("application_name")
+                .and_then(|value| value.as_str())
+                != Some("sql-splitter-migration-assessment")
+            {
+                continue;
+            }
+            if entry
+                .get("error_severity")
+                .and_then(|value| value.as_str())
+                .is_some_and(|severity| severity == "ERROR" || severity == "FATAL")
+            {
+                errors.push(entry.to_string());
+            }
+            let Some(message) = entry.get("message").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let statement = message.strip_prefix("statement: ").or_else(|| {
+                message
+                    .strip_prefix("execute ")
+                    .and_then(|message| message.split_once(": ").map(|(_, sql)| sql))
+            });
+            let Some(statement) = statement else {
+                continue;
+            };
+            let session_id = entry
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow::anyhow!("assessment log entry has no session_id"))?;
+            sessions
+                .entry(session_id.to_owned())
+                .or_default()
+                .push(statement.trim().to_owned());
+        }
+        last_session_count = sessions.len();
+        if sessions.len() < expected_sessions {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        assert_eq!(sessions.len(), expected_sessions);
+        assert!(errors.is_empty(), "assessment logged errors: {errors:?}");
+        for statements in sessions.values() {
+            assert_assessment_statement_set(statements)?;
+            assert_eq!(
+                statements
+                    .iter()
+                    .filter(|statement| {
+                        statement.starts_with("BEGIN") || statement.starts_with("START TRANSACTION")
+                    })
+                    .count(),
+                1,
+                "assessment transaction did not have one BEGIN: {statements:?}"
+            );
+            assert_eq!(
+                statements
+                    .iter()
+                    .filter(|statement| statement.as_str() == "COMMIT")
+                    .count(),
+                1,
+                "assessment transaction did not have one COMMIT: {statements:?}"
+            );
+        }
+        return Ok(());
+    }
+    anyhow::bail!(
+        "only {last_session_count} assessment sessions reached the PostgreSQL JSON statement log"
+    )
+}
+
+fn assert_assessment_statement_set(statements: &[String]) -> anyhow::Result<()> {
+    const EXPECTED_COUNT: usize = 23;
+    const EXPECTED_SHA256: &str =
+        "46879e0dd5c2b1a518a5620ea3cd9f1be4cda2a225ade3c3153ee8a74891deca";
+
+    let mut digest = Sha256::new();
+    for statement in statements {
+        digest.update((statement.len() as u64).to_be_bytes());
+        digest.update(statement.as_bytes());
+    }
+    let actual = hex::encode(digest.finalize());
+    if statements.len() != EXPECTED_COUNT || actual != EXPECTED_SHA256 {
+        anyhow::bail!(
+            "assessment statement set changed: count={} sha256={actual}",
+            statements.len()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn assessment_statement_audit_rejects_mutating_select() {
+    let statements = vec!["SELECT lo_create(0)".to_owned()];
+    assert!(assert_assessment_statement_set(&statements).is_err());
 }
 
 fn connect(config: &PostgresEndpointConfig) -> anyhow::Result<Client> {

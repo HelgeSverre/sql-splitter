@@ -6,6 +6,7 @@
 
 pub mod append_journal;
 pub mod artifact;
+pub mod assessment;
 pub mod canonical;
 pub mod connection;
 pub mod fixture;

@@ -10,6 +10,16 @@ This file is an agent-oriented map of the repository. Keep volatile CLI details,
 benchmarks, and release steps in their authoritative locations instead of
 duplicating them here.
 
+## Agent coordination
+
+Multiple agents work on this repository concurrently. **Read `MAILBOX.md` at
+the start of every session and before committing.** It defines the
+communication protocol (append-only messages, evidence-backed checkboxes,
+territory split) and carries open correction lists addressed to you. Reply
+there per its protocol; do not act on stale contracts — the design series
+`docs/features/enterprise/` is the contract of record and its round ledgers
+record what has already been adjudicated.
+
 ## Sources of truth
 
 Use these sources in descending order of authority:

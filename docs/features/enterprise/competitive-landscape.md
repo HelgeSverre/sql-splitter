@@ -10,11 +10,18 @@ documentation before a migration.
 | --------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------- |
 | Versioned schema migration  | Flyway, Liquibase                                                                       | Apply ordered changesets and track history      | This plan copies an existing database; it is not a changeset registry            |
 | Declarative schema diff     | Atlas, Skeema, Bytebase workflows                                                       | Compare desired and actual schema, review DDL   | This plan also requires consistent bulk data and canonical verification          |
-| Logical bulk copy           | `mysqldump`, MySQL Shell dump/load, mydumper/myloader, `pg_dump`/`pg_restore`, pgloader | Export and load schema/data                     | Format, consistency, conversion, and resume behavior are tool-specific           |
+| Logical bulk copy           | `mysqldump`, MySQL Shell dump/load, mydumper/myloader, `pg_dump`/`pg_restore`, pgloader, pgcopydb | Export and load schema/data                     | Format, consistency, conversion, and resume behavior are tool-specific           |
 | CDC and replication         | Debezium, native logical replication, Vitess VReplication                               | Capture changes and approach online cutover     | CDC is deferred and required before any online claim                             |
 | Cloud migration service     | AWS DMS, Google Database Migration Service, Azure Database Migration Service            | Managed endpoint-specific migration workflows   | Coverage and constraints depend on source, target, mode, region, and edition     |
 | Integrated vendor migration | CockroachDB MOLT, YugabyteDB Voyager, TiDB tools                                        | Assess, copy, and verify into one vendor target | They are target-specific platforms; this plan starts same-dialect                |
 | Data comparison             | pt-table-checksum, pg_comparator, vendor verification tools                             | Detect drift under stated assumptions           | This plan defines expected post-conversion canonical values and journal identity |
+
+pgcopydb is the closest neighbor for the PostgreSQL-to-PostgreSQL quadrant:
+a COPY-based parallel clone with an optional logical-decoding `--follow`
+mode for change catch-up. The offline beta must state its differences —
+reviewed immutable plans, a durable append-only journal, and exact canonical
+verification — against pgcopydb specifically, and any comparative
+performance claim requires reproducible evidence.
 
 Command distinctions matter. Atlas schema inspection/diff commands, Flyway
 versioned migration commands, and bulk-copy commands do not provide identical
@@ -42,6 +49,7 @@ tool without reproducible evidence.
 - [Atlas documentation](https://atlasgo.io/docs/)
 - [MySQL Shell dump and load](https://dev.mysql.com/doc/mysql-shell/8.4/en/mysql-shell-utilities-dump-instance-schema.html)
 - [PostgreSQL pg_dump](https://www.postgresql.org/docs/current/app-pgdump.html)
+- [pgcopydb documentation](https://pgcopydb.readthedocs.io/)
 - [AWS DMS limitations](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Limitations.html)
 - [CockroachDB MOLT](https://www.cockroachlabs.com/docs/molt/)
 - [YugabyteDB Voyager](https://docs.yugabyte.com/preview/yugabyte-voyager/)

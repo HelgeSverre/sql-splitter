@@ -48,6 +48,30 @@ The runner can state direct observations such as “target commit latency rose�
 “target disk pressure caused the timeout.” Suggested checks are clearly labeled
 as suggestions.
 
+## Operator surface for the beta
+
+The beta ships with a minimum operator surface. Wizards and self-serve flows
+remain future work, but they must consume the same versioned data rather than
+issuing new queries.
+
+- **Progress.** During data copy and verification, the runner emits the
+  progress record above per completed chunk to stderr, and appends the same
+  record as JSON lines to a protected progress file, so a later UI needs no
+  new privileges and no database access.
+- **`monitor`.** A read-only subcommand renders current stage, per-table
+  committed chunks, and journal age from the journal snapshot projection. It
+  works during a live run and after a crash, and never opens a database
+  connection.
+- **`abort`.** A request to the running process — the journal is a
+  hash-linked single-writer stream, so a second process never appends to it.
+  The runner records the operator-intent event (a new event class, which
+  bumps the journal format version) and performs the existing cooperative
+  cancellation: statement cancel, active chunk rollback. It never releases a
+  fence, never finalizes, and leaves the run in a resumable or
+  manual-reconciliation state. Fence release remains its own explicit verb.
+- **Reports.** The human-readable assessment and plan report is specified in
+  [15](./15-assessment-product.md). The final report below is unchanged.
+
 ## Alerts in the initial CLI
 
 Initial alert delivery is local stderr plus the protected structured log/report.

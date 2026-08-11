@@ -1519,9 +1519,10 @@ fn lock_exclusive(_file: &File) -> Result<(), AppendJournalError> {
 mod tests {
     use super::*;
     use crate::migration::journal::ConsistencyEvidence;
+    use crate::migration::model::{Identifier, VendorCatalog};
     use crate::migration::plan::{
-        MigrationPlan, OperationKind, PlanOperation, ReviewedPlan, UnsupportedObjectReport,
-        PLAN_SCHEMA_VERSION,
+        AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
+        UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
     };
 
     fn genesis() -> Genesis {
@@ -1557,16 +1558,25 @@ mod tests {
                 phase: operation_phase(&operation.kind),
             })
             .collect();
+        let source_catalog = test_catalog("source");
+        let target_catalog = test_catalog("target");
+        let source_catalog_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(&source_catalog).unwrap()));
+        let target_catalog_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(&target_catalog).unwrap()));
         let reviewed_plan = ReviewedPlan::new(MigrationPlan {
             schema_version: PLAN_SCHEMA_VERSION,
+            purpose: PlanPurpose::Execution,
             migration_id: "migration".into(),
             tool_version: "test".into(),
             source_endpoint_identity: "source".into(),
-            target_endpoint_identity: "target".into(),
-            source_catalog_fingerprint: "source-fingerprint".into(),
-            target_catalog_fingerprint: "target-fingerprint".into(),
-            source_catalog: None,
-            target_catalog: None,
+            target_endpoint_identity: AssessmentStatus::Assessed("target".into()),
+            source_catalog_fingerprint,
+            target_catalog_fingerprint: AssessmentStatus::Assessed(target_catalog_fingerprint),
+            source_catalog: Some(source_catalog),
+            target_catalog: AssessmentStatus::Assessed(target_catalog),
+            source_tls_binding: "source-tls".into(),
+            target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: "consistent_snapshot".into(),
             canonical_encoding_version: 1,
             conversion_policy: "exact".into(),
@@ -1598,6 +1608,18 @@ mod tests {
             binding,
             reviewed_plan,
             operations: specs,
+        }
+    }
+
+    fn test_catalog(database: &str) -> VendorCatalog {
+        VendorCatalog {
+            format_version: 1,
+            dialect: "fixture".into(),
+            server_version: "1".into(),
+            database: Identifier::new(database).unwrap(),
+            namespaces: Vec::new(),
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
         }
     }
 

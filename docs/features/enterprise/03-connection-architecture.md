@@ -156,7 +156,10 @@ evidence fails closed.
 **PostgreSQL sequential contract:** start one read-only `REPEATABLE READ`
 transaction and perform all source-side catalog, data, and verification reads in
 that transaction. Target verification uses a separate target verification
-session. Record server/database identity and transaction snapshot evidence. Long
+session. One exception is pipelined chunk verification
+([13](./13-throughput-and-copy-path.md)): additional read-only sessions may
+bind to the same exported snapshot, under the lifetime and attestation rules
+stated there. Record server/database identity and transaction snapshot evidence. Long
 snapshot effects are reported during preflight. Sequence state and other values
 outside normal table MVCC semantics require a continuous write fence or an
 explicit adapter rule; otherwise the affected object is unsupported.
