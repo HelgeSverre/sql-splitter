@@ -86,10 +86,27 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
     write_json_new(&plan_path, &reviewed)?;
 
     let cancellation = CancellationToken::default();
+    source.capabilities().require(&[
+        "consistent_snapshot",
+        "server_read_only",
+        "typed_identifiers",
+        "bound_parameters",
+    ])?;
+    target.capabilities().require(&[
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+    ])?;
     let snapshot = source.capture_snapshot()?;
     let mut reader = source.open_reader(&snapshot, cancellation.clone())?;
     if !reader.read_only_evidence().server_enforced {
         return Err(anyhow!("source read-only evidence is not server enforced"));
+    }
+    if reader.snapshot() != &snapshot {
+        return Err(anyhow!(
+            "source reader returned different snapshot evidence"
+        ));
     }
     let binding = ResumeBinding {
         migration_id: reviewed.plan.migration_id.clone(),
@@ -105,6 +122,13 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
     let mut state = MigrationState::new(binding.clone());
+    state.validate_for_operations(
+        reviewed
+            .plan
+            .operations
+            .iter()
+            .map(|operation| operation.id.as_str()),
+    )?;
     write_json_new(&state_path, &state)?;
 
     let projection: Vec<_> = columns.iter().map(|column| column.name.clone()).collect();
@@ -148,6 +172,13 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
             target_transaction_intent: format!("fixture-chunk-{chunk_id}"),
             state: ChunkState::Prepared,
         })?;
+        state.validate_for_operations(
+            reviewed
+                .plan
+                .operations
+                .iter()
+                .map(|operation| operation.id.as_str()),
+        )?;
         replace_json(&state_path, &state)?;
         let mut writer = target.open_writer(cancellation.clone())?;
         writer.begin()?;

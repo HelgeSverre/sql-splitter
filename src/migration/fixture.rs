@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::connection::{
-    CancellationToken, CapabilitySet, ConnectionError, ConnectionResult, KeysetPage,
+    CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult, KeysetPage,
     QualifiedTable, ReadOnlyEvidence, ReadSession, SnapshotToken, SourceConnectionFactory,
     TargetConnectionFactory, VerificationSession, WriteSession,
 };
@@ -261,12 +261,14 @@ impl VerificationSession for FixtureVerifier {
 }
 
 fn fixture_capabilities() -> CapabilitySet {
-    CapabilitySet {
-        consistent_snapshot: true,
-        read_only_evidence: true,
-        transactions: true,
-        cancellation: true,
-    }
+    CapabilitySet::from_entries([
+        ("consistent_snapshot", Capability::Supported),
+        ("server_read_only", Capability::Supported),
+        ("transactions", Capability::Supported),
+        ("cancellation", Capability::Supported),
+        ("typed_identifiers", Capability::Supported),
+        ("bound_parameters", Capability::Supported),
+    ])
 }
 
 fn take_failure(

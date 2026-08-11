@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -6,11 +7,50 @@ use super::model::{Identifier, RowBatch};
 pub use super::model::{KeyTuple, QualifiedTable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Capability {
+    Supported,
+    Unsupported { reason: String },
+    Unknown { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CapabilitySet {
-    pub consistent_snapshot: bool,
-    pub read_only_evidence: bool,
-    pub transactions: bool,
-    pub cancellation: bool,
+    capabilities: BTreeMap<&'static str, Capability>,
+}
+
+impl CapabilitySet {
+    pub fn from_entries(entries: impl IntoIterator<Item = (&'static str, Capability)>) -> Self {
+        Self {
+            capabilities: entries.into_iter().collect(),
+        }
+    }
+
+    pub fn require(&self, names: &[&'static str]) -> ConnectionResult<()> {
+        for name in names {
+            match self.capabilities.get(name) {
+                Some(Capability::Supported) => {}
+                Some(Capability::Unsupported { reason }) => {
+                    return Err(ConnectionError::RequiredCapabilityUnavailable {
+                        capability: name,
+                        reason: reason.clone(),
+                    });
+                }
+                Some(Capability::Unknown { reason }) => {
+                    return Err(ConnectionError::RequiredCapabilityUnknown {
+                        capability: name,
+                        reason: reason.clone(),
+                    });
+                }
+                None => {
+                    return Err(ConnectionError::RequiredCapabilityUnknown {
+                        capability: name,
+                        reason: "adapter did not report the capability".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +85,14 @@ pub enum ConnectionError {
     TransactionRequired,
     TransactionAlreadyOpen,
     UnsupportedKeyValue,
+    RequiredCapabilityUnavailable {
+        capability: &'static str,
+        reason: String,
+    },
+    RequiredCapabilityUnknown {
+        capability: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ConnectionError {
@@ -111,4 +159,30 @@ pub trait WriteSession {
 
 pub trait VerificationSession {
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_and_unknown_required_capabilities_fail_closed() {
+        let capabilities = CapabilitySet::from_entries([
+            ("transactions", Capability::Supported),
+            (
+                "cancellation",
+                Capability::Unknown {
+                    reason: "not probed".into(),
+                },
+            ),
+        ]);
+        assert!(matches!(
+            capabilities.require(&["cancellation"]),
+            Err(ConnectionError::RequiredCapabilityUnknown { .. })
+        ));
+        assert!(matches!(
+            capabilities.require(&["server_read_only"]),
+            Err(ConnectionError::RequiredCapabilityUnknown { .. })
+        ));
+    }
 }
