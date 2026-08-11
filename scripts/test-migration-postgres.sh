@@ -265,7 +265,13 @@ docker exec "$container" pg_isready -U postgres >/dev/null
 test_name=live_write_fence_attests_after_restart_blocks_writes_and_releases
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_write_fence_rearms_without_erasing_prior_history
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_write_fence_recovery_boundary_matrix
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_postgres_plan_test "$test_name" -- --ignored --exact
+test_name=live_network_commit_response_loss_matrix
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_foreign_keys_are_checked_added_and_database_validated

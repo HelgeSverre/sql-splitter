@@ -1,9 +1,17 @@
 #![cfg(feature = "enterprise-migration-spike")]
 
 use std::collections::BTreeMap;
+#[cfg(feature = "migration-fault-injection")]
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(feature = "migration-fault-injection")]
+#[path = "support/postgres_commit_proxy.rs"]
+mod postgres_commit_proxy;
+#[cfg(feature = "migration-fault-injection")]
+use postgres_commit_proxy::{CommitFaultMode, PostgresCommitProxy};
 
 use anyhow::Context;
 use native_tls::{Certificate, Identity, TlsConnector};
@@ -28,7 +36,8 @@ use sql_splitter::migration::postgres::{
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::postgres::{postgres_foreign_keys, PostgresTargetFactory};
 use sql_splitter::migration::postgres_fence::{
-    attest_postgres_write_fence, install_postgres_write_fence, InstalledPostgresFence,
+    attest_postgres_write_fence, install_postgres_write_fence, postgres_write_fence_is_released,
+    release_postgres_write_fence, InstalledPostgresFence,
 };
 use sql_splitter::migration::runner::execute_postgres_plan;
 #[cfg(feature = "migration-fault-injection")]
@@ -389,6 +398,55 @@ fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow
 }
 
 #[test]
+#[ignore = "requires a released durable PostgreSQL fence and its reviewed plan"]
+fn live_write_fence_rearms_without_erasing_prior_history() -> anyhow::Result<()> {
+    let admin_path = required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?;
+    let plan_path = required_path("SQL_SPLITTER_PG_FENCE_PLAN")?;
+    let old_artifact_path = required_path("SQL_SPLITTER_PG_FENCE_ARTIFACT")?;
+    let admin = PostgresEndpointConfig::read(&admin_path)?;
+    let reviewed: ReviewedPlan = read_json(plan_path)?;
+    let old: InstalledPostgresFence = read_json(old_artifact_path)?;
+    assert!(postgres_write_fence_is_released(&admin, &old.evidence)?);
+
+    let directory = tempfile::tempdir()?;
+    let new_artifact_path = directory.path().join("rearmed-fence.json");
+    let new = install_postgres_write_fence(&admin, &reviewed, &new_artifact_path)?;
+    assert_ne!(old.evidence, new.evidence);
+    assert!(attest_postgres_write_fence(&admin, &old.evidence).is_err());
+    assert!(release_postgres_write_fence(
+        &admin,
+        match &old.evidence {
+            sql_splitter::migration::journal::ConsistencyEvidence::WriteFence {
+                generation,
+                ..
+            } => generation,
+            _ => anyhow::bail!("old artifact is not write-fence evidence"),
+        },
+        &old.token,
+    )
+    .is_err());
+    attest_postgres_write_fence(&admin, &new.evidence)?;
+
+    let new_generation = match &new.evidence {
+        sql_splitter::migration::journal::ConsistencyEvidence::WriteFence {
+            generation, ..
+        } => generation,
+        _ => anyhow::bail!("new artifact is not write-fence evidence"),
+    };
+    let mut client = connect(&admin)?;
+    let histories: i64 = client
+        .query_one(
+            "SELECT count(DISTINCT generation) FROM sql_splitter_migration_fence.history",
+            &[],
+        )?
+        .get(0);
+    assert!(histories >= 2);
+    release_postgres_write_fence(&admin, new_generation, &new.token)?;
+    assert!(postgres_write_fence_is_released(&admin, &new.evidence)?);
+    Ok(())
+}
+
+#[test]
 #[cfg(feature = "migration-fault-injection")]
 #[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
 fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
@@ -515,6 +573,226 @@ fn live_write_fence_recovery_boundary_matrix() -> anyhow::Result<()> {
 
         cleanup.run()?;
     }
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires TLS-enabled PostgreSQL plus reader, target-owner, and fence-admin roles"]
+fn live_network_commit_response_loss_matrix() -> anyhow::Result<()> {
+    for (suffix, mode) in [
+        ("not_forwarded", CommitFaultMode::NotForwarded),
+        ("ack_lost", CommitFaultMode::AppliedAckLost),
+    ] {
+        run_live_network_commit_response_loss_case(suffix, mode)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn run_live_network_commit_response_loss_case(
+    suffix: &str,
+    mode: CommitFaultMode,
+) -> anyhow::Result<()> {
+    let mut source =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_RUN_SOURCE_CONFIG")?)?;
+    let direct_target =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
+    let mut admin =
+        PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    let control_config = admin.clone();
+    let source_database = format!("migration_network_{suffix}_source");
+    let target_database = format!("migration_network_{suffix}_target");
+    let mut control = connect(&control_config)?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database} OWNER migration_mutator"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
+    ))?;
+    let cleanup = RecoveryDatabaseCleanup::new(
+        control_config,
+        source_database.clone(),
+        target_database.clone(),
+    );
+    source.database.clone_from(&source_database);
+    admin.database.clone_from(&source_database);
+    let mut target = direct_target.clone();
+    target.database.clone_from(&target_database);
+    let upstream = (target.host.as_str(), target.port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("target endpoint did not resolve"))?;
+    let proxy = PostgresCommitProxy::start(upstream, mode)?;
+    let mut proxied_target = target.clone();
+    proxied_target.port = proxy.data_port();
+
+    let mut setup = connect(&admin)?;
+    setup.batch_execute(&format!(
+        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC;
+         REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+         GRANT CONNECT ON DATABASE {source_database} TO migration_reader;
+         GRANT USAGE ON SCHEMA public TO migration_reader;
+         CREATE TABLE public.accounts (id bigint PRIMARY KEY, name text NOT NULL);
+         INSERT INTO public.accounts VALUES (1, 'one'), (2, 'two'), (3, 'three');
+         GRANT SELECT ON public.accounts TO migration_reader"
+    ))?;
+    drop(setup);
+
+    let directory = tempfile::tempdir()?;
+    let source_path = directory.path().join("source.toml");
+    let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
+    std::fs::write(&source_path, toml::to_string(&source)?)?;
+    std::fs::write(&target_path, toml::to_string(&proxied_target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+    let plan_path = directory.path().join("plan.json");
+    let fence_path = directory.path().join("fence.json");
+    let state_path = directory.path().join("state.json");
+    let reviewed = write_live_plan_with_consistency(
+        &source_path,
+        &target_path,
+        &plan_path,
+        PostgresConsistencyMode::WriteFence,
+    )?;
+    install_postgres_write_fence(&admin, &reviewed, &fence_path)?;
+
+    let execution = PostgresInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        target_config_path: &target_path,
+        fence_admin_config_path: &admin_path,
+        fence_artifact_path: &fence_path,
+        approval_reference: "docker-network-commit-loss",
+        state_path: &state_path,
+        interruption: PostgresExecutionInterruption::NetworkCommitFault(proxy.control_port()),
+    };
+
+    match mode {
+        CommitFaultMode::NotForwarded => {
+            let error = execute_postgres_interrupted(execution).unwrap_err();
+            assert!(
+                error.to_string().contains("resume is required"),
+                "{error:#}"
+            );
+            proxy.wait_for("discarded commit bytes", |telemetry| {
+                telemetry.dropped_client_bytes_after_arm > 0
+            })?;
+            let telemetry = proxy.telemetry()?;
+            assert_eq!(telemetry.forwarded_client_bytes_after_arm, 0);
+            assert_eq!(exact_account_rows(&target)?.len(), 0);
+            assert_one_prepared_chunk(&state_path)?;
+            resume_postgres_fenced_plan(
+                &state_path,
+                &source_path,
+                &target_path,
+                &admin_path,
+                &fence_path,
+            )?;
+        }
+        CommitFaultMode::AppliedAckLost => {
+            let execution_thread = thread::scope(|scope| -> anyhow::Result<_> {
+                let handle = scope.spawn(|| execute_postgres_interrupted(execution));
+                wait_for_exact_account_rows(&target)?;
+                proxy.wait_for("withheld commit response", |telemetry| {
+                    telemetry.forwarded_client_bytes_after_arm > 0
+                        && telemetry.dropped_server_bytes_after_arm > 0
+                })?;
+                proxy.cut()?;
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("execution thread panicked"))
+            })?;
+            execution_thread?;
+        }
+    }
+
+    let telemetry = proxy.telemetry()?;
+    match mode {
+        CommitFaultMode::NotForwarded => {
+            assert!(telemetry.dropped_client_bytes_after_arm > 0);
+            assert_eq!(telemetry.forwarded_client_bytes_after_arm, 0);
+        }
+        CommitFaultMode::AppliedAckLost => {
+            assert!(telemetry.forwarded_client_bytes_after_arm > 0);
+            assert_eq!(telemetry.forwarded_server_bytes_after_arm, 0);
+            assert!(telemetry.dropped_server_bytes_after_arm > 0);
+        }
+    }
+    assert_completed_exactly_once(&state_path, &target)?;
+    cleanup.run()?;
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn exact_account_rows(target: &PostgresEndpointConfig) -> anyhow::Result<Vec<(i64, String)>> {
+    let mut client = connect(target)?;
+    let rows = match client.query("SELECT id, name FROM public.accounts ORDER BY id", &[]) {
+        Ok(rows) => rows,
+        Err(error) if error.code() == Some(&postgres::error::SqlState::UNDEFINED_TABLE) => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1)))
+        .collect())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn wait_for_exact_account_rows(target: &PostgresEndpointConfig) -> anyhow::Result<()> {
+    let expected = vec![
+        (1, "one".to_owned()),
+        (2, "two".to_owned()),
+        (3, "three".to_owned()),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if exact_account_rows(target)? == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for committed target rows");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn assert_one_prepared_chunk(state_path: &std::path::Path) -> anyhow::Result<()> {
+    let state: MigrationState = read_json(state_path)?;
+    assert_eq!(state.chunks.len(), 1);
+    assert_eq!(
+        state.chunks[0].state,
+        sql_splitter::migration::journal::ChunkState::Prepared
+    );
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn assert_completed_exactly_once(
+    state_path: &std::path::Path,
+    target: &PostgresEndpointConfig,
+) -> anyhow::Result<()> {
+    let state: MigrationState = read_json(state_path)?;
+    assert_eq!(state.status, MigrationStatus::Completed);
+    assert_eq!(state.chunks.len(), 1);
+    assert_eq!(
+        state.chunks[0].state,
+        sql_splitter::migration::journal::ChunkState::Committed
+    );
+    assert!(state.operations.iter().all(|operation| {
+        operation.state == sql_splitter::migration::journal::OperationState::Verified
+    }));
+    assert_eq!(
+        exact_account_rows(target)?,
+        vec![
+            (1, "one".to_owned()),
+            (2, "two".to_owned()),
+            (3, "three".to_owned()),
+        ]
+    );
     Ok(())
 }
 

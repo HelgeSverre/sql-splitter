@@ -66,6 +66,8 @@ enum ExecutionInterruption {
     AfterForeignKeyPrepared,
     AfterForeignKeyCommitted,
     AfterFenceReleased,
+    #[cfg(feature = "migration-fault-injection")]
+    NetworkCommitFault(u16),
 }
 
 /// Deterministic failure boundaries used by the opt-in real-engine matrix.
@@ -82,6 +84,7 @@ pub enum PostgresExecutionInterruption {
     AfterForeignKeyPrepared,
     AfterForeignKeyCommitted,
     AfterFenceReleased,
+    NetworkCommitFault(u16),
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -102,6 +105,9 @@ impl From<PostgresExecutionInterruption> for ExecutionInterruption {
                 Self::AfterForeignKeyCommitted
             }
             PostgresExecutionInterruption::AfterFenceReleased => Self::AfterFenceReleased,
+            PostgresExecutionInterruption::NetworkCommitFault(port) => {
+                Self::NetworkCommitFault(port)
+            }
         }
     }
 }
@@ -869,6 +875,10 @@ fn execute_postgres_plan_internal(
                 let _ = writer.rollback();
                 return Err(error.into());
             }
+            #[cfg(feature = "migration-fault-injection")]
+            if let Some(ExecutionInterruption::NetworkCommitFault(port)) = interruption {
+                arm_network_commit_fault(port)?;
+            }
             if let Err(error) = writer.commit() {
                 if !matches!(error, ConnectionError::CommitOutcomeUnknown(_)) {
                     return Err(error.into());
@@ -884,14 +894,9 @@ fn execute_postgres_plan_internal(
                 )? {
                     PreparedResolution::MarkedCommitted => {}
                     PreparedResolution::RetryRequired => {
-                        let mut retry_writer = target.open_writer(cancellation.clone())?;
-                        retry_writer.begin()?;
-                        if let Err(error) = retry_writer.insert(table, &batch) {
-                            let _ = retry_writer.rollback();
-                            return Err(error.into());
-                        }
-                        retry_writer.commit()?;
-                        state.commit(chunk_id)?;
+                        return Err(anyhow!(
+                            "commit outcome is absent on the target; resume is required to retry the durable prepared intent"
+                        ));
                     }
                     PreparedResolution::ManualReconciliationRequired => {
                         return Err(anyhow!(
@@ -1045,6 +1050,27 @@ fn interrupt_if(
 #[cfg(feature = "enterprise-migration-spike")]
 fn injected_interruption(configured: Option<ExecutionInterruption>) -> anyhow::Error {
     anyhow!("injected interruption at PostgreSQL execution boundary {configured:?}")
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn arm_network_commit_fault(port: u16) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+    use std::time::Duration;
+
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut control = TcpStream::connect_timeout(&address.into(), Duration::from_secs(10))?;
+    control.set_read_timeout(Some(Duration::from_secs(10)))?;
+    control.set_write_timeout(Some(Duration::from_secs(10)))?;
+    control.write_all(b"ARM\n")?;
+    let mut response = [0_u8; 6];
+    control.read_exact(&mut response)?;
+    if &response != b"ARMED\n" {
+        return Err(anyhow!(
+            "commit fault proxy returned an invalid arm response"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "enterprise-migration-spike")]

@@ -65,6 +65,12 @@ additional matrix uses the non-default `migration-fault-injection` test feature
 and isolated databases to stop after prepared DDL, committed DDL, prepared data,
 an applied commit with a lost acknowledgement, complete verification, and fence
 release. Every case must resume to the exact expected rows and verified journal.
+The network matrix passes the TLS stream through a test-only TCP proxy. One case
+drops the COMMIT bytes before PostgreSQL receives them. A second case forwards
+COMMIT, proves the rows through a separate direct connection, and drops the
+server response. Both cases retain the same durable prepared chunk and recover
+without duplicate rows. The fence matrix also releases one generation, installs
+a new generation without deleting prior history, and rejects old evidence.
 The foreign-key matrix also stops before and after constraint commit, resumes,
 and compares exact PostgreSQL catalog metadata and internal constraint-trigger
 state. A negative live case proves composite anti-join detection and persists a
@@ -117,9 +123,7 @@ the complete report.
 The adapter does not yet prove:
 
 - complete table-key suitability and pagination matrices;
-- a real network fault that loses a commit response before the server applies
-  or rejects the commit;
-- fence generation rollover and the complete fence failure-injection matrix;
+- the complete fence failure-injection matrix, including legacy storage upgrades;
 - post-data indexes and broader DDL coverage;
 - unsupported foreign-key variants beyond the explicitly modeled subset;
 - complete real-engine acceptance matrices in CI.

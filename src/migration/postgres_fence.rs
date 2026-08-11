@@ -32,10 +32,13 @@ const HISTORY_TABLE: &str = "history";
 const DML_FUNCTION: &str = "reject_source_writes";
 const DDL_FUNCTION: &str = "reject_source_ddl";
 const DDL_TRIGGER: &str = "sql_splitter_migration_fence_ddl";
+const HISTORY_FUNCTION: &str = "reject_history_mutation";
+const HISTORY_TRIGGER: &str = "sql_splitter_migration_fence_history_immutable";
 const FENCE_FORMAT_VERSION: i32 = 1;
 pub(crate) const POSTGRES_FENCE_ARTIFACT_VERSION: u32 = 2;
 const DML_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source is protected by sql-splitter migration write fence'; END";
 const DDL_FUNCTION_BODY: &str = "BEGIN IF EXISTS (SELECT 1 FROM sql_splitter_migration_fence.registry WHERE singleton AND state = 'Released' AND admin_role = session_user) THEN RETURN; END IF; RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'source DDL is protected by sql-splitter migration write fence'; END";
+const HISTORY_FUNCTION_BODY: &str = "BEGIN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'sql-splitter migration fence history is immutable'; END";
 
 /// The secret required to release one installed fence.
 ///
@@ -99,6 +102,10 @@ pub struct FenceInventory {
     pub registry_oid: u32,
     pub history_oid: u32,
     pub history_sequence_oid: u32,
+    #[serde(default)]
+    pub history_function_oid: u32,
+    #[serde(default)]
+    pub history_trigger_oid: u32,
     pub dml_function_oid: u32,
     pub ddl_function_oid: u32,
     pub event_trigger_oid: u32,
@@ -218,7 +225,10 @@ pub fn install_postgres_write_fence(
 
     match storage {
         FenceInstallStorage::Fresh => install_protected_registry(&mut transaction)?,
-        FenceInstallStorage::Rearm => prepare_rearm_registry(&mut transaction, &admin_role)?,
+        FenceInstallStorage::Rearm => prepare_rearm_registry(&mut transaction, &admin_role, false)?,
+        FenceInstallStorage::RearmLegacy => {
+            prepare_rearm_registry(&mut transaction, &admin_role, true)?
+        }
     }
     install_guard_functions(&mut transaction)?;
     install_table_guards(&mut transaction, &inventory)?;
@@ -398,6 +408,7 @@ fn fence_unsupported_ids(inventory: &FenceInventory) -> BTreeSet<String> {
         format!("relation-acl:{}", inventory.history_sequence_oid),
         format!("routine-acl:{}", inventory.dml_function_oid),
         format!("routine-acl:{}", inventory.ddl_function_oid),
+        format!("routine-acl:{}", inventory.history_function_oid),
         format!("event-trigger:{}", inventory.event_trigger_oid),
     ]
     .into_iter()
@@ -509,6 +520,8 @@ pub fn postgres_write_fence_is_released(
             "released fence history is invalid",
         ));
     }
+    validate_all_released_history(&mut transaction, &registry.generation)?;
+    attest_released_storage(&mut transaction, &registry)?;
     let remaining_guards: i64 = transaction
         .query_one(
             "SELECT (SELECT count(*) FROM pg_event_trigger WHERE evtname=$1) + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$2 AND p.proname = ANY($3)) + (SELECT count(*) FROM pg_trigger WHERE oid = ANY($4))",
@@ -555,6 +568,8 @@ pub fn release_postgres_write_fence(
             .map(|row| row.get(0))
             .collect();
         if history == ["Draining", "Active", "Released"] || history == ["Draining", "Released"] {
+            validate_all_released_history(&mut transaction, &registry.generation)?;
+            attest_released_storage(&mut transaction, &registry)?;
             transaction.commit()?;
             return Ok(());
         }
@@ -694,15 +709,347 @@ fn reject_prepared_transactions(
     Ok(())
 }
 
-fn reject_existing_fence(transaction: &mut Transaction<'_>) -> Result<(), PostgresFenceError> {
-    let exists: bool = transaction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FenceInstallStorage {
+    Fresh,
+    Rearm,
+    RearmLegacy,
+}
+
+fn inspect_install_storage(
+    transaction: &mut Transaction<'_>,
+) -> Result<FenceInstallStorage, PostgresFenceError> {
+    let row = transaction.query_one(
+        "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname=$1), to_regclass($2) IS NOT NULL, to_regclass($3) IS NOT NULL",
+        &[
+            &FENCE_SCHEMA,
+            &format!("{FENCE_SCHEMA}.{REGISTRY_TABLE}"),
+            &format!("{FENCE_SCHEMA}.{HISTORY_TABLE}"),
+        ],
+    )?;
+    let schema_exists: bool = row.get(0);
+    let registry_exists: bool = row.get(1);
+    let history_exists: bool = row.get(2);
+    if !schema_exists && !registry_exists && !history_exists {
+        return Ok(FenceInstallStorage::Fresh);
+    }
+    if !schema_exists || !registry_exists || !history_exists {
+        return Err(PostgresFenceError::Attestation(
+            "prior fence storage is incomplete",
+        ));
+    }
+    let registry = load_registry_for_update(transaction)?;
+    if registry.state != "Released" {
+        return Err(PostgresFenceError::AlreadyInstalled);
+    }
+    let history_storage = history_guard_storage(&registry.inventory)?;
+    let expected_inventory_fingerprint = match history_storage {
+        HistoryGuardStorage::Current => registry.inventory.fingerprint()?,
+        HistoryGuardStorage::Legacy => legacy_inventory_fingerprint(&registry.inventory)?,
+    };
+    if registry.inventory.generation != registry.generation
+        || expected_inventory_fingerprint != registry.inventory_fingerprint
+    {
+        return Err(PostgresFenceError::Attestation(
+            "released registry inventory is malformed",
+        ));
+    }
+    transaction.batch_execute(&format!(
+        "LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE",
+        quote_ident(FENCE_SCHEMA),
+        quote_ident(HISTORY_TABLE)
+    ))?;
+    validate_all_released_history(transaction, &registry.generation)?;
+    match history_storage {
+        HistoryGuardStorage::Current => {
+            attest_released_storage(transaction, &registry)?;
+            Ok(FenceInstallStorage::Rearm)
+        }
+        HistoryGuardStorage::Legacy => {
+            attest_legacy_released_storage(transaction, &registry)?;
+            Ok(FenceInstallStorage::RearmLegacy)
+        }
+    }
+}
+
+fn legacy_inventory_fingerprint(inventory: &FenceInventory) -> Result<String, PostgresFenceError> {
+    #[derive(Serialize)]
+    struct LegacyInventory<'a> {
+        generation: &'a str,
+        admin_role: &'a str,
+        schema_oid: u32,
+        registry_oid: u32,
+        history_oid: u32,
+        history_sequence_oid: u32,
+        dml_function_oid: u32,
+        ddl_function_oid: u32,
+        event_trigger_oid: u32,
+        tables: &'a [FencedTable],
+    }
+    let legacy = LegacyInventory {
+        generation: &inventory.generation,
+        admin_role: &inventory.admin_role,
+        schema_oid: inventory.schema_oid,
+        registry_oid: inventory.registry_oid,
+        history_oid: inventory.history_oid,
+        history_sequence_oid: inventory.history_sequence_oid,
+        dml_function_oid: inventory.dml_function_oid,
+        ddl_function_oid: inventory.ddl_function_oid,
+        event_trigger_oid: inventory.event_trigger_oid,
+        tables: &inventory.tables,
+    };
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&legacy)?)))
+}
+
+fn prepare_rearm_registry(
+    transaction: &mut Transaction<'_>,
+    admin_role: &str,
+    install_legacy_history_guard: bool,
+) -> Result<(), PostgresFenceError> {
+    let registry = load_registry_for_update(transaction)?;
+    if registry.state != "Released" || registry.inventory.admin_role != admin_role {
+        return Err(PostgresFenceError::Attestation(
+            "released fence owner differs from the new fence administrator",
+        ));
+    }
+    if install_legacy_history_guard {
+        install_immutable_history_guard(transaction)?;
+    }
+    let deleted = transaction.execute(
+        &format!(
+            "DELETE FROM {}.{} WHERE singleton AND generation=$1 AND state='Released'",
+            quote_ident(FENCE_SCHEMA),
+            quote_ident(REGISTRY_TABLE)
+        ),
+        &[&registry.generation],
+    )?;
+    if deleted != 1 {
+        return Err(PostgresFenceError::Attestation(
+            "released registry changed during rearm",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryGuardStorage {
+    Legacy,
+    Current,
+}
+
+fn history_guard_storage(
+    inventory: &FenceInventory,
+) -> Result<HistoryGuardStorage, PostgresFenceError> {
+    match (
+        inventory.history_function_oid,
+        inventory.history_trigger_oid,
+    ) {
+        (0, 0) => Ok(HistoryGuardStorage::Legacy),
+        (function, trigger) if function != 0 && trigger != 0 => Ok(HistoryGuardStorage::Current),
+        _ => Err(PostgresFenceError::Attestation(
+            "released history guard identity is incomplete",
+        )),
+    }
+}
+
+fn validate_all_released_history(
+    transaction: &mut Transaction<'_>,
+    current_generation: &str,
+) -> Result<(), PostgresFenceError> {
+    let rows = transaction.query(
+        &format!(
+            "SELECT generation, state FROM {}.{} ORDER BY sequence",
+            quote_ident(FENCE_SCHEMA),
+            quote_ident(HISTORY_TABLE)
+        ),
+        &[],
+    )?;
+    let transitions = rows
+        .into_iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect::<Vec<_>>();
+    validate_released_transitions(&transitions, current_generation)
+}
+
+fn validate_released_transitions(
+    transitions: &[(String, String)],
+    current_generation: &str,
+) -> Result<(), PostgresFenceError> {
+    if transitions.is_empty() {
+        return Err(PostgresFenceError::Attestation(
+            "released fence has no history",
+        ));
+    }
+    let mut generations = Vec::<(&str, Vec<&str>)>::new();
+    let mut seen = BTreeSet::new();
+    for (generation, state) in transitions {
+        if generations
+            .last()
+            .is_none_or(|(previous, _)| *previous != generation)
+        {
+            if !seen.insert(generation.as_str()) {
+                return Err(PostgresFenceError::Attestation(
+                    "fence history generation is not contiguous",
+                ));
+            }
+            generations.push((generation, Vec::new()));
+        }
+        if let Some((_, states)) = generations.last_mut() {
+            states.push(state);
+        }
+    }
+    if generations.last().map(|(generation, _)| *generation) != Some(current_generation) {
+        return Err(PostgresFenceError::Attestation(
+            "released registry is not the latest history generation",
+        ));
+    }
+    if generations.iter().any(|(_, states)| {
+        states.as_slice() != ["Draining", "Active", "Released"]
+            && states.as_slice() != ["Draining", "Released"]
+    }) {
+        return Err(PostgresFenceError::Attestation(
+            "prior fence history contains an invalid transition sequence",
+        ));
+    }
+    Ok(())
+}
+
+fn attest_released_storage(
+    transaction: &mut Transaction<'_>,
+    registry: &Registry,
+) -> Result<(), PostgresFenceError> {
+    attest_owners_and_acl(transaction, &registry.inventory.admin_role)?;
+    let row = transaction.query_one(
+        "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4)::oid::bigint, (SELECT oid::bigint FROM pg_trigger WHERE tgrelid=to_regclass($3) AND tgname=$5 AND NOT tgisinternal) FROM pg_namespace n WHERE n.nspname=$1",
+        &[
+            &FENCE_SCHEMA,
+            &format!("{FENCE_SCHEMA}.{REGISTRY_TABLE}"),
+            &format!("{FENCE_SCHEMA}.{HISTORY_TABLE}"),
+            &format!("{FENCE_SCHEMA}.{HISTORY_FUNCTION}()"),
+            &HISTORY_TRIGGER,
+        ],
+    )?;
+    let observed = [
+        oid_from_i64(row.get(0))?,
+        oid_from_i64(row.get(1))?,
+        oid_from_i64(row.get(2))?,
+        oid_from_i64(row.get(3))?,
+        oid_from_i64(row.get(4))?,
+        oid_from_i64(row.get(5))?,
+    ];
+    let expected = [
+        registry.inventory.schema_oid,
+        registry.inventory.registry_oid,
+        registry.inventory.history_oid,
+        registry.inventory.history_sequence_oid,
+        registry.inventory.history_function_oid,
+        registry.inventory.history_trigger_oid,
+    ];
+    if observed != expected {
+        return Err(PostgresFenceError::Attestation(
+            "released audit storage identity differs",
+        ));
+    }
+    let history_guard: i64 = transaction
         .query_one(
-            "SELECT to_regclass($1) IS NOT NULL",
-            &[&format!("{FENCE_SCHEMA}.{REGISTRY_TABLE}")],
+            "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.oid=$1::oid AND t.tgrelid=$2::oid AND t.tgenabled='A' AND (t.tgtype & 2) <> 0 AND (t.tgtype & 4) = 0 AND (t.tgtype & 8) <> 0 AND (t.tgtype & 16) <> 0 AND (t.tgtype & 32) <> 0 AND (t.tgtype & 1) = 0 AND p.oid=$3::oid AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND p.prosrc=$4 AND p.proowner::regrole::text=$5 AND NOT EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f'::\"char\", p.proowner))) a WHERE a.grantee <> p.proowner)",
+            &[
+                &registry.inventory.history_trigger_oid,
+                &registry.inventory.history_oid,
+                &registry.inventory.history_function_oid,
+                &HISTORY_FUNCTION_BODY,
+                &registry.inventory.admin_role,
+            ],
         )?
         .get(0);
-    if exists {
-        return Err(PostgresFenceError::AlreadyInstalled);
+    if history_guard != 1 {
+        return Err(PostgresFenceError::Attestation(
+            "immutable history guard differs",
+        ));
+    }
+    let remaining_guards: i64 = transaction
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_event_trigger WHERE evtname=$1) + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$2 AND p.proname = ANY($3)) + (SELECT count(*) FROM pg_trigger WHERE oid = ANY($4))",
+            &[
+                &DDL_TRIGGER,
+                &FENCE_SCHEMA,
+                &&[DML_FUNCTION, DDL_FUNCTION][..],
+                &&registry
+                    .inventory
+                    .tables
+                    .iter()
+                    .map(|table| table.trigger_oid)
+                    .collect::<Vec<_>>()[..],
+            ],
+        )?
+        .get(0);
+    if remaining_guards != 0 {
+        return Err(PostgresFenceError::Attestation(
+            "released fence retains guard objects",
+        ));
+    }
+    Ok(())
+}
+
+fn attest_legacy_released_storage(
+    transaction: &mut Transaction<'_>,
+    registry: &Registry,
+) -> Result<(), PostgresFenceError> {
+    attest_owners_and_acl(transaction, &registry.inventory.admin_role)?;
+    let row = transaction.query_one(
+        "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4) IS NULL, NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass($3) AND tgname=$5 AND NOT tgisinternal) FROM pg_namespace n WHERE n.nspname=$1",
+        &[
+            &FENCE_SCHEMA,
+            &format!("{FENCE_SCHEMA}.{REGISTRY_TABLE}"),
+            &format!("{FENCE_SCHEMA}.{HISTORY_TABLE}"),
+            &format!("{FENCE_SCHEMA}.{HISTORY_FUNCTION}()"),
+            &HISTORY_TRIGGER,
+        ],
+    )?;
+    let observed = [
+        oid_from_i64(row.get(0))?,
+        oid_from_i64(row.get(1))?,
+        oid_from_i64(row.get(2))?,
+        oid_from_i64(row.get(3))?,
+    ];
+    let expected = [
+        registry.inventory.schema_oid,
+        registry.inventory.registry_oid,
+        registry.inventory.history_oid,
+        registry.inventory.history_sequence_oid,
+    ];
+    if observed != expected || !row.get::<_, bool>(4) || !row.get::<_, bool>(5) {
+        return Err(PostgresFenceError::Attestation(
+            "legacy released audit storage differs",
+        ));
+    }
+    attest_no_released_migration_guards(transaction, registry)
+}
+
+fn attest_no_released_migration_guards(
+    transaction: &mut Transaction<'_>,
+    registry: &Registry,
+) -> Result<(), PostgresFenceError> {
+    let remaining_guards: i64 = transaction
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_event_trigger WHERE evtname=$1) + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$2 AND p.proname = ANY($3)) + (SELECT count(*) FROM pg_trigger WHERE oid = ANY($4))",
+            &[
+                &DDL_TRIGGER,
+                &FENCE_SCHEMA,
+                &&[DML_FUNCTION, DDL_FUNCTION][..],
+                &&registry
+                    .inventory
+                    .tables
+                    .iter()
+                    .map(|table| table.trigger_oid)
+                    .collect::<Vec<_>>()[..],
+            ],
+        )?
+        .get(0);
+    if remaining_guards != 0 {
+        return Err(PostgresFenceError::Attestation(
+            "released fence retains guard objects",
+        ));
     }
     Ok(())
 }
@@ -740,6 +1087,8 @@ fn lock_and_resolve_tables(
         registry_oid: 0,
         history_oid: 0,
         history_sequence_oid: 0,
+        history_function_oid: 0,
+        history_trigger_oid: 0,
         dml_function_oid: 0,
         ddl_function_oid: 0,
         event_trigger_oid: 0,
@@ -752,7 +1101,7 @@ fn resolve_protected_inventory(
     inventory: &mut FenceInventory,
 ) -> Result<(), PostgresFenceError> {
     let row = transaction.query_one(
-        "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4)::oid::bigint, to_regprocedure($5)::oid::bigint, (SELECT oid::bigint FROM pg_event_trigger WHERE evtname = $6) FROM pg_namespace n WHERE n.nspname = $1",
+        "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4)::oid::bigint, to_regprocedure($5)::oid::bigint, (SELECT oid::bigint FROM pg_event_trigger WHERE evtname = $6), to_regprocedure($7)::oid::bigint, (SELECT oid::bigint FROM pg_trigger WHERE tgrelid=to_regclass($3) AND tgname=$8 AND NOT tgisinternal) FROM pg_namespace n WHERE n.nspname = $1",
         &[
             &FENCE_SCHEMA,
             &format!("{FENCE_SCHEMA}.{REGISTRY_TABLE}"),
@@ -760,6 +1109,8 @@ fn resolve_protected_inventory(
             &format!("{FENCE_SCHEMA}.{DML_FUNCTION}()"),
             &format!("{FENCE_SCHEMA}.{DDL_FUNCTION}()"),
             &DDL_TRIGGER,
+            &format!("{FENCE_SCHEMA}.{HISTORY_FUNCTION}()"),
+            &HISTORY_TRIGGER,
         ],
     )?;
     inventory.schema_oid = oid_from_i64(row.get(0))?;
@@ -769,6 +1120,8 @@ fn resolve_protected_inventory(
     inventory.dml_function_oid = oid_from_i64(row.get(4))?;
     inventory.ddl_function_oid = oid_from_i64(row.get(5))?;
     inventory.event_trigger_oid = oid_from_i64(row.get(6))?;
+    inventory.history_function_oid = oid_from_i64(row.get(7))?;
+    inventory.history_trigger_oid = oid_from_i64(row.get(8))?;
     for table in &mut inventory.tables {
         let oid: i64 = transaction
             .query_one(
@@ -813,8 +1166,18 @@ fn lock_inventory_tables(
 
 fn install_protected_registry(transaction: &mut Transaction<'_>) -> Result<(), PostgresFenceError> {
     transaction.batch_execute(&format!(
-        "CREATE SCHEMA {schema}; REVOKE ALL ON SCHEMA {schema} FROM PUBLIC; CREATE TABLE {schema}.{registry} (singleton boolean PRIMARY KEY CHECK (singleton), format_version integer NOT NULL, generation text NOT NULL UNIQUE, token_hash text NOT NULL CHECK (length(token_hash) = 64), admin_role name NOT NULL, endpoint_identity text NOT NULL, database_oid oid NOT NULL, system_identifier text NOT NULL, business_catalog_fingerprint text NOT NULL, inventory_fingerprint text NOT NULL, inventory_json jsonb NOT NULL, activation_xid bigint NOT NULL, activated_at timestamptz NOT NULL, state text NOT NULL CHECK (state IN ('Draining', 'Active', 'Released'))); CREATE TABLE {schema}.{history} (sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, generation text NOT NULL, state text NOT NULL CHECK (state IN ('Draining', 'Active', 'Released')), recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(), recorded_by name NOT NULL DEFAULT current_user); REVOKE ALL ON ALL TABLES IN SCHEMA {schema} FROM PUBLIC; REVOKE ALL ON ALL SEQUENCES IN SCHEMA {schema} FROM PUBLIC;",
-        schema = quote_ident(FENCE_SCHEMA), registry = quote_ident(REGISTRY_TABLE), history = quote_ident(HISTORY_TABLE)
+        "CREATE SCHEMA {schema}; REVOKE ALL ON SCHEMA {schema} FROM PUBLIC; CREATE TABLE {schema}.{registry} (singleton boolean PRIMARY KEY CHECK (singleton), format_version integer NOT NULL, generation text NOT NULL UNIQUE, token_hash text NOT NULL CHECK (length(token_hash) = 64), admin_role name NOT NULL, endpoint_identity text NOT NULL, database_oid oid NOT NULL, system_identifier text NOT NULL, business_catalog_fingerprint text NOT NULL, inventory_fingerprint text NOT NULL, inventory_json jsonb NOT NULL, activation_xid bigint NOT NULL, activated_at timestamptz NOT NULL, state text NOT NULL CHECK (state IN ('Draining', 'Active', 'Released'))); CREATE TABLE {schema}.{history} (sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, generation text NOT NULL, state text NOT NULL CHECK (state IN ('Draining', 'Active', 'Released')), recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(), recorded_by name NOT NULL DEFAULT current_user); CREATE FUNCTION {schema}.{history_function}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body${history_body}$body$; REVOKE ALL ON FUNCTION {schema}.{history_function}() FROM PUBLIC; CREATE TRIGGER {history_trigger} BEFORE UPDATE OR DELETE OR TRUNCATE ON {schema}.{history} FOR EACH STATEMENT EXECUTE FUNCTION {schema}.{history_function}(); ALTER TABLE {schema}.{history} ENABLE ALWAYS TRIGGER {history_trigger}; REVOKE ALL ON ALL TABLES IN SCHEMA {schema} FROM PUBLIC; REVOKE ALL ON ALL SEQUENCES IN SCHEMA {schema} FROM PUBLIC;",
+        schema = quote_ident(FENCE_SCHEMA), registry = quote_ident(REGISTRY_TABLE), history = quote_ident(HISTORY_TABLE), history_function = quote_ident(HISTORY_FUNCTION), history_trigger = quote_ident(HISTORY_TRIGGER), history_body = HISTORY_FUNCTION_BODY
+    ))?;
+    Ok(())
+}
+
+fn install_immutable_history_guard(
+    transaction: &mut Transaction<'_>,
+) -> Result<(), PostgresFenceError> {
+    transaction.batch_execute(&format!(
+        "CREATE FUNCTION {schema}.{function}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body${body}$body$; REVOKE ALL ON FUNCTION {schema}.{function}() FROM PUBLIC; CREATE TRIGGER {trigger} BEFORE UPDATE OR DELETE OR TRUNCATE ON {schema}.{history} FOR EACH STATEMENT EXECUTE FUNCTION {schema}.{function}(); ALTER TABLE {schema}.{history} ENABLE ALWAYS TRIGGER {trigger};",
+        schema = quote_ident(FENCE_SCHEMA), function = quote_ident(HISTORY_FUNCTION), trigger = quote_ident(HISTORY_TRIGGER), history = quote_ident(HISTORY_TABLE), body = HISTORY_FUNCTION_BODY
     ))?;
     Ok(())
 }
@@ -981,13 +1344,15 @@ fn attest_protected_object_ids(
     expected_state: &str,
 ) -> Result<(), PostgresFenceError> {
     let row = transaction.query_one(
-        "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4)::oid::bigint, to_regprocedure($5)::oid::bigint FROM pg_namespace n WHERE n.nspname=$1",
+        "SELECT n.oid::bigint, to_regclass($2)::oid::bigint, to_regclass($3)::oid::bigint, pg_get_serial_sequence($3, 'sequence')::regclass::oid::bigint, to_regprocedure($4)::oid::bigint, to_regprocedure($5)::oid::bigint, to_regprocedure($6)::oid::bigint, (SELECT oid::bigint FROM pg_trigger WHERE tgrelid=to_regclass($3) AND tgname=$7 AND NOT tgisinternal) FROM pg_namespace n WHERE n.nspname=$1",
         &[
             &FENCE_SCHEMA,
             &format!("{FENCE_SCHEMA}.{REGISTRY_TABLE}"),
             &format!("{FENCE_SCHEMA}.{HISTORY_TABLE}"),
             &format!("{FENCE_SCHEMA}.{DML_FUNCTION}()"),
             &format!("{FENCE_SCHEMA}.{DDL_FUNCTION}()"),
+            &format!("{FENCE_SCHEMA}.{HISTORY_FUNCTION}()"),
+            &HISTORY_TRIGGER,
         ],
     )?;
     let observed = [
@@ -997,6 +1362,8 @@ fn attest_protected_object_ids(
         oid_from_i64(row.get(3))?,
         oid_from_i64(row.get(4))?,
         oid_from_i64(row.get(5))?,
+        oid_from_i64(row.get(6))?,
+        oid_from_i64(row.get(7))?,
     ];
     let expected = [
         inventory.schema_oid,
@@ -1005,18 +1372,33 @@ fn attest_protected_object_ids(
         inventory.history_sequence_oid,
         inventory.dml_function_oid,
         inventory.ddl_function_oid,
+        inventory.history_function_oid,
+        inventory.history_trigger_oid,
     ];
     if observed != expected {
         return Err(PostgresFenceError::Attestation(
             "protected object identity differs",
         ));
     }
-    let function_oids = [inventory.dml_function_oid, inventory.ddl_function_oid];
+    let history_guard: i64 = transaction.query_one(
+        "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.oid=$1::oid AND t.tgrelid=$2::oid AND t.tgenabled='A' AND (t.tgtype & 2) <> 0 AND (t.tgtype & 4) = 0 AND (t.tgtype & 8) <> 0 AND (t.tgtype & 16) <> 0 AND (t.tgtype & 32) <> 0 AND (t.tgtype & 1) = 0 AND p.oid=$3::oid AND p.prosecdef AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND p.prosrc=$4 AND p.proowner::regrole::text=$5 AND NOT EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f'::\"char\", p.proowner))) a WHERE a.grantee <> p.proowner)",
+        &[&inventory.history_trigger_oid, &inventory.history_oid, &inventory.history_function_oid, &HISTORY_FUNCTION_BODY, &inventory.admin_role],
+    )?.get(0);
+    if history_guard != 1 {
+        return Err(PostgresFenceError::Attestation(
+            "immutable history guard differs",
+        ));
+    }
+    let function_oids = [
+        inventory.dml_function_oid,
+        inventory.ddl_function_oid,
+        inventory.history_function_oid,
+    ];
     let valid_functions: i64 = transaction.query_one(
         "SELECT count(*) FROM pg_proc WHERE oid = ANY($1) AND prosecdef AND proconfig = ARRAY['search_path=pg_catalog']::text[]",
         &[&&function_oids[..]],
     )?.get(0);
-    if valid_functions != 2 {
+    if valid_functions != 3 {
         return Err(PostgresFenceError::Attestation(
             "guard function security attributes differ",
         ));
@@ -1030,6 +1412,10 @@ fn attest_protected_object_ids(
         (
             inventory.ddl_function_oid,
             (DDL_FUNCTION_BODY, "event_trigger"),
+        ),
+        (
+            inventory.history_function_oid,
+            (HISTORY_FUNCTION_BODY, "trigger"),
         ),
     ]);
     for row in definitions {
@@ -1182,6 +1568,8 @@ mod tests {
             registry_oid: 2,
             history_oid: 3,
             history_sequence_oid: 4,
+            history_function_oid: 9,
+            history_trigger_oid: 10,
             dml_function_oid: 5,
             ddl_function_oid: 6,
             event_trigger_oid: 7,
@@ -1214,6 +1602,8 @@ mod tests {
             registry_oid: 2,
             history_oid: 3,
             history_sequence_oid: 4,
+            history_function_oid: 8,
+            history_trigger_oid: 9,
             dml_function_oid: 5,
             ddl_function_oid: 6,
             event_trigger_oid: 7,
@@ -1280,5 +1670,94 @@ insecure = true
             quote_ident("a\"; DROP SCHEMA public; --"),
             "\"a\"\"; DROP SCHEMA public; --\""
         );
+    }
+
+    #[test]
+    fn released_generations_must_be_complete_contiguous_and_latest() {
+        let valid = vec![
+            ("g1".into(), "Draining".into()),
+            ("g1".into(), "Active".into()),
+            ("g1".into(), "Released".into()),
+            ("g2".into(), "Draining".into()),
+            ("g2".into(), "Active".into()),
+            ("g2".into(), "Released".into()),
+        ];
+        assert!(validate_released_transitions(&valid, "g2").is_ok());
+        assert!(validate_released_transitions(&valid, "g1").is_err());
+
+        let interleaved = vec![
+            ("g1".into(), "Draining".into()),
+            ("g2".into(), "Draining".into()),
+            ("g1".into(), "Released".into()),
+        ];
+        assert!(validate_released_transitions(&interleaved, "g1").is_err());
+    }
+
+    #[test]
+    fn active_draining_breached_and_malformed_history_are_not_rearmable() {
+        for transitions in [
+            vec![("g".into(), "Draining".into())],
+            vec![
+                ("g".into(), "Draining".into()),
+                ("g".into(), "Active".into()),
+            ],
+            vec![
+                ("g".into(), "Draining".into()),
+                ("g".into(), "Breached".into()),
+            ],
+            vec![
+                ("g".into(), "Draining".into()),
+                ("g".into(), "Released".into()),
+                ("g".into(), "Active".into()),
+            ],
+        ] {
+            assert!(validate_released_transitions(&transitions, "g").is_err());
+        }
+    }
+
+    #[test]
+    fn independently_generated_fence_secrets_do_not_cross_validate() {
+        let old = FenceToken::generate();
+        let new = FenceToken::generate();
+        assert_ne!(old, new);
+        assert!(!constant_time_eq(
+            old.hash().as_bytes(),
+            new.hash().as_bytes()
+        ));
+    }
+
+    #[test]
+    fn released_legacy_inventory_is_authenticated_with_its_original_fingerprint() {
+        let inventory = FenceInventory {
+            generation: "legacy-generation".into(),
+            admin_role: "admin".into(),
+            schema_oid: 1,
+            registry_oid: 2,
+            history_oid: 3,
+            history_sequence_oid: 4,
+            history_function_oid: 0,
+            history_trigger_oid: 0,
+            dml_function_oid: 5,
+            ddl_function_oid: 6,
+            event_trigger_oid: 7,
+            tables: vec![FencedTable {
+                namespace: "public".into(),
+                table: "accounts".into(),
+                relation_oid: 8,
+                trigger_oid: 9,
+                trigger_name: "legacy-trigger".into(),
+            }],
+        };
+        assert_eq!(
+            history_guard_storage(&inventory).unwrap(),
+            HistoryGuardStorage::Legacy
+        );
+        let fingerprint = legacy_inventory_fingerprint(&inventory).unwrap();
+        assert_eq!(fingerprint.len(), 64);
+        assert_ne!(fingerprint, inventory.fingerprint().unwrap());
+
+        let mut malformed = inventory;
+        malformed.history_function_oid = 10;
+        assert!(history_guard_storage(&malformed).is_err());
     }
 }
