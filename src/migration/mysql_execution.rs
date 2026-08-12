@@ -464,6 +464,11 @@ enum MySqlInterruptionPoint {
     BeforeForeignKeyChecks,
     ForeignKeyPrepared,
     ForeignKeyCommitted,
+    CoerceFirstWriteValue,
+    TruncateFirstWriteText,
+    ReplaceFirstWriteText,
+    SkipFirstWriteRow,
+    TargetTriggerMutation,
     NetworkCommitFault(u16),
 }
 
@@ -481,6 +486,11 @@ pub enum MySqlExecutionInterruption {
     BeforeForeignKeyChecks,
     ForeignKeyPrepared,
     ForeignKeyCommitted,
+    CoerceFirstWriteValue,
+    TruncateFirstWriteText,
+    ReplaceFirstWriteText,
+    SkipFirstWriteRow,
+    TargetTriggerMutation,
     NetworkCommitFault(u16),
 }
 
@@ -498,6 +508,11 @@ impl From<MySqlExecutionInterruption> for MySqlInterruptionPoint {
             MySqlExecutionInterruption::BeforeForeignKeyChecks => Self::BeforeForeignKeyChecks,
             MySqlExecutionInterruption::ForeignKeyPrepared => Self::ForeignKeyPrepared,
             MySqlExecutionInterruption::ForeignKeyCommitted => Self::ForeignKeyCommitted,
+            MySqlExecutionInterruption::CoerceFirstWriteValue => Self::CoerceFirstWriteValue,
+            MySqlExecutionInterruption::TruncateFirstWriteText => Self::TruncateFirstWriteText,
+            MySqlExecutionInterruption::ReplaceFirstWriteText => Self::ReplaceFirstWriteText,
+            MySqlExecutionInterruption::SkipFirstWriteRow => Self::SkipFirstWriteRow,
+            MySqlExecutionInterruption::TargetTriggerMutation => Self::TargetTriggerMutation,
             MySqlExecutionInterruption::NetworkCommitFault(port) => Self::NetworkCommitFault(port),
         }
     }
@@ -1926,9 +1941,27 @@ where
 {
     before_effect()?;
     cancellation.check()?;
+    #[cfg(feature = "migration-fault-injection")]
+    if interruption == Some(MySqlInterruptionPoint::TargetTriggerMutation) {
+        let mutation_column = batch
+            .rows()
+            .first()
+            .into_iter()
+            .flat_map(|row| row.iter().zip(batch.columns()))
+            .rev()
+            .find_map(|(value, column)| matches!(value, DbValue::Text(_)).then_some(&column.name))
+            .ok_or_else(|| anyhow!("injected MySQL trigger fault requires a text column"))?;
+        target.install_write_mutation_trigger(&contract.target, mutation_column)?;
+    }
     let mut writer = target.open_writer(cancellation.clone())?;
     writer.begin()?;
-    if let Err(error) = writer.insert(&contract.target, batch) {
+    #[cfg(feature = "migration-fault-injection")]
+    let injected_batch = mysql_injected_write_batch(batch, interruption)?;
+    #[cfg(feature = "migration-fault-injection")]
+    let write_batch = injected_batch.as_ref().unwrap_or(batch);
+    #[cfg(not(feature = "migration-fault-injection"))]
+    let write_batch = batch;
+    if let Err(error) = writer.insert(&contract.target, write_batch) {
         let rollback = writer.rollback();
         return match rollback {
             Ok(()) => Err(error.into()),
@@ -1991,6 +2024,55 @@ where
         return Err(injected_mysql_interruption(interruption));
     }
     Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn mysql_injected_write_batch(
+    batch: &RowBatch,
+    interruption: Option<MySqlInterruptionPoint>,
+) -> anyhow::Result<Option<RowBatch>> {
+    let Some(mode) = interruption.filter(|mode| {
+        matches!(
+            mode,
+            MySqlInterruptionPoint::CoerceFirstWriteValue
+                | MySqlInterruptionPoint::TruncateFirstWriteText
+                | MySqlInterruptionPoint::ReplaceFirstWriteText
+                | MySqlInterruptionPoint::SkipFirstWriteRow
+        )
+    }) else {
+        return Ok(None);
+    };
+    let mut injected = RowBatch::new(batch.columns().to_vec(), batch.len().max(1), usize::MAX);
+    for (row_index, source_row) in batch.rows().iter().enumerate() {
+        if mode == MySqlInterruptionPoint::SkipFirstWriteRow && row_index == 0 {
+            continue;
+        }
+        let mut row = source_row.clone();
+        if row_index == 0 {
+            let value = row
+                .iter_mut()
+                .find(|value| matches!(value, DbValue::Text(_)));
+            let value = value.ok_or_else(|| {
+                anyhow!("injected MySQL write fault requires a text value in the first row")
+            })?;
+            match mode {
+                MySqlInterruptionPoint::CoerceFirstWriteValue => *value = DbValue::Signed(7),
+                MySqlInterruptionPoint::TruncateFirstWriteText => {
+                    let DbValue::Text(text) = value else {
+                        unreachable!("text value was selected above")
+                    };
+                    text.pop();
+                }
+                MySqlInterruptionPoint::ReplaceFirstWriteText => {
+                    *value = DbValue::Text("replacement".into());
+                }
+                MySqlInterruptionPoint::SkipFirstWriteRow => {}
+                _ => unreachable!("fault mode was filtered above"),
+            }
+        }
+        injected.try_push(row, 0)?;
+    }
+    Ok(Some(injected))
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -3459,6 +3541,80 @@ mod tests {
             },
             first_page: batch,
         }
+    }
+
+    #[cfg(feature = "migration-fault-injection")]
+    #[test]
+    fn write_faults_are_explicit_and_never_modify_the_source_batch() {
+        let columns = vec![
+            ColumnMeta {
+                name: identifier("id"),
+                ordinal: 1,
+                vendor_type: "bigint".into(),
+                nullable: false,
+                collation: None,
+                precision: Some(64),
+                scale: Some(0),
+                timezone_semantics: None,
+            },
+            ColumnMeta {
+                name: identifier("payload"),
+                ordinal: 2,
+                vendor_type: "varchar".into(),
+                nullable: false,
+                collation: Some("utf8mb4_0900_bin".into()),
+                precision: Some(32),
+                scale: None,
+                timezone_semantics: None,
+            },
+        ];
+        let mut source = RowBatch::new(columns, 2, 1024);
+        source
+            .try_push(vec![DbValue::Signed(1), DbValue::Text("one".into())], 16)
+            .unwrap();
+        source
+            .try_push(vec![DbValue::Signed(2), DbValue::Text("two".into())], 16)
+            .unwrap();
+        let original = source.clone();
+        let coerced = mysql_injected_write_batch(
+            &source,
+            Some(MySqlInterruptionPoint::CoerceFirstWriteValue),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(coerced.rows()[0][1], DbValue::Signed(7));
+        let truncated = mysql_injected_write_batch(
+            &source,
+            Some(MySqlInterruptionPoint::TruncateFirstWriteText),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(truncated.rows()[0][1], DbValue::Text("on".into()));
+        let replaced = mysql_injected_write_batch(
+            &source,
+            Some(MySqlInterruptionPoint::ReplaceFirstWriteText),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replaced.rows()[0][1], DbValue::Text("replacement".into()));
+        let skipped =
+            mysql_injected_write_batch(&source, Some(MySqlInterruptionPoint::SkipFirstWriteRow))
+                .unwrap()
+                .unwrap();
+        assert_eq!(skipped.rows(), &source.rows()[1..]);
+        assert_eq!(source, original);
+
+        let mut unicode_source = RowBatch::new(source.columns().to_vec(), 1, 1024);
+        unicode_source
+            .try_push(vec![DbValue::Signed(1), DbValue::Text("oneé".into())], 16)
+            .unwrap();
+        let unicode_truncated = mysql_injected_write_batch(
+            &unicode_source,
+            Some(MySqlInterruptionPoint::TruncateFirstWriteText),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(unicode_truncated.rows()[0][1], DbValue::Text("one".into()));
     }
 
     #[test]

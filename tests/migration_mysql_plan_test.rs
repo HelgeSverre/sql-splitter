@@ -469,6 +469,200 @@ fn live_mysql_foreign_key_integrity_and_recovery_matrix() -> anyhow::Result<()> 
 }
 
 #[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_conflict_no_skip_and_target_coverage_matrix() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_TARGET_METADATA_CONFIG")?;
+    let artifact_dir = required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_ARTIFACT_DIR")?;
+    let journal_dir = required_path("SQL_SPLITTER_MYSQL_TEST_INTEGRITY_JOURNAL_DIR")?;
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+
+    let prepare = |name: &str| -> anyhow::Result<(PathBuf, PathBuf, PathBuf)> {
+        let mut target = connect(&target_config)?;
+        target.query_drop("DROP TABLE IF EXISTS extra_items, empty_items, copy_items")?;
+        let plan_path = artifact_dir.join(format!("integrity-{name}-plan.json"));
+        let assertion_path = artifact_dir.join(format!("integrity-{name}-assertion.json"));
+        let journal_path = journal_dir.join(format!("integrity-{name}.journal"));
+        let reviewed = write_live_plan_with_visibility(
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &plan_path,
+        )?;
+        assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+        write_live_freeze_assertion(&assertion_path, &format!("mysql-integrity-{name}"))?;
+        Ok((plan_path, assertion_path, journal_path))
+    };
+    let interrupt = |name: &str,
+                     interruption: MySqlExecutionInterruption|
+     -> anyhow::Result<(PathBuf, PathBuf)> {
+        let (plan_path, assertion_path, journal_path) = prepare(name)?;
+        assert!(
+            execute_live_mysql_frozen_plan_interrupted(MySqlInterruptedExecution {
+                plan_path: &plan_path,
+                source_config_path: &source_path,
+                source_metadata_config_path: &source_metadata_path,
+                freeze_config_path: &freeze_path,
+                target_config_path: &target_path,
+                target_metadata_config_path: &target_metadata_path,
+                freeze_assertion_path: &assertion_path,
+                approval_reference: "mysql-integrity-live-approval",
+                state_path: &journal_path,
+                interruption,
+            })
+            .is_err()
+        );
+        Ok((assertion_path, journal_path))
+    };
+    let resume = |assertion_path: &Path, journal_path: &Path| {
+        resume_live_mysql_frozen_plan(
+            journal_path,
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            assertion_path,
+        )
+    };
+
+    let (assertion_path, journal_path) = interrupt(
+        "prepared-exact",
+        MySqlExecutionInterruption::ChunkCommitBeforeJournal,
+    )?;
+    let report = resume(&assertion_path, &journal_path)?;
+    assert_eq!(report.copied_rows, 3);
+    assert_eq!(
+        connect(&target_config)?.query::<(i64, String, String), _>(
+            "SELECT id, code, payload FROM copy_items ORDER BY id",
+        )?,
+        vec![
+            (10, "code-a".into(), "payload-a".into()),
+            (20, "code-b".into(), "payload-b".into()),
+            (30, "code-c".into(), "payload-c".into()),
+        ]
+    );
+    assert_eq!(
+        AppendJournal::open_resume(&journal_path)?
+            .projection()
+            .status,
+        MigrationStatus::Completed
+    );
+
+    let (assertion_path, journal_path) = interrupt(
+        "prepared-different",
+        MySqlExecutionInterruption::ChunkCommitBeforeJournal,
+    )?;
+    connect(&target_config)?
+        .query_drop("UPDATE copy_items SET payload = 'changed-after-commit' WHERE id = 10")?;
+    assert!(resume(&assertion_path, &journal_path).is_err());
+    assert_eq!(
+        AppendJournal::open_resume(&journal_path)?
+            .projection()
+            .status,
+        MigrationStatus::ManualReconciliationRequired
+    );
+
+    let (assertion_path, journal_path) =
+        interrupt("secondary-unique", MySqlExecutionInterruption::DdlCommitted)?;
+    connect(&target_config)?.query_drop(
+        "INSERT INTO copy_items (id, code, payload) VALUES (99, 'code-a', 'conflict')",
+    )?;
+    assert!(resume(&assertion_path, &journal_path).is_err());
+    let journal = AppendJournal::open_resume(&journal_path)?;
+    assert!(journal.projection().prepared_chunk.is_some());
+    assert_ne!(journal.projection().status, MigrationStatus::Completed);
+
+    let (_assertion_path, journal_path) = interrupt(
+        "target-trigger",
+        MySqlExecutionInterruption::TargetTriggerMutation,
+    )?;
+    assert_eq!(
+        connect(&target_config)?
+            .query_first::<String, _>("SELECT payload FROM copy_items WHERE id = 10",)?,
+        Some("payload-a-mutated".into())
+    );
+    assert_ne!(
+        AppendJournal::open_resume(&journal_path)?
+            .projection()
+            .status,
+        MigrationStatus::Completed
+    );
+
+    for (name, fault) in [
+        (
+            "coercion",
+            MySqlExecutionInterruption::CoerceFirstWriteValue,
+        ),
+        (
+            "truncation",
+            MySqlExecutionInterruption::TruncateFirstWriteText,
+        ),
+        (
+            "replacement",
+            MySqlExecutionInterruption::ReplaceFirstWriteText,
+        ),
+        ("skip", MySqlExecutionInterruption::SkipFirstWriteRow),
+    ] {
+        let (_assertion_path, journal_path) = interrupt(name, fault)?;
+        let journal = AppendJournal::open_resume(&journal_path)?;
+        assert_ne!(
+            journal.projection().status,
+            MigrationStatus::Completed,
+            "{name}"
+        );
+        assert!(
+            journal.projection().table_verifications.is_empty(),
+            "{name}"
+        );
+    }
+
+    for (name, mutation) in [
+        (
+            "target-before",
+            "INSERT INTO copy_items VALUES (5, 'extra-before', 'extra')",
+        ),
+        (
+            "target-between",
+            "INSERT INTO copy_items VALUES (15, 'extra-between', 'extra')",
+        ),
+        (
+            "target-after",
+            "INSERT INTO copy_items VALUES (40, 'extra-after', 'extra')",
+        ),
+        (
+            "target-empty",
+            "INSERT INTO empty_items VALUES (1, 'extra-empty')",
+        ),
+        (
+            "target-table",
+            "CREATE TABLE extra_items (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB",
+        ),
+    ] {
+        let (assertion_path, journal_path) =
+            interrupt(name, MySqlExecutionInterruption::BeforeForeignKeyChecks)?;
+        connect(&target_config)?.query_drop(mutation)?;
+        assert!(resume(&assertion_path, &journal_path).is_err(), "{name}");
+        assert_ne!(
+            AppendJournal::open_resume(&journal_path)?
+                .projection()
+                .status,
+            MigrationStatus::Completed,
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
 fn live_mysql_canonical_value_matrix() -> anyhow::Result<()> {
     let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_CONFIG")?;
@@ -1243,8 +1437,13 @@ fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
             }
             MySqlExecutionInterruption::BeforeForeignKeyChecks
             | MySqlExecutionInterruption::ForeignKeyPrepared
-            | MySqlExecutionInterruption::ForeignKeyCommitted => {
-                unreachable!("foreign-key faults have a separate integrity matrix")
+            | MySqlExecutionInterruption::ForeignKeyCommitted
+            | MySqlExecutionInterruption::CoerceFirstWriteValue
+            | MySqlExecutionInterruption::TruncateFirstWriteText
+            | MySqlExecutionInterruption::ReplaceFirstWriteText
+            | MySqlExecutionInterruption::SkipFirstWriteRow
+            | MySqlExecutionInterruption::TargetTriggerMutation => {
+                unreachable!("specialized faults have separate integrity matrices")
             }
         }
         drop(interrupted);

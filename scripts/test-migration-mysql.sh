@@ -104,6 +104,7 @@ CREATE DATABASE migration_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_execution_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_values_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_fk_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_integrity_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
@@ -134,8 +135,10 @@ REVOKE SELECT ON migration_source.* FROM 'partially_restricted_reader'@'%';
 GRANT SELECT, SHOW VIEW ON migration_execution_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_values_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_fk_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT, SHOW VIEW ON migration_integrity_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT ON migration_values_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_fk_source.* TO 'migration_admin'@'%';
+GRANT SELECT ON migration_integrity_source.* TO 'migration_admin'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -307,6 +310,20 @@ INSERT INTO fk_node VALUES (1, NULL), (2, 1);
 INSERT INTO fk_cycle_a VALUES (1, NULL);
 INSERT INTO fk_cycle_b VALUES (1, 1);
 UPDATE fk_cycle_a SET b_id = 1 WHERE id = 1;
+USE migration_integrity_source;
+CREATE TABLE copy_items (
+  id BIGINT NOT NULL PRIMARY KEY,
+  code VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL UNIQUE,
+  payload VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO copy_items VALUES
+  (10, 'code-a', 'payload-a'),
+  (20, 'code-b', 'payload-b'),
+  (30, 'code-c', 'payload-c');
+CREATE TABLE empty_items (
+  id BIGINT NOT NULL PRIMARY KEY,
+  payload VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
 SQL
 
 write_config() {
@@ -390,11 +407,13 @@ docker run -d --name "$target_container" \
 target_port=$(docker port "$target_container" 3306/tcp | sed 's/.*://')
 wait_for_mysql "$target_container"
 docker exec -i "$target_container" mysql -uroot -prootpass <<'SQL'
+SET GLOBAL log_bin_trust_function_creators = 1;
 CREATE DATABASE migration_execution_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_values_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_fk_target_prepared CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_fk_target_committed CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_fk_target_violation CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_integrity_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
 CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
 CREATE ROLE 'execution_target_metadata_role'@'%';
@@ -403,6 +422,7 @@ GRANT ALL PRIVILEGES ON migration_values_target.* TO 'migration_execution_target
 GRANT ALL PRIVILEGES ON migration_fk_target_prepared.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_fk_target_committed.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_fk_target_violation.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_integrity_target.* TO 'migration_execution_target'@'%';
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
 GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
 GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
@@ -427,6 +447,11 @@ fk_committed_target_config="$test_dir/fk-committed-target.toml"
 fk_committed_target_metadata_config="$test_dir/fk-committed-target-metadata.toml"
 fk_violation_target_config="$test_dir/fk-violation-target.toml"
 fk_violation_target_metadata_config="$test_dir/fk-violation-target-metadata.toml"
+integrity_source_config="$test_dir/integrity-source.toml"
+integrity_source_metadata_config="$test_dir/integrity-source-metadata.toml"
+integrity_freeze_config="$test_dir/integrity-freeze.toml"
+integrity_target_config="$test_dir/integrity-target.toml"
+integrity_target_metadata_config="$test_dir/integrity-target-metadata.toml"
 write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
 write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
 write_config "$execution_freeze_config" "$port" migration_execution_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
@@ -446,6 +471,11 @@ write_config "$fk_committed_target_config" "$target_port" migration_fk_target_co
 write_config "$fk_committed_target_metadata_config" "$target_port" migration_fk_target_committed execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
 write_config "$fk_violation_target_config" "$target_port" migration_fk_target_violation migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
 write_config "$fk_violation_target_metadata_config" "$target_port" migration_fk_target_violation execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$integrity_source_config" "$port" migration_integrity_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
+write_config "$integrity_source_metadata_config" "$port" migration_integrity_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
+write_config "$integrity_freeze_config" "$port" migration_integrity_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$integrity_target_config" "$target_port" migration_integrity_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$integrity_target_metadata_config" "$target_port" migration_integrity_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
 export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
@@ -476,6 +506,13 @@ export SQL_SPLITTER_MYSQL_TEST_FK_VIOLATION_TARGET_CONFIG="$fk_violation_target_
 export SQL_SPLITTER_MYSQL_TEST_FK_VIOLATION_TARGET_METADATA_CONFIG="$fk_violation_target_metadata_config"
 export SQL_SPLITTER_MYSQL_TEST_FK_ARTIFACT_DIR="$test_dir"
 export SQL_SPLITTER_MYSQL_TEST_FK_JOURNAL_DIR="$journal_dir"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_SOURCE_CONFIG="$integrity_source_config"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_SOURCE_METADATA_CONFIG="$integrity_source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_FREEZE_CONFIG="$integrity_freeze_config"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_TARGET_CONFIG="$integrity_target_config"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_TARGET_METADATA_CONFIG="$integrity_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_ARTIFACT_DIR="$test_dir"
+export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_JOURNAL_DIR="$journal_dir"
 
 docker exec "$container" mysql -uroot -prootpass -Nse \
   "SET PERSIST super_read_only = ON"
@@ -518,6 +555,10 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_foreign_key_integrity_and_recovery_matrix \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_conflict_no_skip_and_target_coverage_matrix \
   -- --ignored --exact --nocapture
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \

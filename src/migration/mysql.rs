@@ -2751,6 +2751,39 @@ impl MySqlTargetFactory {
         &self.config
     }
 
+    #[cfg(feature = "migration-fault-injection")]
+    pub(crate) fn install_write_mutation_trigger(
+        &self,
+        table: &QualifiedTable,
+        column: &Identifier,
+    ) -> ConnectionResult<()> {
+        const TRIGGER_NAME: &str = "sql_splitter_fault_mutate_write";
+        let (mut conn, _registration) = self.controlled_connect()?;
+        self.cancellation.check()?;
+        let exists: Option<u64> = conn
+            .exec_first(
+                "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = ?",
+                (&self.config.database, TRIGGER_NAME),
+            )
+            .map_err(database_error)?;
+        if exists != Some(0) {
+            return Ok(());
+        }
+        let statement = format!(
+            "CREATE TRIGGER {}.{} BEFORE INSERT ON {}.{} FOR EACH ROW SET NEW.{} = CONCAT(NEW.{}, '-mutated')",
+            quote_identifier(&table.namespace),
+            quote_identifier(&Identifier::new(TRIGGER_NAME).map_err(|error| {
+                ConnectionError::InvalidRequest(error.to_string())
+            })?),
+            quote_identifier(&table.namespace),
+            quote_identifier(&table.name),
+            quote_identifier(column),
+            quote_identifier(column),
+        );
+        conn.query_drop(statement).map_err(database_error)?;
+        self.cancellation.check()
+    }
+
     pub(crate) fn validate_reviewed_binding(
         &self,
         reviewed: &ReviewedPlan,
@@ -3338,17 +3371,24 @@ impl WriteSession for MySqlWriter {
             .map(|row| {
                 row.iter()
                     .zip(batch.columns())
-                    .map(|(value, column)| mysql_write_value(value, column))
+                    .zip(reviewed_columns)
+                    .map(|((value, column), (_, data_type))| {
+                        mysql_write_value(value, column, data_type)
+                    })
                     .collect::<ConnectionResult<Vec<_>>>()
             })
             .collect::<ConnectionResult<Vec<_>>>()?;
-        if let Err(error) = self.conn.exec_batch(statement, parameters) {
-            return match self.cancellation.check() {
-                Err(cancellation) => Err(cancellation),
-                Ok(()) => Err(database_error(error)),
-            };
+        let statement = self.conn.prep(statement).map_err(database_error)?;
+        for parameters in parameters {
+            if let Err(error) = self.conn.exec_drop(&statement, parameters) {
+                return match self.cancellation.check() {
+                    Err(cancellation) => Err(cancellation),
+                    Ok(()) => Err(database_error(error)),
+                };
+            }
+            require_mysql_insert_affected_rows(self.conn.affected_rows())?;
+            self.cancellation.check()?;
         }
-        self.cancellation.check()?;
         Ok(())
     }
 
@@ -3389,6 +3429,15 @@ fn validate_mysql_write_contract(
         return Err(ConnectionError::InvalidRequest(
             "MySQL write projection differs from the reviewed table contract".into(),
         ));
+    }
+    Ok(())
+}
+
+fn require_mysql_insert_affected_rows(affected_rows: u64) -> ConnectionResult<()> {
+    if affected_rows != 1 {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "MySQL INSERT affected {affected_rows} rows; exact execution requires one"
+        )));
     }
     Ok(())
 }
@@ -3612,7 +3661,12 @@ fn mysql_parameter(value: &DbValue) -> ConnectionResult<Value> {
     }
 }
 
-fn mysql_write_value(value: &DbValue, column: &ColumnMeta) -> ConnectionResult<Value> {
+fn mysql_write_value(
+    value: &DbValue,
+    column: &ColumnMeta,
+    data_type: &MySqlColumnType,
+) -> ConnectionResult<Value> {
+    validate_mysql_write_value_type(value, column, data_type)?;
     match value {
         DbValue::Null => Ok(Value::NULL),
         DbValue::Bool(value) => Ok(Value::Int(i64::from(*value))),
@@ -3686,6 +3740,111 @@ fn mysql_write_value(value: &DbValue, column: &ColumnMeta) -> ConnectionResult<V
         DbValue::Timestamp { local, .. } => Ok(Value::Bytes(local.as_bytes().to_vec())),
         DbValue::Vendor { .. } => Err(ConnectionError::UnsupportedKeyValue),
     }
+}
+
+fn validate_mysql_write_value_type(
+    value: &DbValue,
+    column: &ColumnMeta,
+    data_type: &MySqlColumnType,
+) -> ConnectionResult<()> {
+    if matches!(value, DbValue::Null) {
+        return if column.nullable {
+            Ok(())
+        } else {
+            Err(ConnectionError::InvalidRequest(format!(
+                "MySQL non-null column {} received NULL",
+                column.name
+            )))
+        };
+    }
+    let exact = match data_type {
+        MySqlColumnType::Integer { unsigned, .. } => {
+            if *unsigned {
+                matches!(value, DbValue::Unsigned(_))
+                    || matches!(value, DbValue::Signed(value) if *value >= 0)
+            } else {
+                matches!(value, DbValue::Signed(_))
+                    || matches!(value, DbValue::Unsigned(value) if *value <= i64::MAX as u128)
+            }
+        }
+        MySqlColumnType::Decimal {
+            precision,
+            scale,
+            unsigned,
+        } => match value {
+            DbValue::Decimal {
+                coefficient,
+                scale: value_scale,
+            } => {
+                let negative = coefficient.first() == Some(&b'-');
+                let digits = coefficient.strip_prefix(b"-").unwrap_or(coefficient);
+                *value_scale == *scale as i32
+                    && (!*unsigned || !negative)
+                    && !digits.is_empty()
+                    && digits.iter().all(u8::is_ascii_digit)
+                    && digits.len() <= *precision as usize
+            }
+            _ => false,
+        },
+        MySqlColumnType::Floating { name, .. } if name == "float" => {
+            matches!(value, DbValue::Float32(_))
+        }
+        MySqlColumnType::Floating { name, .. } if name == "double" => {
+            matches!(value, DbValue::Float64(_))
+        }
+        MySqlColumnType::Floating { .. } => false,
+        MySqlColumnType::Bit { .. } => matches!(value, DbValue::Bytes(_)),
+        MySqlColumnType::Temporal { name, .. } if name == "date" => {
+            matches!(value, DbValue::Date { .. })
+        }
+        MySqlColumnType::Temporal {
+            name,
+            fractional_precision,
+        } if name == "time" => match value {
+            DbValue::Time { nanos } => {
+                mysql_temporal_value_has_exact_precision(*nanos, *fractional_precision)
+            }
+            _ => false,
+        },
+        MySqlColumnType::Temporal {
+            name,
+            fractional_precision,
+        } if matches!(name.as_str(), "datetime" | "timestamp") => {
+            matches!(
+                value,
+                DbValue::Timestamp { precision, .. }
+                    if u32::from(*precision) == fractional_precision.unwrap_or(0)
+            )
+        }
+        MySqlColumnType::Temporal { .. } => false,
+        MySqlColumnType::Year => matches!(value, DbValue::Signed(_)),
+        MySqlColumnType::Character { .. } | MySqlColumnType::Text { .. } => {
+            matches!(value, DbValue::Text(_))
+        }
+        MySqlColumnType::Binary { .. } | MySqlColumnType::Blob { .. } => {
+            matches!(value, DbValue::Bytes(_))
+        }
+        MySqlColumnType::Json => matches!(value, DbValue::Json(_)),
+    };
+    if !exact {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "MySQL value type for column {} differs from the reviewed catalog type",
+            column.name
+        )));
+    }
+    Ok(())
+}
+
+fn mysql_temporal_value_has_exact_precision(
+    nanos: i128,
+    fractional_precision: Option<u32>,
+) -> bool {
+    let precision = fractional_precision.unwrap_or(0);
+    let Some(exponent) = 9_u32.checked_sub(precision) else {
+        return false;
+    };
+    let quantum = 10_i128.pow(exponent);
+    nanos % quantum == 0
 }
 
 fn render_mysql_decimal(coefficient: &[u8], scale: i32) -> ConnectionResult<Vec<u8>> {
@@ -6612,6 +6771,136 @@ mod tests {
     }
 
     #[test]
+    fn writer_requires_exactly_one_affected_row_per_source_row() {
+        require_mysql_insert_affected_rows(1).unwrap();
+        for affected_rows in [0, 2, u64::MAX] {
+            assert!(matches!(
+                require_mysql_insert_affected_rows(affected_rows),
+                Err(ConnectionError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn writer_rejects_values_that_require_server_type_coercion() {
+        let column = ColumnMeta {
+            name: identifier("value"),
+            ordinal: 1,
+            vendor_type: "bigint".into(),
+            nullable: false,
+            collation: None,
+            precision: Some(64),
+            scale: Some(0),
+            timezone_semantics: None,
+        };
+        let signed = MySqlColumnType::Integer {
+            name: "bigint".into(),
+            unsigned: false,
+            display_width: None,
+        };
+        validate_mysql_write_value_type(&DbValue::Signed(7), &column, &signed).unwrap();
+        validate_mysql_write_value_type(&DbValue::Unsigned(7), &column, &signed).unwrap();
+        assert!(matches!(
+            validate_mysql_write_value_type(
+                &DbValue::Unsigned(i64::MAX as u128 + 1),
+                &column,
+                &signed
+            ),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+        let unsigned = MySqlColumnType::Integer {
+            name: "bigint".into(),
+            unsigned: true,
+            display_width: None,
+        };
+        validate_mysql_write_value_type(&DbValue::Signed(0), &column, &unsigned).unwrap();
+        assert!(matches!(
+            validate_mysql_write_value_type(&DbValue::Signed(-1), &column, &unsigned),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_mysql_write_value_type(&DbValue::Text("7".into()), &column, &signed),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_mysql_write_value_type(&DbValue::Null, &column, &signed),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+
+        let decimal = MySqlColumnType::Decimal {
+            precision: 5,
+            scale: 2,
+            unsigned: true,
+        };
+        validate_mysql_write_value_type(
+            &DbValue::Decimal {
+                coefficient: b"12345".to_vec(),
+                scale: 2,
+            },
+            &column,
+            &decimal,
+        )
+        .unwrap();
+        for value in [
+            DbValue::Decimal {
+                coefficient: b"12345".to_vec(),
+                scale: 3,
+            },
+            DbValue::Decimal {
+                coefficient: b"123456".to_vec(),
+                scale: 2,
+            },
+            DbValue::Decimal {
+                coefficient: b"-1".to_vec(),
+                scale: 2,
+            },
+        ] {
+            assert!(matches!(
+                validate_mysql_write_value_type(&value, &column, &decimal),
+                Err(ConnectionError::InvalidRequest(_))
+            ));
+        }
+
+        let time = MySqlColumnType::Temporal {
+            name: "time".into(),
+            fractional_precision: Some(3),
+        };
+        validate_mysql_write_value_type(&DbValue::Time { nanos: 1_000_000 }, &column, &time)
+            .unwrap();
+        assert!(matches!(
+            validate_mysql_write_value_type(&DbValue::Time { nanos: 1_001_000 }, &column, &time,),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+
+        let timestamp = MySqlColumnType::Temporal {
+            name: "timestamp".into(),
+            fractional_precision: Some(6),
+        };
+        validate_mysql_write_value_type(
+            &DbValue::Timestamp {
+                local: "2026-08-12 12:34:56.123456".into(),
+                offset_minutes: None,
+                precision: 6,
+            },
+            &column,
+            &timestamp,
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_mysql_write_value_type(
+                &DbValue::Timestamp {
+                    local: "2026-08-12 12:34:56.123000".into(),
+                    offset_minutes: None,
+                    precision: 3,
+                },
+                &column,
+                &timestamp,
+            ),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
     fn reviewed_mysql_plan_is_typed_and_binds_the_external_freeze_profile() {
         let reviewed = build_plan(
             &snapshot("mysql://source/app", true),
@@ -7027,12 +7316,17 @@ mod tests {
             mysql_write_value(
                 &DbValue::Json(br#"{"n":12,"wide":9007199254740993}"#.to_vec()),
                 &column,
+                &MySqlColumnType::Json,
             )
             .unwrap(),
             Value::Bytes(br#"{"n":12,"wide":9007199254740993}"#.to_vec())
         );
         assert!(matches!(
-            mysql_write_value(&DbValue::Json(br#"{"a":1,"a":2}"#.to_vec()), &column),
+            mysql_write_value(
+                &DbValue::Json(br#"{"a":1,"a":2}"#.to_vec()),
+                &column,
+                &MySqlColumnType::Json,
+            ),
             Err(ConnectionError::InvalidRequest(_))
         ));
     }
@@ -7050,11 +7344,20 @@ mod tests {
             timezone_semantics: None,
         };
         assert_eq!(
-            mysql_write_value(&DbValue::Bytes(vec![1, 255]), &column).unwrap(),
+            mysql_write_value(
+                &DbValue::Bytes(vec![1, 255]),
+                &column,
+                &MySqlColumnType::Bit { length: 9 },
+            )
+            .unwrap(),
             Value::UInt(511)
         );
         assert!(matches!(
-            mysql_write_value(&DbValue::Bytes(vec![2, 0]), &column),
+            mysql_write_value(
+                &DbValue::Bytes(vec![2, 0]),
+                &column,
+                &MySqlColumnType::Bit { length: 9 },
+            ),
             Err(ConnectionError::UnsupportedKeyValue)
         ));
     }

@@ -184,8 +184,10 @@ Agreed 2026-08-12 (mailbox [063-codex]/[064]). Phase 6 does not exit on the
 current green matrix. It exits only when these are also proven live on
 MySQL 8.0 and 8.4, rather than deferred:
 
-1. **Gate 5 target conflicts:** exact prepared equality, changed payload,
-   secondary unique collision, and target-trigger mutation.
+1. **Gate 5 target conflicts (met 2026-08-12):** the MySQL 8.0 and 8.4 live
+   matrices prove exact prepared equality, changed-payload manual
+   reconciliation, secondary-unique collision failure, and target-trigger
+   mutation rejection.
 2. **Gate 7 TLS/redaction:** hostname-verification failure, untrusted CA,
    mTLS rejection and success, explicit insecure binding, distinct
    credentials, malicious identifiers, protected artifacts, and no
@@ -196,9 +198,15 @@ MySQL 8.0 and 8.4, rather than deferred:
    matrices prove typed composite/nullable/self/cycle anti-joins, all checks
    before any constraint is added, database validation, Prepared and Committed
    implicit-DDL recovery, and durable manual reconciliation for violations.
-4. **Gate 10:** coercion/truncation/replacement/no-skip failure injection.
-5. **Gate 11:** target-only rows before, between, after, and in
-   source-empty tables.
+4. **Gate 10 (met 2026-08-12):** the writer checks the reviewed logical value
+   type before binding, requires exactly one affected row for each source row,
+   and the MySQL 8.0 and 8.4 live matrices inject coercion, truncation,
+   replacement, and skip faults; none can complete or publish table
+   verification evidence.
+5. **Gate 11 (met 2026-08-12):** the MySQL 8.0 and 8.4 live matrices reject
+   target-only rows before the first source key, between committed intervals,
+   after the final key, and in a source-empty table, plus an extra target
+   table.
 6. **Business-authorization restoration:** the already-inventoried grants,
    roles, and partial revokes must be *mapped and restored*, not merely
    inventoried and blocked. Inventory-and-block is not a faithful
