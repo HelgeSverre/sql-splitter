@@ -184,6 +184,13 @@ impl StagingReplacement {
             }
         }
     }
+
+    fn live_identity(&self) -> StagingIdentity {
+        match self {
+            Self::Namespace { live, .. } => StagingIdentity::Namespace(live.clone()),
+            Self::Table { live, .. } => StagingIdentity::Table(live.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -713,6 +720,13 @@ fn validate_target_mode(
             if contract.tables.is_empty() {
                 return Err(PlanError::InvalidTargetMode);
             }
+            if contract
+                .tables
+                .windows(2)
+                .any(|pair| pair[0].table >= pair[1].table)
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
             let mut tables = BTreeSet::new();
             let mut merge_items = BTreeSet::new();
             for table in &contract.tables {
@@ -776,10 +790,21 @@ fn validate_target_mode(
                 .validate_against(target_catalog, target_catalog_fingerprint)?;
             let mut replacement_items = BTreeSet::new();
             let mut identities = BTreeSet::new();
+            let mut prior_replacement = None;
             for replacement in &contract.replacements {
-                if replacement.catalog_items().is_empty() {
+                let live_identity = replacement.live_identity();
+                if prior_replacement
+                    .as_ref()
+                    .is_some_and(|prior| prior >= &live_identity)
+                    || replacement.catalog_items().is_empty()
+                    || replacement
+                        .catalog_items()
+                        .windows(2)
+                        .any(|pair| pair[0] >= pair[1])
+                {
                     return Err(PlanError::InvalidTargetMode);
                 }
+                prior_replacement = Some(live_identity);
                 for item in replacement.catalog_items() {
                     if !catalog_items.contains_key(item) || !replacement_items.insert(item.clone())
                     {
@@ -856,6 +881,13 @@ impl TargetOwnershipManifest {
             }
         }
         let mut actual = BTreeSet::new();
+        if self
+            .claims
+            .windows(2)
+            .any(|pair| pair[0].item >= pair[1].item)
+        {
+            return Err(PlanError::InvalidTargetMode);
+        }
         for claim in &self.claims {
             if claim.item.catalog_id().is_empty() || !actual.insert(claim.item.clone()) {
                 return Err(PlanError::InvalidTargetMode);
@@ -1812,6 +1844,18 @@ mod tests {
             Err(PlanError::TargetModeExecutionUnavailable)
         ));
 
+        let mut reordered = plan.clone();
+        let AssessmentStatus::Assessed(TargetModeContract::WarmMerge(contract)) =
+            reordered.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        contract.ownership.claims.reverse();
+        assert!(matches!(
+            reordered.validate(),
+            Err(PlanError::InvalidTargetMode)
+        ));
+
         let AssessmentStatus::Assessed(TargetModeContract::WarmMerge(contract)) =
             plan.target_mode.as_mut().unwrap()
         else {
@@ -1903,6 +1947,21 @@ mod tests {
         assert!(matches!(
             plan.validate_for_execution(),
             Err(PlanError::TargetModeExecutionUnavailable)
+        ));
+
+        let mut reordered = plan.clone();
+        let AssessmentStatus::Assessed(TargetModeContract::StagingSwap(contract)) =
+            reordered.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        match &mut contract.replacements[0] {
+            StagingReplacement::Namespace { catalog_items, .. }
+            | StagingReplacement::Table { catalog_items, .. } => catalog_items.reverse(),
+        }
+        assert!(matches!(
+            reordered.validate(),
+            Err(PlanError::InvalidTargetMode)
         ));
 
         let AssessmentStatus::Assessed(TargetModeContract::StagingSwap(contract)) =

@@ -27,6 +27,7 @@ mod postgres_codec;
 pub mod postgres_fence;
 pub mod postgres_profile;
 pub mod runner;
+pub mod target_baseline;
 pub mod verify;
 
 pub const SPIKE_WARNING: &str = "EXPERIMENTAL SPIKE — NOT FOR PRODUCTION";
