@@ -205,6 +205,42 @@ attestation**:
   releases the external backup lock. Release is a separate operator or
   provider action after durable `Completed` state.
 
+## MySQL metadata-administrator visibility proof (Phase 6)
+
+Selected contract (mailbox [042]/[043]). MySQL `INFORMATION_SCHEMA`
+visibility is account-dependent: routine definitions require `SHOW_ROUTINE`
+or global `SELECT`, view definitions `SHOW VIEW`, trigger listings
+`TRIGGER`, and the `*_PRIVILEGES` views are not equivalent to the server's
+grant tables. Two extracts that lack the same visibility hide the same
+objects, so comparing them proves nothing. Lifting the unconditional
+`catalog_visibility` blocker therefore requires a strictly stronger prover:
+
+- A separately authenticated metadata administrator proves the reviewed
+  source server UUID, database, and TLS binding, plus effective global
+  `SELECT`, `SHOW VIEW`, `TRIGGER`, `EVENT`, and `SHOW_ROUTINE` visibility
+  or a strictly equivalent typed privilege set — demonstrated against the
+  authoritative grant tables, not `INFORMATION_SCHEMA` views.
+- The administrator inventories schema, table, column, routine,
+  role-derived, and direct grant state — including partial revokes — from
+  the authoritative grant tables. The plan binds the inventory's canonical
+  digest. An unknown privilege class or an inaccessible grant table blocks
+  execution.
+- Operational migration and administrator account grants are either
+  explicit typed exclusions with exact account identities and grants bound
+  into the evidence, or they remain blocking. No implicit name filter may
+  hide an account. A server administrator is excluded only when its exact
+  `user` and `host` identity appears in the metadata-administrator endpoint's
+  `operational_server_administrators` list and the authoritative grant
+  inventory proves that account holds `SUPER` or `SYSTEM_USER`. Possession of
+  either privilege does not create an exclusion by itself.
+- Plan validation independently derives the required privilege-finding IDs
+  from every non-operational grant record in the embedded evidence. Removing,
+  weakening, or adding a privilege finding without the matching typed grant
+  evidence invalidates the plan before execution.
+- Execution re-runs the administrator proof under the same continuous
+  freeze and requires the same catalog and grant digests before any target
+  effect and before completion.
+
 ## Delivery placement
 
 This document is Implementation Phase 5b in

@@ -63,6 +63,12 @@ Implementation Phase 6's dialect is MySQL. Scope for its adapter proof:
 - **Collation binding.** Keyset text keys bind collation identity exactly as
   in PostgreSQL. Case-insensitive or otherwise non-deterministic collations
   are rejected as pagination keys.
+- **Catalog visibility.** `INFORMATION_SCHEMA` content is account-dependent.
+  Lifting the unconditional visibility blocker requires the
+  metadata-administrator proof in
+  [14](./14-managed-source-profiles.md#mysql-metadata-administrator-visibility-proof-phase-6);
+  comparing two potentially equally-blind extracts is not acceptable
+  evidence.
 - **Version matrix:** MySQL 8.0 and 8.4 LTS over TLS, with the same
   reproducible disposable-container posture as
   [12](./12-postgresql-first-adapter.md).

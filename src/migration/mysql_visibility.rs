@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION: u16 = 1;
+pub const MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION: u16 = 2;
 
 const REQUIRED_METADATA_PRIVILEGES: [&str; 5] =
     ["EVENT", "SELECT", "SHOW VIEW", "SHOW_ROUTINE", "TRIGGER"];
@@ -140,6 +140,14 @@ pub enum MySqlGrantRecord {
 }
 
 impl MySqlGrantRecord {
+    pub fn canonical_id(&self) -> Result<String, MySqlVisibilityError> {
+        self.validate()?;
+        Ok(format!(
+            "mysql-grant:{}",
+            hex::encode(Sha256::digest(serde_json::to_vec(self)?))
+        ))
+    }
+
     pub fn validate(&self) -> Result<(), MySqlVisibilityError> {
         let require_text = |value: &str| {
             if value.is_empty() || value.contains('\0') {

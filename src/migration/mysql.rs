@@ -121,6 +121,10 @@ pub struct MySqlEndpointConfig {
     pub database: String,
     pub user: String,
     pub credential_env: String,
+    /// Explicit server-administrator accounts excluded from business grant
+    /// blockers when this configuration is used for metadata administration.
+    #[serde(default)]
+    pub operational_server_administrators: Vec<MySqlAccountIdentity>,
     #[serde(default)]
     pub tls: MySqlTlsConfig,
     #[serde(default = "default_timeout_seconds")]
@@ -442,6 +446,10 @@ pub fn collect_mysql_metadata_visibility(
                 .and_then(|account| resolve_mysql_account(&grant_inventory.accounts, &account))
         })
         .transpose()?;
+    // ENABLED_ROLES is bound exactly, including inherited roles. The grant
+    // inventory can under-count an unmodeled effective privilege only by
+    // causing the later required-privilege proof to fail closed; it cannot
+    // turn a restricted source account into an accepted unrestricted one.
     let active_administrator_roles = collect_enabled_mysql_roles(&mut conn)?;
     let operational_exclusions = derive_mysql_operational_exclusions(
         &grant_inventory,
@@ -449,7 +457,8 @@ pub fn collect_mysql_metadata_visibility(
         &metadata_administrator_account,
         freeze_administrator_account.as_ref(),
         &active_administrator_roles,
-    );
+        &metadata_admin_config.operational_server_administrators,
+    )?;
     let effective_administrator_privileges = mysql_effective_global_privileges(
         &grant_inventory,
         &metadata_administrator_account,
@@ -589,7 +598,8 @@ fn derive_mysql_operational_exclusions(
     metadata_administrator: &MySqlAccountIdentity,
     freeze_administrator: Option<&MySqlAccountIdentity>,
     active_administrator_roles: &[MySqlAccountIdentity],
-) -> Vec<MySqlOperationalAccountExclusion> {
+    declared_server_administrators: &[MySqlAccountIdentity],
+) -> Result<Vec<MySqlOperationalAccountExclusion>, MySqlPlanError> {
     let mut purposes = BTreeMap::from([
         (
             source_reader.clone(),
@@ -611,22 +621,36 @@ fn derive_mysql_operational_exclusions(
             .entry(role.clone())
             .or_insert(MySqlOperationalAccountPurpose::OperationalRole);
     }
-    for record in &inventory.records {
-        match record {
-            MySqlGrantRecord::StaticGlobal { account, privilege } if privilege == "SUPER" => {
-                purposes
-                    .entry(account.clone())
-                    .or_insert(MySqlOperationalAccountPurpose::ServerAdministrator);
-            }
-            MySqlGrantRecord::DynamicGlobal {
-                account, privilege, ..
-            } if privilege == "SYSTEM_USER" => {
-                purposes
-                    .entry(account.clone())
-                    .or_insert(MySqlOperationalAccountPurpose::ServerAdministrator);
-            }
-            _ => {}
+    if !declared_server_administrators
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+    {
+        return Err(MySqlPlanError::InvalidConfig(
+            "operational server administrators must be sorted and unique",
+        ));
+    }
+    for account in declared_server_administrators {
+        account.validate()?;
+        let is_server_administrator = inventory.records.iter().any(|record| {
+            matches!(
+                record,
+                MySqlGrantRecord::StaticGlobal { account: holder, privilege }
+                    if holder == account && privilege == "SUPER"
+            ) || matches!(
+                record,
+                MySqlGrantRecord::DynamicGlobal { account: holder, privilege, .. }
+                    if holder == account && privilege == "SYSTEM_USER"
+            )
+        });
+        if inventory.accounts.binary_search(account).is_err() || !is_server_administrator {
+            return Err(MySqlPlanError::InvalidCatalog(format!(
+                "declared MySQL operational server administrator {}@{} is absent or lacks SUPER/SYSTEM_USER",
+                account.user, account.host
+            )));
         }
+        purposes
+            .entry(account.clone())
+            .or_insert(MySqlOperationalAccountPurpose::ServerAdministrator);
     }
     loop {
         let roles = inventory
@@ -653,7 +677,7 @@ fn derive_mysql_operational_exclusions(
         .map(|(account, purpose)| MySqlOperationalAccountExclusion { purpose, account })
         .collect::<Vec<_>>();
     exclusions.sort();
-    exclusions
+    Ok(exclusions)
 }
 
 fn mysql_effective_global_privileges(
@@ -1610,10 +1634,7 @@ fn build_plan_from_execution_source(
 }
 
 fn mysql_grant_record_id(record: &MySqlGrantRecord) -> Result<String, MySqlPlanError> {
-    Ok(format!(
-        "mysql-grant:{}",
-        hex::encode(Sha256::digest(serde_json::to_vec(record)?))
-    ))
+    Ok(record.canonical_id()?)
 }
 
 fn table_has_ddl_blocker(
@@ -2092,6 +2113,18 @@ impl MySqlEndpointConfig {
                     "database, user, and credential reference must be non-empty and must not contain NUL",
                 ));
             }
+        }
+        if !self
+            .operational_server_administrators
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        {
+            return Err(MySqlPlanError::InvalidConfig(
+                "operational server administrators must be sorted and unique",
+            ));
+        }
+        for account in &self.operational_server_administrators {
+            account.validate()?;
         }
         if self.connect_timeout_seconds == 0
             || self.max_batch_rows == 0
@@ -5813,6 +5846,110 @@ mod tests {
             .objects
             .iter()
             .any(|object| object.object_kind == "privilege" && object.required_semantics));
+
+        let original = reviewed.plan;
+        let mut stripped = original.clone();
+        stripped
+            .unsupported_objects
+            .objects
+            .retain(|object| object.object_kind != "privilege");
+        assert!(matches!(
+            ReviewedPlan::new(stripped),
+            Err(PlanError::InvalidMySqlMetadataVisibility)
+        ));
+
+        let mut reclassified = original.clone();
+        reclassified
+            .unsupported_objects
+            .objects
+            .iter_mut()
+            .find(|object| object.object_kind == "privilege")
+            .unwrap()
+            .code = UnsupportedObjectCode::MySqlFreezeEvidence;
+        assert!(matches!(
+            ReviewedPlan::new(reclassified),
+            Err(PlanError::InvalidMySqlMetadataVisibility)
+        ));
+
+        let mut added = original;
+        let mut extra = added
+            .unsupported_objects
+            .objects
+            .iter()
+            .find(|object| object.object_kind == "privilege")
+            .unwrap()
+            .clone();
+        extra.object_id = format!("mysql-grant:{}", "0".repeat(64));
+        added.unsupported_objects.objects.push(extra);
+        assert!(matches!(
+            ReviewedPlan::new(added),
+            Err(PlanError::InvalidMySqlMetadataVisibility)
+        ));
+    }
+
+    #[test]
+    fn server_administrators_are_excluded_only_when_explicitly_declared() {
+        let reader = MySqlAccountIdentity {
+            user: "reader".into(),
+            host: "%".into(),
+        };
+        let metadata = MySqlAccountIdentity {
+            user: "metadata".into(),
+            host: "%".into(),
+        };
+        let legacy_application = MySqlAccountIdentity {
+            user: "legacy_application".into(),
+            host: "%".into(),
+        };
+        let mut inventory = MySqlGrantInventory {
+            partial_revokes_enabled: false,
+            grant_table_columns: Vec::new(),
+            accounts: vec![reader.clone(), metadata.clone(), legacy_application.clone()],
+            records: vec![
+                MySqlGrantRecord::StaticGlobal {
+                    account: legacy_application.clone(),
+                    privilege: "SUPER".into(),
+                },
+                MySqlGrantRecord::Database {
+                    account: legacy_application.clone(),
+                    database: "app".into(),
+                    privilege: "SELECT".into(),
+                },
+            ],
+            unknown_privilege_classes: Vec::new(),
+        };
+        inventory.accounts.sort();
+        inventory.records.sort();
+
+        let implicit =
+            derive_mysql_operational_exclusions(&inventory, &reader, &metadata, None, &[], &[])
+                .unwrap();
+        assert!(!implicit
+            .iter()
+            .any(|exclusion| exclusion.account == legacy_application));
+
+        let explicit = derive_mysql_operational_exclusions(
+            &inventory,
+            &reader,
+            &metadata,
+            None,
+            &[],
+            std::slice::from_ref(&legacy_application),
+        )
+        .unwrap();
+        assert!(explicit.iter().any(|exclusion| {
+            exclusion.account == legacy_application
+                && exclusion.purpose == MySqlOperationalAccountPurpose::ServerAdministrator
+        }));
+        assert!(derive_mysql_operational_exclusions(
+            &inventory,
+            &reader,
+            &metadata,
+            None,
+            &[],
+            std::slice::from_ref(&metadata),
+        )
+        .is_err());
     }
 
     #[test]
@@ -5890,7 +6027,9 @@ mod tests {
             &administrator,
             None,
             std::slice::from_ref(&mandatory_role),
-        );
+            &[],
+        )
+        .unwrap();
         assert!(exclusions.iter().any(|exclusion| {
             exclusion.purpose == MySqlOperationalAccountPurpose::OperationalRole
                 && exclusion.account == mandatory_role

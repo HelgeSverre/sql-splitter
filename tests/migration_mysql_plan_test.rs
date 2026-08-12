@@ -1,6 +1,6 @@
 #![cfg(feature = "enterprise-migration-spike")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mysql::prelude::Queryable;
@@ -28,6 +28,11 @@ use sql_splitter::migration::mysql::{
 };
 use sql_splitter::migration::mysql_execution::{
     execute_live_mysql_frozen_plan, reconcile_mysql_pre_data_schema, resume_live_mysql_frozen_plan,
+};
+#[cfg(feature = "migration-fault-injection")]
+use sql_splitter::migration::mysql_execution::{
+    execute_live_mysql_frozen_plan_interrupted, MySqlExecutionInterruption,
+    MySqlInterruptedExecution,
 };
 use sql_splitter::migration::mysql_profile::{
     MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlExternalFreezeAssertion,
@@ -174,21 +179,17 @@ fn live_mysql_two_container_execute_and_resume() -> anyhow::Result<()> {
         &target_metadata_path,
         &plan_path,
     )?;
-    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let assertion = MySqlExternalFreezeAssertion {
-        schema_version: MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION,
-        profile_generation: "two-container-execution-v1".into(),
-        provider_reference: "disposable-mysql-matrix".into(),
-        activated_at_unix_seconds: now.saturating_sub(30),
-        expires_at_unix_seconds: now.saturating_add(600),
-        continuity_token_hash: "c".repeat(64),
-        backup_lock_connection_id: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID")?
-            .parse()?,
-        backup_lock_owner_user: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER")?,
-        backup_lock_owner_host: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST")?,
-    };
-    write_json_new(&assertion_path, &assertion)?;
+    assert!(
+        !reviewed.plan.unsupported_objects.blocks_execution(),
+        "unexpected blockers: {:#?}\nnon-operational grants: {:#?}",
+        reviewed.plan.unsupported_objects.objects,
+        reviewed
+            .plan
+            .mysql_metadata_visibility
+            .as_ref()
+            .map(|visibility| visibility.non_operational_records())
+    );
+    write_live_freeze_assertion(&assertion_path, "two-container-execution-v1")?;
 
     let target_config = MySqlEndpointConfig::read(&target_path)?;
     let mut target = connect(&target_config)?;
@@ -248,6 +249,225 @@ fn live_mysql_two_container_execute_and_resume() -> anyhow::Result<()> {
     )?;
     assert_eq!(resumed.copied_rows, 3);
     assert_eq!(resumed.committed_chunks, 2);
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG")?;
+    let base_plan = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT")?;
+    let base_assertion = required_path("SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT")?;
+    let base_journal = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT")?;
+    let cases = [
+        ("ddl-prepared", MySqlExecutionInterruption::DdlPrepared),
+        ("ddl-committed", MySqlExecutionInterruption::DdlCommitted),
+        ("chunk-prepared", MySqlExecutionInterruption::ChunkPrepared),
+        (
+            "chunk-applied",
+            MySqlExecutionInterruption::ChunkCommitBeforeJournal,
+        ),
+        (
+            "chunk-committed",
+            MySqlExecutionInterruption::CommittedChunks(1),
+        ),
+        (
+            "auto-increment-prepared",
+            MySqlExecutionInterruption::AutoIncrementPrepared,
+        ),
+        (
+            "auto-increment-committed",
+            MySqlExecutionInterruption::AutoIncrementCommitted,
+        ),
+    ];
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    let mut target = connect(&target_config)?;
+
+    for (name, interruption) in cases {
+        target.query_drop("DROP TABLE IF EXISTS migration_execution_target.copy_items")?;
+        let plan_path = base_plan.with_extension(format!("{name}.plan.json"));
+        let assertion_path = base_assertion.with_extension(format!("{name}.assertion.json"));
+        let journal_path = base_journal.with_extension(format!("{name}.journal"));
+        let reviewed = write_live_plan_with_visibility(
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &plan_path,
+        )?;
+        write_live_freeze_assertion(&assertion_path, &format!("mysql-recovery-{name}"))?;
+
+        let error = execute_live_mysql_frozen_plan_interrupted(MySqlInterruptedExecution {
+            plan_path: &plan_path,
+            source_config_path: &source_path,
+            source_metadata_config_path: &source_metadata_path,
+            freeze_config_path: &freeze_path,
+            target_config_path: &target_path,
+            target_metadata_config_path: &target_metadata_path,
+            freeze_assertion_path: &assertion_path,
+            approval_reference: "live-recovery-boundary-approval",
+            state_path: &journal_path,
+            interruption,
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected MySQL execution interruption"));
+
+        let interrupted = AppendJournal::open_resume(&journal_path)?;
+        assert_ne!(
+            interrupted.projection().status,
+            sql_splitter::migration::journal::MigrationStatus::Completed
+        );
+        let create_id = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CreateTable)
+            .unwrap()
+            .id
+            .to_string();
+        let restore_id = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| {
+                matches!(
+                    &operation.kind,
+                    OperationKind::Vendor(name) if name == "restore_mysql_auto_increment"
+                )
+            })
+            .unwrap()
+            .id
+            .to_string();
+        let target_table_exists: Option<u8> = target.query_first(
+            "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'migration_execution_target' AND TABLE_NAME = 'copy_items'",
+        )?;
+        let target_rows = if target_table_exists.is_some() {
+            target
+                .query_first::<u64, _>(
+                    "SELECT COUNT(*) FROM migration_execution_target.copy_items",
+                )?
+                .unwrap()
+        } else {
+            0
+        };
+        match interruption {
+            MySqlExecutionInterruption::DdlPrepared => {
+                assert_eq!(
+                    interrupted.projection().operations.get(&create_id),
+                    Some(&OperationState::Prepared)
+                );
+                assert!(target_table_exists.is_none());
+            }
+            MySqlExecutionInterruption::DdlCommitted => {
+                assert_eq!(
+                    interrupted.projection().operations.get(&create_id),
+                    Some(&OperationState::Prepared)
+                );
+                assert!(target_table_exists.is_some());
+                assert_eq!(target_rows, 0);
+            }
+            MySqlExecutionInterruption::ChunkPrepared => {
+                assert_eq!(
+                    interrupted
+                        .projection()
+                        .prepared_chunk
+                        .as_ref()
+                        .map(|chunk| chunk.chunk_id),
+                    Some(1)
+                );
+                assert_eq!(target_rows, 0);
+            }
+            MySqlExecutionInterruption::ChunkCommitBeforeJournal => {
+                assert_eq!(
+                    interrupted
+                        .projection()
+                        .prepared_chunk
+                        .as_ref()
+                        .map(|chunk| chunk.chunk_id),
+                    Some(1)
+                );
+                assert_eq!(target_rows, 2);
+            }
+            MySqlExecutionInterruption::CommittedChunks(1) => {
+                assert!(interrupted.projection().prepared_chunk.is_none());
+                assert_eq!(interrupted.projection().last_chunk_id, 1);
+                assert_eq!(target_rows, 2);
+            }
+            MySqlExecutionInterruption::AutoIncrementPrepared => {
+                assert_eq!(
+                    interrupted.projection().operations.get(&restore_id),
+                    Some(&OperationState::Prepared)
+                );
+                assert_eq!(target_rows, 3);
+            }
+            MySqlExecutionInterruption::AutoIncrementCommitted => {
+                assert_eq!(
+                    interrupted.projection().operations.get(&restore_id),
+                    Some(&OperationState::Committed)
+                );
+                assert_eq!(target_rows, 3);
+            }
+            MySqlExecutionInterruption::CommittedChunks(_) => {
+                unreachable!("the matrix uses one exact committed-chunk boundary")
+            }
+        }
+        drop(interrupted);
+
+        let resumed = resume_live_mysql_frozen_plan(
+            &journal_path,
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &assertion_path,
+        )?;
+        assert_eq!(resumed.copied_rows, 3, "case {name}");
+        assert_eq!(resumed.committed_chunks, 2, "case {name}");
+        let rows: Vec<(i64, String)> = target
+            .query("SELECT id, payload FROM migration_execution_target.copy_items ORDER BY id")?;
+        assert_eq!(
+            rows,
+            vec![(1, "one".into()), (2, "two".into()), (3, "three".into())],
+            "case {name}"
+        );
+        let next_value: Option<u64> = target.query_first(
+            "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'migration_execution_target' AND TABLE_NAME = 'copy_items'",
+        )?;
+        assert_eq!(next_value, Some(10), "case {name}");
+    }
+    Ok(())
+}
+
+fn write_live_freeze_assertion(path: &Path, generation: &str) -> anyhow::Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    write_json_new(
+        path,
+        &MySqlExternalFreezeAssertion {
+            schema_version: MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION,
+            profile_generation: generation.into(),
+            provider_reference: "disposable-mysql-matrix".into(),
+            activated_at_unix_seconds: now.saturating_sub(30),
+            expires_at_unix_seconds: now.saturating_add(600),
+            continuity_token_hash: "c".repeat(64),
+            backup_lock_connection_id: std::env::var(
+                "SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID",
+            )?
+            .parse()?,
+            backup_lock_owner_user: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER")?,
+            backup_lock_owner_host: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST")?,
+        },
+    )?;
     Ok(())
 }
 

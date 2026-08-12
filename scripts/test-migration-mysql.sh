@@ -156,6 +156,7 @@ write_config() {
   database=$3
   user=$4
   credential_env=$5
+  server_admin_user=${6:-}
   cat > "$path" <<EOF
 host = "127.0.0.1"
 port = $endpoint_port
@@ -165,6 +166,13 @@ credential_env = "$credential_env"
 connect_timeout_seconds = 10
 max_batch_rows = 2
 max_batch_bytes = 1048576
+EOF
+  if [ -n "$server_admin_user" ]; then
+    printf '%s\n' \
+      'operational_server_administrators = [{ user = "mysql.infoschema", host = "localhost" }, { user = "mysql.session", host = "localhost" }, { user = "mysql.sys", host = "localhost" }, { user = "root", host = "%" }, { user = "root", host = "localhost" }]' \
+      >> "$path"
+  fi
+  cat >> "$path" <<EOF
 
 [tls]
 ca_certificate = "$cert_dir/ca.pem"
@@ -182,8 +190,8 @@ target_metadata_config="$test_dir/target-metadata.toml"
 write_config "$source_config" "$port" migration_source migration_source SQL_SPLITTER_MYSQL_SOURCE_PASSWORD
 write_config "$target_config" "$port" migration_target migration_target SQL_SPLITTER_MYSQL_TARGET_PASSWORD
 write_config "$admin_config" "$port" migration_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
-write_config "$source_metadata_config" "$port" migration_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD
-write_config "$target_metadata_config" "$port" migration_target target_metadata_admin SQL_SPLITTER_MYSQL_TARGET_METADATA_PASSWORD
+write_config "$source_metadata_config" "$port" migration_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
+write_config "$target_metadata_config" "$port" migration_target target_metadata_admin SQL_SPLITTER_MYSQL_TARGET_METADATA_PASSWORD root
 
 export SQL_SPLITTER_MYSQL_SOURCE_PASSWORD=sourcepass
 export SQL_SPLITTER_MYSQL_TARGET_PASSWORD=targetpass
@@ -199,11 +207,11 @@ export SQL_SPLITTER_MYSQL_TEST_TARGET_METADATA_CONFIG="$target_metadata_config"
 export SQL_SPLITTER_MYSQL_TEST_PLAN_OUTPUT="$test_dir/plan.json"
 export SQL_SPLITTER_MYSQL_TEST_JOURNAL_OUTPUT="$journal_dir/state.journal"
 
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_snapshot_catalog_and_blocked_plan \
   -- --ignored --exact --nocapture
 
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_metadata_visibility_contract \
   -- --ignored --exact --nocapture
 
@@ -245,10 +253,10 @@ execution_freeze_config="$test_dir/execution-freeze.toml"
 execution_target_config="$test_dir/execution-target.toml"
 execution_target_metadata_config="$test_dir/execution-target-metadata.toml"
 write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
-write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD
+write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
 write_config "$execution_freeze_config" "$port" migration_execution_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
 write_config "$execution_target_config" "$target_port" migration_execution_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
-write_config "$execution_target_metadata_config" "$target_port" migration_execution_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD
+write_config "$execution_target_metadata_config" "$target_port" migration_execution_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
 export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
@@ -288,10 +296,14 @@ export SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID="$backup_lock_connection_id"
 export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER="$backup_lock_owner_user"
 export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_lock_owner_host"
 
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_external_freeze_attestation \
   -- --ignored --exact --nocapture
 
-cargo test --no-default-features --features enterprise-migration-spike \
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_two_container_execute_and_resume \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_recovery_boundary_matrix \
   -- --ignored --exact --nocapture

@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
-use super::mysql_visibility::{MySqlMetadataVisibilityEvidence, MySqlVisibilityError};
+use super::mysql_visibility::{
+    MySqlGrantRecord, MySqlMetadataVisibilityEvidence, MySqlVisibilityError,
+};
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
@@ -463,6 +465,7 @@ impl MigrationPlan {
                     {
                         return Err(PlanError::InvalidMySqlMetadataVisibility);
                     }
+                    validate_mysql_privilege_blockers(visibility, &self.unsupported_objects)?;
                 } else if !self
                     .unsupported_objects
                     .objects
@@ -647,6 +650,34 @@ impl MigrationPlan {
                 field: "target_catalog_fingerprint",
             })
     }
+}
+
+fn validate_mysql_privilege_blockers(
+    visibility: &MySqlMetadataVisibilityEvidence,
+    unsupported: &UnsupportedObjectReport,
+) -> Result<(), PlanError> {
+    let expected = visibility
+        .non_operational_records()
+        .into_iter()
+        .map(MySqlGrantRecord::canonical_id)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let actual = unsupported
+        .objects
+        .iter()
+        .filter(|finding| finding.object_kind == "privilege")
+        .map(|finding| {
+            if finding.code != UnsupportedObjectCode::MySqlCatalogSemantics
+                || !finding.required_semantics
+            {
+                return Err(PlanError::InvalidMySqlMetadataVisibility);
+            }
+            Ok(finding.object_id.clone())
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if expected != actual {
+        return Err(PlanError::InvalidMySqlMetadataVisibility);
+    }
+    Ok(())
 }
 
 fn validate_catalog_fingerprint(

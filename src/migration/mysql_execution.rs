@@ -105,7 +105,14 @@ pub fn reconcile_mysql_pre_data_schema(
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
 ) -> anyhow::Result<()> {
-    reconcile_mysql_pre_data_schema_with(reviewed, target, journal, cancellation, &mut || Ok(()))
+    reconcile_mysql_pre_data_schema_with(
+        reviewed,
+        target,
+        journal,
+        cancellation,
+        &mut || Ok(()),
+        None,
+    )
 }
 
 fn reconcile_mysql_pre_data_schema_with<G>(
@@ -114,6 +121,7 @@ fn reconcile_mysql_pre_data_schema_with<G>(
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
     before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     G: FnMut() -> anyhow::Result<()>,
@@ -143,6 +151,7 @@ where
             journal,
             cancellation,
             before_effect,
+            interruption,
         )?;
     }
     Ok(())
@@ -184,6 +193,7 @@ fn reconcile_mysql_create_table<G>(
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
     before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     G: FnMut() -> anyhow::Result<()>,
@@ -208,6 +218,7 @@ where
             } else {
                 journal.transition_operation(operation_id, OperationState::Prepared)?;
             }
+            interrupt_mysql_if(interruption, MySqlInterruptionPoint::DdlPrepared)?;
             cancellation.check()?;
             before_effect()?;
             if let Err(create_error) = target.create(expected) {
@@ -230,6 +241,7 @@ where
                     ))),
                 };
             }
+            interrupt_mysql_if(interruption, MySqlInterruptionPoint::DdlCommitted)?;
             cancellation.check()?;
             match target.inspect(expected)? {
                 MySqlTableState::Exact => acknowledge_exact_mysql_ddl(journal, operation_id),
@@ -249,6 +261,7 @@ where
         OperationState::Prepared => match observed {
             MySqlTableState::Exact => acknowledge_exact_mysql_ddl(journal, operation_id),
             MySqlTableState::Absent => {
+                interrupt_mysql_if(interruption, MySqlInterruptionPoint::DdlPrepared)?;
                 cancellation.check()?;
                 before_effect()?;
                 if let Err(create_error) = target.create(expected) {
@@ -273,6 +286,7 @@ where
                         ))),
                     };
                 }
+                interrupt_mysql_if(interruption, MySqlInterruptionPoint::DdlCommitted)?;
                 match target.inspect(expected)? {
                     MySqlTableState::Exact => acknowledge_exact_mysql_ddl(journal, operation_id),
                     MySqlTableState::Absent => Err(anyhow!(
@@ -392,6 +406,62 @@ pub struct MySqlExecutionReport {
     pub committed_chunks: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Constructed only by the opt-in fault-injection feature.
+enum MySqlInterruptionPoint {
+    DdlPrepared,
+    DdlCommitted,
+    ChunkPrepared,
+    ChunkCommitBeforeJournal,
+    CommittedChunks(u64),
+    AutoIncrementPrepared,
+    AutoIncrementCommitted,
+}
+
+/// Deterministic MySQL recovery boundaries used by the opt-in live matrix.
+#[cfg(feature = "migration-fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MySqlExecutionInterruption {
+    DdlPrepared,
+    DdlCommitted,
+    ChunkPrepared,
+    ChunkCommitBeforeJournal,
+    CommittedChunks(u64),
+    AutoIncrementPrepared,
+    AutoIncrementCommitted,
+}
+
+#[cfg(feature = "migration-fault-injection")]
+impl From<MySqlExecutionInterruption> for MySqlInterruptionPoint {
+    fn from(value: MySqlExecutionInterruption) -> Self {
+        match value {
+            MySqlExecutionInterruption::DdlPrepared => Self::DdlPrepared,
+            MySqlExecutionInterruption::DdlCommitted => Self::DdlCommitted,
+            MySqlExecutionInterruption::ChunkPrepared => Self::ChunkPrepared,
+            MySqlExecutionInterruption::ChunkCommitBeforeJournal => Self::ChunkCommitBeforeJournal,
+            MySqlExecutionInterruption::CommittedChunks(count) => Self::CommittedChunks(count),
+            MySqlExecutionInterruption::AutoIncrementPrepared => Self::AutoIncrementPrepared,
+            MySqlExecutionInterruption::AutoIncrementCommitted => Self::AutoIncrementCommitted,
+        }
+    }
+}
+
+/// Inputs for one fault-injected MySQL execution.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct MySqlInterruptedExecution<'a> {
+    pub plan_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub source_metadata_config_path: &'a Path,
+    pub freeze_config_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub target_metadata_config_path: &'a Path,
+    pub freeze_assertion_path: &'a Path,
+    pub approval_reference: &'a str,
+    pub state_path: &'a Path,
+    pub interruption: MySqlExecutionInterruption,
+}
+
 struct MySqlCancellationMonitor {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -451,6 +521,20 @@ impl Drop for MySqlCancellationMonitor {
     }
 }
 
+fn interrupt_mysql_if(
+    interruption: Option<MySqlInterruptionPoint>,
+    expected: MySqlInterruptionPoint,
+) -> anyhow::Result<()> {
+    if interruption == Some(expected) {
+        return Err(injected_mysql_interruption(interruption));
+    }
+    Ok(())
+}
+
+fn injected_mysql_interruption(interruption: Option<MySqlInterruptionPoint>) -> anyhow::Error {
+    anyhow!("injected MySQL execution interruption at {interruption:?}")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute_live_mysql_frozen_plan(
     plan_path: impl AsRef<Path>,
@@ -463,6 +547,53 @@ pub fn execute_live_mysql_frozen_plan(
     approval_reference: &str,
     state_path: impl AsRef<Path>,
 ) -> anyhow::Result<MySqlExecutionReport> {
+    execute_live_mysql_frozen_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        source_metadata_config_path.as_ref(),
+        freeze_config_path.as_ref(),
+        target_config_path.as_ref(),
+        target_metadata_config_path.as_ref(),
+        freeze_assertion_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        None,
+    )
+}
+
+/// Execute until one exact MySQL recovery boundary and return an injected error.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn execute_live_mysql_frozen_plan_interrupted(
+    request: MySqlInterruptedExecution<'_>,
+) -> anyhow::Result<MySqlExecutionReport> {
+    execute_live_mysql_frozen_plan_internal(
+        request.plan_path,
+        request.source_config_path,
+        request.source_metadata_config_path,
+        request.freeze_config_path,
+        request.target_config_path,
+        request.target_metadata_config_path,
+        request.freeze_assertion_path,
+        request.approval_reference,
+        request.state_path,
+        Some(request.interruption.into()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_live_mysql_frozen_plan_internal(
+    plan_path: &Path,
+    source_config_path: &Path,
+    source_metadata_config_path: &Path,
+    freeze_config_path: &Path,
+    target_config_path: &Path,
+    target_metadata_config_path: &Path,
+    freeze_assertion_path: &Path,
+    approval_reference: &str,
+    state_path: &Path,
+    interruption: Option<MySqlInterruptionPoint>,
+) -> anyhow::Result<MySqlExecutionReport> {
     if approval_reference.trim().is_empty() {
         return Err(anyhow!("approval reference must not be empty"));
     }
@@ -471,11 +602,11 @@ pub fn execute_live_mysql_frozen_plan(
     let reviewed: ReviewedPlan = read_json(plan_path)?;
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
-    let source_config = MySqlEndpointConfig::read(source_config_path.as_ref())?;
-    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path.as_ref())?;
-    let freeze_config = MySqlEndpointConfig::read(freeze_config_path.as_ref())?;
-    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
-    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    let source_config = MySqlEndpointConfig::read(source_config_path)?;
+    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path)?;
+    let freeze_config = MySqlEndpointConfig::read(freeze_config_path)?;
+    let target_config = MySqlEndpointConfig::read(target_config_path)?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path)?;
     validate_mysql_execution_credential_separation(
         &source_config,
         &source_metadata_config,
@@ -525,16 +656,28 @@ pub fn execute_live_mysql_frozen_plan(
         Arc::clone(&target),
         cancellation.clone(),
     );
+    source
+        .validate_reviewed_binding(&reviewed)
+        .context("validate reviewed MySQL source factory binding before journal creation")?;
+    let (preflight_reader, _) = capture_exact_source(
+        &reviewed,
+        source.as_ref(),
+        &cancellation,
+        &source_metadata_config,
+        &freeze_config,
+    )
+    .context("re-attest the reviewed MySQL source before journal creation")?;
+    drop(preflight_reader);
     attest_initial_mysql_target(&reviewed, target.endpoint_config(), &target_metadata_config)?;
     target
         .assert_empty()
         .context("require the reviewed MySQL target to remain empty before execution")?;
     let binding = mysql_resume_binding(&reviewed, &accepted, approval_reference)?;
     let mut journal = AppendJournal::create_new(
-        state_path.as_ref(),
+        state_path,
         mysql_journal_genesis(binding, reviewed.clone(), accepted),
     )?;
-    execute_mysql_frozen_plan(
+    execute_mysql_frozen_plan_internal(
         &reviewed,
         source.as_ref(),
         target.as_ref(),
@@ -546,8 +689,9 @@ pub fn execute_live_mysql_frozen_plan(
             target_metadata: &target_metadata_config,
         },
         &assertion,
+        interruption,
     )?;
-    mysql_execution_report(state_path.as_ref(), &journal)
+    mysql_execution_report(state_path, &journal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -747,6 +891,29 @@ pub fn execute_mysql_frozen_plan(
     admin_configs: MySqlExecutionAdminConfigs<'_>,
     assertion: &MySqlExternalFreezeAssertion,
 ) -> anyhow::Result<()> {
+    execute_mysql_frozen_plan_internal(
+        reviewed,
+        source,
+        target,
+        journal,
+        cancellation,
+        admin_configs,
+        assertion,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_mysql_frozen_plan_internal(
+    reviewed: &ReviewedPlan,
+    source: &MySqlSourceFactory,
+    target: &MySqlTargetFactory,
+    journal: &mut AppendJournal,
+    cancellation: &CancellationToken,
+    admin_configs: MySqlExecutionAdminConfigs<'_>,
+    assertion: &MySqlExternalFreezeAssertion,
+    interruption: Option<MySqlInterruptionPoint>,
+) -> anyhow::Result<()> {
     execute_mysql_frozen_plan_with(
         reviewed,
         source,
@@ -758,9 +925,11 @@ pub fn execute_mysql_frozen_plan(
             attest_mysql_external_freeze(admin_configs.freeze, reviewed, assertion)
                 .map_err(anyhow::Error::from)
         },
+        interruption,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Internal executor plus one test-only fault selector.
 fn execute_mysql_frozen_plan_with<F>(
     reviewed: &ReviewedPlan,
     source: &MySqlSourceFactory,
@@ -769,6 +938,7 @@ fn execute_mysql_frozen_plan_with<F>(
     cancellation: &CancellationToken,
     admin_configs: &MySqlExecutionAdminConfigs<'_>,
     attest: &mut F,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     F: FnMut() -> anyhow::Result<MySqlExternalFreezeAttestation>,
@@ -852,6 +1022,7 @@ where
             journal,
             cancellation,
             &mut require_freeze,
+            interruption,
         )?;
         copy_mysql_tables(
             reviewed,
@@ -861,6 +1032,7 @@ where
             cancellation,
             &copy_contracts,
             &mut require_freeze,
+            interruption,
         )?;
     }
     drop(reader);
@@ -881,6 +1053,7 @@ where
             cancellation,
             &auto_increment_contracts,
             &mut require_freeze,
+            interruption,
         )?;
         journal.transition_status(MigrationStatus::Verifying)?;
     }
@@ -1293,6 +1466,7 @@ fn operation_parameter<T: serde::de::DeserializeOwned>(
     .with_context(|| format!("decode reviewed MySQL operation parameter {name}"))
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the durable copy inputs explicit at the effect boundary.
 fn copy_mysql_tables<G>(
     reviewed: &ReviewedPlan,
     reader: &mut dyn ReadSession,
@@ -1301,6 +1475,7 @@ fn copy_mysql_tables<G>(
     cancellation: &CancellationToken,
     contracts: &[MySqlCopyContract],
     before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     G: FnMut() -> anyhow::Result<()>,
@@ -1318,6 +1493,7 @@ where
             cancellation,
             contract,
             before_effect,
+            interruption,
         )?;
     }
 
@@ -1366,6 +1542,7 @@ where
                         reviewed.plan_hash, contract.operation_id
                     ),
                 })?;
+                interrupt_mysql_if(interruption, MySqlInterruptionPoint::ChunkPrepared)?;
                 write_mysql_chunk(
                     target,
                     journal,
@@ -1373,6 +1550,7 @@ where
                     contract,
                     &batch,
                     before_effect,
+                    interruption,
                 )?;
                 after = Some(final_key);
             }
@@ -1382,6 +1560,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the copy boundary for exact prepared reconciliation.
 fn reconcile_prepared_mysql_chunk<G>(
     reviewed: &ReviewedPlan,
     reader: &mut dyn ReadSession,
@@ -1390,6 +1569,7 @@ fn reconcile_prepared_mysql_chunk<G>(
     cancellation: &CancellationToken,
     contract: &MySqlCopyContract,
     before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     G: FnMut() -> anyhow::Result<()>,
@@ -1430,6 +1610,7 @@ where
             contract,
             &expected,
             before_effect,
+            interruption,
         ),
         TargetIntervalState::Different => require_manual(
             journal,
@@ -1445,6 +1626,7 @@ fn write_mysql_chunk<G>(
     contract: &MySqlCopyContract,
     batch: &RowBatch,
     before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     G: FnMut() -> anyhow::Result<()>,
@@ -1472,7 +1654,15 @@ where
         };
     }
     match writer.commit() {
-        Ok(()) => journal.commit_chunk_after_ack().map_err(Into::into),
+        Ok(()) => {
+            interrupt_mysql_if(
+                interruption,
+                MySqlInterruptionPoint::ChunkCommitBeforeJournal,
+            )?;
+            journal
+                .commit_chunk_after_ack()
+                .map_err(anyhow::Error::from)
+        }
         Err(ConnectionError::CommitOutcomeUnknown(error)) => {
             let prepared =
                 journal.projection().prepared_chunk.clone().ok_or_else(|| {
@@ -1490,7 +1680,13 @@ where
             }
         }
         Err(error) => Err(error.into()),
+    }?;
+    if interruption.is_some_and(|point| {
+        matches!(point, MySqlInterruptionPoint::CommittedChunks(limit) if journal.projection().last_chunk_id >= limit)
+    }) {
+        return Err(injected_mysql_interruption(interruption));
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1556,6 +1752,7 @@ fn reconcile_mysql_auto_increment<G>(
     cancellation: &CancellationToken,
     contracts: &[MySqlAutoIncrementContract],
     before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
 ) -> anyhow::Result<()>
 where
     G: FnMut() -> anyhow::Result<()>,
@@ -1582,6 +1779,7 @@ where
             OperationState::Prepared | OperationState::Committed | OperationState::Verified => {}
         }
         if state == OperationState::Prepared {
+            interrupt_mysql_if(interruption, MySqlInterruptionPoint::AutoIncrementPrepared)?;
             if observed == MySqlAutoIncrementTargetState::BeforeDesired {
                 cancellation.check()?;
                 before_effect()?;
@@ -1621,6 +1819,7 @@ where
             }
             journal.transition_operation(operation_id, OperationState::Committed)?;
             state = OperationState::Committed;
+            interrupt_mysql_if(interruption, MySqlInterruptionPoint::AutoIncrementCommitted)?;
         }
         if state == OperationState::Committed {
             if target.inspect_auto_increment(&contract.state, &contract.mapping)?
@@ -2219,6 +2418,7 @@ mod tests {
             database: database.into(),
             user: "migration".into(),
             credential_env: format!("{}_PASSWORD", database.to_uppercase()),
+            operational_server_administrators: Vec::new(),
             tls: MySqlTlsConfig::default(),
             connect_timeout_seconds: 10,
             max_batch_rows: 100,
@@ -2830,6 +3030,7 @@ mod tests {
             &mut journal,
             &CancellationToken::default(),
             &mut || Ok(()),
+            None,
         )
         .unwrap();
 
@@ -2854,6 +3055,7 @@ mod tests {
             &mut retry_journal,
             &CancellationToken::default(),
             &mut || Ok(()),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2870,6 +3072,7 @@ mod tests {
             &mut conflict,
             &CancellationToken::default(),
             &mut || Ok(()),
+            None,
         )
         .is_err());
         assert_eq!(
@@ -2890,6 +3093,7 @@ mod tests {
             &mut journal,
             &CancellationToken::default(),
             &mut || Ok(()),
+            None,
         )
         .is_err());
         assert_eq!(
