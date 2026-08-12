@@ -49,7 +49,7 @@ use super::plan::{
     MYSQL_SESSION_COLLATION, MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
-pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 2;
+pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 3;
 pub const MYSQL_CONSISTENCY_SNAPSHOT: &str = "mysql-repeatable-read-consistent-snapshot";
 const DEFAULT_PORT: u16 = 3306;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
@@ -111,6 +111,16 @@ type MySqlConstraintKeyRow = (
     Option<String>,
     Option<String>,
 );
+type MySqlReferenceRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+);
+type MySqlForeignKeyColumnRow = (u64, String, Option<String>, Option<String>, Option<String>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -314,6 +324,37 @@ pub struct MySqlTableDefinition {
 pub struct MySqlTableMapping {
     pub source: QualifiedTable,
     pub target: QualifiedTable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MySqlForeignKeyAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlForeignKey {
+    pub catalog_object_id: String,
+    pub name: Identifier,
+    pub table: QualifiedTable,
+    pub columns: Vec<Identifier>,
+    pub referenced_table: QualifiedTable,
+    pub referenced_columns: Vec<Identifier>,
+    pub referenced_constraint: Identifier,
+    pub update_action: MySqlForeignKeyAction,
+    pub delete_action: MySqlForeignKeyAction,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MySqlForeignKeyState {
+    Absent,
+    Exact,
+    Different,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1347,7 +1388,11 @@ fn build_plan_from_execution_source(
         .iter()
         .map(|state| (state.table.clone(), state))
         .collect::<BTreeMap<_, _>>();
+    let foreign_keys = mysql_supported_foreign_keys(&source.catalog)
+        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
     let mut operations = Vec::new();
+    let mut table_verifications = Vec::new();
+    let mut copy_operation_ids = BTreeMap::new();
     let mut tables = source
         .catalog
         .namespaces
@@ -1467,6 +1512,7 @@ fn build_plan_from_execution_source(
             vec![create.id.clone()],
             copy_parameters,
         )?;
+        copy_operation_ids.insert(table.clone(), copy.id.clone());
         let mut verify_dependencies = vec![copy.id.clone()];
         let restore = auto_increment_by_table
             .get(&table)
@@ -1496,16 +1542,44 @@ fn build_plan_from_execution_source(
         if let Some(restore) = &restore {
             verify_dependencies.push(restore.id.clone());
         }
-        let verify = PlanOperation::new(
-            OperationKind::VerifyTable,
-            Some(table.clone()),
-            verify_dependencies,
-            BTreeMap::new(),
-        )?;
         operations.extend([create, copy]);
         if let Some(restore) = restore {
             operations.push(restore);
         }
+        table_verifications.push((table, verify_dependencies));
+    }
+    let all_copy_dependencies = copy_operation_ids.values().cloned().collect::<Vec<_>>();
+    let mut foreign_key_add_operations = Vec::new();
+    for foreign_key in foreign_keys {
+        let check = PlanOperation::new(
+            OperationKind::CheckForeignKey,
+            Some(foreign_key.table.clone()),
+            all_copy_dependencies.clone(),
+            BTreeMap::from([(
+                "mysql_foreign_key".into(),
+                serde_json::to_value(&foreign_key)?,
+            )]),
+        )?;
+        let add = PlanOperation::new(
+            OperationKind::AddForeignKey,
+            Some(foreign_key.table.clone()),
+            vec![check.id.clone()],
+            BTreeMap::from([(
+                "mysql_foreign_key".into(),
+                serde_json::to_value(&foreign_key)?,
+            )]),
+        )?;
+        foreign_key_add_operations.push(add.id.clone());
+        operations.extend([check, add]);
+    }
+    for (table, mut dependencies) in table_verifications {
+        dependencies.extend(foreign_key_add_operations.iter().cloned());
+        let verify = PlanOperation::new(
+            OperationKind::VerifyTable,
+            Some(table),
+            dependencies,
+            BTreeMap::new(),
+        )?;
         operations.push(verify);
     }
     let verify_schema = PlanOperation::new(
@@ -1721,6 +1795,11 @@ fn validate_catalog_snapshot(snapshot: &MySqlCatalogSnapshot) -> Result<(), MySq
 fn required_blocker_keys(
     catalog: &VendorCatalog,
 ) -> Result<Vec<(String, &'static str)>, MySqlPlanError> {
+    let supported_foreign_keys = mysql_supported_foreign_keys(catalog)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|foreign_key| foreign_key.catalog_object_id)
+        .collect::<BTreeSet<_>>();
     let mut required = vec![(
         catalog_id(
             "catalog_visibility",
@@ -1784,7 +1863,9 @@ fn required_blocker_keys(
             }
             CatalogObjectKind::View => required.push((object.id.clone(), "view")),
             CatalogObjectKind::ForeignKey => {
-                required.push((object.id.clone(), "foreign_key"));
+                if !supported_foreign_keys.contains(&object.id) {
+                    required.push((object.id.clone(), "foreign_key"));
+                }
             }
             CatalogObjectKind::CheckConstraint => {
                 required.push((object.id.clone(), "check_constraint"));
@@ -2603,6 +2684,7 @@ pub struct MySqlTargetFactory {
     config: MySqlEndpointConfig,
     reviewed_catalog: VendorCatalog,
     reviewed_tables: BTreeMap<QualifiedTable, MySqlTableDefinition>,
+    reviewed_foreign_keys: BTreeMap<String, MySqlForeignKey>,
     target_evidence: MySqlSnapshotEvidence,
     registry: Arc<SessionRegistry>,
     cancellation: CancellationToken,
@@ -2649,10 +2731,16 @@ impl MySqlTargetFactory {
                 (definition.table.clone(), definition)
             })
             .collect();
+        let reviewed_foreign_keys = mysql_foreign_keys(&reviewed_catalog)
+            .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?
+            .into_iter()
+            .map(|foreign_key| (foreign_key.catalog_object_id.clone(), foreign_key))
+            .collect();
         Ok(Self {
             config,
             reviewed_catalog,
             reviewed_tables,
+            reviewed_foreign_keys,
             target_evidence,
             registry: Arc::default(),
             cancellation,
@@ -2838,6 +2926,90 @@ impl MySqlTargetFactory {
         Ok(())
     }
 
+    pub fn inspect_foreign_key(
+        &self,
+        expected: &MySqlForeignKey,
+    ) -> ConnectionResult<MySqlForeignKeyState> {
+        let expected = self.target_foreign_key(expected)?;
+        let catalog = self.current_catalog()?;
+        let observed = match mysql_foreign_keys(&catalog) {
+            Ok(observed) => observed,
+            Err(_) => return Ok(MySqlForeignKeyState::Different),
+        };
+        let same_name = observed
+            .iter()
+            .filter(|foreign_key| foreign_key.name == expected.name)
+            .collect::<Vec<_>>();
+        if same_name.is_empty() {
+            return Ok(MySqlForeignKeyState::Absent);
+        }
+        Ok(
+            if same_name.len() == 1 && mysql_foreign_key_semantics_eq(same_name[0], &expected) {
+                MySqlForeignKeyState::Exact
+            } else {
+                MySqlForeignKeyState::Different
+            },
+        )
+    }
+
+    pub fn check_foreign_key(&self, expected: &MySqlForeignKey) -> ConnectionResult<bool> {
+        let expected = self.target_foreign_key(expected)?;
+        let statement = mysql_foreign_key_violation_query(&expected)?;
+        let (mut conn, _registration) = self.controlled_connect()?;
+        self.cancellation.check()?;
+        let result = match conn.query_first::<u8, _>(statement) {
+            Ok(result) => result,
+            Err(error) => {
+                self.cancellation.check()?;
+                return Err(database_error(error));
+            }
+        };
+        let has_violation = result.ok_or_else(|| {
+            ConnectionError::Database("MySQL foreign-key anti-join returned no result".into())
+        })? != 0;
+        self.cancellation.check()?;
+        Ok(has_violation)
+    }
+
+    pub fn reconcile_foreign_key(
+        &self,
+        expected: &MySqlForeignKey,
+    ) -> ConnectionResult<MySqlForeignKeyState> {
+        match self.inspect_foreign_key(expected)? {
+            MySqlForeignKeyState::Exact => return Ok(MySqlForeignKeyState::Exact),
+            MySqlForeignKeyState::Different => {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL target foreign key {} has different semantics",
+                    expected.name
+                )));
+            }
+            MySqlForeignKeyState::Absent => {}
+        }
+        let target = self.target_foreign_key(expected)?;
+        let statement = render_mysql_add_foreign_key(&target)?;
+        let (mut conn, _registration) = self.controlled_connect()?;
+        self.cancellation.check()?;
+        if let Err(error) = conn.query_drop(statement) {
+            self.cancellation.check()?;
+            return Err(mysql_foreign_key_ddl_error(error));
+        }
+        self.cancellation.check()?;
+        self.inspect_foreign_key(expected)
+    }
+
+    fn target_foreign_key(&self, expected: &MySqlForeignKey) -> ConnectionResult<MySqlForeignKey> {
+        if self.reviewed_foreign_keys.get(&expected.catalog_object_id) != Some(expected) {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL foreign key differs from the reviewed source catalog".into(),
+            ));
+        }
+        let mut target = expected.clone();
+        target.table.namespace = Identifier::new(self.config.database.clone())
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        target.referenced_table.namespace = target.table.namespace.clone();
+        Ok(target)
+    }
+
     pub fn reviewed_table(
         &self,
         table: &QualifiedTable,
@@ -2864,6 +3036,7 @@ impl MySqlTargetFactory {
                         | CatalogObjectKind::PrimaryKey
                         | CatalogObjectKind::UniqueConstraint
                         | CatalogObjectKind::Index
+                        | CatalogObjectKind::ForeignKey
                 ) && !matches!(
                     &object.kind,
                     CatalogObjectKind::Vendor(kind) if kind == "mysql_privilege"
@@ -2882,6 +3055,32 @@ impl MySqlTargetFactory {
         if observed != self.reviewed_tables {
             return Err(ConnectionError::InvalidRequest(
                 "MySQL target schema differs from the reviewed typed schema".into(),
+            ));
+        }
+        let mut expected_foreign_keys = self
+            .reviewed_foreign_keys
+            .values()
+            .map(|foreign_key| self.target_foreign_key(foreign_key))
+            .collect::<ConnectionResult<Vec<_>>>()?;
+        expected_foreign_keys.sort_by(|left, right| {
+            (&left.table, &left.name, &left.catalog_object_id).cmp(&(
+                &right.table,
+                &right.name,
+                &right.catalog_object_id,
+            ))
+        });
+        let observed_foreign_keys = mysql_foreign_keys(&catalog)?;
+        if observed_foreign_keys.len() != expected_foreign_keys.len()
+            || expected_foreign_keys.iter().any(|expected| {
+                observed_foreign_keys
+                    .iter()
+                    .filter(|observed| mysql_foreign_key_semantics_eq(observed, expected))
+                    .count()
+                    != 1
+            })
+        {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL target foreign keys differ from the reviewed schema".into(),
             ));
         }
         Ok(())
@@ -2972,6 +3171,7 @@ impl TargetConnectionFactory for MySqlTargetFactory {
             ("typed_identifiers", Capability::Supported),
             ("bound_parameters", Capability::Supported),
             ("plain_insert", Capability::Supported),
+            ("foreign_keys", Capability::Supported),
             (
                 "bulk_write",
                 Capability::Unsupported {
@@ -3951,6 +4151,97 @@ fn render_mysql_create_table(definition: &MySqlTableDefinition) -> Result<String
     ))
 }
 
+fn mysql_foreign_key_violation_query(foreign_key: &MySqlForeignKey) -> ConnectionResult<String> {
+    validate_mysql_foreign_key_shape(foreign_key)?;
+    let all_non_null = foreign_key
+        .columns
+        .iter()
+        .map(|column| format!("child.{} IS NOT NULL", quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let equality = foreign_key
+        .columns
+        .iter()
+        .zip(&foreign_key.referenced_columns)
+        .map(|(child, parent)| {
+            format!(
+                "parent.{} = child.{}",
+                quote_identifier(parent),
+                quote_identifier(child)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Ok(format!(
+        "SELECT EXISTS (SELECT 1 FROM {}.{} AS child WHERE ({all_non_null}) AND NOT EXISTS (SELECT 1 FROM {}.{} AS parent WHERE {equality}))",
+        quote_identifier(&foreign_key.table.namespace),
+        quote_identifier(&foreign_key.table.name),
+        quote_identifier(&foreign_key.referenced_table.namespace),
+        quote_identifier(&foreign_key.referenced_table.name),
+    ))
+}
+
+fn render_mysql_add_foreign_key(foreign_key: &MySqlForeignKey) -> ConnectionResult<String> {
+    validate_mysql_foreign_key_shape(foreign_key)?;
+    let columns = foreign_key
+        .columns
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let referenced_columns = foreign_key
+        .referenced_columns
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "ALTER TABLE {}.{} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {}.{} ({referenced_columns}) ON UPDATE {} ON DELETE {}",
+        quote_identifier(&foreign_key.table.namespace),
+        quote_identifier(&foreign_key.table.name),
+        quote_identifier(&foreign_key.name),
+        quote_identifier(&foreign_key.referenced_table.namespace),
+        quote_identifier(&foreign_key.referenced_table.name),
+        mysql_foreign_key_action_sql(foreign_key.update_action),
+        mysql_foreign_key_action_sql(foreign_key.delete_action),
+    ))
+}
+
+fn validate_mysql_foreign_key_shape(foreign_key: &MySqlForeignKey) -> ConnectionResult<()> {
+    if !foreign_key.enforced
+        || foreign_key.columns.is_empty()
+        || foreign_key.columns.len() != foreign_key.referenced_columns.len()
+        || foreign_key.table.namespace != foreign_key.referenced_table.namespace
+    {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "MySQL foreign key {} has an invalid typed shape",
+            foreign_key.name
+        )));
+    }
+    Ok(())
+}
+
+fn mysql_foreign_key_semantics_eq(left: &MySqlForeignKey, right: &MySqlForeignKey) -> bool {
+    left.name == right.name
+        && left.table == right.table
+        && left.columns == right.columns
+        && left.referenced_table == right.referenced_table
+        && left.referenced_columns == right.referenced_columns
+        && left.referenced_constraint == right.referenced_constraint
+        && left.update_action == right.update_action
+        && left.delete_action == right.delete_action
+        && left.enforced == right.enforced
+}
+
+fn mysql_foreign_key_action_sql(action: MySqlForeignKeyAction) -> &'static str {
+    match action {
+        MySqlForeignKeyAction::NoAction => "NO ACTION",
+        MySqlForeignKeyAction::Restrict => "RESTRICT",
+        MySqlForeignKeyAction::Cascade => "CASCADE",
+        MySqlForeignKeyAction::SetNull => "SET NULL",
+    }
+}
+
 fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
     let ordinal = required_u64(object, "ordinal")?;
     let data_type = required_text(object, "data_type")?;
@@ -4896,9 +5187,9 @@ fn inventory_constraints(
             (database,),
         )
         .map_err(database_error)?;
-    let references: Vec<(String, String, String, String, String, String)> = conn
+    let references: Vec<MySqlReferenceRow> = conn
         .exec(
-            "SELECT TABLE_NAME, CONSTRAINT_NAME, UNIQUE_CONSTRAINT_SCHEMA, UNIQUE_CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE BINARY CONSTRAINT_SCHEMA = BINARY ? ORDER BY TABLE_NAME, CONSTRAINT_NAME",
+            "SELECT TABLE_NAME, CONSTRAINT_NAME, UNIQUE_CONSTRAINT_SCHEMA, UNIQUE_CONSTRAINT_NAME, MATCH_OPTION, UPDATE_RULE, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE BINARY CONSTRAINT_SCHEMA = BINARY ? ORDER BY TABLE_NAME, CONSTRAINT_NAME",
             (database,),
         )
         .map_err(database_error)?;
@@ -4909,10 +5200,7 @@ fn inventory_constraints(
         )
         .map_err(database_error)?;
     let columns_by_constraint = key_columns.into_iter().fold(
-        BTreeMap::<
-            (String, String),
-            Vec<(u64, String, Option<String>, Option<String>, Option<String>)>,
-        >::new(),
+        BTreeMap::<(String, String), Vec<MySqlForeignKeyColumnRow>>::new(),
         |mut map, (table, constraint, column, ordinal, ref_schema, ref_table, ref_column)| {
             map.entry((table, constraint))
                 .or_default()
@@ -4923,10 +5211,24 @@ fn inventory_constraints(
     let references_by_constraint = references
         .into_iter()
         .map(
-            |(table, constraint, unique_schema, unique_name, update_rule, delete_rule)| {
+            |(
+                table,
+                constraint,
+                unique_schema,
+                unique_name,
+                match_option,
+                update_rule,
+                delete_rule,
+            )| {
                 (
                     (table, constraint),
-                    (unique_schema, unique_name, update_rule, delete_rule),
+                    (
+                        unique_schema,
+                        unique_name,
+                        match_option,
+                        update_rule,
+                        delete_rule,
+                    ),
                 )
             },
         )
@@ -4955,17 +5257,44 @@ fn inventory_constraints(
         if let Some(check_clause) = checks_by_name.get(&name) {
             attributes.insert("check_clause".into(), serde_json::json!(check_clause));
         }
-        blockers.push(MySqlCatalogBlocker {
-            object_id: id.clone(),
-            object_kind: match kind {
-                CatalogObjectKind::ForeignKey => "foreign_key",
-                CatalogObjectKind::CheckConstraint => "check_constraint",
-                _ => "constraint",
-            }
-            .into(),
-            reason: "MySQL constraint creation, anti-join checking, and implicit-commit recovery are not yet modeled exactly"
+        if kind != CatalogObjectKind::ForeignKey
+            || enforced != "YES"
+            || references_by_constraint
+                .get(&(table.clone(), name.clone()))
+                .is_none_or(
+                    |(schema, unique_name, match_option, update_rule, delete_rule)| {
+                        schema.as_deref() != Some(database)
+                            || unique_name.as_deref().is_none_or(str::is_empty)
+                            || match_option != "NONE"
+                            || parse_mysql_foreign_key_action(update_rule).is_err()
+                            || parse_mysql_foreign_key_action(delete_rule).is_err()
+                    },
+                )
+            || columns_by_constraint
+                .get(&(table.clone(), name.clone()))
+                .is_none_or(|columns| {
+                    columns.is_empty()
+                        || columns.iter().any(
+                            |(_, _, schema, referenced_table, referenced_column)| {
+                                schema.as_deref() != Some(database)
+                                    || referenced_table.as_deref().is_none_or(str::is_empty)
+                                    || referenced_column.as_deref().is_none_or(str::is_empty)
+                            },
+                        )
+                })
+        {
+            blockers.push(MySqlCatalogBlocker {
+                object_id: id.clone(),
+                object_kind: match kind {
+                    CatalogObjectKind::ForeignKey => "foreign_key",
+                    CatalogObjectKind::CheckConstraint => "check_constraint",
+                    _ => "constraint",
+                }
                 .into(),
-        });
+                reason: "MySQL constraint semantics are outside the typed foreign-key subset or are malformed"
+                    .into(),
+            });
+        }
         objects.push(CatalogObject {
             id,
             kind,
@@ -5242,6 +5571,261 @@ fn catalog_dependencies(database: &str, objects: &[CatalogObject]) -> Vec<Catalo
     dependencies
 }
 
+pub fn mysql_foreign_keys(catalog: &VendorCatalog) -> ConnectionResult<Vec<MySqlForeignKey>> {
+    mysql_foreign_keys_with_policy(catalog, false)
+}
+
+fn mysql_supported_foreign_keys(catalog: &VendorCatalog) -> ConnectionResult<Vec<MySqlForeignKey>> {
+    mysql_foreign_keys_with_policy(catalog, true)
+}
+
+fn mysql_foreign_keys_with_policy(
+    catalog: &VendorCatalog,
+    skip_unsupported: bool,
+) -> ConnectionResult<Vec<MySqlForeignKey>> {
+    if catalog.dialect != "mysql" || catalog.format_version != MYSQL_CATALOG_FORMAT_VERSION {
+        return Err(ConnectionError::InvalidRequest(
+            "foreign keys require the current MySQL catalog format".into(),
+        ));
+    }
+    let namespace = catalog
+        .namespaces
+        .iter()
+        .find(|namespace| namespace.name == catalog.database)
+        .ok_or_else(|| {
+            ConnectionError::InvalidRequest("MySQL catalog database namespace is absent".into())
+        })?;
+    let table_columns = namespace
+        .objects
+        .iter()
+        .filter(|object| object.kind == CatalogObjectKind::Column)
+        .filter_map(|object| {
+            optional_text(object, "table_name").map(|table| ((table, object.name.as_str()), object))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let indexes = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            matches!(
+                object.kind,
+                CatalogObjectKind::PrimaryKey
+                    | CatalogObjectKind::UniqueConstraint
+                    | CatalogObjectKind::Index
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut foreign_keys = Vec::new();
+    for object in namespace
+        .objects
+        .iter()
+        .filter(|object| object.kind == CatalogObjectKind::ForeignKey)
+    {
+        let parsed = (|| -> ConnectionResult<MySqlForeignKey> {
+            if required_text(object, "constraint_type")
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?
+                != "FOREIGN KEY"
+                || !required_bool(object, "enforced")
+                    .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL foreign key {} is not enforced",
+                    object.id
+                )));
+            }
+            let table_name = required_text(object, "table_name")
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let mut columns: Vec<MySqlForeignKeyColumnRow> = serde_json::from_value(
+                object.attributes.get("columns").cloned().ok_or_else(|| {
+                    ConnectionError::InvalidRequest(format!(
+                        "MySQL foreign key {} lacks columns",
+                        object.id
+                    ))
+                })?,
+            )
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let (referenced_schema, referenced_constraint, match_option, update_rule, delete_rule): (
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            String,
+        ) = serde_json::from_value(object.attributes.get("reference").cloned().ok_or_else(
+            || {
+                ConnectionError::InvalidRequest(format!(
+                    "MySQL foreign key {} lacks reference metadata",
+                    object.id
+                ))
+            },
+        )?)
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            columns.sort_by_key(|column| column.0);
+            if columns.is_empty()
+                || columns
+                    .iter()
+                    .enumerate()
+                    .any(|(index, column)| column.0 != index as u64 + 1)
+                || match_option != "NONE"
+                || referenced_schema.as_deref() != Some(catalog.database.as_str())
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL foreign key {} has unsupported match or column metadata",
+                    object.id
+                )));
+            }
+            let referenced_table_name = columns
+                .first()
+                .and_then(|column| column.3.as_deref())
+                .ok_or_else(|| {
+                    ConnectionError::InvalidRequest(format!(
+                        "MySQL foreign key {} lacks a referenced table",
+                        object.id
+                    ))
+                })?;
+            if columns.iter().any(|column| {
+                column.2.as_deref() != Some(catalog.database.as_str())
+                    || column.3.as_deref() != Some(referenced_table_name)
+                    || column.4.is_none()
+                    || !table_columns.contains_key(&(table_name, column.1.as_str()))
+                    || !table_columns.contains_key(&(
+                        referenced_table_name,
+                        column.4.as_deref().unwrap_or_default(),
+                    ))
+            }) {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL foreign key {} has a dangling or cross-database column",
+                    object.id
+                )));
+            }
+            let child_columns = columns
+                .iter()
+                .map(|column| Identifier::new(column.1.clone()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let referenced_columns = columns
+                .iter()
+                .map(|column| {
+                    let name = column.4.clone().ok_or_else(|| {
+                        ConnectionError::InvalidRequest(format!(
+                            "MySQL foreign key {} lacks a referenced column",
+                            object.id
+                        ))
+                    })?;
+                    Identifier::new(name)
+                        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))
+                })
+                .collect::<ConnectionResult<Vec<_>>>()?;
+            let referenced_constraint = Identifier::new(
+                referenced_constraint
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        ConnectionError::InvalidRequest(format!(
+                            "MySQL foreign key {} lacks a referenced key identity",
+                            object.id
+                        ))
+                    })?,
+            )
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let referenced_index = indexes.iter().find(|index| {
+                optional_text(index, "table_name") == Some(referenced_table_name)
+                    && index.name == referenced_constraint
+            });
+            let referenced_index_columns = referenced_index
+                .and_then(|index| index.attributes.get("columns"))
+                .cloned()
+                .map(serde_json::from_value::<Vec<MySqlIndexColumn>>)
+                .transpose()
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            if referenced_index.is_none_or(|index| {
+                required_bool(index, "non_unique").unwrap_or(true)
+                    || required_text(index, "index_type").ok() != Some("BTREE")
+                    || !required_bool(index, "visible").unwrap_or(false)
+            }) || referenced_index_columns.is_none_or(|index_columns| {
+                index_columns.len() != referenced_columns.len()
+                    || index_columns.iter().zip(&referenced_columns).any(
+                        |(index_column, referenced_column)| {
+                            index_column.name.as_ref() != Some(referenced_column)
+                                || !index_column.ascending
+                                || index_column.prefix_length.is_some()
+                                || index_column.expression.is_some()
+                        },
+                    )
+            }) {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL foreign key {} does not reference an exact supported unique key",
+                    object.id
+                )));
+            }
+            let delete_action = parse_mysql_foreign_key_action(&delete_rule)?;
+            if delete_action == MySqlForeignKeyAction::SetNull
+                && columns.iter().any(|column| {
+                    table_columns
+                        .get(&(table_name, column.1.as_str()))
+                        .is_none_or(|object| required_bool(object, "nullable").ok() != Some(true))
+                })
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL foreign key {} uses SET NULL on a non-null column",
+                    object.id
+                )));
+            }
+            Ok(MySqlForeignKey {
+                catalog_object_id: object.id.clone(),
+                name: object.name.clone(),
+                table: QualifiedTable {
+                    namespace: catalog.database.clone(),
+                    name: Identifier::new(table_name)
+                        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+                },
+                columns: child_columns,
+                referenced_table: QualifiedTable {
+                    namespace: catalog.database.clone(),
+                    name: Identifier::new(referenced_table_name)
+                        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+                },
+                referenced_columns,
+                referenced_constraint,
+                update_action: parse_mysql_foreign_key_action(&update_rule)?,
+                delete_action,
+                enforced: true,
+            })
+        })();
+        match parsed {
+            Ok(foreign_key) => foreign_keys.push(foreign_key),
+            Err(_) if skip_unsupported => {}
+            Err(error) => return Err(error),
+        }
+    }
+    foreign_keys.sort_by(|left, right| {
+        (&left.table, &left.name, &left.catalog_object_id).cmp(&(
+            &right.table,
+            &right.name,
+            &right.catalog_object_id,
+        ))
+    });
+    if foreign_keys.windows(2).any(|pair| {
+        pair[0].catalog_object_id == pair[1].catalog_object_id
+            || (pair[0].table == pair[1].table && pair[0].name == pair[1].name)
+    }) {
+        return Err(ConnectionError::InvalidRequest(
+            "MySQL catalog contains duplicate foreign-key identities".into(),
+        ));
+    }
+    Ok(foreign_keys)
+}
+
+fn parse_mysql_foreign_key_action(value: &str) -> ConnectionResult<MySqlForeignKeyAction> {
+    match value {
+        "NO ACTION" => Ok(MySqlForeignKeyAction::NoAction),
+        "RESTRICT" => Ok(MySqlForeignKeyAction::Restrict),
+        "CASCADE" => Ok(MySqlForeignKeyAction::Cascade),
+        "SET NULL" => Ok(MySqlForeignKeyAction::SetNull),
+        _ => Err(ConnectionError::InvalidRequest(format!(
+            "unsupported MySQL foreign-key action {value:?}"
+        ))),
+    }
+}
+
 pub fn mysql_auto_increment_states(
     catalog: &VendorCatalog,
 ) -> ConnectionResult<Vec<MySqlAutoIncrementState>> {
@@ -5459,6 +6043,30 @@ fn database_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Database(error.to_string())
 }
 
+fn mysql_foreign_key_ddl_error(error: mysql::Error) -> ConnectionError {
+    match error {
+        mysql::Error::MySqlError(error)
+            if mysql_foreign_key_ddl_error_is_deterministic(error.code, &error.state) =>
+        {
+            ConnectionError::InvalidRequest(format!(
+                "MySQL server rejected ADD FOREIGN KEY with deterministic code {} and SQLSTATE {}",
+                error.code, error.state
+            ))
+        }
+        error => database_error(error),
+    }
+}
+
+fn mysql_foreign_key_ddl_error_is_deterministic(code: u16, sql_state: &str) -> bool {
+    if sql_state.starts_with("23") {
+        return true;
+    }
+    matches!(
+        code,
+        1005 | 1022 | 1215 | 1451 | 1452 | 1553 | 1821..=1833 | 3780
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5629,6 +6237,79 @@ mod tests {
         }
     }
 
+    fn foreign_key_snapshot(endpoint: &str) -> MySqlCatalogSnapshot {
+        let mut snapshot = snapshot(endpoint, true);
+        let namespace = snapshot.catalog.namespaces.first_mut().unwrap();
+        let mut parent_id = namespace
+            .objects
+            .iter()
+            .find(|object| object.kind == CatalogObjectKind::Column && object.name.as_str() == "id")
+            .cloned()
+            .unwrap();
+        parent_id.id = catalog_id("column", "app", "items", "parent_id");
+        parent_id.name = identifier("parent_id");
+        parent_id
+            .attributes
+            .insert("ordinal".into(), serde_json::json!(2));
+        parent_id
+            .attributes
+            .insert("nullable".into(), serde_json::json!(true));
+        namespace.objects.push(parent_id);
+        namespace.objects.push(CatalogObject {
+            id: catalog_id("index", "app", "items", "PRIMARY"),
+            kind: CatalogObjectKind::PrimaryKey,
+            name: identifier("PRIMARY"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("table_name".into(), serde_json::json!("items")),
+                ("non_unique".into(), serde_json::json!(false)),
+                ("primary".into(), serde_json::json!(true)),
+                ("constraint_backed".into(), serde_json::json!(true)),
+                ("index_type".into(), serde_json::json!("BTREE")),
+                ("visible".into(), serde_json::json!(true)),
+                (
+                    "columns".into(),
+                    serde_json::to_value(vec![MySqlIndexColumn {
+                        name: Some(identifier("id")),
+                        ordinal: 1,
+                        ascending: true,
+                        prefix_length: None,
+                        nullable: false,
+                        expression: None,
+                    }])
+                    .unwrap(),
+                ),
+            ]),
+        });
+        namespace.objects.push(CatalogObject {
+            id: catalog_id("constraint", "app", "items", "fk_items_parent"),
+            kind: CatalogObjectKind::ForeignKey,
+            name: identifier("fk_items_parent"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("table_name".into(), serde_json::json!("items")),
+                ("constraint_type".into(), serde_json::json!("FOREIGN KEY")),
+                ("enforced".into(), serde_json::json!(true)),
+                (
+                    "columns".into(),
+                    serde_json::json!([[1, "parent_id", "app", "items", "id"]]),
+                ),
+                (
+                    "reference".into(),
+                    serde_json::json!(["app", "PRIMARY", "NONE", "CASCADE", "SET NULL"]),
+                ),
+            ]),
+        });
+        namespace
+            .objects
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        snapshot.catalog.dependencies =
+            catalog_dependencies("app", &snapshot.catalog.namespaces[0].objects);
+        snapshot.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&snapshot.catalog).unwrap();
+        snapshot
+    }
+
     fn visibility_capture(
         snapshot: &MySqlCatalogSnapshot,
         administrator_user: &str,
@@ -5743,6 +6424,106 @@ mod tests {
         descending.columns[0].ascending = true;
         descending.columns[0].prefix_length = Some(4);
         assert!(select_resumable_key(&columns, &[descending], "8.0.40").is_none());
+    }
+
+    #[test]
+    fn typed_foreign_key_contract_drives_checks_ddl_and_plan_order() {
+        let source = foreign_key_snapshot("mysql://source/app");
+        let foreign_keys = mysql_foreign_keys(&source.catalog).unwrap();
+        assert_eq!(foreign_keys.len(), 1);
+        let foreign_key = &foreign_keys[0];
+        assert_eq!(foreign_key.columns, vec![identifier("parent_id")]);
+        assert_eq!(foreign_key.referenced_columns, vec![identifier("id")]);
+        assert_eq!(foreign_key.update_action, MySqlForeignKeyAction::Cascade);
+        assert_eq!(foreign_key.delete_action, MySqlForeignKeyAction::SetNull);
+        assert_eq!(
+            mysql_foreign_key_violation_query(foreign_key).unwrap(),
+            "SELECT EXISTS (SELECT 1 FROM `app`.`items` AS child WHERE (child.`parent_id` IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM `app`.`items` AS parent WHERE parent.`id` = child.`parent_id`))"
+        );
+        assert_eq!(
+            render_mysql_add_foreign_key(foreign_key).unwrap(),
+            "ALTER TABLE `app`.`items` ADD CONSTRAINT `fk_items_parent` FOREIGN KEY (`parent_id`) REFERENCES `app`.`items` (`id`) ON UPDATE CASCADE ON DELETE SET NULL"
+        );
+
+        let reviewed = build_plan(&source, &snapshot("mysql://target/app", false)).unwrap();
+        let check = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::CheckForeignKey)
+            .unwrap();
+        let add = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::AddForeignKey)
+            .unwrap();
+        assert_eq!(
+            check
+                .dependencies
+                .iter()
+                .filter(
+                    |dependency| reviewed.plan.operations.iter().any(|operation| {
+                        operation.id == **dependency && operation.kind == OperationKind::CopyTable
+                    })
+                )
+                .count(),
+            1
+        );
+        assert_eq!(add.dependencies.as_slice(), std::slice::from_ref(&check.id));
+        let verify = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::VerifyTable)
+            .unwrap();
+        assert!(verify.dependencies.contains(&add.id));
+    }
+
+    #[test]
+    fn unsupported_foreign_key_remains_an_explicit_plan_blocker() {
+        let mut source = foreign_key_snapshot("mysql://source/app");
+        let foreign_key = source.catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::ForeignKey)
+            .unwrap();
+        foreign_key.attributes.insert(
+            "reference".into(),
+            serde_json::json!(["app", "PRIMARY", "NONE", "CASCADE", "SET DEFAULT"]),
+        );
+        let object_id = foreign_key.id.clone();
+        source.blockers.push(MySqlCatalogBlocker {
+            object_id: object_id.clone(),
+            object_kind: "foreign_key".into(),
+            reason: "unsupported test foreign-key action".into(),
+        });
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+
+        assert!(mysql_foreign_keys(&source.catalog).is_err());
+        let reviewed = build_plan(&source, &snapshot("mysql://target/app", false)).unwrap();
+        assert!(reviewed.plan.unsupported_objects.blocks_execution());
+        assert!(reviewed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .any(|object| object.object_id == object_id && object.object_kind == "foreign_key"));
+        assert!(!reviewed.plan.operations.iter().any(|operation| matches!(
+            operation.kind,
+            OperationKind::CheckForeignKey | OperationKind::AddForeignKey
+        )));
+    }
+
+    #[test]
+    fn foreign_key_ddl_error_classification_keeps_transient_failures_retryable() {
+        assert!(mysql_foreign_key_ddl_error_is_deterministic(1452, "23000"));
+        assert!(mysql_foreign_key_ddl_error_is_deterministic(1826, "HY000"));
+        assert!(mysql_foreign_key_ddl_error_is_deterministic(3780, "HY000"));
+        assert!(!mysql_foreign_key_ddl_error_is_deterministic(1021, "HY000"));
+        assert!(!mysql_foreign_key_ddl_error_is_deterministic(1205, "HY000"));
+        assert!(!mysql_foreign_key_ddl_error_is_deterministic(1213, "40001"));
     }
 
     #[test]

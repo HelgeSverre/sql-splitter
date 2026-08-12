@@ -26,9 +26,10 @@ use super::journal::{ConsistencyEvidence, MigrationStatus, OperationState, Resum
 use super::model::{DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch, VendorCatalog};
 use super::mysql::{
     attest_mysql_external_freeze, collect_mysql_metadata_visibility, mysql_auto_increment_states,
-    mysql_catalog_fingerprint, mysql_table_definitions, validate_mysql_external_freeze_continuity,
-    MySqlAutoIncrementState, MySqlAutoIncrementTargetState, MySqlCatalogSnapshot,
-    MySqlEndpointConfig, MySqlResumableKey, MySqlSourceFactory, MySqlTableDefinition,
+    mysql_catalog_fingerprint, mysql_foreign_keys, mysql_table_definitions,
+    validate_mysql_external_freeze_continuity, MySqlAutoIncrementState,
+    MySqlAutoIncrementTargetState, MySqlCatalogSnapshot, MySqlEndpointConfig, MySqlForeignKey,
+    MySqlForeignKeyState, MySqlResumableKey, MySqlSourceFactory, MySqlTableDefinition,
     MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
 };
 use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAttestation};
@@ -81,6 +82,40 @@ impl MySqlAutoIncrementTarget for MySqlTargetFactory {
         mapping: &MySqlTableMapping,
     ) -> ConnectionResult<()> {
         self.restore_auto_increment(expected, mapping)
+    }
+}
+
+trait MySqlForeignKeyTarget {
+    fn inspect_foreign_key(
+        &self,
+        expected: &MySqlForeignKey,
+    ) -> ConnectionResult<MySqlForeignKeyState>;
+
+    fn check_foreign_key(&self, expected: &MySqlForeignKey) -> ConnectionResult<bool>;
+
+    fn reconcile_foreign_key(
+        &self,
+        expected: &MySqlForeignKey,
+    ) -> ConnectionResult<MySqlForeignKeyState>;
+}
+
+impl MySqlForeignKeyTarget for MySqlTargetFactory {
+    fn inspect_foreign_key(
+        &self,
+        expected: &MySqlForeignKey,
+    ) -> ConnectionResult<MySqlForeignKeyState> {
+        self.inspect_foreign_key(expected)
+    }
+
+    fn check_foreign_key(&self, expected: &MySqlForeignKey) -> ConnectionResult<bool> {
+        self.check_foreign_key(expected)
+    }
+
+    fn reconcile_foreign_key(
+        &self,
+        expected: &MySqlForeignKey,
+    ) -> ConnectionResult<MySqlForeignKeyState> {
+        self.reconcile_foreign_key(expected)
     }
 }
 
@@ -395,6 +430,13 @@ struct MySqlAutoIncrementContract {
     mapping: MySqlTableMapping,
 }
 
+#[derive(Debug, Clone)]
+struct MySqlForeignKeyContract {
+    check_operation_id: String,
+    add_operation_id: String,
+    foreign_key: MySqlForeignKey,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MySqlExecutionAdminConfigs<'a> {
     pub freeze: &'a MySqlEndpointConfig,
@@ -419,6 +461,9 @@ enum MySqlInterruptionPoint {
     CommittedChunks(u64),
     AutoIncrementPrepared,
     AutoIncrementCommitted,
+    BeforeForeignKeyChecks,
+    ForeignKeyPrepared,
+    ForeignKeyCommitted,
     NetworkCommitFault(u16),
 }
 
@@ -433,6 +478,9 @@ pub enum MySqlExecutionInterruption {
     CommittedChunks(u64),
     AutoIncrementPrepared,
     AutoIncrementCommitted,
+    BeforeForeignKeyChecks,
+    ForeignKeyPrepared,
+    ForeignKeyCommitted,
     NetworkCommitFault(u16),
 }
 
@@ -447,6 +495,9 @@ impl From<MySqlExecutionInterruption> for MySqlInterruptionPoint {
             MySqlExecutionInterruption::CommittedChunks(count) => Self::CommittedChunks(count),
             MySqlExecutionInterruption::AutoIncrementPrepared => Self::AutoIncrementPrepared,
             MySqlExecutionInterruption::AutoIncrementCommitted => Self::AutoIncrementCommitted,
+            MySqlExecutionInterruption::BeforeForeignKeyChecks => Self::BeforeForeignKeyChecks,
+            MySqlExecutionInterruption::ForeignKeyPrepared => Self::ForeignKeyPrepared,
+            MySqlExecutionInterruption::ForeignKeyCommitted => Self::ForeignKeyCommitted,
             MySqlExecutionInterruption::NetworkCommitFault(port) => Self::NetworkCommitFault(port),
         }
     }
@@ -684,6 +735,7 @@ fn execute_live_mysql_frozen_plan_internal(
         "typed_identifiers",
         "bound_parameters",
         "plain_insert",
+        "foreign_keys",
     ])?;
     let _monitor = MySqlCancellationMonitor::start(
         Arc::clone(&source),
@@ -852,6 +904,7 @@ fn resume_live_mysql_frozen_plan_internal(
         "typed_identifiers",
         "bound_parameters",
         "plain_insert",
+        "foreign_keys",
     ])?;
     let _monitor = MySqlCancellationMonitor::start(
         Arc::clone(&source),
@@ -1150,6 +1203,7 @@ where
     )?;
     let copy_contracts = mysql_copy_contracts(reviewed, &initial_catalog)?;
     let auto_increment_contracts = mysql_auto_increment_contracts(reviewed)?;
+    let foreign_key_contracts = mysql_foreign_key_contracts(reviewed, &initial_catalog)?;
 
     if journal.projection().status == MigrationStatus::Running {
         reconcile_mysql_pre_data_schema_with(
@@ -1188,6 +1242,14 @@ where
             journal,
             cancellation,
             &auto_increment_contracts,
+            &mut require_freeze,
+            interruption,
+        )?;
+        reconcile_mysql_foreign_keys(
+            target,
+            journal,
+            cancellation,
+            &foreign_key_contracts,
             &mut require_freeze,
             interruption,
         )?;
@@ -1583,6 +1645,101 @@ fn mysql_auto_increment_contracts(
                 operation_id: operation.id.to_string(),
                 state,
                 mapping,
+            })
+        })
+        .collect()
+}
+
+fn mysql_foreign_key_contracts(
+    reviewed: &ReviewedPlan,
+    source_catalog: &VendorCatalog,
+) -> anyhow::Result<Vec<MySqlForeignKeyContract>> {
+    let foreign_keys = mysql_foreign_keys(source_catalog)?
+        .into_iter()
+        .map(|foreign_key| (foreign_key.catalog_object_id.clone(), foreign_key))
+        .collect::<BTreeMap<_, _>>();
+    let copy_operations = reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CopyTable)
+        .map(|operation| operation.id.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut checks = BTreeMap::new();
+    for operation in reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::CheckForeignKey)
+    {
+        let foreign_key: MySqlForeignKey = operation_parameter(operation, "mysql_foreign_key")?;
+        if foreign_keys.get(&foreign_key.catalog_object_id) != Some(&foreign_key)
+            || operation.table.as_ref() != Some(&foreign_key.table)
+            || operation
+                .dependencies
+                .iter()
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>()
+                != copy_operations
+            || checks
+                .insert(
+                    foreign_key.catalog_object_id.clone(),
+                    (operation.id.to_string(), foreign_key),
+                )
+                .is_some()
+        {
+            return Err(anyhow!("invalid reviewed MySQL foreign-key check contract"));
+        }
+    }
+    let mut adds = BTreeMap::new();
+    for operation in reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::AddForeignKey)
+    {
+        let foreign_key: MySqlForeignKey = operation_parameter(operation, "mysql_foreign_key")?;
+        let check_id = checks
+            .get(&foreign_key.catalog_object_id)
+            .map(|(operation_id, _)| operation_id)
+            .ok_or_else(|| anyhow!("MySQL foreign-key add has no reviewed check"))?;
+        if foreign_keys.get(&foreign_key.catalog_object_id) != Some(&foreign_key)
+            || operation.table.as_ref() != Some(&foreign_key.table)
+            || operation.dependencies.len() != 1
+            || operation.dependencies[0].as_str() != check_id
+            || adds
+                .insert(
+                    foreign_key.catalog_object_id.clone(),
+                    (operation.id.to_string(), foreign_key),
+                )
+                .is_some()
+        {
+            return Err(anyhow!("invalid reviewed MySQL foreign-key add contract"));
+        }
+    }
+    if checks.len() != foreign_keys.len() || adds.len() != foreign_keys.len() {
+        return Err(anyhow!(
+            "reviewed MySQL plan does not cover every source foreign key exactly once"
+        ));
+    }
+    foreign_keys
+        .into_iter()
+        .map(|(catalog_object_id, foreign_key)| {
+            let (check_operation_id, checked) = checks
+                .remove(&catalog_object_id)
+                .ok_or_else(|| anyhow!("MySQL foreign key lacks a check operation"))?;
+            let (add_operation_id, added) = adds
+                .remove(&catalog_object_id)
+                .ok_or_else(|| anyhow!("MySQL foreign key lacks an add operation"))?;
+            if checked != foreign_key || added != foreign_key {
+                return Err(anyhow!(
+                    "MySQL foreign-key operations disagree with the source catalog"
+                ));
+            }
+            Ok(MySqlForeignKeyContract {
+                check_operation_id,
+                add_operation_id,
+                foreign_key,
             })
         })
         .collect()
@@ -2042,6 +2199,151 @@ fn verify_mysql_auto_increment_target(
     Ok(())
 }
 
+fn reconcile_mysql_foreign_keys<G>(
+    target: &impl MySqlForeignKeyTarget,
+    journal: &mut AppendJournal,
+    cancellation: &CancellationToken,
+    contracts: &[MySqlForeignKeyContract],
+    before_effect: &mut G,
+    interruption: Option<MySqlInterruptionPoint>,
+) -> anyhow::Result<()>
+where
+    G: FnMut() -> anyhow::Result<()>,
+{
+    interrupt_mysql_if(interruption, MySqlInterruptionPoint::BeforeForeignKeyChecks)?;
+    for contract in contracts {
+        cancellation.check()?;
+        match operation_state(journal, &contract.check_operation_id)? {
+            OperationState::Pending => {
+                journal
+                    .transition_operation(&contract.check_operation_id, OperationState::Running)?;
+            }
+            OperationState::Running | OperationState::Committed | OperationState::Verified => {}
+            OperationState::Prepared => {
+                return Err(anyhow!(
+                    "MySQL foreign-key check has an invalid prepared state"
+                ));
+            }
+        }
+        before_effect()?;
+        if target.check_foreign_key(&contract.foreign_key)? {
+            return require_manual(
+                journal,
+                format!(
+                    "target rows violate reviewed MySQL foreign key {}",
+                    contract.foreign_key.name
+                ),
+            );
+        }
+        match operation_state(journal, &contract.check_operation_id)? {
+            OperationState::Running | OperationState::Committed => journal
+                .transition_operation(&contract.check_operation_id, OperationState::Verified)?,
+            OperationState::Verified => {}
+            OperationState::Pending | OperationState::Prepared => {
+                return Err(anyhow!(
+                    "MySQL foreign-key check did not reach a runnable state"
+                ));
+            }
+        }
+    }
+
+    for contract in contracts {
+        cancellation.check()?;
+        let operation_id = contract.add_operation_id.as_str();
+        match operation_state(journal, operation_id)? {
+            OperationState::Pending => journal.prepare_operations_atomic([operation_id])?,
+            OperationState::Running => {
+                journal.transition_operation(operation_id, OperationState::Prepared)?;
+            }
+            OperationState::Prepared | OperationState::Committed | OperationState::Verified => {}
+        }
+        let mut state = operation_state(journal, operation_id)?;
+        before_effect()?;
+        let mut observed = target.inspect_foreign_key(&contract.foreign_key)?;
+        if state == OperationState::Prepared {
+            interrupt_mysql_if(interruption, MySqlInterruptionPoint::ForeignKeyPrepared)?;
+            if observed == MySqlForeignKeyState::Absent {
+                cancellation.check()?;
+                match target.reconcile_foreign_key(&contract.foreign_key) {
+                    Ok(value) => observed = value,
+                    Err(ConnectionError::InvalidRequest(reason)) => {
+                        return require_manual(
+                            journal,
+                            format!(
+                                "MySQL foreign-key reconciliation requires manual intervention: {reason}"
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        observed = target
+                            .inspect_foreign_key(&contract.foreign_key)
+                            .context("inspect MySQL foreign key after DDL error")?;
+                        match observed {
+                            MySqlForeignKeyState::Exact => {}
+                            MySqlForeignKeyState::Absent => {
+                                return Err(anyhow!(error).context(format!(
+                                    "MySQL ADD FOREIGN KEY {} did not take effect; durable intent remains prepared",
+                                    contract.foreign_key.name
+                                )));
+                            }
+                            MySqlForeignKeyState::Different => {
+                                return require_manual(
+                                    journal,
+                                    format!(
+                                        "MySQL ADD FOREIGN KEY {} produced a different effect after a server error",
+                                        contract.foreign_key.name
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if observed == MySqlForeignKeyState::Different {
+                return require_manual(
+                    journal,
+                    format!(
+                        "prepared MySQL foreign key {} differs from reviewed semantics",
+                        contract.foreign_key.name
+                    ),
+                );
+            }
+            if observed != MySqlForeignKeyState::Exact {
+                return Err(anyhow!(
+                    "MySQL foreign key {} is absent after reconciliation",
+                    contract.foreign_key.name
+                ));
+            }
+            journal.transition_operation(operation_id, OperationState::Committed)?;
+            state = OperationState::Committed;
+            interrupt_mysql_if(interruption, MySqlInterruptionPoint::ForeignKeyCommitted)?;
+        }
+        if state == OperationState::Committed {
+            if target.inspect_foreign_key(&contract.foreign_key)? != MySqlForeignKeyState::Exact {
+                return require_manual(
+                    journal,
+                    format!(
+                        "committed MySQL foreign key {} drifted",
+                        contract.foreign_key.name
+                    ),
+                );
+            }
+            journal.transition_operation(operation_id, OperationState::Verified)?;
+        } else if state == OperationState::Verified
+            && target.inspect_foreign_key(&contract.foreign_key)? != MySqlForeignKeyState::Exact
+        {
+            return require_manual(
+                journal,
+                format!(
+                    "verified MySQL foreign key {} drifted",
+                    contract.foreign_key.name
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn verify_mysql_tables(
     reviewed: &ReviewedPlan,
     reader: &mut dyn ReadSession,
@@ -2370,6 +2672,13 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct FakeForeignKeyTarget {
+        state: Mutex<MySqlForeignKeyState>,
+        has_violation: bool,
+        reconcile_calls: Mutex<u64>,
+    }
+
+    #[derive(Debug)]
     struct FakeReader {
         token: SnapshotToken,
         evidence: ReadOnlyEvidence,
@@ -2441,6 +2750,28 @@ mod tests {
         ) -> ConnectionResult<()> {
             *self.state.lock().unwrap() = MySqlAutoIncrementTargetState::Exact;
             Ok(())
+        }
+    }
+
+    impl MySqlForeignKeyTarget for FakeForeignKeyTarget {
+        fn inspect_foreign_key(
+            &self,
+            _expected: &MySqlForeignKey,
+        ) -> ConnectionResult<MySqlForeignKeyState> {
+            Ok(*self.state.lock().unwrap())
+        }
+
+        fn check_foreign_key(&self, _expected: &MySqlForeignKey) -> ConnectionResult<bool> {
+            Ok(self.has_violation)
+        }
+
+        fn reconcile_foreign_key(
+            &self,
+            _expected: &MySqlForeignKey,
+        ) -> ConnectionResult<MySqlForeignKeyState> {
+            *self.reconcile_calls.lock().unwrap() += 1;
+            *self.state.lock().unwrap() = MySqlForeignKeyState::Exact;
+            Ok(MySqlForeignKeyState::Exact)
         }
     }
 
@@ -3064,6 +3395,54 @@ mod tests {
         (ReviewedPlan::new(plan).unwrap(), contract, verify_schema_id)
     }
 
+    fn foreign_key_reviewed_plan() -> (ReviewedPlan, MySqlForeignKeyContract) {
+        let (base, _) = reviewed_plan();
+        let table = QualifiedTable {
+            namespace: identifier("source_db"),
+            name: identifier("items"),
+        };
+        let foreign_key = MySqlForeignKey {
+            catalog_object_id: "mysql:foreign-key:test".into(),
+            name: identifier("fk_items_parent"),
+            table: table.clone(),
+            columns: vec![identifier("parent_id")],
+            referenced_table: table.clone(),
+            referenced_columns: vec![identifier("id")],
+            referenced_constraint: identifier("PRIMARY"),
+            update_action: crate::migration::mysql::MySqlForeignKeyAction::Cascade,
+            delete_action: crate::migration::mysql::MySqlForeignKeyAction::SetNull,
+            enforced: true,
+        };
+        let check = PlanOperation::new(
+            OperationKind::CheckForeignKey,
+            Some(table.clone()),
+            Vec::new(),
+            BTreeMap::from([(
+                "mysql_foreign_key".into(),
+                serde_json::to_value(&foreign_key).unwrap(),
+            )]),
+        )
+        .unwrap();
+        let add = PlanOperation::new(
+            OperationKind::AddForeignKey,
+            Some(table),
+            vec![check.id.clone()],
+            BTreeMap::from([(
+                "mysql_foreign_key".into(),
+                serde_json::to_value(&foreign_key).unwrap(),
+            )]),
+        )
+        .unwrap();
+        let contract = MySqlForeignKeyContract {
+            check_operation_id: check.id.to_string(),
+            add_operation_id: add.id.to_string(),
+            foreign_key,
+        };
+        let mut plan = base.plan;
+        plan.operations = vec![check, add];
+        (ReviewedPlan::new(plan).unwrap(), contract)
+    }
+
     fn fake_reader(batch: RowBatch) -> FakeReader {
         FakeReader {
             token: SnapshotToken {
@@ -3309,6 +3688,125 @@ mod tests {
         assert_eq!(
             journal.projection().operations.get(&operation_id),
             Some(&OperationState::Verified)
+        );
+    }
+
+    #[test]
+    fn foreign_key_prepared_and_committed_boundaries_resume_exactly_once() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let (reviewed, contract) = foreign_key_reviewed_plan();
+        let target = FakeForeignKeyTarget {
+            state: Mutex::new(MySqlForeignKeyState::Absent),
+            has_violation: false,
+            reconcile_calls: Mutex::new(0),
+        };
+        let mut prepared = journal(
+            &directory.path().join("fk-prepared.journal"),
+            reviewed.clone(),
+        );
+        assert!(reconcile_mysql_foreign_keys(
+            &target,
+            &mut prepared,
+            &CancellationToken::default(),
+            std::slice::from_ref(&contract),
+            &mut || Ok(()),
+            Some(MySqlInterruptionPoint::ForeignKeyPrepared),
+        )
+        .is_err());
+        assert_eq!(
+            operation_state(&prepared, &contract.add_operation_id).unwrap(),
+            OperationState::Prepared
+        );
+        assert_eq!(*target.reconcile_calls.lock().unwrap(), 0);
+        reconcile_mysql_foreign_keys(
+            &target,
+            &mut prepared,
+            &CancellationToken::default(),
+            std::slice::from_ref(&contract),
+            &mut || Ok(()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            operation_state(&prepared, &contract.add_operation_id).unwrap(),
+            OperationState::Verified
+        );
+        assert_eq!(*target.reconcile_calls.lock().unwrap(), 1);
+
+        *target.state.lock().unwrap() = MySqlForeignKeyState::Absent;
+        *target.reconcile_calls.lock().unwrap() = 0;
+        let mut committed = journal(&directory.path().join("fk-committed.journal"), reviewed);
+        assert!(reconcile_mysql_foreign_keys(
+            &target,
+            &mut committed,
+            &CancellationToken::default(),
+            std::slice::from_ref(&contract),
+            &mut || Ok(()),
+            Some(MySqlInterruptionPoint::ForeignKeyCommitted),
+        )
+        .is_err());
+        assert_eq!(
+            operation_state(&committed, &contract.add_operation_id).unwrap(),
+            OperationState::Committed
+        );
+        assert_eq!(*target.reconcile_calls.lock().unwrap(), 1);
+        reconcile_mysql_foreign_keys(
+            &target,
+            &mut committed,
+            &CancellationToken::default(),
+            &[contract],
+            &mut || Ok(()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(*target.reconcile_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn foreign_key_violation_and_semantic_conflict_require_manual_reconciliation() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let (reviewed, contract) = foreign_key_reviewed_plan();
+        let violation = FakeForeignKeyTarget {
+            state: Mutex::new(MySqlForeignKeyState::Absent),
+            has_violation: true,
+            reconcile_calls: Mutex::new(0),
+        };
+        let mut violation_journal = journal(
+            &directory.path().join("fk-violation.journal"),
+            reviewed.clone(),
+        );
+        assert!(reconcile_mysql_foreign_keys(
+            &violation,
+            &mut violation_journal,
+            &CancellationToken::default(),
+            std::slice::from_ref(&contract),
+            &mut || Ok(()),
+            None,
+        )
+        .is_err());
+        assert_eq!(
+            violation_journal.projection().status,
+            MigrationStatus::ManualReconciliationRequired
+        );
+
+        let conflict = FakeForeignKeyTarget {
+            state: Mutex::new(MySqlForeignKeyState::Different),
+            has_violation: false,
+            reconcile_calls: Mutex::new(0),
+        };
+        let mut conflict_journal = journal(&directory.path().join("fk-conflict.journal"), reviewed);
+        assert!(reconcile_mysql_foreign_keys(
+            &conflict,
+            &mut conflict_journal,
+            &CancellationToken::default(),
+            &[contract],
+            &mut || Ok(()),
+            None,
+        )
+        .is_err());
+        assert_eq!(
+            conflict_journal.projection().status,
+            MigrationStatus::ManualReconciliationRequired
         );
     }
 

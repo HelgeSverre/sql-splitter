@@ -49,9 +49,12 @@
 > strict verification, durable completion, and completed-state resume.
 > The MySQL 8.0/8.4 TLS matrix now also proves durable crash recovery, query
 > cancellation with rollback and resume, causal network COMMIT-response loss,
-> and the same-dialect canonical value contract. Broader source, target, plan,
-> and effect drift coverage remains open, so this is not the Phase 6 exit or a
-> production support statement.
+> the same-dialect canonical value contract, and typed post-copy foreign-key
+> restoration. Foreign-key checks cover composite nullable keys,
+> self-references, cycles, database validation, Prepared and Committed
+> implicit-DDL recovery, and durable manual reconciliation. The remaining
+> Phase 6 exit gates in [08](./08-implementation-prerequisites.md) remain open,
+> so this is not the Phase 6 exit or a production support statement.
 
 ## Status and product boundary
 

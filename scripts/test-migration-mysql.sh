@@ -103,6 +103,7 @@ CREATE DATABASE MIGRATION_SOURCE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_execution_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_values_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_fk_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
@@ -132,7 +133,9 @@ GRANT SELECT ON *.* TO 'partially_restricted_reader'@'%';
 REVOKE SELECT ON migration_source.* FROM 'partially_restricted_reader'@'%';
 GRANT SELECT, SHOW VIEW ON migration_execution_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_values_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT, SHOW VIEW ON migration_fk_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT ON migration_values_source.* TO 'migration_admin'@'%';
+GRANT SELECT ON migration_fk_source.* TO 'migration_admin'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -262,6 +265,48 @@ INSERT INTO value_matrix VALUES
    '1970-01-01 00:00:00', '1970-01-01 00:00:01.000001',
    '1970-01-01 00:00:01', '00:00:00.000001', 2000,
    X'', X'', '{"duplicate":1,"duplicate":2,"number":1.00}');
+USE migration_fk_source;
+CREATE TABLE fk_parent (
+  tenant_id BIGINT NOT NULL,
+  id BIGINT NOT NULL,
+  payload VARCHAR(32) COLLATE utf8mb4_0900_bin NOT NULL,
+  PRIMARY KEY (tenant_id, id)
+) ENGINE=InnoDB;
+CREATE TABLE fk_child (
+  child_id BIGINT NOT NULL PRIMARY KEY,
+  tenant_id BIGINT NULL,
+  parent_id BIGINT NULL,
+  CONSTRAINT fk_child_parent FOREIGN KEY (tenant_id, parent_id)
+    REFERENCES fk_parent (tenant_id, id) ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB;
+CREATE TABLE fk_node (
+  id BIGINT NOT NULL PRIMARY KEY,
+  parent_id BIGINT NULL,
+  CONSTRAINT fk_node_parent FOREIGN KEY (parent_id)
+    REFERENCES fk_node (id) ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB;
+CREATE TABLE fk_cycle_a (
+  id BIGINT NOT NULL PRIMARY KEY,
+  b_id BIGINT NULL
+) ENGINE=InnoDB;
+CREATE TABLE fk_cycle_b (
+  id BIGINT NOT NULL PRIMARY KEY,
+  a_id BIGINT NULL
+) ENGINE=InnoDB;
+ALTER TABLE fk_cycle_a ADD CONSTRAINT fk_cycle_a_b FOREIGN KEY (b_id)
+  REFERENCES fk_cycle_b (id) ON UPDATE CASCADE ON DELETE SET NULL;
+ALTER TABLE fk_cycle_b ADD CONSTRAINT fk_cycle_b_a FOREIGN KEY (a_id)
+  REFERENCES fk_cycle_a (id) ON UPDATE CASCADE ON DELETE SET NULL;
+INSERT INTO fk_parent VALUES (1, 10, 'parent-1'), (2, 20, 'parent-2');
+INSERT INTO fk_child VALUES
+  (1, 1, 10),
+  (2, NULL, 999),
+  (3, 2, NULL),
+  (4, NULL, NULL);
+INSERT INTO fk_node VALUES (1, NULL), (2, 1);
+INSERT INTO fk_cycle_a VALUES (1, NULL);
+INSERT INTO fk_cycle_b VALUES (1, 1);
+UPDATE fk_cycle_a SET b_id = 1 WHERE id = 1;
 SQL
 
 write_config() {
@@ -347,11 +392,17 @@ wait_for_mysql "$target_container"
 docker exec -i "$target_container" mysql -uroot -prootpass <<'SQL'
 CREATE DATABASE migration_execution_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_values_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_fk_target_prepared CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_fk_target_committed CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_fk_target_violation CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
 CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
 CREATE ROLE 'execution_target_metadata_role'@'%';
 GRANT ALL PRIVILEGES ON migration_execution_target.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_values_target.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_fk_target_prepared.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_fk_target_committed.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_fk_target_violation.* TO 'migration_execution_target'@'%';
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
 GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
 GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
@@ -367,6 +418,15 @@ values_source_metadata_config="$test_dir/values-source-metadata.toml"
 values_freeze_config="$test_dir/values-freeze.toml"
 values_target_config="$test_dir/values-target.toml"
 values_target_metadata_config="$test_dir/values-target-metadata.toml"
+fk_source_config="$test_dir/fk-source.toml"
+fk_source_metadata_config="$test_dir/fk-source-metadata.toml"
+fk_freeze_config="$test_dir/fk-freeze.toml"
+fk_prepared_target_config="$test_dir/fk-prepared-target.toml"
+fk_prepared_target_metadata_config="$test_dir/fk-prepared-target-metadata.toml"
+fk_committed_target_config="$test_dir/fk-committed-target.toml"
+fk_committed_target_metadata_config="$test_dir/fk-committed-target-metadata.toml"
+fk_violation_target_config="$test_dir/fk-violation-target.toml"
+fk_violation_target_metadata_config="$test_dir/fk-violation-target-metadata.toml"
 write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
 write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
 write_config "$execution_freeze_config" "$port" migration_execution_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
@@ -377,6 +437,15 @@ write_config "$values_source_metadata_config" "$port" migration_values_source so
 write_config "$values_freeze_config" "$port" migration_values_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
 write_config "$values_target_config" "$target_port" migration_values_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
 write_config "$values_target_metadata_config" "$target_port" migration_values_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$fk_source_config" "$port" migration_fk_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
+write_config "$fk_source_metadata_config" "$port" migration_fk_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
+write_config "$fk_freeze_config" "$port" migration_fk_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$fk_prepared_target_config" "$target_port" migration_fk_target_prepared migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$fk_prepared_target_metadata_config" "$target_port" migration_fk_target_prepared execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$fk_committed_target_config" "$target_port" migration_fk_target_committed migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$fk_committed_target_metadata_config" "$target_port" migration_fk_target_committed execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$fk_violation_target_config" "$target_port" migration_fk_target_violation migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$fk_violation_target_metadata_config" "$target_port" migration_fk_target_violation execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
 export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
@@ -396,6 +465,17 @@ export SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_METADATA_CONFIG="$values_target_met
 export SQL_SPLITTER_MYSQL_TEST_VALUES_PLAN_OUTPUT="$test_dir/values-plan.json"
 export SQL_SPLITTER_MYSQL_TEST_VALUES_ASSERTION_OUTPUT="$test_dir/values-assertion.json"
 export SQL_SPLITTER_MYSQL_TEST_VALUES_JOURNAL_OUTPUT="$journal_dir/values-state.journal"
+export SQL_SPLITTER_MYSQL_TEST_FK_SOURCE_CONFIG="$fk_source_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_SOURCE_METADATA_CONFIG="$fk_source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_FREEZE_CONFIG="$fk_freeze_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_PREPARED_TARGET_CONFIG="$fk_prepared_target_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_PREPARED_TARGET_METADATA_CONFIG="$fk_prepared_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_COMMITTED_TARGET_CONFIG="$fk_committed_target_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_COMMITTED_TARGET_METADATA_CONFIG="$fk_committed_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_VIOLATION_TARGET_CONFIG="$fk_violation_target_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_VIOLATION_TARGET_METADATA_CONFIG="$fk_violation_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_FK_ARTIFACT_DIR="$test_dir"
+export SQL_SPLITTER_MYSQL_TEST_FK_JOURNAL_DIR="$journal_dir"
 
 docker exec "$container" mysql -uroot -prootpass -Nse \
   "SET PERSIST super_read_only = ON"
@@ -434,6 +514,10 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_canonical_value_matrix \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_foreign_key_integrity_and_recovery_matrix \
   -- --ignored --exact --nocapture
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \

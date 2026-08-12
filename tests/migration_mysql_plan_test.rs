@@ -27,14 +27,16 @@ use sql_splitter::migration::canonical::{
 use sql_splitter::migration::connection::{
     CancellationToken, KeysetPage, ReadSession, SourceConnectionFactory, TargetConnectionFactory,
 };
-use sql_splitter::migration::journal::{ConsistencyEvidence, OperationState, ResumeBinding};
+use sql_splitter::migration::journal::{
+    ConsistencyEvidence, MigrationStatus, OperationState, ResumeBinding,
+};
 use sql_splitter::migration::model::{
     ColumnMeta, DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch,
 };
 use sql_splitter::migration::mysql::{
     attest_mysql_external_freeze, build_plan, build_plan_with_visibility,
     collect_mysql_metadata_visibility, inspect_live_endpoint, mysql_auto_increment_states,
-    mysql_catalog_fingerprint, mysql_table_definitions, mysql_tls_binding,
+    mysql_catalog_fingerprint, mysql_foreign_keys, mysql_table_definitions, mysql_tls_binding,
     validate_mysql_external_freeze_continuity, write_live_plan, write_live_plan_with_visibility,
     MySqlEndpointConfig, MySqlSourceFactory, MySqlTableState, MySqlTargetFactory,
     MYSQL_CONSISTENCY_SNAPSHOT,
@@ -262,6 +264,207 @@ fn live_mysql_two_container_execute_and_resume() -> anyhow::Result<()> {
     )?;
     assert_eq!(resumed.copied_rows, 3);
     assert_eq!(resumed.committed_chunks, 2);
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_foreign_key_integrity_and_recovery_matrix() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_FK_SOURCE_CONFIG")?;
+    let source_metadata_path = required_path("SQL_SPLITTER_MYSQL_TEST_FK_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_FK_FREEZE_CONFIG")?;
+    let artifact_dir = required_path("SQL_SPLITTER_MYSQL_TEST_FK_ARTIFACT_DIR")?;
+    let journal_dir = required_path("SQL_SPLITTER_MYSQL_TEST_FK_JOURNAL_DIR")?;
+
+    for (name, target_env, target_metadata_env, interruption, durable_state) in [
+        (
+            "prepared",
+            "SQL_SPLITTER_MYSQL_TEST_FK_PREPARED_TARGET_CONFIG",
+            "SQL_SPLITTER_MYSQL_TEST_FK_PREPARED_TARGET_METADATA_CONFIG",
+            MySqlExecutionInterruption::ForeignKeyPrepared,
+            OperationState::Prepared,
+        ),
+        (
+            "committed",
+            "SQL_SPLITTER_MYSQL_TEST_FK_COMMITTED_TARGET_CONFIG",
+            "SQL_SPLITTER_MYSQL_TEST_FK_COMMITTED_TARGET_METADATA_CONFIG",
+            MySqlExecutionInterruption::ForeignKeyCommitted,
+            OperationState::Committed,
+        ),
+    ] {
+        let target_path = required_path(target_env)?;
+        let target_metadata_path = required_path(target_metadata_env)?;
+        let plan_path = artifact_dir.join(format!("fk-{name}-plan.json"));
+        let assertion_path = artifact_dir.join(format!("fk-{name}-assertion.json"));
+        let journal_path = journal_dir.join(format!("fk-{name}.journal"));
+        let reviewed = write_live_plan_with_visibility(
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &plan_path,
+        )?;
+        assert!(
+            !reviewed.plan.unsupported_objects.blocks_execution(),
+            "unexpected MySQL FK blockers: {:#?}",
+            reviewed.plan.unsupported_objects.objects
+        );
+        assert_eq!(
+            mysql_foreign_keys(reviewed.plan.source_catalog.as_ref().unwrap())?.len(),
+            4
+        );
+        assert_eq!(
+            reviewed
+                .plan
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::CheckForeignKey)
+                .count(),
+            4
+        );
+        assert_eq!(
+            reviewed
+                .plan
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::AddForeignKey)
+                .count(),
+            4
+        );
+        write_live_freeze_assertion(&assertion_path, &format!("mysql-fk-{name}"))?;
+        assert!(
+            execute_live_mysql_frozen_plan_interrupted(MySqlInterruptedExecution {
+                plan_path: &plan_path,
+                source_config_path: &source_path,
+                source_metadata_config_path: &source_metadata_path,
+                freeze_config_path: &freeze_path,
+                target_config_path: &target_path,
+                target_metadata_config_path: &target_metadata_path,
+                freeze_assertion_path: &assertion_path,
+                approval_reference: "mysql-fk-live-approval",
+                state_path: &journal_path,
+                interruption,
+            })
+            .is_err()
+        );
+        let journal = AppendJournal::open_resume(&journal_path)?;
+        assert!(journal
+            .reviewed_plan()
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == OperationKind::AddForeignKey)
+            .any(|operation| {
+                journal.projection().operations.get(operation.id.as_str()) == Some(&durable_state)
+            }));
+        drop(journal);
+
+        let report = resume_live_mysql_frozen_plan(
+            &journal_path,
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &assertion_path,
+        )?;
+        assert_eq!(report.copied_rows, 10);
+        let target_config = MySqlEndpointConfig::read(&target_path)?;
+        let mut target = connect(&target_config)?;
+        let foreign_key_count: u64 = target
+            .query_first(
+                "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'FOREIGN KEY'",
+            )?
+            .unwrap();
+        assert_eq!(foreign_key_count, 4);
+        let child_rows: Vec<(i64, Option<i64>, Option<i64>)> = target
+            .query("SELECT child_id, tenant_id, parent_id FROM fk_child ORDER BY child_id")?;
+        assert_eq!(
+            child_rows,
+            vec![
+                (1, Some(1), Some(10)),
+                (2, None, Some(999)),
+                (3, Some(2), None),
+                (4, None, None),
+            ]
+        );
+        let cycle: Vec<(i64, Option<i64>, i64, Option<i64>)> = target.query(
+            "SELECT a.id, a.b_id, b.id, b.a_id FROM fk_cycle_a a JOIN fk_cycle_b b ON b.id = a.b_id",
+        )?;
+        assert_eq!(cycle, vec![(1, Some(1), 1, Some(1))]);
+        assert!(target
+            .query_drop("INSERT INTO fk_child VALUES (99, 9, 9)")
+            .is_err());
+        let journal = AppendJournal::open_resume(&journal_path)?;
+        for operation in journal
+            .reviewed_plan()
+            .plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation.kind,
+                    OperationKind::CheckForeignKey | OperationKind::AddForeignKey
+                )
+            })
+        {
+            assert_eq!(
+                journal.projection().operations.get(operation.id.as_str()),
+                Some(&OperationState::Verified)
+            );
+        }
+        assert_eq!(journal.projection().status, MigrationStatus::Completed);
+    }
+
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_FK_VIOLATION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_FK_VIOLATION_TARGET_METADATA_CONFIG")?;
+    let plan_path = artifact_dir.join("fk-violation-plan.json");
+    let assertion_path = artifact_dir.join("fk-violation-assertion.json");
+    let journal_path = journal_dir.join("fk-violation.journal");
+    write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    write_live_freeze_assertion(&assertion_path, "mysql-fk-violation")?;
+    assert!(
+        execute_live_mysql_frozen_plan_interrupted(MySqlInterruptedExecution {
+            plan_path: &plan_path,
+            source_config_path: &source_path,
+            source_metadata_config_path: &source_metadata_path,
+            freeze_config_path: &freeze_path,
+            target_config_path: &target_path,
+            target_metadata_config_path: &target_metadata_path,
+            freeze_assertion_path: &assertion_path,
+            approval_reference: "mysql-fk-live-approval",
+            state_path: &journal_path,
+            interruption: MySqlExecutionInterruption::BeforeForeignKeyChecks,
+        })
+        .is_err()
+    );
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    connect(&target_config)?.query_drop("INSERT INTO fk_child VALUES (99, 9, 9)")?;
+    assert!(resume_live_mysql_frozen_plan(
+        &journal_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+    )
+    .is_err());
+    let journal = AppendJournal::open_resume(&journal_path)?;
+    assert_eq!(
+        journal.projection().status,
+        MigrationStatus::ManualReconciliationRequired
+    );
     Ok(())
 }
 
@@ -1037,6 +1240,11 @@ fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
             }
             MySqlExecutionInterruption::NetworkCommitFault(_) => {
                 unreachable!("network commit faults have a separate causal proxy matrix")
+            }
+            MySqlExecutionInterruption::BeforeForeignKeyChecks
+            | MySqlExecutionInterruption::ForeignKeyPrepared
+            | MySqlExecutionInterruption::ForeignKeyCommitted => {
+                unreachable!("foreign-key faults have a separate integrity matrix")
             }
         }
         drop(interrupted);

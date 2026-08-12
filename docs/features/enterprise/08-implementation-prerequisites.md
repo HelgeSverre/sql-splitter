@@ -97,7 +97,12 @@ Implementation Phase 6's dialect is MySQL. Scope for its adapter proof:
 Current spike evidence covers MySQL 8.0 and 8.4 over authenticated TLS for
 typed DDL, bounded two-page copy, canonical encoding version 2 value and digest
 round trips, durable recovery boundaries, cancellation rollback and resume,
-and causal COMMIT-response loss. The value matrix includes NULL, Unicode,
+causal COMMIT-response loss, and typed post-copy foreign-key restoration. The
+foreign-key matrix covers ordered composite keys, nullable `MATCH SIMPLE`
+semantics, self-references, cycles, database-enforced validation, and durable
+recovery from both Prepared and Committed implicit-DDL states. A target-side
+violation or conflicting constraint enters durable manual reconciliation. The
+value matrix includes NULL, Unicode,
 signed and unsigned integer bounds, fixed-scale decimal values, observable
 float bits, `BIT`, temporal precision, binary/blob bytes, normalized JSON,
 catalog column order, and complete keys. MySQL normalizes negative floating
@@ -172,6 +177,52 @@ No Implementation Phase exits on unit tests alone. Required gates are:
     tables, and change sequence state outside PostgreSQL table MVCC. Execution
     must acquire fresh evidence and fail closed when the reviewed plan no longer
     matches or the consistency contract cannot cover an object.
+
+## Phase 6 (MySQL) exit boundary
+
+Agreed 2026-08-12 (mailbox [063-codex]/[064]). Phase 6 does not exit on the
+current green matrix. It exits only when these are also proven live on
+MySQL 8.0 and 8.4, rather than deferred:
+
+1. **Gate 5 target conflicts:** exact prepared equality, changed payload,
+   secondary unique collision, and target-trigger mutation.
+2. **Gate 7 TLS/redaction:** hostname-verification failure, untrusted CA,
+   mTLS rejection and success, explicit insecure binding, distinct
+   credentials, malicious identifiers, protected artifacts, and no
+   secret/row/SQL-literal leakage. (This gate's wrong-hostname *negative*
+   live case is also currently missing on the PostgreSQL side — see the
+   TLS note below — so both dialects owe it.)
+3. **Gate 8 foreign keys (met 2026-08-12):** the MySQL 8.0 and 8.4 live
+   matrices prove typed composite/nullable/self/cycle anti-joins, all checks
+   before any constraint is added, database validation, Prepared and Committed
+   implicit-DDL recovery, and durable manual reconciliation for violations.
+4. **Gate 10:** coercion/truncation/replacement/no-skip failure injection.
+5. **Gate 11:** target-only rows before, between, after, and in
+   source-empty tables.
+6. **Business-authorization restoration:** the already-inventoried grants,
+   roles, and partial revokes must be *mapped and restored*, not merely
+   inventoried and blocked. Inventory-and-block is not a faithful
+   same-dialect migration for ordinary business schemas.
+
+**Support-boundary decision (not a deferral of correctness):** in the first
+MySQL support subset, routines, triggers, events, views, partitions,
+generated columns, checks, and unsupported index forms remain explicitly
+blocking. They must stay exhaustively inventoried and must never be silently
+omitted. This is a narrower first subset than the PostgreSQL adapter (which
+migrates a narrow view/function/generated/partition subset); the asymmetry
+is intentional for the first MySQL cut and is a product-priority call open
+to revision, not a permanent limit.
+
+**TLS backend note (PostgreSQL, 2026-08-12):** the PostgreSQL connector
+moved from `postgres-native-tls` to `postgres-openssl` (commit `1a8ddf9`)
+so the Amazon RDS regional multi-certificate CA bundle validates; macOS
+Secure Transport rejected the valid chain on an extended-key-usage error.
+Hostname verification remains on by default and `insecure=true` is the only
+disable path. Two recorded consequences: no live test yet proves
+wrong-hostname *fails closed* (folded into gate 7 above for both dialects),
+and `roots=platform` with no configured CA now means the OpenSSL default
+trust paths rather than the macOS keychain — every live path configures a
+CA file, so no evidence is affected.
 
 ## Documentation gate
 
