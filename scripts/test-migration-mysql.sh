@@ -37,6 +37,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+wait_for_mysql() {
+  local name=$1
+  local consecutive=0
+  for _ in $(seq 1 120); do
+    if docker exec "$name" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null 2>&1; then
+      consecutive=$((consecutive + 1))
+      if [ "$consecutive" -eq 3 ]; then
+        return 0
+      fi
+    else
+      consecutive=0
+    fi
+    sleep 1
+  done
+  echo "MySQL container $name did not become stably ready" >&2
+  docker logs "$name" >&2 || true
+  return 1
+}
+
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
   -subj '/CN=sql-splitter-test-ca' \
   -keyout "$cert_dir/ca-key.pem" -out "$cert_dir/ca.pem" >/dev/null 2>&1
@@ -75,13 +94,7 @@ docker run -d --name "$container" \
 docker port "$container" 3306/tcp | sed 's/.*://' > "$port_file"
 port=$(cat "$port_file")
 
-for _ in $(seq 1 90); do
-  if docker exec "$container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-docker exec "$container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null
+wait_for_mysql "$container"
 
 docker exec -i "$container" mysql -uroot -prootpass <<'SQL'
 SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin;
@@ -138,6 +151,57 @@ CREATE INDEX items_lower_name ON items ((lower(name)));
 CREATE TABLE ci_keys (
   name VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL UNIQUE
 ) ENGINE=InnoDB;
+CREATE TABLE key_scalar (
+  id BIGINT NOT NULL PRIMARY KEY,
+  payload VARCHAR(16) COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO key_scalar VALUES
+  (-9223372036854775808, 'minimum'), (0, 'zero'),
+  (9223372036854775807, 'maximum');
+CREATE TABLE key_composite (
+  tenant_id INT NOT NULL,
+  id BIGINT NOT NULL,
+  payload VARCHAR(16) COLLATE utf8mb4_0900_bin NOT NULL,
+  PRIMARY KEY (tenant_id, id)
+) ENGINE=InnoDB;
+INSERT INTO key_composite VALUES
+  (-1, -9223372036854775808, 'negative'),
+  (0, 0, 'zero'), (0, 1, 'repeated'),
+  (1, 9223372036854775807, 'maximum');
+CREATE TABLE key_text (
+  key_value VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL PRIMARY KEY,
+  payload INT NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO key_text VALUES ('', 0), ('a', 1), ('å', 2), ('水', 3);
+CREATE TABLE key_binary (
+  key_value VARBINARY(8) NOT NULL PRIMARY KEY,
+  payload INT NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO key_binary VALUES (X'', 0), (X'00', 1), (X'00FF', 2), (X'FF', 3);
+CREATE TABLE key_exact_n (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO key_exact_n VALUES (1), (2);
+CREATE TABLE key_n_plus_one (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO key_n_plus_one VALUES (1), (2), (3);
+CREATE TABLE key_one (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO key_one VALUES (1);
+CREATE TABLE key_empty (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE key_byte_bound (
+  id BIGINT NOT NULL PRIMARY KEY,
+  payload VARCHAR(128) COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO key_byte_bound VALUES
+  (1, REPEAT('x', 80)), (2, REPEAT('y', 80)), (3, REPEAT('z', 80));
+CREATE TABLE key_nullable (
+  key_value BIGINT NULL UNIQUE,
+  payload INT NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO key_nullable VALUES (NULL, 1), (1, 2);
+CREATE TABLE key_nonunique (
+  key_value BIGINT NOT NULL,
+  payload INT NOT NULL,
+  INDEX (key_value)
+) ENGINE=InnoDB;
+INSERT INTO key_nonunique VALUES (1, 1), (1, 2);
 CREATE TABLE auto_items (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL
@@ -279,13 +343,7 @@ docker run -d --name "$target_container" \
   --ssl-cert=/certs/server-cert.pem \
   --ssl-key=/certs/server-key.pem >/dev/null
 target_port=$(docker port "$target_container" 3306/tcp | sed 's/.*://')
-for _ in $(seq 1 90); do
-  if docker exec "$target_container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-docker exec "$target_container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null
+wait_for_mysql "$target_container"
 docker exec -i "$target_container" mysql -uroot -prootpass <<'SQL'
 CREATE DATABASE migration_execution_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_values_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;

@@ -25,7 +25,7 @@ use sql_splitter::migration::canonical::{
     canonicalize_json, digest_rows, CanonicalRow, CANONICAL_ENCODING_VERSION,
 };
 use sql_splitter::migration::connection::{
-    CancellationToken, KeysetPage, SourceConnectionFactory, TargetConnectionFactory,
+    CancellationToken, KeysetPage, ReadSession, SourceConnectionFactory, TargetConnectionFactory,
 };
 use sql_splitter::migration::journal::{ConsistencyEvidence, OperationState, ResumeBinding};
 use sql_splitter::migration::model::{
@@ -697,6 +697,68 @@ fn live_mysql_freeze_loss_stops_before_journal() -> anyhow::Result<()> {
     assert!(format!("{error:#}").contains("backup-lock owner is absent"));
     assert!(!journal_path.exists());
     Ok(())
+}
+
+struct CollectedMySqlPages {
+    rows: Vec<Vec<DbValue>>,
+    cursors: Vec<Vec<DbValue>>,
+}
+
+fn read_all_mysql_pages(
+    reader: &mut dyn ReadSession,
+    table: &str,
+    projection: &[&str],
+    key: &[&str],
+    limit: u32,
+) -> anyhow::Result<CollectedMySqlPages> {
+    let projection = projection
+        .iter()
+        .map(|column| Identifier::new(*column))
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = key
+        .iter()
+        .map(|column| Identifier::new(*column))
+        .collect::<Result<Vec<_>, _>>()?;
+    let key_positions = key
+        .iter()
+        .map(|column| {
+            projection
+                .iter()
+                .position(|projected| projected == column)
+                .ok_or_else(|| anyhow::anyhow!("key column {column} is not projected"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let table = QualifiedTable {
+        namespace: identifier("migration_source"),
+        name: Identifier::new(table)?,
+    };
+    let mut rows = Vec::new();
+    let mut cursors = Vec::new();
+    let mut after = None;
+    loop {
+        let batch = reader.select_page(&KeysetPage {
+            table: table.clone(),
+            projection: projection.clone(),
+            key: key.clone(),
+            after,
+            limit,
+        })?;
+        if batch.is_empty() {
+            break;
+        }
+        let final_row = batch
+            .rows()
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("nonempty page has no final row"))?;
+        let cursor = key_positions
+            .iter()
+            .map(|position| final_row[*position].clone())
+            .collect::<Vec<_>>();
+        cursors.push(cursor.clone());
+        rows.extend(batch.rows().iter().cloned());
+        after = Some(KeyTuple::new(cursor));
+    }
+    Ok(CollectedMySqlPages { rows, cursors })
 }
 
 fn mysql_value_projection() -> anyhow::Result<Vec<Identifier>> {
@@ -1402,6 +1464,21 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
     assert!(source.blockers.iter().any(|blocker| {
         blocker.object_kind == "catalog_visibility" && blocker.reason.contains("account-dependent")
     }));
+    for table_name in ["key_nullable", "key_nonunique"] {
+        let table_id = source.catalog.namespaces[0]
+            .objects
+            .iter()
+            .find(|object| {
+                object.kind == sql_splitter::migration::model::CatalogObjectKind::Table
+                    && object.name.as_str() == table_name
+            })
+            .ok_or_else(|| anyhow::anyhow!("source catalog has no {table_name} table"))?
+            .id
+            .clone();
+        assert!(source.blockers.iter().any(|blocker| {
+            blocker.object_kind == "resumable_key" && blocker.object_id == table_id
+        }));
+    }
     assert!(!source.catalog.namespaces[0].objects.iter().any(|object| {
         object
             .attributes
@@ -1423,10 +1500,178 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
     let factory = MySqlSourceFactory::new(source_config.clone());
     let token = factory.capture_snapshot()?;
     assert_eq!(token.consistency_mode, MYSQL_CONSISTENCY_SNAPSHOT);
-    let mut admin = connect(&admin_config)?;
-    admin.query_drop("UPDATE migration_source.items SET name='changed' WHERE id=2")?;
-    admin.query_drop("INSERT INTO migration_source.items(id, name) VALUES (3, 'three')")?;
     let mut reader = factory.open_reader(&token, CancellationToken::default())?;
+    let CollectedMySqlPages {
+        rows: scalar_rows,
+        cursors: scalar_cursors,
+    } = read_all_mysql_pages(
+        reader.as_mut(),
+        "key_scalar",
+        &["id", "payload"],
+        &["id"],
+        2,
+    )?;
+    assert_eq!(
+        scalar_rows,
+        vec![
+            vec![
+                DbValue::Signed(i64::MIN.into()),
+                DbValue::Text("minimum".into())
+            ],
+            vec![DbValue::Signed(0), DbValue::Text("zero".into())],
+            vec![
+                DbValue::Signed(i64::MAX.into()),
+                DbValue::Text("maximum".into())
+            ],
+        ]
+    );
+    assert_eq!(
+        scalar_cursors,
+        vec![
+            vec![DbValue::Signed(0)],
+            vec![DbValue::Signed(i64::MAX.into())]
+        ]
+    );
+
+    let CollectedMySqlPages {
+        rows: composite_rows,
+        cursors: composite_cursors,
+    } = read_all_mysql_pages(
+        reader.as_mut(),
+        "key_composite",
+        &["tenant_id", "id", "payload"],
+        &["tenant_id", "id"],
+        2,
+    )?;
+    assert_eq!(
+        composite_rows,
+        vec![
+            vec![
+                DbValue::Signed(-1),
+                DbValue::Signed(i64::MIN.into()),
+                DbValue::Text("negative".into()),
+            ],
+            vec![
+                DbValue::Signed(0),
+                DbValue::Signed(0),
+                DbValue::Text("zero".into())
+            ],
+            vec![
+                DbValue::Signed(0),
+                DbValue::Signed(1),
+                DbValue::Text("repeated".into())
+            ],
+            vec![
+                DbValue::Signed(1),
+                DbValue::Signed(i64::MAX.into()),
+                DbValue::Text("maximum".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        composite_cursors,
+        vec![
+            vec![DbValue::Signed(0), DbValue::Signed(0)],
+            vec![DbValue::Signed(1), DbValue::Signed(i64::MAX.into())],
+        ]
+    );
+
+    let text_rows = read_all_mysql_pages(
+        reader.as_mut(),
+        "key_text",
+        &["key_value", "payload"],
+        &["key_value"],
+        2,
+    )?
+    .rows;
+    assert_eq!(
+        text_rows,
+        vec![
+            vec![DbValue::Text(String::new()), DbValue::Signed(0)],
+            vec![DbValue::Text("a".into()), DbValue::Signed(1)],
+            vec![DbValue::Text("å".into()), DbValue::Signed(2)],
+            vec![DbValue::Text("水".into()), DbValue::Signed(3)],
+        ]
+    );
+    let binary_rows = read_all_mysql_pages(
+        reader.as_mut(),
+        "key_binary",
+        &["key_value", "payload"],
+        &["key_value"],
+        2,
+    )?
+    .rows;
+    assert_eq!(
+        binary_rows,
+        vec![
+            vec![DbValue::Bytes(Vec::new()), DbValue::Signed(0)],
+            vec![DbValue::Bytes(vec![0]), DbValue::Signed(1)],
+            vec![DbValue::Bytes(vec![0, 255]), DbValue::Signed(2)],
+            vec![DbValue::Bytes(vec![255]), DbValue::Signed(3)],
+        ]
+    );
+    let exact_n = read_all_mysql_pages(reader.as_mut(), "key_exact_n", &["id"], &["id"], 2)?;
+    assert_eq!(
+        exact_n.rows,
+        vec![vec![DbValue::Signed(1)], vec![DbValue::Signed(2)]]
+    );
+    assert_eq!(exact_n.cursors, vec![vec![DbValue::Signed(2)]]);
+
+    let n_plus_one = read_all_mysql_pages(reader.as_mut(), "key_n_plus_one", &["id"], &["id"], 2)?;
+    assert_eq!(
+        n_plus_one.rows,
+        vec![
+            vec![DbValue::Signed(1)],
+            vec![DbValue::Signed(2)],
+            vec![DbValue::Signed(3)],
+        ]
+    );
+    assert_eq!(
+        n_plus_one.cursors,
+        vec![vec![DbValue::Signed(2)], vec![DbValue::Signed(3)]]
+    );
+
+    let one = read_all_mysql_pages(reader.as_mut(), "key_one", &["id"], &["id"], 2)?;
+    assert_eq!(one.rows, vec![vec![DbValue::Signed(1)]]);
+    assert_eq!(one.cursors, vec![vec![DbValue::Signed(1)]]);
+
+    let empty = read_all_mysql_pages(reader.as_mut(), "key_empty", &["id"], &["id"], 2)?;
+    assert!(empty.rows.is_empty());
+    assert!(empty.cursors.is_empty());
+
+    let sample = vec![DbValue::Signed(1), DbValue::Text("x".repeat(80))];
+    let mut byte_bounded_config = source_config.clone();
+    byte_bounded_config.max_batch_rows = 10;
+    byte_bounded_config.max_batch_bytes = serde_json::to_vec(&sample)?.len() + 1;
+    let byte_bounded_factory = MySqlSourceFactory::new(byte_bounded_config);
+    let byte_bounded_token = byte_bounded_factory.capture_snapshot()?;
+    let mut byte_bounded_reader =
+        byte_bounded_factory.open_reader(&byte_bounded_token, CancellationToken::default())?;
+    let CollectedMySqlPages {
+        rows: byte_bounded_rows,
+        cursors: byte_bounded_cursors,
+    } = read_all_mysql_pages(
+        byte_bounded_reader.as_mut(),
+        "key_byte_bound",
+        &["id", "payload"],
+        &["id"],
+        10,
+    )?;
+    assert_eq!(byte_bounded_rows.len(), 3);
+    assert_eq!(
+        byte_bounded_cursors,
+        vec![
+            vec![DbValue::Signed(1)],
+            vec![DbValue::Signed(2)],
+            vec![DbValue::Signed(3)],
+        ]
+    );
+    drop(byte_bounded_reader);
+
+    let mut admin = connect(&admin_config)?;
+    admin.query_drop("UPDATE migration_source.items SET id=4 WHERE id=2")?;
+    admin.query_drop("DELETE FROM migration_source.items WHERE id=1")?;
+    admin.query_drop("INSERT INTO migration_source.items(id, name) VALUES (3, 'three')")?;
     let table = QualifiedTable {
         namespace: identifier("migration_source"),
         name: identifier("items"),
