@@ -536,7 +536,13 @@ impl MigrationPlan {
                 }
             }
             validate_catalog_fingerprint("target_catalog_fingerprint", catalog, fingerprint)?;
-            validate_target_mode(mode, catalog, fingerprint, &self.conversion_policy)?;
+            validate_target_mode(
+                mode,
+                catalog,
+                fingerprint,
+                &self.conversion_policy,
+                &self.operations,
+            )?;
         }
         if self.purpose == PlanPurpose::Execution {
             require_execution_target(self)?;
@@ -693,6 +699,7 @@ fn validate_target_mode(
     target_catalog: &VendorCatalog,
     target_catalog_fingerprint: &str,
     conversion_policy: &MigrationConversionPolicy,
+    operations: &[PlanOperation],
 ) -> Result<(), PlanError> {
     match mode {
         TargetModeContract::EmptyOwned => Ok(()),
@@ -725,6 +732,18 @@ fn validate_target_mode(
                     return Err(PlanError::InvalidTargetMode);
                 }
                 merge_items.insert(item);
+            }
+            let copy_table_count = operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::CopyTable)
+                .count();
+            let copy_tables = operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::CopyTable)
+                .map(|operation| operation.table.as_ref().ok_or(PlanError::InvalidTargetMode))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if copy_table_count != contract.tables.len() || copy_tables != tables {
+                return Err(PlanError::InvalidTargetMode);
             }
             let claimed_merge_items = contract
                 .ownership
@@ -1762,6 +1781,15 @@ mod tests {
     fn warm_merge_is_closed_over_the_target_catalog_and_not_yet_executable() {
         let mut plan = plan();
         let table = add_target_table(&mut plan);
+        plan.operations.push(
+            PlanOperation::new(
+                OperationKind::CopyTable,
+                Some(table.clone()),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
             WarmMergeContract {
                 conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
@@ -1794,6 +1822,54 @@ mod tests {
             plan.validate(),
             Err(PlanError::IncompleteTargetOwnershipManifest)
         ));
+    }
+
+    #[test]
+    fn warm_merge_tables_equal_the_complete_copy_operation_set() {
+        let mut plan = plan();
+        let table = add_target_table(&mut plan);
+        plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
+            WarmMergeContract {
+                conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
+                ownership: ownership_manifest(
+                    &plan,
+                    TargetObjectDisposition::Preserve,
+                    TargetObjectDisposition::MergeRows,
+                ),
+                tables: vec![WarmMergeTable {
+                    table: table.clone(),
+                    target_table_object_id: "relation:items".into(),
+                }],
+            },
+        )));
+
+        assert!(matches!(plan.validate(), Err(PlanError::InvalidTargetMode)));
+
+        plan.operations.push(
+            PlanOperation::new(
+                OperationKind::CopyTable,
+                Some(table.clone()),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        assert!(plan.validate().is_ok());
+
+        let other = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("other").unwrap(),
+        };
+        plan.operations.push(
+            PlanOperation::new(
+                OperationKind::CopyTable,
+                Some(other),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        assert!(matches!(plan.validate(), Err(PlanError::InvalidTargetMode)));
     }
 
     #[test]
