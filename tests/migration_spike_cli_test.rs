@@ -16,6 +16,12 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("probe-postgres-source-profile"));
     assert!(help.contains("plan-postgres"));
     assert!(help.contains("plan-mysql"));
+    assert!(help.contains("plan-postgres-to-mysql"));
+    assert!(help.contains("plan-mysql-to-postgres"));
+    assert!(help.contains("execute-postgres-to-mysql"));
+    assert!(help.contains("resume-postgres-to-mysql"));
+    assert!(help.contains("execute-mysql-to-postgres"));
+    assert!(help.contains("resume-mysql-to-postgres"));
     assert!(help.contains("execute-mysql"));
     assert!(help.contains("resume-mysql"));
     assert!(help.contains("execute-postgres"));
@@ -39,6 +45,158 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn cross_dialect_modes_expose_exact_inputs_and_execution_gates() {
+    for (command, expected) in [
+        (
+            "plan-postgres-to-mysql",
+            &[
+                "--source-config",
+                "--target-config",
+                "--target-metadata-admin-config",
+                "--mapping-input",
+                "--plan-output",
+                "--consistency",
+            ][..],
+        ),
+        (
+            "plan-mysql-to-postgres",
+            &[
+                "--source-config",
+                "--source-metadata-admin-config",
+                "--freeze-admin-config",
+                "--target-config",
+                "--mapping-input",
+                "--plan-output",
+                "--consistency",
+            ][..],
+        ),
+        (
+            "execute-postgres-to-mysql",
+            &[
+                "--plan-input",
+                "--source-config",
+                "--fence-admin-config",
+                "--fence-artifact",
+                "--target-config",
+                "--target-metadata-admin-config",
+                "--approval-ref",
+                "--state-output",
+                "--execute",
+                "--strict-verification",
+            ][..],
+        ),
+        (
+            "resume-postgres-to-mysql",
+            &[
+                "--state",
+                "--source-config",
+                "--fence-admin-config",
+                "--fence-artifact",
+                "--target-config",
+                "--target-metadata-admin-config",
+                "--execute",
+                "--strict-verification",
+            ][..],
+        ),
+        (
+            "execute-mysql-to-postgres",
+            &[
+                "--plan-input",
+                "--source-config",
+                "--source-metadata-admin-config",
+                "--freeze-admin-config",
+                "--target-config",
+                "--external-freeze-assertion",
+                "--approval-ref",
+                "--state-output",
+                "--execute",
+                "--strict-verification",
+            ][..],
+        ),
+        (
+            "resume-mysql-to-postgres",
+            &[
+                "--state",
+                "--source-config",
+                "--source-metadata-admin-config",
+                "--freeze-admin-config",
+                "--target-config",
+                "--external-freeze-assertion",
+                "--execute",
+                "--strict-verification",
+            ][..],
+        ),
+    ] {
+        let output = spike().args([command, "--help"]).output().unwrap();
+        assert!(output.status.success(), "{command} help failed");
+        let help = String::from_utf8(output.stdout).unwrap();
+        for flag in expected {
+            assert!(help.contains(flag), "{command} omits {flag}");
+        }
+        if command.starts_with("resume-") {
+            assert!(!help.contains("--plan-input"));
+            assert!(!help.contains("--approval-ref"));
+            assert!(!help.contains("--state-output"));
+        }
+        if command.starts_with("plan-") {
+            assert!(!help.contains("--execute"));
+            assert!(!help.contains("--approval-ref"));
+        }
+    }
+}
+
+#[test]
+fn cross_dialect_plans_reject_the_wrong_consistency_mode_before_io() {
+    let postgres_to_mysql = spike()
+        .args([
+            "plan-postgres-to-mysql",
+            "--source-config",
+            "source.toml",
+            "--target-config",
+            "target.toml",
+            "--target-metadata-admin-config",
+            "metadata.toml",
+            "--mapping-input",
+            "mapping.json",
+            "--plan-output",
+            "plan.json",
+            "--consistency",
+            "consistent-snapshot",
+        ])
+        .output()
+        .unwrap();
+    assert!(!postgres_to_mysql.status.success());
+    assert!(String::from_utf8(postgres_to_mysql.stderr)
+        .unwrap()
+        .contains("requires --consistency write-fence"));
+
+    let mysql_to_postgres = spike()
+        .args([
+            "plan-mysql-to-postgres",
+            "--source-config",
+            "source.toml",
+            "--source-metadata-admin-config",
+            "metadata.toml",
+            "--freeze-admin-config",
+            "freeze.toml",
+            "--target-config",
+            "target.toml",
+            "--mapping-input",
+            "mapping.json",
+            "--plan-output",
+            "plan.json",
+            "--consistency",
+            "write-fence",
+        ])
+        .output()
+        .unwrap();
+    assert!(!mysql_to_postgres.status.success());
+    assert!(String::from_utf8(mysql_to_postgres.stderr)
+        .unwrap()
+        .contains("requires --consistency consistent-snapshot"));
 }
 
 #[test]

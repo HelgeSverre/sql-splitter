@@ -123,6 +123,124 @@ enum Command {
         #[arg(long, value_enum)]
         consistency: ConsistencyMode,
     },
+    /// Inspect PostgreSQL and MySQL endpoints and write a reviewed conversion plan.
+    PlanPostgresToMysql {
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        target_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        mapping_input: PathBuf,
+        #[arg(long)]
+        plan_output: PathBuf,
+        /// PostgreSQL cross-dialect execution requires a durable write fence.
+        #[arg(long, value_enum)]
+        consistency: ConsistencyMode,
+    },
+    /// Inspect MySQL and PostgreSQL endpoints and write a reviewed conversion plan.
+    PlanMysqlToPostgres {
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        source_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        freeze_admin_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        mapping_input: PathBuf,
+        #[arg(long)]
+        plan_output: PathBuf,
+        /// MySQL uses a retained snapshot plus continuous external freeze evidence.
+        #[arg(long, value_enum)]
+        consistency: ConsistencyMode,
+    },
+    /// Execute one reviewed PostgreSQL-to-MySQL conversion into an empty target.
+    ExecutePostgresToMysql {
+        #[arg(long)]
+        plan_input: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        fence_admin_config: PathBuf,
+        #[arg(long)]
+        fence_artifact: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        target_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        approval_ref: String,
+        #[arg(long)]
+        state_output: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
+    },
+    /// Resume only the PostgreSQL-to-MySQL intent embedded in a journal.
+    ResumePostgresToMysql {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        fence_admin_config: PathBuf,
+        #[arg(long)]
+        fence_artifact: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        target_metadata_admin_config: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
+    },
+    /// Execute one reviewed MySQL-to-PostgreSQL conversion into an empty target.
+    ExecuteMysqlToPostgres {
+        #[arg(long)]
+        plan_input: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        source_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        freeze_admin_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        external_freeze_assertion: PathBuf,
+        #[arg(long)]
+        approval_ref: String,
+        #[arg(long)]
+        state_output: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
+    },
+    /// Resume only the MySQL-to-PostgreSQL intent embedded in a journal.
+    ResumeMysqlToPostgres {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        source_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        freeze_admin_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        external_freeze_assertion: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
+    },
     /// Execute one reviewed same-dialect MySQL plan into an empty target.
     ExecuteMysql {
         #[arg(long)]
@@ -425,6 +543,146 @@ fn main() -> anyhow::Result<()> {
             );
             eprintln!("Every reported required MySQL semantic remains execution-blocking");
         }
+        Command::PlanPostgresToMysql {
+            source_config,
+            target_config,
+            target_metadata_admin_config,
+            mapping_input,
+            plan_output,
+            consistency,
+        } => {
+            if !matches!(consistency, ConsistencyMode::WriteFence) {
+                anyhow::bail!("PostgreSQL-to-MySQL execution requires --consistency write-fence");
+            }
+            let plan = sql_splitter::migration::cross_dialect::write_live_postgres_to_mysql_plan(
+                source_config,
+                target_config,
+                target_metadata_admin_config,
+                mapping_input,
+                &plan_output,
+            )?;
+            print_plan_summary(&plan_output, &plan);
+        }
+        Command::PlanMysqlToPostgres {
+            source_config,
+            source_metadata_admin_config,
+            freeze_admin_config,
+            target_config,
+            mapping_input,
+            plan_output,
+            consistency,
+        } => {
+            if !matches!(consistency, ConsistencyMode::ConsistentSnapshot) {
+                anyhow::bail!(
+                    "MySQL-to-PostgreSQL execution requires --consistency consistent-snapshot plus continuous external freeze evidence"
+                );
+            }
+            let plan = sql_splitter::migration::cross_dialect::write_live_mysql_to_postgres_plan(
+                source_config,
+                source_metadata_admin_config,
+                freeze_admin_config,
+                target_config,
+                mapping_input,
+                &plan_output,
+            )?;
+            print_plan_summary(&plan_output, &plan);
+        }
+        Command::ExecutePostgresToMysql {
+            plan_input,
+            source_config,
+            fence_admin_config,
+            fence_artifact,
+            target_config,
+            target_metadata_admin_config,
+            approval_ref,
+            state_output,
+            execute,
+            strict_verification,
+        } => {
+            require_execution_gates(execute, strict_verification)?;
+            let report =
+                sql_splitter::migration::cross_dialect_execution::execute_postgres_to_mysql_plan(
+                    plan_input,
+                    source_config,
+                    fence_admin_config,
+                    fence_artifact,
+                    target_config,
+                    target_metadata_admin_config,
+                    &approval_ref,
+                    &state_output,
+                )?;
+            print_cross_report(&report);
+        }
+        Command::ResumePostgresToMysql {
+            state,
+            source_config,
+            fence_admin_config,
+            fence_artifact,
+            target_config,
+            target_metadata_admin_config,
+            execute,
+            strict_verification,
+        } => {
+            require_execution_gates(execute, strict_verification)?;
+            let report =
+                sql_splitter::migration::cross_dialect_execution::resume_postgres_to_mysql_plan(
+                    &state,
+                    source_config,
+                    fence_admin_config,
+                    fence_artifact,
+                    target_config,
+                    target_metadata_admin_config,
+                )?;
+            print_cross_report(&report);
+        }
+        Command::ExecuteMysqlToPostgres {
+            plan_input,
+            source_config,
+            source_metadata_admin_config,
+            freeze_admin_config,
+            target_config,
+            external_freeze_assertion,
+            approval_ref,
+            state_output,
+            execute,
+            strict_verification,
+        } => {
+            require_execution_gates(execute, strict_verification)?;
+            let report =
+                sql_splitter::migration::cross_dialect_execution::execute_mysql_to_postgres_plan(
+                    plan_input,
+                    source_config,
+                    source_metadata_admin_config,
+                    freeze_admin_config,
+                    target_config,
+                    external_freeze_assertion,
+                    &approval_ref,
+                    &state_output,
+                )?;
+            print_cross_report(&report);
+        }
+        Command::ResumeMysqlToPostgres {
+            state,
+            source_config,
+            source_metadata_admin_config,
+            freeze_admin_config,
+            target_config,
+            external_freeze_assertion,
+            execute,
+            strict_verification,
+        } => {
+            require_execution_gates(execute, strict_verification)?;
+            let report =
+                sql_splitter::migration::cross_dialect_execution::resume_mysql_to_postgres_plan(
+                    &state,
+                    source_config,
+                    source_metadata_admin_config,
+                    freeze_admin_config,
+                    target_config,
+                    external_freeze_assertion,
+                )?;
+            print_cross_report(&report);
+        }
         Command::ExecuteMysql {
             plan_input,
             source_config,
@@ -657,4 +915,29 @@ fn source_profile(
         SourceProfile::ManagedAdministrator => sql_splitter::migration::postgres_profile::PostgresSourceProfileKind::ManagedAdministrator,
         SourceProfile::AttestedExternalQuiesce => sql_splitter::migration::postgres_profile::PostgresSourceProfileKind::AttestedExternalQuiesce,
     }
+}
+
+fn require_execution_gates(execute: bool, strict_verification: bool) -> anyhow::Result<()> {
+    if !execute || !strict_verification {
+        anyhow::bail!("--execute and --strict-verification are required");
+    }
+    Ok(())
+}
+
+fn print_plan_summary(path: &std::path::Path, plan: &sql_splitter::migration::plan::ReviewedPlan) {
+    println!("plan: {}", path.display());
+    println!("plan hash: {}", plan.plan_hash);
+    println!(
+        "unsupported objects: {} (execution-blocking: {})",
+        plan.plan.unsupported_objects.objects.len(),
+        plan.plan.unsupported_objects.blocks_execution()
+    );
+}
+
+fn print_cross_report(
+    report: &sql_splitter::migration::cross_dialect_execution::CrossDialectExecutionReport,
+) {
+    println!("state: {}", report.state.display());
+    println!("copied rows: {}", report.copied_rows);
+    println!("committed chunks: {}", report.committed_chunks);
 }

@@ -10,16 +10,28 @@ enforce.
 
 Origin: the 2026-08-11 market-alignment plan's Phase 7 item and the design
 hazards raised in mailbox [083]. Serialization: row-conversion schema v3,
-plan schema v16, PostgreSQL catalog format v6, MySQL catalog format v4.
+plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
 
 ## Scope and safety model
 
-- **This is a same-dialect-exact + cross-dialect-conversion contract, not an
-  execution path.** As of `b9fe5dd`, no operator-runnable cross-dialect
-  copy/convert/write exists; both runners reject any non-same-dialect policy
-  before target effects (MySQL `validate_mysql_running_tool_contract`,
-  PostgreSQL's explicit conversion-policy gate added per [086]). Execution,
-  resume, and verification across adapters are the next increment.
+- **Cross-dialect execution is a separate reviewed path.** The operator CLI
+  exposes direction-specific plan, execute, and resume commands. It does not
+  route a conversion policy through either same-dialect runner. Each journal
+  embeds the reviewed plan, exact per-table conversion policy, source
+  consistency evidence, converted chunk digest, and target transaction intent.
+- **PostgreSQL sources require a durable write fence.** The runner recaptures
+  and normalizes the fenced catalog, re-attests the exact fence inventory
+  before every target effect and final verification, and releases the fence
+  only after strict verification is durable. A crash after release but before
+  journal completion is recovered only from fully verified durable state.
+- **MySQL sources require the retained repeatable-read snapshot and continuous
+  external DML/DDL freeze evidence.** Freeze continuity and authoritative
+  metadata visibility are re-attested before each target effect and before
+  completion.
+- Both directions can finish only as
+  `CompletedWithApprovedTransformations`. Plan schema v17 is the compatibility
+  boundary for these source-consistency rules; older plans fail at schema
+  validation.
 - **Every conversion rule is lossless-by-construction or fails closed.** This
   is load-bearing: verification digests the *converted* value on both sides,
   so a canonical-digest equality **cannot detect a lossy conversion rule** —
@@ -90,12 +102,14 @@ plan schema v16, PostgreSQL catalog format v6, MySQL catalog format v4.
   the live cross-dialect matrix runs, and the contract says so rather than
   claiming it now.
 
-## Known items before cross-dialect execution wires
+## Open acceptance evidence
 
 - The typed MySQL target contract caps `utf8mb4` `VARCHAR` at 16,383
   characters. Wider PostgreSQL `varchar(n)` columns now fail during policy
   derivation and cannot reach target DDL.
-- Cross-adapter execution, resume, and verification, and the full live
-  PostgreSQL 15/16/17 × MySQL 8.0/8.4 matrix in both directions, remain the
-  next increment and are where the deferred float/JSON storage-fidelity
-  proofs come due.
+- The full live PostgreSQL 15/16/17 × MySQL 8.0/8.4 matrix in both directions
+  remains open. It must prove the deferred float/JSON storage fidelity,
+  create-only reconciliation, commit-response loss on both targets, source
+  fence/freeze loss, cancellation, target drift after durable verification,
+  and released-fence recovery. Phase 7 does not exit before this matrix is
+  green and its exact commands and environment are recorded.

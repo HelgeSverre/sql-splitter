@@ -33,8 +33,14 @@ use super::mysql_execution::{
 use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAttestation};
 use super::plan::{OperationKind, PlanOperation, ReviewedPlan};
 use super::postgres::{
-    catalog_fingerprint, postgres_tls_binding, PostgresConversionTableState,
-    PostgresEndpointConfig, PostgresTargetFactory,
+    catalog_fingerprint, postgres_tls_binding, PostgresConsistencyMode,
+    PostgresConversionTableState, PostgresEndpointConfig, PostgresSourceFactory,
+    PostgresTargetFactory,
+};
+use super::postgres_fence::{
+    attest_postgres_write_fence, postgres_write_fence_is_released, release_postgres_write_fence,
+    remove_attested_fence_objects, FenceInventory, InstalledPostgresFence,
+    POSTGRES_FENCE_ARTIFACT_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +178,65 @@ impl Drop for MySqlPostgresCancellationMonitor {
     }
 }
 
+struct PostgresMySqlCancellationMonitor {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PostgresMySqlCancellationMonitor {
+    fn start(
+        source: Arc<PostgresSourceFactory>,
+        target: Arc<MySqlTargetFactory>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if worker_stop.load(Ordering::Acquire) {
+                return;
+            }
+            let mut errors = Vec::new();
+            for (label, control) in [
+                ("PostgreSQL source", source.open_control()),
+                ("MySQL target", target.open_control()),
+            ] {
+                match control {
+                    Ok(mut control) => {
+                        if let Err(error) = control.cancel_active_statement() {
+                            if !matches!(error, ConnectionError::InvalidRequest(_)) {
+                                errors.push(format!("{label}: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) if !matches!(error, ConnectionError::InvalidRequest(_)) => {
+                        errors.push(format!("{label}: {error}"));
+                    }
+                    Err(_) => {}
+                }
+            }
+            if !errors.is_empty() {
+                cancellation.record_control_error(errors.join("; "));
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for PostgresMySqlCancellationMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute_mysql_to_postgres_plan(
     plan_path: impl AsRef<Path>,
@@ -254,7 +319,7 @@ pub fn execute_mysql_to_postgres_plan(
     let accepted_for_checks = accepted.clone();
     let mut journal = AppendJournal::create_new(
         state_path.as_ref(),
-        cross_journal_genesis(binding, reviewed.clone(), accepted),
+        cross_journal_genesis(binding, reviewed.clone(), Some(accepted)),
     )?;
     let mut require_source_consistency = || {
         require_current_cross_mysql_source_consistency(
@@ -403,6 +468,201 @@ pub fn resume_mysql_to_postgres_plan(
     cross_report(state_path.as_ref(), &journal)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn execute_postgres_to_mysql_plan(
+    plan_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    fence_admin_config_path: impl AsRef<Path>,
+    fence_artifact_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    target_metadata_config_path: impl AsRef<Path>,
+    approval_reference: &str,
+    state_path: impl AsRef<Path>,
+) -> anyhow::Result<CrossDialectExecutionReport> {
+    if approval_reference.trim().is_empty() {
+        return Err(anyhow!("approval reference must not be empty"));
+    }
+    let reviewed: ReviewedPlan = read_json(plan_path)?;
+    validate_postgres_mysql_plan(&reviewed)?;
+    let source_config = PostgresEndpointConfig::read(source_config_path.as_ref())?;
+    let fence_admin = PostgresEndpointConfig::read(fence_admin_config_path.as_ref())?;
+    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    validate_postgres_mysql_credentials(
+        &source_config,
+        &fence_admin,
+        &target_config,
+        &target_metadata_config,
+    )?;
+    validate_postgres_mysql_tls(&reviewed, &source_config, &target_config)?;
+    let installed: InstalledPostgresFence = read_json(fence_artifact_path)?;
+    validate_cross_fence_binding(&reviewed, &installed, &fence_admin)?;
+    let inventory = attest_postgres_write_fence(&fence_admin, &installed.evidence)?;
+    validate_cross_fence_inventory(&reviewed, &inventory)?;
+    let cancellation = CancellationToken::default();
+    cancellation.observe_process_sigint()?;
+    let source = Arc::new(PostgresSourceFactory::new_with_cancellation(
+        source_config,
+        cancellation.clone(),
+    ));
+    let target = Arc::new(cross_mysql_target(
+        &reviewed,
+        &target_config,
+        cancellation.clone(),
+    )?);
+    let _monitor = PostgresMySqlCancellationMonitor::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        cancellation.clone(),
+    );
+    source.capabilities().require(&[
+        "consistent_snapshot",
+        "server_read_only",
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+    ])?;
+    target.capabilities().require(&[
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+        "plain_insert",
+    ])?;
+    let mut reader =
+        capture_cross_postgres_source(&reviewed, source.as_ref(), &inventory, &cancellation)?;
+    attest_initial_cross_mysql_target(&reviewed, &target_config, &target_metadata_config)?;
+    target.assert_empty()?;
+    let binding = cross_postgres_resume_binding(&reviewed, &installed, approval_reference)?;
+    let mut journal = AppendJournal::create_new(
+        state_path.as_ref(),
+        cross_journal_genesis(binding, reviewed.clone(), None),
+    )?;
+    let expected_inventory = inventory.clone();
+    let mut require_source_consistency =
+        || require_current_cross_postgres_fence(&fence_admin, &installed, &expected_inventory);
+    execute_cross_dialect_journal(
+        &reviewed,
+        reader.as_mut(),
+        target.as_ref(),
+        &mut journal,
+        &cancellation,
+        &mut require_source_consistency,
+    )?;
+    attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
+    require_source_consistency()?;
+    cancellation.check()?;
+    release_cross_postgres_fence(&fence_admin, &installed)?;
+    journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
+    cross_report(state_path.as_ref(), &journal)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resume_postgres_to_mysql_plan(
+    state_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    fence_admin_config_path: impl AsRef<Path>,
+    fence_artifact_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    target_metadata_config_path: impl AsRef<Path>,
+) -> anyhow::Result<CrossDialectExecutionReport> {
+    let mut journal = AppendJournal::open_resume(state_path.as_ref())?;
+    let reviewed = journal.reviewed_plan().clone();
+    validate_postgres_mysql_plan(&reviewed)?;
+    validate_cross_resume_binding(&journal.genesis().binding, &reviewed)?;
+    if matches!(
+        journal.projection().status,
+        MigrationStatus::Completed | MigrationStatus::CompletedWithApprovedTransformations
+    ) {
+        return Err(anyhow!(
+            "completed cross-dialect migration cannot be resumed"
+        ));
+    }
+    if journal.projection().status == MigrationStatus::ManualReconciliationRequired {
+        return Err(anyhow!(
+            "cross-dialect migration requires manual reconciliation"
+        ));
+    }
+    let source_config = PostgresEndpointConfig::read(source_config_path.as_ref())?;
+    let fence_admin = PostgresEndpointConfig::read(fence_admin_config_path.as_ref())?;
+    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    validate_postgres_mysql_credentials(
+        &source_config,
+        &fence_admin,
+        &target_config,
+        &target_metadata_config,
+    )?;
+    validate_postgres_mysql_tls(&reviewed, &source_config, &target_config)?;
+    let installed: InstalledPostgresFence = read_json(fence_artifact_path)?;
+    validate_cross_fence_binding(&reviewed, &installed, &fence_admin)?;
+    if installed.evidence != journal.genesis().binding.consistency_evidence {
+        return Err(anyhow!(
+            "PostgreSQL fence artifact differs from durable cross-dialect admission"
+        ));
+    }
+    if postgres_write_fence_is_released(&fence_admin, &installed.evidence)? {
+        if journal.projection().status != MigrationStatus::Verifying
+            || !journal.projection().schema_verified
+        {
+            return Err(anyhow!(
+                "released PostgreSQL fence is not paired with fully verified cross-dialect state"
+            ));
+        }
+        let cancellation = CancellationToken::default();
+        cancellation.observe_process_sigint()?;
+        let target = cross_mysql_target(&reviewed, &target_config, cancellation.clone())?;
+        attest_current_cross_mysql_target_binding(
+            &reviewed,
+            &target_config,
+            &target_metadata_config,
+        )?;
+        let contracts = cross_dialect_contracts(&reviewed)?;
+        verify_cross_target_from_journal(&target, &journal, &cancellation, &contracts)?;
+        journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
+        return cross_report(state_path.as_ref(), &journal);
+    }
+    let inventory = attest_postgres_write_fence(&fence_admin, &installed.evidence)?;
+    validate_cross_fence_inventory(&reviewed, &inventory)?;
+    let cancellation = CancellationToken::default();
+    cancellation.observe_process_sigint()?;
+    let source = Arc::new(PostgresSourceFactory::new_with_cancellation(
+        source_config,
+        cancellation.clone(),
+    ));
+    let target = Arc::new(cross_mysql_target(
+        &reviewed,
+        &target_config,
+        cancellation.clone(),
+    )?);
+    let _monitor = PostgresMySqlCancellationMonitor::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        cancellation.clone(),
+    );
+    let mut reader =
+        capture_cross_postgres_source(&reviewed, source.as_ref(), &inventory, &cancellation)?;
+    attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
+    let expected_inventory = inventory.clone();
+    let mut require_source_consistency =
+        || require_current_cross_postgres_fence(&fence_admin, &installed, &expected_inventory);
+    execute_cross_dialect_journal(
+        &reviewed,
+        reader.as_mut(),
+        target.as_ref(),
+        &mut journal,
+        &cancellation,
+        &mut require_source_consistency,
+    )?;
+    attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
+    require_source_consistency()?;
+    cancellation.check()?;
+    release_cross_postgres_fence(&fence_admin, &installed)?;
+    journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
+    cross_report(state_path.as_ref(), &journal)
+}
+
 fn validate_mysql_postgres_plan(reviewed: &ReviewedPlan) -> anyhow::Result<()> {
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
@@ -424,6 +684,27 @@ fn validate_mysql_postgres_plan(reviewed: &ReviewedPlan) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_postgres_mysql_plan(reviewed: &ReviewedPlan) -> anyhow::Result<()> {
+    reviewed.validate()?;
+    reviewed.plan.validate_for_execution()?;
+    if reviewed.plan.tool_version != env!("CARGO_PKG_VERSION")
+        || reviewed.plan.consistency_mode != PostgresConsistencyMode::WriteFence.as_str()
+        || reviewed.plan.conversion_policy.source_dialect() != ConversionDialect::PostgreSql
+        || reviewed.plan.conversion_policy.target_dialect() != Some(ConversionDialect::MySql)
+        || reviewed.plan.mysql_source_profile.is_some()
+        || reviewed.plan.mysql_snapshot_evidence.is_some()
+        || reviewed.plan.mysql_metadata_visibility.is_some()
+        || reviewed.plan.mysql_target_snapshot_evidence.is_none()
+        || reviewed.plan.mysql_target_metadata_visibility.is_none()
+    {
+        return Err(anyhow!(
+            "reviewed plan is not an executable PostgreSQL-to-MySQL write-fence contract"
+        ));
+    }
+    cross_dialect_contracts(reviewed)?;
+    Ok(())
+}
+
 fn cross_policies(reviewed: &ReviewedPlan) -> anyhow::Result<Vec<TableConversionPolicy>> {
     let MigrationConversionMode::CrossDialect { tables, .. } =
         &reviewed.plan.conversion_policy.mode
@@ -431,6 +712,31 @@ fn cross_policies(reviewed: &ReviewedPlan) -> anyhow::Result<Vec<TableConversion
         return Err(anyhow!("reviewed plan is not cross-dialect"));
     };
     Ok(tables.clone())
+}
+
+fn cross_mysql_target(
+    reviewed: &ReviewedPlan,
+    config: &MySqlEndpointConfig,
+    cancellation: CancellationToken,
+) -> anyhow::Result<MySqlTargetFactory> {
+    let target_catalog = reviewed
+        .plan
+        .target_catalog
+        .as_assessed()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no target catalog"))?
+        .clone();
+    let target_evidence = reviewed
+        .plan
+        .mysql_target_snapshot_evidence
+        .clone()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no MySQL target evidence"))?;
+    Ok(MySqlTargetFactory::new_cross_dialect_with_cancellation(
+        config.clone(),
+        target_catalog,
+        cross_policies(reviewed)?,
+        target_evidence,
+        cancellation,
+    )?)
 }
 
 fn validate_mysql_postgres_credentials(
@@ -457,6 +763,30 @@ fn validate_mysql_postgres_credentials(
     Ok(())
 }
 
+fn validate_postgres_mysql_credentials(
+    source: &PostgresEndpointConfig,
+    fence_admin: &PostgresEndpointConfig,
+    target: &MySqlEndpointConfig,
+    target_metadata: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let credentials = [
+        source.credential_env.as_str(),
+        fence_admin.credential_env.as_str(),
+        target.credential_env.as_str(),
+        target_metadata.credential_env.as_str(),
+    ];
+    if credentials
+        .iter()
+        .enumerate()
+        .any(|(index, credential)| credentials[..index].contains(credential))
+    {
+        return Err(anyhow!(
+            "PostgreSQL source, fence administration, MySQL target, and MySQL metadata administration require separate credential references"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_cross_tls(
     reviewed: &ReviewedPlan,
     source: &MySqlEndpointConfig,
@@ -474,6 +804,95 @@ fn validate_cross_tls(
     {
         return Err(anyhow!(
             "cross-dialect endpoint TLS policy differs from the reviewed plan"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_postgres_mysql_tls(
+    reviewed: &ReviewedPlan,
+    source: &PostgresEndpointConfig,
+    target: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let target_binding = reviewed
+        .plan
+        .target_tls_binding
+        .as_assessed()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no target TLS binding"))?;
+    if reviewed.plan.source_tls_binding != postgres_tls_binding(source)?
+        || target_binding != &mysql_tls_binding(target)?
+        || reviewed.plan.capabilities.get("source_tls") != Some(&reviewed.plan.source_tls_binding)
+        || reviewed.plan.capabilities.get("target_tls") != Some(target_binding)
+    {
+        return Err(anyhow!(
+            "cross-dialect endpoint TLS policy differs from the reviewed plan"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cross_fence_binding(
+    reviewed: &ReviewedPlan,
+    installed: &InstalledPostgresFence,
+    fence_admin: &PostgresEndpointConfig,
+) -> anyhow::Result<()> {
+    if fence_admin.tls.insecure {
+        return Err(anyhow!(
+            "cross-dialect fence administration requires authenticated TLS"
+        ));
+    }
+    let expected_admin_tls = installed.admin_tls_binding.as_ref().ok_or_else(|| {
+        anyhow!(
+            "legacy fence artifact has no TLS binding; automatic cross-dialect execution is refused"
+        )
+    })?;
+    if installed.format_version != POSTGRES_FENCE_ARTIFACT_VERSION
+        || expected_admin_tls != &postgres_tls_binding(fence_admin)?
+    {
+        return Err(anyhow!(
+            "fence artifact format or administration TLS policy differs from the installed fence"
+        ));
+    }
+    match &installed.evidence {
+        ConsistencyEvidence::WriteFence {
+            endpoint_identity,
+            business_catalog_fingerprint,
+            ..
+        } if endpoint_identity == &reviewed.plan.source_endpoint_identity
+            && business_catalog_fingerprint == &reviewed.plan.source_catalog_fingerprint =>
+        {
+            Ok(())
+        }
+        ConsistencyEvidence::NativeSnapshot { .. }
+        | ConsistencyEvidence::WriteFence { .. }
+        | ConsistencyEvidence::MySqlExternalFreeze { .. } => Err(anyhow!(
+            "PostgreSQL fence evidence differs from the reviewed cross-dialect source"
+        )),
+    }
+}
+
+fn validate_cross_fence_inventory(
+    reviewed: &ReviewedPlan,
+    inventory: &FenceInventory,
+) -> anyhow::Result<()> {
+    let expected = cross_policies(reviewed)?
+        .into_iter()
+        .map(|policy| policy.source_table)
+        .collect::<std::collections::BTreeSet<_>>();
+    let fenced_roots = inventory
+        .tables
+        .iter()
+        .filter(|table| table.parent_relation_oid.is_none())
+        .map(|table| -> Result<_, super::model::IdentifierError> {
+            Ok(QualifiedTable {
+                namespace: Identifier::new(table.namespace.clone())?,
+                name: Identifier::new(table.table.clone())?,
+            })
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    if expected != fenced_roots {
+        return Err(anyhow!(
+            "PostgreSQL fence root inventory differs from the reviewed cross-dialect tables"
         ));
     }
     Ok(())
@@ -580,6 +999,46 @@ fn capture_cross_mysql_source(
     Ok((reader, visibility.authoritative_catalog))
 }
 
+fn capture_cross_postgres_source(
+    reviewed: &ReviewedPlan,
+    source: &PostgresSourceFactory,
+    inventory: &FenceInventory,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<Box<dyn ReadSession>> {
+    cancellation.check()?;
+    let snapshot = source.capture_snapshot()?;
+    let expected_catalog = reviewed
+        .plan
+        .source_catalog
+        .as_ref()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no source catalog"))?;
+    if snapshot.endpoint_identity != reviewed.plan.source_endpoint_identity
+        || snapshot.database_identity != expected_catalog.database.as_str()
+        || snapshot.server_version != expected_catalog.server_version
+    {
+        return Err(anyhow!(
+            "fresh PostgreSQL source endpoint differs from the reviewed plan"
+        ));
+    }
+    let (mut catalog, mut unsupported, _) = source.captured_catalog(&snapshot)?;
+    remove_attested_fence_objects(&mut catalog, &mut unsupported, inventory)?;
+    if unsupported.blocks_execution()
+        || catalog_fingerprint(&catalog)? != reviewed.plan.source_catalog_fingerprint
+        || &catalog != expected_catalog
+    {
+        return Err(anyhow!(
+            "fresh fenced PostgreSQL source differs from the reviewed cross-dialect catalog"
+        ));
+    }
+    let reader = source.open_reader(&snapshot, cancellation.clone())?;
+    if !reader.read_only_evidence().server_enforced || reader.snapshot() != &snapshot {
+        return Err(anyhow!(
+            "PostgreSQL source reader does not retain the reviewed read-only snapshot"
+        ));
+    }
+    Ok(reader)
+}
+
 fn attest_initial_postgres_target(
     reviewed: &ReviewedPlan,
     target: &PostgresTargetFactory,
@@ -606,6 +1065,111 @@ fn attest_initial_postgres_target(
         ));
     }
     Ok(())
+}
+
+fn attest_initial_cross_mysql_target(
+    reviewed: &ReviewedPlan,
+    target_config: &MySqlEndpointConfig,
+    metadata_config: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let current_target = super::mysql::inspect_live_endpoint(target_config.clone())?;
+    let current =
+        collect_mysql_metadata_visibility(&current_target, target_config, metadata_config, None)?;
+    let accepted_evidence = reviewed
+        .plan
+        .mysql_target_snapshot_evidence
+        .as_ref()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no MySQL target evidence"))?;
+    let accepted_visibility = reviewed
+        .plan
+        .mysql_target_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no MySQL target visibility evidence"))?;
+    let accepted_catalog = reviewed
+        .plan
+        .target_catalog
+        .as_assessed()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no target catalog"))?;
+    if !mysql_execution_snapshot_binding_is_exact(
+        &current_target.snapshot_evidence,
+        accepted_evidence,
+    ) || current.evidence != *accepted_visibility
+        || current.authoritative_catalog != *accepted_catalog
+        || mysql_catalog_fingerprint(&current.authoritative_catalog)?
+            != reviewed.plan.execution_target_catalog_fingerprint()?
+        || !mysql_catalog_visibility_is_complete(&current_target, &current)?
+        || !current.authoritative_blockers.is_empty()
+    {
+        return Err(anyhow!(
+            "current MySQL target catalog, visibility, or authorization differs from the reviewed empty target"
+        ));
+    }
+    Ok(())
+}
+
+fn attest_current_cross_mysql_target_binding(
+    reviewed: &ReviewedPlan,
+    target_config: &MySqlEndpointConfig,
+    metadata_config: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let current_target = super::mysql::inspect_live_endpoint(target_config.clone())?;
+    let current =
+        collect_mysql_metadata_visibility(&current_target, target_config, metadata_config, None)?;
+    let accepted_evidence = reviewed
+        .plan
+        .mysql_target_snapshot_evidence
+        .as_ref()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no MySQL target evidence"))?;
+    let accepted_visibility = reviewed
+        .plan
+        .mysql_target_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no MySQL target visibility evidence"))?;
+    let expected_tls = reviewed
+        .plan
+        .target_tls_binding
+        .as_assessed()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no target TLS binding"))?;
+    if !mysql_target_runtime_binding_is_exact(&current_target, accepted_evidence, expected_tls)
+        || !current.evidence.same_authorization_as(accepted_visibility)
+        || !mysql_catalog_visibility_is_complete(&current_target, &current)?
+        || !current.authoritative_blockers.is_empty()
+    {
+        return Err(anyhow!(
+            "current MySQL target endpoint or authorization differs from the reviewed contract"
+        ));
+    }
+    Ok(())
+}
+
+fn mysql_target_runtime_binding_is_exact(
+    current: &MySqlCatalogSnapshot,
+    reviewed: &super::plan::MySqlSnapshotEvidence,
+    expected_tls: &str,
+) -> bool {
+    let observed = &current.snapshot_evidence;
+    current.endpoint_identity == reviewed.endpoint_identity
+        && current.database_identity == reviewed.database_identity
+        && current.server_version == reviewed.server_version
+        && current.tls_binding == expected_tls
+        && observed.endpoint_identity == reviewed.endpoint_identity
+        && observed.database_identity == reviewed.database_identity
+        && observed.server_uuid == reviewed.server_uuid
+        && observed.server_version == reviewed.server_version
+        && observed.authenticated_account == reviewed.authenticated_account
+        && observed
+            .transaction_isolation
+            .eq_ignore_ascii_case(&reviewed.transaction_isolation)
+        && observed.transaction_read_only == reviewed.transaction_read_only
+        && observed.session_time_zone == reviewed.session_time_zone
+        && observed.catalog_snapshot_protected == reviewed.catalog_snapshot_protected
+        && observed.information_schema_stats_expiry == reviewed.information_schema_stats_expiry
+        && observed.lower_case_table_names == reviewed.lower_case_table_names
+        && observed.session_sql_mode == reviewed.session_sql_mode
+        && observed.character_set_client == reviewed.character_set_client
+        && observed.character_set_connection == reviewed.character_set_connection
+        && observed.character_set_results == reviewed.character_set_results
+        && observed.collation_connection == reviewed.collation_connection
 }
 
 fn cross_mysql_resume_binding(
@@ -645,6 +1209,68 @@ fn cross_mysql_resume_binding(
     })
 }
 
+fn cross_postgres_resume_binding(
+    reviewed: &ReviewedPlan,
+    installed: &InstalledPostgresFence,
+    approval_reference: &str,
+) -> anyhow::Result<ResumeBinding> {
+    if !matches!(installed.evidence, ConsistencyEvidence::WriteFence { .. }) {
+        return Err(anyhow!(
+            "cross-dialect PostgreSQL source requires write-fence evidence"
+        ));
+    }
+    Ok(ResumeBinding {
+        migration_id: reviewed.plan.migration_id.clone(),
+        plan_hash: reviewed.plan_hash.to_string(),
+        approval_reference: approval_reference.into(),
+        tool_version: reviewed.plan.tool_version.clone(),
+        source_endpoint: reviewed.plan.source_endpoint_identity.clone(),
+        target_endpoint: reviewed
+            .plan
+            .execution_target_endpoint_identity()?
+            .to_owned(),
+        consistency_evidence: installed.evidence.clone(),
+        source_schema_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
+        target_schema_fingerprint: reviewed
+            .plan
+            .execution_target_catalog_fingerprint()?
+            .to_owned(),
+        outage_projection_digest: None,
+        external_quiesce_attestation_digest: None,
+        mysql_freeze_attestation_digest: None,
+        conversion_policy: reviewed.plan.conversion_policy.clone(),
+        canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+    })
+}
+
+fn require_current_cross_postgres_fence(
+    fence_admin: &PostgresEndpointConfig,
+    installed: &InstalledPostgresFence,
+    expected_inventory: &FenceInventory,
+) -> anyhow::Result<()> {
+    let current = attest_postgres_write_fence(fence_admin, &installed.evidence)
+        .context("re-attest PostgreSQL source write fence")?;
+    if &current != expected_inventory {
+        return Err(anyhow!(
+            "PostgreSQL source fence inventory changed during cross-dialect execution"
+        ));
+    }
+    Ok(())
+}
+
+fn release_cross_postgres_fence(
+    fence_admin: &PostgresEndpointConfig,
+    installed: &InstalledPostgresFence,
+) -> anyhow::Result<()> {
+    let ConsistencyEvidence::WriteFence { generation, .. } = &installed.evidence else {
+        return Err(anyhow!(
+            "cross-dialect PostgreSQL source has no write-fence generation"
+        ));
+    };
+    release_postgres_write_fence(fence_admin, generation, &installed.token)
+        .context("release PostgreSQL source write fence")
+}
+
 fn validate_cross_resume_binding(
     binding: &ResumeBinding,
     reviewed: &ReviewedPlan,
@@ -660,7 +1286,7 @@ fn validate_cross_resume_binding(
             != reviewed.plan.execution_target_catalog_fingerprint()?
         || binding.outage_projection_digest.is_some()
         || binding.external_quiesce_attestation_digest.is_some()
-        || binding.mysql_freeze_attestation_digest.is_none()
+        || !cross_resume_consistency_is_exact(binding, reviewed)
         || binding.conversion_policy != reviewed.plan.conversion_policy
         || binding.canonical_encoding_version != CANONICAL_ENCODING_VERSION
         || binding.approval_reference.trim().is_empty()
@@ -672,10 +1298,35 @@ fn validate_cross_resume_binding(
     Ok(())
 }
 
+fn cross_resume_consistency_is_exact(binding: &ResumeBinding, reviewed: &ReviewedPlan) -> bool {
+    match reviewed.plan.conversion_policy.source_dialect() {
+        ConversionDialect::MySql => {
+            binding.mysql_freeze_attestation_digest.is_some()
+                && matches!(
+                    binding.consistency_evidence,
+                    ConsistencyEvidence::MySqlExternalFreeze { .. }
+                )
+        }
+        ConversionDialect::PostgreSql => {
+            binding.mysql_freeze_attestation_digest.is_none()
+                && matches!(
+                    &binding.consistency_evidence,
+                    ConsistencyEvidence::WriteFence {
+                        endpoint_identity,
+                        business_catalog_fingerprint,
+                        ..
+                    } if endpoint_identity == &reviewed.plan.source_endpoint_identity
+                        && business_catalog_fingerprint
+                            == &reviewed.plan.source_catalog_fingerprint
+                )
+        }
+    }
+}
+
 fn cross_journal_genesis(
     binding: ResumeBinding,
     reviewed: ReviewedPlan,
-    accepted: MySqlExternalFreezeAttestation,
+    accepted_mysql_freeze: Option<MySqlExternalFreezeAttestation>,
 ) -> Genesis {
     let operations = reviewed
         .plan
@@ -704,7 +1355,7 @@ fn cross_journal_genesis(
         reviewed_plan: reviewed,
         accepted_outage_projection: None,
         accepted_external_quiesce: None,
-        accepted_mysql_freeze: Some(accepted),
+        accepted_mysql_freeze,
         operations,
     }
 }
@@ -938,7 +1589,10 @@ fn reconcile_cross_tables(
         }
         if state == OperationState::Prepared {
             match target.inspect_cross_table(&contract.policy)? {
-                CrossTableState::Absent => target.create_cross_table(&contract.policy)?,
+                CrossTableState::Absent => {
+                    require_source_consistency()?;
+                    target.create_cross_table(&contract.policy)?;
+                }
                 CrossTableState::Exact => {}
                 CrossTableState::Different => {
                     return require_manual(
@@ -1219,6 +1873,84 @@ fn verify_cross_tables(
     Ok(())
 }
 
+fn verify_cross_target_from_journal(
+    target: &dyn CrossDialectTarget,
+    journal: &AppendJournal,
+    cancellation: &CancellationToken,
+    contracts: &[CrossCopyContract],
+) -> anyhow::Result<()> {
+    let mut chunks = journal.all_committed_chunks()?.peekable();
+    for contract in contracts {
+        let mut verifier = target.open_verifier(cancellation.clone())?;
+        let mut source_after = None;
+        let mut target_after = None;
+        let mut manifest = Sha256::new();
+        let mut target_hash = Sha256::new();
+        while let Some(next) = chunks.peek() {
+            let next = next.as_ref().map_err(|error| anyhow!(error.to_string()))?;
+            if next.operation_id != contract.copy_operation_id {
+                break;
+            }
+            let chunk = chunks
+                .next()
+                .ok_or_else(|| anyhow!("cross-dialect chunk stream ended unexpectedly"))??;
+            if chunk.start_key != source_after.as_ref().map(|key: &KeyTuple| key.0.clone()) {
+                return Err(anyhow!("cross-dialect chunk manifest has a keyspace gap"));
+            }
+            let limit = u32::try_from(chunk.row_count)?;
+            let target_batch =
+                verifier.select_page(&target_page(contract, target_after.clone(), limit))?;
+            let expected_target_final = contract.policy.convert_source_key(&chunk.final_key)?;
+            let target_digest = converted_batch_digest(contract, &target_batch)?;
+            if target_batch.len() as u64 != chunk.row_count
+                || batch_key(&target_batch, &contract.target_key_indexes)?.0
+                    != expected_target_final
+                || target_digest != chunk.canonical_digest
+            {
+                return Err(anyhow!(
+                    "released-fence target rows differ from the durable converted manifest"
+                ));
+            }
+            let encoded = serde_json::to_vec(&chunk)?;
+            manifest.update(u64::try_from(encoded.len())?.to_be_bytes());
+            manifest.update(encoded);
+            target_hash.update(target_digest.as_bytes());
+            source_after = Some(KeyTuple::new(chunk.final_key));
+            target_after = Some(KeyTuple::new(expected_target_final));
+        }
+        if !verifier
+            .select_page(&target_page(contract, target_after, 1))?
+            .is_empty()
+        {
+            return Err(anyhow!(
+                "released-fence target contains rows after the durable converted manifest"
+            ));
+        }
+        let durable = journal
+            .table_verification_evidence(&contract.copy_operation_id)
+            .ok_or_else(|| anyhow!("released-fence recovery has no durable table evidence"))?;
+        if durable.0 != hex::encode(manifest.finalize())
+            || durable.2 != hex::encode(target_hash.finalize())
+        {
+            return Err(anyhow!(
+                "released-fence target verification differs from durable evidence"
+            ));
+        }
+    }
+    if let Some(extra) = chunks.next() {
+        return Err(anyhow!(
+            "journal contains an unexpected released-fence target chunk for {}",
+            extra?.operation_id
+        ));
+    }
+    let policies = contracts
+        .iter()
+        .map(|contract| contract.policy.clone())
+        .collect::<Vec<_>>();
+    target.verify_cross_schema(&policies)?;
+    Ok(())
+}
+
 fn verify_cross_table(
     reader: &mut dyn ReadSession,
     verifier: &mut dyn super::connection::VerificationSession,
@@ -1416,7 +2148,9 @@ mod tests {
         CapabilitySet, ControlSession, ReadOnlyEvidence, SnapshotToken, VerificationSession,
         WriteSession,
     };
-    use crate::migration::cross_dialect::tests::mysql_to_postgres_reviewed_plan;
+    use crate::migration::cross_dialect::tests::{
+        mysql_to_postgres_reviewed_plan, postgres_to_mysql_reviewed_plan,
+    };
     use crate::migration::mysql_profile::{
         MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlFreezeAttestationStatus,
         MySqlFreezeProfileKind, MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
@@ -1690,6 +2424,27 @@ mod tests {
         }
     }
 
+    fn installed_fence(reviewed: &ReviewedPlan) -> InstalledPostgresFence {
+        serde_json::from_value(serde_json::json!({
+            "format_version": POSTGRES_FENCE_ARTIFACT_VERSION,
+            "token": "release-secret",
+            "evidence": {
+                "mode": "write-fence",
+                "generation": "generation-1",
+                "token_hash": "a".repeat(64),
+                "endpoint_identity": reviewed.plan.source_endpoint_identity,
+                "database_oid": 42,
+                "system_identifier": "system-1",
+                "business_catalog_fingerprint": reviewed.plan.source_catalog_fingerprint,
+                "fence_inventory_fingerprint": "b".repeat(64),
+                "activation_xid": 7,
+                "activated_at": "2026-08-12 12:00:00+00"
+            },
+            "admin_tls_binding": "hostname_verified;roots=platform;client=admin"
+        }))
+        .unwrap()
+    }
+
     fn source_rows(policy: &TableConversionPolicy) -> RowBatch {
         let mut rows = RowBatch::new(
             policy
@@ -1751,7 +2506,7 @@ mod tests {
         let binding = cross_mysql_resume_binding(reviewed, &accepted, "approval-1").unwrap();
         AppendJournal::create_new(
             directory.join("migration.state"),
-            cross_journal_genesis(binding, reviewed.clone(), accepted),
+            cross_journal_genesis(binding, reviewed.clone(), Some(accepted)),
         )
         .unwrap()
     }
@@ -1832,6 +2587,8 @@ mod tests {
         )
         .unwrap();
         assert!(!journal.projection().table_verifications.is_empty());
+        let contracts = cross_dialect_contracts(&reviewed).unwrap();
+        verify_cross_target_from_journal(&target, &journal, &cancellation, &contracts).unwrap();
         let columns = target.state.lock().unwrap().rows.columns().to_vec();
         let mut drifted = RowBatch::new(columns, 2, 1024);
         drifted.try_push(vec![DbValue::Signed(9)], 8).unwrap();
@@ -1848,6 +2605,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("row verification failed"));
+        let error = verify_cross_target_from_journal(&target, &journal, &cancellation, &contracts)
+            .unwrap_err();
+        assert!(error.to_string().contains("durable converted manifest"));
     }
 
     #[test]
@@ -1861,7 +2621,7 @@ mod tests {
         let mut checks = 0_u8;
         let mut require_consistency = || {
             checks += 1;
-            if checks == 2 {
+            if checks == 3 {
                 Err(anyhow!("freeze lost"))
             } else {
                 Ok(())
@@ -1880,5 +2640,55 @@ mod tests {
         assert!(error.to_string().contains("freeze lost"));
         assert!(journal.projection().prepared_chunk.is_some());
         assert!(target.state.lock().unwrap().rows.is_empty());
+    }
+
+    #[test]
+    fn postgres_source_journal_binds_only_exact_write_fence_evidence() {
+        let reviewed = postgres_to_mysql_reviewed_plan();
+        validate_postgres_mysql_plan(&reviewed).unwrap();
+        let installed = installed_fence(&reviewed);
+        let unrelated_inventory = FenceInventory {
+            generation: "generation-1".into(),
+            admin_role: "fence_admin".into(),
+            schema_oid: 1,
+            registry_oid: 2,
+            history_oid: 3,
+            history_sequence_oid: 4,
+            history_function_oid: 5,
+            history_trigger_oid: 6,
+            dml_function_oid: 7,
+            ddl_function_oid: 8,
+            event_trigger_oid: 9,
+            tables: Vec::new(),
+            sequences: Vec::new(),
+        };
+        assert!(validate_cross_fence_inventory(&reviewed, &unrelated_inventory).is_err());
+        let binding = cross_postgres_resume_binding(&reviewed, &installed, "approval-1").unwrap();
+        assert!(matches!(
+            binding.consistency_evidence,
+            ConsistencyEvidence::WriteFence { .. }
+        ));
+        assert!(binding.mysql_freeze_attestation_digest.is_none());
+        validate_cross_resume_binding(&binding, &reviewed).unwrap();
+        let directory = private_tempdir();
+        let journal = AppendJournal::create_new(
+            directory.path().join("postgres-source.state"),
+            cross_journal_genesis(binding.clone(), reviewed.clone(), None),
+        )
+        .unwrap();
+        assert_eq!(
+            journal.genesis().binding.consistency_evidence,
+            installed.evidence
+        );
+
+        let mut wrong = binding;
+        wrong.mysql_freeze_attestation_digest = Some("c".repeat(64));
+        assert!(validate_cross_resume_binding(&wrong, &reviewed).is_err());
+
+        let mut snapshot_plan = reviewed.plan.clone();
+        snapshot_plan.consistency_mode =
+            PostgresConsistencyMode::ConsistentSnapshot.as_str().into();
+        let snapshot_plan = ReviewedPlan::new(snapshot_plan).unwrap();
+        assert!(validate_postgres_mysql_plan(&snapshot_plan).is_err());
     }
 }

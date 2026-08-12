@@ -1,10 +1,12 @@
 //! Reviewed cross-dialect plan construction.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::artifact::{read_json, write_json_new, ArtifactError};
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::conversion::{
     ConversionDialect, MigrationConversionPolicy, QualifiedIdentifier, TableConversionPolicy,
@@ -13,7 +15,7 @@ use super::model::{CatalogObjectKind, Identifier, QualifiedTable, VendorCatalog}
 use super::mysql::{
     mysql_catalog_fingerprint, mysql_catalog_visibility_is_complete,
     mysql_to_postgres_table_conversion_policy, validate_metadata_visibility_capture,
-    MySqlCatalogSnapshot, MySqlMetadataVisibilityCapture, MySqlPlanError,
+    MySqlCatalogSnapshot, MySqlEndpointConfig, MySqlMetadataVisibilityCapture, MySqlPlanError,
 };
 use super::mysql_profile::MySqlFreezeProfileContract;
 use super::plan::{
@@ -23,7 +25,7 @@ use super::plan::{
 };
 use super::postgres::{
     catalog_fingerprint, postgres_to_mysql_table_conversion_policy, CatalogSnapshot,
-    PostgresConsistencyMode, PostgresPlanError, CATALOG_FORMAT_VERSION,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresPlanError, CATALOG_FORMAT_VERSION,
 };
 
 pub const CROSS_DIALECT_MAPPING_SCHEMA_VERSION: u16 = 1;
@@ -102,6 +104,82 @@ impl CrossDialectMapping {
         }
         Ok(())
     }
+}
+
+/// Inspect a PostgreSQL source and empty MySQL target, then publish one
+/// reviewed PostgreSQL-to-MySQL plan.
+pub fn write_live_postgres_to_mysql_plan(
+    source_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    target_metadata_config_path: impl AsRef<Path>,
+    mapping_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<ReviewedPlan, CrossDialectPlanError> {
+    let source_config = PostgresEndpointConfig::read(source_config_path.as_ref())?;
+    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
+    let target_metadata = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    require_separate_credentials(&[
+        &source_config.credential_env,
+        &target_config.credential_env,
+        &target_metadata.credential_env,
+    ])?;
+    let mapping: CrossDialectMapping = read_json(mapping_path)?;
+    let source = super::postgres::inspect_endpoint(&source_config)?;
+    let target = super::mysql::inspect_live_endpoint(target_config.clone())?;
+    let visibility = super::mysql::collect_mysql_metadata_visibility(
+        &target,
+        &target_config,
+        &target_metadata,
+        None,
+    )?;
+    let reviewed = build_postgres_to_mysql_plan(&source, &target, &visibility, &mapping)?;
+    write_json_new(output_path, &reviewed)?;
+    Ok(reviewed)
+}
+
+/// Inspect a continuously frozen MySQL source and empty PostgreSQL target,
+/// then publish one reviewed MySQL-to-PostgreSQL plan.
+pub fn write_live_mysql_to_postgres_plan(
+    source_config_path: impl AsRef<Path>,
+    source_metadata_config_path: impl AsRef<Path>,
+    freeze_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    mapping_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<ReviewedPlan, CrossDialectPlanError> {
+    let source_config = MySqlEndpointConfig::read(source_config_path.as_ref())?;
+    let source_metadata = MySqlEndpointConfig::read(source_metadata_config_path.as_ref())?;
+    let freeze_config = MySqlEndpointConfig::read(freeze_config_path.as_ref())?;
+    let target_config = PostgresEndpointConfig::read(target_config_path.as_ref())?;
+    require_separate_credentials(&[
+        &source_config.credential_env,
+        &source_metadata.credential_env,
+        &freeze_config.credential_env,
+        &target_config.credential_env,
+    ])?;
+    let mapping: CrossDialectMapping = read_json(mapping_path)?;
+    let source = super::mysql::inspect_live_endpoint(source_config.clone())?;
+    let visibility = super::mysql::collect_mysql_metadata_visibility(
+        &source,
+        &source_config,
+        &source_metadata,
+        Some(&freeze_config),
+    )?;
+    let target = super::postgres::inspect_endpoint(&target_config)?;
+    let reviewed = build_mysql_to_postgres_plan(&source, &visibility, &target, &mapping)?;
+    write_json_new(output_path, &reviewed)?;
+    Ok(reviewed)
+}
+
+fn require_separate_credentials(credentials: &[&String]) -> Result<(), CrossDialectPlanError> {
+    if credentials
+        .iter()
+        .enumerate()
+        .any(|(index, credential)| credentials[..index].contains(credential))
+    {
+        return Err(CrossDialectPlanError::SharedCredentials);
+    }
+    Ok(())
 }
 
 /// Build one PostgreSQL-to-MySQL reviewed plan from exact endpoint evidence.
@@ -212,7 +290,7 @@ pub fn build_postgres_to_mysql_plan(
         target_catalog: AssessmentStatus::Assessed(target_visibility.authoritative_catalog.clone()),
         source_tls_binding: source.tls_binding.clone(),
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
-        consistency_mode: PostgresConsistencyMode::ConsistentSnapshot.as_str().into(),
+        consistency_mode: PostgresConsistencyMode::WriteFence.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy,
         outage_policy: None,
@@ -617,6 +695,10 @@ pub enum CrossDialectPlanError {
     IncompleteMapping,
     #[error("cross-dialect endpoint evidence differs from the reviewed catalogs")]
     EndpointEvidenceMismatch,
+    #[error("cross-dialect operational roles require separate credential references")]
+    SharedCredentials,
+    #[error("protected cross-dialect artifact operation failed")]
+    Artifact(#[from] ArtifactError),
     #[error("PostgreSQL cross-dialect plan failed")]
     Postgres(#[from] PostgresPlanError),
     #[error("MySQL cross-dialect plan failed")]
@@ -1056,6 +1138,17 @@ pub(crate) mod tests {
         build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap()
     }
 
+    pub(crate) fn postgres_to_mysql_reviewed_plan() -> ReviewedPlan {
+        let source = postgres_snapshot("postgres://source/app?user=reader", true);
+        let target = mysql_snapshot("mysql://target/app", false);
+        let target_visibility = mysql_visibility(&target);
+        let mapping = mapping(vec![CrossDialectTableMapping {
+            source: table("public", "items"),
+            target: table("app", "items"),
+        }]);
+        build_postgres_to_mysql_plan(&source, &target, &target_visibility, &mapping).unwrap()
+    }
+
     #[test]
     fn mapping_requires_stable_bijective_table_order() {
         let first = CrossDialectTableMapping {
@@ -1178,6 +1271,7 @@ pub(crate) mod tests {
             build_postgres_to_mysql_plan(&source, &target, &target_visibility, &mapping).unwrap();
         assert!(!reviewed.plan.unsupported_objects.blocks_execution());
         assert_eq!(reviewed.plan.operations.len(), 4);
+        assert_eq!(reviewed.plan.consistency_mode, "write-fence");
         assert!(matches!(
             reviewed.plan.conversion_policy.mode,
             super::super::conversion::MigrationConversionMode::CrossDialect {
