@@ -1,10 +1,18 @@
 #![cfg(feature = "enterprise-migration-spike")]
 
+#[cfg(feature = "migration-fault-injection")]
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "migration-fault-injection")]
 use std::{thread, time::Instant};
+
+#[cfg(feature = "migration-fault-injection")]
+#[path = "support/postgres_commit_proxy.rs"]
+mod mysql_commit_proxy;
+#[cfg(feature = "migration-fault-injection")]
+use mysql_commit_proxy::{CommitFaultMode, PostgresCommitProxy};
 
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts};
@@ -423,6 +431,9 @@ fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
             MySqlExecutionInterruption::CommittedChunks(_) => {
                 unreachable!("the matrix uses one exact committed-chunk boundary")
             }
+            MySqlExecutionInterruption::NetworkCommitFault(_) => {
+                unreachable!("network commit faults have a separate causal proxy matrix")
+            }
         }
         drop(interrupted);
 
@@ -571,6 +582,173 @@ fn live_mysql_cancellation_rolls_back_and_resumes() -> anyhow::Result<()> {
     )?;
     assert_eq!(resumed.copied_rows, 3);
     assert_eq!(resumed.committed_chunks, 2);
+    let rows: Vec<(i64, String)> = observer
+        .query("SELECT id, payload FROM migration_execution_target.copy_items ORDER BY id")?;
+    assert_eq!(
+        rows,
+        vec![(1, "one".into()), (2, "two".into()), (3, "three".into())]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_network_commit_response_loss_matrix() -> anyhow::Result<()> {
+    for (suffix, mode) in [
+        ("not-forwarded", CommitFaultMode::NotForwarded),
+        ("ack-lost", CommitFaultMode::AppliedAckLost),
+    ] {
+        run_live_mysql_network_commit_response_loss_case(suffix, mode)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn run_live_mysql_network_commit_response_loss_case(
+    suffix: &str,
+    mode: CommitFaultMode,
+) -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG")?;
+    let direct_target_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG")?;
+    let direct_target = MySqlEndpointConfig::read(&direct_target_path)?;
+    let upstream = (direct_target.host.as_str(), direct_target.port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("MySQL target endpoint did not resolve"))?;
+    let proxy = PostgresCommitProxy::start(upstream, mode)?;
+    let mut proxied_target = direct_target.clone();
+    proxied_target.port = proxy.data_port();
+    let proxied_target_path = direct_target_path.with_extension(format!("{suffix}.proxy.toml"));
+    std::fs::write(&proxied_target_path, toml::to_string(&proxied_target)?)?;
+    let plan_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT")?
+        .with_extension(format!("{suffix}.network.plan.json"));
+    let assertion_path = required_path("SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT")?
+        .with_extension(format!("{suffix}.network.assertion.json"));
+    let journal_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT")?
+        .with_extension(format!("{suffix}.network.journal"));
+    let mut observer = connect(&direct_target)?;
+    observer.query_drop("DROP TABLE IF EXISTS migration_execution_target.copy_items")?;
+    write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &proxied_target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    write_live_freeze_assertion(&assertion_path, &format!("mysql-network-{suffix}"))?;
+    let execution = MySqlInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        source_metadata_config_path: &source_metadata_path,
+        freeze_config_path: &freeze_path,
+        target_config_path: &proxied_target_path,
+        target_metadata_config_path: &target_metadata_path,
+        freeze_assertion_path: &assertion_path,
+        approval_reference: "live-network-commit-loss",
+        state_path: &journal_path,
+        interruption: MySqlExecutionInterruption::NetworkCommitFault(proxy.control_port()),
+    };
+
+    match mode {
+        CommitFaultMode::NotForwarded => {
+            let error = execute_live_mysql_frozen_plan_interrupted(execution).unwrap_err();
+            assert!(error.to_string().contains("commit outcome is unknown"));
+            proxy.wait_for("discarded MySQL COMMIT bytes", |telemetry| {
+                telemetry.dropped_client_bytes_after_arm > 0
+            })?;
+            let telemetry = proxy.telemetry()?;
+            assert_eq!(telemetry.forwarded_client_bytes_after_arm, 0);
+            let target_rows: u64 = observer
+                .query_first("SELECT COUNT(*) FROM migration_execution_target.copy_items")?
+                .unwrap();
+            assert_eq!(target_rows, 0);
+            let interrupted = AppendJournal::open_resume(&journal_path)?;
+            assert_eq!(interrupted.projection().last_chunk_id, 0);
+            assert_eq!(
+                interrupted
+                    .projection()
+                    .prepared_chunk
+                    .as_ref()
+                    .map(|chunk| chunk.chunk_id),
+                Some(1)
+            );
+            drop(interrupted);
+            resume_live_mysql_frozen_plan(
+                &journal_path,
+                &source_path,
+                &source_metadata_path,
+                &freeze_path,
+                &proxied_target_path,
+                &target_metadata_path,
+                &assertion_path,
+            )?;
+        }
+        CommitFaultMode::AppliedAckLost => {
+            let result = thread::scope(|scope| -> anyhow::Result<_> {
+                let handle = scope.spawn(|| execute_live_mysql_frozen_plan_interrupted(execution));
+                let deadline = Instant::now() + Duration::from_secs(20);
+                loop {
+                    let table_exists: Option<u8> = observer.query_first(
+                        "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'migration_execution_target' AND TABLE_NAME = 'copy_items'",
+                    )?;
+                    let rows: Vec<(i64, String)> = if table_exists.is_some() {
+                        observer.query(
+                            "SELECT id, payload FROM migration_execution_target.copy_items ORDER BY id",
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    if rows == vec![(1, "one".into()), (2, "two".into())] {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        anyhow::bail!("MySQL committed chunk was not visible before CUT timeout");
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                proxy.wait_for("withheld MySQL COMMIT response", |telemetry| {
+                    telemetry.forwarded_client_bytes_after_arm > 0
+                        && telemetry.dropped_server_bytes_after_arm > 0
+                })?;
+                proxy.cut()?;
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("MySQL network-fault runner thread panicked"))
+            })?;
+            let report = result?;
+            assert_eq!(report.copied_rows, 3);
+            assert_eq!(report.committed_chunks, 2);
+        }
+    }
+
+    let telemetry = proxy.telemetry()?;
+    match mode {
+        CommitFaultMode::NotForwarded => {
+            assert!(telemetry.dropped_client_bytes_after_arm > 0);
+            assert_eq!(telemetry.forwarded_client_bytes_after_arm, 0);
+        }
+        CommitFaultMode::AppliedAckLost => {
+            assert!(telemetry.forwarded_client_bytes_after_arm > 0);
+            assert_eq!(telemetry.forwarded_server_bytes_after_arm, 0);
+            assert!(telemetry.dropped_server_bytes_after_arm > 0);
+        }
+    }
+    let completed = AppendJournal::open_resume(&journal_path)?;
+    assert_eq!(
+        completed.projection().status,
+        sql_splitter::migration::journal::MigrationStatus::Completed
+    );
+    let committed = completed
+        .all_committed_chunks()?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(committed.len(), 2);
     let rows: Vec<(i64, String)> = observer
         .query("SELECT id, payload FROM migration_execution_target.copy_items ORDER BY id")?;
     assert_eq!(

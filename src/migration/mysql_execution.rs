@@ -416,6 +416,7 @@ enum MySqlInterruptionPoint {
     CommittedChunks(u64),
     AutoIncrementPrepared,
     AutoIncrementCommitted,
+    NetworkCommitFault(u16),
 }
 
 /// Deterministic MySQL recovery boundaries used by the opt-in live matrix.
@@ -429,6 +430,7 @@ pub enum MySqlExecutionInterruption {
     CommittedChunks(u64),
     AutoIncrementPrepared,
     AutoIncrementCommitted,
+    NetworkCommitFault(u16),
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -442,6 +444,7 @@ impl From<MySqlExecutionInterruption> for MySqlInterruptionPoint {
             MySqlExecutionInterruption::CommittedChunks(count) => Self::CommittedChunks(count),
             MySqlExecutionInterruption::AutoIncrementPrepared => Self::AutoIncrementPrepared,
             MySqlExecutionInterruption::AutoIncrementCommitted => Self::AutoIncrementCommitted,
+            MySqlExecutionInterruption::NetworkCommitFault(port) => Self::NetworkCommitFault(port),
         }
     }
 }
@@ -1708,6 +1711,17 @@ where
             ))),
         };
     }
+    #[cfg(feature = "migration-fault-injection")]
+    if let Some(MySqlInterruptionPoint::NetworkCommitFault(port)) = interruption {
+        let prepared_chunk_id = journal
+            .projection()
+            .prepared_chunk
+            .as_ref()
+            .map(|chunk| chunk.chunk_id);
+        if prepared_chunk_id == Some(1) {
+            arm_mysql_network_commit_fault(port)?;
+        }
+    }
     match writer.commit() {
         Ok(()) => {
             interrupt_mysql_if(
@@ -1740,6 +1754,26 @@ where
         matches!(point, MySqlInterruptionPoint::CommittedChunks(limit) if journal.projection().last_chunk_id >= limit)
     }) {
         return Err(injected_mysql_interruption(interruption));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn arm_mysql_network_commit_fault(port: u16) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut control = TcpStream::connect_timeout(&address.into(), Duration::from_secs(10))?;
+    control.set_read_timeout(Some(Duration::from_secs(10)))?;
+    control.set_write_timeout(Some(Duration::from_secs(10)))?;
+    control.write_all(b"ARM\n")?;
+    let mut response = [0_u8; 6];
+    control.read_exact(&mut response)?;
+    if &response != b"ARMED\n" {
+        return Err(anyhow!(
+            "MySQL commit fault proxy returned an invalid arm response"
+        ));
     }
     Ok(())
 }
