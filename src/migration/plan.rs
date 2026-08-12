@@ -7,10 +7,11 @@ use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
+use super::mysql_visibility::{MySqlMetadataVisibilityEvidence, MySqlVisibilityError};
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 10;
+pub const PLAN_SCHEMA_VERSION: u16 = 11;
 pub const MYSQL_STRICT_SQL_MODE: &str =
     "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION";
 pub const MYSQL_SESSION_CHARACTER_SET: &str = "utf8mb4";
@@ -23,6 +24,7 @@ pub struct MySqlSnapshotEvidence {
     pub database_identity: String,
     pub server_uuid: String,
     pub server_version: String,
+    pub authenticated_account: String,
     pub lifecycle_id: String,
     pub connection_id: u32,
     pub transaction_isolation: String,
@@ -318,6 +320,10 @@ pub struct MigrationPlan {
     pub mysql_snapshot_evidence: Option<MySqlSnapshotEvidence>,
     #[serde(default)]
     pub mysql_target_snapshot_evidence: Option<MySqlSnapshotEvidence>,
+    #[serde(default)]
+    pub mysql_metadata_visibility: Option<MySqlMetadataVisibilityEvidence>,
+    #[serde(default)]
+    pub mysql_target_metadata_visibility: Option<MySqlMetadataVisibilityEvidence>,
     pub capabilities: BTreeMap<String, String>,
     pub operations: Vec<PlanOperation>,
     pub unsupported_objects: UnsupportedObjectReport,
@@ -428,12 +434,45 @@ impl MigrationPlan {
                         field: "mysql_source_profile",
                     })?
                     .validate()?;
+                let catalog_reader_fingerprint = self
+                    .mysql_metadata_visibility
+                    .as_ref()
+                    .map_or(self.source_catalog_fingerprint.as_str(), |visibility| {
+                        visibility.catalog_reader_fingerprint.as_str()
+                    });
                 validate_mysql_snapshot_evidence(
                     evidence,
                     &self.source_endpoint_identity,
                     source_catalog,
-                    &self.source_catalog_fingerprint,
+                    catalog_reader_fingerprint,
                 )?;
+                if let Some(visibility) = &self.mysql_metadata_visibility {
+                    visibility.validate()?;
+                    if visibility.endpoint_identity != self.source_endpoint_identity
+                        || visibility.database_identity != evidence.database_identity
+                        || visibility.server_uuid != evidence.server_uuid
+                        || visibility.catalog_reader_tls_binding != self.source_tls_binding
+                        || format!(
+                            "{}@{}",
+                            visibility.catalog_reader_account.user,
+                            visibility.catalog_reader_account.host
+                        ) != evidence.authenticated_account
+                        || visibility.catalog_reader_fingerprint != evidence.catalog_fingerprint
+                        || visibility.authoritative_catalog_fingerprint
+                            != self.source_catalog_fingerprint
+                    {
+                        return Err(PlanError::InvalidMySqlMetadataVisibility);
+                    }
+                } else if !self
+                    .unsupported_objects
+                    .objects
+                    .iter()
+                    .any(|finding| finding.object_kind == "catalog_visibility")
+                {
+                    return Err(PlanError::MissingEvidence {
+                        field: "mysql_metadata_visibility",
+                    });
+                }
                 if self.postgres_source_profile.is_some() {
                     return Err(PlanError::InvalidMySqlSnapshotEvidence);
                 }
@@ -442,6 +481,16 @@ impl MigrationPlan {
                         field: "mysql_target_snapshot_evidence",
                     },
                 )?;
+                let target_reader_catalog_fingerprint =
+                    self.mysql_target_metadata_visibility.as_ref().map_or_else(
+                        || {
+                            self.target_catalog_fingerprint
+                                .as_assessed()
+                                .map(String::as_str)
+                                .unwrap_or_default()
+                        },
+                        |visibility| visibility.catalog_reader_fingerprint.as_str(),
+                    );
                 validate_mysql_snapshot_evidence(
                     target_evidence,
                     self.target_endpoint_identity
@@ -450,10 +499,47 @@ impl MigrationPlan {
                     self.target_catalog
                         .as_assessed()
                         .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
-                    self.target_catalog_fingerprint
-                        .as_assessed()
-                        .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
+                    target_reader_catalog_fingerprint,
                 )?;
+                if let Some(visibility) = &self.mysql_target_metadata_visibility {
+                    visibility.validate()?;
+                    if visibility.endpoint_identity
+                        != *self
+                            .target_endpoint_identity
+                            .as_assessed()
+                            .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
+                        || visibility.database_identity != target_evidence.database_identity
+                        || visibility.server_uuid != target_evidence.server_uuid
+                        || visibility.catalog_reader_tls_binding
+                            != *self
+                                .target_tls_binding
+                                .as_assessed()
+                                .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
+                        || format!(
+                            "{}@{}",
+                            visibility.catalog_reader_account.user,
+                            visibility.catalog_reader_account.host
+                        ) != target_evidence.authenticated_account
+                        || visibility.catalog_reader_fingerprint
+                            != target_evidence.catalog_fingerprint
+                        || visibility.authoritative_catalog_fingerprint
+                            != *self
+                                .target_catalog_fingerprint
+                                .as_assessed()
+                                .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
+                    {
+                        return Err(PlanError::InvalidMySqlMetadataVisibility);
+                    }
+                } else if !self
+                    .unsupported_objects
+                    .objects
+                    .iter()
+                    .any(|finding| finding.object_kind == "target_catalog_visibility")
+                {
+                    return Err(PlanError::MissingEvidence {
+                        field: "mysql_target_metadata_visibility",
+                    });
+                }
                 if evidence.lower_case_table_names != target_evidence.lower_case_table_names
                     || self.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
                 {
@@ -471,7 +557,11 @@ impl MigrationPlan {
             }
             (_, None) => {}
         }
-        if source_catalog.dialect != "mysql" && self.mysql_source_profile.is_some() {
+        if source_catalog.dialect != "mysql"
+            && (self.mysql_source_profile.is_some()
+                || self.mysql_metadata_visibility.is_some()
+                || self.mysql_target_metadata_visibility.is_some())
+        {
             return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
         }
         let mut finding_keys = BTreeSet::new();
@@ -600,6 +690,8 @@ fn validate_mysql_snapshot_evidence(
     if evidence.endpoint_identity != endpoint_identity
         || evidence.database_identity != catalog.database.as_str()
         || evidence.server_version != catalog.server_version
+        || evidence.authenticated_account.is_empty()
+        || evidence.authenticated_account.contains('\0')
         || evidence.catalog_fingerprint != catalog_fingerprint
         || evidence.server_uuid.is_empty()
         || evidence.lifecycle_id.is_empty()
@@ -728,6 +820,10 @@ pub enum PlanError {
     PostgresSourceProfile(#[from] PostgresSourceProfileError),
     #[error("reviewed MySQL snapshot evidence is invalid or inconsistent")]
     InvalidMySqlSnapshotEvidence,
+    #[error("reviewed MySQL metadata-visibility evidence is invalid or inconsistent")]
+    InvalidMySqlMetadataVisibility,
+    #[error("reviewed MySQL metadata-visibility evidence is invalid")]
+    MySqlMetadataVisibility(#[from] MySqlVisibilityError),
     #[error("reviewed MySQL source profile is invalid")]
     MySqlSourceProfile(#[from] MySqlFreezeProfileError),
     #[error("non-MySQL plan contains MySQL snapshot evidence")]
@@ -808,6 +904,8 @@ mod tests {
             mysql_source_profile: None,
             mysql_snapshot_evidence: None,
             mysql_target_snapshot_evidence: None,
+            mysql_metadata_visibility: None,
+            mysql_target_metadata_visibility: None,
             capabilities: BTreeMap::new(),
             operations: vec![PlanOperation::new(
                 OperationKind::VerifySchema,
@@ -866,6 +964,7 @@ mod tests {
             database_identity: source_catalog.database.to_string(),
             server_uuid: "server-uuid".into(),
             server_version: "8.4.0".into(),
+            authenticated_account: "source@%".into(),
             lifecycle_id: "mysql-session-1".into(),
             connection_id: 7,
             transaction_isolation: "REPEATABLE-READ".into(),
@@ -887,6 +986,7 @@ mod tests {
             database_identity: target_catalog.database.to_string(),
             server_uuid: "target-server-uuid".into(),
             server_version: "8.4.0".into(),
+            authenticated_account: "target@%".into(),
             lifecycle_id: "mysql-target-session-1".into(),
             connection_id: 8,
             transaction_isolation: "REPEATABLE-READ".into(),
@@ -903,6 +1003,22 @@ mod tests {
             gtid_executed_observation: String::new(),
             catalog_fingerprint: target_fingerprint,
         });
+        plan.unsupported_objects.objects.extend([
+            UnsupportedObject {
+                code: UnsupportedObjectCode::MySqlCatalogSemantics,
+                object_id: "mysql-source-catalog-visibility".into(),
+                object_kind: "catalog_visibility".into(),
+                reason: "source metadata visibility is not proven in this fixture".into(),
+                required_semantics: true,
+            },
+            UnsupportedObject {
+                code: UnsupportedObjectCode::MySqlCatalogSemantics,
+                object_id: "mysql-target-catalog-visibility".into(),
+                object_kind: "target_catalog_visibility".into(),
+                reason: "target metadata visibility is not proven in this fixture".into(),
+                required_semantics: true,
+            },
+        ]);
         assert!(plan.validate().is_ok());
 
         plan.mysql_target_snapshot_evidence

@@ -19,7 +19,8 @@ use sql_splitter::migration::model::{
     ColumnMeta, DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch,
 };
 use sql_splitter::migration::mysql::{
-    attest_mysql_external_freeze, build_plan, inspect_live_endpoint, mysql_auto_increment_states,
+    attest_mysql_external_freeze, build_plan, build_plan_with_visibility,
+    collect_mysql_metadata_visibility, inspect_live_endpoint, mysql_auto_increment_states,
     mysql_catalog_fingerprint, mysql_table_definitions, mysql_tls_binding,
     validate_mysql_external_freeze_continuity, write_live_plan, MySqlEndpointConfig,
     MySqlSourceFactory, MySqlTableState, MySqlTargetFactory, MYSQL_CONSISTENCY_SNAPSHOT,
@@ -30,12 +31,122 @@ use sql_splitter::migration::mysql_profile::{
     MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus, MySqlFreezeProfileKind,
     MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION, MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
 };
+use sql_splitter::migration::mysql_visibility::{
+    MySqlGrantRecord, MySqlOperationalAccountPurpose, MySqlProxyTarget,
+};
 use sql_splitter::migration::plan::{OperationKind, ReviewedPlan, UnsupportedObjectCode};
 
 fn required_path(name: &str) -> anyhow::Result<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("{name} is required"))
+}
+
+#[test]
+#[ignore = "requires the disposable MySQL 8.0/8.4 TLS matrix"]
+fn live_mysql_metadata_visibility_contract() -> anyhow::Result<()> {
+    let source_config =
+        MySqlEndpointConfig::read(&required_path("SQL_SPLITTER_MYSQL_TEST_SOURCE_CONFIG")?)?;
+    let source_metadata_config = MySqlEndpointConfig::read(&required_path(
+        "SQL_SPLITTER_MYSQL_TEST_SOURCE_METADATA_CONFIG",
+    )?)?;
+    let freeze_config =
+        MySqlEndpointConfig::read(&required_path("SQL_SPLITTER_MYSQL_TEST_ADMIN_CONFIG")?)?;
+    let target_config =
+        MySqlEndpointConfig::read(&required_path("SQL_SPLITTER_MYSQL_TEST_TARGET_CONFIG")?)?;
+    let target_metadata_config = MySqlEndpointConfig::read(&required_path(
+        "SQL_SPLITTER_MYSQL_TEST_TARGET_METADATA_CONFIG",
+    )?)?;
+
+    let source = inspect_live_endpoint(source_config.clone())?;
+    let source_visibility = collect_mysql_metadata_visibility(
+        &source,
+        &source_config,
+        &source_metadata_config,
+        Some(&freeze_config),
+    )?;
+    let target = inspect_live_endpoint(target_config.clone())?;
+    let target_visibility =
+        collect_mysql_metadata_visibility(&target, &target_config, &target_metadata_config, None)?;
+    assert!(source_visibility
+        .evidence
+        .grant_inventory
+        .unknown_privilege_classes
+        .is_empty());
+    assert!(target_visibility
+        .evidence
+        .grant_inventory
+        .unknown_privilege_classes
+        .is_empty());
+    assert!(source_visibility
+        .evidence
+        .operational_exclusions
+        .iter()
+        .any(|exclusion| exclusion.purpose == MySqlOperationalAccountPurpose::FreezeAdministrator));
+    assert!(source_visibility
+        .evidence
+        .active_administrator_roles
+        .iter()
+        .any(|role| role.user == "source_metadata_role" && role.host == "%"));
+    assert!(source_visibility
+        .evidence
+        .effective_administrator_privileges
+        .iter()
+        .any(|privilege| privilege == "SHOW_ROUTINE"));
+    assert!(source_visibility
+        .evidence
+        .grant_inventory
+        .records
+        .iter()
+        .any(|record| matches!(
+            record,
+            MySqlGrantRecord::PartialRevoke {
+                account,
+                database,
+                privileges,
+            } if account.user == "partially_restricted_reader"
+                && database == "migration_source"
+                && privileges == &["SELECT"]
+        )));
+    assert!(source_visibility
+        .evidence
+        .grant_inventory
+        .records
+        .iter()
+        .any(|record| matches!(
+            record,
+            MySqlGrantRecord::Proxy {
+                account,
+                target: MySqlProxyTarget::AnyAccount,
+                grantable: true,
+            } if account.user == "migration_admin" && account.host == "%"
+        )));
+    let reviewed =
+        build_plan_with_visibility(&source, &target, &source_visibility, &target_visibility)?;
+    assert_eq!(
+        reviewed.plan.mysql_metadata_visibility,
+        Some(source_visibility.evidence)
+    );
+    assert_eq!(
+        reviewed.plan.mysql_target_metadata_visibility,
+        Some(target_visibility.evidence)
+    );
+    assert!(!reviewed
+        .plan
+        .unsupported_objects
+        .objects
+        .iter()
+        .any(|object| matches!(
+            object.object_kind.as_str(),
+            "catalog_visibility" | "target_catalog_visibility"
+        )));
+    assert!(reviewed
+        .plan
+        .unsupported_objects
+        .objects
+        .iter()
+        .any(|object| object.object_kind == "privilege"));
+    Ok(())
 }
 
 fn identifier(value: &str) -> Identifier {

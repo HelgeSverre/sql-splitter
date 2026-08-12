@@ -46,7 +46,10 @@ fn mysql_plan_is_read_only_and_requires_an_explicit_consistency_contract() {
     let help = String::from_utf8(output.stdout).unwrap();
     for required in [
         "--source-config",
+        "--source-metadata-admin-config",
+        "--freeze-admin-config",
         "--target-config",
+        "--target-metadata-admin-config",
         "--plan-output",
         "--consistency <CONSISTENCY>",
     ] {

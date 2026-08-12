@@ -17,10 +17,11 @@ use super::connection::{
 use super::journal::{MigrationStatus, OperationState};
 use super::model::{DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch, VendorCatalog};
 use super::mysql::{
-    attest_mysql_external_freeze, mysql_auto_increment_states, mysql_table_definitions,
-    validate_mysql_external_freeze_continuity, MySqlAutoIncrementState,
-    MySqlAutoIncrementTargetState, MySqlEndpointConfig, MySqlResumableKey, MySqlSourceFactory,
-    MySqlTableDefinition, MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
+    attest_mysql_external_freeze, collect_mysql_metadata_visibility, mysql_auto_increment_states,
+    mysql_catalog_fingerprint, mysql_table_definitions, validate_mysql_external_freeze_continuity,
+    MySqlAutoIncrementState, MySqlAutoIncrementTargetState, MySqlCatalogSnapshot,
+    MySqlEndpointConfig, MySqlResumableKey, MySqlSourceFactory, MySqlTableDefinition,
+    MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
 };
 use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAttestation};
 use super::plan::{MySqlSnapshotEvidence, OperationKind, PlanOperation, ReviewedPlan};
@@ -369,6 +370,13 @@ struct MySqlAutoIncrementContract {
     mapping: MySqlTableMapping,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MySqlExecutionAdminConfigs<'a> {
+    pub freeze: &'a MySqlEndpointConfig,
+    pub source_metadata: &'a MySqlEndpointConfig,
+    pub target_metadata: &'a MySqlEndpointConfig,
+}
+
 /// Execute or resume the reviewed MySQL plan while continuously re-attesting
 /// the externally owned source freeze. The journal must have been created with
 /// the same reviewed plan and accepted freeze attestation.
@@ -378,12 +386,21 @@ pub fn execute_mysql_frozen_plan(
     target: &MySqlTargetFactory,
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
-    admin_config: &MySqlEndpointConfig,
+    admin_configs: MySqlExecutionAdminConfigs<'_>,
     assertion: &MySqlExternalFreezeAssertion,
 ) -> anyhow::Result<()> {
-    execute_mysql_frozen_plan_with(reviewed, source, target, journal, cancellation, &mut || {
-        attest_mysql_external_freeze(admin_config, reviewed, assertion).map_err(anyhow::Error::from)
-    })
+    execute_mysql_frozen_plan_with(
+        reviewed,
+        source,
+        target,
+        journal,
+        cancellation,
+        &admin_configs,
+        &mut || {
+            attest_mysql_external_freeze(admin_configs.freeze, reviewed, assertion)
+                .map_err(anyhow::Error::from)
+        },
+    )
 }
 
 fn execute_mysql_frozen_plan_with<F>(
@@ -392,11 +409,19 @@ fn execute_mysql_frozen_plan_with<F>(
     target: &MySqlTargetFactory,
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
+    admin_configs: &MySqlExecutionAdminConfigs<'_>,
     attest: &mut F,
 ) -> anyhow::Result<()>
 where
     F: FnMut() -> anyhow::Result<MySqlExternalFreezeAttestation>,
 {
+    validate_mysql_execution_credential_separation(
+        source.endpoint_config(),
+        admin_configs.source_metadata,
+        admin_configs.freeze,
+        target.endpoint_config(),
+        admin_configs.target_metadata,
+    )?;
     reviewed
         .validate()
         .context("validate reviewed MySQL plan hash")?;
@@ -425,6 +450,19 @@ where
         let current = attest().context("re-attest the external MySQL freeze")?;
         validate_mysql_external_freeze_continuity(&accepted, &current)
             .context("validate continuous MySQL freeze evidence")?;
+        attest_current_mysql_source_visibility(
+            reviewed,
+            source.endpoint_config(),
+            admin_configs.source_metadata,
+            admin_configs.freeze,
+        )
+        .context("re-attest MySQL source metadata visibility and authorization inventory")?;
+        attest_current_mysql_target_visibility(
+            reviewed,
+            target.endpoint_config(),
+            admin_configs.target_metadata,
+        )
+        .context("re-attest MySQL target metadata visibility and authorization inventory")?;
         cancellation.check()?;
         Ok(())
     };
@@ -439,7 +477,13 @@ where
     }
 
     require_freeze()?;
-    let (mut reader, initial_catalog) = capture_exact_source(reviewed, source, cancellation)?;
+    let (mut reader, initial_catalog) = capture_exact_source(
+        reviewed,
+        source,
+        cancellation,
+        admin_configs.source_metadata,
+        admin_configs.freeze,
+    )?;
     let copy_contracts = mysql_copy_contracts(reviewed, &initial_catalog)?;
     let auto_increment_contracts = mysql_auto_increment_contracts(reviewed)?;
 
@@ -464,8 +508,13 @@ where
     drop(reader);
 
     require_freeze()?;
-    let (mut verification_reader, final_catalog) =
-        capture_exact_source(reviewed, source, cancellation)?;
+    let (mut verification_reader, final_catalog) = capture_exact_source(
+        reviewed,
+        source,
+        cancellation,
+        admin_configs.source_metadata,
+        admin_configs.freeze,
+    )?;
     verify_auto_increment_source_equality(reviewed, &final_catalog)?;
     if journal.projection().status == MigrationStatus::Running {
         reconcile_mysql_auto_increment(
@@ -491,6 +540,92 @@ where
     require_freeze()?;
     target.assert_exact_schema()?;
     finish_mysql_schema_verification(reviewed, journal)?;
+    Ok(())
+}
+
+fn validate_mysql_execution_credential_separation(
+    source: &MySqlEndpointConfig,
+    source_metadata: &MySqlEndpointConfig,
+    freeze: &MySqlEndpointConfig,
+    target: &MySqlEndpointConfig,
+    target_metadata: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let references = [
+        source.credential_env.as_str(),
+        source_metadata.credential_env.as_str(),
+        freeze.credential_env.as_str(),
+        target.credential_env.as_str(),
+        target_metadata.credential_env.as_str(),
+    ];
+    if references
+        .iter()
+        .enumerate()
+        .any(|(index, value)| references[..index].contains(value))
+    {
+        return Err(anyhow!(
+            "MySQL execution requires separate source reader, source metadata administrator, freeze administrator, target writer, and target metadata administrator credential references"
+        ));
+    }
+    Ok(())
+}
+
+fn attest_current_mysql_source_visibility(
+    reviewed: &ReviewedPlan,
+    source_config: &MySqlEndpointConfig,
+    metadata_admin_config: &MySqlEndpointConfig,
+    freeze_admin_config: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let current_source = super::mysql::inspect_live_endpoint(source_config.clone())?;
+    let current = collect_mysql_metadata_visibility(
+        &current_source,
+        source_config,
+        metadata_admin_config,
+        Some(freeze_admin_config),
+    )?;
+    let accepted = reviewed
+        .plan
+        .mysql_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no metadata-visibility evidence"))?;
+    let fingerprint = mysql_catalog_fingerprint(&current.authoritative_catalog)?;
+    if current.evidence != *accepted
+        || !super::mysql::mysql_catalog_visibility_is_complete(&current_source, &current)?
+        || fingerprint != reviewed.plan.source_catalog_fingerprint
+        || reviewed.plan.source_catalog.as_ref() != Some(&current.authoritative_catalog)
+        || !current.authoritative_blockers.is_empty()
+    {
+        return Err(anyhow!(
+            "current MySQL metadata visibility, grants, roles, partial revokes, or catalog differs from the reviewed contract"
+        ));
+    }
+    Ok(())
+}
+
+fn attest_current_mysql_target_visibility(
+    reviewed: &ReviewedPlan,
+    target_config: &MySqlEndpointConfig,
+    metadata_admin_config: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let current_target = super::mysql::inspect_live_endpoint(target_config.clone())?;
+    let current = collect_mysql_metadata_visibility(
+        &current_target,
+        target_config,
+        metadata_admin_config,
+        None,
+    )?;
+    let accepted = reviewed
+        .plan
+        .mysql_target_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target metadata-visibility evidence"))?;
+    if !current.evidence.same_authorization_as(accepted)
+        || !super::mysql::mysql_catalog_visibility_is_complete(&current_target, &current)?
+        || !current.authoritative_blockers.is_empty()
+    {
+        return Err(anyhow!(
+            "current MySQL target metadata visibility, grants, roles, partial revokes, or catalog differs from the reviewed contract"
+        ));
+    }
     Ok(())
 }
 
@@ -521,6 +656,8 @@ fn capture_exact_source(
     reviewed: &ReviewedPlan,
     source: &MySqlSourceFactory,
     cancellation: &CancellationToken,
+    metadata_admin_config: &MySqlEndpointConfig,
+    freeze_admin_config: &MySqlEndpointConfig,
 ) -> anyhow::Result<(Box<dyn ReadSession>, VendorCatalog)> {
     cancellation.check()?;
     let snapshot = source.capture_snapshot()?;
@@ -530,10 +667,35 @@ fn capture_exact_source(
         .mysql_snapshot_evidence
         .as_ref()
         .ok_or_else(|| anyhow!("reviewed MySQL plan has no source snapshot evidence"))?;
-    let (catalog, blockers, fingerprint) = source.captured_catalog(&snapshot)?;
-    if !blockers.is_empty()
+    let (reader_catalog, reader_blockers, reader_fingerprint) =
+        source.captured_catalog(&snapshot)?;
+    let source_snapshot = MySqlCatalogSnapshot {
+        endpoint_identity: snapshot.endpoint_identity.clone(),
+        database_identity: snapshot.database_identity.clone(),
+        server_version: snapshot.server_version.clone(),
+        tls_binding: reviewed.plan.source_tls_binding.clone(),
+        snapshot_evidence: current_evidence.clone(),
+        catalog: reader_catalog,
+        blockers: reader_blockers,
+    };
+    let visibility = collect_mysql_metadata_visibility(
+        &source_snapshot,
+        source.endpoint_config(),
+        metadata_admin_config,
+        Some(freeze_admin_config),
+    )?;
+    let reviewed_visibility = reviewed
+        .plan
+        .mysql_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no metadata-visibility evidence"))?;
+    let fingerprint = mysql_catalog_fingerprint(&visibility.authoritative_catalog)?;
+    if !visibility.authoritative_blockers.is_empty()
+        || visibility.evidence != *reviewed_visibility
+        || !super::mysql::mysql_catalog_visibility_is_complete(&source_snapshot, &visibility)?
+        || reader_fingerprint != reviewed_visibility.catalog_reader_fingerprint
         || fingerprint != reviewed.plan.source_catalog_fingerprint
-        || reviewed.plan.source_catalog.as_ref() != Some(&catalog)
+        || reviewed.plan.source_catalog.as_ref() != Some(&visibility.authoritative_catalog)
         || !mysql_execution_snapshot_binding_is_exact(&current_evidence, reviewed_evidence)
     {
         return Err(anyhow!(
@@ -546,29 +708,81 @@ fn capture_exact_source(
             "MySQL source reader does not retain the reviewed read-only snapshot"
         ));
     }
-    Ok((reader, catalog))
+    Ok((reader, visibility.authoritative_catalog))
 }
 
 fn mysql_execution_snapshot_binding_is_exact(
     current: &MySqlSnapshotEvidence,
     reviewed: &MySqlSnapshotEvidence,
 ) -> bool {
-    current.endpoint_identity == reviewed.endpoint_identity
-        && current.database_identity == reviewed.database_identity
-        && current.server_uuid == reviewed.server_uuid
-        && current.server_version == reviewed.server_version
-        && current.transaction_isolation == reviewed.transaction_isolation
-        && current.transaction_read_only == reviewed.transaction_read_only
-        && current.session_time_zone == reviewed.session_time_zone
-        && current.catalog_snapshot_protected == reviewed.catalog_snapshot_protected
-        && current.information_schema_stats_expiry == reviewed.information_schema_stats_expiry
-        && current.lower_case_table_names == reviewed.lower_case_table_names
-        && current.session_sql_mode == reviewed.session_sql_mode
-        && current.character_set_client == reviewed.character_set_client
-        && current.character_set_connection == reviewed.character_set_connection
-        && current.character_set_results == reviewed.character_set_results
-        && current.collation_connection == reviewed.collation_connection
-        && current.catalog_fingerprint == reviewed.catalog_fingerprint
+    mysql_execution_snapshot_binding(current) == mysql_execution_snapshot_binding(reviewed)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MySqlExecutionSnapshotBinding<'a> {
+    endpoint_identity: &'a str,
+    database_identity: &'a str,
+    server_uuid: &'a str,
+    server_version: &'a str,
+    authenticated_account: &'a str,
+    transaction_isolation: &'a str,
+    transaction_read_only: bool,
+    session_time_zone: &'a str,
+    catalog_snapshot_protected: bool,
+    information_schema_stats_expiry: u64,
+    lower_case_table_names: u8,
+    session_sql_mode: &'a str,
+    character_set_client: &'a str,
+    character_set_connection: &'a str,
+    character_set_results: &'a str,
+    collation_connection: &'a str,
+    catalog_fingerprint: &'a str,
+}
+
+fn mysql_execution_snapshot_binding(
+    evidence: &MySqlSnapshotEvidence,
+) -> MySqlExecutionSnapshotBinding<'_> {
+    let MySqlSnapshotEvidence {
+        endpoint_identity,
+        database_identity,
+        server_uuid,
+        server_version,
+        authenticated_account,
+        lifecycle_id: _,
+        connection_id: _,
+        transaction_isolation,
+        transaction_read_only,
+        session_time_zone,
+        catalog_snapshot_protected,
+        information_schema_stats_expiry,
+        lower_case_table_names,
+        session_sql_mode,
+        character_set_client,
+        character_set_connection,
+        character_set_results,
+        collation_connection,
+        gtid_executed_observation: _,
+        catalog_fingerprint,
+    } = evidence;
+    MySqlExecutionSnapshotBinding {
+        endpoint_identity,
+        database_identity,
+        server_uuid,
+        server_version,
+        authenticated_account,
+        transaction_isolation,
+        transaction_read_only: *transaction_read_only,
+        session_time_zone,
+        catalog_snapshot_protected: *catalog_snapshot_protected,
+        information_schema_stats_expiry: *information_schema_stats_expiry,
+        lower_case_table_names: *lower_case_table_names,
+        session_sql_mode,
+        character_set_client,
+        character_set_connection,
+        character_set_results,
+        collation_connection,
+        catalog_fingerprint,
+    }
 }
 
 fn mysql_copy_contracts(
@@ -1360,6 +1574,11 @@ mod tests {
         MySqlFreezeAttestationStatus, MySqlFreezeProfileKind,
         MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
     };
+    use crate::migration::mysql_visibility::{
+        MySqlAccountIdentity, MySqlGrantInventory, MySqlGrantRecord, MySqlGrantTableColumn,
+        MySqlMetadataVisibilityEvidence, MySqlOperationalAccountExclusion,
+        MySqlOperationalAccountPurpose, MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION,
+    };
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, MySqlSnapshotEvidence, PlanPurpose,
         UnsupportedObjectReport, MYSQL_SESSION_CHARACTER_SET, MYSQL_SESSION_COLLATION,
@@ -1608,6 +1827,84 @@ mod tests {
         }
     }
 
+    fn visibility_evidence(
+        endpoint_identity: &str,
+        database: &str,
+        server_uuid: &str,
+        reader_user: &str,
+        reader_tls_binding: &str,
+        reader_catalog_fingerprint: &str,
+        authoritative_catalog_fingerprint: &str,
+    ) -> MySqlMetadataVisibilityEvidence {
+        let reader = MySqlAccountIdentity {
+            user: reader_user.into(),
+            host: "%".into(),
+        };
+        let administrator = MySqlAccountIdentity {
+            user: format!("{reader_user}_metadata_admin"),
+            host: "%".into(),
+        };
+        let mut records = ["EVENT", "SELECT", "SHOW VIEW", "TRIGGER"]
+            .into_iter()
+            .map(|privilege| MySqlGrantRecord::StaticGlobal {
+                account: administrator.clone(),
+                privilege: privilege.into(),
+            })
+            .chain(std::iter::once(MySqlGrantRecord::DynamicGlobal {
+                account: administrator.clone(),
+                privilege: "SHOW_ROUTINE".into(),
+                grantable: false,
+            }))
+            .collect::<Vec<_>>();
+        records.sort();
+        let mut accounts = vec![reader.clone(), administrator.clone()];
+        accounts.sort();
+        let grant_inventory = MySqlGrantInventory {
+            partial_revokes_enabled: true,
+            grant_table_columns: vec![MySqlGrantTableColumn {
+                table: "user".into(),
+                column: "Host".into(),
+                data_type: "char".into(),
+            }],
+            accounts,
+            records,
+            unknown_privilege_classes: Vec::new(),
+        };
+        let grant_inventory_digest = grant_inventory.canonical_hash().unwrap();
+        MySqlMetadataVisibilityEvidence {
+            schema_version: MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION,
+            endpoint_identity: endpoint_identity.into(),
+            database_identity: database.into(),
+            server_uuid: server_uuid.into(),
+            catalog_reader_tls_binding: reader_tls_binding.into(),
+            metadata_administrator_tls_binding: "metadata-admin-tls".into(),
+            catalog_reader_account: reader.clone(),
+            metadata_administrator_account: administrator.clone(),
+            active_administrator_roles: Vec::new(),
+            effective_administrator_privileges: vec![
+                "EVENT".into(),
+                "SELECT".into(),
+                "SHOW VIEW".into(),
+                "SHOW_ROUTINE".into(),
+                "TRIGGER".into(),
+            ],
+            operational_exclusions: vec![
+                MySqlOperationalAccountExclusion {
+                    purpose: MySqlOperationalAccountPurpose::CatalogReader,
+                    account: reader,
+                },
+                MySqlOperationalAccountExclusion {
+                    purpose: MySqlOperationalAccountPurpose::MetadataAdministrator,
+                    account: administrator,
+                },
+            ],
+            catalog_reader_fingerprint: reader_catalog_fingerprint.into(),
+            authoritative_catalog_fingerprint: authoritative_catalog_fingerprint.into(),
+            grant_inventory_digest,
+            grant_inventory,
+        }
+    }
+
     fn reviewed_plan() -> (ReviewedPlan, String) {
         let source_config = endpoint_config("source_db");
         let target_config = endpoint_config("target_db");
@@ -1615,6 +1912,26 @@ mod tests {
         let target_catalog = catalog("target_db");
         let source_fingerprint = fingerprint(&source_catalog);
         let target_fingerprint = fingerprint(&target_catalog);
+        let source_tls_binding = mysql_tls_binding(&source_config).unwrap();
+        let target_tls_binding = mysql_tls_binding(&target_config).unwrap();
+        let source_visibility = visibility_evidence(
+            "mysql://source/source_db",
+            "source_db",
+            "server-uuid",
+            "source",
+            &source_tls_binding,
+            &source_fingerprint,
+            &source_fingerprint,
+        );
+        let target_visibility = visibility_evidence(
+            "mysql://target/target_db",
+            "target_db",
+            "target-server-uuid",
+            "target",
+            &target_tls_binding,
+            &target_fingerprint,
+            &target_fingerprint,
+        );
         let (source_table, definition, mapping) = table_definition();
         let operation = PlanOperation::new(
             OperationKind::CreateTable,
@@ -1644,10 +1961,8 @@ mod tests {
             target_catalog_fingerprint: AssessmentStatus::Assessed(target_fingerprint.clone()),
             source_catalog: Some(source_catalog),
             target_catalog: AssessmentStatus::Assessed(target_catalog),
-            source_tls_binding: mysql_tls_binding(&source_config).unwrap(),
-            target_tls_binding: AssessmentStatus::Assessed(
-                mysql_tls_binding(&target_config).unwrap(),
-            ),
+            source_tls_binding,
+            target_tls_binding: AssessmentStatus::Assessed(target_tls_binding),
             consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "mysql_same_dialect_exact".into(),
@@ -1661,6 +1976,7 @@ mod tests {
                 database_identity: "source_db".into(),
                 server_uuid: "server-uuid".into(),
                 server_version: "8.4.0".into(),
+                authenticated_account: "source@%".into(),
                 lifecycle_id: "lifecycle".into(),
                 connection_id: 7,
                 transaction_isolation: "REPEATABLE-READ".into(),
@@ -1682,6 +1998,7 @@ mod tests {
                 database_identity: "target_db".into(),
                 server_uuid: "target-server-uuid".into(),
                 server_version: "8.4.0".into(),
+                authenticated_account: "target@%".into(),
                 lifecycle_id: "target-lifecycle".into(),
                 connection_id: 8,
                 transaction_isolation: "REPEATABLE-READ".into(),
@@ -1698,6 +2015,8 @@ mod tests {
                 gtid_executed_observation: String::new(),
                 catalog_fingerprint: target_fingerprint,
             }),
+            mysql_metadata_visibility: Some(source_visibility),
+            mysql_target_metadata_visibility: Some(target_visibility),
             capabilities: BTreeMap::new(),
             operations: vec![operation],
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -1751,6 +2070,33 @@ mod tests {
 
         fresh.server_uuid = "clone-server-uuid".into();
         assert!(!mysql_execution_snapshot_binding_is_exact(&fresh, expected));
+    }
+
+    #[test]
+    fn execution_requires_five_distinct_credential_references() {
+        let source = endpoint_config("source");
+        let source_metadata = endpoint_config("source_metadata");
+        let freeze = endpoint_config("freeze");
+        let target = endpoint_config("target");
+        let mut target_metadata = endpoint_config("target_metadata");
+        assert!(validate_mysql_execution_credential_separation(
+            &source,
+            &source_metadata,
+            &freeze,
+            &target,
+            &target_metadata,
+        )
+        .is_ok());
+
+        target_metadata.credential_env = freeze.credential_env.clone();
+        assert!(validate_mysql_execution_credential_separation(
+            &source,
+            &source_metadata,
+            &freeze,
+            &target,
+            &target_metadata,
+        )
+        .is_err());
     }
 
     fn auto_increment_reviewed_plan() -> (ReviewedPlan, MySqlAutoIncrementContract, String) {

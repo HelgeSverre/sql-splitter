@@ -1942,6 +1942,8 @@ mod tests {
             mysql_source_profile: None,
             mysql_snapshot_evidence: None,
             mysql_target_snapshot_evidence: None,
+            mysql_metadata_visibility: None,
+            mysql_target_metadata_visibility: None,
             capabilities: BTreeMap::new(),
             operations,
             unsupported_objects: UnsupportedObjectReport::default(),

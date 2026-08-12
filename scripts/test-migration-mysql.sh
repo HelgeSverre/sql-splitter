@@ -18,8 +18,10 @@ fi
 
 run_id="${version//./}-$$-$RANDOM"
 container="sqlspl-migration-mysql-$run_id"
-test_dir=$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-mysql-${run_id}.XXXXXX")
+test_dir=$(mktemp -d "$PWD/.sqlspl-mysql-test-${run_id}.XXXXXX")
 journal_dir=$(mktemp -d "$PWD/.sqlspl-mysql-journal-${run_id}.XXXXXX")
+test_dir=$(cd "$test_dir" && pwd -P)
+journal_dir=$(cd "$journal_dir" && pwd -P)
 cert_dir="$test_dir/certs"
 mkdir -p "$cert_dir"
 
@@ -86,13 +88,28 @@ CREATE DATABASE migration_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
+CREATE USER 'source_metadata_admin'@'%' IDENTIFIED BY 'sourcemetapass' REQUIRE X509;
+CREATE USER 'target_metadata_admin'@'%' IDENTIFIED BY 'targetmetapass' REQUIRE X509;
 CREATE USER 'business_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
+CREATE USER 'partially_restricted_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
+CREATE ROLE 'source_metadata_role'@'%';
+CREATE ROLE 'target_metadata_role'@'%';
 GRANT SELECT, SHOW VIEW ON migration_source.* TO 'migration_source'@'%';
 GRANT SELECT ON MIGRATION_SOURCE.* TO 'migration_source'@'%';
 GRANT ALL PRIVILEGES ON migration_target.* TO 'migration_target'@'%';
 GRANT ALL PRIVILEGES ON migration_source.* TO 'migration_admin'@'%';
 GRANT PROCESS ON *.* TO 'migration_admin'@'%';
 GRANT SELECT ON performance_schema.* TO 'migration_admin'@'%';
+GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'source_metadata_admin'@'%';
+GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'target_metadata_admin'@'%';
+GRANT SHOW_ROUTINE ON *.* TO 'source_metadata_role'@'%';
+GRANT SHOW_ROUTINE ON *.* TO 'target_metadata_role'@'%';
+GRANT 'source_metadata_role'@'%' TO 'source_metadata_admin'@'%';
+GRANT 'target_metadata_role'@'%' TO 'target_metadata_admin'@'%';
+GRANT PROXY ON ''@'' TO 'migration_admin'@'%' WITH GRANT OPTION;
+SET PERSIST partial_revokes = ON;
+GRANT SELECT ON *.* TO 'partially_restricted_reader'@'%';
+REVOKE SELECT ON migration_source.* FROM 'partially_restricted_reader'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -146,22 +163,34 @@ EOF
 source_config="$test_dir/source.toml"
 target_config="$test_dir/target.toml"
 admin_config="$test_dir/admin.toml"
+source_metadata_config="$test_dir/source-metadata.toml"
+target_metadata_config="$test_dir/target-metadata.toml"
 write_config "$source_config" migration_source migration_source SQL_SPLITTER_MYSQL_SOURCE_PASSWORD
 write_config "$target_config" migration_target migration_target SQL_SPLITTER_MYSQL_TARGET_PASSWORD
 write_config "$admin_config" migration_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$source_metadata_config" migration_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD
+write_config "$target_metadata_config" migration_target target_metadata_admin SQL_SPLITTER_MYSQL_TARGET_METADATA_PASSWORD
 
 export SQL_SPLITTER_MYSQL_SOURCE_PASSWORD=sourcepass
 export SQL_SPLITTER_MYSQL_TARGET_PASSWORD=targetpass
 export SQL_SPLITTER_MYSQL_ADMIN_PASSWORD=adminpass
+export SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD=sourcemetapass
+export SQL_SPLITTER_MYSQL_TARGET_METADATA_PASSWORD=targetmetapass
 export SQL_SPLITTER_MYSQL_CLIENT_IDENTITY_PASSWORD=clientpass
 export SQL_SPLITTER_MYSQL_TEST_SOURCE_CONFIG="$source_config"
 export SQL_SPLITTER_MYSQL_TEST_TARGET_CONFIG="$target_config"
 export SQL_SPLITTER_MYSQL_TEST_ADMIN_CONFIG="$admin_config"
+export SQL_SPLITTER_MYSQL_TEST_SOURCE_METADATA_CONFIG="$source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_TARGET_METADATA_CONFIG="$target_metadata_config"
 export SQL_SPLITTER_MYSQL_TEST_PLAN_OUTPUT="$test_dir/plan.json"
 export SQL_SPLITTER_MYSQL_TEST_JOURNAL_OUTPUT="$journal_dir/state.journal"
 
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_mysql_plan_test live_mysql_snapshot_catalog_and_blocked_plan \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_mysql_plan_test live_mysql_metadata_visibility_contract \
   -- --ignored --exact --nocapture
 
 docker exec "$container" mysql -uroot -prootpass -Nse \

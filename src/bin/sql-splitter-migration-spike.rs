@@ -101,9 +101,18 @@ enum Command {
         /// Source endpoint TOML. Credentials are referenced through an environment variable.
         #[arg(long)]
         source_config: PathBuf,
+        /// Separately authenticated source metadata administrator TOML.
+        #[arg(long)]
+        source_metadata_admin_config: PathBuf,
+        /// Source freeze administrator TOML used to bind its operational account exclusion.
+        #[arg(long)]
+        freeze_admin_config: PathBuf,
         /// Empty target endpoint TOML. Plan-only uses a read-only consistent snapshot.
         #[arg(long)]
         target_config: PathBuf,
+        /// Separately authenticated target metadata administrator TOML.
+        #[arg(long)]
+        target_metadata_admin_config: PathBuf,
         /// New protected plan artifact. Existing files are not replaced.
         #[arg(long)]
         plan_output: PathBuf,
@@ -334,7 +343,10 @@ fn main() -> anyhow::Result<()> {
         }
         Command::PlanMysql {
             source_config,
+            source_metadata_admin_config,
+            freeze_admin_config,
             target_config,
+            target_metadata_admin_config,
             plan_output,
             consistency,
         } => {
@@ -343,9 +355,12 @@ fn main() -> anyhow::Result<()> {
                     "MySQL Phase 6 uses --consistency consistent-snapshot plus separate continuous DML/DDL freeze evidence"
                 );
             }
-            let plan = sql_splitter::migration::mysql::write_live_plan(
+            let plan = sql_splitter::migration::mysql::write_live_plan_with_visibility(
                 source_config,
+                source_metadata_admin_config,
+                freeze_admin_config,
                 target_config,
+                target_metadata_admin_config,
                 &plan_output,
             )?;
             println!("plan: {}", plan_output.display());
@@ -355,9 +370,7 @@ fn main() -> anyhow::Result<()> {
                 plan.plan.unsupported_objects.objects.len(),
                 plan.plan.unsupported_objects.blocks_execution()
             );
-            eprintln!(
-                "MySQL execution remains blocked until continuous DML/DDL freeze and AUTO_INCREMENT consistency evidence are admitted"
-            );
+            eprintln!("MySQL execution remains blocked for every reported required semantic");
         }
         Command::FenceInstallPostgres {
             plan_input,

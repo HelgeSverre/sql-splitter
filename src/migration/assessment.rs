@@ -1037,6 +1037,8 @@ mod tests {
             mysql_source_profile: None,
             mysql_snapshot_evidence: None,
             mysql_target_snapshot_evidence: None,
+            mysql_metadata_visibility: None,
+            mysql_target_metadata_visibility: None,
             capabilities: BTreeMap::from([("acl.report_only".into(), "approval_required".into())]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),
