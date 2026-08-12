@@ -12,7 +12,7 @@ use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfi
 
 pub const PLAN_SCHEMA_VERSION: u16 = 10;
 pub const MYSQL_STRICT_SQL_MODE: &str =
-    "STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,NO_AUTO_VALUE_ON_ZERO";
+    "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION";
 pub const MYSQL_SESSION_CHARACTER_SET: &str = "utf8mb4";
 pub const MYSQL_SESSION_COLLATION: &str = "utf8mb4_0900_bin";
 

@@ -883,6 +883,11 @@ pub fn attest_mysql_external_freeze(
             "MySQL freeze administrator endpoint differs from the reviewed source".into(),
         ));
     }
+    if identity.connection_id == assertion.backup_lock_connection_id {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "the migration process must not own the external MySQL backup lock".into(),
+        ));
+    }
     let (read_only, super_read_only): (u8, u8) = conn
         .query_first("SELECT @@global.read_only, @@global.super_read_only")?
         .ok_or_else(|| {
@@ -892,12 +897,32 @@ pub fn attest_mysql_external_freeze(
         "SELECT VARIABLE_VALUE FROM performance_schema.persisted_variables WHERE VARIABLE_NAME = 'super_read_only'",
         (),
     )?;
-    let lock_owner: Option<(Option<String>, Option<String>)> = conn.exec_first(
-        "SELECT t.PROCESSLIST_USER, t.PROCESSLIST_HOST FROM performance_schema.metadata_locks ml JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID WHERE ml.OBJECT_TYPE = 'BACKUP LOCK' AND ml.LOCK_STATUS = 'GRANTED' AND t.PROCESSLIST_ID = ?",
+    let (server_now_unix_seconds, server_uptime_seconds): (u64, u64) = conn
+        .query_first(
+            "SELECT CAST(UNIX_TIMESTAMP() AS UNSIGNED), CAST(VARIABLE_VALUE AS UNSIGNED) FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Uptime'",
+        )?
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "MySQL server-start evidence query returned no row".into(),
+            )
+        })?;
+    let server_start_estimate = server_now_unix_seconds
+        .checked_sub(server_uptime_seconds)
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "MySQL server uptime exceeds the observed server clock".into(),
+            )
+        })?;
+    let server_start_lower_bound_unix_seconds = server_start_estimate.saturating_sub(1);
+    let server_start_upper_bound_unix_seconds = server_start_estimate
+        .checked_add(1)
+        .ok_or_else(|| MySqlPlanError::InvalidCatalog("MySQL server clock overflow".into()))?;
+    let lock_owner: Option<(u64, Option<String>, Option<String>)> = conn.exec_first(
+        "SELECT ml.OWNER_THREAD_ID, t.PROCESSLIST_USER, t.PROCESSLIST_HOST FROM performance_schema.metadata_locks ml JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID WHERE ml.OBJECT_TYPE = 'BACKUP LOCK' AND ml.LOCK_STATUS = 'GRANTED' AND t.PROCESSLIST_ID = ?",
         (assertion.backup_lock_connection_id,),
     )?;
-    let (lock_owner_user, lock_owner_host) = lock_owner
-        .and_then(|(user, host)| Some((user?, host?)))
+    let (backup_lock_owner_thread_id, lock_owner_user, lock_owner_host) = lock_owner
+        .and_then(|(thread_id, user, host)| Some((thread_id, user?, host?)))
         .ok_or_else(|| {
             MySqlPlanError::InvalidCatalog(
                 "the asserted external MySQL backup-lock owner is absent".into(),
@@ -920,6 +945,8 @@ pub fn attest_mysql_external_freeze(
         source_database_identity: identity.database,
         source_catalog_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
         server_uuid: identity.server_uuid,
+        server_start_lower_bound_unix_seconds,
+        server_start_upper_bound_unix_seconds,
         administrator_tls_binding: mysql_tls_binding(admin_config)?,
         profile_generation: assertion.profile_generation.clone(),
         provider_reference: assertion.provider_reference.clone(),
@@ -927,6 +954,7 @@ pub fn attest_mysql_external_freeze(
         expires_at_unix_seconds: assertion.expires_at_unix_seconds,
         continuity_token_hash: assertion.continuity_token_hash.clone(),
         backup_lock_connection_id: assertion.backup_lock_connection_id,
+        backup_lock_owner_thread_id,
         backup_lock_owner_user: lock_owner_user,
         backup_lock_owner_host: lock_owner_host,
         read_only: read_only == 1,
@@ -1886,11 +1914,26 @@ impl TargetConnectionFactory for MySqlTargetFactory {
         cancellation: CancellationToken,
     ) -> ConnectionResult<Box<dyn WriteSession>> {
         let (conn, registration) = self.controlled_connect()?;
+        let reviewed_projections = self
+            .reviewed_tables
+            .iter()
+            .map(|(table, definition)| {
+                (
+                    table.clone(),
+                    definition
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                )
+            })
+            .collect();
         Ok(Box::new(MySqlWriter {
             conn,
             registration: Some(registration),
             cancellation,
             transaction_open: false,
+            reviewed_projections,
         }))
     }
 
@@ -1942,6 +1985,7 @@ struct MySqlWriter {
     registration: Option<SessionRegistration>,
     cancellation: CancellationToken,
     transaction_open: bool,
+    reviewed_projections: BTreeMap<QualifiedTable, Vec<Identifier>>,
 }
 
 impl Drop for MySqlWriter {
@@ -1976,6 +2020,7 @@ impl WriteSession for MySqlWriter {
                 "MySQL insert requires a nonempty batch and projection".into(),
             ));
         }
+        validate_mysql_write_contract(&self.reviewed_projections, table, batch)?;
         let columns = batch
             .columns()
             .iter()
@@ -2024,6 +2069,27 @@ impl WriteSession for MySqlWriter {
         self.transaction_open = false;
         self.conn.query_drop("ROLLBACK").map_err(database_error)
     }
+}
+
+fn validate_mysql_write_contract(
+    reviewed_projections: &BTreeMap<QualifiedTable, Vec<Identifier>>,
+    table: &QualifiedTable,
+    batch: &RowBatch,
+) -> ConnectionResult<()> {
+    let expected = reviewed_projections
+        .get(table)
+        .ok_or_else(|| ConnectionError::TableNotFound(table.clone()))?;
+    if !batch
+        .columns()
+        .iter()
+        .map(|column| &column.name)
+        .eq(expected.iter())
+    {
+        return Err(ConnectionError::InvalidRequest(
+            "MySQL write projection differs from the reviewed table contract".into(),
+        ));
+    }
+    Ok(())
 }
 
 struct MySqlVerifier {
@@ -4462,6 +4528,48 @@ mod tests {
             quote_identifier_text("a`b; DROP TABLE x"),
             "`a``b; DROP TABLE x`"
         );
+    }
+
+    #[test]
+    fn writer_rejects_unreviewed_tables_and_column_projections() {
+        let table = QualifiedTable {
+            namespace: identifier("app"),
+            name: identifier("items"),
+        };
+        let reviewed =
+            BTreeMap::from([(table.clone(), vec![identifier("id"), identifier("payload")])]);
+        let columns = |names: &[&str]| {
+            names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| ColumnMeta {
+                    name: identifier(name),
+                    ordinal: u32::try_from(index + 1).unwrap(),
+                    vendor_type: "bigint".into(),
+                    nullable: false,
+                    collation: None,
+                    precision: None,
+                    scale: None,
+                    timezone_semantics: None,
+                })
+                .collect()
+        };
+        let exact = RowBatch::new(columns(&["id", "payload"]), 1, 1024);
+        validate_mysql_write_contract(&reviewed, &table, &exact).unwrap();
+
+        let reordered = RowBatch::new(columns(&["payload", "id"]), 1, 1024);
+        assert!(matches!(
+            validate_mysql_write_contract(&reviewed, &table, &reordered),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+        let unreviewed = QualifiedTable {
+            namespace: identifier("app"),
+            name: identifier("other"),
+        };
+        assert!(matches!(
+            validate_mysql_write_contract(&reviewed, &unreviewed, &exact),
+            Err(ConnectionError::TableNotFound(_))
+        ));
     }
 
     #[test]

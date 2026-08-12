@@ -27,7 +27,7 @@ cleanup() {
   if [ -n "${lock_pid:-}" ]; then
     kill "$lock_pid" >/dev/null 2>&1 || true
   fi
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  docker rm -fv "$container" >/dev/null 2>&1 || true
   rm -rf "$test_dir"
   rm -rf "$journal_dir"
 }
@@ -61,6 +61,7 @@ port_file="$test_dir/port"
 docker run -d --name "$container" \
   -e MYSQL_ROOT_PASSWORD=rootpass \
   -p 127.0.0.1::3306 \
+  --tmpfs /var/lib/mysql:rw,size=1g \
   -v "$cert_dir:/certs:ro" \
   "mysql:$version" \
   --require-secure-transport=ON \

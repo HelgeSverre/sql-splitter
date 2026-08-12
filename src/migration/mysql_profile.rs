@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const MYSQL_FREEZE_PROFILE_SCHEMA_VERSION: u16 = 1;
-pub const MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION: u16 = 1;
+pub const MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION: u16 = 1;
+pub const MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,7 +87,7 @@ pub struct MySqlExternalFreezeAssertion {
 
 impl MySqlExternalFreezeAssertion {
     pub fn validate(&self) -> Result<(), MySqlFreezeProfileError> {
-        if self.schema_version != MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION {
+        if self.schema_version != MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION {
             return Err(MySqlFreezeProfileError::UnsupportedVersion);
         }
         require_nonempty(&self.profile_generation)?;
@@ -114,6 +115,8 @@ pub struct MySqlExternalFreezeAttestation {
     pub source_database_identity: String,
     pub source_catalog_fingerprint: String,
     pub server_uuid: String,
+    pub server_start_lower_bound_unix_seconds: u64,
+    pub server_start_upper_bound_unix_seconds: u64,
     pub administrator_tls_binding: String,
     pub profile_generation: String,
     pub provider_reference: String,
@@ -121,6 +124,7 @@ pub struct MySqlExternalFreezeAttestation {
     pub expires_at_unix_seconds: u64,
     pub continuity_token_hash: String,
     pub backup_lock_connection_id: u32,
+    pub backup_lock_owner_thread_id: u64,
     pub backup_lock_owner_user: String,
     pub backup_lock_owner_host: String,
     pub read_only: bool,
@@ -158,6 +162,14 @@ impl MySqlExternalFreezeAttestation {
             || self.attested_at_unix_seconds < self.activated_at_unix_seconds
             || self.expires_at_unix_seconds <= self.attested_at_unix_seconds
             || self.backup_lock_connection_id == 0
+            || self.backup_lock_owner_thread_id == 0
+            || self.server_start_lower_bound_unix_seconds == 0
+            || self.server_start_upper_bound_unix_seconds
+                < self.server_start_lower_bound_unix_seconds
+            || self
+                .server_start_upper_bound_unix_seconds
+                .saturating_sub(self.server_start_lower_bound_unix_seconds)
+                > 2
             || !self.read_only
             || !self.super_read_only
             || !self.super_read_only_persisted
@@ -194,6 +206,12 @@ impl MySqlExternalFreezeAttestation {
             && self.source_database_identity == accepted.source_database_identity
             && self.source_catalog_fingerprint == accepted.source_catalog_fingerprint
             && self.server_uuid == accepted.server_uuid
+            && intervals_overlap(
+                self.server_start_lower_bound_unix_seconds,
+                self.server_start_upper_bound_unix_seconds,
+                accepted.server_start_lower_bound_unix_seconds,
+                accepted.server_start_upper_bound_unix_seconds,
+            )
             && self.administrator_tls_binding == accepted.administrator_tls_binding
             && self.profile_generation == accepted.profile_generation
             && self.provider_reference == accepted.provider_reference
@@ -201,9 +219,14 @@ impl MySqlExternalFreezeAttestation {
             && self.expires_at_unix_seconds == accepted.expires_at_unix_seconds
             && self.continuity_token_hash == accepted.continuity_token_hash
             && self.backup_lock_connection_id == accepted.backup_lock_connection_id
+            && self.backup_lock_owner_thread_id == accepted.backup_lock_owner_thread_id
             && self.backup_lock_owner_user == accepted.backup_lock_owner_user
             && self.backup_lock_owner_host == accepted.backup_lock_owner_host
     }
+}
+
+fn intervals_overlap(left_lower: u64, left_upper: u64, right_lower: u64, right_upper: u64) -> bool {
+    left_lower <= right_upper && right_lower <= left_upper
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -253,6 +276,8 @@ mod tests {
             source_database_identity: "app".into(),
             source_catalog_fingerprint: "a".repeat(64),
             server_uuid: "uuid".into(),
+            server_start_lower_bound_unix_seconds: 99,
+            server_start_upper_bound_unix_seconds: 101,
             administrator_tls_binding: "tls".into(),
             profile_generation: "generation-1".into(),
             provider_reference: "change-1".into(),
@@ -260,6 +285,7 @@ mod tests {
             expires_at_unix_seconds: 30,
             continuity_token_hash: "b".repeat(64),
             backup_lock_connection_id: 42,
+            backup_lock_owner_thread_id: 23,
             backup_lock_owner_user: "freeze_owner".into(),
             backup_lock_owner_host: "10.0.0.1".into(),
             read_only: true,
@@ -299,5 +325,23 @@ mod tests {
             value.validate(),
             Err(MySqlFreezeProfileError::InvalidAttestation)
         );
+    }
+
+    #[test]
+    fn server_restart_or_replaced_lock_thread_breaks_continuity() {
+        let accepted = attestation();
+        let mut restarted = accepted.clone();
+        restarted.server_start_lower_bound_unix_seconds = 200;
+        restarted.server_start_upper_bound_unix_seconds = 202;
+        assert!(!restarted.same_continuity_as(&accepted));
+
+        let mut replaced_thread = accepted.clone();
+        replaced_thread.backup_lock_owner_thread_id += 1;
+        assert!(!replaced_thread.same_continuity_as(&accepted));
+
+        let mut same_boot_jitter = accepted.clone();
+        same_boot_jitter.server_start_lower_bound_unix_seconds = 100;
+        same_boot_jitter.server_start_upper_bound_unix_seconds = 102;
+        assert!(same_boot_jitter.same_continuity_as(&accepted));
     }
 }

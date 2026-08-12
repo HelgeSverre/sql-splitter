@@ -28,7 +28,7 @@ use sql_splitter::migration::mysql_execution::reconcile_mysql_pre_data_schema;
 use sql_splitter::migration::mysql_profile::{
     MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlExternalFreezeAssertion,
     MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus, MySqlFreezeProfileKind,
-    MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
+    MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION, MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
 };
 use sql_splitter::migration::plan::{OperationKind, ReviewedPlan, UnsupportedObjectCode};
 
@@ -256,6 +256,8 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
         source_database_identity: copy_source.snapshot_evidence.database_identity.clone(),
         source_catalog_fingerprint: copy_plan.plan.source_catalog_fingerprint.clone(),
         server_uuid: copy_source.snapshot_evidence.server_uuid.clone(),
+        server_start_lower_bound_unix_seconds: 99,
+        server_start_upper_bound_unix_seconds: 101,
         administrator_tls_binding: mysql_tls_binding(&admin_config)?,
         profile_generation: "target-adapter-test-only".into(),
         provider_reference: "target-adapter-test-does-not-admit-execution".into(),
@@ -263,6 +265,7 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
         expires_at_unix_seconds: 30,
         continuity_token_hash: "c".repeat(64),
         backup_lock_connection_id: 42,
+        backup_lock_owner_thread_id: 23,
         backup_lock_owner_user: "test-only".into(),
         backup_lock_owner_host: "localhost".into(),
         read_only: true,
@@ -455,7 +458,7 @@ fn live_mysql_external_freeze_attestation() -> anyhow::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     let assertion = MySqlExternalFreezeAssertion {
-        schema_version: MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
+        schema_version: MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION,
         profile_generation: "local-live-generation-1".into(),
         provider_reference: "local-docker-external-lock-owner".into(),
         activated_at_unix_seconds: now.saturating_sub(1),
@@ -474,11 +477,22 @@ fn live_mysql_external_freeze_attestation() -> anyhow::Result<()> {
         accepted.backup_lock_connection_id,
         backup_lock_connection_id
     );
+    assert!(accepted.backup_lock_owner_thread_id > 0);
+    assert!(
+        accepted.server_start_lower_bound_unix_seconds
+            <= accepted.server_start_upper_bound_unix_seconds
+    );
 
     let current = attest_mysql_external_freeze(&admin_config, &reviewed, &assertion)?;
     validate_mysql_external_freeze_continuity(&accepted, &current)?;
     let mut replaced_owner = current;
     replaced_owner.backup_lock_connection_id += 1;
     assert!(validate_mysql_external_freeze_continuity(&accepted, &replaced_owner).is_err());
+    let mut restarted = accepted.clone();
+    restarted.server_start_lower_bound_unix_seconds =
+        accepted.server_start_upper_bound_unix_seconds + 10;
+    restarted.server_start_upper_bound_unix_seconds =
+        restarted.server_start_lower_bound_unix_seconds + 2;
+    assert!(validate_mysql_external_freeze_continuity(&accepted, &restarted).is_err());
     Ok(())
 }

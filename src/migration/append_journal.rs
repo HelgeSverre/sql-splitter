@@ -22,7 +22,7 @@ use super::postgres_profile::{
 
 const FILE_MAGIC: &[u8; 8] = b"SSJNL001";
 const FRAME_MAGIC: u32 = 0x534a_4631;
-const FORMAT_VERSION: u16 = 4;
+const FORMAT_VERSION: u16 = 5;
 const FILE_HEADER_LEN: u64 = 10;
 const FRAME_HEADER_LEN: usize = 84;
 const FRAME_TRAILER_LEN: usize = 32;
