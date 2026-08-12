@@ -1817,6 +1817,91 @@ impl PostgresTargetFactory {
         Ok(())
     }
 
+    /// Verify the complete reviewed cross-dialect PostgreSQL target inventory
+    /// and return its stable policy fingerprint.
+    pub fn verify_conversion_schema(
+        &self,
+        policies: &[TableConversionPolicy],
+    ) -> ConnectionResult<String> {
+        let expected = policies
+            .iter()
+            .map(|policy| (policy.target_table.clone(), policy))
+            .collect::<BTreeMap<_, _>>();
+        if expected.len() != policies.len()
+            || expected.len() != self.cross_conversion_tables.len()
+            || expected
+                .iter()
+                .any(|(table, policy)| self.cross_conversion_tables.get(table) != Some(*policy))
+        {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL conversion schema policies differ from the reviewed target contract"
+                    .into(),
+            ));
+        }
+        let catalog = self.inspect_endpoint()?.catalog;
+        let mut table_ids = BTreeSet::new();
+        for namespace in &catalog.namespaces {
+            for object in namespace
+                .objects
+                .iter()
+                .filter(|object| object.kind == CatalogObjectKind::Table)
+            {
+                let table = QualifiedTable {
+                    namespace: namespace.name.clone(),
+                    name: object.name.clone(),
+                };
+                if !expected.contains_key(&table) || !table_ids.insert(object.id.as_str()) {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "PostgreSQL target contains unexpected table {}.{}",
+                        table.namespace, table.name
+                    )));
+                }
+            }
+        }
+        if table_ids.len() != expected.len() {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL target is missing a reviewed conversion table".into(),
+            ));
+        }
+        for namespace in &catalog.namespaces {
+            for object in &namespace.objects {
+                if object.kind == CatalogObjectKind::Table {
+                    continue;
+                }
+                let supported_kind = matches!(
+                    object.kind,
+                    CatalogObjectKind::Column
+                        | CatalogObjectKind::PrimaryKey
+                        | CatalogObjectKind::UniqueConstraint
+                        | CatalogObjectKind::CheckConstraint
+                        | CatalogObjectKind::Index
+                );
+                let targets_reviewed_table = object
+                    .attributes
+                    .get("table_oid")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|table_id| table_ids.contains(table_id));
+                if !supported_kind || !targets_reviewed_table {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "PostgreSQL target contains unexpected catalog object {}",
+                        object.id
+                    )));
+                }
+            }
+        }
+        for policy in policies {
+            if self.inspect_conversion_table(policy)? != PostgresConversionTableState::Exact {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "PostgreSQL conversion target table {}.{} is not exact",
+                    policy.target_table.namespace, policy.target_table.name
+                )));
+            }
+        }
+        serde_json::to_vec(policies)
+            .map(|bytes| hex::encode(Sha256::digest(bytes)))
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))
+    }
+
     /// Inspect the exact configuration and current state of one PostgreSQL sequence.
     pub fn inspect_sequence(
         &self,

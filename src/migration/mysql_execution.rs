@@ -1411,7 +1411,7 @@ fn validate_mysql_execution_credential_separation(
     Ok(())
 }
 
-fn attest_current_mysql_source_visibility(
+pub(crate) fn attest_current_mysql_source_visibility(
     reviewed: &ReviewedPlan,
     source_config: &MySqlEndpointConfig,
     metadata_admin_config: &MySqlEndpointConfig,
@@ -1633,7 +1633,7 @@ fn capture_exact_source(
     Ok((reader, visibility.authoritative_catalog))
 }
 
-fn mysql_execution_snapshot_binding_is_exact(
+pub(crate) fn mysql_execution_snapshot_binding_is_exact(
     current: &MySqlSnapshotEvidence,
     reviewed: &MySqlSnapshotEvidence,
 ) -> bool {

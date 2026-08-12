@@ -630,7 +630,7 @@ pub enum CrossDialectPlanError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::migration::conversion::{
         CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectSourceType,
@@ -1032,6 +1032,28 @@ mod tests {
             unsupported: UnsupportedObjectReport::default(),
             tls_binding: "hostname_verified;roots=platform;client=none".into(),
         }
+    }
+
+    pub(crate) fn mysql_to_postgres_reviewed_plan() -> ReviewedPlan {
+        let source = mysql_snapshot("mysql://source/app", true);
+        let source_visibility = mysql_visibility(&source);
+        let target = postgres_snapshot("postgres://target/app", false);
+        let mapping = CrossDialectMapping {
+            schema_version: CROSS_DIALECT_MAPPING_SCHEMA_VERSION,
+            source_dialect: ConversionDialect::MySql,
+            target_dialect: ConversionDialect::PostgreSql,
+            target_defaults: CrossDialectTargetDefaults::PostgreSql {
+                text_collation: QualifiedIdentifier {
+                    namespace: identifier("pg_catalog"),
+                    name: identifier("C"),
+                },
+            },
+            tables: vec![CrossDialectTableMapping {
+                source: table("app", "items"),
+                target: table("public", "items"),
+            }],
+        };
+        build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap()
     }
 
     #[test]

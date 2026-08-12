@@ -3298,6 +3298,79 @@ impl MySqlTargetFactory {
         Ok(())
     }
 
+    /// Verify the complete reviewed cross-dialect target inventory and return
+    /// its stable policy fingerprint.
+    pub fn verify_conversion_schema(
+        &self,
+        policies: &[TableConversionPolicy],
+    ) -> ConnectionResult<String> {
+        let expected = policies
+            .iter()
+            .map(|policy| (policy.target_table.clone(), policy))
+            .collect::<BTreeMap<_, _>>();
+        if expected.len() != policies.len()
+            || expected.len() != self.cross_conversion_tables.len()
+            || expected
+                .iter()
+                .any(|(table, policy)| self.cross_conversion_tables.get(table) != Some(*policy))
+        {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL conversion schema policies differ from the reviewed target contract".into(),
+            ));
+        }
+        let catalog = self.current_catalog()?;
+        for namespace in &catalog.namespaces {
+            for object in &namespace.objects {
+                if matches!(&object.kind, CatalogObjectKind::Vendor(kind) if kind == "mysql_privilege")
+                {
+                    continue;
+                }
+                let table_name = if object.kind == CatalogObjectKind::Table {
+                    Some(object.name.clone())
+                } else {
+                    object
+                        .attributes
+                        .get("table_name")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|name| Identifier::new(name).ok())
+                };
+                let supported_kind = matches!(
+                    object.kind,
+                    CatalogObjectKind::Table
+                        | CatalogObjectKind::Column
+                        | CatalogObjectKind::PrimaryKey
+                        | CatalogObjectKind::UniqueConstraint
+                        | CatalogObjectKind::Index
+                        | CatalogObjectKind::CheckConstraint
+                );
+                if !supported_kind
+                    || table_name.is_none_or(|name| {
+                        !expected.contains_key(&QualifiedTable {
+                            namespace: namespace.name.clone(),
+                            name,
+                        })
+                    })
+                {
+                    return Err(ConnectionError::InvalidRequest(format!(
+                        "MySQL target contains unexpected catalog object {}",
+                        object.id
+                    )));
+                }
+            }
+        }
+        for policy in policies {
+            if self.inspect_conversion_table(policy)? != MySqlTableState::Exact {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL conversion target table {}.{} is not exact",
+                    policy.target_table.namespace, policy.target_table.name
+                )));
+            }
+        }
+        serde_json::to_vec(policies)
+            .map(|bytes| hex::encode(Sha256::digest(bytes)))
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))
+    }
+
     pub fn inspect_foreign_key(
         &self,
         expected: &MySqlForeignKey,

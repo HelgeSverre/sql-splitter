@@ -1256,6 +1256,7 @@ mod tests {
     fn cross_dialect_plan_binds_both_catalog_dialects() {
         let mut plan = plan();
         bind_unproven_mysql_target(&mut plan);
+        plan.operations.clear();
         plan.conversion_policy = MigrationConversionPolicy::cross_dialect(
             ConversionDialect::PostgreSql,
             ConversionDialect::MySql,

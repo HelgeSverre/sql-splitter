@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::canonical::canonicalize_json;
-use super::model::{ColumnMeta, DbValue, Identifier, QualifiedTable};
+use super::model::{ColumnMeta, DbValue, Identifier, QualifiedTable, RowBatch};
 
 pub const ROW_TYPE_CONVERSION_SCHEMA_VERSION: u16 = 3;
 pub const MYSQL_UTF8MB4_VARCHAR_MAX_CHARACTERS: u32 = 16_383;
@@ -74,6 +74,51 @@ impl TableConversionPolicy {
         }
         validate_table_contract(self)?;
         validate_resumable_key(self)
+    }
+
+    /// Convert one complete source batch through the reviewed row policy.
+    pub fn convert_batch(&self, source: &RowBatch) -> Result<RowBatch, RowConversionError> {
+        self.validate()?;
+        let converter = ReviewedRowTypeConverter::new(self.row_policy.clone())?;
+        let target_columns = self
+            .row_policy
+            .columns
+            .iter()
+            .map(|column| column.target.clone())
+            .collect::<Vec<_>>();
+        let mut target = RowBatch::new(target_columns, source.len().max(1), usize::MAX);
+        for row in source.rows() {
+            let converted = converter.convert_row(source.columns(), row)?;
+            target
+                .try_push(converted.values, 0)
+                .map_err(|_| RowConversionError::InvalidConvertedBatch)?;
+        }
+        Ok(target)
+    }
+
+    /// Convert a source resumable-key tuple to the exact target key tuple.
+    pub fn convert_source_key(
+        &self,
+        source_key: &[DbValue],
+    ) -> Result<Vec<DbValue>, RowConversionError> {
+        self.validate()?;
+        if source_key.len() != self.resumable_key.source_columns.len() {
+            return Err(RowConversionError::InvalidSourceKey);
+        }
+        self.resumable_key
+            .source_columns
+            .iter()
+            .zip(source_key)
+            .map(|(name, value)| {
+                let column = self
+                    .row_policy
+                    .columns
+                    .iter()
+                    .find(|column| column.source.name == *name)
+                    .ok_or(RowConversionError::InvalidSourceKey)?;
+                convert_value(column, value)
+            })
+            .collect()
     }
 }
 
@@ -2654,6 +2699,10 @@ pub enum RowConversionError {
     IncoherentTableContract,
     #[error("cross-dialect resumable key is missing, malformed, or not order preserving")]
     InvalidTargetKey,
+    #[error("source resumable-key tuple differs from the reviewed policy")]
+    InvalidSourceKey,
+    #[error("converted row batch violates its reviewed shape")]
+    InvalidConvertedBatch,
     #[error("source column metadata differs from the reviewed conversion policy")]
     SourceMetadataMismatch,
     #[error("source row has {actual} values but policy has {expected} columns")]
@@ -3350,6 +3399,53 @@ mod tests {
         assert!(matches!(
             text_key_table.validate(),
             Err(RowConversionError::InvalidTargetKey)
+        ));
+    }
+
+    #[test]
+    fn table_policy_converts_batches_and_source_cursors_through_one_rule() {
+        let row_policy = policy(vec![ValueConversionRule::UnsignedIntegerToDecimal {
+            maximum: u64::MAX,
+            precision: 20,
+        }]);
+        let table_policy = TableConversionPolicy {
+            source_table: table("source", "items"),
+            target_table: table("target", "items"),
+            target_contract: CrossDialectTargetTableContract::PostgreSql {
+                persistence: PostgresTargetPersistence::Permanent,
+            },
+            resumable_key: primary_key(&row_policy),
+            row_policy: row_policy.clone(),
+        };
+        let mut source = RowBatch::new(
+            row_policy
+                .columns
+                .iter()
+                .map(|column| column.source.clone())
+                .collect(),
+            1,
+            1024,
+        );
+        source
+            .try_push(vec![DbValue::Unsigned(u128::from(u64::MAX))], 16)
+            .unwrap();
+
+        let converted = table_policy.convert_batch(&source).unwrap();
+        let expected = DbValue::Decimal {
+            coefficient: b"18446744073709551615".to_vec(),
+            scale: 0,
+        };
+        assert_eq!(converted.columns(), [row_policy.columns[0].target.clone()]);
+        assert_eq!(converted.rows(), &[vec![expected.clone()]]);
+        assert_eq!(
+            table_policy
+                .convert_source_key(&[DbValue::Unsigned(u128::from(u64::MAX))])
+                .unwrap(),
+            [expected]
+        );
+        assert!(matches!(
+            table_policy.convert_source_key(&[]),
+            Err(RowConversionError::InvalidSourceKey)
         ));
     }
 
