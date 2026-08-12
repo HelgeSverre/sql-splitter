@@ -188,12 +188,14 @@ MySQL 8.0 and 8.4, rather than deferred:
    matrices prove exact prepared equality, changed-payload manual
    reconciliation, secondary-unique collision failure, and target-trigger
    mutation rejection.
-2. **Gate 7 TLS/redaction:** hostname-verification failure, untrusted CA,
-   mTLS rejection and success, explicit insecure binding, distinct
-   credentials, malicious identifiers, protected artifacts, and no
-   secret/row/SQL-literal leakage. (This gate's wrong-hostname *negative*
-   live case is also currently missing on the PostgreSQL side — see the
-   TLS note below — so both dialects owe it.)
+2. **Gate 7 TLS/redaction (met 2026-08-12):** the MySQL 8.0 and 8.4 live
+   matrices prove wrong-hostname and untrusted-CA failure, mTLS rejection and
+   success, explicit insecure binding, distinct credentials, malicious quoted
+   identifiers, protected/no-clobber/symlink-safe artifacts, and no secret row,
+   credential, or INSERT-literal leakage. MySQL driver errors retain only a
+   typed safe class or numeric server code. PostgreSQL 15, 16, and 17 also
+   prove the previously missing wrong-hostname negative plus explicit-insecure
+   binding in the mTLS matrix.
 3. **Gate 8 foreign keys (met 2026-08-12):** the MySQL 8.0 and 8.4 live
    matrices prove typed composite/nullable/self/cycle anti-joins, all checks
    before any constraint is added, database validation, Prepared and Committed
@@ -226,9 +228,9 @@ moved from `postgres-native-tls` to `postgres-openssl` (commit `1a8ddf9`)
 so the Amazon RDS regional multi-certificate CA bundle validates; macOS
 Secure Transport rejected the valid chain on an extended-key-usage error.
 Hostname verification remains on by default and `insecure=true` is the only
-disable path. Two recorded consequences: no live test yet proves
-wrong-hostname *fails closed* (folded into gate 7 above for both dialects),
-and `roots=platform` with no configured CA now means the OpenSSL default
+disable path. The wrong-hostname negative and explicit-insecure positive now
+pass live on PostgreSQL 15, 16, and 17. One remaining recorded consequence:
+`roots=platform` with no configured CA means the OpenSSL default
 trust paths rather than the macOS keychain — every live path configures a
 CA file, so no evidence is affected.
 

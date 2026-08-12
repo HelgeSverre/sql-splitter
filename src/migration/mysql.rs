@@ -168,7 +168,7 @@ pub enum MySqlPlanError {
     #[error("cannot inspect configured TLS file")]
     TlsFile(#[source] std::io::Error),
     #[error("MySQL operation failed: {0}")]
-    Database(#[from] mysql::Error),
+    Database(MySqlSafeError),
     #[error("invalid database identifier")]
     Identifier(#[from] super::model::IdentifierError),
     #[error("catalog serialization failed")]
@@ -183,6 +183,47 @@ pub enum MySqlPlanError {
     FreezeProfile(#[from] MySqlFreezeProfileError),
     #[error("invalid MySQL metadata-visibility evidence")]
     MetadataVisibility(#[from] MySqlVisibilityError),
+}
+
+impl From<mysql::Error> for MySqlPlanError {
+    fn from(error: mysql::Error) -> Self {
+        Self::Database(MySqlSafeError::from(error))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum MySqlSafeError {
+    #[error("server error code {code}")]
+    Server { code: u16 },
+    #[error("transport error")]
+    Transport,
+    #[error("packet codec error")]
+    Codec,
+    #[error("driver error")]
+    Driver,
+    #[error("connection URL error")]
+    Url,
+    #[error("TLS error")]
+    Tls,
+    #[error("value decoding error")]
+    ValueDecode,
+    #[error("row decoding error")]
+    RowDecode,
+}
+
+impl From<mysql::Error> for MySqlSafeError {
+    fn from(error: mysql::Error) -> Self {
+        match error {
+            mysql::Error::MySqlError(error) => Self::Server { code: error.code },
+            mysql::Error::IoError(_) => Self::Transport,
+            mysql::Error::CodecError(_) => Self::Codec,
+            mysql::Error::DriverError(_) => Self::Driver,
+            mysql::Error::UrlError(_) => Self::Url,
+            mysql::Error::TlsError(_) => Self::Tls,
+            mysql::Error::FromValueError(_) => Self::ValueDecode,
+            mysql::Error::FromRowError(_) => Self::RowDecode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2450,7 +2491,7 @@ impl MySqlSourceFactory {
 
     fn controlled_connect(&self) -> ConnectionResult<(Conn, SessionRegistration)> {
         self.cancellation.check()?;
-        let mut conn = self.config.connect().map_err(database_error)?;
+        let mut conn = self.config.connect().map_err(plan_connection_error)?;
         let registration = self.registry.register(conn.connection_id())?;
         configure_mysql_session(&mut conn)?;
         self.cancellation.check()?;
@@ -2668,7 +2709,7 @@ impl ControlSession for MySqlControlSession {
                 "no active MySQL statement can be cancelled".into(),
             ));
         }
-        let mut control = self.config.connect().map_err(database_error)?;
+        let mut control = self.config.connect().map_err(plan_connection_error)?;
         for connection_id in connection_ids {
             control
                 .query_drop(format!("KILL QUERY {connection_id}"))
@@ -2834,7 +2875,7 @@ impl MySqlTargetFactory {
 
     fn controlled_connect(&self) -> ConnectionResult<(Conn, SessionRegistration)> {
         self.cancellation.check()?;
-        let mut conn = self.config.connect().map_err(database_error)?;
+        let mut conn = self.config.connect().map_err(plan_connection_error)?;
         let registration = self.registry.register(conn.connection_id())?;
         configure_mysql_session(&mut conn)?;
         conn.query_drop("SET SESSION information_schema_stats_expiry = 0")
@@ -3398,9 +3439,9 @@ impl WriteSession for MySqlWriter {
             return Err(ConnectionError::TransactionRequired);
         }
         self.transaction_open = false;
-        self.conn
-            .query_drop("COMMIT")
-            .map_err(|error| ConnectionError::CommitOutcomeUnknown(error.to_string()))
+        self.conn.query_drop("COMMIT").map_err(|error| {
+            ConnectionError::CommitOutcomeUnknown(MySqlSafeError::from(error).to_string())
+        })
     }
 
     fn rollback(&mut self) -> ConnectionResult<()> {
@@ -6198,7 +6239,11 @@ fn mysql_session_settings_are_exact(identity: &MySqlLiveSessionIdentity) -> bool
         && identity.collation_connection == MYSQL_SESSION_COLLATION
 }
 
-fn database_error(error: impl std::fmt::Display) -> ConnectionError {
+fn database_error(error: mysql::Error) -> ConnectionError {
+    ConnectionError::Database(MySqlSafeError::from(error).to_string())
+}
+
+fn plan_connection_error(error: MySqlPlanError) -> ConnectionError {
     ConnectionError::Database(error.to_string())
 }
 
@@ -6208,8 +6253,8 @@ fn mysql_foreign_key_ddl_error(error: mysql::Error) -> ConnectionError {
             if mysql_foreign_key_ddl_error_is_deterministic(error.code, &error.state) =>
         {
             ConnectionError::InvalidRequest(format!(
-                "MySQL server rejected ADD FOREIGN KEY with deterministic code {} and SQLSTATE {}",
-                error.code, error.state
+                "MySQL server rejected ADD FOREIGN KEY with deterministic code {}",
+                error.code
             ))
         }
         error => database_error(error),
@@ -6779,6 +6824,27 @@ mod tests {
                 Err(ConnectionError::InvalidRequest(_))
             ));
         }
+    }
+
+    #[test]
+    fn driver_errors_do_not_expose_server_messages_or_values() {
+        let raw = mysql::Error::MySqlError(mysql::MySqlError {
+            state: "23000".into(),
+            message: "Duplicate entry 'row-secret-needle' for key 'secret-key'".into(),
+            code: 1062,
+        });
+        let safe = MySqlSafeError::from(raw);
+        assert_eq!(safe, MySqlSafeError::Server { code: 1062 });
+        assert_eq!(safe.to_string(), "server error code 1062");
+        let connection = database_error(mysql::Error::MySqlError(mysql::MySqlError {
+            state: "23000".into(),
+            message: "Duplicate entry 'row-secret-needle' for key 'secret-key'".into(),
+            code: 1062,
+        }));
+        let display = connection.to_string();
+        assert!(!display.contains("row-secret-needle"));
+        assert!(!display.contains("secret-key"));
+        assert!(display.contains("1062"));
     }
 
     #[test]

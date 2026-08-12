@@ -54,9 +54,11 @@
 > self-references, cycles, database validation, Prepared and Committed
 > implicit-DDL recovery, and durable manual reconciliation. Target-conflict,
 > strict no-skip, and complete-target-coverage matrices also pass on both
-> versions. The remaining Phase 6 exit gates in
-> [08](./08-implementation-prerequisites.md) remain open, so this is not the
-> Phase 6 exit or a production support statement.
+> versions. The TLS/redaction matrix proves authenticated and explicitly
+> insecure modes, negative hostname/CA/client cases, hostile identifiers,
+> protected artifacts, and safe diagnostics. The remaining Phase 6 exit gate
+> in [08](./08-implementation-prerequisites.md) is still open, so this is not
+> the Phase 6 exit or a production support statement.
 
 ## Status and product boundary
 

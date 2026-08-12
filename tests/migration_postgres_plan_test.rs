@@ -584,6 +584,14 @@ fn live_mutual_tls_requires_valid_client_identity() -> anyhow::Result<()> {
     let snapshot = inspect_endpoint(&config)?;
     assert!(snapshot.tls_binding.starts_with("hostname_verified+mtls;"));
 
+    let mut wrong_hostname = config.clone();
+    wrong_hostname.host = "127.1".into();
+    assert!(inspect_endpoint(&wrong_hostname).is_err());
+    wrong_hostname.tls.insecure = true;
+    assert!(inspect_endpoint(&wrong_hostname)?
+        .tls_binding
+        .starts_with("insecure_explicit+mtls;"));
+
     let mut missing_identity = config.clone();
     missing_identity.tls.client_certificate = None;
     missing_identity.tls.client_private_key = None;

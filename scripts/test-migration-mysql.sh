@@ -19,6 +19,7 @@ fi
 run_id="${version//./}-$$-$RANDOM"
 container="sqlspl-migration-mysql-$run_id"
 target_container="sqlspl-migration-mysql-target-$run_id"
+tls_container="sqlspl-migration-mysql-tls-$run_id"
 test_dir=$(mktemp -d "$PWD/.sqlspl-mysql-test-${run_id}.XXXXXX")
 journal_dir=$(mktemp -d "$PWD/.sqlspl-mysql-journal-${run_id}.XXXXXX")
 test_dir=$(cd "$test_dir" && pwd -P)
@@ -32,6 +33,7 @@ cleanup() {
   fi
   docker rm -fv "$container" >/dev/null 2>&1 || true
   docker rm -fv "$target_container" >/dev/null 2>&1 || true
+  docker rm -fv "$tls_container" >/dev/null 2>&1 || true
   rm -rf "$test_dir"
   rm -rf "$journal_dir"
 }
@@ -60,13 +62,24 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
   -subj '/CN=sql-splitter-test-ca' \
   -keyout "$cert_dir/ca-key.pem" -out "$cert_dir/ca.pem" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes \
-  -subj '/CN=localhost' \
-  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+  -subj '/CN=sql-splitter-test-server' \
+  -addext 'subjectAltName=IP:127.0.0.1' \
   -keyout "$cert_dir/server-key.pem" -out "$cert_dir/server.csr" >/dev/null 2>&1
-printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > "$cert_dir/server.ext"
+printf 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > "$cert_dir/server.ext"
 openssl x509 -req -days 2 -in "$cert_dir/server.csr" \
   -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" -CAcreateserial \
   -extfile "$cert_dir/server.ext" -out "$cert_dir/server-cert.pem" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes \
+  -subj '/CN=sql-splitter-wrong-host-server' \
+  -addext 'subjectAltName=IP:127.0.0.2' \
+  -keyout "$cert_dir/wrong-server-key.pem" \
+  -out "$cert_dir/wrong-server.csr" >/dev/null 2>&1
+printf 'subjectAltName=IP:127.0.0.2\nextendedKeyUsage=serverAuth\n' \
+  > "$cert_dir/wrong-server.ext"
+openssl x509 -req -days 2 -in "$cert_dir/wrong-server.csr" \
+  -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" -CAcreateserial \
+  -extfile "$cert_dir/wrong-server.ext" \
+  -out "$cert_dir/wrong-server-cert.pem" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes \
   -subj '/CN=sql-splitter-client' \
   -keyout "$cert_dir/client-key.pem" -out "$cert_dir/client.csr" >/dev/null 2>&1
@@ -77,8 +90,18 @@ openssl x509 -req -days 2 -in "$cert_dir/client.csr" \
 openssl pkcs12 -export -out "$cert_dir/client.p12" \
   -inkey "$cert_dir/client-key.pem" -in "$cert_dir/client-cert.pem" \
   -certfile "$cert_dir/ca.pem" -passout pass:clientpass >/dev/null 2>&1
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+  -subj '/CN=sql-splitter-untrusted-ca' \
+  -keyout "$cert_dir/untrusted-ca-key.pem" \
+  -out "$cert_dir/untrusted-ca.pem" >/dev/null 2>&1
 chmod 0600 "$cert_dir/client.p12"
-chmod 0644 "$cert_dir/ca.pem" "$cert_dir/server-cert.pem" "$cert_dir/server-key.pem"
+chmod 0644 \
+  "$cert_dir/ca.pem" \
+  "$cert_dir/server-cert.pem" \
+  "$cert_dir/server-key.pem" \
+  "$cert_dir/wrong-server-cert.pem" \
+  "$cert_dir/wrong-server-key.pem" \
+  "$cert_dir/untrusted-ca.pem"
 
 port_file="$test_dir/port"
 docker run -d --name "$container" \
@@ -91,10 +114,28 @@ docker run -d --name "$container" \
   --ssl-ca=/certs/ca.pem \
   --ssl-cert=/certs/server-cert.pem \
   --ssl-key=/certs/server-key.pem >/dev/null
+docker run -d --name "$tls_container" \
+  -e MYSQL_ROOT_PASSWORD=rootpass \
+  -p 127.0.0.1::3306 \
+  --tmpfs /var/lib/mysql:rw,size=512m \
+  -v "$cert_dir:/certs:ro" \
+  "mysql:$version" \
+  --require-secure-transport=ON \
+  --ssl-ca=/certs/ca.pem \
+  --ssl-cert=/certs/wrong-server-cert.pem \
+  --ssl-key=/certs/wrong-server-key.pem >/dev/null
 docker port "$container" 3306/tcp | sed 's/.*://' > "$port_file"
 port=$(cat "$port_file")
+tls_port=$(docker port "$tls_container" 3306/tcp | sed 's/.*://')
 
 wait_for_mysql "$container"
+wait_for_mysql "$tls_container"
+
+docker exec -i "$tls_container" mysql -uroot -prootpass <<'SQL'
+CREATE DATABASE tls_probe CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE USER 'tls_probe'@'%' IDENTIFIED BY 'tlsprobepass' REQUIRE X509;
+GRANT SELECT ON tls_probe.* TO 'tls_probe'@'%';
+SQL
 
 docker exec -i "$container" mysql -uroot -prootpass <<'SQL'
 SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin;
@@ -105,6 +146,7 @@ CREATE DATABASE migration_execution_source CHARACTER SET utf8mb4 COLLATE utf8mb4
 CREATE DATABASE migration_values_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_fk_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_integrity_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_security_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
@@ -136,9 +178,11 @@ GRANT SELECT, SHOW VIEW ON migration_execution_source.* TO 'migration_execution_
 GRANT SELECT, SHOW VIEW ON migration_values_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_fk_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_integrity_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT, SHOW VIEW ON migration_security_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT ON migration_values_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_fk_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_integrity_source.* TO 'migration_admin'@'%';
+GRANT SELECT ON migration_security_source.* TO 'migration_admin'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -324,6 +368,12 @@ CREATE TABLE empty_items (
   id BIGINT NOT NULL PRIMARY KEY,
   payload VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
 ) ENGINE=InnoDB;
+USE migration_security_source;
+CREATE TABLE `hostile``table;--` (
+  `id``key` BIGINT NOT NULL PRIMARY KEY,
+  `payload``text` VARCHAR(96) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO `hostile``table;--` VALUES (7, 'row-secret-needle-7f99');
 SQL
 
 write_config() {
@@ -414,6 +464,7 @@ CREATE DATABASE migration_fk_target_prepared CHARACTER SET utf8mb4 COLLATE utf8m
 CREATE DATABASE migration_fk_target_committed CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_fk_target_violation CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_integrity_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_security_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
 CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
 CREATE ROLE 'execution_target_metadata_role'@'%';
@@ -423,6 +474,7 @@ GRANT ALL PRIVILEGES ON migration_fk_target_prepared.* TO 'migration_execution_t
 GRANT ALL PRIVILEGES ON migration_fk_target_committed.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_fk_target_violation.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_integrity_target.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_security_target.* TO 'migration_execution_target'@'%';
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
 GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
 GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
@@ -452,6 +504,15 @@ integrity_source_metadata_config="$test_dir/integrity-source-metadata.toml"
 integrity_freeze_config="$test_dir/integrity-freeze.toml"
 integrity_target_config="$test_dir/integrity-target.toml"
 integrity_target_metadata_config="$test_dir/integrity-target-metadata.toml"
+security_source_config="$test_dir/security-source.toml"
+security_source_metadata_config="$test_dir/security-source-metadata.toml"
+security_freeze_config="$test_dir/security-freeze.toml"
+security_target_config="$test_dir/security-target.toml"
+security_target_metadata_config="$test_dir/security-target-metadata.toml"
+wrong_hostname_config="$test_dir/wrong-hostname.toml"
+untrusted_ca_config="$test_dir/untrusted-ca.toml"
+missing_client_config="$test_dir/missing-client.toml"
+explicit_insecure_config="$test_dir/explicit-insecure.toml"
 write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
 write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
 write_config "$execution_freeze_config" "$port" migration_execution_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
@@ -476,9 +537,32 @@ write_config "$integrity_source_metadata_config" "$port" migration_integrity_sou
 write_config "$integrity_freeze_config" "$port" migration_integrity_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
 write_config "$integrity_target_config" "$target_port" migration_integrity_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
 write_config "$integrity_target_metadata_config" "$target_port" migration_integrity_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$security_source_config" "$port" migration_security_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
+write_config "$security_source_metadata_config" "$port" migration_security_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
+write_config "$security_freeze_config" "$port" migration_security_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$security_target_config" "$target_port" migration_security_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$security_target_metadata_config" "$target_port" migration_security_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+
+write_config "$wrong_hostname_config" "$tls_port" tls_probe tls_probe SQL_SPLITTER_MYSQL_TLS_PROBE_PASSWORD
+cp "$wrong_hostname_config" "$untrusted_ca_config"
+awk -v replacement="ca_certificate = \"$cert_dir/untrusted-ca.pem\"" \
+  '{ if ($0 ~ /^ca_certificate = /) print replacement; else print }' \
+  "$untrusted_ca_config" > "$untrusted_ca_config.tmp"
+mv "$untrusted_ca_config.tmp" "$untrusted_ca_config"
+awk '!/^client_identity_pkcs12 = / && !/^client_identity_password_env = /' \
+  "$wrong_hostname_config" > "$missing_client_config"
+cp "$wrong_hostname_config" "$explicit_insecure_config"
+awk -v replacement="ca_certificate = \"$cert_dir/untrusted-ca.pem\"" \
+  '{
+    if ($0 ~ /^ca_certificate = /) print replacement;
+    else if ($0 == "insecure = false") print "insecure = true";
+    else print;
+  }' "$explicit_insecure_config" > "$explicit_insecure_config.tmp"
+mv "$explicit_insecure_config.tmp" "$explicit_insecure_config"
 export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
+export SQL_SPLITTER_MYSQL_TLS_PROBE_PASSWORD=tlsprobepass
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG="$execution_source_config"
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG="$execution_source_metadata_config"
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG="$execution_freeze_config"
@@ -513,6 +597,17 @@ export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_TARGET_CONFIG="$integrity_target_config
 export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_TARGET_METADATA_CONFIG="$integrity_target_metadata_config"
 export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_ARTIFACT_DIR="$test_dir"
 export SQL_SPLITTER_MYSQL_TEST_INTEGRITY_JOURNAL_DIR="$journal_dir"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_SOURCE_CONFIG="$security_source_config"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_SOURCE_METADATA_CONFIG="$security_source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_FREEZE_CONFIG="$security_freeze_config"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_TARGET_CONFIG="$security_target_config"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_TARGET_METADATA_CONFIG="$security_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_WRONG_HOSTNAME_CONFIG="$wrong_hostname_config"
+export SQL_SPLITTER_MYSQL_TEST_UNTRUSTED_CA_CONFIG="$untrusted_ca_config"
+export SQL_SPLITTER_MYSQL_TEST_MISSING_CLIENT_CONFIG="$missing_client_config"
+export SQL_SPLITTER_MYSQL_TEST_EXPLICIT_INSECURE_CONFIG="$explicit_insecure_config"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_ARTIFACT_DIR="$test_dir"
+export SQL_SPLITTER_MYSQL_TEST_SECURITY_JOURNAL_DIR="$journal_dir"
 
 docker exec "$container" mysql -uroot -prootpass -Nse \
   "SET PERSIST super_read_only = ON"
@@ -543,6 +638,10 @@ export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_lock_owner_host"
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_external_freeze_attestation \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_tls_redaction_and_artifact_security \
   -- --ignored --exact --nocapture
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \

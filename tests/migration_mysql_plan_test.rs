@@ -5,6 +5,9 @@ use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt};
+
 #[cfg(feature = "migration-fault-injection")]
 use std::{thread, time::Instant};
 
@@ -264,6 +267,144 @@ fn live_mysql_two_container_execute_and_resume() -> anyhow::Result<()> {
     )?;
     assert_eq!(resumed.copied_rows, 3);
     assert_eq!(resumed.committed_chunks, 2);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_tls_redaction_and_artifact_security() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_TARGET_METADATA_CONFIG")?;
+    let wrong_hostname_path = required_path("SQL_SPLITTER_MYSQL_TEST_WRONG_HOSTNAME_CONFIG")?;
+    let untrusted_ca_path = required_path("SQL_SPLITTER_MYSQL_TEST_UNTRUSTED_CA_CONFIG")?;
+    let missing_client_path = required_path("SQL_SPLITTER_MYSQL_TEST_MISSING_CLIENT_CONFIG")?;
+    let explicit_insecure_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXPLICIT_INSECURE_CONFIG")?;
+    let artifact_dir = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_ARTIFACT_DIR")?;
+    let journal_dir = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_JOURNAL_DIR")?;
+
+    let source_config = MySqlEndpointConfig::read(&source_path)?;
+    let source_metadata_config = MySqlEndpointConfig::read(&source_metadata_path)?;
+    let freeze_config = MySqlEndpointConfig::read(&freeze_path)?;
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    let target_metadata_config = MySqlEndpointConfig::read(&target_metadata_path)?;
+    let credential_references = [
+        source_config.credential_env.as_str(),
+        source_metadata_config.credential_env.as_str(),
+        freeze_config.credential_env.as_str(),
+        target_config.credential_env.as_str(),
+        target_metadata_config.credential_env.as_str(),
+    ];
+    assert!(credential_references
+        .iter()
+        .enumerate()
+        .all(|(index, value)| !credential_references[..index].contains(value)));
+
+    let secure = inspect_live_endpoint(source_config.clone())?;
+    assert!(secure.tls_binding.starts_with("hostname_verified+mtls;"));
+    for path in [
+        &wrong_hostname_path,
+        &untrusted_ca_path,
+        &missing_client_path,
+    ] {
+        let error = inspect_live_endpoint(MySqlEndpointConfig::read(path)?).unwrap_err();
+        let display = error.to_string();
+        assert!(display.contains("MySQL operation failed"));
+        for secret in [
+            "row-secret-needle-7f99",
+            "execsourcepass",
+            "exectargetpass",
+            "sourcemetapass",
+            "adminpass",
+            "clientpass",
+            "INSERT INTO",
+        ] {
+            assert!(
+                !display.contains(secret),
+                "error leaked {secret}: {display}"
+            );
+        }
+    }
+    let insecure = inspect_live_endpoint(MySqlEndpointConfig::read(&explicit_insecure_path)?)?;
+    assert!(insecure.tls_binding.starts_with("insecure_explicit+mtls;"));
+
+    let plan_path = artifact_dir.join("security-plan.json");
+    let assertion_path = artifact_dir.join("security-freeze-assertion.json");
+    let journal_path = journal_dir.join("security-state.journal");
+    let reviewed = write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    write_live_freeze_assertion(&assertion_path, "mysql-security-live-v1")?;
+    let report = execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "mysql-security-live-approval",
+        &journal_path,
+    )?;
+    assert_eq!(report.copied_rows, 1);
+    assert_eq!(
+        connect(&target_config)?.query::<(i64, String), _>(
+            "SELECT `id``key`, `payload``text` FROM `migration_security_target`.`hostile``table;--`",
+        )?,
+        vec![(7, "row-secret-needle-7f99".into())]
+    );
+
+    for path in [&plan_path, &assertion_path, &journal_path] {
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(path)?.permissions().mode() & 0o777,
+            0o600,
+            "{}",
+            path.display()
+        );
+        let bytes = std::fs::read(path)?;
+        for secret in [
+            b"row-secret-needle-7f99".as_slice(),
+            b"execsourcepass".as_slice(),
+            b"exectargetpass".as_slice(),
+            b"sourcemetapass".as_slice(),
+            b"adminpass".as_slice(),
+            b"clientpass".as_slice(),
+            b"INSERT INTO".as_slice(),
+        ] {
+            assert!(
+                !bytes.windows(secret.len()).any(|window| window == secret),
+                "{} contains protected data",
+                path.display()
+            );
+        }
+    }
+
+    let original_plan = std::fs::read(&plan_path)?;
+    assert!(write_json_new(&plan_path, &serde_json::json!({ "replacement": true })).is_err());
+    assert_eq!(std::fs::read(&plan_path)?, original_plan);
+
+    #[cfg(unix)]
+    {
+        let real_path = artifact_dir.join("security-symlink-target.json");
+        let symlink_path = artifact_dir.join("security-symlink-plan.json");
+        std::fs::write(&real_path, b"keep")?;
+        symlink(&real_path, &symlink_path)?;
+        assert!(
+            write_json_new(&symlink_path, &serde_json::json!({ "replacement": true })).is_err()
+        );
+        assert_eq!(std::fs::read(real_path)?, b"keep");
+    }
     Ok(())
 }
 
