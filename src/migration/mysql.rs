@@ -1240,6 +1240,30 @@ impl MySqlSourceFactory {
         }
     }
 
+    pub(crate) fn validate_reviewed_binding(
+        &self,
+        reviewed: &ReviewedPlan,
+    ) -> Result<(), MySqlPlanError> {
+        let evidence = reviewed
+            .plan
+            .mysql_snapshot_evidence
+            .as_ref()
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "reviewed MySQL plan has no source snapshot evidence".into(),
+                )
+            })?;
+        if self.config.database != evidence.database_identity
+            || reviewed.plan.source_endpoint_identity != evidence.endpoint_identity
+            || reviewed.plan.source_tls_binding != mysql_tls_binding(&self.config)?
+        {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL source factory differs from the reviewed endpoint binding".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn controlled_connect(&self) -> ConnectionResult<(Conn, SessionRegistration)> {
         self.cancellation.check()?;
         let mut conn = self.config.connect().map_err(database_error)?;
@@ -1529,6 +1553,54 @@ impl MySqlTargetFactory {
             registry: Arc::default(),
             cancellation,
         })
+    }
+
+    pub(crate) fn validate_reviewed_binding(
+        &self,
+        reviewed: &ReviewedPlan,
+    ) -> Result<(), MySqlPlanError> {
+        let reviewed_source_catalog = reviewed.plan.source_catalog.as_ref().ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog("reviewed MySQL plan has no source catalog".into())
+        })?;
+        let reviewed_target_evidence = reviewed
+            .plan
+            .mysql_target_snapshot_evidence
+            .as_ref()
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "reviewed MySQL plan has no target snapshot evidence".into(),
+                )
+            })?;
+        let reviewed_target_endpoint = reviewed
+            .plan
+            .target_endpoint_identity
+            .as_assessed()
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "reviewed MySQL plan has no target endpoint identity".into(),
+                )
+            })?;
+        let reviewed_target_tls =
+            reviewed
+                .plan
+                .target_tls_binding
+                .as_assessed()
+                .ok_or_else(|| {
+                    MySqlPlanError::InvalidCatalog(
+                        "reviewed MySQL plan has no target TLS binding".into(),
+                    )
+                })?;
+        if &self.reviewed_catalog != reviewed_source_catalog
+            || &self.target_evidence != reviewed_target_evidence
+            || reviewed_target_endpoint != &self.target_evidence.endpoint_identity
+            || self.config.database != self.target_evidence.database_identity
+            || reviewed_target_tls != &mysql_tls_binding(&self.config)?
+        {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL target factory differs from the reviewed endpoint or catalog binding".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn controlled_connect(&self) -> ConnectionResult<(Conn, SessionRegistration)> {

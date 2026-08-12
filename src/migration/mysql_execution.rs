@@ -17,13 +17,13 @@ use super::connection::{
 use super::journal::{MigrationStatus, OperationState};
 use super::model::{DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch, VendorCatalog};
 use super::mysql::{
-    mysql_auto_increment_states, mysql_table_definitions,
+    attest_mysql_external_freeze, mysql_auto_increment_states, mysql_table_definitions,
     validate_mysql_external_freeze_continuity, MySqlAutoIncrementState,
-    MySqlAutoIncrementTargetState, MySqlResumableKey, MySqlSourceFactory, MySqlTableDefinition,
-    MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
+    MySqlAutoIncrementTargetState, MySqlEndpointConfig, MySqlResumableKey, MySqlSourceFactory,
+    MySqlTableDefinition, MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
 };
-use super::mysql_profile::MySqlExternalFreezeAttestation;
-use super::plan::{OperationKind, PlanOperation, ReviewedPlan};
+use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAttestation};
+use super::plan::{MySqlSnapshotEvidence, OperationKind, PlanOperation, ReviewedPlan};
 
 trait MySqlDdlTarget {
     fn inspect(&self, expected: &MySqlTableDefinition) -> ConnectionResult<MySqlTableState>;
@@ -37,6 +37,54 @@ impl MySqlDdlTarget for MySqlTargetFactory {
 
     fn create(&self, expected: &MySqlTableDefinition) -> ConnectionResult<()> {
         self.create_table(expected)
+    }
+}
+
+trait MySqlAutoIncrementTarget {
+    fn inspect_auto_increment(
+        &self,
+        expected: &MySqlAutoIncrementState,
+        mapping: &MySqlTableMapping,
+    ) -> ConnectionResult<MySqlAutoIncrementTargetState>;
+
+    fn restore_auto_increment(
+        &self,
+        expected: &MySqlAutoIncrementState,
+        mapping: &MySqlTableMapping,
+    ) -> ConnectionResult<()>;
+}
+
+impl MySqlAutoIncrementTarget for MySqlTargetFactory {
+    fn inspect_auto_increment(
+        &self,
+        expected: &MySqlAutoIncrementState,
+        mapping: &MySqlTableMapping,
+    ) -> ConnectionResult<MySqlAutoIncrementTargetState> {
+        self.inspect_auto_increment(expected, mapping)
+    }
+
+    fn restore_auto_increment(
+        &self,
+        expected: &MySqlAutoIncrementState,
+        mapping: &MySqlTableMapping,
+    ) -> ConnectionResult<()> {
+        self.restore_auto_increment(expected, mapping)
+    }
+}
+
+trait MySqlVerificationTarget {
+    fn open_verifier(
+        &self,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn VerificationSession>>;
+}
+
+impl MySqlVerificationTarget for MySqlTargetFactory {
+    fn open_verifier(
+        &self,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn VerificationSession>> {
+        TargetConnectionFactory::open_verifier(self, cancellation)
     }
 }
 
@@ -324,13 +372,27 @@ struct MySqlAutoIncrementContract {
 /// Execute or resume the reviewed MySQL plan while continuously re-attesting
 /// the externally owned source freeze. The journal must have been created with
 /// the same reviewed plan and accepted freeze attestation.
-pub fn execute_mysql_frozen_plan<F>(
+pub fn execute_mysql_frozen_plan(
     reviewed: &ReviewedPlan,
     source: &MySqlSourceFactory,
     target: &MySqlTargetFactory,
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
-    mut attest: F,
+    admin_config: &MySqlEndpointConfig,
+    assertion: &MySqlExternalFreezeAssertion,
+) -> anyhow::Result<()> {
+    execute_mysql_frozen_plan_with(reviewed, source, target, journal, cancellation, &mut || {
+        attest_mysql_external_freeze(admin_config, reviewed, assertion).map_err(anyhow::Error::from)
+    })
+}
+
+fn execute_mysql_frozen_plan_with<F>(
+    reviewed: &ReviewedPlan,
+    source: &MySqlSourceFactory,
+    target: &MySqlTargetFactory,
+    journal: &mut AppendJournal,
+    cancellation: &CancellationToken,
+    attest: &mut F,
 ) -> anyhow::Result<()>
 where
     F: FnMut() -> anyhow::Result<MySqlExternalFreezeAttestation>,
@@ -342,6 +404,12 @@ where
         .plan
         .validate_for_execution()
         .context("validate MySQL plan for execution")?;
+    source
+        .validate_reviewed_binding(reviewed)
+        .context("validate reviewed MySQL source factory binding")?;
+    target
+        .validate_reviewed_binding(reviewed)
+        .context("validate reviewed MySQL target factory binding")?;
     if journal.reviewed_plan() != reviewed {
         return Err(anyhow!(
             "MySQL journal genesis contains a different reviewed plan"
@@ -367,12 +435,7 @@ where
                 "MySQL migration journal is in a terminal non-success state"
             ));
         }
-        MigrationStatus::Completed => {
-            require_freeze()?;
-            target.assert_exact_schema()?;
-            return Ok(());
-        }
-        MigrationStatus::Running | MigrationStatus::Verifying => {}
+        MigrationStatus::Running | MigrationStatus::Verifying | MigrationStatus::Completed => {}
     }
 
     require_freeze()?;
@@ -414,6 +477,7 @@ where
         )?;
         journal.transition_status(MigrationStatus::Verifying)?;
     }
+    verify_mysql_auto_increment_target(target, journal, &auto_increment_contracts)?;
 
     require_freeze()?;
     verify_mysql_tables(
@@ -460,10 +524,17 @@ fn capture_exact_source(
 ) -> anyhow::Result<(Box<dyn ReadSession>, VendorCatalog)> {
     cancellation.check()?;
     let snapshot = source.capture_snapshot()?;
+    let current_evidence = source.snapshot_evidence(&snapshot)?;
+    let reviewed_evidence = reviewed
+        .plan
+        .mysql_snapshot_evidence
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no source snapshot evidence"))?;
     let (catalog, blockers, fingerprint) = source.captured_catalog(&snapshot)?;
     if !blockers.is_empty()
         || fingerprint != reviewed.plan.source_catalog_fingerprint
         || reviewed.plan.source_catalog.as_ref() != Some(&catalog)
+        || !mysql_execution_snapshot_binding_is_exact(&current_evidence, reviewed_evidence)
     {
         return Err(anyhow!(
             "fresh MySQL source catalog differs from the reviewed executable catalog"
@@ -476,6 +547,28 @@ fn capture_exact_source(
         ));
     }
     Ok((reader, catalog))
+}
+
+fn mysql_execution_snapshot_binding_is_exact(
+    current: &MySqlSnapshotEvidence,
+    reviewed: &MySqlSnapshotEvidence,
+) -> bool {
+    current.endpoint_identity == reviewed.endpoint_identity
+        && current.database_identity == reviewed.database_identity
+        && current.server_uuid == reviewed.server_uuid
+        && current.server_version == reviewed.server_version
+        && current.transaction_isolation == reviewed.transaction_isolation
+        && current.transaction_read_only == reviewed.transaction_read_only
+        && current.session_time_zone == reviewed.session_time_zone
+        && current.catalog_snapshot_protected == reviewed.catalog_snapshot_protected
+        && current.information_schema_stats_expiry == reviewed.information_schema_stats_expiry
+        && current.lower_case_table_names == reviewed.lower_case_table_names
+        && current.session_sql_mode == reviewed.session_sql_mode
+        && current.character_set_client == reviewed.character_set_client
+        && current.character_set_connection == reviewed.character_set_connection
+        && current.character_set_results == reviewed.character_set_results
+        && current.collation_connection == reviewed.collation_connection
+        && current.catalog_fingerprint == reviewed.catalog_fingerprint
 }
 
 fn mysql_copy_contracts(
@@ -806,7 +899,7 @@ fn inspect_target_interval(
         .checked_add(1)
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| anyhow!("prepared MySQL chunk is too large to inspect"))?;
-    let mut verifier = target.open_verifier(cancellation.clone())?;
+    let mut verifier = TargetConnectionFactory::open_verifier(target, cancellation.clone())?;
     let observed = verifier.select_page(&page_request(
         &contract.target,
         contract,
@@ -845,7 +938,7 @@ fn verify_auto_increment_source_equality(
 }
 
 fn reconcile_mysql_auto_increment<G>(
-    target: &MySqlTargetFactory,
+    target: &impl MySqlAutoIncrementTarget,
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
     contracts: &[MySqlAutoIncrementContract],
@@ -939,36 +1032,91 @@ where
     Ok(())
 }
 
+fn verify_mysql_auto_increment_target(
+    target: &impl MySqlAutoIncrementTarget,
+    journal: &mut AppendJournal,
+    contracts: &[MySqlAutoIncrementContract],
+) -> anyhow::Result<()> {
+    let status = journal.projection().status;
+    for contract in contracts {
+        if operation_state(journal, &contract.operation_id)? != OperationState::Verified {
+            return Err(anyhow!(
+                "MySQL AUTO_INCREMENT operation {} is not verified",
+                contract.operation_id
+            ));
+        }
+        if target.inspect_auto_increment(&contract.state, &contract.mapping)?
+            == MySqlAutoIncrementTargetState::Exact
+        {
+            continue;
+        }
+        if status == MigrationStatus::Completed {
+            return Err(anyhow!(
+                "completed MySQL migration has target AUTO_INCREMENT drift"
+            ));
+        }
+        return require_manual(
+            journal,
+            "verified MySQL AUTO_INCREMENT effect drifted before final verification".into(),
+        );
+    }
+    Ok(())
+}
+
 fn verify_mysql_tables(
     reviewed: &ReviewedPlan,
     reader: &mut dyn ReadSession,
-    target: &MySqlTargetFactory,
+    target: &impl MySqlVerificationTarget,
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
     contracts: &[MySqlCopyContract],
 ) -> anyhow::Result<()> {
-    if journal.projection().status != MigrationStatus::Verifying {
+    let status = journal.projection().status;
+    if !matches!(
+        status,
+        MigrationStatus::Verifying | MigrationStatus::Completed
+    ) {
         return Err(anyhow!(
-            "MySQL table verification is outside Verifying state"
+            "MySQL table verification is outside Verifying or Completed state"
         ));
     }
     let mut verifier = target.open_verifier(cancellation.clone())?;
     let mut chunks = journal.all_committed_chunks()?.peekable();
+    let mut fresh_evidence = Vec::with_capacity(contracts.len());
     for contract in contracts {
         let evidence = verify_mysql_table(reader, verifier.as_mut(), &mut chunks, contract)?;
-        match journal.table_verification_evidence(&contract.operation_id) {
+        fresh_evidence.push((
+            contract.operation_id.clone(),
+            contract.source.clone(),
+            evidence,
+        ));
+    }
+    if chunks.next().transpose()?.is_some() {
+        return Err(anyhow!(
+            "MySQL journal contains committed chunks outside the reviewed table order"
+        ));
+    }
+    drop(chunks);
+
+    for (operation_id, source_table, evidence) in fresh_evidence {
+        match journal.table_verification_evidence(&operation_id) {
             Some(stored) if stored == &evidence => {}
             Some(_) => {
                 return Err(anyhow!(
                     "fresh MySQL table verification differs from durable evidence"
                 ));
             }
-            None => journal.verify_table(
-                &contract.operation_id,
+            None if status == MigrationStatus::Verifying => journal.verify_table(
+                &operation_id,
                 evidence.0.clone(),
                 evidence.1.clone(),
                 evidence.2.clone(),
             )?,
+            None => {
+                return Err(anyhow!(
+                    "completed MySQL migration lacks durable table verification evidence"
+                ));
+            }
         }
         let verify_operation = reviewed
             .plan
@@ -976,15 +1124,18 @@ fn verify_mysql_tables(
             .iter()
             .find(|operation| {
                 operation.kind == OperationKind::VerifyTable
-                    && operation.table.as_ref() == Some(&contract.source)
+                    && operation.table.as_ref() == Some(&source_table)
             })
             .ok_or_else(|| anyhow!("MySQL copy table has no verification operation"))?;
-        complete_effect_operation(journal, verify_operation.id.as_str())?;
-    }
-    if chunks.next().transpose()?.is_some() {
-        return Err(anyhow!(
-            "MySQL journal contains committed chunks outside the reviewed table order"
-        ));
+        if status == MigrationStatus::Verifying {
+            complete_effect_operation(journal, verify_operation.id.as_str())?;
+        } else if operation_state(journal, verify_operation.id.as_str())?
+            != OperationState::Verified
+        {
+            return Err(anyhow!(
+                "completed MySQL migration has an unverified table operation"
+            ));
+        }
     }
     Ok(())
 }
@@ -1194,11 +1345,14 @@ mod tests {
     use super::*;
     use crate::migration::append_journal::{Genesis, OperationPhase, OperationSpec};
     use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
-    use crate::migration::connection::ConnectionError;
+    use crate::migration::connection::{ConnectionError, ReadOnlyEvidence, SnapshotToken};
     use crate::migration::journal::{ConsistencyEvidence, MigrationStatus, ResumeBinding};
-    use crate::migration::model::{CatalogNamespace, Identifier, QualifiedTable, VendorCatalog};
+    use crate::migration::model::{
+        CatalogNamespace, ColumnMeta, Identifier, QualifiedTable, VendorCatalog,
+    };
     use crate::migration::mysql::{
-        MySqlColumnDefinition, MySqlColumnType, MySqlIndexDefinition, MYSQL_CATALOG_FORMAT_VERSION,
+        mysql_tls_binding, MySqlColumnDefinition, MySqlColumnType, MySqlEndpointConfig,
+        MySqlIndexDefinition, MySqlTlsConfig, MYSQL_CATALOG_FORMAT_VERSION,
         MYSQL_CONSISTENCY_SNAPSHOT,
     };
     use crate::migration::mysql_profile::{
@@ -1224,6 +1378,86 @@ mod tests {
     struct FakeTarget {
         state: Mutex<MySqlTableState>,
         behavior: Mutex<CreateBehavior>,
+    }
+
+    #[derive(Debug)]
+    struct FakeAutoIncrementTarget {
+        state: Mutex<MySqlAutoIncrementTargetState>,
+    }
+
+    #[derive(Debug)]
+    struct FakeReader {
+        token: SnapshotToken,
+        evidence: ReadOnlyEvidence,
+        first_page: RowBatch,
+    }
+
+    impl ReadSession for FakeReader {
+        fn read_only_evidence(&self) -> &ReadOnlyEvidence {
+            &self.evidence
+        }
+
+        fn snapshot(&self) -> &SnapshotToken {
+            &self.token
+        }
+
+        fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+            Ok(if request.after.is_none() {
+                self.first_page.clone()
+            } else {
+                empty_batch()
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeVerifier {
+        first_page: RowBatch,
+    }
+
+    impl VerificationSession for FakeVerifier {
+        fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+            Ok(if request.after.is_none() {
+                self.first_page.clone()
+            } else {
+                empty_batch()
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeVerificationTarget {
+        first_page: RowBatch,
+    }
+
+    impl MySqlVerificationTarget for FakeVerificationTarget {
+        fn open_verifier(
+            &self,
+            _cancellation: CancellationToken,
+        ) -> ConnectionResult<Box<dyn VerificationSession>> {
+            Ok(Box::new(FakeVerifier {
+                first_page: self.first_page.clone(),
+            }))
+        }
+    }
+
+    impl MySqlAutoIncrementTarget for FakeAutoIncrementTarget {
+        fn inspect_auto_increment(
+            &self,
+            _expected: &MySqlAutoIncrementState,
+            _mapping: &MySqlTableMapping,
+        ) -> ConnectionResult<MySqlAutoIncrementTargetState> {
+            Ok(*self.state.lock().unwrap())
+        }
+
+        fn restore_auto_increment(
+            &self,
+            _expected: &MySqlAutoIncrementState,
+            _mapping: &MySqlTableMapping,
+        ) -> ConnectionResult<()> {
+            *self.state.lock().unwrap() = MySqlAutoIncrementTargetState::Exact;
+            Ok(())
+        }
     }
 
     impl FakeTarget {
@@ -1265,6 +1499,31 @@ mod tests {
 
     fn identifier(value: &str) -> Identifier {
         Identifier::new(value).unwrap()
+    }
+
+    fn empty_batch() -> RowBatch {
+        RowBatch::new(
+            vec![ColumnMeta {
+                name: identifier("id"),
+                ordinal: 1,
+                vendor_type: "bigint unsigned".into(),
+                nullable: false,
+                collation: None,
+                precision: None,
+                scale: None,
+                timezone_semantics: None,
+            }],
+            1,
+            1024,
+        )
+    }
+
+    fn one_row_batch(value: u64) -> RowBatch {
+        let mut batch = empty_batch();
+        batch
+            .try_push(vec![DbValue::Unsigned(value.into())], 8)
+            .unwrap();
+        batch
     }
 
     fn table_definition() -> (QualifiedTable, MySqlTableDefinition, MySqlTableMapping) {
@@ -1335,7 +1594,23 @@ mod tests {
         hex::encode(Sha256::digest(serde_json::to_vec(catalog).unwrap()))
     }
 
+    fn endpoint_config(database: &str) -> MySqlEndpointConfig {
+        MySqlEndpointConfig {
+            host: database.into(),
+            port: 3306,
+            database: database.into(),
+            user: "migration".into(),
+            credential_env: format!("{}_PASSWORD", database.to_uppercase()),
+            tls: MySqlTlsConfig::default(),
+            connect_timeout_seconds: 10,
+            max_batch_rows: 100,
+            max_batch_bytes: 1024 * 1024,
+        }
+    }
+
     fn reviewed_plan() -> (ReviewedPlan, String) {
+        let source_config = endpoint_config("source_db");
+        let target_config = endpoint_config("target_db");
         let source_catalog = catalog("source_db");
         let target_catalog = catalog("target_db");
         let source_fingerprint = fingerprint(&source_catalog);
@@ -1369,8 +1644,10 @@ mod tests {
             target_catalog_fingerprint: AssessmentStatus::Assessed(target_fingerprint.clone()),
             source_catalog: Some(source_catalog),
             target_catalog: AssessmentStatus::Assessed(target_catalog),
-            source_tls_binding: "source-tls".into(),
-            target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
+            source_tls_binding: mysql_tls_binding(&source_config).unwrap(),
+            target_tls_binding: AssessmentStatus::Assessed(
+                mysql_tls_binding(&target_config).unwrap(),
+            ),
             consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "mysql_same_dialect_exact".into(),
@@ -1429,8 +1706,295 @@ mod tests {
         (reviewed, operation_id)
     }
 
+    #[test]
+    fn factories_must_match_the_reviewed_endpoint_and_catalog_bindings() {
+        let (reviewed, _) = reviewed_plan();
+        let source = MySqlSourceFactory::new(endpoint_config("source_db"));
+        source.validate_reviewed_binding(&reviewed).unwrap();
+
+        let source_catalog = reviewed.plan.source_catalog.clone().unwrap();
+        let target_evidence = reviewed
+            .plan
+            .mysql_target_snapshot_evidence
+            .clone()
+            .unwrap();
+        let target = MySqlTargetFactory::new(
+            endpoint_config("target_db"),
+            source_catalog.clone(),
+            target_evidence.clone(),
+        )
+        .unwrap();
+        target.validate_reviewed_binding(&reviewed).unwrap();
+
+        let wrong_source = MySqlSourceFactory::new(endpoint_config("source_clone"));
+        assert!(wrong_source.validate_reviewed_binding(&reviewed).is_err());
+
+        let mut wrong_target_evidence = target_evidence;
+        wrong_target_evidence.server_uuid = "clone-server-uuid".into();
+        let wrong_target = MySqlTargetFactory::new(
+            endpoint_config("target_db"),
+            source_catalog,
+            wrong_target_evidence,
+        )
+        .unwrap();
+        assert!(wrong_target.validate_reviewed_binding(&reviewed).is_err());
+    }
+
+    #[test]
+    fn fresh_snapshot_binding_rejects_a_catalog_identical_source_clone() {
+        let (reviewed, _) = reviewed_plan();
+        let expected = reviewed.plan.mysql_snapshot_evidence.as_ref().unwrap();
+        let mut fresh = expected.clone();
+        fresh.lifecycle_id = "fresh-lifecycle".into();
+        fresh.connection_id = 99;
+        assert!(mysql_execution_snapshot_binding_is_exact(&fresh, expected));
+
+        fresh.server_uuid = "clone-server-uuid".into();
+        assert!(!mysql_execution_snapshot_binding_is_exact(&fresh, expected));
+    }
+
+    fn auto_increment_reviewed_plan() -> (ReviewedPlan, MySqlAutoIncrementContract, String) {
+        let (base, _) = reviewed_plan();
+        let (source, _, mapping) = table_definition();
+        let state = MySqlAutoIncrementState {
+            table: source.clone(),
+            column: identifier("id"),
+            next_value: Some(42),
+            stats_expiry: 0,
+        };
+        let restore = PlanOperation::new(
+            OperationKind::Vendor("restore_mysql_auto_increment".into()),
+            Some(source.clone()),
+            Vec::new(),
+            BTreeMap::from([
+                (
+                    "mysql_auto_increment_state".into(),
+                    serde_json::to_value(&state).unwrap(),
+                ),
+                (
+                    "mysql_table_mapping".into(),
+                    serde_json::to_value(&mapping).unwrap(),
+                ),
+            ]),
+        )
+        .unwrap();
+        let verify_schema = PlanOperation::new(
+            OperationKind::VerifySchema,
+            None,
+            vec![restore.id.clone()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let restore_id = restore.id.to_string();
+        let verify_schema_id = verify_schema.id.to_string();
+        let mut plan = base.plan;
+        plan.operations = vec![restore, verify_schema];
+        let reviewed = ReviewedPlan::new(plan).unwrap();
+        (
+            reviewed,
+            MySqlAutoIncrementContract {
+                operation_id: restore_id,
+                state,
+                mapping,
+            },
+            verify_schema_id,
+        )
+    }
+
+    #[test]
+    fn auto_increment_drift_in_verifying_requires_manual_reconciliation() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let (reviewed, contract, _) = auto_increment_reviewed_plan();
+        let mut journal = journal(&directory.path().join("auto-drift.journal"), reviewed);
+        complete_effect_operation(&mut journal, &contract.operation_id).unwrap();
+        journal
+            .transition_status(MigrationStatus::Verifying)
+            .unwrap();
+        let target = FakeAutoIncrementTarget {
+            state: Mutex::new(MySqlAutoIncrementTargetState::Different),
+        };
+
+        assert!(verify_mysql_auto_increment_target(&target, &mut journal, &[contract]).is_err());
+        assert_eq!(
+            journal.projection().status,
+            MigrationStatus::ManualReconciliationRequired
+        );
+    }
+
+    #[test]
+    fn completed_auto_increment_drift_is_rejected_without_mutating_the_terminal_journal() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let (reviewed, contract, verify_schema_id) = auto_increment_reviewed_plan();
+        let source_fingerprint = reviewed.plan.source_catalog_fingerprint.clone();
+        let mut journal = journal(&directory.path().join("completed-drift.journal"), reviewed);
+        complete_effect_operation(&mut journal, &contract.operation_id).unwrap();
+        journal
+            .transition_status(MigrationStatus::Verifying)
+            .unwrap();
+        journal.verify_schema(source_fingerprint).unwrap();
+        complete_effect_operation(&mut journal, &verify_schema_id).unwrap();
+        journal
+            .transition_status(MigrationStatus::Completed)
+            .unwrap();
+        let target = FakeAutoIncrementTarget {
+            state: Mutex::new(MySqlAutoIncrementTargetState::Different),
+        };
+
+        assert!(verify_mysql_auto_increment_target(&target, &mut journal, &[contract]).is_err());
+        assert_eq!(journal.projection().status, MigrationStatus::Completed);
+    }
+
+    fn copy_reviewed_plan() -> (ReviewedPlan, MySqlCopyContract, String) {
+        let (base, _) = reviewed_plan();
+        let (source, _, mapping) = table_definition();
+        let copy = PlanOperation::new(
+            OperationKind::CopyTable,
+            Some(source.clone()),
+            Vec::new(),
+            BTreeMap::from([
+                (
+                    "mysql_table_mapping".into(),
+                    serde_json::to_value(&mapping).unwrap(),
+                ),
+                (
+                    "mysql_write_policy".into(),
+                    serde_json::json!("plain_insert_transaction_v1"),
+                ),
+            ]),
+        )
+        .unwrap();
+        let verify_table = PlanOperation::new(
+            OperationKind::VerifyTable,
+            Some(source.clone()),
+            vec![copy.id.clone()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let verify_schema = PlanOperation::new(
+            OperationKind::VerifySchema,
+            None,
+            vec![verify_table.id.clone()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let verify_schema_id = verify_schema.id.to_string();
+        let contract = MySqlCopyContract {
+            operation_id: copy.id.to_string(),
+            source,
+            target: mapping.target,
+            projection: vec![identifier("id")],
+            key: vec![identifier("id")],
+            key_indexes: vec![0],
+        };
+        let mut plan = base.plan;
+        plan.operations = vec![copy, verify_table, verify_schema];
+        (ReviewedPlan::new(plan).unwrap(), contract, verify_schema_id)
+    }
+
+    fn fake_reader(batch: RowBatch) -> FakeReader {
+        FakeReader {
+            token: SnapshotToken {
+                endpoint_identity: "mysql://source/source_db".into(),
+                database_identity: "source_db".into(),
+                snapshot_id: "snapshot".into(),
+                consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
+                server_version: "8.4.0".into(),
+                lifecycle_id: "lifecycle".into(),
+            },
+            evidence: ReadOnlyEvidence {
+                server_enforced: true,
+                description: "test".into(),
+            },
+            first_page: batch,
+        }
+    }
+
+    #[test]
+    fn completed_table_data_is_reverified_against_current_target_rows() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let (reviewed, contract, verify_schema_id) = copy_reviewed_plan();
+        let source_fingerprint = reviewed.plan.source_catalog_fingerprint.clone();
+        let source_batch = one_row_batch(1);
+        let digest = batch_digest(&contract.source, &contract, &source_batch).unwrap();
+        let mut journal = journal(
+            &directory.path().join("completed-rows.journal"),
+            reviewed.clone(),
+        );
+        journal
+            .transition_operation(&contract.operation_id, OperationState::Running)
+            .unwrap();
+        journal
+            .prepare_chunk(PreparedChunk {
+                chunk_id: 1,
+                operation_id: contract.operation_id.clone(),
+                start_key: None,
+                final_key: vec![DbValue::Unsigned(1)],
+                row_count: 1,
+                canonical_digest: digest,
+                target_transaction_intent: "intent-1".into(),
+            })
+            .unwrap();
+        journal.commit_chunk_after_ack().unwrap();
+        complete_effect_operation(&mut journal, &contract.operation_id).unwrap();
+        journal
+            .transition_status(MigrationStatus::Verifying)
+            .unwrap();
+        let matching_target = FakeVerificationTarget {
+            first_page: source_batch.clone(),
+        };
+        verify_mysql_tables(
+            &reviewed,
+            &mut fake_reader(source_batch.clone()),
+            &matching_target,
+            &mut journal,
+            &CancellationToken::default(),
+            std::slice::from_ref(&contract),
+        )
+        .unwrap();
+        journal.verify_schema(source_fingerprint).unwrap();
+        complete_effect_operation(&mut journal, &verify_schema_id).unwrap();
+        journal
+            .transition_status(MigrationStatus::Completed)
+            .unwrap();
+
+        let drifted_target = FakeVerificationTarget {
+            first_page: one_row_batch(2),
+        };
+        assert!(verify_mysql_tables(
+            &reviewed,
+            &mut fake_reader(source_batch),
+            &drifted_target,
+            &mut journal,
+            &CancellationToken::default(),
+            &[contract],
+        )
+        .is_err());
+        assert_eq!(journal.projection().status, MigrationStatus::Completed);
+    }
+
     fn journal(path: &std::path::Path, reviewed: ReviewedPlan) -> AppendJournal {
-        let operation_id = reviewed.plan.operations[0].id.to_string();
+        let operations = reviewed
+            .plan
+            .operations
+            .iter()
+            .map(|operation| OperationSpec {
+                operation_id: operation.id.to_string(),
+                dependencies: operation
+                    .dependencies
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                is_copy: operation.kind == OperationKind::CopyTable,
+                phase: if matches!(
+                    operation.kind,
+                    OperationKind::VerifyTable | OperationKind::VerifySchema
+                ) {
+                    OperationPhase::Verification
+                } else {
+                    OperationPhase::Execution
+                },
+            })
+            .collect();
         let freeze = MySqlExternalFreezeAttestation {
             schema_version: MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
             profile: MySqlFreezeProfileKind::ExternalContinuousFreezeV1,
@@ -1499,12 +2063,7 @@ mod tests {
                 accepted_outage_projection: None,
                 accepted_external_quiesce: None,
                 accepted_mysql_freeze: Some(freeze),
-                operations: vec![OperationSpec {
-                    operation_id,
-                    dependencies: Vec::new(),
-                    is_copy: false,
-                    phase: OperationPhase::Execution,
-                }],
+                operations,
             },
         )
         .unwrap()
