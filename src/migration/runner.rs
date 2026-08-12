@@ -4431,6 +4431,9 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         target_catalog: AssessmentStatus::Assessed(target_catalog),
         source_tls_binding: "fixture-source-tls".into(),
         target_tls_binding: AssessmentStatus::Assessed("fixture-target-tls".into()),
+        target_mode: Some(AssessmentStatus::Assessed(
+            crate::migration::plan::TargetModeContract::EmptyOwned,
+        )),
         consistency_mode: PostgresConsistencyMode::ConsistentSnapshot.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
@@ -5229,6 +5232,9 @@ mod tests {
             target_catalog: AssessmentStatus::Assessed(target_catalog),
             source_tls_binding: binding.clone(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
+            target_mode: Some(AssessmentStatus::Assessed(
+                crate::migration::plan::TargetModeContract::EmptyOwned,
+            )),
             consistency_mode: "write-fence".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,

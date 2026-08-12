@@ -290,6 +290,9 @@ pub fn build_postgres_to_mysql_plan(
         target_catalog: AssessmentStatus::Assessed(target_visibility.authoritative_catalog.clone()),
         source_tls_binding: source.tls_binding.clone(),
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
+        target_mode: Some(AssessmentStatus::Assessed(
+            super::plan::TargetModeContract::EmptyOwned,
+        )),
         consistency_mode: PostgresConsistencyMode::WriteFence.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy,
@@ -447,6 +450,9 @@ pub fn build_mysql_to_postgres_plan(
         target_catalog: AssessmentStatus::Assessed(target.catalog.clone()),
         source_tls_binding: source.tls_binding.clone(),
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
+        target_mode: Some(AssessmentStatus::Assessed(
+            super::plan::TargetModeContract::EmptyOwned,
+        )),
         consistency_mode: super::mysql::MYSQL_CONSISTENCY_SNAPSHOT.into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy,

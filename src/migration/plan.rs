@@ -9,7 +9,7 @@ use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::conversion::{
     ConversionDialect, MigrationConversionMode, MigrationConversionPolicy, RowConversionError,
 };
-use super::model::{QualifiedTable, VendorCatalog};
+use super::model::{CatalogObjectKind, Identifier, QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
 use super::mysql_visibility::{
     MySqlAuthorizationContract, MySqlGrantRecord, MySqlMetadataVisibilityEvidence,
@@ -18,7 +18,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 17;
+pub const PLAN_SCHEMA_VERSION: u16 = 18;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -81,6 +81,118 @@ impl<T> AssessmentStatus<T> {
     pub fn is_assessed(&self) -> bool {
         matches!(self, Self::Assessed(_))
     }
+}
+
+/// The reviewed target behavior. This is part of the plan hash and cannot be
+/// changed by execute or resume flags.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", content = "contract", rename_all = "snake_case")]
+pub enum TargetModeContract {
+    EmptyOwned,
+    WarmMerge(WarmMergeContract),
+    StagingSwap(StagingSwapContract),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmMergeConflictPolicy {
+    RejectAnyKeyCollision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WarmMergeContract {
+    pub conflict_policy: WarmMergeConflictPolicy,
+    pub ownership: TargetOwnershipManifest,
+    pub tables: Vec<WarmMergeTable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WarmMergeTable {
+    pub table: QualifiedTable,
+    pub target_table_object_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "catalog_id", rename_all = "snake_case")]
+pub enum TargetCatalogItem {
+    Namespace(String),
+    Object(String),
+}
+
+impl TargetCatalogItem {
+    fn catalog_id(&self) -> &str {
+        match self {
+            Self::Namespace(id) | Self::Object(id) => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetObjectDisposition {
+    Preserve,
+    MergeRows,
+    ReplaceAtCutover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetOwnershipClaim {
+    pub item: TargetCatalogItem,
+    pub disposition: TargetObjectDisposition,
+}
+
+/// Closed classification of every user namespace and catalog object observed
+/// on the reviewed target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetOwnershipManifest {
+    pub target_catalog_fingerprint: String,
+    pub claims: Vec<TargetOwnershipClaim>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedBackupPolicy {
+    RetainUntilExplicitCleanup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum StagingReplacement {
+    Namespace {
+        live: Identifier,
+        staging: Identifier,
+        retained: Identifier,
+        catalog_items: Vec<TargetCatalogItem>,
+    },
+    Table {
+        live: QualifiedTable,
+        staging: QualifiedTable,
+        retained: QualifiedTable,
+        catalog_items: Vec<TargetCatalogItem>,
+    },
+}
+
+impl StagingReplacement {
+    fn catalog_items(&self) -> &[TargetCatalogItem] {
+        match self {
+            Self::Namespace { catalog_items, .. } | Self::Table { catalog_items, .. } => {
+                catalog_items
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagingSwapContract {
+    pub ownership: TargetOwnershipManifest,
+    pub replacements: Vec<StagingReplacement>,
+    pub metadata_lock_timeout_millis: u64,
+    pub retained_backup_policy: RetainedBackupPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -320,6 +432,8 @@ pub struct MigrationPlan {
     pub target_catalog: AssessmentStatus<VendorCatalog>,
     pub source_tls_binding: String,
     pub target_tls_binding: AssessmentStatus<String>,
+    #[serde(default)]
+    pub target_mode: Option<AssessmentStatus<TargetModeContract>>,
     pub consistency_mode: String,
     pub canonical_encoding_version: u16,
     pub conversion_policy: MigrationConversionPolicy,
@@ -386,11 +500,18 @@ impl MigrationPlan {
             &self.source_catalog_fingerprint,
         )?;
 
+        let target_mode = self
+            .target_mode
+            .as_ref()
+            .ok_or(PlanError::MissingEvidence {
+                field: "target_mode",
+            })?;
         let target_assessment = [
             self.target_endpoint_identity.is_assessed(),
             self.target_catalog_fingerprint.is_assessed(),
             self.target_catalog.is_assessed(),
             self.target_tls_binding.is_assessed(),
+            target_mode.is_assessed(),
         ];
         if !target_assessment
             .iter()
@@ -398,11 +519,12 @@ impl MigrationPlan {
         {
             return Err(PlanError::InconsistentTargetAssessment);
         }
-        if let (Some(endpoint), Some(fingerprint), Some(catalog), Some(tls_binding)) = (
+        if let (Some(endpoint), Some(fingerprint), Some(catalog), Some(tls_binding), Some(mode)) = (
             self.target_endpoint_identity.as_assessed(),
             self.target_catalog_fingerprint.as_assessed(),
             self.target_catalog.as_assessed(),
             self.target_tls_binding.as_assessed(),
+            target_mode.as_assessed(),
         ) {
             for (field, value) in [
                 ("target_endpoint_identity", endpoint),
@@ -414,6 +536,7 @@ impl MigrationPlan {
                 }
             }
             validate_catalog_fingerprint("target_catalog_fingerprint", catalog, fingerprint)?;
+            validate_target_mode(mode, catalog, fingerprint, &self.conversion_policy)?;
         }
         if self.purpose == PlanPurpose::Execution {
             require_execution_target(self)?;
@@ -530,6 +653,14 @@ impl MigrationPlan {
             return Err(PlanError::AssessmentCannotExecute);
         }
         require_execution_target(self)?;
+        if !matches!(
+            self.target_mode
+                .as_ref()
+                .and_then(AssessmentStatus::as_assessed),
+            Some(TargetModeContract::EmptyOwned)
+        ) {
+            return Err(PlanError::TargetModeExecutionUnavailable);
+        }
         if self.unsupported_objects.blocks_execution() {
             return Err(PlanError::UnsupportedRequiredSemantics);
         }
@@ -555,6 +686,287 @@ impl MigrationPlan {
                 field: "target_catalog_fingerprint",
             })
     }
+}
+
+fn validate_target_mode(
+    mode: &TargetModeContract,
+    target_catalog: &VendorCatalog,
+    target_catalog_fingerprint: &str,
+    conversion_policy: &MigrationConversionPolicy,
+) -> Result<(), PlanError> {
+    match mode {
+        TargetModeContract::EmptyOwned => Ok(()),
+        TargetModeContract::WarmMerge(contract) => {
+            if conversion_policy.has_approved_transformations() {
+                return Err(PlanError::CrossDialectTargetModeUnavailable);
+            }
+            let catalog_items = contract
+                .ownership
+                .validate_against(target_catalog, target_catalog_fingerprint)?;
+            if contract.tables.is_empty() {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            let mut tables = BTreeSet::new();
+            let mut merge_items = BTreeSet::new();
+            for table in &contract.tables {
+                if table.target_table_object_id.is_empty() || !tables.insert(&table.table) {
+                    return Err(PlanError::InvalidTargetMode);
+                }
+                let item = TargetCatalogItem::Object(table.target_table_object_id.clone());
+                let Some(CatalogItemEvidence::Object {
+                    kind: CatalogObjectKind::Table,
+                    namespace,
+                    name,
+                }) = catalog_items.get(&item)
+                else {
+                    return Err(PlanError::InvalidTargetMode);
+                };
+                if *namespace != &table.table.namespace || *name != &table.table.name {
+                    return Err(PlanError::InvalidTargetMode);
+                }
+                merge_items.insert(item);
+            }
+            let claimed_merge_items = contract
+                .ownership
+                .claims
+                .iter()
+                .filter(|claim| claim.disposition == TargetObjectDisposition::MergeRows)
+                .map(|claim| claim.item.clone())
+                .collect::<BTreeSet<_>>();
+            if claimed_merge_items != merge_items
+                || contract
+                    .ownership
+                    .claims
+                    .iter()
+                    .any(|claim| claim.disposition == TargetObjectDisposition::ReplaceAtCutover)
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            Ok(())
+        }
+        TargetModeContract::StagingSwap(contract) => {
+            if conversion_policy.has_approved_transformations()
+                || contract.replacements.is_empty()
+                || contract.metadata_lock_timeout_millis == 0
+                || contract.metadata_lock_timeout_millis > 3_600_000
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            let catalog_items = contract
+                .ownership
+                .validate_against(target_catalog, target_catalog_fingerprint)?;
+            let mut replacement_items = BTreeSet::new();
+            let mut identities = BTreeSet::new();
+            for replacement in &contract.replacements {
+                if replacement.catalog_items().is_empty() {
+                    return Err(PlanError::InvalidTargetMode);
+                }
+                for item in replacement.catalog_items() {
+                    if !catalog_items.contains_key(item) || !replacement_items.insert(item.clone())
+                    {
+                        return Err(PlanError::InvalidTargetMode);
+                    }
+                }
+                validate_staging_replacement(replacement, target_catalog, &mut identities)?;
+            }
+            let claimed_replacement_items = contract
+                .ownership
+                .claims
+                .iter()
+                .filter(|claim| claim.disposition == TargetObjectDisposition::ReplaceAtCutover)
+                .map(|claim| claim.item.clone())
+                .collect::<BTreeSet<_>>();
+            if claimed_replacement_items != replacement_items
+                || contract
+                    .ownership
+                    .claims
+                    .iter()
+                    .any(|claim| claim.disposition == TargetObjectDisposition::MergeRows)
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CatalogItemEvidence<'a> {
+    Namespace,
+    Object {
+        kind: &'a CatalogObjectKind,
+        namespace: &'a Identifier,
+        name: &'a Identifier,
+    },
+}
+
+impl TargetOwnershipManifest {
+    fn validate_against<'a>(
+        &self,
+        target_catalog: &'a VendorCatalog,
+        target_catalog_fingerprint: &str,
+    ) -> Result<BTreeMap<TargetCatalogItem, CatalogItemEvidence<'a>>, PlanError> {
+        if self.target_catalog_fingerprint != target_catalog_fingerprint {
+            return Err(PlanError::TargetOwnershipFingerprintMismatch);
+        }
+        let mut expected = BTreeMap::new();
+        for namespace in &target_catalog.namespaces {
+            if expected
+                .insert(
+                    TargetCatalogItem::Namespace(namespace.id.clone()),
+                    CatalogItemEvidence::Namespace,
+                )
+                .is_some()
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            for object in &namespace.objects {
+                if expected
+                    .insert(
+                        TargetCatalogItem::Object(object.id.clone()),
+                        CatalogItemEvidence::Object {
+                            kind: &object.kind,
+                            namespace: &namespace.name,
+                            name: &object.name,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(PlanError::InvalidTargetMode);
+                }
+            }
+        }
+        let mut actual = BTreeSet::new();
+        for claim in &self.claims {
+            if claim.item.catalog_id().is_empty() || !actual.insert(claim.item.clone()) {
+                return Err(PlanError::InvalidTargetMode);
+            }
+        }
+        if actual != expected.keys().cloned().collect() {
+            return Err(PlanError::IncompleteTargetOwnershipManifest);
+        }
+        Ok(expected)
+    }
+}
+
+fn validate_staging_replacement(
+    replacement: &StagingReplacement,
+    target_catalog: &VendorCatalog,
+    identities: &mut BTreeSet<StagingIdentity>,
+) -> Result<(), PlanError> {
+    let namespace_names = target_catalog
+        .namespaces
+        .iter()
+        .map(|namespace| &namespace.name)
+        .collect::<BTreeSet<_>>();
+    let table_names = target_catalog
+        .namespaces
+        .iter()
+        .flat_map(|namespace| {
+            namespace
+                .objects
+                .iter()
+                .filter(|object| object.kind == CatalogObjectKind::Table)
+                .map(|object| QualifiedTable {
+                    namespace: namespace.name.clone(),
+                    name: object.name.clone(),
+                })
+        })
+        .collect::<BTreeSet<_>>();
+    match replacement {
+        StagingReplacement::Namespace {
+            live,
+            staging,
+            retained,
+            catalog_items,
+        } => {
+            if !namespace_names.contains(live)
+                || namespace_names.contains(staging)
+                || namespace_names.contains(retained)
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            for identity in [live, staging, retained] {
+                if !identities.insert(StagingIdentity::Namespace(identity.clone())) {
+                    return Err(PlanError::InvalidTargetMode);
+                }
+            }
+            let namespace = target_catalog
+                .namespaces
+                .iter()
+                .find(|namespace| &namespace.name == live)
+                .ok_or(PlanError::InvalidTargetMode)?;
+            let expected = std::iter::once(TargetCatalogItem::Namespace(namespace.id.clone()))
+                .chain(
+                    namespace
+                        .objects
+                        .iter()
+                        .map(|object| TargetCatalogItem::Object(object.id.clone())),
+                )
+                .collect::<BTreeSet<_>>();
+            if catalog_items.iter().cloned().collect::<BTreeSet<_>>() != expected {
+                return Err(PlanError::InvalidTargetMode);
+            }
+        }
+        StagingReplacement::Table {
+            live,
+            staging,
+            retained,
+            catalog_items,
+        } => {
+            if !table_names.contains(live)
+                || table_names.contains(staging)
+                || table_names.contains(retained)
+            {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            for identity in [live, staging, retained] {
+                if !identities.insert(StagingIdentity::Table(identity.clone())) {
+                    return Err(PlanError::InvalidTargetMode);
+                }
+            }
+            let table_id = target_catalog
+                .namespaces
+                .iter()
+                .find(|namespace| namespace.name == live.namespace)
+                .and_then(|namespace| {
+                    namespace.objects.iter().find(|object| {
+                        object.kind == CatalogObjectKind::Table && object.name == live.name
+                    })
+                })
+                .map(|object| object.id.as_str())
+                .ok_or(PlanError::InvalidTargetMode)?;
+            let supplied = catalog_items
+                .iter()
+                .map(|item| match item {
+                    TargetCatalogItem::Object(id) => Ok(id.as_str()),
+                    TargetCatalogItem::Namespace(_) => Err(PlanError::InvalidTargetMode),
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let mut dependent_closure = BTreeSet::from([table_id]);
+            loop {
+                let prior_len = dependent_closure.len();
+                for dependency in &target_catalog.dependencies {
+                    if dependent_closure.contains(dependency.to_object_id.as_str()) {
+                        dependent_closure.insert(dependency.from_object_id.as_str());
+                    }
+                }
+                if dependent_closure.len() == prior_len {
+                    break;
+                }
+            }
+            if supplied != dependent_closure {
+                return Err(PlanError::InvalidTargetMode);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum StagingIdentity {
+    Namespace(Identifier),
+    Table(QualifiedTable),
 }
 
 fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), PlanError> {
@@ -928,6 +1340,12 @@ fn require_execution_target(plan: &MigrationPlan) -> Result<(), PlanError> {
         ),
         ("target_catalog", plan.target_catalog.is_assessed()),
         ("target_tls_binding", plan.target_tls_binding.is_assessed()),
+        (
+            "target_mode",
+            plan.target_mode
+                .as_ref()
+                .is_some_and(AssessmentStatus::is_assessed),
+        ),
     ] {
         if !assessed {
             return Err(PlanError::MissingEvidence { field });
@@ -1069,6 +1487,16 @@ pub enum PlanError {
     UnsupportedRequiredSemantics,
     #[error("assessment plans cannot be executed")]
     AssessmentCannotExecute,
+    #[error("reviewed target mode is invalid or inconsistent with the target catalog")]
+    InvalidTargetMode,
+    #[error("target ownership manifest does not classify every reviewed target item exactly once")]
+    IncompleteTargetOwnershipManifest,
+    #[error("target ownership manifest fingerprint differs from the reviewed target catalog")]
+    TargetOwnershipFingerprintMismatch,
+    #[error("cross-dialect warm merge and staging swap are not supported")]
+    CrossDialectTargetModeUnavailable,
+    #[error("the reviewed target mode does not yet have an execution implementation")]
+    TargetModeExecutionUnavailable,
     #[error("assessment plan must not contain an execution outage policy")]
     AssessmentContainsOutagePolicy,
     #[error("assessment plan must not contain a PostgreSQL execution source profile")]
@@ -1106,7 +1534,7 @@ mod tests {
         RowConversionPolicy, TableConversionPolicy, ValueConversionRule,
         ROW_TYPE_CONVERSION_SCHEMA_VERSION,
     };
-    use crate::migration::model::{ColumnMeta, Identifier};
+    use crate::migration::model::{CatalogNamespace, CatalogObject, ColumnMeta, Identifier};
     use crate::migration::outage_projection::{
         ByteBasis, ThroughputProfile, OUTAGE_PROJECTION_SCHEMA_VERSION,
         THROUGHPUT_PROFILE_SCHEMA_VERSION,
@@ -1128,6 +1556,57 @@ mod tests {
         hex::encode(Sha256::digest(serde_json::to_vec(catalog).unwrap()))
     }
 
+    fn add_target_table(plan: &mut MigrationPlan) -> QualifiedTable {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("items").unwrap(),
+        };
+        let target_catalog = match &mut plan.target_catalog {
+            AssessmentStatus::Assessed(catalog) => catalog,
+            AssessmentStatus::NotAssessed => unreachable!(),
+        };
+        target_catalog.namespaces.push(CatalogNamespace {
+            id: "namespace:public".into(),
+            name: table.namespace.clone(),
+            owner: Some("target_owner".into()),
+            charset: None,
+            collation: None,
+            objects: vec![CatalogObject {
+                id: "relation:items".into(),
+                kind: CatalogObjectKind::Table,
+                name: table.name.clone(),
+                definition: Vec::new(),
+                attributes: BTreeMap::new(),
+            }],
+        });
+        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(fingerprint(target_catalog));
+        table
+    }
+
+    fn ownership_manifest(
+        plan: &MigrationPlan,
+        namespace: TargetObjectDisposition,
+        table: TargetObjectDisposition,
+    ) -> TargetOwnershipManifest {
+        TargetOwnershipManifest {
+            target_catalog_fingerprint: plan
+                .target_catalog_fingerprint
+                .as_assessed()
+                .unwrap()
+                .clone(),
+            claims: vec![
+                TargetOwnershipClaim {
+                    item: TargetCatalogItem::Namespace("namespace:public".into()),
+                    disposition: namespace,
+                },
+                TargetOwnershipClaim {
+                    item: TargetCatalogItem::Object("relation:items".into()),
+                    disposition: table,
+                },
+            ],
+        }
+    }
+
     fn plan() -> MigrationPlan {
         let source_catalog = catalog("source");
         let target_catalog = catalog("target");
@@ -1145,6 +1624,7 @@ mod tests {
             target_catalog: AssessmentStatus::Assessed(target_catalog),
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
+            target_mode: Some(AssessmentStatus::Assessed(TargetModeContract::EmptyOwned)),
             consistency_mode: "consistent-snapshot".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
@@ -1250,6 +1730,118 @@ mod tests {
             Err(PlanError::UnsupportedVersion { found })
                 if found == PLAN_SCHEMA_VERSION - 1
         ));
+    }
+
+    #[test]
+    fn legacy_json_without_target_mode_reaches_the_version_boundary() {
+        let mut value = serde_json::to_value(plan()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("target_mode");
+        object.insert(
+            "schema_version".into(),
+            serde_json::json!(PLAN_SCHEMA_VERSION - 1),
+        );
+        let legacy: MigrationPlan = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            legacy.validate(),
+            Err(PlanError::UnsupportedVersion { found })
+                if found == PLAN_SCHEMA_VERSION - 1
+        ));
+
+        let mut current = legacy;
+        current.schema_version = PLAN_SCHEMA_VERSION;
+        assert!(matches!(
+            current.validate(),
+            Err(PlanError::MissingEvidence {
+                field: "target_mode"
+            })
+        ));
+    }
+
+    #[test]
+    fn warm_merge_is_closed_over_the_target_catalog_and_not_yet_executable() {
+        let mut plan = plan();
+        let table = add_target_table(&mut plan);
+        plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
+            WarmMergeContract {
+                conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
+                ownership: ownership_manifest(
+                    &plan,
+                    TargetObjectDisposition::Preserve,
+                    TargetObjectDisposition::MergeRows,
+                ),
+                tables: vec![WarmMergeTable {
+                    table,
+                    target_table_object_id: "relation:items".into(),
+                }],
+            },
+        )));
+
+        assert!(plan.validate().is_ok());
+        assert!(ReviewedPlan::new(plan.clone()).is_ok());
+        assert!(matches!(
+            plan.validate_for_execution(),
+            Err(PlanError::TargetModeExecutionUnavailable)
+        ));
+
+        let AssessmentStatus::Assessed(TargetModeContract::WarmMerge(contract)) =
+            plan.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        contract.ownership.claims.pop();
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::IncompleteTargetOwnershipManifest)
+        ));
+    }
+
+    #[test]
+    fn staging_swap_binds_distinct_names_and_exact_replacement_items() {
+        let mut plan = plan();
+        add_target_table(&mut plan);
+        let catalog_items = vec![
+            TargetCatalogItem::Namespace("namespace:public".into()),
+            TargetCatalogItem::Object("relation:items".into()),
+        ];
+        plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::StagingSwap(
+            StagingSwapContract {
+                ownership: ownership_manifest(
+                    &plan,
+                    TargetObjectDisposition::ReplaceAtCutover,
+                    TargetObjectDisposition::ReplaceAtCutover,
+                ),
+                replacements: vec![StagingReplacement::Namespace {
+                    live: Identifier::new("public").unwrap(),
+                    staging: Identifier::new("sqlspl_stage_m1").unwrap(),
+                    retained: Identifier::new("sqlspl_retained_m1").unwrap(),
+                    catalog_items,
+                }],
+                metadata_lock_timeout_millis: 5_000,
+                retained_backup_policy: RetainedBackupPolicy::RetainUntilExplicitCleanup,
+            },
+        )));
+
+        assert!(plan.validate().is_ok());
+        assert!(ReviewedPlan::new(plan.clone()).is_ok());
+        assert!(matches!(
+            plan.validate_for_execution(),
+            Err(PlanError::TargetModeExecutionUnavailable)
+        ));
+
+        let AssessmentStatus::Assessed(TargetModeContract::StagingSwap(contract)) =
+            plan.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        let StagingReplacement::Namespace {
+            staging, retained, ..
+        } = &mut contract.replacements[0]
+        else {
+            unreachable!()
+        };
+        *retained = staging.clone();
+        assert!(matches!(plan.validate(), Err(PlanError::InvalidTargetMode)));
     }
 
     #[test]
@@ -1591,6 +2183,7 @@ mod tests {
         plan.target_catalog_fingerprint = AssessmentStatus::NotAssessed;
         plan.target_catalog = AssessmentStatus::NotAssessed;
         plan.target_tls_binding = AssessmentStatus::NotAssessed;
+        plan.target_mode = Some(AssessmentStatus::NotAssessed);
         plan.consistency_mode.clear();
         plan.conversion_policy = POSTGRESQL_ASSESSMENT_CONVERSION_POLICY;
 
@@ -1652,6 +2245,7 @@ mod tests {
         assessment.target_catalog_fingerprint = AssessmentStatus::NotAssessed;
         assessment.target_catalog = AssessmentStatus::NotAssessed;
         assessment.target_tls_binding = AssessmentStatus::NotAssessed;
+        assessment.target_mode = Some(AssessmentStatus::NotAssessed);
         assessment.consistency_mode.clear();
         assessment.conversion_policy = POSTGRESQL_ASSESSMENT_CONVERSION_POLICY;
 
@@ -1674,6 +2268,7 @@ mod tests {
         plan.target_endpoint_identity = AssessmentStatus::NotAssessed;
         plan.target_catalog_fingerprint = AssessmentStatus::NotAssessed;
         plan.target_tls_binding = AssessmentStatus::NotAssessed;
+        plan.target_mode = Some(AssessmentStatus::NotAssessed);
         assert!(matches!(
             plan.validate_for_execution(),
             Err(PlanError::MissingEvidence {

@@ -1771,6 +1771,9 @@ fn build_plan_from_execution_source(
         target_catalog: AssessmentStatus::Assessed(target.catalog.clone()),
         source_tls_binding: source.tls_binding.clone(),
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
+        target_mode: Some(AssessmentStatus::Assessed(
+            super::plan::TargetModeContract::EmptyOwned,
+        )),
         consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY,

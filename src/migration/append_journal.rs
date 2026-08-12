@@ -1993,6 +1993,9 @@ mod tests {
             target_catalog: AssessmentStatus::Assessed(target_catalog),
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
+            target_mode: Some(AssessmentStatus::Assessed(
+                crate::migration::plan::TargetModeContract::EmptyOwned,
+            )),
             consistency_mode: POSTGRES_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,

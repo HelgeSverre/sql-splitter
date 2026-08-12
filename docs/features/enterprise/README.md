@@ -91,7 +91,7 @@ This plan distinguishes three products:
 
 ## Document index
 
-This directory contains 20 documents:
+This directory contains 21 documents:
 
 | Document                                            | Purpose                                                               |
 | --------------------------------------------------- | --------------------------------------------------------------------- |
@@ -112,6 +112,7 @@ This directory contains 20 documents:
 | [15](./15-assessment-product.md)                    | Standalone read-only assessment product and report                    |
 | [16](./16-round-4-review-findings.md)               | Round-4 resolution ledger                                             |
 | [17](./17-cross-dialect-type-mapping.md)            | Phase 7 PostgreSQL↔MySQL scalar type mapping contract                 |
+| [18](./18-warm-target-and-staging.md)               | Phase 8 warm-merge, staging-swap, ownership, and recovery contract    |
 | [Competitive landscape](./competitive-landscape.md) | Tool categories and scoped positioning                                |
 | [Observability](./observability-and-operations.md)  | Metrics, logs, alerts, and operations                                 |
 | This README                                         | Scope and navigation                                                  |

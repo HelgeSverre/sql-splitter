@@ -10,7 +10,7 @@ enforce.
 
 Origin: the 2026-08-11 market-alignment plan's Phase 7 item and the design
 hazards raised in mailbox [083]. Serialization: row-conversion schema v3,
-plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
+plan schema v18, PostgreSQL catalog format v6, MySQL catalog format v4.
 
 ## Scope and safety model
 
@@ -29,7 +29,7 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
   metadata visibility are re-attested before each target effect and before
   completion.
 - Both directions can finish only as
-  `CompletedWithApprovedTransformations`. Plan schema v17 is the compatibility
+  `CompletedWithApprovedTransformations`. Plan schema v18 is the compatibility
   boundary for these source-consistency rules; older plans fail at schema
   validation.
 - **Every conversion rule is lossless-by-construction or fails closed.** This

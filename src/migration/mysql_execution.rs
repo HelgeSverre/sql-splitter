@@ -3422,6 +3422,9 @@ mod tests {
             target_catalog: AssessmentStatus::Assessed(target_catalog),
             source_tls_binding,
             target_tls_binding: AssessmentStatus::Assessed(target_tls_binding),
+            target_mode: Some(AssessmentStatus::Assessed(
+                crate::migration::plan::TargetModeContract::EmptyOwned,
+            )),
             consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY,

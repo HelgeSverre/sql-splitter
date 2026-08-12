@@ -16,7 +16,7 @@ descriptive stages in [04](./04-execution-design.md).
 | **Implementation Phase 5b — Managed Source Profiles**          | Privilege probe suite, execution-time attestation, sequence-stability evidence ([14](./14-managed-source-profiles.md))                                                | Probe, attestation-stop, and sequence-equality matrices pass against at least one managed provider |
 | **Implementation Phase 6 — Second Dialect (MySQL)**            | Equivalent catalog, snapshot, DDL, value, and verification adapter; scope below                                                                                       | Same real-engine matrix passes for second dialect            |
 | **Implementation Phase 7 — Cross-Dialect**                     | Explicit conversion policies and `RowTypeConverter` over canonical values                                                                                             | Every approved conversion has exact expected-value vectors   |
-| **Implementation Phase 8 — Warm Target/Staging**               | Ownership model, merge/conflict policy, staging state machine, write-fence and recovery gates                                                                         | Destructive and metadata-lock fault tests pass               |
+| **Implementation Phase 8 — Warm Target/Staging**               | Typed target mode, closed ownership manifest, disjoint-key merge, retained-backup staging swap, target fence, and recovery ([18](./18-warm-target-and-staging.md))      | Warm-conflict, destructive, and metadata-lock fault matrices pass |
 | **Implementation Phase 9 — Parallelism**                       | Shareable/exported snapshots, per-worker sessions, deterministic manifests, table-level parallel copy under a per-table prepared-chunk journal format ([13](./13-throughput-and-copy-path.md)) | Snapshot-sharing and concurrent crash matrix passes          |
 | **Implementation Phase 10 — Dialect Optimizations**            | Cursor, direct-copy, concurrent-index, partition, and non-PostgreSQL COPY optimizations where proven                                                                  | Optimization is equivalent to baseline canonical output      |
 
@@ -258,6 +258,24 @@ publication. The exact conversion and evidence contract is recorded in
 This is feature-gated spike evidence. The large-dataset, two-managed-instance
 acceptance in mailbox [078] remains the higher production bar and is not
 claimed here.
+
+## Phase 8 (warm target/staging) exit boundary
+
+Phase 8 implements both reviewed same-dialect modes in
+[18](./18-warm-target-and-staging.md): disjoint-key warm merge with
+`reject_any_key_collision`, and staging swap with exact retained backups. The
+target mode and closed ownership manifest are part of the plan hash and journal
+genesis. Both source and target consistency boundaries remain continuously
+attested through strict verification or cutover.
+
+The phase does not exit until PostgreSQL 15–17 and MySQL 8.0/8.4 pass the
+applicable warm-conflict, dual-fence, metadata-lock, destructive-operation,
+ambiguous-commit, cancellation, drift, complete-verification, and retained-
+backup matrices. Cross-dialect warm targets, automatic cleanup, automatic data
+rollback, CDC, and zero-downtime claims remain outside this phase.
+
+The initial plan-schema increment only records `empty_owned` explicitly and
+defines the typed future modes. That is a prerequisite, not Phase 8 completion.
 
 **TLS backend note (PostgreSQL, 2026-08-12):** the PostgreSQL connector
 moved from `postgres-native-tls` to `postgres-openssl` (commit `1a8ddf9`)
