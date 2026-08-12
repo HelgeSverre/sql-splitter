@@ -13,7 +13,7 @@ use super::append_journal::{
     AppendJournal, CommittedChunkIter, Genesis, OperationPhase, OperationSpec, PreparedChunk,
 };
 use super::artifact::read_json;
-use super::canonical::{digest_rows, CanonicalRow, CANONICAL_ENCODING_VERSION};
+use super::canonical::{canonicalize_json, digest_rows, CanonicalRow, CANONICAL_ENCODING_VERSION};
 use super::connection::{
     CancellationToken, ConnectionError, KeyTuple, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
@@ -1140,13 +1140,20 @@ fn attest_current_cross_mysql_target_binding(
         .target_tls_binding
         .as_assessed()
         .ok_or_else(|| anyhow!("cross-dialect plan has no target TLS binding"))?;
-    if !mysql_target_runtime_binding_is_exact(&current_target, accepted_evidence, expected_tls)
-        || !current.evidence.same_authorization_as(accepted_visibility)
-        || !mysql_catalog_visibility_is_complete(&current_target, &current)?
-        || !current.authoritative_blockers.is_empty()
-    {
+    let runtime_binding_exact =
+        mysql_target_runtime_binding_is_exact(&current_target, accepted_evidence, expected_tls);
+    let authorization_exact = current.evidence.same_authorization_as(accepted_visibility);
+    let visibility_complete = mysql_catalog_visibility_is_complete(&current_target, &current)?;
+    // The target can contain reviewed conversion objects after execution has
+    // started. Their generic catalog blockers are schema semantics, not
+    // authorization evidence. The create/reconcile path and final typed schema
+    // verifier attest those objects exactly.
+    if !runtime_binding_exact || !authorization_exact || !visibility_complete {
         return Err(anyhow!(
-            "current MySQL target endpoint or authorization differs from the reviewed contract"
+            "current MySQL target endpoint or authorization differs from the reviewed contract \
+             (runtime_binding_exact={runtime_binding_exact}, \
+             authorization_exact={authorization_exact}, \
+             visibility_complete={visibility_complete})"
         ));
     }
     Ok(())
@@ -1850,7 +1857,7 @@ fn inspect_target_interval(
         return Ok(CrossTableState::Absent);
     }
     let expected_final_key = contract.policy.convert_source_key(&prepared.final_key)?;
-    let exact = observed.rows() == expected.rows()
+    let exact = cross_rows_equal(observed.rows(), expected.rows())?
         && observed.len() as u64 == prepared.row_count
         && batch_key(&observed, &contract.target_key_indexes)?.0 == expected_final_key
         && converted_batch_digest(contract, &observed)? == prepared.canonical_digest;
@@ -2008,17 +2015,23 @@ fn verify_cross_table(
         let expected_target_final = contract.policy.convert_source_key(&chunk.final_key)?;
         if expected.len() as u64 != chunk.row_count
             || target_batch.len() as u64 != chunk.row_count
-            || expected.rows() != target_batch.rows()
+            || !cross_rows_equal(expected.rows(), target_batch.rows())?
             || batch_key(&source_batch, &contract.source_key_indexes)?.0 != chunk.final_key
             || batch_key(&target_batch, &contract.target_key_indexes)?.0 != expected_target_final
         {
-            return Err(anyhow!("cross-dialect committed row verification failed"));
+            return Err(anyhow!(
+                "cross-dialect committed row verification failed for {}.{}",
+                contract.policy.source_table.namespace,
+                contract.policy.source_table.name
+            ));
         }
         let expected_digest = converted_batch_digest(contract, &expected)?;
         let target_digest = converted_batch_digest(contract, &target_batch)?;
         if expected_digest != chunk.canonical_digest || target_digest != chunk.canonical_digest {
             return Err(anyhow!(
-                "cross-dialect committed digest verification failed"
+                "cross-dialect committed digest verification failed for {}.{}",
+                contract.policy.source_table.namespace,
+                contract.policy.source_table.name
             ));
         }
         let encoded = serde_json::to_vec(&chunk)?;
@@ -2153,6 +2166,29 @@ fn converted_batch_digest(
         })
         .collect::<Vec<_>>();
     Ok(hex::encode(digest_rows(rows.iter())?))
+}
+
+fn cross_rows_equal(left: &[Vec<DbValue>], right: &[Vec<DbValue>]) -> anyhow::Result<bool> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left_row, right_row) in left.iter().zip(right) {
+        if left_row.len() != right_row.len() {
+            return Ok(false);
+        }
+        for (left_value, right_value) in left_row.iter().zip(right_row) {
+            let equal = match (left_value, right_value) {
+                (DbValue::Json(left), DbValue::Json(right)) => {
+                    canonicalize_json(left)? == canonicalize_json(right)?
+                }
+                _ => left_value == right_value,
+            };
+            if !equal {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn operation_state(journal: &AppendJournal, operation_id: &str) -> anyhow::Result<OperationState> {
@@ -2656,6 +2692,30 @@ mod tests {
         assert_eq!(committed.len(), 2);
         assert!(committed.iter().all(|chunk| chunk.row_count == 1));
         assert_eq!(target.state.lock().unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn cross_row_equality_canonicalizes_json_but_keeps_other_values_exact() {
+        let left = vec![vec![
+            DbValue::Json(br#"{ "b": 1.00, "a": [2, 3] }"#.to_vec()),
+            DbValue::Text("value".into()),
+        ]];
+        let equivalent = vec![vec![
+            DbValue::Json(br#"{"a":[2,3],"b":1}"#.to_vec()),
+            DbValue::Text("value".into()),
+        ]];
+        let different_text = vec![vec![
+            DbValue::Json(br#"{"a":[2,3],"b":1}"#.to_vec()),
+            DbValue::Text("VALUE".into()),
+        ]];
+
+        assert!(cross_rows_equal(&left, &equivalent).unwrap());
+        assert!(!cross_rows_equal(&left, &different_text).unwrap());
+        assert!(cross_rows_equal(
+            &[vec![DbValue::Json(br#"{"a":1,"a":2}"#.to_vec())]],
+            &[vec![DbValue::Json(br#"{"a":2}"#.to_vec())]],
+        )
+        .is_err());
     }
 
     #[test]

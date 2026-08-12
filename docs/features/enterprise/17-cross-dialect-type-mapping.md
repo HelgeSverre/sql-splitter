@@ -97,19 +97,34 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
   Float, JSON, and text rules are excluded; text keys are conservatively
   rejected cross-dialect because collation ordering diverges. MySQL binary
   keys are capped at 3072 bytes.
-- **Deferred storage-fidelity proofs.** Float and JSON are lossless at the
-  contract level; their real-server round-trip fidelity is proven only when
-  the live cross-dialect matrix runs, and the contract says so rather than
-  claiming it now.
+- **Storage-fidelity proofs.** Float and JSON are lossless at the contract
+  level. The live matrix below proves their real-server round-trip fidelity
+  for the recorded finite IEEE and canonical JSON vectors on every supported
+  PostgreSQL/MySQL version pair.
 
 ## Open acceptance evidence
 
 - The typed MySQL target contract caps `utf8mb4` `VARCHAR` at 16,383
   characters. Wider PostgreSQL `varchar(n)` columns now fail during policy
   derivation and cannot reach target DDL.
-- The full live PostgreSQL 15/16/17 × MySQL 8.0/8.4 matrix in both directions
-  remains open. It must prove the deferred float/JSON storage fidelity,
-  create-only reconciliation, commit-response loss on both targets, source
-  fence/freeze loss, cancellation, target drift after durable verification,
-  and released-fence recovery. Phase 7 does not exit before this matrix is
-  green and its exact commands and environment are recorded.
+- The baseline live PostgreSQL 15/16/17 × MySQL 8.0/8.4 matrix passes in both
+  directions. It covers bounded multi-chunk execution and exact Boolean,
+  decimal, finite `float4`/`float8`, Unicode text, binary, and canonical JSON
+  target readback. Run these commands from the repository root:
+
+  ```text
+  scripts/test-migration-cross-dialect.sh 15 8.0
+  scripts/test-migration-cross-dialect.sh 15 8.4
+  scripts/test-migration-cross-dialect.sh 16 8.0
+  scripts/test-migration-cross-dialect.sh 16 8.4
+  scripts/test-migration-cross-dialect.sh 17 8.0
+  scripts/test-migration-cross-dialect.sh 17 8.4
+  ```
+
+  Recorded 2026-08-12 on Darwin 24.6.0 arm64, Docker client/server 29.4.0
+  with Linux arm64 containers, and Rust 1.97.1. Each command passed both
+  direction-specific ignored integration tests. The Phase 7 exit remains
+  open until the same matrix proves create-only reconciliation,
+  commit-response loss on both targets, source fence/freeze loss,
+  cancellation, target drift after durable verification, and released-fence
+  recovery.

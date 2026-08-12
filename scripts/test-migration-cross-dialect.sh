@@ -111,9 +111,21 @@ docker exec -e PGPASSWORD=admin-secret "$pg_container" psql -U postgres -d cross
   -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC" \
   -c "CREATE TABLE public.items (id bigint PRIMARY KEY)" \
   -c "INSERT INTO public.items VALUES (1),(2),(3)" \
+  -c "CREATE TABLE public.bool_values (id bigint PRIMARY KEY, value boolean NOT NULL)" \
+  -c "INSERT INTO public.bool_values VALUES (1,true),(2,false),(3,true)" \
+  -c "CREATE TABLE public.decimal_values (id bigint PRIMARY KEY, value numeric(10,2) NOT NULL)" \
+  -c "INSERT INTO public.decimal_values VALUES (1,1.25),(2,-2.50),(3,99999999.99)" \
+  -c "CREATE TABLE public.float_values (id bigint PRIMARY KEY, single_value real NOT NULL, double_value double precision NOT NULL)" \
+  -c "INSERT INTO public.float_values VALUES (1,1.25,1.25),(2,-2.5,-2.5),(3,0.0,9007199254740992.0)" \
+  -c "CREATE TABLE public.text_values (id bigint PRIMARY KEY, value varchar(64) NOT NULL)" \
+  -c "INSERT INTO public.text_values VALUES (1,'one'),(2,'tø'),(3,'三')" \
+  -c "CREATE TABLE public.byte_values (id bigint PRIMARY KEY, value bytea NOT NULL)" \
+  -c "INSERT INTO public.byte_values VALUES (1,'\\x0001'),(2,'\\xff00'),(3,'\\x1020')" \
+  -c "CREATE TABLE public.json_values (id bigint PRIMARY KEY, value jsonb NOT NULL)" \
+  -c "INSERT INTO public.json_values VALUES (1,'{\"k\":1}'),(2,'{\"a\":[1,2]}'),(3,'null')" \
   -c "GRANT CONNECT ON DATABASE cross_pg_source TO cross_pg_source" \
   -c "GRANT USAGE ON SCHEMA public TO cross_pg_source" \
-  -c "GRANT SELECT ON public.items TO cross_pg_source" >/dev/null
+  -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO cross_pg_source" >/dev/null
 
 docker exec -i "$mysql_container" mysql -uroot -prootpass <<'SQL'
 CREATE DATABASE cross_mysql_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
@@ -129,6 +141,18 @@ GRANT SELECT ON performance_schema.* TO 'cross_mysql_freeze'@'%';
 USE cross_mysql_source;
 CREATE TABLE items (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
 INSERT INTO items VALUES (1),(2),(3);
+CREATE TABLE bool_values (id BIGINT NOT NULL PRIMARY KEY, value TINYINT(1) NOT NULL) ENGINE=InnoDB;
+INSERT INTO bool_values VALUES (1,1),(2,0),(3,1);
+CREATE TABLE decimal_values (id BIGINT NOT NULL PRIMARY KEY, value DECIMAL(10,2) NOT NULL) ENGINE=InnoDB;
+INSERT INTO decimal_values VALUES (1,1.25),(2,-2.50),(3,99999999.99);
+CREATE TABLE float_values (id BIGINT NOT NULL PRIMARY KEY, single_value FLOAT NOT NULL, double_value DOUBLE NOT NULL) ENGINE=InnoDB;
+INSERT INTO float_values VALUES (1,1.25,1.25),(2,-2.5,-2.5),(3,0.0,9007199254740992.0);
+CREATE TABLE text_values (id BIGINT NOT NULL PRIMARY KEY, value VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL) ENGINE=InnoDB;
+INSERT INTO text_values VALUES (1,'one'),(2,'tø'),(3,'三');
+CREATE TABLE byte_values (id BIGINT NOT NULL PRIMARY KEY, value BLOB NOT NULL) ENGINE=InnoDB;
+INSERT INTO byte_values VALUES (1,X'0001'),(2,X'ff00'),(3,X'1020');
+CREATE TABLE json_values (id BIGINT NOT NULL PRIMARY KEY, value JSON NOT NULL) ENGINE=InnoDB;
+INSERT INTO json_values VALUES (1,JSON_OBJECT('k',1)),(2,JSON_OBJECT('a',JSON_ARRAY(1,2))),(3,CAST('null' AS JSON));
 SQL
 
 docker exec -i "$mysql_target_container" mysql -uroot -prootpass <<'SQL'
@@ -189,10 +213,10 @@ sed -i.bak "s/port = $mysql_port/port = $mysql_target_port/" "$test_dir/mysql-ta
 rm "$test_dir/mysql-target.toml.bak" "$test_dir/mysql-target-metadata.toml.bak"
 
 cat >"$test_dir/pg-to-mysql.json" <<'EOF'
-{"schema_version":1,"source_dialect":"postgre_sql","target_dialect":"my_sql","target_defaults":{"dialect":"my_sql","character_set":"utf8mb4","collation":"utf8mb4_0900_bin"},"tables":[{"source":{"namespace":"public","name":"items"},"target":{"namespace":"cross_mysql_target","name":"items_from_pg"}}]}
+{"schema_version":1,"source_dialect":"postgre_sql","target_dialect":"my_sql","target_defaults":{"dialect":"my_sql","character_set":"utf8mb4","collation":"utf8mb4_0900_bin"},"tables":[{"source":{"namespace":"public","name":"bool_values"},"target":{"namespace":"cross_mysql_target","name":"bool_values_from_pg"}},{"source":{"namespace":"public","name":"byte_values"},"target":{"namespace":"cross_mysql_target","name":"byte_values_from_pg"}},{"source":{"namespace":"public","name":"decimal_values"},"target":{"namespace":"cross_mysql_target","name":"decimal_values_from_pg"}},{"source":{"namespace":"public","name":"float_values"},"target":{"namespace":"cross_mysql_target","name":"float_values_from_pg"}},{"source":{"namespace":"public","name":"items"},"target":{"namespace":"cross_mysql_target","name":"items_from_pg"}},{"source":{"namespace":"public","name":"json_values"},"target":{"namespace":"cross_mysql_target","name":"json_values_from_pg"}},{"source":{"namespace":"public","name":"text_values"},"target":{"namespace":"cross_mysql_target","name":"text_values_from_pg"}}]}
 EOF
 cat >"$test_dir/mysql-to-pg.json" <<'EOF'
-{"schema_version":1,"source_dialect":"my_sql","target_dialect":"postgre_sql","target_defaults":{"dialect":"postgre_sql","text_collation":{"namespace":"pg_catalog","name":"C"}},"tables":[{"source":{"namespace":"cross_mysql_source","name":"items"},"target":{"namespace":"public","name":"items_from_mysql"}}]}
+{"schema_version":1,"source_dialect":"my_sql","target_dialect":"postgre_sql","target_defaults":{"dialect":"postgre_sql","text_collation":{"namespace":"pg_catalog","name":"C"}},"tables":[{"source":{"namespace":"cross_mysql_source","name":"bool_values"},"target":{"namespace":"public","name":"bool_values_from_mysql"}},{"source":{"namespace":"cross_mysql_source","name":"byte_values"},"target":{"namespace":"public","name":"byte_values_from_mysql"}},{"source":{"namespace":"cross_mysql_source","name":"decimal_values"},"target":{"namespace":"public","name":"decimal_values_from_mysql"}},{"source":{"namespace":"cross_mysql_source","name":"float_values"},"target":{"namespace":"public","name":"float_values_from_mysql"}},{"source":{"namespace":"cross_mysql_source","name":"items"},"target":{"namespace":"public","name":"items_from_mysql"}},{"source":{"namespace":"cross_mysql_source","name":"json_values"},"target":{"namespace":"public","name":"json_values_from_mysql"}},{"source":{"namespace":"cross_mysql_source","name":"text_values"},"target":{"namespace":"public","name":"text_values_from_mysql"}}]}
 EOF
 chmod 0600 "$test_dir"/*.json
 
