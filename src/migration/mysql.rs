@@ -6076,7 +6076,7 @@ fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
     let ordinal = required_u64(object, "ordinal")?;
     let data_type = required_text(object, "data_type")?;
     let precision = match data_type {
-        "decimal" | "numeric" => optional_u64(object, "numeric_precision"),
+        "bit" | "decimal" | "numeric" => optional_u64(object, "numeric_precision"),
         "datetime" | "timestamp" | "time" => optional_u64(object, "datetime_precision"),
         _ => None,
     };
@@ -9228,6 +9228,29 @@ mod tests {
             meta.timezone_semantics.as_deref(),
             Some("mysql_session_time_zone")
         );
+    }
+
+    #[test]
+    fn bit_column_meta_preserves_the_reviewed_width() {
+        let object = CatalogObject {
+            id: "column:app:items:flags".into(),
+            kind: CatalogObjectKind::Column,
+            name: identifier("flags"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("ordinal".into(), serde_json::json!(1)),
+                ("data_type".into(), serde_json::json!("bit")),
+                ("nullable".into(), serde_json::json!(false)),
+                ("collation".into(), serde_json::Value::Null),
+                ("numeric_precision".into(), serde_json::json!(9)),
+                ("numeric_scale".into(), serde_json::Value::Null),
+                ("datetime_precision".into(), serde_json::Value::Null),
+            ]),
+        };
+
+        let meta = column_meta(&object).unwrap();
+        assert_eq!(meta.precision, Some(9));
+        assert_eq!(meta.scale, None);
     }
 
     #[test]

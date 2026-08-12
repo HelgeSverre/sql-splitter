@@ -119,6 +119,95 @@ pub struct CrossDialectExecutionReport {
     pub committed_chunks: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Constructed only by the opt-in fault-injection feature.
+enum CrossDialectInterruptionPoint {
+    TablePrepared,
+    TableEffectApplied,
+    ChunkPrepared,
+    ChunkEffectApplied,
+    CancelAfterInsert,
+    NetworkCommitFault(u16),
+    AfterVerification,
+    AfterPostgresFenceRelease,
+}
+
+/// Deterministic cross-dialect recovery boundaries used by the opt-in live matrix.
+#[cfg(feature = "migration-fault-injection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossDialectExecutionInterruption {
+    TablePrepared,
+    TableEffectApplied,
+    ChunkPrepared,
+    ChunkEffectApplied,
+    CancelAfterInsert,
+    NetworkCommitFault(u16),
+    AfterVerification,
+    AfterPostgresFenceRelease,
+}
+
+#[cfg(feature = "migration-fault-injection")]
+impl From<CrossDialectExecutionInterruption> for CrossDialectInterruptionPoint {
+    fn from(value: CrossDialectExecutionInterruption) -> Self {
+        match value {
+            CrossDialectExecutionInterruption::TablePrepared => Self::TablePrepared,
+            CrossDialectExecutionInterruption::TableEffectApplied => Self::TableEffectApplied,
+            CrossDialectExecutionInterruption::ChunkPrepared => Self::ChunkPrepared,
+            CrossDialectExecutionInterruption::ChunkEffectApplied => Self::ChunkEffectApplied,
+            CrossDialectExecutionInterruption::CancelAfterInsert => Self::CancelAfterInsert,
+            CrossDialectExecutionInterruption::NetworkCommitFault(port) => {
+                Self::NetworkCommitFault(port)
+            }
+            CrossDialectExecutionInterruption::AfterVerification => Self::AfterVerification,
+            CrossDialectExecutionInterruption::AfterPostgresFenceRelease => {
+                Self::AfterPostgresFenceRelease
+            }
+        }
+    }
+}
+
+/// Inputs for one fault-injected MySQL-to-PostgreSQL execution.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct InterruptedMySqlToPostgresExecution<'a> {
+    pub plan_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub source_metadata_config_path: &'a Path,
+    pub freeze_config_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub freeze_assertion_path: &'a Path,
+    pub approval_reference: &'a str,
+    pub state_path: &'a Path,
+    pub interruption: CrossDialectExecutionInterruption,
+}
+
+/// Inputs for one fault-injected PostgreSQL-to-MySQL execution.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct InterruptedPostgresToMySqlExecution<'a> {
+    pub plan_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub fence_admin_config_path: &'a Path,
+    pub fence_artifact_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub target_metadata_config_path: &'a Path,
+    pub approval_reference: &'a str,
+    pub state_path: &'a Path,
+    pub interruption: CrossDialectExecutionInterruption,
+}
+
+fn interrupt_cross_dialect_if(
+    interruption: Option<CrossDialectInterruptionPoint>,
+    expected: CrossDialectInterruptionPoint,
+) -> anyhow::Result<()> {
+    if interruption == Some(expected) {
+        return Err(anyhow!(
+            "injected cross-dialect execution interruption at {interruption:?}"
+        ));
+    }
+    Ok(())
+}
+
 struct MySqlPostgresCancellationMonitor {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -248,15 +337,59 @@ pub fn execute_mysql_to_postgres_plan(
     approval_reference: &str,
     state_path: impl AsRef<Path>,
 ) -> anyhow::Result<CrossDialectExecutionReport> {
+    execute_mysql_to_postgres_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        source_metadata_config_path.as_ref(),
+        freeze_config_path.as_ref(),
+        target_config_path.as_ref(),
+        freeze_assertion_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        None,
+    )
+}
+
+/// Execute MySQL-to-PostgreSQL until one exact recovery boundary.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn execute_mysql_to_postgres_plan_interrupted(
+    request: InterruptedMySqlToPostgresExecution<'_>,
+) -> anyhow::Result<CrossDialectExecutionReport> {
+    execute_mysql_to_postgres_plan_internal(
+        request.plan_path,
+        request.source_config_path,
+        request.source_metadata_config_path,
+        request.freeze_config_path,
+        request.target_config_path,
+        request.freeze_assertion_path,
+        request.approval_reference,
+        request.state_path,
+        Some(request.interruption.into()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_mysql_to_postgres_plan_internal(
+    plan_path: &Path,
+    source_config_path: &Path,
+    source_metadata_config_path: &Path,
+    freeze_config_path: &Path,
+    target_config_path: &Path,
+    freeze_assertion_path: &Path,
+    approval_reference: &str,
+    state_path: &Path,
+    interruption: Option<CrossDialectInterruptionPoint>,
+) -> anyhow::Result<CrossDialectExecutionReport> {
     if approval_reference.trim().is_empty() {
         return Err(anyhow!("approval reference must not be empty"));
     }
     let reviewed: ReviewedPlan = read_json(plan_path)?;
     validate_mysql_postgres_plan(&reviewed)?;
-    let source_config = MySqlEndpointConfig::read(source_config_path.as_ref())?;
-    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path.as_ref())?;
-    let freeze_config = MySqlEndpointConfig::read(freeze_config_path.as_ref())?;
-    let target_config = PostgresEndpointConfig::read(target_config_path.as_ref())?;
+    let source_config = MySqlEndpointConfig::read(source_config_path)?;
+    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path)?;
+    let freeze_config = MySqlEndpointConfig::read(freeze_config_path)?;
+    let target_config = PostgresEndpointConfig::read(target_config_path)?;
     validate_mysql_postgres_credentials(
         &source_config,
         &source_metadata_config,
@@ -319,7 +452,7 @@ pub fn execute_mysql_to_postgres_plan(
     let binding = cross_mysql_resume_binding(&reviewed, &accepted, approval_reference)?;
     let accepted_for_checks = accepted.clone();
     let mut journal = AppendJournal::create_new(
-        state_path.as_ref(),
+        state_path,
         cross_journal_genesis(binding, reviewed.clone(), Some(accepted)),
     )?;
     let mut require_source_consistency = || {
@@ -338,13 +471,20 @@ pub fn execute_mysql_to_postgres_plan(
         reader.as_mut(),
         target.as_ref(),
         &mut journal,
-        &cancellation,
-        page_limit,
-        &mut require_source_consistency,
+        CrossDialectExecutionRuntime {
+            cancellation: &cancellation,
+            page_limit,
+            require_source_consistency: &mut require_source_consistency,
+            interruption,
+        },
+    )?;
+    interrupt_cross_dialect_if(
+        interruption,
+        CrossDialectInterruptionPoint::AfterVerification,
     )?;
     require_source_consistency()?;
     journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
-    cross_report(state_path.as_ref(), &journal)
+    cross_report(state_path, &journal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -463,9 +603,12 @@ pub fn resume_mysql_to_postgres_plan(
         reader.as_mut(),
         target.as_ref(),
         &mut journal,
-        &cancellation,
-        page_limit,
-        &mut require_source_consistency,
+        CrossDialectExecutionRuntime {
+            cancellation: &cancellation,
+            page_limit,
+            require_source_consistency: &mut require_source_consistency,
+            interruption: None,
+        },
     )?;
     require_source_consistency()?;
     journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
@@ -483,15 +626,59 @@ pub fn execute_postgres_to_mysql_plan(
     approval_reference: &str,
     state_path: impl AsRef<Path>,
 ) -> anyhow::Result<CrossDialectExecutionReport> {
+    execute_postgres_to_mysql_plan_internal(
+        plan_path.as_ref(),
+        source_config_path.as_ref(),
+        fence_admin_config_path.as_ref(),
+        fence_artifact_path.as_ref(),
+        target_config_path.as_ref(),
+        target_metadata_config_path.as_ref(),
+        approval_reference,
+        state_path.as_ref(),
+        None,
+    )
+}
+
+/// Execute PostgreSQL-to-MySQL until one exact recovery boundary.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn execute_postgres_to_mysql_plan_interrupted(
+    request: InterruptedPostgresToMySqlExecution<'_>,
+) -> anyhow::Result<CrossDialectExecutionReport> {
+    execute_postgres_to_mysql_plan_internal(
+        request.plan_path,
+        request.source_config_path,
+        request.fence_admin_config_path,
+        request.fence_artifact_path,
+        request.target_config_path,
+        request.target_metadata_config_path,
+        request.approval_reference,
+        request.state_path,
+        Some(request.interruption.into()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_postgres_to_mysql_plan_internal(
+    plan_path: &Path,
+    source_config_path: &Path,
+    fence_admin_config_path: &Path,
+    fence_artifact_path: &Path,
+    target_config_path: &Path,
+    target_metadata_config_path: &Path,
+    approval_reference: &str,
+    state_path: &Path,
+    interruption: Option<CrossDialectInterruptionPoint>,
+) -> anyhow::Result<CrossDialectExecutionReport> {
     if approval_reference.trim().is_empty() {
         return Err(anyhow!("approval reference must not be empty"));
     }
     let reviewed: ReviewedPlan = read_json(plan_path)?;
     validate_postgres_mysql_plan(&reviewed)?;
-    let source_config = PostgresEndpointConfig::read(source_config_path.as_ref())?;
-    let fence_admin = PostgresEndpointConfig::read(fence_admin_config_path.as_ref())?;
-    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
-    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    let source_config = PostgresEndpointConfig::read(source_config_path)?;
+    let fence_admin = PostgresEndpointConfig::read(fence_admin_config_path)?;
+    let target_config = MySqlEndpointConfig::read(target_config_path)?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path)?;
     validate_postgres_mysql_credentials(
         &source_config,
         &fence_admin,
@@ -541,7 +728,7 @@ pub fn execute_postgres_to_mysql_plan(
     target.assert_empty()?;
     let binding = cross_postgres_resume_binding(&reviewed, &installed, approval_reference)?;
     let mut journal = AppendJournal::create_new(
-        state_path.as_ref(),
+        state_path,
         cross_journal_genesis(binding, reviewed.clone(), None),
     )?;
     let expected_inventory = inventory.clone();
@@ -552,17 +739,28 @@ pub fn execute_postgres_to_mysql_plan(
         reader.as_mut(),
         target.as_ref(),
         &mut journal,
-        &cancellation,
-        page_limit,
-        &mut require_source_consistency,
+        CrossDialectExecutionRuntime {
+            cancellation: &cancellation,
+            page_limit,
+            require_source_consistency: &mut require_source_consistency,
+            interruption,
+        },
+    )?;
+    interrupt_cross_dialect_if(
+        interruption,
+        CrossDialectInterruptionPoint::AfterVerification,
     )?;
     attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
     require_source_consistency()?;
     cancellation.check()?;
     drop(reader);
     release_cross_postgres_fence(&fence_admin, &installed)?;
+    interrupt_cross_dialect_if(
+        interruption,
+        CrossDialectInterruptionPoint::AfterPostgresFenceRelease,
+    )?;
     journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
-    cross_report(state_path.as_ref(), &journal)
+    cross_report(state_path, &journal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -660,9 +858,12 @@ pub fn resume_postgres_to_mysql_plan(
         reader.as_mut(),
         target.as_ref(),
         &mut journal,
-        &cancellation,
-        page_limit,
-        &mut require_source_consistency,
+        CrossDialectExecutionRuntime {
+            cancellation: &cancellation,
+            page_limit,
+            require_source_consistency: &mut require_source_consistency,
+            interruption: None,
+        },
     )?;
     attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
     require_source_consistency()?;
@@ -1406,10 +1607,11 @@ struct CrossCopyContract {
     target_key_indexes: Vec<usize>,
 }
 
-#[derive(Clone, Copy)]
-struct CrossCopyRuntime<'a> {
+struct CrossDialectExecutionRuntime<'a> {
     cancellation: &'a CancellationToken,
     page_limit: u32,
+    require_source_consistency: &'a mut dyn FnMut() -> anyhow::Result<()>,
+    interruption: Option<CrossDialectInterruptionPoint>,
 }
 
 impl CrossCopyContract {
@@ -1551,36 +1753,23 @@ fn execute_cross_dialect_journal(
     reader: &mut dyn ReadSession,
     target: &dyn CrossDialectTarget,
     journal: &mut AppendJournal,
-    cancellation: &CancellationToken,
-    page_limit: u32,
-    require_source_consistency: &mut dyn FnMut() -> anyhow::Result<()>,
+    mut runtime: CrossDialectExecutionRuntime<'_>,
 ) -> anyhow::Result<()> {
-    if page_limit == 0 {
+    if runtime.page_limit == 0 {
         return Err(anyhow!("cross-dialect page limit must be positive"));
     }
     let contracts = cross_dialect_contracts(reviewed)?;
-    reconcile_cross_tables(target, journal, &contracts, require_source_consistency)?;
-    copy_cross_tables(
-        reviewed,
-        reader,
-        target,
-        journal,
-        CrossCopyRuntime {
-            cancellation,
-            page_limit,
-        },
-        &contracts,
-        require_source_consistency,
-    )?;
-    require_source_consistency()?;
+    reconcile_cross_tables(target, journal, &contracts, &mut runtime)?;
+    copy_cross_tables(reviewed, reader, target, journal, &contracts, &mut runtime)?;
+    (runtime.require_source_consistency)()?;
     if journal.projection().status == MigrationStatus::Running {
         journal.transition_status(MigrationStatus::Verifying)?;
     }
     if journal.projection().status != MigrationStatus::Verifying {
         return Err(anyhow!("cross-dialect journal is not in a resumable phase"));
     }
-    verify_cross_tables(reader, target, journal, cancellation, &contracts)?;
-    require_source_consistency()?;
+    verify_cross_tables(reader, target, journal, runtime.cancellation, &contracts)?;
+    (runtime.require_source_consistency)()?;
     let policies = contracts
         .iter()
         .map(|contract| contract.policy.clone())
@@ -1603,15 +1792,19 @@ fn reconcile_cross_tables(
     target: &dyn CrossDialectTarget,
     journal: &mut AppendJournal,
     contracts: &[CrossCopyContract],
-    require_source_consistency: &mut dyn FnMut() -> anyhow::Result<()>,
+    runtime: &mut CrossDialectExecutionRuntime<'_>,
 ) -> anyhow::Result<()> {
     for contract in contracts {
-        require_source_consistency()?;
+        (runtime.require_source_consistency)()?;
         let operation_id = contract.create_operation_id.as_str();
         let mut state = operation_state(journal, operation_id)?;
         if state == OperationState::Pending {
             journal.prepare_operations_atomic([operation_id])?;
             state = OperationState::Prepared;
+            interrupt_cross_dialect_if(
+                runtime.interruption,
+                CrossDialectInterruptionPoint::TablePrepared,
+            )?;
         }
         if state == OperationState::Running {
             journal.transition_operation(operation_id, OperationState::Prepared)?;
@@ -1620,8 +1813,12 @@ fn reconcile_cross_tables(
         if state == OperationState::Prepared {
             match target.inspect_cross_table(&contract.policy)? {
                 CrossTableState::Absent => {
-                    require_source_consistency()?;
+                    (runtime.require_source_consistency)()?;
                     target.create_cross_table(&contract.policy)?;
+                    interrupt_cross_dialect_if(
+                        runtime.interruption,
+                        CrossDialectInterruptionPoint::TableEffectApplied,
+                    )?;
                 }
                 CrossTableState::Exact => {}
                 CrossTableState::Different => {
@@ -1667,9 +1864,8 @@ fn copy_cross_tables(
     reader: &mut dyn ReadSession,
     target: &dyn CrossDialectTarget,
     journal: &mut AppendJournal,
-    runtime: CrossCopyRuntime<'_>,
     contracts: &[CrossCopyContract],
-    require_source_consistency: &mut dyn FnMut() -> anyhow::Result<()>,
+    runtime: &mut CrossDialectExecutionRuntime<'_>,
 ) -> anyhow::Result<()> {
     if let Some(prepared) = journal.projection().prepared_chunk.clone() {
         let contract = contracts
@@ -1683,7 +1879,7 @@ fn copy_cross_tables(
             journal,
             runtime.cancellation,
             contract,
-            require_source_consistency,
+            runtime.require_source_consistency,
         )?;
     }
     for contract in contracts {
@@ -1728,13 +1924,18 @@ fn copy_cross_tables(
                         reviewed.plan_hash, operation_id
                     ),
                 })?;
+                interrupt_cross_dialect_if(
+                    runtime.interruption,
+                    CrossDialectInterruptionPoint::ChunkPrepared,
+                )?;
                 write_cross_chunk(
                     target,
                     journal,
                     runtime.cancellation,
                     contract,
                     &target_batch,
-                    require_source_consistency,
+                    runtime.require_source_consistency,
+                    runtime.interruption,
                 )?;
                 after = Some(final_key);
             }
@@ -1790,6 +1991,7 @@ fn reconcile_prepared_cross_chunk(
             contract,
             &target_batch,
             require_source_consistency,
+            None,
         ),
         CrossTableState::Different => require_manual(
             journal,
@@ -1805,6 +2007,7 @@ fn write_cross_chunk(
     contract: &CrossCopyContract,
     target_batch: &RowBatch,
     require_source_consistency: &mut dyn FnMut() -> anyhow::Result<()>,
+    interruption: Option<CrossDialectInterruptionPoint>,
 ) -> anyhow::Result<()> {
     require_source_consistency()?;
     let mut writer = target.open_writer(cancellation.clone())?;
@@ -1818,19 +2021,52 @@ fn write_cross_chunk(
             )),
         };
     }
+    if interruption == Some(CrossDialectInterruptionPoint::CancelAfterInsert) {
+        cancellation.cancel();
+    }
     if let Err(cancelled) = cancellation.check() {
         writer
             .rollback()
             .context("roll back cancelled cross-dialect target transaction")?;
         return Err(cancelled.into());
     }
+    #[cfg(feature = "migration-fault-injection")]
+    if let Some(CrossDialectInterruptionPoint::NetworkCommitFault(port)) = interruption {
+        arm_cross_network_commit_fault(port)?;
+    }
     match writer.commit() {
-        Ok(()) => journal.commit_chunk_after_ack().map_err(Into::into),
+        Ok(()) => {
+            interrupt_cross_dialect_if(
+                interruption,
+                CrossDialectInterruptionPoint::ChunkEffectApplied,
+            )?;
+            journal.commit_chunk_after_ack().map_err(Into::into)
+        }
         Err(ConnectionError::CommitOutcomeUnknown(reason)) => Err(anyhow!(
             "cross-dialect target commit outcome is unknown: {reason}; resume must reconcile durable intent"
         )),
         Err(error) => Err(error.into()),
     }
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn arm_cross_network_commit_fault(port: u16) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut control = TcpStream::connect_timeout(&address.into(), Duration::from_secs(10))?;
+    control.set_read_timeout(Some(Duration::from_secs(10)))?;
+    control.set_write_timeout(Some(Duration::from_secs(10)))?;
+    control.write_all(b"ARM\n")?;
+    let mut response = [0_u8; 6];
+    control.read_exact(&mut response)?;
+    if &response != b"ARMED\n" {
+        return Err(anyhow!(
+            "cross-dialect commit fault proxy returned an invalid arm response"
+        ));
+    }
+    Ok(())
 }
 
 fn inspect_target_interval(
@@ -1840,11 +2076,8 @@ fn inspect_target_interval(
     prepared: &PreparedChunk,
     expected: &RowBatch,
 ) -> anyhow::Result<CrossTableState> {
-    let limit = prepared
-        .row_count
-        .checked_add(1)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| anyhow!("prepared cross-dialect chunk is too large to inspect"))?;
+    let limit = u32::try_from(prepared.row_count)
+        .map_err(|_| anyhow!("prepared cross-dialect chunk is too large to inspect"))?;
     let after = prepared
         .start_key
         .as_deref()
@@ -2630,9 +2863,12 @@ mod tests {
             &mut reader(source.clone()),
             &target,
             &mut journal,
-            &cancellation,
-            2,
-            &mut require_consistency,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
         )
         .unwrap_err();
         assert!(error.to_string().contains("outcome is unknown"));
@@ -2646,9 +2882,12 @@ mod tests {
             &mut reader(source),
             &target,
             &mut journal,
-            &cancellation,
-            2,
-            &mut require_consistency,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
         )
         .unwrap();
         assert!(journal.projection().prepared_chunk.is_none());
@@ -2677,9 +2916,12 @@ mod tests {
             &mut reader(source),
             &target,
             &mut journal,
-            &cancellation,
-            1,
-            &mut require_consistency,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 1,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
         )
         .unwrap();
 
@@ -2733,9 +2975,12 @@ mod tests {
             &mut reader(source.clone()),
             &target,
             &mut journal,
-            &cancellation,
-            2,
-            &mut require_consistency,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
         )
         .unwrap();
         assert!(!journal.projection().table_verifications.is_empty());
@@ -2752,9 +2997,12 @@ mod tests {
             &mut reader(source),
             &target,
             &mut journal,
-            &cancellation,
-            2,
-            &mut require_consistency,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
         )
         .unwrap_err();
         assert!(error.to_string().contains("row verification failed"));
@@ -2786,9 +3034,12 @@ mod tests {
             &mut reader(source_rows(&policy)),
             &target,
             &mut journal,
-            &cancellation,
-            2,
-            &mut require_consistency,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
         )
         .unwrap_err();
         assert!(error.to_string().contains("freeze lost"));

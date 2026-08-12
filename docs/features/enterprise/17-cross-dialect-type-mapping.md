@@ -102,7 +102,7 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
   for the recorded finite IEEE and canonical JSON vectors on every supported
   PostgreSQL/MySQL version pair.
 
-## Open acceptance evidence
+## Acceptance evidence
 
 - The typed MySQL target contract caps `utf8mb4` `VARCHAR` at 16,383
   characters. Wider PostgreSQL `varchar(n)` columns now fail during policy
@@ -123,8 +123,41 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
 
   Recorded 2026-08-12 on Darwin 24.6.0 arm64, Docker client/server 29.4.0
   with Linux arm64 containers, and Rust 1.97.1. Each command passed both
-  direction-specific ignored integration tests. The Phase 7 exit remains
-  open until the same matrix proves create-only reconciliation,
-  commit-response loss on both targets, source fence/freeze loss,
-  cancellation, target drift after durable verification, and released-fence
-  recovery.
+  direction-specific ignored integration tests.
+- The recovery matrix passes on PostgreSQL 17 and MySQL 8.4 in both
+  directions. It covers:
+  - durable table `Prepared` and create-effect-applied states;
+  - durable chunk `Prepared` and target-commit-before-journal states;
+  - cancellation after insert with transaction rollback;
+  - COMMIT bytes not forwarded to the target;
+  - target commit externally visible while its acknowledgement is withheld;
+  - interruption after durable verification;
+  - target drift after durable verification;
+  - MySQL freeze loss and PostgreSQL fence loss;
+  - PostgreSQL fence release before terminal journal publication.
+
+  Recovery mode uses the same disposable harness and one named interruption:
+
+  ```text
+  SQL_SPLITTER_CROSS_INTERRUPTION=<boundary> \
+    scripts/test-migration-cross-dialect.sh 17 8.4 mysql-to-postgres-recovery
+  SQL_SPLITTER_CROSS_INTERRUPTION=<boundary> \
+    scripts/test-migration-cross-dialect.sh 17 8.4 postgres-to-mysql-recovery
+  ```
+
+  Supported boundaries are `table-prepared`, `table-effect-applied`,
+  `chunk-prepared`, `chunk-effect-applied`, `cancel-after-insert`,
+  `network-not-forwarded`, `network-ack-lost`, and `after-verification`.
+  PostgreSQL-source execution also supports
+  `after-postgres-fence-release`. Set
+  `SQL_SPLITTER_CROSS_EXPECT_TARGET_DRIFT=1` or
+  `SQL_SPLITTER_CROSS_EXPECT_SOURCE_LOSS=1` with `after-verification` for the
+  two fail-closed negative cases.
+- The same shared-catalog checkpoint passes the complete same-dialect MySQL
+  8.0/8.4 and PostgreSQL 15/16/17 live matrices. This includes the MySQL
+  `BIT(9)` value fixture, which preserves its reviewed width through catalog
+  extraction and target binding.
+- The Phase 7 execution-hardening exit remains open until the recovery matrix
+  passes on all six supported PostgreSQL/MySQL version pairs. The recorded
+  PostgreSQL 17/MySQL 8.4 run proves the boundary semantics but does not prove
+  version-wide recovery compatibility.

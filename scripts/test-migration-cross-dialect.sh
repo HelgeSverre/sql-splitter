@@ -3,8 +3,18 @@ set -euo pipefail
 
 postgres_version=${1:-17}
 mysql_version=${2:-8.4}
-case "$postgres_version" in 15|16|17) ;; *) echo "usage: $0 [15|16|17] [8.0|8.4]" >&2; exit 2 ;; esac
-case "$mysql_version" in 8.0|8.4) ;; *) echo "usage: $0 [15|16|17] [8.0|8.4]" >&2; exit 2 ;; esac
+matrix_mode=${3:-baseline}
+usage="usage: $0 [15|16|17] [8.0|8.4] [baseline|mysql-to-postgres-recovery|postgres-to-mysql-recovery]"
+case "$postgres_version" in 15|16|17) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$mysql_version" in 8.0|8.4) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$matrix_mode" in
+  baseline|mysql-to-postgres-recovery|postgres-to-mysql-recovery) ;;
+  *) echo "$usage" >&2; exit 2 ;;
+esac
+if [[ "$matrix_mode" != baseline && -z "${SQL_SPLITTER_CROSS_INTERRUPTION:-}" ]]; then
+  echo "SQL_SPLITTER_CROSS_INTERRUPTION is required for recovery mode" >&2
+  exit 2
+fi
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl is required" >&2; exit 1; }
 
@@ -239,6 +249,8 @@ export SQL_SPLITTER_CROSS_MYSQL_TARGET_CONFIG="$test_dir/mysql-target.toml"
 export SQL_SPLITTER_CROSS_MYSQL_TARGET_METADATA_CONFIG="$test_dir/mysql-target-metadata.toml"
 export SQL_SPLITTER_CROSS_PG_TO_MYSQL_MAPPING="$test_dir/pg-to-mysql.json"
 export SQL_SPLITTER_CROSS_MYSQL_TO_PG_MAPPING="$test_dir/mysql-to-pg.json"
+export SQL_SPLITTER_CROSS_PG_CONTAINER="$pg_container"
+export SQL_SPLITTER_CROSS_MYSQL_CONTAINER="$mysql_container"
 
 docker exec "$mysql_container" mysql -uroot -prootpass -Nse "SET PERSIST super_read_only=ON"
 docker exec "$mysql_container" mysql -uroot -prootpass -Nse \
@@ -259,5 +271,22 @@ export SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID="$backup_lock_connection_id"
 export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER="$backup_user"
 export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_host"
 
-cargo test --no-default-features --features enterprise-migration-spike \
-  --test migration_cross_dialect_test -- --ignored --nocapture
+case "$matrix_mode" in
+  baseline)
+    cargo test --no-default-features --features enterprise-migration-spike \
+      --test migration_cross_dialect_test \
+      executes_bounded_verified_conversion -- --ignored --nocapture
+    ;;
+  mysql-to-postgres-recovery)
+    cargo test --no-default-features \
+      --features enterprise-migration-spike,migration-fault-injection \
+      --test migration_cross_dialect_test \
+      live_mysql_to_postgres_resumes_selected_recovery_boundary -- --ignored --nocapture
+    ;;
+  postgres-to-mysql-recovery)
+    cargo test --no-default-features \
+      --features enterprise-migration-spike,migration-fault-injection \
+      --test migration_cross_dialect_test \
+      live_postgres_to_mysql_resumes_selected_recovery_boundary -- --ignored --nocapture
+    ;;
+esac

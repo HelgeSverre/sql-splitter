@@ -4441,7 +4441,7 @@ fn assert_assessment_statement_log(
 fn assert_assessment_statement_set(statements: &[String]) -> anyhow::Result<()> {
     const EXPECTED_COUNT: usize = 23;
     const EXPECTED_SHA256: &str =
-        "4cc4c6a80b1bcfe97fbda2fad4870abfc2feba72558d49a7f73bafaf166566eb";
+        "7c9b7e52eb04c7a1485bb7a67988846cf2170d816b632c76dd2b7320be3c04ec";
 
     let mut digest = Sha256::new();
     for statement in statements {

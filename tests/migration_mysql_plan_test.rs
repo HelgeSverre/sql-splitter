@@ -11,6 +11,8 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 #[cfg(feature = "migration-fault-injection")]
 use std::{thread, time::Instant};
 
+use anyhow::Context;
+
 #[cfg(feature = "migration-fault-injection")]
 #[path = "support/postgres_commit_proxy.rs"]
 mod mysql_commit_proxy;
@@ -20,9 +22,7 @@ use mysql_commit_proxy::{CommitFaultMode, PostgresCommitProxy};
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts};
 
-use sql_splitter::migration::append_journal::{
-    AppendJournal, Genesis, OperationPhase, OperationSpec,
-};
+use sql_splitter::migration::append_journal::AppendJournal;
 use sql_splitter::migration::artifact::{read_json, write_json_new};
 use sql_splitter::migration::canonical::{
     canonicalize_json, digest_rows, CanonicalRow, CANONICAL_ENCODING_VERSION,
@@ -30,23 +30,20 @@ use sql_splitter::migration::canonical::{
 use sql_splitter::migration::connection::{
     CancellationToken, KeysetPage, ReadSession, SourceConnectionFactory, TargetConnectionFactory,
 };
-use sql_splitter::migration::journal::{
-    ConsistencyEvidence, MigrationStatus, OperationState, ResumeBinding,
-};
+use sql_splitter::migration::journal::{MigrationStatus, OperationState};
 use sql_splitter::migration::model::{
     ColumnMeta, DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch,
 };
 use sql_splitter::migration::mysql::{
-    attest_mysql_external_freeze, build_plan, build_plan_with_visibility,
-    collect_mysql_metadata_visibility, inspect_live_endpoint, mysql_auto_increment_states,
-    mysql_catalog_fingerprint, mysql_foreign_keys, mysql_table_definitions, mysql_tls_binding,
-    validate_mysql_external_freeze_continuity, write_live_plan, write_live_plan_with_visibility,
-    write_live_plan_with_visibility_and_authorization, MySqlAuthorizationTargetState,
-    MySqlEndpointConfig, MySqlSourceFactory, MySqlTableState, MySqlTargetFactory,
-    MYSQL_CONSISTENCY_SNAPSHOT,
+    attest_mysql_external_freeze, build_plan_with_visibility, collect_mysql_metadata_visibility,
+    inspect_live_endpoint, mysql_auto_increment_states, mysql_foreign_keys,
+    mysql_table_definitions, validate_mysql_external_freeze_continuity, write_live_plan,
+    write_live_plan_with_visibility, write_live_plan_with_visibility_and_authorization,
+    MySqlAuthorizationTargetState, MySqlEndpointConfig, MySqlSourceFactory, MySqlTableState,
+    MySqlTargetFactory, MYSQL_CONSISTENCY_SNAPSHOT,
 };
 use sql_splitter::migration::mysql_execution::{
-    execute_live_mysql_frozen_plan, reconcile_mysql_pre_data_schema, resume_live_mysql_frozen_plan,
+    execute_live_mysql_frozen_plan, resume_live_mysql_frozen_plan,
 };
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::mysql_execution::{
@@ -54,9 +51,7 @@ use sql_splitter::migration::mysql_execution::{
     MySqlCancellationResume, MySqlExecutionInterruption, MySqlInterruptedExecution,
 };
 use sql_splitter::migration::mysql_profile::{
-    MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlExternalFreezeAssertion,
-    MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus, MySqlFreezeProfileKind,
-    MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION, MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
+    MySqlExternalFreezeAssertion, MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION,
 };
 use sql_splitter::migration::mysql_visibility::{
     MySqlGrantRecord, MySqlOperationalAccountPurpose, MySqlProxyTarget,
@@ -901,11 +896,11 @@ fn live_mysql_canonical_value_matrix() -> anyhow::Result<()> {
         source_columns[16].timezone_semantics.as_deref(),
         Some("mysql_session_time_zone")
     );
-    assert_eq!(source_columns[14].scale, Some(6));
-    assert_eq!(source_columns[15].scale, Some(0));
-    assert_eq!(source_columns[16].scale, Some(6));
-    assert_eq!(source_columns[17].scale, Some(0));
-    assert_eq!(source_columns[18].scale, Some(6));
+    assert_eq!(source_columns[14].precision, Some(6));
+    assert_eq!(source_columns[15].precision, Some(0));
+    assert_eq!(source_columns[16].precision, Some(6));
+    assert_eq!(source_columns[17].precision, Some(0));
+    assert_eq!(source_columns[18].precision, Some(6));
 
     assert_eq!(source_rows[0][1], DbValue::Null);
     assert_eq!(source_rows[0][2], DbValue::Text("Unicode: åß水🧪".into()));
@@ -2272,7 +2267,6 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
     let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_TARGET_CONFIG")?;
     let admin_path = required_path("SQL_SPLITTER_MYSQL_TEST_ADMIN_CONFIG")?;
     let plan_path = required_path("SQL_SPLITTER_MYSQL_TEST_PLAN_OUTPUT")?;
-    let journal_path = required_path("SQL_SPLITTER_MYSQL_TEST_JOURNAL_OUTPUT")?;
     let source_config = MySqlEndpointConfig::read(&source_path)?;
     let target_config = MySqlEndpointConfig::read(&target_path)?;
     let admin_config = MySqlEndpointConfig::read(&admin_path)?;
@@ -2583,7 +2577,13 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
     assert!(reviewed.plan.unsupported_objects.blocks_execution());
 
     let mut copy_catalog = source.catalog.clone();
-    let namespace = &mut copy_catalog.namespaces[0];
+    copy_catalog
+        .namespaces
+        .retain(|namespace| namespace.name.as_str() == "migration_source");
+    let namespace = copy_catalog
+        .namespaces
+        .first_mut()
+        .ok_or_else(|| anyhow::anyhow!("source catalog has no migration_source namespace"))?;
     namespace.objects.retain(|object| {
         (object.kind == sql_splitter::migration::model::CatalogObjectKind::Table
             && object.name.as_str() == "copy_items")
@@ -2602,21 +2602,15 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
         retained_ids.contains(&dependency.from_object_id)
             && retained_ids.contains(&dependency.to_object_id)
     });
-    let mut copy_source = source.clone();
-    copy_source.catalog = copy_catalog.clone();
-    copy_source.blockers.retain(|blocker| {
-        blocker.object_kind == "catalog_visibility" || retained_ids.contains(&blocker.object_id)
-    });
-    copy_source.snapshot_evidence.catalog_fingerprint = mysql_catalog_fingerprint(&copy_catalog)?;
     let target_before_copy = inspect_live_endpoint(target_config.clone())?;
-    let copy_plan = build_plan(&copy_source, &target_before_copy)?;
     let definitions = mysql_table_definitions(&copy_catalog)?;
     assert_eq!(definitions.len(), 1);
     let target_factory = MySqlTargetFactory::new(
         target_config.clone(),
         copy_catalog,
         target_before_copy.snapshot_evidence.clone(),
-    )?;
+    )
+    .context("construct the narrowed target adapter")?;
     let target_table = QualifiedTable {
         namespace: identifier("migration_target"),
         name: identifier("copy_items"),
@@ -2627,128 +2621,7 @@ fn live_mysql_snapshot_catalog_and_blocked_plan() -> anyhow::Result<()> {
         target_factory.inspect_table(expected)?,
         MySqlTableState::Absent
     );
-    let freeze = MySqlExternalFreezeAttestation {
-        schema_version: MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
-        profile: MySqlFreezeProfileKind::ExternalContinuousFreezeV1,
-        status: MySqlFreezeAttestationStatus::Active,
-        source_endpoint_identity: copy_plan.plan.source_endpoint_identity.clone(),
-        source_database_identity: copy_source.snapshot_evidence.database_identity.clone(),
-        source_catalog_fingerprint: copy_plan.plan.source_catalog_fingerprint.clone(),
-        server_uuid: copy_source.snapshot_evidence.server_uuid.clone(),
-        server_start_lower_bound_unix_seconds: 99,
-        server_start_upper_bound_unix_seconds: 101,
-        administrator_tls_binding: mysql_tls_binding(&admin_config)?,
-        profile_generation: "target-adapter-test-only".into(),
-        provider_reference: "target-adapter-test-does-not-admit-execution".into(),
-        activated_at_unix_seconds: 10,
-        expires_at_unix_seconds: 30,
-        continuity_token_hash: "c".repeat(64),
-        backup_lock_connection_id: 42,
-        backup_lock_owner_thread_id: 23,
-        backup_lock_owner_user: "test-only".into(),
-        backup_lock_owner_host: "localhost".into(),
-        read_only: true,
-        super_read_only: true,
-        super_read_only_persisted: true,
-        active_replication_channels: Vec::new(),
-        dml_mechanism: MySqlDmlFreezeMechanism::PersistedSuperReadOnly,
-        ddl_mechanism: MySqlDdlFreezeMechanism::ExternalBackupLock,
-        freeze_enforced_by_tool: false,
-        attested_at_unix_seconds: 20,
-    };
-    let binding = ResumeBinding {
-        migration_id: copy_plan.plan.migration_id.clone(),
-        plan_hash: copy_plan.plan_hash.to_string(),
-        approval_reference: "live-mysql-target-adapter-test".into(),
-        tool_version: copy_plan.plan.tool_version.clone(),
-        source_endpoint: copy_plan.plan.source_endpoint_identity.clone(),
-        target_endpoint: copy_plan
-            .plan
-            .target_endpoint_identity
-            .as_assessed()
-            .expect("execution plan target")
-            .clone(),
-        consistency_evidence: ConsistencyEvidence::MySqlExternalFreeze {
-            endpoint_identity: copy_source.snapshot_evidence.endpoint_identity.clone(),
-            database_identity: copy_source.snapshot_evidence.database_identity.clone(),
-            server_uuid: freeze.server_uuid.clone(),
-            source_catalog_fingerprint: copy_plan.plan.source_catalog_fingerprint.clone(),
-            profile_generation: freeze.profile_generation.clone(),
-            continuity_token_hash: freeze.continuity_token_hash.clone(),
-            backup_lock_connection_id: freeze.backup_lock_connection_id,
-        },
-        source_schema_fingerprint: copy_plan.plan.source_catalog_fingerprint.clone(),
-        target_schema_fingerprint: copy_plan
-            .plan
-            .target_catalog_fingerprint
-            .as_assessed()
-            .expect("execution plan target fingerprint")
-            .clone(),
-        outage_projection_digest: None,
-        external_quiesce_attestation_digest: None,
-        mysql_freeze_attestation_digest: Some(freeze.canonical_hash()?),
-        conversion_policy: copy_plan.plan.conversion_policy.clone(),
-        canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-    };
-    let operations = copy_plan
-        .plan
-        .operations
-        .iter()
-        .map(|operation| OperationSpec {
-            operation_id: operation.id.to_string(),
-            dependencies: operation
-                .dependencies
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            is_copy: operation.kind == OperationKind::CopyTable,
-            phase: if matches!(
-                operation.kind,
-                OperationKind::VerifyTable | OperationKind::VerifySchema
-            ) {
-                OperationPhase::Verification
-            } else {
-                OperationPhase::Execution
-            },
-        })
-        .collect();
-    let create_operation_id = copy_plan
-        .plan
-        .operations
-        .iter()
-        .find(|operation| operation.kind == OperationKind::CreateTable)
-        .expect("create-table operation")
-        .id
-        .to_string();
-    let mut journal = AppendJournal::create_new(
-        &journal_path,
-        Genesis {
-            binding,
-            reviewed_plan: copy_plan.clone(),
-            accepted_outage_projection: None,
-            accepted_external_quiesce: None,
-            accepted_mysql_freeze: Some(freeze),
-            operations,
-        },
-    )?;
-    reconcile_mysql_pre_data_schema(
-        &copy_plan,
-        &target_factory,
-        &mut journal,
-        &CancellationToken::default(),
-    )?;
-    assert_eq!(
-        journal.projection().operations.get(&create_operation_id),
-        Some(&OperationState::Verified)
-    );
-    drop(journal);
-    let mut journal = AppendJournal::open_resume(&journal_path)?;
-    reconcile_mysql_pre_data_schema(
-        &copy_plan,
-        &target_factory,
-        &mut journal,
-        &CancellationToken::default(),
-    )?;
+    target_factory.create_table(expected)?;
     assert_eq!(
         target_factory.inspect_table(expected)?,
         MySqlTableState::Exact
