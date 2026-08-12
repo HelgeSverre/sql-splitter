@@ -1555,6 +1555,27 @@ fn postgres_relation_identity(
     Ok(Some((rows[0].get(0), rows[0].get(2))))
 }
 
+const POSTGRES_TEMP_RELATION_IDENTITY_SQL: &str =
+    "SELECT c.oid, c.relkind::text, c.relpersistence::text FROM pg_class c WHERE c.relnamespace=pg_my_temp_schema() AND c.relname=$1";
+
+fn postgres_temp_relation_identity(
+    client: &mut impl postgres::GenericClient,
+    name: &Identifier,
+) -> ConnectionResult<Option<(u32, String)>> {
+    let rows = client
+        .query(POSTGRES_TEMP_RELATION_IDENTITY_SQL, &[&name.as_str()])
+        .map_err(database_error)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() != 1 || rows[0].get::<_, String>(1) != "r" {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "PostgreSQL temporary target name {name} is occupied by a different relation kind"
+        )));
+    }
+    Ok(Some((rows[0].get(0), rows[0].get(2))))
+}
+
 fn postgres_conversion_table_signature(
     client: &mut impl postgres::GenericClient,
     table_oid: u32,
@@ -1761,13 +1782,13 @@ impl PostgresTargetFactory {
         let ddl = render_postgres_conversion_create_table(&shadow_policy)
             .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
         transaction.batch_execute(&ddl).map_err(database_error)?;
-        let (shadow_oid, shadow_persistence) = postgres_relation_identity(
-            &mut transaction,
-            &shadow_policy.target_table,
-        )?
-        .ok_or_else(|| {
-            ConnectionError::Database("PostgreSQL conversion shadow table was not cataloged".into())
-        })?;
+        let (shadow_oid, shadow_persistence) =
+            postgres_temp_relation_identity(&mut transaction, &shadow_policy.target_table.name)?
+                .ok_or_else(|| {
+                    ConnectionError::Database(
+                        "PostgreSQL conversion shadow table was not cataloged".into(),
+                    )
+                })?;
         if shadow_persistence != "t" {
             return Err(ConnectionError::Database(
                 "PostgreSQL conversion shadow table is not temporary".into(),
@@ -9221,6 +9242,13 @@ mod tests {
             super::super::mysql::render_mysql_conversion_create_table(&hostile).unwrap(),
             "CREATE TABLE `a``b`.`t``x` (`id` bigint NOT NULL, `active` tinyint(1) NOT NULL CHECK (`active` BETWEEN 0 AND 1), PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_bin`"
         );
+    }
+
+    #[test]
+    fn conversion_shadow_lookup_uses_the_session_temp_namespace_oid() {
+        assert!(POSTGRES_TEMP_RELATION_IDENTITY_SQL.contains("pg_my_temp_schema()"));
+        assert!(!POSTGRES_TEMP_RELATION_IDENTITY_SQL.contains("n.nspname"));
+        assert!(!POSTGRES_TEMP_RELATION_IDENTITY_SQL.contains("'pg_temp'"));
     }
 
     #[test]
