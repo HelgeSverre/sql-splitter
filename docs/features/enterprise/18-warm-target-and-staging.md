@@ -74,26 +74,44 @@ The first complete policy is `reject_any_key_collision`.
 - Foreign-key checks and final verification cover the union, not only rows
   written by this invocation.
 
-The reviewed plan records a canonical target baseline manifest for each merge
-table. It contains bounded key intervals, canonical row digests, row counts,
-and a table manifest hash. It does not contain row values. Before the first
-write, the executor re-reads the target and requires the same baseline. Resume
-re-attests it plus the durable set of migration-owned committed intervals.
+The reviewed plan records the exact baseline-acceptance policy, target tables,
+key contracts, and target-fence requirement. It does not record volatile row
+evidence. At execute preflight, after the target fence or external quiesce is
+active and before journal genesis or any target write, the executor performs a
+complete ordered source/target key anti-join. Any collision rejects execution.
+The same pass computes a canonical target-only row count and table hash. The
+journal genesis binds that accepted baseline, the target-fence evidence, and a
+digest of both. It does not contain row values or key values.
+
+The target fence makes the collision result durable evidence: a source key was
+absent when the accepted baseline was captured, and no other writer can create
+it later. The migration therefore does not need a separate row-ownership table.
+Resume re-attests the same target fence and accepted baseline before it
+reconciles or starts another effect. A missing or discontinuous fence cannot be
+replaced with a fresh baseline because that would adopt unreviewed rows.
 
 Prepared-chunk reconciliation classifies one interval as:
 
-1. exact baseline plus no migration rows — retry the same intent;
-2. exact baseline plus exactly the reviewed converted source rows — mark the
-   same intent committed;
-3. any key collision, changed baseline row, extra row in a migration interval,
-   or partial converted effect — durable manual reconciliation.
+1. every expected source key is absent — retry the same intent;
+2. every expected source key has exactly the reviewed converted source row —
+   mark the same intent committed;
+3. a mixture, a changed value, an extra matching key, or any target-fence loss
+   — durable manual reconciliation.
+
+Baseline rows can be interleaved with a prepared source interval. Reconciliation
+does not classify them from row presence. It relies on continuous fence
+attestation and probes only the complete expected source-key set for that
+durable intent.
 
 The target must be protected by a continuously attested write fence or an
 external quiesce contract from the baseline read through final verification.
 Source consistency remains independently required. Losing either boundary
 stops before the next effect.
 
-Final verification proves all three statements independently:
+Final verification performs one bounded ordered merge of the frozen source and
+target tables. Source-key matches must contain the exact reviewed source row;
+target-only rows feed an independently recomputed baseline hash. The pass
+proves all three statements independently:
 
 - every reviewed baseline row remains exact;
 - every source row appears once as its reviewed canonical target value;
@@ -122,13 +140,22 @@ the live objects. The staging catalog and rows must pass the same exact schema,
 canonical data, dependency, and completeness checks as an empty-target run.
 The target role must own the staging objects it creates.
 
+Execute captures and journals a canonical live-object baseline before it
+creates staging objects. Unlike warm merge, staging build does not require the
+live objects to remain fenced for the complete copy. Immediately before
+cutover, the executor activates the target fence or verifies the external
+quiesce, then requires the complete live baseline to remain exact. Any live
+write during staging build therefore aborts cutover; it is never silently
+discarded or adopted into a new baseline.
+
 ### Cutover boundary
 
 Cutover requires:
 
 1. strict staging verification is durably complete;
 2. source consistency is still valid;
-3. the exact live target catalog and data baseline still match review;
+3. the exact live target catalog and accepted data baseline still match the
+   journal genesis;
 4. a target write fence or explicit external quiesce is active;
 5. the destructive approval reference is bound in the journal;
 6. all required metadata locks are acquired inside a reviewed finite timeout.
@@ -180,6 +207,8 @@ not require or imply automatic cleanup.
 The journal genesis binds:
 
 - target mode and ownership-manifest digest;
+- the accepted target baseline and target-fence evidence digest when the mode
+  requires them;
 - live, staging, and retained identities;
 - source and target endpoint/TLS/catalog bindings;
 - source and target consistency or fence evidence;
