@@ -18,7 +18,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 18;
+pub const PLAN_SCHEMA_VERSION: u16 = 19;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -99,10 +99,21 @@ pub enum WarmMergeConflictPolicy {
     RejectAnyKeyCollision,
 }
 
+/// The reviewed mechanism that excludes target writes outside the migration.
+/// Runtime evidence is accepted separately and bound in journal genesis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mechanism", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TargetProtectionContract {
+    PostgreSqlMigrationTokenFenceV1,
+    MySqlMigrationTokenFenceWithExternalDdlFreezeV1 { provider_reference: String },
+    ExternalContinuousQuiesceV1 { provider_reference: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarmMergeContract {
     pub conflict_policy: WarmMergeConflictPolicy,
+    pub target_protection: TargetProtectionContract,
     pub ownership: TargetOwnershipManifest,
     pub tables: Vec<WarmMergeTable>,
 }
@@ -196,6 +207,7 @@ impl StagingReplacement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StagingSwapContract {
+    pub target_protection: TargetProtectionContract,
     pub ownership: TargetOwnershipManifest,
     pub replacements: Vec<StagingReplacement>,
     pub metadata_lock_timeout_millis: u64,
@@ -720,6 +732,7 @@ fn validate_target_mode(
             if contract.tables.is_empty() {
                 return Err(PlanError::InvalidTargetMode);
             }
+            validate_target_protection(&contract.target_protection, target_catalog)?;
             if contract
                 .tables
                 .windows(2)
@@ -785,6 +798,7 @@ fn validate_target_mode(
             {
                 return Err(PlanError::InvalidTargetMode);
             }
+            validate_target_protection(&contract.target_protection, target_catalog)?;
             let catalog_items = contract
                 .ownership
                 .validate_against(target_catalog, target_catalog_fingerprint)?;
@@ -832,6 +846,35 @@ fn validate_target_mode(
             Ok(())
         }
     }
+}
+
+fn validate_target_protection(
+    protection: &TargetProtectionContract,
+    target_catalog: &VendorCatalog,
+) -> Result<(), PlanError> {
+    let provider_reference = match protection {
+        TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 => {
+            if target_catalog.dialect != "postgresql" {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            return Ok(());
+        }
+        TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+            provider_reference,
+        } => {
+            if target_catalog.dialect != "mysql" {
+                return Err(PlanError::InvalidTargetMode);
+            }
+            provider_reference
+        }
+        TargetProtectionContract::ExternalContinuousQuiesceV1 { provider_reference } => {
+            provider_reference
+        }
+    };
+    if provider_reference.trim().is_empty() || provider_reference.contains('\0') {
+        return Err(PlanError::InvalidTargetMode);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1825,6 +1868,7 @@ mod tests {
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
             WarmMergeContract {
                 conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
+                target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
                 ownership: ownership_manifest(
                     &plan,
                     TargetObjectDisposition::Preserve,
@@ -1856,6 +1900,21 @@ mod tests {
             Err(PlanError::InvalidTargetMode)
         ));
 
+        let mut wrong_dialect = plan.clone();
+        let AssessmentStatus::Assessed(TargetModeContract::WarmMerge(contract)) =
+            wrong_dialect.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        contract.target_protection =
+            TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                provider_reference: "ddl-freeze-provider".into(),
+            };
+        assert!(matches!(
+            wrong_dialect.validate(),
+            Err(PlanError::InvalidTargetMode)
+        ));
+
         let AssessmentStatus::Assessed(TargetModeContract::WarmMerge(contract)) =
             plan.target_mode.as_mut().unwrap()
         else {
@@ -1875,6 +1934,7 @@ mod tests {
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
             WarmMergeContract {
                 conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
+                target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
                 ownership: ownership_manifest(
                     &plan,
                     TargetObjectDisposition::Preserve,
@@ -1926,6 +1986,7 @@ mod tests {
         ];
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::StagingSwap(
             StagingSwapContract {
+                target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
                 ownership: ownership_manifest(
                     &plan,
                     TargetObjectDisposition::ReplaceAtCutover,

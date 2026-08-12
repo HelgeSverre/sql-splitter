@@ -32,6 +32,19 @@ command-line override after review.
 Phase 8 introduces new CLI options only when their complete execution paths
 exist. Until then, the current commands continue to build `empty_owned` plans.
 
+The target mode also contains one typed protection contract. PostgreSQL uses a
+migration-token fence whose trigger exemption is available only to sessions
+that prove the per-migration secret. MySQL uses migration-token DML guards plus
+a separately held external DDL freeze, or a provider can attest one continuous
+external quiesce that excludes both DML and DDL. The reviewed plan binds the
+mechanism and external provider identity, but never the runtime token. Execute
+cannot substitute a different mechanism.
+
+The existing source fence is not a target fence. Its PostgreSQL DML guard
+rejects the migration writer, and MySQL `super_read_only` rejects privileged
+client updates as well. Phase 8 requires separate target-fence installation,
+attestation, release, and recovery paths with a narrow migration exemption.
+
 ## Ownership manifest
 
 Warm merge and staging swap require a closed ownership manifest over the exact
