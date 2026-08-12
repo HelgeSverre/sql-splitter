@@ -943,12 +943,18 @@ fn resume_postgres_plan_internal(
     let target_config = PostgresEndpointConfig::read(target_config_path)?;
     validate_reviewed_tls(&reviewed, "source_tls", &source_config)?;
     validate_reviewed_tls(&reviewed, "target_tls", &target_config)?;
-    let accepted_external_quiesce = validate_external_quiesce_resume(
+    let external_quiesce_resume = validate_external_quiesce_resume(
         &reviewed,
-        journal.genesis().accepted_external_quiesce.as_ref(),
-        &journal.genesis().binding,
+        journal.projection().current_external_quiesce.as_ref(),
         external_quiesce_attestation_path,
     )?;
+    if let Some(admission) = external_quiesce_resume.as_ref() {
+        if let Some(previous_digest) = &admission.renewal_previous_digest {
+            journal
+                .renew_external_quiesce(previous_digest.clone(), admission.attestation.clone())?;
+        }
+    }
+    let accepted_external_quiesce = external_quiesce_resume.map(|admission| admission.attestation);
     let fenced = match (
         reviewed.plan.consistency_mode.as_str(),
         fence_paths,
@@ -2064,6 +2070,9 @@ fn validate_external_quiesce_admission(
                 .map_err(|_| anyhow!("system clock is before the Unix epoch"))?
                 .as_secs();
             attestation
+                .validate_initial()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            attestation
                 .validate_for_plan(
                     source_endpoint_identity,
                     source_catalog_fingerprint,
@@ -2083,25 +2092,28 @@ fn validate_external_quiesce_admission(
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
+struct ExternalQuiesceResumeAdmission {
+    attestation: PostgresExternalQuiesceAttestation,
+    renewal_previous_digest: Option<String>,
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
 fn validate_external_quiesce_resume(
     reviewed: &ReviewedPlan,
-    accepted: Option<&PostgresExternalQuiesceAttestation>,
-    binding: &ResumeBinding,
+    current: Option<&PostgresExternalQuiesceAttestation>,
     supplied_path: Option<&Path>,
-) -> anyhow::Result<Option<PostgresExternalQuiesceAttestation>> {
+) -> anyhow::Result<Option<ExternalQuiesceResumeAdmission>> {
     match (
         reviewed.plan.postgres_source_profile.as_ref(),
-        accepted,
-        binding.external_quiesce_attestation_digest.as_ref(),
+        current,
         supplied_path,
     ) {
         (
             Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }),
-            Some(accepted),
-            Some(expected_digest),
+            Some(current),
             Some(path),
         ) => {
-            accepted
+            current
                 .validate()
                 .map_err(|error| anyhow!(error.to_string()))?;
             let supplied: PostgresExternalQuiesceAttestation = read_json(path)?;
@@ -2112,20 +2124,44 @@ fn validate_external_quiesce_resume(
             {
                 return Err(anyhow!("external-quiesce attestation is withdrawn"));
             }
+            let current_digest = current
+                .canonical_hash()
+                .map_err(|error| anyhow!(error.to_string()))?;
             let supplied_digest = supplied
                 .canonical_hash()
                 .map_err(|error| anyhow!(error.to_string()))?;
-            if &supplied_digest != expected_digest || &supplied != accepted {
-                return Err(anyhow!(
-                    "external-quiesce attestation differs from durable admission"
-                ));
+            if supplied_digest == current_digest && &supplied == current {
+                let observed_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| anyhow!("system clock is before the Unix epoch"))?
+                    .as_secs();
+                supplied
+                    .require_active_at(observed_at)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                return Ok(Some(ExternalQuiesceResumeAdmission {
+                    attestation: supplied,
+                    renewal_previous_digest: None,
+                }));
             }
-            Ok(Some(supplied))
+            supplied
+                .validate_renewal_from(current)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let observed_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| anyhow!("system clock is before the Unix epoch"))?
+                .as_secs();
+            supplied
+                .require_active_at(observed_at)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            Ok(Some(ExternalQuiesceResumeAdmission {
+                attestation: supplied,
+                renewal_previous_digest: Some(current_digest),
+            }))
         }
-        (Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }), _, _, _) => Err(
+        (Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. }), _, _) => Err(
             anyhow!("external-quiesce resume evidence is incomplete or missing"),
         ),
-        (_, None, None, None) => Ok(None),
+        (_, None, None) => Ok(None),
         _ => Err(anyhow!(
             "external-quiesce resume evidence is forbidden for this reviewed source profile"
         )),
@@ -5168,6 +5204,122 @@ mod tests {
             dependencies: Vec::new(),
             vendor_metadata: BTreeMap::new(),
         }
+    }
+
+    #[cfg(feature = "enterprise-migration-spike")]
+    fn external_quiesce_test_plan() -> ReviewedPlan {
+        let source_catalog = empty_test_catalog("source");
+        let target_catalog = empty_test_catalog("target");
+        ReviewedPlan::new(MigrationPlan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            purpose: PlanPurpose::Execution,
+            migration_id: "external-quiesce-test".into(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+            source_endpoint_identity: "source".into(),
+            target_endpoint_identity: AssessmentStatus::Assessed("target".into()),
+            source_catalog_fingerprint: catalog_fingerprint(&source_catalog).unwrap(),
+            target_catalog_fingerprint: AssessmentStatus::Assessed(
+                catalog_fingerprint(&target_catalog).unwrap(),
+            ),
+            source_catalog: Some(source_catalog),
+            target_catalog: AssessmentStatus::Assessed(target_catalog),
+            source_tls_binding: "source-tls".into(),
+            target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
+            target_mode: Some(AssessmentStatus::Assessed(
+                crate::migration::plan::TargetModeContract::EmptyOwned,
+            )),
+            target_writer_identity: None,
+            consistency_mode: super::super::postgres::POSTGRES_CONSISTENCY_SNAPSHOT.into(),
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
+            outage_policy: None,
+            postgres_source_profile: Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: false,
+                freeze_enforced_by_tool: false,
+            }),
+            mysql_source_profile: None,
+            mysql_snapshot_evidence: None,
+            mysql_target_snapshot_evidence: None,
+            mysql_metadata_visibility: None,
+            mysql_target_metadata_visibility: None,
+            mysql_authorization: None,
+            capabilities: BTreeMap::new(),
+            operations: Vec::new(),
+            unsupported_objects: UnsupportedObjectReport::default(),
+        })
+        .unwrap()
+    }
+
+    #[cfg(feature = "enterprise-migration-spike")]
+    #[test]
+    fn external_quiesce_resume_accepts_durable_evidence_or_one_active_renewal() {
+        let reviewed = external_quiesce_test_plan();
+        let directory = tempfile::tempdir().unwrap();
+        let current_path = directory.path().join("current.json");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let current = PostgresExternalQuiesceAttestation {
+            schema_version:
+                super::super::postgres_profile::POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            source_endpoint_identity: reviewed.plan.source_endpoint_identity.clone(),
+            source_catalog_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
+            attestation_reference: "CHANGE-123".into(),
+            previous_attestation_digest: None,
+            issued_at_unix_seconds: now.saturating_sub(1),
+            expires_at_unix_seconds: now + 10,
+            status: super::super::postgres_profile::PostgresExternalQuiesceStatus::Active,
+        };
+        write_json_new(&current_path, &current).unwrap();
+        let admission =
+            validate_external_quiesce_resume(&reviewed, Some(&current), Some(&current_path))
+                .unwrap()
+                .unwrap();
+        assert!(admission.renewal_previous_digest.is_none());
+
+        let expired = PostgresExternalQuiesceAttestation {
+            issued_at_unix_seconds: 1,
+            expires_at_unix_seconds: 2,
+            ..current.clone()
+        };
+        let expired_path = directory.path().join("expired.json");
+        write_json_new(&expired_path, &expired).unwrap();
+        assert!(
+            validate_external_quiesce_resume(&reviewed, Some(&expired), Some(&expired_path))
+                .is_err()
+        );
+
+        let active = current;
+        let active_digest = active.canonical_hash().unwrap();
+        let renewal = PostgresExternalQuiesceAttestation {
+            previous_attestation_digest: Some(active_digest.clone()),
+            issued_at_unix_seconds: now,
+            expires_at_unix_seconds: now + 20,
+            ..active.clone()
+        };
+        let renewal_path = directory.path().join("renewal.json");
+        write_json_new(&renewal_path, &renewal).unwrap();
+        let admission =
+            validate_external_quiesce_resume(&reviewed, Some(&active), Some(&renewal_path))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            admission.renewal_previous_digest.as_deref(),
+            Some(active_digest.as_str())
+        );
+
+        let mut discontinuous = renewal;
+        discontinuous.issued_at_unix_seconds = active.expires_at_unix_seconds + 1;
+        discontinuous.expires_at_unix_seconds = active.expires_at_unix_seconds + 20;
+        let discontinuous_path = directory.path().join("discontinuous.json");
+        write_json_new(&discontinuous_path, &discontinuous).unwrap();
+        assert!(validate_external_quiesce_resume(
+            &reviewed,
+            Some(&active),
+            Some(&discontinuous_path)
+        )
+        .is_err());
     }
 
     #[cfg(feature = "enterprise-migration-spike")]

@@ -10,6 +10,7 @@ use super::connection::SnapshotToken;
 use super::postgres::{validate_sequence, PostgresSequence, POSTGRES_CONSISTENCY_SNAPSHOT};
 
 pub const POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION: u16 = 1;
+pub const POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -238,23 +239,62 @@ pub struct PostgresExternalQuiesceAttestation {
     pub source_endpoint_identity: String,
     pub source_catalog_fingerprint: String,
     pub attestation_reference: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    pub previous_attestation_digest: Option<String>,
     pub issued_at_unix_seconds: u64,
     pub expires_at_unix_seconds: u64,
     pub status: PostgresExternalQuiesceStatus,
 }
 
+fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
 impl PostgresExternalQuiesceAttestation {
     pub fn validate(&self) -> Result<(), PostgresSourceProfileError> {
-        if self.schema_version != POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION {
+        if self.schema_version != POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION {
             return Err(PostgresSourceProfileError::UnsupportedVersion);
         }
         require_nonempty(&self.source_endpoint_identity)?;
         require_sha256(&self.source_catalog_fingerprint)?;
         require_nonempty(&self.attestation_reference)?;
+        if let Some(digest) = &self.previous_attestation_digest {
+            require_sha256(digest)?;
+        }
         if self.issued_at_unix_seconds == 0
             || self.expires_at_unix_seconds <= self.issued_at_unix_seconds
         {
             return Err(PostgresSourceProfileError::InvalidTimestamp);
+        }
+        Ok(())
+    }
+
+    pub fn validate_initial(&self) -> Result<(), PostgresSourceProfileError> {
+        self.validate()?;
+        if self.previous_attestation_digest.is_some() {
+            return Err(PostgresSourceProfileError::InvalidAttestationChain);
+        }
+        Ok(())
+    }
+
+    pub fn validate_renewal_from(&self, previous: &Self) -> Result<(), PostgresSourceProfileError> {
+        self.validate()?;
+        previous.validate()?;
+        let previous_digest = previous.canonical_hash()?;
+        if self.previous_attestation_digest.as_deref() != Some(previous_digest.as_str())
+            || self.source_endpoint_identity != previous.source_endpoint_identity
+            || self.source_catalog_fingerprint != previous.source_catalog_fingerprint
+            || self.attestation_reference != previous.attestation_reference
+            || self.status != PostgresExternalQuiesceStatus::Active
+            || previous.status != PostgresExternalQuiesceStatus::Active
+            || self.issued_at_unix_seconds < previous.issued_at_unix_seconds
+            || self.issued_at_unix_seconds > previous.expires_at_unix_seconds
+            || self.expires_at_unix_seconds <= previous.expires_at_unix_seconds
+        {
+            return Err(PostgresSourceProfileError::InvalidAttestationChain);
         }
         Ok(())
     }
@@ -516,6 +556,8 @@ pub enum PostgresSourceProfileError {
     AttestationWithdrawn,
     #[error("external quiesce attestation is not active at the observed time")]
     AttestationExpired,
+    #[error("external quiesce attestation renewal is not a continuous exact chain")]
+    InvalidAttestationChain,
     #[error("sequence equality cannot prove sequences with CACHE greater than one")]
     CachedSequenceUnsupported,
     #[error("sequence equality evidence contains an invalid sequence contract")]
@@ -612,10 +654,11 @@ mod tests {
     #[test]
     fn external_attestation_must_be_active_and_current() {
         let mut attestation = PostgresExternalQuiesceAttestation {
-            schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
             source_endpoint_identity: "postgres://source/app?user=reader".into(),
             source_catalog_fingerprint: "a".repeat(64),
             attestation_reference: "CHANGE-1234".into(),
+            previous_attestation_digest: None,
             issued_at_unix_seconds: 1_000,
             expires_at_unix_seconds: 2_000,
             status: PostgresExternalQuiesceStatus::Active,
@@ -630,6 +673,43 @@ mod tests {
             attestation.require_active_at(1_500),
             Err(PostgresSourceProfileError::AttestationWithdrawn)
         ));
+    }
+
+    #[test]
+    fn external_attestation_renewal_requires_an_overlapping_exact_chain() {
+        let initial = PostgresExternalQuiesceAttestation {
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            source_endpoint_identity: "postgres://source/app?user=reader".into(),
+            source_catalog_fingerprint: "a".repeat(64),
+            attestation_reference: "CHANGE-1234".into(),
+            previous_attestation_digest: None,
+            issued_at_unix_seconds: 1_000,
+            expires_at_unix_seconds: 2_000,
+            status: PostgresExternalQuiesceStatus::Active,
+        };
+        initial.validate_initial().unwrap();
+        let mut renewal = PostgresExternalQuiesceAttestation {
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            source_endpoint_identity: initial.source_endpoint_identity.clone(),
+            source_catalog_fingerprint: initial.source_catalog_fingerprint.clone(),
+            attestation_reference: initial.attestation_reference.clone(),
+            previous_attestation_digest: Some(initial.canonical_hash().unwrap()),
+            issued_at_unix_seconds: 1_900,
+            expires_at_unix_seconds: 3_000,
+            status: PostgresExternalQuiesceStatus::Active,
+        };
+        renewal.validate_renewal_from(&initial).unwrap();
+        renewal.issued_at_unix_seconds = 2_001;
+        assert!(matches!(
+            renewal.validate_renewal_from(&initial),
+            Err(PostgresSourceProfileError::InvalidAttestationChain)
+        ));
+    }
+
+    #[test]
+    fn external_attestation_rejects_a_pre_current_field_set() {
+        let stale = r#"{"schema_version":1,"source_endpoint_identity":"postgres://source/app?user=reader","source_catalog_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","attestation_reference":"CHANGE-1234","issued_at_unix_seconds":1000,"expires_at_unix_seconds":2000,"status":"active"}"#;
+        assert!(serde_json::from_str::<PostgresExternalQuiesceAttestation>(stale).is_err());
     }
 
     #[test]

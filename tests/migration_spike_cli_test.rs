@@ -14,6 +14,7 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("EXPERIMENTAL SPIKE"));
     assert!(help.contains("assess-postgres"));
     assert!(help.contains("probe-postgres-source-profile"));
+    assert!(help.contains("attest-postgres-external-quiesce"));
     assert!(help.contains("plan-postgres"));
     assert!(help.contains("plan-mysql"));
     assert!(help.contains("plan-postgres-to-mysql"));
@@ -45,6 +46,27 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+
+    let output = spike()
+        .args(["attest-postgres-external-quiesce", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--plan-input",
+        "--source-config",
+        "--prior-attestation",
+        "--attestation-ref",
+        "--valid-for-seconds",
+        "--external-freeze-active",
+        "--attestation-output",
+    ] {
+        assert!(help.contains(flag), "attestation command omits {flag}");
+    }
+    assert!(!help.contains("--target-config"));
+    assert!(!help.contains("--admin-config"));
+    assert!(!help.contains("--execute"));
 }
 
 #[test]

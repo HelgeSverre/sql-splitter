@@ -66,9 +66,10 @@ use super::postgres_codec::{
     encode_time, encode_timestamp,
 };
 use super::postgres_profile::{
-    PostgresSourceProbeArtifact, PostgresSourceProbeRequirement, PostgresSourceProbeResult,
-    PostgresSourceProbeStatus, PostgresSourceProfileContract, PostgresSourceProfileError,
-    PostgresSourceProfileKind, POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceStatus, PostgresSourceProbeArtifact,
+    PostgresSourceProbeRequirement, PostgresSourceProbeResult, PostgresSourceProbeStatus,
+    PostgresSourceProfileContract, PostgresSourceProfileError, PostgresSourceProfileKind,
+    POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION, POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
 };
 
 pub(crate) const CATALOG_FORMAT_VERSION: u32 = 6;
@@ -8411,6 +8412,113 @@ fn query_exact_total_relation_bytes(
                 "PostgreSQL total relation size overflowed",
             ))
     })
+}
+
+/// Publish initial or continuously renewed operator evidence for a reviewed
+/// PostgreSQL external-quiesce profile.
+///
+/// This reads the live source through a server-side read-only catalog
+/// transaction. It does not create or enforce the external freeze. The caller
+/// must first activate that freeze and explicitly acknowledge it.
+#[allow(clippy::too_many_arguments)]
+pub fn write_live_postgres_external_quiesce_attestation(
+    plan_input: impl AsRef<Path>,
+    source_config: impl AsRef<Path>,
+    prior_attestation: Option<&Path>,
+    attestation_reference: Option<&str>,
+    valid_for_seconds: u64,
+    freeze_acknowledged: bool,
+    output: impl AsRef<Path>,
+) -> Result<PostgresExternalQuiesceAttestation, PostgresPlanError> {
+    const MAX_VALIDITY_SECONDS: u64 = 7 * 24 * 60 * 60;
+    if !freeze_acknowledged {
+        return Err(PostgresPlanError::InvalidConfig(
+            "external quiesce must be active and explicitly acknowledged",
+        ));
+    }
+    if valid_for_seconds == 0 || valid_for_seconds > MAX_VALIDITY_SECONDS {
+        return Err(PostgresPlanError::InvalidConfig(
+            "external-quiesce validity must be between 1 second and 7 days",
+        ));
+    }
+
+    let reviewed: ReviewedPlan = read_json(plan_input)?;
+    reviewed.validate()?;
+    reviewed.plan.validate_for_execution()?;
+    if !matches!(
+        reviewed.plan.postgres_source_profile,
+        Some(PostgresSourceProfileContract::AttestedExternalQuiesce { .. })
+    ) || reviewed.plan.consistency_mode != POSTGRES_CONSISTENCY_SNAPSHOT
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "reviewed plan does not select the PostgreSQL external-quiesce profile",
+        ));
+    }
+
+    let source_config = PostgresEndpointConfig::read(source_config)?;
+    let source = inspect_endpoint(&source_config)?;
+    let source_catalog_fingerprint = catalog_fingerprint(&source.catalog)?;
+    if source.endpoint_identity != reviewed.plan.source_endpoint_identity
+        || source_catalog_fingerprint != reviewed.plan.source_catalog_fingerprint
+        || source.tls_binding != reviewed.plan.source_tls_binding
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "live source differs from the reviewed external-quiesce plan",
+        ));
+    }
+
+    let issued_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PostgresPlanError::InvalidConfig("system clock is before the Unix epoch"))?
+        .as_secs();
+    let expires_at_unix_seconds = issued_at_unix_seconds
+        .checked_add(valid_for_seconds)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "external-quiesce expiry overflowed",
+        ))?;
+    let prior: Option<PostgresExternalQuiesceAttestation> =
+        prior_attestation.map(read_json).transpose()?;
+    let (attestation_reference, previous_attestation_digest) = match prior.as_ref() {
+        None => (
+            attestation_reference.ok_or(PostgresPlanError::InvalidConfig(
+                "initial external-quiesce attestation requires a reference",
+            ))?,
+            None,
+        ),
+        Some(prior) => {
+            prior.validate_for_plan(
+                &source.endpoint_identity,
+                &source_catalog_fingerprint,
+                issued_at_unix_seconds,
+            )?;
+            if attestation_reference.is_some_and(|value| value != prior.attestation_reference) {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "renewal reference differs from the prior attestation",
+                ));
+            }
+            (
+                prior.attestation_reference.as_str(),
+                Some(prior.canonical_hash()?),
+            )
+        }
+    };
+    let attestation = PostgresExternalQuiesceAttestation {
+        schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+        source_endpoint_identity: source.endpoint_identity,
+        source_catalog_fingerprint,
+        attestation_reference: attestation_reference.to_owned(),
+        previous_attestation_digest,
+        issued_at_unix_seconds,
+        expires_at_unix_seconds,
+        status: PostgresExternalQuiesceStatus::Active,
+    };
+    if let Some(prior) = prior.as_ref() {
+        attestation.validate_renewal_from(prior)?;
+    } else {
+        attestation.validate_initial()?;
+    }
+    write_json_new(output, &attestation)?;
+    Ok(attestation)
 }
 
 /// Run the explicit, side-effecting PostgreSQL administrator probe suite and

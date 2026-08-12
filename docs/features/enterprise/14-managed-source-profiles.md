@@ -58,11 +58,11 @@ capability. Vendor documentation is advisory context only.
 
 ## Profiles
 
-| Profile | Freeze enforcement | Requirements |
-| ------- | ------------------ | ------------ |
-| `self-managed-administrator` | Full fence, current behavior | All six requirements proven by probe |
-| `managed-administrator` | Full fence semantics through a provider admin role | All six requirements proven by probe under that role; any unprobeable requirement excludes this profile |
-| `attested-external-quiesce` | None by the tool; freeze by external means (application maintenance mode, provider read-only flag) | Operator attestation supplied at execution, matching the write-fence acknowledgement timing in [03](./03-connection-architecture.md); sequence-stability evidence (below) always required |
+| Profile                      | Freeze enforcement                                                                                 | Requirements                                                                                                                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `self-managed-administrator` | Full fence, current behavior                                                                       | All six requirements proven by probe                                                                                                                                                      |
+| `managed-administrator`      | Full fence semantics through a provider admin role                                                 | All six requirements proven by probe under that role; any unprobeable requirement excludes this profile                                                                                   |
+| `attested-external-quiesce`  | None by the tool; freeze by external means (application maintenance mode, provider read-only flag) | Operator attestation supplied at execution, matching the write-fence acknowledgement timing in [03](./03-connection-architecture.md); sequence-stability evidence (below) always required |
 
 This profile reads through one database-native consistent snapshot, so it
 executes under the second arm of the README product boundary; the plan
@@ -120,9 +120,9 @@ This follows the same manual reproducible-matrix posture as
 
 The Phase 5b provider matrix passed on 2026-08-12 with this exact boundary:
 
-| Provider | Engine | Administrator class | Managed-administrator probes | External-quiesce execution |
-| -------- | ------ | ------------------- | ---------------------------- | -------------------------- |
-| Amazon RDS | PostgreSQL 16.14 | non-superuser member of `rds_superuser` | all six requirements proven | withdrawal stop, sequence-drift stop, `CACHE 1` equality, recovery, exact data and sequence state passed |
+| Provider   | Engine           | Administrator class                     | Managed-administrator probes | External-quiesce execution                                                                                                                  |
+| ---------- | ---------------- | --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Amazon RDS | PostgreSQL 16.14 | non-superuser member of `rds_superuser` | all six requirements proven  | withdrawal stop, sequence-drift stop, `CACHE 1` equality, and exact data passed; killed-process resume awaits renewal-workflow revalidation |
 
 The reproducible ignored test is
 `live_managed_provider_phase5b_matrix`. It creates isolated test roles and
@@ -131,8 +131,10 @@ TLS with the regional CA bundle, and removes those objects after the run. It
 records only provider, engine version, administrator class, and typed probe
 outcomes. It does not record the endpoint or credentials.
 
-This statement admits the `attested-external-quiesce` profile for this provider
-and version under its explicit operator-attestation contract. The
+The 2026-08-13 killed-process test found that the original command set could
+consume an external-quiesce attestation but could not create or renew one. The
+profile remains implemented, but the provider exit gate is open until the
+artifact workflow below passes a killed-process resume on RDS. The
 `managed-administrator` probe suite also predicts that the tested role can meet
 all six fence prerequisites. A full provider write-fence execution matrix was
 not run, so this statement does not admit database-enforced
@@ -167,24 +169,56 @@ Selected contract (mailbox [021-codex]/[023]):
   tool enforces that freeze.
 - **Attestation artifact.** The external-quiesce attestation is a
   protected typed artifact: schema version, attestation reference, exact
-  source endpoint and catalog fingerprint, issued and expiry times, and
-  active or withdrawn status. Execute and resume take the same artifact
-  input, validate it against the plan, and bind its canonical digest at
-  journal genesis. A different artifact with the same reference is never
-  silently substituted. Withdrawal or sequence-state drift stops execution
-  (the gate-2 analogue above). Expiry follows the outage-policy precedent
-  in [13](./13-throughput-and-copy-path.md): recorded admission stays
-  valid for recovery, and renewal is an explicit recorded event, never a
-  substitution. The initial tier is operator evidence, not independently
-  verified freeze enforcement, and the plan and report say so.
+  source endpoint and catalog fingerprint, issued and expiry times, active or
+  withdrawn status, and an optional previous-attestation digest. Initial
+  evidence has no previous digest. A renewal must name the exact prior digest,
+  keep the same endpoint, catalog, and reference, be issued before the prior
+  expiry, and extend that expiry. Execute accepts initial evidence and binds
+  its canonical digest at journal genesis. Resume accepts the current durable
+  evidence or one continuous renewal. It appends and synchronizes the renewal
+  event before it resumes database work. A gap, changed reference, changed
+  source, withdrawal, expiry without a continuous renewal, or sequence-state
+  drift stops execution. Recorded admission remains the durable chain root,
+  but it cannot authorize new source reads after its expiry. The current
+  artifact or a newly supplied renewal must be active when resume admits it.
+  The initial tier is operator evidence, not independently verified freeze
+  enforcement, and the plan and report say so.
+- **Attestation command.** `attest-postgres-external-quiesce` reads the exact
+  reviewed plan and source configuration. It inspects the source through a
+  server-side read-only catalog transaction and publishes a new protected
+  no-clobber artifact. It does not activate, test, or enforce the external
+  freeze. The operator must first establish the freeze and supply
+  `--external-freeze-active`. An initial command uses `--attestation-ref`; a
+  renewal uses `--prior-attestation`. Both require `--valid-for-seconds` and
+  `--attestation-output`. The maximum validity is seven days.
 - **CLI surface**, introduced only in Phase 5b per
   [04](./04-execution-design.md)'s future-flag rule — probe:
   `--source-config`, `--admin-config`, `--profile`, `--probe-output`,
   explicit `--execute`; plan: `--source-profile` and
   `--source-profile-evidence` for administrator profiles, plus
   `--verified-external-quiesce-rescan` to select the optional full re-scan
-  tier; execute/resume:
+  tier; attestation: `--plan-input`, `--source-config`, either
+  `--attestation-ref` or `--prior-attestation`, `--valid-for-seconds`,
+  `--external-freeze-active`, and `--attestation-output`; execute/resume:
   `--external-quiesce-attestation` for the external profile only.
+
+The complete RDS command order is:
+
+1. Create a reviewed consistent-snapshot plan with
+   `--source-profile attested-external-quiesce`.
+2. Activate the provider or application freeze outside `sql-splitter`.
+3. Run `attest-postgres-external-quiesce` with the reviewed plan, the source
+   configuration, the external reference, the required acknowledgement, and
+   a new output path.
+4. Pass that artifact to `execute-postgres --external-quiesce-attestation`.
+5. Before its expiry, publish a renewal from the current artifact if the
+   operation can continue beyond that interval.
+6. After a process restart, pass the current artifact or its direct renewal to
+   `resume-postgres --external-quiesce-attestation`.
+
+This is not a signed provider assertion. Filesystem protection and the reviewed
+source binding protect the local artifact. The operator and the named external
+change system remain responsible for freeze truth and continuity.
 
 ## MySQL freeze profile (Phase 6)
 
@@ -222,7 +256,7 @@ attestation**:
   owner) permanently invalidates old journal state; reacquiring a new lock
   cannot resume it, because the gap may contain writes.
 - `AUTO_INCREMENT` state is captured with `information_schema_stats_expiry
-  = 0` after activation and must be exactly equal on a fresh end read
+= 0` after activation and must be exactly equal on a fresh end read
   before target restoration. GTID remains observation only. A full source
   re-scan may be required as additional profile policy but cannot repair a
   continuity gap.

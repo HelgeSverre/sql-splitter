@@ -5,20 +5,20 @@ descriptive stages in [04](./04-execution-design.md).
 
 ## Implementation Phases
 
-| Delivery sequence                                              | Outcome                                                                                                                                                               | Exit condition                                               |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| **Implementation Phase 1 — Foundations**                       | Versioned identifiers, endpoint/TLS/credential configuration, capabilities, exact vendor catalog, `DbValue`, `ColumnMeta`, bounded `RowBatch`, protected artifact I/O | Adapter-independent vectors and security tests pass          |
-| **Implementation Phase 2 — Plan Contract**                     | Immutable plan schema, operation IDs, fingerprints, unsupported-object report, plan hash, plan-only CLI                                                               | One live dialect plan-only works against real engines        |
-| **Implementation Phase 3 — Read Path & Consistency**           | Factories/sessions, cancellation, source read-only proof, snapshot token and lifecycle, typed keyset requests                                                         | Sequential snapshot concurrency tests pass for first dialect |
-| **Implementation Phase 4 — Sequential Same-Dialect Execution** | Empty-target checks, create-only pre-data DDL, transactional plain INSERT chunks, durable journal, post-data DDL                                                      | First-dialect offline beta execution passes crash tests      |
-| **Implementation Phase 5 — Verification & Recovery**           | Canonical comparison, FK anti-joins, constraint validation, ambiguous-commit reconciliation, strict finalize                                                          | No-success-with-skips and resume drift gates pass            |
-| **Implementation Phase 5a — PostgreSQL Throughput**            | COPY-protocol chunk writer and pipelined chunk verification over an exported snapshot ([13](./13-throughput-and-copy-path.md))                                        | COPY path passes the same crash and equivalence matrices; measured throughput published |
-| **Implementation Phase 5b — Managed Source Profiles**          | Privilege probe suite, execution-time attestation, sequence-stability evidence ([14](./14-managed-source-profiles.md))                                                | Probe, attestation-stop, and sequence-equality matrices pass against at least one managed provider |
-| **Implementation Phase 6 — Second Dialect (MySQL)**            | Equivalent catalog, snapshot, DDL, value, and verification adapter; scope below                                                                                       | Same real-engine matrix passes for second dialect            |
-| **Implementation Phase 7 — Cross-Dialect**                     | Explicit conversion policies and `RowTypeConverter` over canonical values                                                                                             | Every approved conversion has exact expected-value vectors   |
-| **Implementation Phase 8 — Warm Target/Staging**               | Typed target mode, closed ownership manifest, disjoint-key merge, retained-backup staging swap, target fence, and recovery ([18](./18-warm-target-and-staging.md))      | Warm-conflict, destructive, and metadata-lock fault matrices pass |
-| **Implementation Phase 9 — Parallelism**                       | Shareable/exported snapshots, per-worker sessions, deterministic manifests, table-level parallel copy under a per-table prepared-chunk journal format ([13](./13-throughput-and-copy-path.md)) | Snapshot-sharing and concurrent crash matrix passes          |
-| **Implementation Phase 10 — Dialect Optimizations**            | Cursor, direct-copy, concurrent-index, partition, and non-PostgreSQL COPY optimizations where proven                                                                  | Optimization is equivalent to baseline canonical output      |
+| Delivery sequence                                              | Outcome                                                                                                                                                                                        | Exit condition                                                                                     |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Implementation Phase 1 — Foundations**                       | Versioned identifiers, endpoint/TLS/credential configuration, capabilities, exact vendor catalog, `DbValue`, `ColumnMeta`, bounded `RowBatch`, protected artifact I/O                          | Adapter-independent vectors and security tests pass                                                |
+| **Implementation Phase 2 — Plan Contract**                     | Immutable plan schema, operation IDs, fingerprints, unsupported-object report, plan hash, plan-only CLI                                                                                        | One live dialect plan-only works against real engines                                              |
+| **Implementation Phase 3 — Read Path & Consistency**           | Factories/sessions, cancellation, source read-only proof, snapshot token and lifecycle, typed keyset requests                                                                                  | Sequential snapshot concurrency tests pass for first dialect                                       |
+| **Implementation Phase 4 — Sequential Same-Dialect Execution** | Empty-target checks, create-only pre-data DDL, transactional plain INSERT chunks, durable journal, post-data DDL                                                                               | First-dialect offline beta execution passes crash tests                                            |
+| **Implementation Phase 5 — Verification & Recovery**           | Canonical comparison, FK anti-joins, constraint validation, ambiguous-commit reconciliation, strict finalize                                                                                   | No-success-with-skips and resume drift gates pass                                                  |
+| **Implementation Phase 5a — PostgreSQL Throughput**            | COPY-protocol chunk writer and pipelined chunk verification over an exported snapshot ([13](./13-throughput-and-copy-path.md))                                                                 | COPY path passes the same crash and equivalence matrices; measured throughput published            |
+| **Implementation Phase 5b — Managed Source Profiles**          | Privilege probe suite, execution-time attestation, sequence-stability evidence ([14](./14-managed-source-profiles.md))                                                                         | Probe, attestation-stop, and sequence-equality matrices pass against at least one managed provider |
+| **Implementation Phase 6 — Second Dialect (MySQL)**            | Equivalent catalog, snapshot, DDL, value, and verification adapter; scope below                                                                                                                | Same real-engine matrix passes for second dialect                                                  |
+| **Implementation Phase 7 — Cross-Dialect**                     | Explicit conversion policies and `RowTypeConverter` over canonical values                                                                                                                      | Every approved conversion has exact expected-value vectors                                         |
+| **Implementation Phase 8 — Warm Target/Staging**               | Typed target mode, closed ownership manifest, disjoint-key merge, retained-backup staging swap, target fence, and recovery ([18](./18-warm-target-and-staging.md))                             | Warm-conflict, destructive, and metadata-lock fault matrices pass                                  |
+| **Implementation Phase 9 — Parallelism**                       | Shareable/exported snapshots, per-worker sessions, deterministic manifests, table-level parallel copy under a per-table prepared-chunk journal format ([13](./13-throughput-and-copy-path.md)) | Snapshot-sharing and concurrent crash matrix passes                                                |
+| **Implementation Phase 10 — Dialect Optimizations**            | Cursor, direct-copy, concurrent-index, partition, and non-PostgreSQL COPY optimizations where proven                                                                                           | Optimization is equivalent to baseline canonical output                                            |
 
 Managed service automation and CDC remain deferred after this sequence.
 
@@ -32,13 +32,17 @@ plan-bound outage projection is enforced at execute preflight with live
 over-budget rejection evidence. This is spike evidence within the
 feature-gated command, not a production support statement.
 
-Implementation Phase 5b met its exit condition on 2026-08-12. The real-provider
-matrix passed against Amazon RDS for PostgreSQL 16.14 with a non-superuser
+Implementation Phase 5b initially appeared to meet its exit condition on
+2026-08-12. The real-provider matrix passed against Amazon RDS for PostgreSQL
+16.14 with a non-superuser
 administrator that is a member of `rds_superuser`. All six administrator
 profile probes passed. The same run proved that a withdrawn external-quiesce
 attestation and changed sequence state stop resume, and that an unchanged
 `CACHE 1` sequence completes with exact start/end equality evidence. The
-provider/version/profile statement and limits are recorded in
+2026-08-13 killed-process test then proved that the command set could not create
+or renew the attestation needed for RDS resume. The exit gate is open until the
+new protected attestation and renewal workflow passes that killed-process case
+on RDS. The provider evidence and exact remaining gate are recorded in
 [14](./14-managed-source-profiles.md#recorded-provider-evidence). This remains
 feature-gated spike evidence and does not claim provider control-plane
 automation or general production support.

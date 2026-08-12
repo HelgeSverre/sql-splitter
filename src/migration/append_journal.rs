@@ -157,7 +157,7 @@ impl Genesis {
                 Some(digest),
             ) => {
                 attestation
-                    .validate()
+                    .validate_initial()
                     .map_err(|_| AppendJournalError::InvalidGenesis)?;
                 if attestation.status != PostgresExternalQuiesceStatus::Active
                     || attestation.source_endpoint_identity
@@ -352,6 +352,10 @@ pub enum JournalEvent {
     ExternalQuiesceRescanComplete {
         evidence: PostgresExternalQuiesceRescanEvidence,
     },
+    ExternalQuiesceRenewed {
+        previous_digest: String,
+        attestation: PostgresExternalQuiesceAttestation,
+    },
     TableVerificationComplete {
         operation_id: String,
         chunk_count: u64,
@@ -376,6 +380,7 @@ pub struct JournalProjection {
     pub schema_verified: bool,
     pub sequence_equality: Option<PostgresSequenceEqualityEvidence>,
     pub external_quiesce_rescan: Option<PostgresExternalQuiesceRescanEvidence>,
+    pub current_external_quiesce: Option<PostgresExternalQuiesceAttestation>,
     table_verification_evidence: BTreeMap<String, (String, String, String)>,
     dependencies: BTreeMap<String, Vec<String>>,
     copy_operations: BTreeSet<String>,
@@ -417,6 +422,7 @@ impl JournalProjection {
             schema_verified: false,
             sequence_equality: None,
             external_quiesce_rescan: None,
+            current_external_quiesce: genesis.accepted_external_quiesce.clone(),
             table_verification_evidence: BTreeMap::new(),
             dependencies: genesis
                 .operations
@@ -695,6 +701,31 @@ impl JournalProjection {
                     )
                 })?;
                 self.external_quiesce_rescan = Some(evidence.clone());
+            }
+            JournalEvent::ExternalQuiesceRenewed {
+                previous_digest,
+                attestation,
+            } => {
+                let current = self.current_external_quiesce.as_ref().ok_or(
+                    AppendJournalError::InvalidTransition(
+                        "external-quiesce renewal without accepted evidence",
+                    ),
+                )?;
+                let current_digest = current.canonical_hash().map_err(|_| {
+                    AppendJournalError::InvalidTransition("current external-quiesce attestation")
+                })?;
+                if previous_digest != &current_digest
+                    || attestation.source_endpoint_identity != self.source_endpoint_identity
+                    || attestation.source_catalog_fingerprint != self.source_catalog_fingerprint
+                {
+                    return Err(AppendJournalError::InvalidTransition(
+                        "external-quiesce renewal binding",
+                    ));
+                }
+                attestation.validate_renewal_from(current).map_err(|_| {
+                    AppendJournalError::InvalidTransition("external-quiesce renewal chain")
+                })?;
+                self.current_external_quiesce = Some(attestation.clone());
             }
             JournalEvent::TableVerificationComplete {
                 operation_id,
@@ -1126,6 +1157,17 @@ impl AppendJournal {
         evidence: PostgresExternalQuiesceRescanEvidence,
     ) -> Result<(), AppendJournalError> {
         self.append_validated(JournalEvent::ExternalQuiesceRescanComplete { evidence })
+    }
+
+    pub fn renew_external_quiesce(
+        &mut self,
+        previous_digest: String,
+        attestation: PostgresExternalQuiesceAttestation,
+    ) -> Result<(), AppendJournalError> {
+        self.append_validated(JournalEvent::ExternalQuiesceRenewed {
+            previous_digest,
+            attestation,
+        })
     }
 
     pub fn verify_table(
@@ -1918,7 +1960,8 @@ mod tests {
     use crate::migration::postgres_profile::{
         PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanTableEvidence,
         PostgresExternalQuiesceStatus, PostgresSequenceEqualityEvidence,
-        PostgresSourceProfileContract, POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+        PostgresSourceProfileContract, POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+        POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
     };
 
     fn genesis() -> Genesis {
@@ -2124,7 +2167,7 @@ mod tests {
         genesis.accepted_outage_projection = None;
 
         let attestation = PostgresExternalQuiesceAttestation {
-            schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
             source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
             source_catalog_fingerprint: genesis
                 .reviewed_plan
@@ -2132,6 +2175,7 @@ mod tests {
                 .source_catalog_fingerprint
                 .clone(),
             attestation_reference: "external-freeze-1".into(),
+            previous_attestation_digest: None,
             issued_at_unix_seconds: 10,
             expires_at_unix_seconds: 20,
             status: PostgresExternalQuiesceStatus::Active,
@@ -2158,6 +2202,71 @@ mod tests {
     }
 
     #[test]
+    fn external_quiesce_renewal_is_durable_and_replayed_as_a_chain() {
+        let mut genesis = genesis();
+        genesis.reviewed_plan.plan.consistency_mode = POSTGRES_CONSISTENCY_SNAPSHOT.into();
+        genesis.reviewed_plan.plan.outage_policy = None;
+        genesis.reviewed_plan.plan.postgres_source_profile =
+            Some(PostgresSourceProfileContract::AttestedExternalQuiesce {
+                verified_rescan: false,
+                freeze_enforced_by_tool: false,
+            });
+        genesis.reviewed_plan = ReviewedPlan::new(genesis.reviewed_plan.plan).unwrap();
+        genesis.binding.plan_hash = genesis.reviewed_plan.plan_hash.to_string();
+        genesis.binding.outage_projection_digest = None;
+        genesis.accepted_outage_projection = None;
+        let initial = PostgresExternalQuiesceAttestation {
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
+            source_catalog_fingerprint: genesis
+                .reviewed_plan
+                .plan
+                .source_catalog_fingerprint
+                .clone(),
+            attestation_reference: "external-renewal-1".into(),
+            previous_attestation_digest: None,
+            issued_at_unix_seconds: 10,
+            expires_at_unix_seconds: 20,
+            status: PostgresExternalQuiesceStatus::Active,
+        };
+        let initial_digest = initial.canonical_hash().unwrap();
+        genesis.binding.external_quiesce_attestation_digest = Some(initial_digest.clone());
+        genesis.accepted_external_quiesce = Some(initial.clone());
+
+        let renewal = PostgresExternalQuiesceAttestation {
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            source_endpoint_identity: initial.source_endpoint_identity.clone(),
+            source_catalog_fingerprint: initial.source_catalog_fingerprint.clone(),
+            attestation_reference: initial.attestation_reference.clone(),
+            previous_attestation_digest: Some(initial_digest.clone()),
+            issued_at_unix_seconds: 19,
+            expires_at_unix_seconds: 30,
+            status: PostgresExternalQuiesceStatus::Active,
+        };
+        let directory = private_tempdir();
+        let path = directory.path().join("external-renewal.journal");
+        let mut journal = AppendJournal::create_new(&path, genesis).unwrap();
+        journal
+            .renew_external_quiesce(initial_digest, renewal.clone())
+            .unwrap();
+        assert_eq!(
+            journal.projection().current_external_quiesce.as_ref(),
+            Some(&renewal)
+        );
+        drop(journal);
+
+        let resumed = AppendJournal::open_resume(path).unwrap();
+        assert_eq!(
+            resumed.projection().current_external_quiesce.as_ref(),
+            Some(&renewal)
+        );
+        assert_ne!(
+            resumed.genesis().accepted_external_quiesce.as_ref(),
+            Some(&renewal)
+        );
+    }
+
+    #[test]
     fn verified_external_quiesce_cannot_verify_schema_without_fresh_rescan() {
         let mut genesis = genesis();
         genesis.reviewed_plan.plan.consistency_mode = POSTGRES_CONSISTENCY_SNAPSHOT.into();
@@ -2172,7 +2281,7 @@ mod tests {
         genesis.binding.outage_projection_digest = None;
         genesis.accepted_outage_projection = None;
         let attestation = PostgresExternalQuiesceAttestation {
-            schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+            schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
             source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
             source_catalog_fingerprint: genesis
                 .reviewed_plan
@@ -2180,6 +2289,7 @@ mod tests {
                 .source_catalog_fingerprint
                 .clone(),
             attestation_reference: "external-verified-1".into(),
+            previous_attestation_digest: None,
             issued_at_unix_seconds: 10,
             expires_at_unix_seconds: 20,
             status: PostgresExternalQuiesceStatus::Active,

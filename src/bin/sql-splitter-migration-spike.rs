@@ -66,6 +66,30 @@ enum Command {
         #[arg(long, required = true)]
         execute: bool,
     },
+    /// Publish initial or renewed operator evidence for an active PostgreSQL external quiesce.
+    AttestPostgresExternalQuiesce {
+        /// Exact protected reviewed plan selecting the external-quiesce profile.
+        #[arg(long)]
+        plan_input: PathBuf,
+        /// Reviewed source endpoint TOML. Inspection is server-side read-only.
+        #[arg(long)]
+        source_config: PathBuf,
+        /// Existing active attestation to renew. The output must be a different path.
+        #[arg(long)]
+        prior_attestation: Option<PathBuf>,
+        /// External change, maintenance, or provider reference for an initial attestation.
+        #[arg(long, required_unless_present = "prior_attestation")]
+        attestation_ref: Option<String>,
+        /// Validity of the new evidence, in seconds. Maximum: seven days.
+        #[arg(long)]
+        valid_for_seconds: u64,
+        /// Explicit operator assertion that the external freeze is active and continuous.
+        #[arg(long, required = true)]
+        external_freeze_active: bool,
+        /// New protected attestation artifact. Existing files are not replaced.
+        #[arg(long)]
+        attestation_output: PathBuf,
+    },
     /// Inspect two live PostgreSQL catalogs and write a deterministic plan.
     PlanPostgres {
         /// Source endpoint TOML. Credentials are referenced through an environment variable.
@@ -459,6 +483,32 @@ fn main() -> anyhow::Result<()> {
                     ))
                     .count(),
                 artifact.results.len()
+            );
+        }
+        Command::AttestPostgresExternalQuiesce {
+            plan_input,
+            source_config,
+            prior_attestation,
+            attestation_ref,
+            valid_for_seconds,
+            external_freeze_active,
+            attestation_output,
+        } => {
+            let attestation =
+                sql_splitter::migration::postgres::write_live_postgres_external_quiesce_attestation(
+                    plan_input,
+                    source_config,
+                    prior_attestation.as_deref(),
+                    attestation_ref.as_deref(),
+                    valid_for_seconds,
+                    external_freeze_active,
+                    &attestation_output,
+                )?;
+            println!("attestation: {}", attestation_output.display());
+            println!("reference: {}", attestation.attestation_reference);
+            println!("expires at: {}", attestation.expires_at_unix_seconds);
+            eprintln!(
+                "WARNING: sql-splitter records this operator assertion but does not enforce the external source freeze"
             );
         }
         Command::PlanPostgres {

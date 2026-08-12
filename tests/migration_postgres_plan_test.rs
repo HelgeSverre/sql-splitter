@@ -46,18 +46,18 @@ use sql_splitter::migration::postgres::{
     postgres_sequences, probe_live_postgres_source_profile, write_live_assessment, write_live_plan,
     write_live_plan_with_consistency as write_unbudgeted_live_plan_with_consistency,
     write_live_plan_with_outage_policy, write_live_plan_with_policies,
-    write_live_plan_with_profile_tier, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresPlanError, PostgresSequenceOwnership, PostgresSequenceOwnershipKind,
-    PostgresSourceFactory, PostgresTargetFactory, PostgresWritePolicy,
+    write_live_plan_with_profile_tier, write_live_postgres_external_quiesce_attestation,
+    PostgresConsistencyMode, PostgresEndpointConfig, PostgresPlanError, PostgresSequenceOwnership,
+    PostgresSequenceOwnershipKind, PostgresSourceFactory, PostgresTargetFactory,
+    PostgresWritePolicy,
 };
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, postgres_write_fence_is_released,
     release_postgres_write_fence, InstalledPostgresFence,
 };
 use sql_splitter::migration::postgres_profile::{
-    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceStatus, PostgresSourceProbeArtifact,
-    PostgresSourceProbeStatus, PostgresSourceProfileContract, PostgresSourceProfileKind,
-    POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+    PostgresExternalQuiesceStatus, PostgresSourceProbeArtifact, PostgresSourceProbeStatus,
+    PostgresSourceProfileContract, PostgresSourceProfileKind,
 };
 use sql_splitter::migration::runner::execute_postgres_plan;
 #[cfg(feature = "migration-fault-injection")]
@@ -1844,20 +1844,25 @@ fn run_external_quiesce_sequence_equality(
         })
     );
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let attestation = PostgresExternalQuiesceAttestation {
-        schema_version: POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
-        source_endpoint_identity: reviewed.plan.source_endpoint_identity.clone(),
-        source_catalog_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
-        attestation_reference: format!("live-external-quiesce-{suffix}"),
-        issued_at_unix_seconds: now.saturating_sub(1),
-        expires_at_unix_seconds: now
-            .checked_add(5)
-            .context("external-quiesce expiry overflowed")?,
-        status: PostgresExternalQuiesceStatus::Active,
-    };
-    attestation.require_active_at(now)?;
-    write_json_new(&attestation_path, &attestation)?;
+    let attestation = write_live_postgres_external_quiesce_attestation(
+        &plan_path,
+        &source_path,
+        None,
+        Some(&format!("live-external-quiesce-{suffix}")),
+        5,
+        true,
+        &attestation_path,
+    )?;
+    let renewal_path = directory.path().join("external-quiesce-renewal.json");
+    let renewal = write_live_postgres_external_quiesce_attestation(
+        &plan_path,
+        &source_path,
+        Some(&attestation_path),
+        None,
+        30,
+        true,
+        &renewal_path,
+    )?;
 
     let interrupted = execute_postgres_external_quiesce_plan_with_interruption(
         &plan_path,
@@ -1940,7 +1945,7 @@ fn run_external_quiesce_sequence_equality(
         &state_path,
         &source_path,
         &target_path,
-        &attestation_path,
+        &renewal_path,
     )?;
     assert_eq!(report.state, state_path);
     assert_eq!(report.copied_rows, 3);
@@ -1950,6 +1955,10 @@ fn run_external_quiesce_sequence_equality(
     assert_eq!(
         journal.genesis().accepted_external_quiesce.as_ref(),
         Some(&attestation)
+    );
+    assert_eq!(
+        journal.projection().current_external_quiesce.as_ref(),
+        Some(&renewal)
     );
     let attestation_digest = attestation.canonical_hash()?;
     assert_eq!(
