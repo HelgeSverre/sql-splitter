@@ -3489,6 +3489,11 @@ fn complete_legacy_operation_if_needed(
 
 #[cfg(feature = "enterprise-migration-spike")]
 fn validate_postgres_execution_operations(reviewed: &ReviewedPlan) -> anyhow::Result<()> {
+    if reviewed.plan.conversion_policy != POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY {
+        return Err(anyhow!(
+            "PostgreSQL same-dialect runner cannot execute this conversion policy"
+        ));
+    }
     for operation in &reviewed.plan.operations {
         if !matches!(
             operation.kind,
@@ -5192,7 +5197,7 @@ mod tests {
 
     #[cfg(feature = "enterprise-migration-spike")]
     #[test]
-    fn reviewed_tls_policy_rejects_downgrade_and_authentication_changes() {
+    fn reviewed_tls_and_postgres_runner_policy_gates_fail_closed() {
         let directory = tempfile::tempdir().unwrap();
         let certificate = directory.path().join("certificate.pem");
         let private_key = directory.path().join("private-key.pem");
@@ -5250,6 +5255,13 @@ mod tests {
         assert!(validate_reviewed_tls(&reviewed, "source_tls", &config).is_err());
         config.tls.insecure = true;
         assert!(validate_reviewed_tls(&reviewed, "source_tls", &config).is_err());
+
+        let mut cross_dialect = reviewed;
+        cross_dialect.plan.conversion_policy =
+            super::super::conversion::MigrationConversionPolicy::assessment_source_only(
+                super::super::conversion::ConversionDialect::MySql,
+            );
+        assert!(validate_postgres_execution_operations(&cross_dialect).is_err());
     }
 
     #[cfg(feature = "enterprise-migration-spike")]

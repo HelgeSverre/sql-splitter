@@ -18,7 +18,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 13;
+pub const PLAN_SCHEMA_VERSION: u16 = 14;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -987,6 +987,8 @@ pub enum PlanError {
 mod tests {
     use super::*;
     use crate::migration::conversion::{
+        CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectSourceType,
+        CrossDialectTargetType, MySqlIntegerWidth, MySqlTargetType, PostgresTargetType,
         RowConversionPolicy, TableConversionPolicy, ValueConversionRule,
         ROW_TYPE_CONVERSION_SCHEMA_VERSION,
     };
@@ -1146,20 +1148,39 @@ mod tests {
             scale: None,
             timezone_semantics: None,
         };
-        let target_column = ColumnMeta {
-            vendor_type: "bigint".into(),
-            ..source_column.clone()
-        };
+        let target_type = CrossDialectTargetType::MySql(MySqlTargetType::Integer {
+            width: MySqlIntegerWidth::Big,
+            unsigned: false,
+        });
+        let target_column = target_type
+            .column_meta(Identifier::new("id").unwrap(), 1, false)
+            .unwrap();
         let table_policy = TableConversionPolicy {
             source_table: source_table.clone(),
             target_table,
+            target_contract: super::super::conversion::CrossDialectTargetTableContract::MySql {
+                engine: super::super::conversion::MySqlTargetEngine::InnoDb,
+                character_set: Identifier::new("utf8mb4").unwrap(),
+                collation: Identifier::new("utf8mb4_0900_bin").unwrap(),
+            },
+            resumable_key: CrossDialectResumableKey {
+                source_name: Identifier::new("source_pkey").unwrap(),
+                source_kind: CrossDialectKeyKind::PrimaryKey,
+                source_columns: vec![Identifier::new("id").unwrap()],
+                target_name: None,
+                target_kind: CrossDialectKeyKind::PrimaryKey,
+                target_columns: vec![Identifier::new("id").unwrap()],
+            },
             row_policy: RowConversionPolicy {
                 schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
                 source_dialect: ConversionDialect::PostgreSql,
                 target_dialect: ConversionDialect::MySql,
                 columns: vec![super::super::conversion::ColumnConversion {
                     source: source_column,
+                    source_type: CrossDialectSourceType::PostgreSql(PostgresTargetType::BigInt),
                     target: target_column,
+                    target_type,
+                    target_checks: Vec::new(),
                     rule: ValueConversionRule::SignedInteger {
                         minimum: i64::MIN,
                         maximum: i64::MAX,

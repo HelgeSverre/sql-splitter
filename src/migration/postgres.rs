@@ -36,6 +36,14 @@ use super::connection::{
     ControlSession, KeysetPage, ReadOnlyEvidence, ReadSession, SnapshotToken,
     SourceConnectionFactory, TargetConnectionFactory, VerificationSession, WriteSession,
 };
+use super::conversion::{
+    cross_dialect_target_key_name, derive_postgres_to_mysql_column, ConversionDialect,
+    CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectTargetTableContract,
+    CrossDialectTargetType, MySqlTargetEngine, PostgresTargetPersistence, PostgresTargetType,
+    QualifiedIdentifier, RowConversionError, RowConversionPolicy, TableConversionPolicy,
+    TargetCheckConstraint, TimestampBound, TimestampSemantics, POSTGRES_TIMESTAMP_RANGE,
+    POSTGRES_TIME_MAXIMUM_NANOS, POSTGRES_TIME_MINIMUM_NANOS, ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+};
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
     Identifier, QualifiedTable, RowBatch, RowBatchError, ValueFormat, VendorCatalog,
@@ -59,7 +67,7 @@ use super::postgres_profile::{
     PostgresSourceProfileKind, POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
 };
 
-pub(crate) const CATALOG_FORMAT_VERSION: u32 = 5;
+pub(crate) const CATALOG_FORMAT_VERSION: u32 = 6;
 pub const POSTGRES_CONSISTENCY_SNAPSHOT: &str = "consistent-snapshot";
 const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
@@ -174,8 +182,524 @@ pub enum PostgresPlanError {
     OutageProjection(#[from] OutageProjectionError),
     #[error("PostgreSQL source-profile validation failed")]
     SourceProfile(#[from] PostgresSourceProfileError),
+    #[error("cross-dialect conversion policy derivation failed")]
+    Conversion(#[from] RowConversionError),
     #[error("catalog serialization failed")]
     Serialize(#[from] serde_json::Error),
+}
+
+/// Derive one PostgreSQL-to-MySQL table policy from the exact source catalog.
+pub fn postgres_to_mysql_table_conversion_policy(
+    catalog: &VendorCatalog,
+    source_table: &QualifiedTable,
+    target_table: QualifiedTable,
+    mysql_character_set: &str,
+    mysql_collation: &str,
+) -> Result<TableConversionPolicy, PostgresPlanError> {
+    if catalog.dialect != "postgresql" || catalog.format_version != CATALOG_FORMAT_VERSION {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion requires the current catalog format",
+        ));
+    }
+    let namespace = catalog
+        .namespaces
+        .iter()
+        .find(|namespace| namespace.name == source_table.namespace)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion source namespace is absent",
+        ))?;
+    let table = namespace
+        .objects
+        .iter()
+        .find(|object| object.kind == CatalogObjectKind::Table && object.name == source_table.name)
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion source table is absent",
+        ))?;
+    if required_catalog_string(table, "relkind")? != "r"
+        || required_catalog_string(table, "persistence")? != "p"
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion currently requires an ordinary persistent source table",
+        ));
+    }
+    let mut columns = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == CatalogObjectKind::Column
+                && object
+                    .attributes
+                    .get("table_oid")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(table.id.as_str())
+        })
+        .map(|object| postgres_conversion_column_meta(object).map(|meta| (object, meta)))
+        .collect::<Result<Vec<_>, _>>()?;
+    columns.sort_by_key(|(_, column)| column.ordinal);
+    if columns.is_empty()
+        || columns
+            .iter()
+            .enumerate()
+            .any(|(index, (_, column))| column.ordinal != index as u32 + 1)
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion columns are empty or non-contiguous",
+        ));
+    }
+    let mysql_character_set = Identifier::new(mysql_character_set).map_err(|_| {
+        PostgresPlanError::InvalidConfig("MySQL conversion character set is invalid")
+    })?;
+    let mysql_collation = Identifier::new(mysql_collation)
+        .map_err(|_| PostgresPlanError::InvalidConfig("MySQL conversion collation is invalid"))?;
+    if mysql_character_set.as_str() != "utf8mb4"
+        || !matches!(mysql_collation.as_str(), "utf8mb4_bin" | "utf8mb4_0900_bin")
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "MySQL conversion currently requires a deterministic utf8mb4 binary collation",
+        ));
+    }
+    let conversions = columns
+        .into_iter()
+        .map(|(object, source)| {
+            if object
+                .attributes
+                .get("default")
+                .is_some_and(|value| !value.is_null())
+                || object
+                    .attributes
+                    .get("generated_expression")
+                    .is_some_and(|value| !value.is_null())
+                || object
+                    .attributes
+                    .get("sequence_default_oid")
+                    .is_some_and(|value| !value.is_null())
+                || object
+                    .attributes
+                    .get("identity")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "PostgreSQL conversion defaults, generated columns, and identity columns require a separate typed mapping",
+                ));
+            }
+            let source_type = postgres_conversion_source_type(object, &source)?;
+            derive_postgres_to_mysql_column(
+                source.clone(),
+                source_type,
+                source.name,
+                source.ordinal,
+                mysql_character_set.clone(),
+                mysql_collation.clone(),
+            )
+            .map_err(PostgresPlanError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if conversions.iter().any(|column| {
+        matches!(
+            &column.source_type,
+            super::conversion::CrossDialectSourceType::PostgreSql(
+                PostgresTargetType::Character { .. }
+                    | PostgresTargetType::CharacterVarying { .. }
+                    | PostgresTargetType::Text { .. }
+            )
+        )
+    }) && catalog
+        .vendor_metadata
+        .get("server_encoding")
+        .map(String::as_str)
+        != Some("UTF8")
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL text conversion currently requires UTF8 server encoding",
+        ));
+    }
+    let row_policy = RowConversionPolicy {
+        schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+        source_dialect: ConversionDialect::PostgreSql,
+        target_dialect: ConversionDialect::MySql,
+        columns: conversions,
+    };
+    row_policy.validate()?;
+    let source_key = select_resumable_key(catalog, source_table)?;
+    let source_key_name = namespace
+        .objects
+        .iter()
+        .find(|object| object.id == source_key.catalog_object_id)
+        .map(|object| object.name.clone())
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion resumable key identity is absent",
+        ))?;
+    let source_kind = if source_key.kind == "primary_key" {
+        CrossDialectKeyKind::PrimaryKey
+    } else {
+        CrossDialectKeyKind::Unique
+    };
+    let target_name = matches!(source_kind, CrossDialectKeyKind::Unique)
+        .then(|| cross_dialect_target_key_name(&target_table, &source_key.columns))
+        .transpose()?;
+    let policy = TableConversionPolicy {
+        source_table: source_table.clone(),
+        target_table,
+        target_contract: CrossDialectTargetTableContract::MySql {
+            engine: MySqlTargetEngine::InnoDb,
+            character_set: mysql_character_set,
+            collation: mysql_collation,
+        },
+        resumable_key: CrossDialectResumableKey {
+            source_name: source_key_name,
+            source_kind,
+            source_columns: source_key.columns.clone(),
+            target_name,
+            target_kind: source_kind,
+            target_columns: source_key.columns,
+        },
+        row_policy,
+    };
+    policy.validate()?;
+    Ok(policy)
+}
+
+/// Render a create-only PostgreSQL table from a reviewed typed conversion policy.
+pub fn render_postgres_conversion_create_table(
+    policy: &TableConversionPolicy,
+) -> Result<String, PostgresPlanError> {
+    policy.validate()?;
+    if !matches!(
+        policy.target_contract,
+        CrossDialectTargetTableContract::PostgreSql {
+            persistence: PostgresTargetPersistence::Permanent,
+        }
+    ) || policy.row_policy.target_dialect != ConversionDialect::PostgreSql
+    {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion DDL requires a reviewed PostgreSQL target contract",
+        ));
+    }
+    let mut columns = Vec::with_capacity(policy.row_policy.columns.len());
+    for column in &policy.row_policy.columns {
+        let CrossDialectTargetType::PostgreSql(target_type) = &column.target_type else {
+            return Err(PostgresPlanError::InvalidConfig(
+                "PostgreSQL conversion DDL contains a non-PostgreSQL column",
+            ));
+        };
+        let quoted_column = quote_identifier(&column.target.name);
+        let mut sql = format!("{quoted_column} {}", target_type.ddl_type()?);
+        if let Some(collation) = target_type.collation() {
+            sql.push_str(" COLLATE ");
+            sql.push_str(&quote_identifier(&collation.namespace));
+            sql.push('.');
+            sql.push_str(&quote_identifier(&collation.name));
+        }
+        if !column.target.nullable {
+            sql.push_str(" NOT NULL");
+        }
+        for check in &column.target_checks {
+            sql.push_str(" CHECK (");
+            sql.push_str(&render_postgres_conversion_check(
+                &quoted_column,
+                target_type,
+                check,
+            )?);
+            sql.push(')');
+        }
+        columns.push(sql);
+    }
+    let key_columns = policy
+        .resumable_key
+        .target_columns
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    columns.push(match policy.resumable_key.target_kind {
+        CrossDialectKeyKind::PrimaryKey => format!("PRIMARY KEY ({key_columns})"),
+        CrossDialectKeyKind::Unique => format!(
+            "CONSTRAINT {} UNIQUE ({key_columns})",
+            quote_identifier(policy.resumable_key.target_name.as_ref().ok_or(
+                PostgresPlanError::InvalidConfig(
+                    "PostgreSQL conversion unique key has no target name",
+                )
+            )?,)
+        ),
+    });
+    Ok(format!(
+        "CREATE TABLE {}.{} ({})",
+        quote_identifier(&policy.target_table.namespace),
+        quote_identifier(&policy.target_table.name),
+        columns.join(", ")
+    ))
+}
+
+fn render_postgres_conversion_check(
+    column: &str,
+    target_type: &PostgresTargetType,
+    check: &TargetCheckConstraint,
+) -> Result<String, PostgresPlanError> {
+    Ok(match check {
+        TargetCheckConstraint::NonNegative => format!("{column} >= 0"),
+        TargetCheckConstraint::SignedIntegerRange { minimum, maximum } => {
+            format!("{column} BETWEEN {minimum} AND {maximum}")
+        }
+        TargetCheckConstraint::UnsignedIntegerRange { maximum } => {
+            format!("{column} BETWEEN 0 AND {maximum}")
+        }
+        TargetCheckConstraint::DateYearRange {
+            minimum_year,
+            maximum_year,
+        } => format!("EXTRACT(YEAR FROM {column}) BETWEEN {minimum_year} AND {maximum_year}"),
+        TargetCheckConstraint::TimestampRange { range } => {
+            let PostgresTargetType::Timestamp {
+                precision,
+                semantics,
+                ..
+            } = target_type
+            else {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "timestamp range check is attached to a non-timestamp column",
+                ));
+            };
+            let minimum = postgres_timestamp_literal(range.minimum, *precision, *semantics)?;
+            let maximum = postgres_timestamp_literal(range.maximum, *precision, *semantics)?;
+            format!("{column} BETWEEN {minimum} AND {maximum}")
+        }
+        TargetCheckConstraint::CharacterLengthMaximum { maximum } => {
+            format!("char_length({column}) <= {maximum}")
+        }
+        TargetCheckConstraint::OctetLengthMaximum { maximum } => {
+            format!("octet_length({column}) <= {maximum}")
+        }
+    })
+}
+
+fn postgres_timestamp_literal(
+    bound: TimestampBound,
+    precision: u8,
+    semantics: TimestampSemantics,
+) -> Result<String, PostgresPlanError> {
+    if bound.year <= 0 || precision > 6 {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion timestamp CHECK bound is unsupported",
+        ));
+    }
+    let fraction = if precision == 0 {
+        String::new()
+    } else {
+        let divisor = 10_u32.pow(9 - u32::from(precision));
+        format!(
+            ".{:0width$}",
+            bound.nanos / divisor,
+            width = usize::from(precision)
+        )
+    };
+    let zone = if semantics == TimestampSemantics::OffsetAware {
+        "+00"
+    } else {
+        ""
+    };
+    let type_name = if semantics == TimestampSemantics::OffsetAware {
+        "TIMESTAMPTZ"
+    } else {
+        "TIMESTAMP"
+    };
+    Ok(format!(
+        "{type_name} '{:04}-{:02}-{:02} {:02}:{:02}:{:02}{fraction}{zone}'",
+        bound.year, bound.month, bound.day, bound.hour, bound.minute, bound.second
+    ))
+}
+
+fn postgres_conversion_source_type(
+    object: &CatalogObject,
+    source: &ColumnMeta,
+) -> Result<PostgresTargetType, PostgresPlanError> {
+    let type_name = required_catalog_string(object, "type_name")?;
+    let collation = || -> Result<QualifiedIdentifier, PostgresPlanError> {
+        let namespace = required_catalog_string(object, "collation_schema")?;
+        let name = required_catalog_string(object, "collation")?;
+        Ok(QualifiedIdentifier {
+            namespace: Identifier::new(namespace).map_err(|_| {
+                PostgresPlanError::InvalidConfig("PostgreSQL collation namespace is invalid")
+            })?,
+            name: Identifier::new(name).map_err(|_| {
+                PostgresPlanError::InvalidConfig("PostgreSQL collation name is invalid")
+            })?,
+        })
+    };
+    let temporal_precision = || -> Result<u8, PostgresPlanError> {
+        u8::try_from(source.precision.ok_or(PostgresPlanError::InvalidConfig(
+            "PostgreSQL temporal precision is absent",
+        ))?)
+        .map_err(|_| PostgresPlanError::InvalidConfig("PostgreSQL temporal precision is invalid"))
+    };
+    let target_type = match type_name {
+        "bool" => PostgresTargetType::Boolean,
+        "int2" => PostgresTargetType::SmallInt,
+        "int4" => PostgresTargetType::Integer,
+        "int8" => PostgresTargetType::BigInt,
+        "numeric" => PostgresTargetType::Numeric {
+            precision: source.precision.ok_or(PostgresPlanError::InvalidConfig(
+                "PostgreSQL numeric precision is not bounded",
+            ))?,
+            scale: source.scale.ok_or(PostgresPlanError::InvalidConfig(
+                "PostgreSQL numeric scale is not bounded",
+            ))?,
+        },
+        "float4" => PostgresTargetType::Real,
+        "float8" => PostgresTargetType::DoublePrecision,
+        "bpchar" => PostgresTargetType::Character {
+            length: optional_catalog_u32(object, "character_maximum_length")?.ok_or(
+                PostgresPlanError::InvalidConfig("PostgreSQL character length is not bounded"),
+            )?,
+            collation: collation()?,
+        },
+        "varchar" => PostgresTargetType::CharacterVarying {
+            length: optional_catalog_u32(object, "character_maximum_length")?.ok_or(
+                PostgresPlanError::InvalidConfig("PostgreSQL varchar length is not bounded"),
+            )?,
+            collation: collation()?,
+        },
+        "text" => PostgresTargetType::Text {
+            collation: collation()?,
+        },
+        "bytea" => PostgresTargetType::Bytea,
+        "json" => PostgresTargetType::Json,
+        "jsonb" => PostgresTargetType::Jsonb,
+        "date" => PostgresTargetType::Date {
+            minimum_year: -4_712,
+            maximum_year: 5_874_897,
+        },
+        "time" => PostgresTargetType::Time {
+            precision: temporal_precision()?,
+            with_time_zone: false,
+            minimum_nanos: POSTGRES_TIME_MINIMUM_NANOS,
+            maximum_nanos: POSTGRES_TIME_MAXIMUM_NANOS,
+        },
+        "timetz" => PostgresTargetType::Time {
+            precision: temporal_precision()?,
+            with_time_zone: true,
+            minimum_nanos: POSTGRES_TIME_MINIMUM_NANOS,
+            maximum_nanos: POSTGRES_TIME_MAXIMUM_NANOS,
+        },
+        "timestamp" => {
+            let precision = temporal_precision()?;
+            PostgresTargetType::Timestamp {
+                precision,
+                semantics: TimestampSemantics::WallClock,
+                range: POSTGRES_TIMESTAMP_RANGE.at_precision(precision)?,
+            }
+        }
+        "timestamptz" => {
+            let precision = temporal_precision()?;
+            PostgresTargetType::Timestamp {
+                precision,
+                semantics: TimestampSemantics::OffsetAware,
+                range: POSTGRES_TIMESTAMP_RANGE.at_precision(precision)?,
+            }
+        }
+        _ => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "PostgreSQL source type has no cross-dialect mapping",
+            ));
+        }
+    };
+    Ok(target_type)
+}
+
+fn postgres_conversion_column_meta(
+    object: &CatalogObject,
+) -> Result<ColumnMeta, PostgresPlanError> {
+    let ordinal = object
+        .attributes
+        .get("ordinal")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion column ordinal is malformed",
+        ))?;
+    let type_schema = required_catalog_string(object, "type_schema")?;
+    let type_name = required_catalog_string(object, "type_name")?;
+    if type_schema != "pg_catalog" {
+        return Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion source type is not built in",
+        ));
+    }
+    let data_type = format!("{type_schema}.{type_name}");
+    let temporal = matches!(type_name, "time" | "timetz" | "timestamp" | "timestamptz");
+    let precision = optional_catalog_u32(
+        object,
+        if temporal {
+            "datetime_precision"
+        } else {
+            "numeric_precision"
+        },
+    )?;
+    let scale = optional_catalog_i32(object, "numeric_scale")?;
+    let collation = match (
+        object.attributes.get("collation_schema"),
+        object.attributes.get("collation"),
+    ) {
+        (Some(serde_json::Value::String(schema)), Some(serde_json::Value::String(name))) => {
+            Some(format!("{schema}.{name}"))
+        }
+        (Some(serde_json::Value::Null), Some(serde_json::Value::Null)) => None,
+        _ => {
+            return Err(PostgresPlanError::InvalidConfig(
+                "PostgreSQL conversion column collation is malformed",
+            ));
+        }
+    };
+    Ok(ColumnMeta {
+        name: object.name.clone(),
+        ordinal,
+        vendor_type: data_type,
+        nullable: required_catalog_bool(object, "nullable")?,
+        collation,
+        precision,
+        scale,
+        timezone_semantics: match type_name {
+            "timetz" | "timestamptz" => Some("with_time_zone".into()),
+            "time" | "timestamp" => Some("without_time_zone".into()),
+            _ => None,
+        },
+    })
+}
+
+fn optional_catalog_u32(
+    object: &CatalogObject,
+    name: &'static str,
+) -> Result<Option<u32>, PostgresPlanError> {
+    match object.attributes.get(name) {
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "PostgreSQL conversion numeric metadata is malformed",
+            )),
+        None => Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion numeric metadata is absent",
+        )),
+    }
+}
+
+fn optional_catalog_i32(
+    object: &CatalogObject,
+    name: &'static str,
+) -> Result<Option<i32>, PostgresPlanError> {
+    match object.attributes.get(name) {
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(Some)
+            .ok_or(PostgresPlanError::InvalidConfig(
+                "PostgreSQL conversion numeric metadata is malformed",
+            )),
+        None => Err(PostgresPlanError::InvalidConfig(
+            "PostgreSQL conversion numeric metadata is absent",
+        )),
+    }
 }
 
 impl PostgresEndpointConfig {
@@ -4655,7 +5179,19 @@ fn load_projection_metadata(
                 nullable: row.get(3),
                 collation: row.get(4),
                 precision: row
-                    .get::<_, Option<i32>>(5)
+                    .get::<_, Option<i32>>(
+                        if matches!(
+                            data_type.as_str(),
+                            "timestamp with time zone"
+                                | "time with time zone"
+                                | "timestamp without time zone"
+                                | "time without time zone"
+                        ) {
+                            7
+                        } else {
+                            5
+                        },
+                    )
                     .map(u32::try_from)
                     .transpose()
                     .map_err(|_| ConnectionError::Database("negative numeric precision".into()))?,
@@ -5242,7 +5778,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', CASE WHEN a.attgenerated = '' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'generated_expression', CASE WHEN a.attgenerated = 's' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND a.attgenerated = '' AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname)::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
+        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', CASE WHEN a.attgenerated = '' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'generated_expression', CASE WHEN a.attgenerated = 's' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND a.attgenerated = '' AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname, 'numeric_precision', information_schema._pg_numeric_precision(a.atttypid, a.atttypmod), 'numeric_scale', information_schema._pg_numeric_scale(a.atttypid, a.atttypmod), 'datetime_precision', information_schema._pg_datetime_precision(a.atttypid, a.atttypmod), 'character_maximum_length', information_schema._pg_char_max_length(a.atttypid, a.atttypmod))::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
         CatalogObjectKind::Column,
     )?;
     let generated_dependency_rows = transaction.query(
@@ -8150,6 +8686,110 @@ mod tests {
             unsupported: UnsupportedObjectReport::default(),
             tls_binding: "hostname_verified;roots=platform;client=none".into(),
         }
+    }
+
+    #[test]
+    fn postgres_catalog_derives_a_typed_mysql_table_policy() {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("items").unwrap(),
+        };
+        let mut catalog = VendorCatalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            dialect: "postgresql".into(),
+            server_version: "17.0".into(),
+            database: Identifier::new("source").unwrap(),
+            namespaces: vec![CatalogNamespace {
+                id: "namespace:1".into(),
+                name: table.namespace.clone(),
+                owner: None,
+                charset: Some("UTF8".into()),
+                collation: None,
+                objects: vec![CatalogObject {
+                    id: "relation:1".into(),
+                    kind: CatalogObjectKind::Table,
+                    name: table.name.clone(),
+                    definition: Vec::new(),
+                    attributes: BTreeMap::from([
+                        ("relkind".into(), serde_json::json!("r")),
+                        ("persistence".into(), serde_json::json!("p")),
+                    ]),
+                }],
+            }],
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        };
+        let column = |id: &str, name: &str, ordinal: i64, type_name: &str| CatalogObject {
+            id: id.into(),
+            kind: CatalogObjectKind::Column,
+            name: Identifier::new(name).unwrap(),
+            definition: type_name.as_bytes().to_vec(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("ordinal".into(), serde_json::json!(ordinal)),
+                ("nullable".into(), serde_json::json!(false)),
+                ("default".into(), serde_json::Value::Null),
+                ("generated_expression".into(), serde_json::Value::Null),
+                ("sequence_default_oid".into(), serde_json::Value::Null),
+                ("identity".into(), serde_json::json!("")),
+                ("type_schema".into(), serde_json::json!("pg_catalog")),
+                ("type_name".into(), serde_json::json!(type_name)),
+                ("numeric_precision".into(), serde_json::Value::Null),
+                ("numeric_scale".into(), serde_json::Value::Null),
+                ("datetime_precision".into(), serde_json::Value::Null),
+                ("collation_schema".into(), serde_json::Value::Null),
+                ("collation".into(), serde_json::Value::Null),
+            ]),
+        };
+        catalog.namespaces[0].objects.extend([
+            column("column:1:1", "id", 1, "int8"),
+            column("column:1:2", "active", 2, "bool"),
+            CatalogObject {
+                id: "constraint:1".into(),
+                kind: CatalogObjectKind::PrimaryKey,
+                name: Identifier::new("items_pkey").unwrap(),
+                definition: Vec::new(),
+                attributes: BTreeMap::from([
+                    ("table_oid".into(), serde_json::json!("relation:1")),
+                    ("validated".into(), serde_json::json!(true)),
+                    ("columns".into(), serde_json::json!(["id"])),
+                ]),
+            },
+        ]);
+
+        let policy = postgres_to_mysql_table_conversion_policy(
+            &catalog,
+            &table,
+            QualifiedTable {
+                namespace: Identifier::new("app").unwrap(),
+                name: table.name.clone(),
+            },
+            "utf8mb4",
+            "utf8mb4_0900_bin",
+        )
+        .unwrap();
+
+        assert_eq!(policy.row_policy.columns.len(), 2);
+        assert_eq!(
+            policy.row_policy.columns[0].rule,
+            super::super::conversion::ValueConversionRule::SignedInteger {
+                minimum: i64::MIN,
+                maximum: i64::MAX,
+            }
+        );
+        assert_eq!(
+            policy.row_policy.columns[1].rule,
+            super::super::conversion::ValueConversionRule::BooleanToSigned
+        );
+        let mut hostile = policy;
+        hostile.target_table = QualifiedTable {
+            namespace: Identifier::new("a`b").unwrap(),
+            name: Identifier::new("t`x").unwrap(),
+        };
+        assert_eq!(
+            super::super::mysql::render_mysql_conversion_create_table(&hostile).unwrap(),
+            "CREATE TABLE `a``b`.`t``x` (`id` bigint NOT NULL, `active` tinyint(1) NOT NULL CHECK (`active` BETWEEN 0 AND 1), PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_bin`"
+        );
     }
 
     #[test]

@@ -27,6 +27,15 @@ use super::connection::{
     ControlSession, KeysetPage, ReadOnlyEvidence, ReadSession, SnapshotToken,
     SourceConnectionFactory, TargetConnectionFactory, VerificationSession, WriteSession,
 };
+use super::conversion::{
+    cross_dialect_target_key_name, derive_mysql_to_postgres_column, ConversionDialect,
+    CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectTargetTableContract,
+    CrossDialectTargetType, MySqlBinaryStorage, MySqlIntegerWidth, MySqlTargetEngine,
+    MySqlTargetType, MySqlTextStorage, PostgresTargetPersistence, QualifiedIdentifier,
+    RowConversionError, RowConversionPolicy, TableConversionPolicy, TargetCheckConstraint,
+    TimestampBound, TimestampSemantics, MYSQL_DATETIME_RANGE, MYSQL_TIMESTAMP_RANGE,
+    MYSQL_TIME_MAXIMUM_NANOS, MYSQL_TIME_MINIMUM_NANOS, ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+};
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
     Identifier, QualifiedTable, RowBatch, RowBatchError, VendorCatalog,
@@ -49,7 +58,7 @@ use super::plan::{
     MYSQL_SESSION_COLLATION, MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
-pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 3;
+pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 4;
 pub const MYSQL_CONSISTENCY_SNAPSHOT: &str = "mysql-repeatable-read-consistent-snapshot";
 const DEFAULT_PORT: u16 = 3306;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
@@ -183,6 +192,8 @@ pub enum MySqlPlanError {
     FreezeProfile(#[from] MySqlFreezeProfileError),
     #[error("invalid MySQL metadata-visibility evidence")]
     MetadataVisibility(#[from] MySqlVisibilityError),
+    #[error("cross-dialect conversion policy derivation failed")]
+    Conversion(#[from] RowConversionError),
 }
 
 impl From<mysql::Error> for MySqlPlanError {
@@ -4168,7 +4179,7 @@ fn mysql_value(value: Value, column: &ColumnMeta) -> ConnectionResult<DbValue> {
                     day,
                 })
             } else {
-                let precision = column.scale.unwrap_or(0).clamp(0, 6) as u8;
+                let precision = column.precision.unwrap_or(0).min(6) as u8;
                 Ok(DbValue::Timestamp {
                     local: format!(
                         "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{micros:06}"
@@ -4299,6 +4310,422 @@ pub fn mysql_table_definitions(
     }
     definitions.sort_by(|left, right| left.table.cmp(&right.table));
     Ok(definitions)
+}
+
+/// Derive one MySQL-to-PostgreSQL table policy from the exact source catalog.
+pub fn mysql_to_postgres_table_conversion_policy(
+    catalog: &VendorCatalog,
+    source_table: &QualifiedTable,
+    target_table: QualifiedTable,
+    postgres_text_collation: QualifiedIdentifier,
+) -> Result<TableConversionPolicy, MySqlPlanError> {
+    if catalog.dialect != "mysql" || catalog.format_version != MYSQL_CATALOG_FORMAT_VERSION {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL conversion requires the current catalog format".into(),
+        ));
+    }
+    let source_namespace = catalog
+        .namespaces
+        .iter()
+        .find(|namespace| namespace.name == source_table.namespace)
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "MySQL conversion source namespace is absent from the reviewed catalog".into(),
+            )
+        })?;
+    let source_table_object = source_namespace
+        .objects
+        .iter()
+        .find(|object| object.kind == CatalogObjectKind::Table && object.name == source_table.name)
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "MySQL conversion source table is absent from the reviewed catalog".into(),
+            )
+        })?;
+    let source_key: MySqlResumableKey = serde_json::from_value(
+        source_table_object
+            .attributes
+            .get("resumable_key")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL conversion source table has no reviewed resumable key".into(),
+                )
+            })?,
+    )?;
+    let definition = mysql_table_definitions(catalog)?
+        .into_iter()
+        .find(|definition| &definition.table == source_table)
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "MySQL conversion source table is absent from the reviewed catalog".into(),
+            )
+        })?;
+    if definition
+        .columns
+        .iter()
+        .any(|column| column.auto_increment)
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL AUTO_INCREMENT requires a separate cross-dialect mapping".into(),
+        ));
+    }
+    let columns = definition
+        .columns
+        .iter()
+        .map(|column| {
+            let source_type = mysql_conversion_source_type(column)?;
+            let source = super::conversion::CrossDialectTargetType::MySql(source_type.clone())
+                .column_meta(
+                    column.name.clone(),
+                    u32::try_from(column.ordinal).map_err(|_| {
+                        MySqlPlanError::InvalidCatalog(
+                            "MySQL conversion column ordinal is too large".into(),
+                        )
+                    })?,
+                    column.nullable,
+                )?;
+            derive_mysql_to_postgres_column(
+                source,
+                source_type,
+                column.name.clone(),
+                u32::try_from(column.ordinal).map_err(|_| {
+                    MySqlPlanError::InvalidCatalog(
+                        "MySQL conversion column ordinal is too large".into(),
+                    )
+                })?,
+                postgres_text_collation.clone(),
+            )
+            .map_err(MySqlPlanError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let row_policy = RowConversionPolicy {
+        schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+        source_dialect: ConversionDialect::MySql,
+        target_dialect: ConversionDialect::PostgreSql,
+        columns,
+    };
+    row_policy.validate()?;
+    let source_kind = if source_key.primary {
+        CrossDialectKeyKind::PrimaryKey
+    } else {
+        CrossDialectKeyKind::Unique
+    };
+    let target_name = matches!(source_kind, CrossDialectKeyKind::Unique)
+        .then(|| cross_dialect_target_key_name(&target_table, &source_key.columns))
+        .transpose()?;
+    let policy = TableConversionPolicy {
+        source_table: source_table.clone(),
+        target_table,
+        target_contract: CrossDialectTargetTableContract::PostgreSql {
+            persistence: PostgresTargetPersistence::Permanent,
+        },
+        resumable_key: CrossDialectResumableKey {
+            source_name: source_key.index_name,
+            source_kind,
+            source_columns: source_key.columns.clone(),
+            target_name,
+            target_kind: source_kind,
+            target_columns: source_key.columns,
+        },
+        row_policy,
+    };
+    policy.validate()?;
+    Ok(policy)
+}
+
+/// Render a create-only MySQL table from a reviewed typed conversion policy.
+pub fn render_mysql_conversion_create_table(
+    policy: &TableConversionPolicy,
+) -> Result<String, MySqlPlanError> {
+    policy.validate()?;
+    let CrossDialectTargetTableContract::MySql {
+        engine: MySqlTargetEngine::InnoDb,
+        character_set,
+        collation,
+    } = &policy.target_contract
+    else {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL conversion DDL requires a reviewed MySQL target contract".into(),
+        ));
+    };
+    if policy.row_policy.target_dialect != ConversionDialect::MySql {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL conversion DDL has the wrong target dialect".into(),
+        ));
+    }
+    let mut columns = Vec::with_capacity(policy.row_policy.columns.len());
+    for column in &policy.row_policy.columns {
+        let CrossDialectTargetType::MySql(target_type) = &column.target_type else {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL conversion DDL contains a non-MySQL column".into(),
+            ));
+        };
+        let quoted_column = quote_identifier(&column.target.name);
+        let mut sql = format!("{quoted_column} {}", target_type.ddl_type()?);
+        if let Some((column_character_set, column_collation)) =
+            target_type.character_set_and_collation()
+        {
+            sql.push_str(" CHARACTER SET ");
+            sql.push_str(&quote_identifier(column_character_set));
+            sql.push_str(" COLLATE ");
+            sql.push_str(&quote_identifier(column_collation));
+        }
+        if !column.target.nullable {
+            sql.push_str(" NOT NULL");
+        }
+        for check in &column.target_checks {
+            sql.push_str(" CHECK (");
+            sql.push_str(&render_mysql_conversion_check(&quoted_column, check)?);
+            sql.push(')');
+        }
+        columns.push(sql);
+    }
+    let key_columns = policy
+        .resumable_key
+        .target_columns
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    columns.push(match policy.resumable_key.target_kind {
+        CrossDialectKeyKind::PrimaryKey => format!("PRIMARY KEY ({key_columns})"),
+        CrossDialectKeyKind::Unique => format!(
+            "CONSTRAINT {} UNIQUE ({key_columns})",
+            quote_identifier(policy.resumable_key.target_name.as_ref().ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL conversion unique key has no target name".into(),
+                )
+            })?,)
+        ),
+    });
+    Ok(format!(
+        "CREATE TABLE {}.{} ({}) ENGINE=InnoDB DEFAULT CHARACTER SET {} COLLATE {}",
+        quote_identifier(&policy.target_table.namespace),
+        quote_identifier(&policy.target_table.name),
+        columns.join(", "),
+        quote_identifier(character_set),
+        quote_identifier(collation)
+    ))
+}
+
+fn render_mysql_conversion_check(
+    column: &str,
+    check: &TargetCheckConstraint,
+) -> Result<String, MySqlPlanError> {
+    Ok(match check {
+        TargetCheckConstraint::NonNegative => format!("{column} >= 0"),
+        TargetCheckConstraint::SignedIntegerRange { minimum, maximum } => {
+            format!("{column} BETWEEN {minimum} AND {maximum}")
+        }
+        TargetCheckConstraint::UnsignedIntegerRange { maximum } => {
+            format!("{column} BETWEEN 0 AND {maximum}")
+        }
+        TargetCheckConstraint::DateYearRange {
+            minimum_year,
+            maximum_year,
+        } => format!("EXTRACT(YEAR FROM {column}) BETWEEN {minimum_year} AND {maximum_year}"),
+        TargetCheckConstraint::TimestampRange { range } => format!(
+            "{column} BETWEEN {} AND {}",
+            mysql_timestamp_literal(range.minimum)?,
+            mysql_timestamp_literal(range.maximum)?
+        ),
+        TargetCheckConstraint::CharacterLengthMaximum { maximum } => {
+            format!("CHAR_LENGTH({column}) <= {maximum}")
+        }
+        TargetCheckConstraint::OctetLengthMaximum { maximum } => {
+            format!("OCTET_LENGTH({column}) <= {maximum}")
+        }
+    })
+}
+
+fn mysql_timestamp_literal(bound: TimestampBound) -> Result<String, MySqlPlanError> {
+    if bound.year <= 0 || !bound.nanos.is_multiple_of(1_000) {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL conversion timestamp CHECK bound is unsupported".into(),
+        ));
+    }
+    Ok(format!(
+        "TIMESTAMP '{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}'",
+        bound.year,
+        bound.month,
+        bound.day,
+        bound.hour,
+        bound.minute,
+        bound.second,
+        bound.nanos / 1_000
+    ))
+}
+
+fn mysql_conversion_source_type(
+    column: &MySqlColumnDefinition,
+) -> Result<MySqlTargetType, MySqlPlanError> {
+    let data_type = match &column.data_type {
+        MySqlColumnType::Integer { name, unsigned, .. } => MySqlTargetType::Integer {
+            width: match name.as_str() {
+                "tinyint" => MySqlIntegerWidth::Tiny,
+                "smallint" => MySqlIntegerWidth::Small,
+                "mediumint" => MySqlIntegerWidth::Medium,
+                "int" | "integer" => MySqlIntegerWidth::Integer,
+                "bigint" => MySqlIntegerWidth::Big,
+                _ => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL integer has no cross-dialect mapping".into(),
+                    ));
+                }
+            },
+            unsigned: *unsigned,
+        },
+        MySqlColumnType::Decimal {
+            precision,
+            scale,
+            unsigned,
+        } => MySqlTargetType::Decimal {
+            precision: *precision,
+            scale: *scale,
+            unsigned: *unsigned,
+        },
+        MySqlColumnType::Floating {
+            name,
+            precision: None,
+            scale: None,
+            unsigned: false,
+        } if name == "float" => MySqlTargetType::Float,
+        MySqlColumnType::Floating {
+            name,
+            precision: None,
+            scale: None,
+            unsigned: false,
+        } if name == "double" => MySqlTargetType::Double,
+        MySqlColumnType::Temporal {
+            name,
+            fractional_precision,
+        } => {
+            let precision = u8::try_from(fractional_precision.unwrap_or(0)).map_err(|_| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL temporal precision has no cross-dialect mapping".into(),
+                )
+            })?;
+            match name.as_str() {
+                "date" if precision == 0 => MySqlTargetType::Date {
+                    minimum_year: 1_000,
+                    maximum_year: 9_999,
+                },
+                "time" => MySqlTargetType::Time {
+                    precision,
+                    minimum_nanos: MYSQL_TIME_MINIMUM_NANOS,
+                    maximum_nanos: MYSQL_TIME_MAXIMUM_NANOS,
+                },
+                "datetime" => MySqlTargetType::DateTime {
+                    precision,
+                    semantics: TimestampSemantics::WallClock,
+                    range: MYSQL_DATETIME_RANGE.at_precision(precision)?,
+                },
+                "timestamp" => MySqlTargetType::Timestamp {
+                    precision,
+                    semantics: TimestampSemantics::UtcNormalized,
+                    range: MYSQL_TIMESTAMP_RANGE.at_precision(precision)?,
+                },
+                _ => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL temporal type has no cross-dialect mapping".into(),
+                    ));
+                }
+            }
+        }
+        MySqlColumnType::Character { name, length } => MySqlTargetType::Text {
+            // The target CHECK constraints use UTF-8 octet lengths. Other source
+            // character sets can expand during decoding and need a separate policy.
+            storage: match name.as_str() {
+                "char" => MySqlTextStorage::Char { length: *length },
+                "varchar" => MySqlTextStorage::VarChar { length: *length },
+                _ => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL character type has no cross-dialect mapping".into(),
+                    ));
+                }
+            },
+            character_set: Identifier::new(column.character_set.clone().ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL text conversion requires a character set".into(),
+                )
+            })?)
+            .map_err(|_| {
+                MySqlPlanError::InvalidCatalog("MySQL character set identity is invalid".into())
+            })?,
+            collation: Identifier::new(column.collation.clone().ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog("MySQL text conversion requires a collation".into())
+            })?)
+            .map_err(|_| {
+                MySqlPlanError::InvalidCatalog("MySQL collation identity is invalid".into())
+            })?,
+        },
+        MySqlColumnType::Text { name } => MySqlTargetType::Text {
+            storage: match name.as_str() {
+                "tinytext" => MySqlTextStorage::TinyText,
+                "text" => MySqlTextStorage::Text,
+                "mediumtext" => MySqlTextStorage::MediumText,
+                "longtext" => MySqlTextStorage::LongText,
+                _ => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL text type has no cross-dialect mapping".into(),
+                    ));
+                }
+            },
+            character_set: Identifier::new(column.character_set.clone().ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL text conversion requires a character set".into(),
+                )
+            })?)
+            .map_err(|_| {
+                MySqlPlanError::InvalidCatalog("MySQL character set identity is invalid".into())
+            })?,
+            collation: Identifier::new(column.collation.clone().ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog("MySQL text conversion requires a collation".into())
+            })?)
+            .map_err(|_| {
+                MySqlPlanError::InvalidCatalog("MySQL collation identity is invalid".into())
+            })?,
+        },
+        MySqlColumnType::Binary { name, length } => MySqlTargetType::Binary {
+            storage: match name.as_str() {
+                "binary" => MySqlBinaryStorage::Binary { length: *length },
+                "varbinary" => MySqlBinaryStorage::VarBinary { length: *length },
+                _ => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL binary type has no cross-dialect mapping".into(),
+                    ));
+                }
+            },
+        },
+        MySqlColumnType::Blob { name } => MySqlTargetType::Binary {
+            storage: match name.as_str() {
+                "tinyblob" => MySqlBinaryStorage::TinyBlob,
+                "blob" => MySqlBinaryStorage::Blob,
+                "mediumblob" => MySqlBinaryStorage::MediumBlob,
+                "longblob" => MySqlBinaryStorage::LongBlob,
+                _ => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL blob type has no cross-dialect mapping".into(),
+                    ));
+                }
+            },
+        },
+        MySqlColumnType::Json => MySqlTargetType::Json,
+        MySqlColumnType::Bit { .. } | MySqlColumnType::Year | MySqlColumnType::Floating { .. } => {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL source type has no exact cross-dialect mapping".into(),
+            ));
+        }
+    };
+    if matches!(data_type, MySqlTargetType::Text { ref character_set, .. } if character_set.as_str() != "utf8mb4")
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL text conversion currently requires utf8mb4 source columns".into(),
+        ));
+    }
+    Ok(data_type)
 }
 
 fn mysql_table_definition(
@@ -5158,10 +5585,10 @@ fn mysql_foreign_key_action_sql(action: MySqlForeignKeyAction) -> &'static str {
 fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
     let ordinal = required_u64(object, "ordinal")?;
     let data_type = required_text(object, "data_type")?;
-    let scale = if matches!(data_type, "datetime" | "timestamp" | "time") {
-        optional_i64(object, "datetime_precision")
+    let precision = if matches!(data_type, "datetime" | "timestamp" | "time") {
+        optional_u64(object, "datetime_precision")
     } else {
-        optional_i64(object, "numeric_scale")
+        optional_u64(object, "numeric_precision")
     };
     Ok(ColumnMeta {
         name: object.name.clone(),
@@ -5170,11 +5597,11 @@ fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
         vendor_type: required_text(object, "data_type")?.into(),
         nullable: required_bool(object, "nullable")?,
         collation: optional_text(object, "collation").map(str::to_owned),
-        precision: optional_u64(object, "numeric_precision")
+        precision: precision
             .map(u32::try_from)
             .transpose()
             .map_err(|_| MySqlPlanError::InvalidCatalog("column precision is too large".into()))?,
-        scale: scale
+        scale: optional_i64(object, "numeric_scale")
             .map(i32::try_from)
             .transpose()
             .map_err(|_| MySqlPlanError::InvalidCatalog("column scale is too large".into()))?,
@@ -7154,6 +7581,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mysql_catalog_derives_a_typed_postgres_table_policy() {
+        let source_table = QualifiedTable {
+            namespace: identifier("app"),
+            name: identifier("items"),
+        };
+        let policy = mysql_to_postgres_table_conversion_policy(
+            &catalog(true),
+            &source_table,
+            QualifiedTable {
+                namespace: identifier("public"),
+                name: identifier("items"),
+            },
+            QualifiedIdentifier {
+                namespace: identifier("pg_catalog"),
+                name: identifier("C"),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(policy.row_policy.columns.len(), 1);
+        assert_eq!(
+            policy.row_policy.columns[0].source_type,
+            super::super::conversion::CrossDialectSourceType::MySql(MySqlTargetType::Integer {
+                width: MySqlIntegerWidth::Big,
+                unsigned: false,
+            })
+        );
+        assert_eq!(
+            policy.row_policy.columns[0].target_type,
+            super::super::conversion::CrossDialectTargetType::PostgreSql(
+                super::super::conversion::PostgresTargetType::BigInt,
+            )
+        );
+        let mut hostile = policy;
+        hostile.target_table = QualifiedTable {
+            namespace: identifier("a\"b"),
+            name: identifier("t\"x"),
+        };
+        assert_eq!(
+            super::super::postgres::render_postgres_conversion_create_table(&hostile).unwrap(),
+            "CREATE TABLE \"a\"\"b\".\"t\"\"x\" (\"id\" bigint NOT NULL CHECK (\"id\" BETWEEN -9223372036854775808 AND 9223372036854775807), PRIMARY KEY (\"id\"))"
+        );
+    }
+
     fn foreign_key_snapshot(endpoint: &str) -> MySqlCatalogSnapshot {
         let mut snapshot = snapshot(endpoint, true);
         let namespace = snapshot.catalog.namespaces.first_mut().unwrap();
@@ -8159,7 +8631,8 @@ mod tests {
             ]),
         };
         let meta = column_meta(&object).unwrap();
-        assert_eq!(meta.scale, Some(6));
+        assert_eq!(meta.precision, Some(6));
+        assert_eq!(meta.scale, None);
         assert_eq!(
             meta.timezone_semantics.as_deref(),
             Some("mysql_session_time_zone")
