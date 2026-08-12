@@ -124,8 +124,8 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
   Recorded 2026-08-12 on Darwin 24.6.0 arm64, Docker client/server 29.4.0
   with Linux arm64 containers, and Rust 1.97.1. Each command passed both
   direction-specific ignored integration tests.
-- The recovery matrix passes on PostgreSQL 17 and MySQL 8.4 in both
-  directions. It covers:
+- The recovery matrix passes on all six PostgreSQL 15/16/17 × MySQL 8.0/8.4
+  version pairs in both directions. It covers:
   - durable table `Prepared` and create-effect-applied states;
   - durable chunk `Prepared` and target-commit-before-journal states;
   - cancellation after insert with transaction rollback;
@@ -140,9 +140,11 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
 
   ```text
   SQL_SPLITTER_CROSS_INTERRUPTION=<boundary> \
-    scripts/test-migration-cross-dialect.sh 17 8.4 mysql-to-postgres-recovery
+    scripts/test-migration-cross-dialect.sh <pg-version> <mysql-version> \
+      mysql-to-postgres-recovery
   SQL_SPLITTER_CROSS_INTERRUPTION=<boundary> \
-    scripts/test-migration-cross-dialect.sh 17 8.4 postgres-to-mysql-recovery
+    scripts/test-migration-cross-dialect.sh <pg-version> <mysql-version> \
+      postgres-to-mysql-recovery
   ```
 
   Supported boundaries are `table-prepared`, `table-effect-applied`,
@@ -157,7 +159,11 @@ plan schema v17, PostgreSQL catalog format v6, MySQL catalog format v4.
   8.0/8.4 and PostgreSQL 15/16/17 live matrices. This includes the MySQL
   `BIT(9)` value fixture, which preserves its reviewed width through catalog
   extraction and target binding.
-- The Phase 7 execution-hardening exit remains open until the recovery matrix
-  passes on all six supported PostgreSQL/MySQL version pairs. The recorded
-  PostgreSQL 17/MySQL 8.4 run proves the boundary semantics but does not prove
-  version-wide recovery compatibility.
+
+**Phase 7 exit: met at spike level on 2026-08-12.** The baseline transforming
+value matrix and the 21-case recovery matrix pass on all six supported
+PostgreSQL/MySQL version pairs in both directions. Mailbox review [100]
+approved the combined implementation through commit `68b3e3e` with no
+critical or high findings. This remains feature-gated spike evidence. The
+large-dataset, two-managed-instance acceptance in mailbox [078] is still the
+higher production bar and is not claimed here.

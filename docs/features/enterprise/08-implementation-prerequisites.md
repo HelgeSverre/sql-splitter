@@ -242,6 +242,23 @@ migrates a narrow view/function/generated/partition subset); the asymmetry
 is intentional for the first MySQL cut and is a product-priority call open
 to revision, not a permanent limit.
 
+## Phase 7 (cross-dialect) exit boundary
+
+**Phase 7 exit: met at spike level on 2026-08-12** (implementation through
+commit `68b3e3e`; review [100]). The PostgreSQL 15/16/17 × MySQL 8.0/8.4
+baseline matrix passes in both directions with exact Boolean, decimal, finite
+float, Unicode text, binary, and canonical JSON target readback. The same six
+version pairs pass the 21-case recovery matrix in both directions: table and
+chunk Prepared/effect-applied states, cancellation rollback, both network
+COMMIT ambiguity outcomes, post-verification resume, target drift, source
+freeze/fence loss, and PostgreSQL fence release before terminal journal
+publication. The exact conversion and evidence contract is recorded in
+[17](./17-cross-dialect-type-mapping.md).
+
+This is feature-gated spike evidence. The large-dataset, two-managed-instance
+acceptance in mailbox [078] remains the higher production bar and is not
+claimed here.
+
 **TLS backend note (PostgreSQL, 2026-08-12):** the PostgreSQL connector
 moved from `postgres-native-tls` to `postgres-openssl` (commit `1a8ddf9`)
 so the Amazon RDS regional multi-certificate CA bundle validates; macOS
