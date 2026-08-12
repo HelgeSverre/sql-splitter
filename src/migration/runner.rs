@@ -4434,6 +4434,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         target_mode: Some(AssessmentStatus::Assessed(
             crate::migration::plan::TargetModeContract::EmptyOwned,
         )),
+        target_writer_identity: None,
         consistency_mode: PostgresConsistencyMode::ConsistentSnapshot.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
@@ -5235,6 +5236,7 @@ mod tests {
             target_mode: Some(AssessmentStatus::Assessed(
                 crate::migration::plan::TargetModeContract::EmptyOwned,
             )),
+            target_writer_identity: None,
             consistency_mode: "write-fence".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,

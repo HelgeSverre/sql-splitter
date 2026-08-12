@@ -12,13 +12,13 @@ use super::conversion::{
 use super::model::{CatalogObjectKind, Identifier, QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
 use super::mysql_visibility::{
-    MySqlAuthorizationContract, MySqlGrantRecord, MySqlMetadataVisibilityEvidence,
-    MySqlVisibilityError,
+    MySqlAccountIdentity, MySqlAuthorizationContract, MySqlGrantRecord,
+    MySqlMetadataVisibilityEvidence, MySqlVisibilityError,
 };
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 19;
+pub const PLAN_SCHEMA_VERSION: u16 = 20;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -99,14 +99,58 @@ pub enum WarmMergeConflictPolicy {
     RejectAnyKeyCollision,
 }
 
+/// The exact authenticated target principal permitted to perform migration
+/// effects while target protection is active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "dialect", content = "identity", rename_all = "snake_case")]
+pub enum TargetWriterIdentity {
+    PostgreSqlRole(Identifier),
+    MySqlAccount(MySqlAccountIdentity),
+}
+
+impl TargetWriterIdentity {
+    fn validate_for_catalog(&self, target_catalog: &VendorCatalog) -> Result<(), PlanError> {
+        match (self, target_catalog.dialect.as_str()) {
+            (Self::PostgreSqlRole(role), "postgresql") if !role.as_str().is_empty() => Ok(()),
+            (Self::MySqlAccount(account), "mysql") => {
+                account.validate()?;
+                Ok(())
+            }
+            _ => Err(PlanError::InvalidTargetWriterIdentity),
+        }
+    }
+}
+
 /// The reviewed mechanism that excludes target writes outside the migration.
 /// Runtime evidence is accepted separately and bound in journal genesis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mechanism", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TargetProtectionContract {
-    PostgreSqlMigrationTokenFenceV1,
-    MySqlMigrationTokenFenceWithExternalDdlFreezeV1 { provider_reference: String },
-    ExternalContinuousQuiesceV1 { provider_reference: String },
+    PostgreSqlMigrationTokenFenceV1 {
+        writer_identity: TargetWriterIdentity,
+    },
+    MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+        writer_identity: TargetWriterIdentity,
+        provider_reference: String,
+    },
+    ExternalContinuousQuiesceV1 {
+        writer_identity: TargetWriterIdentity,
+        provider_reference: String,
+    },
+}
+
+impl TargetProtectionContract {
+    pub fn writer_identity(&self) -> &TargetWriterIdentity {
+        match self {
+            Self::PostgreSqlMigrationTokenFenceV1 { writer_identity }
+            | Self::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                writer_identity, ..
+            }
+            | Self::ExternalContinuousQuiesceV1 {
+                writer_identity, ..
+            } => writer_identity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +497,8 @@ pub struct MigrationPlan {
     pub target_tls_binding: AssessmentStatus<String>,
     #[serde(default)]
     pub target_mode: Option<AssessmentStatus<TargetModeContract>>,
+    #[serde(default)]
+    pub target_writer_identity: Option<TargetWriterIdentity>,
     pub consistency_mode: String,
     pub canonical_encoding_version: u16,
     pub conversion_policy: MigrationConversionPolicy,
@@ -561,6 +607,7 @@ impl MigrationPlan {
                 fingerprint,
                 &self.conversion_policy,
                 &self.operations,
+                self.target_writer_identity.as_ref(),
             )?;
         }
         if self.purpose == PlanPurpose::Execution {
@@ -602,6 +649,9 @@ impl MigrationPlan {
             }
             if self.mysql_source_profile.is_some() {
                 return Err(PlanError::AssessmentContainsSourceProfile);
+            }
+            if self.target_writer_identity.is_some() {
+                return Err(PlanError::InvalidTargetWriterIdentity);
             }
         }
         if let Some(outage_policy) = &self.outage_policy {
@@ -719,9 +769,15 @@ fn validate_target_mode(
     target_catalog_fingerprint: &str,
     conversion_policy: &MigrationConversionPolicy,
     operations: &[PlanOperation],
+    target_writer_identity: Option<&TargetWriterIdentity>,
 ) -> Result<(), PlanError> {
     match mode {
-        TargetModeContract::EmptyOwned => Ok(()),
+        TargetModeContract::EmptyOwned => {
+            if target_writer_identity.is_some() {
+                return Err(PlanError::InvalidTargetWriterIdentity);
+            }
+            Ok(())
+        }
         TargetModeContract::WarmMerge(contract) => {
             if conversion_policy.has_approved_transformations() {
                 return Err(PlanError::CrossDialectTargetModeUnavailable);
@@ -732,7 +788,12 @@ fn validate_target_mode(
             if contract.tables.is_empty() {
                 return Err(PlanError::InvalidTargetMode);
             }
-            validate_target_protection(&contract.target_protection, target_catalog)?;
+            validate_target_protection(
+                TargetProtectionUse::WarmMerge,
+                &contract.target_protection,
+                target_catalog,
+                target_writer_identity,
+            )?;
             if contract
                 .tables
                 .windows(2)
@@ -798,7 +859,12 @@ fn validate_target_mode(
             {
                 return Err(PlanError::InvalidTargetMode);
             }
-            validate_target_protection(&contract.target_protection, target_catalog)?;
+            validate_target_protection(
+                TargetProtectionUse::StagingSwap,
+                &contract.target_protection,
+                target_catalog,
+                target_writer_identity,
+            )?;
             let catalog_items = contract
                 .ownership
                 .validate_against(target_catalog, target_catalog_fingerprint)?;
@@ -806,6 +872,9 @@ fn validate_target_mode(
             let mut identities = BTreeSet::new();
             let mut prior_replacement = None;
             for replacement in &contract.replacements {
+                if matches!(replacement, StagingReplacement::Table { .. }) {
+                    return Err(PlanError::TableStagingExecutionUnavailable);
+                }
                 let live_identity = replacement.live_identity();
                 if prior_replacement
                     .as_ref()
@@ -848,27 +917,52 @@ fn validate_target_mode(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetProtectionUse {
+    WarmMerge,
+    StagingSwap,
+}
+
 fn validate_target_protection(
+    target_use: TargetProtectionUse,
     protection: &TargetProtectionContract,
     target_catalog: &VendorCatalog,
+    target_writer_identity: Option<&TargetWriterIdentity>,
 ) -> Result<(), PlanError> {
-    let provider_reference = match protection {
-        TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 => {
-            if target_catalog.dialect != "postgresql" {
-                return Err(PlanError::InvalidTargetMode);
-            }
-            return Ok(());
-        }
-        TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
-            provider_reference,
-        } => {
-            if target_catalog.dialect != "mysql" {
-                return Err(PlanError::InvalidTargetMode);
-            }
+    let reviewed_writer = target_writer_identity.ok_or(PlanError::MissingEvidence {
+        field: "target_writer_identity",
+    })?;
+    reviewed_writer.validate_for_catalog(target_catalog)?;
+    if protection.writer_identity() != reviewed_writer {
+        return Err(PlanError::InvalidTargetWriterIdentity);
+    }
+    let provider_reference = match (target_use, protection) {
+        (
+            TargetProtectionUse::WarmMerge,
+            TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 { .. },
+        ) if target_catalog.dialect == "postgresql" => return Ok(()),
+        (
+            TargetProtectionUse::WarmMerge,
+            TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                provider_reference,
+                ..
+            },
+        ) if target_catalog.dialect == "mysql" => provider_reference,
+        (
+            TargetProtectionUse::WarmMerge | TargetProtectionUse::StagingSwap,
+            TargetProtectionContract::ExternalContinuousQuiesceV1 {
+                provider_reference, ..
+            },
+        ) if matches!(target_catalog.dialect.as_str(), "postgresql" | "mysql") => {
             provider_reference
         }
-        TargetProtectionContract::ExternalContinuousQuiesceV1 { provider_reference } => {
-            provider_reference
+        (
+            _,
+            TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 { .. }
+            | TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 { .. }
+            | TargetProtectionContract::ExternalContinuousQuiesceV1 { .. },
+        ) => {
+            return Err(PlanError::TargetProtectionUnavailableForMode);
         }
     };
     if provider_reference.trim().is_empty() || provider_reference.contains('\0') {
@@ -1583,6 +1677,14 @@ pub enum PlanError {
     AssessmentCannotExecute,
     #[error("reviewed target mode is invalid or inconsistent with the target catalog")]
     InvalidTargetMode,
+    #[error("reviewed target writer identity is absent, invalid, or inconsistent")]
+    InvalidTargetWriterIdentity,
+    #[error("reviewed target-protection mechanism is unavailable for the selected target mode")]
+    TargetProtectionUnavailableForMode,
+    #[error(
+        "table-level staging is unavailable until table-owned child identities and rename behavior are proven"
+    )]
+    TableStagingExecutionUnavailable,
     #[error("target ownership manifest does not classify every reviewed target item exactly once")]
     IncompleteTargetOwnershipManifest,
     #[error("target ownership manifest fingerprint differs from the reviewed target catalog")]
@@ -1701,6 +1803,23 @@ mod tests {
         }
     }
 
+    fn postgres_writer() -> TargetWriterIdentity {
+        TargetWriterIdentity::PostgreSqlRole(Identifier::new("writer").unwrap())
+    }
+
+    fn postgres_token_fence() -> TargetProtectionContract {
+        TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 {
+            writer_identity: postgres_writer(),
+        }
+    }
+
+    fn postgres_external_quiesce() -> TargetProtectionContract {
+        TargetProtectionContract::ExternalContinuousQuiesceV1 {
+            writer_identity: postgres_writer(),
+            provider_reference: "quiesce-provider".into(),
+        }
+    }
+
     fn plan() -> MigrationPlan {
         let source_catalog = catalog("source");
         let target_catalog = catalog("target");
@@ -1719,6 +1838,7 @@ mod tests {
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             target_mode: Some(AssessmentStatus::Assessed(TargetModeContract::EmptyOwned)),
+            target_writer_identity: None,
             consistency_mode: "consistent-snapshot".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
@@ -1868,7 +1988,7 @@ mod tests {
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
             WarmMergeContract {
                 conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
-                target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
+                target_protection: postgres_token_fence(),
                 ownership: ownership_manifest(
                     &plan,
                     TargetObjectDisposition::Preserve,
@@ -1880,12 +2000,22 @@ mod tests {
                 }],
             },
         )));
+        plan.target_writer_identity = Some(postgres_writer());
 
         assert!(plan.validate().is_ok());
         assert!(ReviewedPlan::new(plan.clone()).is_ok());
         assert!(matches!(
             plan.validate_for_execution(),
             Err(PlanError::TargetModeExecutionUnavailable)
+        ));
+
+        let mut wrong_writer = plan.clone();
+        wrong_writer.target_writer_identity = Some(TargetWriterIdentity::PostgreSqlRole(
+            Identifier::new("other_writer").unwrap(),
+        ));
+        assert!(matches!(
+            wrong_writer.validate(),
+            Err(PlanError::InvalidTargetWriterIdentity)
         ));
 
         let mut reordered = plan.clone();
@@ -1908,11 +2038,15 @@ mod tests {
         };
         contract.target_protection =
             TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                writer_identity: TargetWriterIdentity::MySqlAccount(MySqlAccountIdentity {
+                    user: "writer".into(),
+                    host: "%".into(),
+                }),
                 provider_reference: "ddl-freeze-provider".into(),
             };
         assert!(matches!(
             wrong_dialect.validate(),
-            Err(PlanError::InvalidTargetMode)
+            Err(PlanError::InvalidTargetWriterIdentity)
         ));
 
         let AssessmentStatus::Assessed(TargetModeContract::WarmMerge(contract)) =
@@ -1934,7 +2068,7 @@ mod tests {
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
             WarmMergeContract {
                 conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
-                target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
+                target_protection: postgres_token_fence(),
                 ownership: ownership_manifest(
                     &plan,
                     TargetObjectDisposition::Preserve,
@@ -1946,6 +2080,7 @@ mod tests {
                 }],
             },
         )));
+        plan.target_writer_identity = Some(postgres_writer());
 
         assert!(matches!(plan.validate(), Err(PlanError::InvalidTargetMode)));
 
@@ -1986,7 +2121,7 @@ mod tests {
         ];
         plan.target_mode = Some(AssessmentStatus::Assessed(TargetModeContract::StagingSwap(
             StagingSwapContract {
-                target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
+                target_protection: postgres_external_quiesce(),
                 ownership: ownership_manifest(
                     &plan,
                     TargetObjectDisposition::ReplaceAtCutover,
@@ -2002,12 +2137,51 @@ mod tests {
                 retained_backup_policy: RetainedBackupPolicy::RetainUntilExplicitCleanup,
             },
         )));
+        plan.target_writer_identity = Some(postgres_writer());
 
         assert!(plan.validate().is_ok());
         assert!(ReviewedPlan::new(plan.clone()).is_ok());
         assert!(matches!(
             plan.validate_for_execution(),
             Err(PlanError::TargetModeExecutionUnavailable)
+        ));
+
+        let mut postgres_token_staging = plan.clone();
+        let AssessmentStatus::Assessed(TargetModeContract::StagingSwap(contract)) =
+            postgres_token_staging.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        contract.target_protection = postgres_token_fence();
+        assert!(matches!(
+            postgres_token_staging.validate(),
+            Err(PlanError::TargetProtectionUnavailableForMode)
+        ));
+
+        let mut table_staging = plan.clone();
+        let AssessmentStatus::Assessed(TargetModeContract::StagingSwap(contract)) =
+            table_staging.target_mode.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        contract.replacements = vec![StagingReplacement::Table {
+            live: QualifiedTable {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new("items").unwrap(),
+            },
+            staging: QualifiedTable {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new("sqlspl_stage_items_m1").unwrap(),
+            },
+            retained: QualifiedTable {
+                namespace: Identifier::new("public").unwrap(),
+                name: Identifier::new("sqlspl_retained_items_m1").unwrap(),
+            },
+            catalog_items: vec![TargetCatalogItem::Object("relation:items".into())],
+        }];
+        assert!(matches!(
+            table_staging.validate(),
+            Err(PlanError::TableStagingExecutionUnavailable)
         ));
 
         let mut reordered = plan.clone();
@@ -2038,6 +2212,42 @@ mod tests {
         };
         *retained = staging.clone();
         assert!(matches!(plan.validate(), Err(PlanError::InvalidTargetMode)));
+    }
+
+    #[test]
+    fn mysql_staging_requires_external_continuous_quiesce() {
+        let mut target = catalog("target");
+        target.dialect = "mysql".into();
+        let writer = TargetWriterIdentity::MySqlAccount(MySqlAccountIdentity {
+            user: "writer".into(),
+            host: "%".into(),
+        });
+        let backup_lock =
+            TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                writer_identity: writer.clone(),
+                provider_reference: "backup-lock-provider".into(),
+            };
+        assert!(matches!(
+            validate_target_protection(
+                TargetProtectionUse::StagingSwap,
+                &backup_lock,
+                &target,
+                Some(&writer),
+            ),
+            Err(PlanError::TargetProtectionUnavailableForMode)
+        ));
+
+        let quiesce = TargetProtectionContract::ExternalContinuousQuiesceV1 {
+            writer_identity: writer.clone(),
+            provider_reference: "quiesce-provider".into(),
+        };
+        assert!(validate_target_protection(
+            TargetProtectionUse::StagingSwap,
+            &quiesce,
+            &target,
+            Some(&writer),
+        )
+        .is_ok());
     }
 
     #[test]

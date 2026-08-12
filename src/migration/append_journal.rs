@@ -1996,6 +1996,7 @@ mod tests {
             target_mode: Some(AssessmentStatus::Assessed(
                 crate::migration::plan::TargetModeContract::EmptyOwned,
             )),
+            target_writer_identity: None,
             consistency_mode: POSTGRES_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,

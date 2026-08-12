@@ -1774,6 +1774,7 @@ fn build_plan_from_execution_source(
         target_mode: Some(AssessmentStatus::Assessed(
             super::plan::TargetModeContract::EmptyOwned,
         )),
+        target_writer_identity: None,
         consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY,

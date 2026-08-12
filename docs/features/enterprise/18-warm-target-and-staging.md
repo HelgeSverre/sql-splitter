@@ -3,6 +3,9 @@
 Implementation Phase 8 adds two same-dialect target modes. It does not make
 the current empty-target executor destructive by default.
 
+Serialization uses plan schema v20 and target-protection evidence schema v2.
+Older artifacts fail at their typed version boundaries.
+
 1. **Warm merge** preserves target-only rows and inserts source rows whose
    complete keys do not exist on the target.
 2. **Staging swap** builds and verifies migration-owned objects under staging
@@ -37,8 +40,18 @@ migration-token fence whose trigger exemption is available only to sessions
 that prove the per-migration secret. MySQL uses migration-token DML guards plus
 a separately held external DDL freeze, or a provider can attest one continuous
 external quiesce that excludes both DML and DDL. The reviewed plan binds the
-mechanism and external provider identity, but never the runtime token. Execute
-cannot substitute a different mechanism.
+mechanism, exact typed target-writer identity, and external provider identity,
+but never the runtime token. Accepted runtime evidence repeats the writer
+identity and must equal the reviewed identity. Execute cannot substitute a
+different mechanism or writer.
+
+Protection validation is mode-aware. Warm merge can use the PostgreSQL token
+fence, the MySQL token fence plus external DDL freeze, or a complete external
+quiesce for the matching target dialect. The first staging subset uses only a
+complete external quiesce. The MySQL backup lock blocks `RENAME TABLE`, and the
+PostgreSQL token-fence contract does not yet encode the exact role- and
+token-bound event-trigger exemption required by cutover. Those two mechanisms
+therefore cannot authorize staging.
 
 The existing source fence is not a target fence. Its PostgreSQL DML guard
 rejects the migration writer, and MySQL `super_read_only` rejects privileged
@@ -135,6 +148,13 @@ comparison, user callbacks, deletes, or target-to-source reconciliation. Each
 would require a separate typed policy and expected-value contract.
 
 ## Staging swap
+
+The first execution subset replaces complete namespaces only. Table-level
+replacement remains represented by the typed plan model, but execution rejects
+it until the adapter proves the complete set of table-owned and external child
+identities and their rename behavior. This prevents a table rename from
+leaving views, foreign keys, routines, grants, or other dependent objects bound
+to an unreviewed identity.
 
 ### Naming and ownership
 

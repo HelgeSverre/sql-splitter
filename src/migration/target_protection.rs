@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::model::Identifier;
-use super::mysql_visibility::MySqlAccountIdentity;
-use super::plan::{AssessmentStatus, ReviewedPlan, TargetModeContract, TargetProtectionContract};
+use super::plan::{
+    AssessmentStatus, ReviewedPlan, TargetModeContract, TargetProtectionContract,
+    TargetWriterIdentity,
+};
 
-pub const TARGET_PROTECTION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
+pub const TARGET_PROTECTION_EVIDENCE_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +20,7 @@ pub struct TargetProtectionBinding {
     pub target_endpoint_identity: String,
     pub target_catalog_fingerprint: String,
     pub target_mode_hash: String,
+    pub writer_identity: TargetWriterIdentity,
     pub activated_at_unix_seconds: u64,
 }
 
@@ -30,7 +32,6 @@ pub enum AcceptedTargetProtectionEvidence {
         generation: String,
         token_hash: String,
         guard_inventory_fingerprint: String,
-        writer_role: Identifier,
         administrator_tls_binding: String,
     },
     MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
@@ -38,7 +39,6 @@ pub enum AcceptedTargetProtectionEvidence {
         generation: String,
         token_hash: String,
         guard_inventory_fingerprint: String,
-        writer_account: MySqlAccountIdentity,
         administrator_tls_binding: String,
         provider_reference: String,
         ddl_freeze_continuity_token_hash: String,
@@ -88,6 +88,7 @@ impl AcceptedTargetProtectionEvidence {
             || binding.target_endpoint_identity != *target_endpoint
             || binding.target_catalog_fingerprint != *target_fingerprint
             || binding.target_mode_hash != canonical_hash(mode)?
+            || binding.writer_identity != *contract.writer_identity()
             || binding.activated_at_unix_seconds == 0
         {
             return Err(TargetProtectionError::ReviewedPlanMismatch);
@@ -112,22 +113,23 @@ impl AcceptedTargetProtectionEvidence {
         &self,
         contract: &TargetProtectionContract,
     ) -> Result<(), TargetProtectionError> {
+        if &self.binding().writer_identity != contract.writer_identity() {
+            return Err(TargetProtectionError::MechanismMismatch);
+        }
         match (self, contract) {
             (
                 Self::PostgreSqlMigrationTokenFenceV1 {
                     generation,
                     token_hash,
                     guard_inventory_fingerprint,
-                    writer_role,
                     administrator_tls_binding,
                     ..
                 },
-                TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
+                TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 { .. },
             ) => {
                 require_nonempty(generation)?;
                 require_sha256(token_hash)?;
                 require_sha256(guard_inventory_fingerprint)?;
-                require_nonempty(writer_role.as_str())?;
                 require_nonempty(administrator_tls_binding)
             }
             (
@@ -135,7 +137,6 @@ impl AcceptedTargetProtectionEvidence {
                     generation,
                     token_hash,
                     guard_inventory_fingerprint,
-                    writer_account,
                     administrator_tls_binding,
                     provider_reference,
                     ddl_freeze_continuity_token_hash,
@@ -145,14 +146,12 @@ impl AcceptedTargetProtectionEvidence {
                 },
                 TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
                     provider_reference: expected_provider,
+                    ..
                 },
             ) => {
                 require_nonempty(generation)?;
                 require_sha256(token_hash)?;
                 require_sha256(guard_inventory_fingerprint)?;
-                writer_account
-                    .validate()
-                    .map_err(|_| TargetProtectionError::InvalidEvidence)?;
                 require_nonempty(administrator_tls_binding)?;
                 require_nonempty(provider_reference)?;
                 require_sha256(ddl_freeze_continuity_token_hash)?;
@@ -173,6 +172,7 @@ impl AcceptedTargetProtectionEvidence {
                 },
                 TargetProtectionContract::ExternalContinuousQuiesceV1 {
                     provider_reference: expected_provider,
+                    ..
                 },
             ) => {
                 require_nonempty(provider_reference)?;
@@ -232,6 +232,19 @@ pub enum TargetProtectionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::model::Identifier;
+    use crate::migration::mysql_visibility::MySqlAccountIdentity;
+
+    fn postgres_writer() -> TargetWriterIdentity {
+        TargetWriterIdentity::PostgreSqlRole(Identifier::new("writer").unwrap())
+    }
+
+    fn mysql_writer() -> TargetWriterIdentity {
+        TargetWriterIdentity::MySqlAccount(MySqlAccountIdentity {
+            user: "writer".into(),
+            host: "host".into(),
+        })
+    }
 
     fn binding() -> TargetProtectionBinding {
         TargetProtectionBinding {
@@ -241,6 +254,7 @@ mod tests {
             target_endpoint_identity: "target".into(),
             target_catalog_fingerprint: "b".repeat(64),
             target_mode_hash: "c".repeat(64),
+            writer_identity: mysql_writer(),
             activated_at_unix_seconds: 100,
         }
     }
@@ -253,10 +267,6 @@ mod tests {
                 generation: "generation-1".into(),
                 token_hash: "d".repeat(64),
                 guard_inventory_fingerprint: "e".repeat(64),
-                writer_account: MySqlAccountIdentity {
-                    user: "writer".into(),
-                    host: "host".into(),
-                },
                 administrator_tls_binding: "admin-tls".into(),
                 provider_reference: "provider-1".into(),
                 ddl_freeze_continuity_token_hash: "f".repeat(64),
@@ -266,6 +276,7 @@ mod tests {
         assert!(evidence
             .validate_mechanism(
                 &TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                    writer_identity: mysql_writer(),
                     provider_reference: "provider-1".into(),
                 }
             )
@@ -273,6 +284,7 @@ mod tests {
         assert!(matches!(
             evidence.validate_mechanism(
                 &TargetProtectionContract::MySqlMigrationTokenFenceWithExternalDdlFreezeV1 {
+                    writer_identity: mysql_writer(),
                     provider_reference: "other".into(),
                 }
             ),
@@ -283,20 +295,36 @@ mod tests {
     #[test]
     fn evidence_variant_must_equal_the_reviewed_mechanism() {
         let evidence = AcceptedTargetProtectionEvidence::PostgreSqlMigrationTokenFenceV1 {
-            binding: binding(),
+            binding: TargetProtectionBinding {
+                writer_identity: postgres_writer(),
+                ..binding()
+            },
             generation: "generation-1".into(),
             token_hash: "d".repeat(64),
             guard_inventory_fingerprint: "e".repeat(64),
-            writer_role: Identifier::new("writer").unwrap(),
             administrator_tls_binding: "admin-tls".into(),
         };
         assert!(evidence
-            .validate_mechanism(&TargetProtectionContract::PostgreSqlMigrationTokenFenceV1)
+            .validate_mechanism(&TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 {
+                writer_identity: postgres_writer(),
+            })
             .is_ok());
         assert!(matches!(
             evidence.validate_mechanism(&TargetProtectionContract::ExternalContinuousQuiesceV1 {
+                writer_identity: postgres_writer(),
                 provider_reference: "provider-1".into(),
             }),
+            Err(TargetProtectionError::MechanismMismatch)
+        ));
+
+        assert!(matches!(
+            evidence.validate_mechanism(
+                &TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 {
+                    writer_identity: TargetWriterIdentity::PostgreSqlRole(
+                        Identifier::new("other_writer").unwrap(),
+                    ),
+                }
+            ),
             Err(TargetProtectionError::MechanismMismatch)
         ));
     }

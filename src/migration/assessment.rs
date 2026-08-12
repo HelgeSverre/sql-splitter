@@ -1031,6 +1031,7 @@ mod tests {
             source_tls_binding: "hostname_verified".into(),
             target_tls_binding: AssessmentStatus::NotAssessed,
             target_mode: Some(AssessmentStatus::NotAssessed),
+            target_writer_identity: None,
             consistency_mode: "not_assessed".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: POSTGRESQL_ASSESSMENT_CONVERSION_POLICY,

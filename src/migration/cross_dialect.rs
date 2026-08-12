@@ -293,6 +293,7 @@ pub fn build_postgres_to_mysql_plan(
         target_mode: Some(AssessmentStatus::Assessed(
             super::plan::TargetModeContract::EmptyOwned,
         )),
+        target_writer_identity: None,
         consistency_mode: PostgresConsistencyMode::WriteFence.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy,
@@ -453,6 +454,7 @@ pub fn build_mysql_to_postgres_plan(
         target_mode: Some(AssessmentStatus::Assessed(
             super::plan::TargetModeContract::EmptyOwned,
         )),
+        target_writer_identity: None,
         consistency_mode: super::mysql::MYSQL_CONSISTENCY_SNAPSHOT.into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy,

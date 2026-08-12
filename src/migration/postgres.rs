@@ -7418,6 +7418,7 @@ pub fn build_plan_with_consistency_and_contracts(
         target_mode: Some(AssessmentStatus::Assessed(
             super::plan::TargetModeContract::EmptyOwned,
         )),
+        target_writer_identity: None,
         consistency_mode: consistency_mode.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
@@ -8149,6 +8150,7 @@ pub fn build_source_assessment_with_profile(
         source_tls_binding: source.tls_binding.clone(),
         target_tls_binding: AssessmentStatus::NotAssessed,
         target_mode: Some(AssessmentStatus::NotAssessed),
+        target_writer_identity: None,
         consistency_mode: "not_assessed".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         conversion_policy: POSTGRESQL_ASSESSMENT_CONVERSION_POLICY,

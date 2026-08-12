@@ -216,7 +216,8 @@ mod tests {
     use crate::migration::plan::{
         MigrationPlan, PlanOperation, PlanPurpose, TargetCatalogItem, TargetObjectDisposition,
         TargetOwnershipClaim, TargetOwnershipManifest, TargetProtectionContract,
-        UnsupportedObjectReport, WarmMergeConflictPolicy, WarmMergeTable, PLAN_SCHEMA_VERSION,
+        TargetWriterIdentity, UnsupportedObjectReport, WarmMergeConflictPolicy, WarmMergeTable,
+        PLAN_SCHEMA_VERSION,
     };
 
     fn fingerprint(catalog: &VendorCatalog) -> String {
@@ -284,7 +285,11 @@ mod tests {
             target_mode: Some(AssessmentStatus::Assessed(TargetModeContract::WarmMerge(
                 WarmMergeContract {
                     conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
-                    target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1,
+                    target_protection: TargetProtectionContract::PostgreSqlMigrationTokenFenceV1 {
+                        writer_identity: TargetWriterIdentity::PostgreSqlRole(
+                            Identifier::new("writer").unwrap(),
+                        ),
+                    },
                     ownership: TargetOwnershipManifest {
                         target_catalog_fingerprint: target_fingerprint,
                         claims: vec![
@@ -304,6 +309,9 @@ mod tests {
                     }],
                 },
             ))),
+            target_writer_identity: Some(TargetWriterIdentity::PostgreSqlRole(
+                Identifier::new("writer").unwrap(),
+            )),
             consistency_mode: "write-fence".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy:
