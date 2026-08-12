@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use super::journal::{ConsistencyEvidence, MigrationStatus, OperationState, ResumeBinding};
 use super::model::{CatalogObjectKind, DbValue};
+use super::mysql_profile::{MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus};
 use super::outage_projection::AcceptedOutageProjection;
 use super::plan::{OperationKind, ReviewedPlan};
 use super::postgres::{postgres_sequences, PostgresSequence, POSTGRES_CONSISTENCY_SNAPSHOT};
@@ -88,6 +89,7 @@ pub struct Genesis {
     pub reviewed_plan: ReviewedPlan,
     pub accepted_outage_projection: Option<AcceptedOutageProjection>,
     pub accepted_external_quiesce: Option<PostgresExternalQuiesceAttestation>,
+    pub accepted_mysql_freeze: Option<MySqlExternalFreezeAttestation>,
     pub operations: Vec<OperationSpec>,
 }
 
@@ -151,6 +153,62 @@ impl Genesis {
             | (_, Some(_), _)
             | (_, _, Some(_)) => return Err(AppendJournalError::InvalidGenesis),
             _ => {}
+        }
+        match (
+            self.reviewed_plan.plan.mysql_source_profile.as_ref(),
+            self.accepted_mysql_freeze.as_ref(),
+            self.binding.mysql_freeze_attestation_digest.as_ref(),
+        ) {
+            (Some(profile), Some(attestation), Some(digest)) => {
+                profile
+                    .validate()
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                attestation
+                    .validate()
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                if attestation.status != MySqlFreezeAttestationStatus::Active
+                    || attestation.source_endpoint_identity
+                        != self.reviewed_plan.plan.source_endpoint_identity
+                    || attestation.source_database_identity
+                        != self
+                            .reviewed_plan
+                            .plan
+                            .source_catalog
+                            .as_ref()
+                            .ok_or(AppendJournalError::InvalidGenesis)?
+                            .database
+                            .as_str()
+                    || attestation.source_catalog_fingerprint
+                        != self.reviewed_plan.plan.source_catalog_fingerprint
+                    || &attestation
+                        .canonical_hash()
+                        .map_err(|_| AppendJournalError::InvalidGenesis)?
+                        != digest
+                {
+                    return Err(AppendJournalError::InvalidGenesis);
+                }
+                match &self.binding.consistency_evidence {
+                    ConsistencyEvidence::MySqlExternalFreeze {
+                        endpoint_identity,
+                        database_identity,
+                        server_uuid,
+                        source_catalog_fingerprint,
+                        profile_generation,
+                        continuity_token_hash,
+                        backup_lock_connection_id,
+                    } if endpoint_identity == &attestation.source_endpoint_identity
+                        && database_identity == &attestation.source_database_identity
+                        && server_uuid == &attestation.server_uuid
+                        && source_catalog_fingerprint
+                            == &attestation.source_catalog_fingerprint
+                        && profile_generation == &attestation.profile_generation
+                        && continuity_token_hash == &attestation.continuity_token_hash
+                        && backup_lock_connection_id == &attestation.backup_lock_connection_id => {}
+                    _ => return Err(AppendJournalError::InvalidGenesis),
+                }
+            }
+            (None, None, None) => {}
+            _ => return Err(AppendJournalError::InvalidGenesis),
         }
         if self.reviewed_plan.plan.consistency_mode == POSTGRES_CONSISTENCY_SNAPSHOT {
             let catalog = self
@@ -397,18 +455,23 @@ impl JournalProjection {
                     database_identity, ..
                 } => Some(database_identity.clone()),
                 ConsistencyEvidence::WriteFence { .. } => None,
+                ConsistencyEvidence::MySqlExternalFreeze {
+                    database_identity, ..
+                } => Some(database_identity.clone()),
             },
             initial_source_server_version: match &genesis.binding.consistency_evidence {
                 ConsistencyEvidence::NativeSnapshot { server_version, .. } => {
                     Some(server_version.clone())
                 }
                 ConsistencyEvidence::WriteFence { .. } => None,
+                ConsistencyEvidence::MySqlExternalFreeze { .. } => None,
             },
             initial_source_lifecycle_id: match &genesis.binding.consistency_evidence {
                 ConsistencyEvidence::NativeSnapshot { lifecycle_id, .. } => {
                     Some(lifecycle_id.clone())
                 }
                 ConsistencyEvidence::WriteFence { .. } => None,
+                ConsistencyEvidence::MySqlExternalFreeze { .. } => None,
             },
         }
     }
@@ -804,6 +867,23 @@ impl std::fmt::Debug for AppendJournal {
 }
 
 impl AppendJournal {
+    pub fn reviewed_plan(&self) -> &ReviewedPlan {
+        &self.genesis.reviewed_plan
+    }
+
+    pub fn accepted_mysql_freeze(&self) -> Option<&MySqlExternalFreezeAttestation> {
+        self.genesis.accepted_mysql_freeze.as_ref()
+    }
+
+    pub fn table_verification_evidence(
+        &self,
+        operation_id: &str,
+    ) -> Option<&(String, String, String)> {
+        self.projection
+            .table_verification_evidence
+            .get(operation_id)
+    }
+
     pub fn read_snapshot(
         path: impl AsRef<Path>,
     ) -> Result<Option<JournalSnapshot>, AppendJournalError> {
@@ -1859,7 +1939,9 @@ mod tests {
             conversion_policy: "exact".into(),
             outage_policy: Some(outage_policy.clone()),
             postgres_source_profile: None,
+            mysql_source_profile: None,
             mysql_snapshot_evidence: None,
+            mysql_target_snapshot_evidence: None,
             capabilities: BTreeMap::new(),
             operations,
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -1887,6 +1969,7 @@ mod tests {
                 .to_owned(),
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
+            mysql_freeze_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: 1,
         };
@@ -1912,6 +1995,7 @@ mod tests {
             reviewed_plan,
             accepted_outage_projection: Some(accepted_outage_projection),
             accepted_external_quiesce: None,
+            accepted_mysql_freeze: None,
             operations: specs,
         }
     }

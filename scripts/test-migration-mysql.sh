@@ -19,12 +19,17 @@ fi
 run_id="${version//./}-$$-$RANDOM"
 container="sqlspl-migration-mysql-$run_id"
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-mysql-${run_id}.XXXXXX")
+journal_dir=$(mktemp -d "$PWD/.sqlspl-mysql-journal-${run_id}.XXXXXX")
 cert_dir="$test_dir/certs"
 mkdir -p "$cert_dir"
 
 cleanup() {
+  if [ -n "${lock_pid:-}" ]; then
+    kill "$lock_pid" >/dev/null 2>&1 || true
+  fi
   docker rm -f "$container" >/dev/null 2>&1 || true
   rm -rf "$test_dir"
+  rm -rf "$journal_dir"
 }
 trap cleanup EXIT INT TERM
 
@@ -75,14 +80,18 @@ docker exec "$container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null
 
 docker exec -i "$container" mysql -uroot -prootpass <<'SQL'
 CREATE DATABASE migration_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE MIGRATION_SOURCE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
 CREATE USER 'business_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
 GRANT SELECT, SHOW VIEW ON migration_source.* TO 'migration_source'@'%';
-GRANT SELECT, SHOW VIEW ON migration_target.* TO 'migration_target'@'%';
+GRANT SELECT ON MIGRATION_SOURCE.* TO 'migration_source'@'%';
+GRANT ALL PRIVILEGES ON migration_target.* TO 'migration_target'@'%';
 GRANT ALL PRIVILEGES ON migration_source.* TO 'migration_admin'@'%';
+GRANT PROCESS ON *.* TO 'migration_admin'@'%';
+GRANT SELECT ON performance_schema.* TO 'migration_admin'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -90,6 +99,12 @@ CREATE TABLE items (
   name VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL
 ) ENGINE=InnoDB;
 INSERT INTO items VALUES (1, 'one'), (2, 'two');
+CREATE VIEW items_view AS SELECT id, name FROM items;
+CREATE TABLE copy_items (
+  id BIGINT NOT NULL PRIMARY KEY,
+  payload VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO copy_items VALUES (1, 'one'), (2, 'two');
 GRANT SELECT (name) ON migration_source.items TO 'business_reader'@'%';
 CREATE INDEX items_lower_name ON items ((lower(name)));
 CREATE TABLE ci_keys (
@@ -101,6 +116,7 @@ CREATE TABLE auto_items (
 ) ENGINE=InnoDB;
 INSERT INTO auto_items(name) VALUES ('first');
 CREATE TABLE legacy (id BIGINT NOT NULL PRIMARY KEY) ENGINE=MyISAM;
+CREATE TABLE MIGRATION_SOURCE.case_collision (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
 SQL
 
 write_config() {
@@ -141,7 +157,39 @@ export SQL_SPLITTER_MYSQL_TEST_SOURCE_CONFIG="$source_config"
 export SQL_SPLITTER_MYSQL_TEST_TARGET_CONFIG="$target_config"
 export SQL_SPLITTER_MYSQL_TEST_ADMIN_CONFIG="$admin_config"
 export SQL_SPLITTER_MYSQL_TEST_PLAN_OUTPUT="$test_dir/plan.json"
+export SQL_SPLITTER_MYSQL_TEST_JOURNAL_OUTPUT="$journal_dir/state.journal"
 
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_mysql_plan_test live_mysql_snapshot_catalog_and_blocked_plan \
+  -- --ignored --exact --nocapture
+
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "SET PERSIST super_read_only = ON"
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "LOCK INSTANCE FOR BACKUP; SELECT SLEEP(300)" >/dev/null 2>&1 &
+lock_pid=$!
+
+backup_lock_connection_id=""
+for _ in $(seq 1 50); do
+  backup_lock_connection_id=$(docker exec "$container" mysql -uroot -prootpass -Nse \
+    "SELECT t.PROCESSLIST_ID FROM performance_schema.metadata_locks ml JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID WHERE ml.OBJECT_TYPE = 'BACKUP LOCK' AND ml.LOCK_STATUS = 'GRANTED' LIMIT 1" 2>/dev/null || true)
+  if [ -n "$backup_lock_connection_id" ]; then
+    break
+  fi
+  sleep 0.1
+done
+if [ -z "$backup_lock_connection_id" ]; then
+  echo "external MySQL backup lock did not become observable" >&2
+  exit 1
+fi
+read -r backup_lock_owner_user backup_lock_owner_host <<EOF
+$(docker exec "$container" mysql -uroot -prootpass -Nse \
+  "SELECT PROCESSLIST_USER, PROCESSLIST_HOST FROM performance_schema.threads WHERE PROCESSLIST_ID = $backup_lock_connection_id")
+EOF
+export SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID="$backup_lock_connection_id"
+export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER="$backup_lock_owner_user"
+export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_lock_owner_host"
+
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_mysql_plan_test live_mysql_external_freeze_attestation \
   -- --ignored --exact --nocapture

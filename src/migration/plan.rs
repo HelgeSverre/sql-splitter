@@ -6,10 +6,15 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::model::{QualifiedTable, VendorCatalog};
+use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 9;
+pub const PLAN_SCHEMA_VERSION: u16 = 10;
+pub const MYSQL_STRICT_SQL_MODE: &str =
+    "STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,NO_AUTO_VALUE_ON_ZERO";
+pub const MYSQL_SESSION_CHARACTER_SET: &str = "utf8mb4";
+pub const MYSQL_SESSION_COLLATION: &str = "utf8mb4_0900_bin";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +31,12 @@ pub struct MySqlSnapshotEvidence {
     /// MySQL data-dictionary reads are not protected by the InnoDB row snapshot.
     pub catalog_snapshot_protected: bool,
     pub information_schema_stats_expiry: u64,
+    pub lower_case_table_names: u8,
+    pub session_sql_mode: String,
+    pub character_set_client: String,
+    pub character_set_connection: String,
+    pub character_set_results: String,
+    pub collation_connection: String,
     pub gtid_executed_observation: String,
     pub catalog_fingerprint: String,
 }
@@ -302,7 +313,11 @@ pub struct MigrationPlan {
     #[serde(default)]
     pub postgres_source_profile: Option<PostgresSourceProfileContract>,
     #[serde(default)]
+    pub mysql_source_profile: Option<MySqlFreezeProfileContract>,
+    #[serde(default)]
     pub mysql_snapshot_evidence: Option<MySqlSnapshotEvidence>,
+    #[serde(default)]
+    pub mysql_target_snapshot_evidence: Option<MySqlSnapshotEvidence>,
     pub capabilities: BTreeMap<String, String>,
     pub operations: Vec<PlanOperation>,
     pub unsupported_objects: UnsupportedObjectReport,
@@ -385,6 +400,9 @@ impl MigrationPlan {
             if self.postgres_source_profile.is_some() {
                 return Err(PlanError::AssessmentContainsSourceProfile);
             }
+            if self.mysql_source_profile.is_some() {
+                return Err(PlanError::AssessmentContainsSourceProfile);
+            }
         }
         if let Some(outage_policy) = &self.outage_policy {
             outage_policy.validate()?;
@@ -404,25 +422,41 @@ impl MigrationPlan {
             &self.mysql_snapshot_evidence,
         ) {
             ("mysql", Some(evidence)) => {
-                if evidence.endpoint_identity != self.source_endpoint_identity
-                    || evidence.database_identity != source_catalog.database.as_str()
-                    || evidence.server_version != source_catalog.server_version
-                    || evidence.catalog_fingerprint != self.source_catalog_fingerprint
-                    || evidence.server_uuid.is_empty()
-                    || evidence.lifecycle_id.is_empty()
-                    || evidence.connection_id == 0
-                    || !evidence
-                        .transaction_isolation
-                        .eq_ignore_ascii_case("REPEATABLE-READ")
-                    || !evidence.transaction_read_only
-                    || evidence.session_time_zone != "+00:00"
-                    || evidence.catalog_snapshot_protected
-                    || evidence.information_schema_stats_expiry != 0
-                    || self.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
-                {
+                self.mysql_source_profile
+                    .as_ref()
+                    .ok_or(PlanError::MissingEvidence {
+                        field: "mysql_source_profile",
+                    })?
+                    .validate()?;
+                validate_mysql_snapshot_evidence(
+                    evidence,
+                    &self.source_endpoint_identity,
+                    source_catalog,
+                    &self.source_catalog_fingerprint,
+                )?;
+                if self.postgres_source_profile.is_some() {
                     return Err(PlanError::InvalidMySqlSnapshotEvidence);
                 }
-                if self.postgres_source_profile.is_some() {
+                let target_evidence = self.mysql_target_snapshot_evidence.as_ref().ok_or(
+                    PlanError::MissingEvidence {
+                        field: "mysql_target_snapshot_evidence",
+                    },
+                )?;
+                validate_mysql_snapshot_evidence(
+                    target_evidence,
+                    self.target_endpoint_identity
+                        .as_assessed()
+                        .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
+                    self.target_catalog
+                        .as_assessed()
+                        .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
+                    self.target_catalog_fingerprint
+                        .as_assessed()
+                        .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
+                )?;
+                if evidence.lower_case_table_names != target_evidence.lower_case_table_names
+                    || self.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
+                {
                     return Err(PlanError::InvalidMySqlSnapshotEvidence);
                 }
             }
@@ -432,7 +466,13 @@ impl MigrationPlan {
                 });
             }
             (_, Some(_)) => return Err(PlanError::UnexpectedMySqlSnapshotEvidence),
+            (_, None) if self.mysql_target_snapshot_evidence.is_some() => {
+                return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
+            }
             (_, None) => {}
+        }
+        if source_catalog.dialect != "mysql" && self.mysql_source_profile.is_some() {
+            return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
         }
         let mut finding_keys = BTreeSet::new();
         for finding in &self.unsupported_objects.objects {
@@ -551,6 +591,42 @@ fn require_execution_target(plan: &MigrationPlan) -> Result<(), PlanError> {
     Ok(())
 }
 
+fn validate_mysql_snapshot_evidence(
+    evidence: &MySqlSnapshotEvidence,
+    endpoint_identity: &str,
+    catalog: &VendorCatalog,
+    catalog_fingerprint: &str,
+) -> Result<(), PlanError> {
+    if evidence.endpoint_identity != endpoint_identity
+        || evidence.database_identity != catalog.database.as_str()
+        || evidence.server_version != catalog.server_version
+        || evidence.catalog_fingerprint != catalog_fingerprint
+        || evidence.server_uuid.is_empty()
+        || evidence.lifecycle_id.is_empty()
+        || evidence.connection_id == 0
+        || !evidence
+            .transaction_isolation
+            .eq_ignore_ascii_case("REPEATABLE-READ")
+        || !evidence.transaction_read_only
+        || evidence.session_time_zone != "+00:00"
+        || evidence.catalog_snapshot_protected
+        || evidence.information_schema_stats_expiry != 0
+        || evidence.lower_case_table_names > 2
+        || evidence.session_sql_mode != MYSQL_STRICT_SQL_MODE
+        || evidence.character_set_client != MYSQL_SESSION_CHARACTER_SET
+        || evidence.character_set_connection != MYSQL_SESSION_CHARACTER_SET
+        || evidence.character_set_results != MYSQL_SESSION_CHARACTER_SET
+        || evidence.collation_connection != MYSQL_SESSION_COLLATION
+        || catalog
+            .vendor_metadata
+            .get("lower_case_table_names")
+            .is_none_or(|value| value != &evidence.lower_case_table_names.to_string())
+    {
+        return Err(PlanError::InvalidMySqlSnapshotEvidence);
+    }
+    Ok(())
+}
+
 fn detect_cycle(operations: &[PlanOperation]) -> Result<(), PlanError> {
     fn visit<'a>(
         id: &'a OperationId,
@@ -652,6 +728,8 @@ pub enum PlanError {
     PostgresSourceProfile(#[from] PostgresSourceProfileError),
     #[error("reviewed MySQL snapshot evidence is invalid or inconsistent")]
     InvalidMySqlSnapshotEvidence,
+    #[error("reviewed MySQL source profile is invalid")]
+    MySqlSourceProfile(#[from] MySqlFreezeProfileError),
     #[error("non-MySQL plan contains MySQL snapshot evidence")]
     UnexpectedMySqlSnapshotEvidence,
     #[error("required plan evidence {field} is absent")]
@@ -727,7 +805,9 @@ mod tests {
                 maximum_approved_seconds: 1,
             }),
             postgres_source_profile: None,
+            mysql_source_profile: None,
             mysql_snapshot_evidence: None,
+            mysql_target_snapshot_evidence: None,
             capabilities: BTreeMap::new(),
             operations: vec![PlanOperation::new(
                 OperationKind::VerifySchema,
@@ -759,8 +839,28 @@ mod tests {
         source_catalog.server_version = "8.4.0".into();
         let source_fingerprint = fingerprint(source_catalog);
         plan.source_catalog_fingerprint = source_fingerprint.clone();
+        let target_catalog = match &mut plan.target_catalog {
+            AssessmentStatus::Assessed(catalog) => catalog,
+            AssessmentStatus::NotAssessed => unreachable!(),
+        };
+        target_catalog.dialect = "mysql".into();
+        target_catalog.server_version = "8.4.0".into();
+        target_catalog
+            .vendor_metadata
+            .insert("lower_case_table_names".into(), "0".into());
+        let target_fingerprint = fingerprint(target_catalog);
+        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(target_fingerprint.clone());
+        source_catalog
+            .vendor_metadata
+            .insert("lower_case_table_names".into(), "0".into());
+        let source_fingerprint = fingerprint(source_catalog);
+        plan.source_catalog_fingerprint = source_fingerprint.clone();
         plan.consistency_mode = "mysql-repeatable-read-consistent-snapshot".into();
         plan.outage_policy = None;
+        plan.mysql_source_profile = Some(
+            crate::migration::mysql_profile::MySqlFreezeProfileContract::external_continuous_freeze(
+            ),
+        );
         plan.mysql_snapshot_evidence = Some(MySqlSnapshotEvidence {
             endpoint_identity: plan.source_endpoint_identity.clone(),
             database_identity: source_catalog.database.to_string(),
@@ -773,10 +873,50 @@ mod tests {
             session_time_zone: "+00:00".into(),
             catalog_snapshot_protected: false,
             information_schema_stats_expiry: 0,
+            lower_case_table_names: 0,
+            session_sql_mode: MYSQL_STRICT_SQL_MODE.into(),
+            character_set_client: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_connection: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_results: MYSQL_SESSION_CHARACTER_SET.into(),
+            collation_connection: MYSQL_SESSION_COLLATION.into(),
             gtid_executed_observation: "uuid:1-7".into(),
             catalog_fingerprint: source_fingerprint,
         });
+        plan.mysql_target_snapshot_evidence = Some(MySqlSnapshotEvidence {
+            endpoint_identity: plan.target_endpoint_identity.as_assessed().unwrap().clone(),
+            database_identity: target_catalog.database.to_string(),
+            server_uuid: "target-server-uuid".into(),
+            server_version: "8.4.0".into(),
+            lifecycle_id: "mysql-target-session-1".into(),
+            connection_id: 8,
+            transaction_isolation: "REPEATABLE-READ".into(),
+            transaction_read_only: true,
+            session_time_zone: "+00:00".into(),
+            catalog_snapshot_protected: false,
+            information_schema_stats_expiry: 0,
+            lower_case_table_names: 0,
+            session_sql_mode: MYSQL_STRICT_SQL_MODE.into(),
+            character_set_client: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_connection: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_results: MYSQL_SESSION_CHARACTER_SET.into(),
+            collation_connection: MYSQL_SESSION_COLLATION.into(),
+            gtid_executed_observation: String::new(),
+            catalog_fingerprint: target_fingerprint,
+        });
         assert!(plan.validate().is_ok());
+
+        plan.mysql_target_snapshot_evidence
+            .as_mut()
+            .unwrap()
+            .lower_case_table_names = 1;
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::InvalidMySqlSnapshotEvidence)
+        ));
+        plan.mysql_target_snapshot_evidence
+            .as_mut()
+            .unwrap()
+            .lower_case_table_names = 0;
 
         plan.mysql_snapshot_evidence
             .as_mut()

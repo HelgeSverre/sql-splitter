@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::model::{DbValue, KeyTuple};
 use super::plan::ReviewedPlan;
 
-pub const STATE_SCHEMA_VERSION: u16 = 7;
+pub const STATE_SCHEMA_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
@@ -30,6 +30,15 @@ pub enum ConsistencyEvidence {
         activation_xid: u64,
         activated_at: String,
     },
+    MySqlExternalFreeze {
+        endpoint_identity: String,
+        database_identity: String,
+        server_uuid: String,
+        source_catalog_fingerprint: String,
+        profile_generation: String,
+        continuity_token_hash: String,
+        backup_lock_connection_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +55,7 @@ pub struct ResumeBinding {
     pub target_schema_fingerprint: String,
     pub outage_projection_digest: Option<String>,
     pub external_quiesce_attestation_digest: Option<String>,
+    pub mysql_freeze_attestation_digest: Option<String>,
     pub conversion_policy: String,
     pub canonical_encoding_version: u16,
 }
@@ -282,6 +292,7 @@ impl MigrationState {
         check!(target_schema_fingerprint);
         check!(outage_projection_digest);
         check!(external_quiesce_attestation_digest);
+        check!(mysql_freeze_attestation_digest);
         check!(conversion_policy);
         check!(canonical_encoding_version);
         Ok(())
@@ -380,6 +391,13 @@ impl MigrationState {
                 });
             }
         }
+        if let Some(digest) = &self.binding.mysql_freeze_attestation_digest {
+            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(JournalError::InvalidBindingDigest {
+                    field: "mysql_freeze_attestation_digest",
+                });
+            }
+        }
         let consistency_fields: Vec<(&'static str, &str)> = match &self.binding.consistency_evidence
         {
             ConsistencyEvidence::NativeSnapshot {
@@ -416,6 +434,39 @@ impl MigrationState {
                 ("fence_inventory_fingerprint", fence_inventory_fingerprint),
                 ("fence_activated_at", activated_at),
             ],
+            ConsistencyEvidence::MySqlExternalFreeze {
+                endpoint_identity,
+                database_identity,
+                server_uuid,
+                source_catalog_fingerprint,
+                profile_generation,
+                continuity_token_hash,
+                backup_lock_connection_id,
+            } => {
+                if *backup_lock_connection_id == 0
+                    || [source_catalog_fingerprint, continuity_token_hash]
+                        .iter()
+                        .any(|digest| {
+                            digest.len() != 64
+                                || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                {
+                    return Err(JournalError::InvalidBindingDigest {
+                        field: "mysql_external_freeze",
+                    });
+                }
+                vec![
+                    ("consistency_endpoint_identity", endpoint_identity),
+                    ("consistency_database_identity", database_identity),
+                    ("mysql_server_uuid", server_uuid),
+                    (
+                        "mysql_source_catalog_fingerprint",
+                        source_catalog_fingerprint,
+                    ),
+                    ("mysql_profile_generation", profile_generation),
+                    ("mysql_continuity_token_hash", continuity_token_hash),
+                ]
+            }
         };
         for (field, value) in consistency_fields {
             if value.is_empty() {
@@ -427,6 +478,9 @@ impl MigrationState {
                 endpoint_identity, ..
             }
             | ConsistencyEvidence::WriteFence {
+                endpoint_identity, ..
+            }
+            | ConsistencyEvidence::MySqlExternalFreeze {
                 endpoint_identity, ..
             } => endpoint_identity,
         };
@@ -978,6 +1032,7 @@ mod tests {
             target_schema_fingerprint: "tf".into(),
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
+            mysql_freeze_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: 1,
         }

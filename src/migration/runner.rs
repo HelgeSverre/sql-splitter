@@ -545,6 +545,7 @@ fn append_journal_genesis(
         reviewed_plan,
         accepted_outage_projection,
         accepted_external_quiesce,
+        accepted_mysql_freeze: None,
         operations,
     }
 }
@@ -1425,7 +1426,10 @@ fn resume_postgres_plan_internal(
     if let Some((admin, installed, _)) = &fenced {
         let generation = match &installed.evidence {
             ConsistencyEvidence::WriteFence { generation, .. } => generation,
-            ConsistencyEvidence::NativeSnapshot { .. } => unreachable!("validated above"),
+            ConsistencyEvidence::NativeSnapshot { .. }
+            | ConsistencyEvidence::MySqlExternalFreeze { .. } => {
+                unreachable!("validated above")
+            }
         };
         cancellation.check()?;
         release_postgres_write_fence(admin, generation, &installed.token)?;
@@ -1635,6 +1639,7 @@ fn execute_postgres_plan_internal(
             .to_owned(),
         outage_projection_digest,
         external_quiesce_attestation_digest,
+        mysql_freeze_attestation_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -2021,6 +2026,9 @@ fn execute_postgres_plan_internal(
             ConsistencyEvidence::WriteFence { generation, .. } => generation,
             ConsistencyEvidence::NativeSnapshot { .. } => {
                 return Err(anyhow!("fence artifact contains native snapshot evidence"));
+            }
+            ConsistencyEvidence::MySqlExternalFreeze { .. } => {
+                return Err(anyhow!("fence artifact contains MySQL freeze evidence"));
             }
         };
         cancellation.check()?;
@@ -4420,7 +4428,9 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         conversion_policy: "same-dialect-exact".into(),
         outage_policy: None,
         postgres_source_profile: None,
+        mysql_source_profile: None,
         mysql_snapshot_evidence: None,
+        mysql_target_snapshot_evidence: None,
         capabilities: BTreeMap::from([
             ("consistent_snapshot".into(), "fixture_supported".into()),
             ("server_read_only".into(), "fixture_supported".into()),
@@ -4478,6 +4488,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
             .to_owned(),
         outage_projection_digest: None,
         external_quiesce_attestation_digest: None,
+        mysql_freeze_attestation_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -5008,6 +5019,7 @@ mod tests {
             target_schema_fingerprint: "target".into(),
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
+            mysql_freeze_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
@@ -5211,7 +5223,9 @@ mod tests {
             conversion_policy: "exact".into(),
             outage_policy: None,
             postgres_source_profile: None,
+            mysql_source_profile: None,
             mysql_snapshot_evidence: None,
+            mysql_target_snapshot_evidence: None,
             capabilities: BTreeMap::from([("source_tls".into(), binding)]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -5351,6 +5365,7 @@ mod tests {
             target_schema_fingerprint: "target".into(),
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
+            mysql_freeze_attestation_digest: None,
             conversion_policy: "exact".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };

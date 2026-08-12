@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -25,16 +25,22 @@ use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::connection::{
     CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
     ControlSession, KeysetPage, ReadOnlyEvidence, ReadSession, SnapshotToken,
-    SourceConnectionFactory,
+    SourceConnectionFactory, TargetConnectionFactory, VerificationSession, WriteSession,
 };
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
     Identifier, QualifiedTable, RowBatch, RowBatchError, VendorCatalog,
 };
+use super::mysql_profile::{
+    MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlExternalFreezeAssertion,
+    MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus, MySqlFreezeProfileContract,
+    MySqlFreezeProfileError, MySqlFreezeProfileKind, MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
+};
 use super::plan::{
     AssessmentStatus, MigrationPlan, MySqlSnapshotEvidence, OperationKind, PlanError,
     PlanOperation, PlanPurpose, ReviewedPlan, UnsupportedObject, UnsupportedObjectCode,
-    UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
+    UnsupportedObjectReport, MYSQL_SESSION_CHARACTER_SET, MYSQL_SESSION_COLLATION,
+    MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
 pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 1;
@@ -45,19 +51,27 @@ const DEFAULT_BATCH_ROWS: usize = 10_000;
 const DEFAULT_BATCH_BYTES: usize = 64 * 1024 * 1024;
 static SNAPSHOT_LIFECYCLE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-type MySqlIdentityRow = (
-    String,
-    String,
-    u16,
-    String,
-    String,
-    String,
-    u8,
-    String,
-    u64,
-    String,
-    u32,
-);
+#[derive(Debug)]
+struct MySqlLiveSessionIdentity {
+    database: String,
+    hostname: String,
+    port: u16,
+    server_version: String,
+    server_uuid: String,
+    transaction_isolation: String,
+    transaction_read_only: u8,
+    session_time_zone: String,
+    information_schema_stats_expiry: u64,
+    gtid_executed_observation: String,
+    connection_id: u32,
+    lower_case_table_names: u8,
+    session_sql_mode: String,
+    character_set_client: String,
+    character_set_connection: String,
+    character_set_results: String,
+    collation_connection: String,
+}
+
 type MySqlIndexRow = (
     String,
     String,
@@ -71,6 +85,15 @@ type MySqlIndexRow = (
     String,
     Option<String>,
     u8,
+);
+type MySqlTableRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
 );
 type MySqlConstraintKeyRow = (
     String,
@@ -135,6 +158,8 @@ pub enum MySqlPlanError {
     Artifact(#[from] ArtifactError),
     #[error("invalid MySQL catalog: {0}")]
     InvalidCatalog(String),
+    #[error("invalid MySQL freeze profile evidence")]
+    FreezeProfile(#[from] MySqlFreezeProfileError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +201,104 @@ pub struct MySqlAutoIncrementState {
     pub stats_expiry: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MySqlColumnType {
+    Integer {
+        name: String,
+        unsigned: bool,
+        display_width: Option<u32>,
+    },
+    Decimal {
+        precision: u32,
+        scale: u32,
+        unsigned: bool,
+    },
+    Floating {
+        name: String,
+        precision: Option<u32>,
+        scale: Option<u32>,
+        unsigned: bool,
+    },
+    Bit {
+        length: u32,
+    },
+    Temporal {
+        name: String,
+        fractional_precision: Option<u32>,
+    },
+    Year,
+    Character {
+        name: String,
+        length: u32,
+    },
+    Binary {
+        name: String,
+        length: u32,
+    },
+    Text {
+        name: String,
+    },
+    Blob {
+        name: String,
+    },
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlColumnDefinition {
+    pub name: Identifier,
+    pub ordinal: u64,
+    pub data_type: MySqlColumnType,
+    pub nullable: bool,
+    pub character_set: Option<String>,
+    pub collation: Option<String>,
+    pub auto_increment: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlIndexDefinition {
+    pub name: Identifier,
+    pub primary: bool,
+    pub unique: bool,
+    pub constraint_backed: bool,
+    pub columns: Vec<Identifier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlTableDefinition {
+    pub table: QualifiedTable,
+    pub engine: String,
+    pub character_set: String,
+    pub collation: String,
+    pub columns: Vec<MySqlColumnDefinition>,
+    pub indexes: Vec<MySqlIndexDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlTableMapping {
+    pub source: QualifiedTable,
+    pub target: QualifiedTable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MySqlTableState {
+    Absent,
+    Exact,
+    Different,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MySqlAutoIncrementTargetState {
+    Exact,
+    BeforeDesired,
+    Different,
+}
+
 /// Inspect one MySQL endpoint through one retained consistent-snapshot session.
 pub fn inspect_live_endpoint(
     config: MySqlEndpointConfig,
@@ -212,8 +335,8 @@ pub fn inspect_live_endpoint(
     })
 }
 
-/// Build a reviewed MySQL plan that remains blocked until freeze and
-/// AUTO_INCREMENT consistency evidence are admitted at execution design time.
+/// Build a reviewed MySQL plan. Live execution separately requires the
+/// reviewed external-freeze attestation stored in its journal genesis.
 pub fn build_plan(
     source: &MySqlCatalogSnapshot,
     target: &MySqlCatalogSnapshot,
@@ -222,6 +345,12 @@ pub fn build_plan(
     validate_catalog_snapshot(target)?;
     validate_supported_server_version(&source.server_version)?;
     validate_supported_server_version(&target.server_version)?;
+    let auto_increment = mysql_auto_increment_states(&source.catalog)
+        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
+    let auto_increment_by_table = auto_increment
+        .iter()
+        .map(|state| (state.table.clone(), state))
+        .collect::<BTreeMap<_, _>>();
     let mut operations = Vec::new();
     let mut tables = source
         .catalog
@@ -286,15 +415,38 @@ pub fn build_plan(
             })
             .cloned()
             .collect::<Vec<_>>();
+        let mut create_parameters = BTreeMap::from([
+            ("mysql_table".into(), serde_json::to_value(object)?),
+            ("mysql_columns".into(), serde_json::to_value(columns)?),
+            ("mysql_indexes".into(), serde_json::to_value(indexes)?),
+        ]);
+        let mut table_mapping = None;
+        match mysql_table_definition(namespace, object) {
+            Ok(mut definition) => {
+                let source_table = definition.table.clone();
+                definition.table.namespace = target.catalog.database.clone();
+                let mapping = MySqlTableMapping {
+                    source: source_table,
+                    target: definition.table.clone(),
+                };
+                create_parameters.insert(
+                    "mysql_table_definition".into(),
+                    serde_json::to_value(definition)?,
+                );
+                create_parameters.insert(
+                    "mysql_table_mapping".into(),
+                    serde_json::to_value(&mapping)?,
+                );
+                table_mapping = Some(mapping);
+            }
+            Err(_) if table_has_ddl_blocker(source, namespace, object) => {}
+            Err(error) => return Err(error),
+        }
         let create = PlanOperation::new(
             OperationKind::CreateTable,
             Some(table.clone()),
             Vec::new(),
-            BTreeMap::from([
-                ("mysql_table".into(), serde_json::to_value(object)?),
-                ("mysql_columns".into(), serde_json::to_value(columns)?),
-                ("mysql_indexes".into(), serde_json::to_value(indexes)?),
-            ]),
+            create_parameters,
         )?;
         let key: Option<MySqlResumableKey> = object
             .attributes
@@ -310,19 +462,55 @@ pub fn build_plan(
         if let Some(key) = key {
             copy_parameters.insert("resumable_key".into(), serde_json::to_value(key)?);
         }
+        if let Some(mapping) = &table_mapping {
+            copy_parameters.insert("mysql_table_mapping".into(), serde_json::to_value(mapping)?);
+        }
         let copy = PlanOperation::new(
             OperationKind::CopyTable,
             Some(table.clone()),
             vec![create.id.clone()],
             copy_parameters,
         )?;
+        let mut verify_dependencies = vec![copy.id.clone()];
+        let restore = auto_increment_by_table
+            .get(&table)
+            .filter(|state| state.next_value.is_some())
+            .map(|state| {
+                let mapping = table_mapping.as_ref().ok_or_else(|| {
+                    MySqlPlanError::InvalidCatalog(format!(
+                        "MySQL AUTO_INCREMENT table {} has no target mapping",
+                        table.name
+                    ))
+                })?;
+                PlanOperation::new(
+                    OperationKind::Vendor("restore_mysql_auto_increment".into()),
+                    Some(table.clone()),
+                    vec![copy.id.clone()],
+                    BTreeMap::from([
+                        (
+                            "mysql_auto_increment_state".into(),
+                            serde_json::to_value(*state)?,
+                        ),
+                        ("mysql_table_mapping".into(), serde_json::to_value(mapping)?),
+                    ]),
+                )
+                .map_err(MySqlPlanError::from)
+            })
+            .transpose()?;
+        if let Some(restore) = &restore {
+            verify_dependencies.push(restore.id.clone());
+        }
         let verify = PlanOperation::new(
             OperationKind::VerifyTable,
             Some(table.clone()),
-            vec![copy.id.clone()],
+            verify_dependencies,
             BTreeMap::new(),
         )?;
-        operations.extend([create, copy, verify]);
+        operations.extend([create, copy]);
+        if let Some(restore) = restore {
+            operations.push(restore);
+        }
+        operations.push(verify);
     }
     let verify_schema = PlanOperation::new(
         OperationKind::VerifySchema,
@@ -348,23 +536,17 @@ pub fn build_plan(
             .into(),
         required_semantics: true,
     });
-    unsupported.push(UnsupportedObject {
-        code: UnsupportedObjectCode::MySqlFreezeEvidence,
-        object_id: "mysql-continuous-dml-ddl-freeze".into(),
-        object_kind: "consistency_precondition".into(),
-        reason: "MySQL execution requires a continuously proven DML and DDL freeze; a consistent snapshot alone does not protect catalog reads or AUTO_INCREMENT state".into(),
-        required_semantics: true,
-    });
-    let auto_increment = mysql_auto_increment_states(&source.catalog)
-        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
-    if !auto_increment.is_empty() {
+    let missing_auto_increment_state = auto_increment
+        .iter()
+        .filter(|state| state.next_value.is_none())
+        .count();
+    if missing_auto_increment_state != 0 {
         unsupported.push(UnsupportedObject {
             code: UnsupportedObjectCode::MySqlAutoIncrementConsistency,
             object_id: "mysql-auto-increment-consistency".into(),
             object_kind: "auto_increment_consistency".into(),
             reason: format!(
-                "{} MySQL AUTO_INCREMENT counters require a proven freeze or exact equality re-read and post-load restoration",
-                auto_increment.len()
+                "{missing_auto_increment_state} MySQL AUTO_INCREMENT counters have no exact next-value evidence"
             ),
             required_semantics: true,
         });
@@ -395,12 +577,13 @@ pub fn build_plan(
             required_semantics: true,
         });
     }
-    if source.endpoint_identity == target.endpoint_identity {
+    if source.snapshot_evidence.server_uuid == target.snapshot_evidence.server_uuid {
         unsupported.push(UnsupportedObject {
             code: UnsupportedObjectCode::SameEndpoint,
             object_id: "source-target-endpoint-collision".into(),
             object_kind: "endpoint_precondition".into(),
-            reason: "source and target resolve to the same MySQL endpoint identity".into(),
+            reason: "source and target resolve to the same MySQL server UUID; freezing the source would also freeze target writes"
+                .into(),
             required_semantics: true,
         });
     }
@@ -428,7 +611,9 @@ pub fn build_plan(
         conversion_policy: "mysql_same_dialect_exact".into(),
         outage_policy: None,
         postgres_source_profile: None,
+        mysql_source_profile: Some(MySqlFreezeProfileContract::external_continuous_freeze()),
         mysql_snapshot_evidence: Some(source.snapshot_evidence.clone()),
+        mysql_target_snapshot_evidence: Some(target.snapshot_evidence.clone()),
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -446,6 +631,29 @@ pub fn build_plan(
         },
     })
     .map_err(MySqlPlanError::from)
+}
+
+fn table_has_ddl_blocker(
+    snapshot: &MySqlCatalogSnapshot,
+    namespace: &CatalogNamespace,
+    table: &CatalogObject,
+) -> bool {
+    let object_ids = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object.id == table.id
+                || optional_text(object, "table_name") == Some(table.name.as_str())
+        })
+        .map(|object| object.id.as_str())
+        .collect::<BTreeSet<_>>();
+    snapshot.blockers.iter().any(|blocker| {
+        object_ids.contains(blocker.object_id.as_str())
+            && matches!(
+                blocker.object_kind.as_str(),
+                "table" | "table_ddl" | "column_ddl" | "generated_column" | "index"
+            )
+    })
 }
 
 fn validate_catalog_snapshot(snapshot: &MySqlCatalogSnapshot) -> Result<(), MySqlPlanError> {
@@ -468,6 +676,17 @@ fn validate_catalog_snapshot(snapshot: &MySqlCatalogSnapshot) -> Result<(), MySq
         || evidence.session_time_zone != "+00:00"
         || evidence.catalog_snapshot_protected
         || evidence.information_schema_stats_expiry != 0
+        || evidence.lower_case_table_names > 2
+        || evidence.session_sql_mode != MYSQL_STRICT_SQL_MODE
+        || evidence.character_set_client != MYSQL_SESSION_CHARACTER_SET
+        || evidence.character_set_connection != MYSQL_SESSION_CHARACTER_SET
+        || evidence.character_set_results != MYSQL_SESSION_CHARACTER_SET
+        || evidence.collation_connection != MYSQL_SESSION_COLLATION
+        || snapshot
+            .catalog
+            .vendor_metadata
+            .get("lower_case_table_names")
+            .is_none_or(|value| value != &evidence.lower_case_table_names.to_string())
     {
         return Err(MySqlPlanError::InvalidCatalog(
             "MySQL catalog snapshot is not exactly bound to its live snapshot evidence".into(),
@@ -515,6 +734,13 @@ fn required_blocker_keys(
                 if optional_text(object, "engine") != Some("InnoDB") {
                     required.push((object.id.clone(), "table"));
                 }
+                if optional_text(object, "character_set").is_none()
+                    || optional_text(object, "collation").is_none()
+                    || optional_text(object, "create_options")
+                        .is_some_and(|value| !value.is_empty())
+                {
+                    required.push((object.id.clone(), "table_ddl"));
+                }
                 if object
                     .attributes
                     .get("resumable_key")
@@ -524,8 +750,18 @@ fn required_blocker_keys(
                 }
             }
             CatalogObjectKind::Column => {
-                if !supported_value_type(required_text(object, "data_type")?) {
-                    required.push((object.id.clone(), "column_type"));
+                if object
+                    .attributes
+                    .get("mysql_ddl_type")
+                    .is_none_or(serde_json::Value::is_null)
+                    || !supported_value_type(required_text(object, "data_type")?)
+                    || object
+                        .attributes
+                        .get("default")
+                        .is_some_and(|value| !value.is_null())
+                    || !supported_column_extra(required_text(object, "extra")?)
+                {
+                    required.push((object.id.clone(), "column_ddl"));
                 }
                 if optional_text(object, "generation_expression")
                     .is_some_and(|value| !value.is_empty())
@@ -596,6 +832,134 @@ pub fn write_live_plan(
     let reviewed = build_plan(&source, &target)?;
     write_json_new(output.as_ref(), &reviewed)?;
     Ok(reviewed)
+}
+
+/// Attest the externally owned MySQL freeze without changing or releasing it.
+pub fn attest_mysql_external_freeze(
+    admin_config: &MySqlEndpointConfig,
+    reviewed: &ReviewedPlan,
+    assertion: &MySqlExternalFreezeAssertion,
+) -> Result<MySqlExternalFreezeAttestation, MySqlPlanError> {
+    admin_config.validate()?;
+    reviewed.validate()?;
+    assertion.validate()?;
+    reviewed
+        .plan
+        .mysql_source_profile
+        .as_ref()
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "reviewed MySQL plan has no external freeze profile".into(),
+            )
+        })?
+        .validate()?;
+    let source_evidence = reviewed
+        .plan
+        .mysql_snapshot_evidence
+        .as_ref()
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "reviewed MySQL plan has no source snapshot evidence".into(),
+            )
+        })?;
+    let mut conn = admin_config.connect()?;
+    configure_mysql_session(&mut conn)
+        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
+    conn.query_drop("SET SESSION information_schema_stats_expiry = 0")?;
+    let identity = mysql_live_session_identity(&mut conn)
+        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
+    let endpoint_identity = format!(
+        "mysql://{}:{}/{}?server_uuid={}",
+        identity.hostname, identity.port, identity.database, identity.server_uuid
+    );
+    if endpoint_identity != reviewed.plan.source_endpoint_identity
+        || identity.database != source_evidence.database_identity
+        || identity.server_uuid != source_evidence.server_uuid
+        || identity.server_version != source_evidence.server_version
+        || identity.lower_case_table_names != source_evidence.lower_case_table_names
+        || !mysql_session_settings_are_exact(&identity)
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL freeze administrator endpoint differs from the reviewed source".into(),
+        ));
+    }
+    let (read_only, super_read_only): (u8, u8) = conn
+        .query_first("SELECT @@global.read_only, @@global.super_read_only")?
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog("MySQL global read-only query returned no row".into())
+        })?;
+    let persisted_super_read_only: Option<String> = conn.exec_first(
+        "SELECT VARIABLE_VALUE FROM performance_schema.persisted_variables WHERE VARIABLE_NAME = 'super_read_only'",
+        (),
+    )?;
+    let lock_owner: Option<(Option<String>, Option<String>)> = conn.exec_first(
+        "SELECT t.PROCESSLIST_USER, t.PROCESSLIST_HOST FROM performance_schema.metadata_locks ml JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID WHERE ml.OBJECT_TYPE = 'BACKUP LOCK' AND ml.LOCK_STATUS = 'GRANTED' AND t.PROCESSLIST_ID = ?",
+        (assertion.backup_lock_connection_id,),
+    )?;
+    let (lock_owner_user, lock_owner_host) = lock_owner
+        .and_then(|(user, host)| Some((user?, host?)))
+        .ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(
+                "the asserted external MySQL backup-lock owner is absent".into(),
+            )
+        })?;
+    let mut active_replication_channels: Vec<String> = conn.query(
+        "SELECT CHANNEL_NAME FROM performance_schema.replication_connection_status WHERE SERVICE_STATE = 'ON' UNION SELECT CHANNEL_NAME FROM performance_schema.replication_applier_status WHERE SERVICE_STATE = 'ON' ORDER BY CHANNEL_NAME",
+    )?;
+    active_replication_channels.sort();
+    active_replication_channels.dedup();
+    let attested_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| MySqlPlanError::InvalidCatalog("system clock precedes Unix epoch".into()))?
+        .as_secs();
+    let attestation = MySqlExternalFreezeAttestation {
+        schema_version: MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
+        profile: MySqlFreezeProfileKind::ExternalContinuousFreezeV1,
+        status: MySqlFreezeAttestationStatus::Active,
+        source_endpoint_identity: endpoint_identity,
+        source_database_identity: identity.database,
+        source_catalog_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
+        server_uuid: identity.server_uuid,
+        administrator_tls_binding: mysql_tls_binding(admin_config)?,
+        profile_generation: assertion.profile_generation.clone(),
+        provider_reference: assertion.provider_reference.clone(),
+        activated_at_unix_seconds: assertion.activated_at_unix_seconds,
+        expires_at_unix_seconds: assertion.expires_at_unix_seconds,
+        continuity_token_hash: assertion.continuity_token_hash.clone(),
+        backup_lock_connection_id: assertion.backup_lock_connection_id,
+        backup_lock_owner_user: lock_owner_user,
+        backup_lock_owner_host: lock_owner_host,
+        read_only: read_only == 1,
+        super_read_only: super_read_only == 1,
+        super_read_only_persisted: persisted_super_read_only
+            .is_some_and(|value| value.eq_ignore_ascii_case("ON") || value == "1"),
+        active_replication_channels,
+        dml_mechanism: MySqlDmlFreezeMechanism::PersistedSuperReadOnly,
+        ddl_mechanism: MySqlDdlFreezeMechanism::ExternalBackupLock,
+        freeze_enforced_by_tool: false,
+        attested_at_unix_seconds,
+    };
+    attestation.validate()?;
+    if !attestation.matches_assertion(assertion) {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "live MySQL freeze evidence differs from the external assertion".into(),
+        ));
+    }
+    Ok(attestation)
+}
+
+pub fn validate_mysql_external_freeze_continuity(
+    accepted: &MySqlExternalFreezeAttestation,
+    current: &MySqlExternalFreezeAttestation,
+) -> Result<(), MySqlPlanError> {
+    accepted.validate()?;
+    current.validate()?;
+    if !current.same_continuity_as(accepted) {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL freeze continuity, server, or backup-lock owner changed".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_supported_server_version(version: &str) -> Result<(), MySqlPlanError> {
@@ -878,8 +1242,9 @@ impl MySqlSourceFactory {
 
     fn controlled_connect(&self) -> ConnectionResult<(Conn, SessionRegistration)> {
         self.cancellation.check()?;
-        let conn = self.config.connect().map_err(database_error)?;
+        let mut conn = self.config.connect().map_err(database_error)?;
         let registration = self.registry.register(conn.connection_id())?;
+        configure_mysql_session(&mut conn)?;
         self.cancellation.check()?;
         Ok((conn, registration))
     }
@@ -959,77 +1324,70 @@ impl SourceConnectionFactory for MySqlSourceFactory {
             .map_err(database_error)?;
         conn.query_drop("SET SESSION TRANSACTION READ ONLY")
             .map_err(database_error)?;
-        conn.query_drop("SET SESSION time_zone = '+00:00'")
-            .map_err(database_error)?;
         conn.query_drop("SET SESSION information_schema_stats_expiry = 0")
             .map_err(database_error)?;
         conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
             .map_err(database_error)?;
-        let identity: Option<MySqlIdentityRow> = conn
-            .query_first(
-                "SELECT DATABASE(), @@hostname, @@port, VERSION(), @@server_uuid, @@transaction_isolation, @@transaction_read_only, @@session.time_zone, @@session.information_schema_stats_expiry, @@global.gtid_executed, CONNECTION_ID()",
-            )
-            .map_err(database_error)?;
-        let (
-            database,
-            hostname,
-            port,
-            server_version,
-            server_uuid,
-            transaction_isolation,
-            transaction_read_only,
-            session_time_zone,
-            information_schema_stats_expiry,
-            gtid_executed_observation,
-            connection_id,
-        ) = identity.ok_or_else(|| {
-            ConnectionError::Database("MySQL identity query returned no row".into())
-        })?;
-        if database != self.config.database
-            || !transaction_isolation.eq_ignore_ascii_case("REPEATABLE-READ")
-            || transaction_read_only != 1
-            || session_time_zone != "+00:00"
-            || information_schema_stats_expiry != 0
-            || connection_id != registration.connection_id
+        let identity = mysql_live_session_identity(&mut conn)?;
+        if identity.database != self.config.database
+            || !identity
+                .transaction_isolation
+                .eq_ignore_ascii_case("REPEATABLE-READ")
+            || identity.transaction_read_only != 1
+            || !mysql_session_settings_are_exact(&identity)
+            || identity.connection_id != registration.connection_id
         {
             return Err(ConnectionError::SnapshotMismatch);
         }
-        let endpoint_identity =
-            format!("mysql://{hostname}:{port}/{database}?server_uuid={server_uuid}");
+        let endpoint_identity = format!(
+            "mysql://{}:{}/{}?server_uuid={}",
+            identity.hostname, identity.port, identity.database, identity.server_uuid
+        );
         let lifecycle_id = format!(
             "mysql-session-{}",
             SNAPSHOT_LIFECYCLE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let (catalog, blockers) = extract_catalog(&mut conn, &database, &server_version)?;
+        let (catalog, blockers) = extract_catalog(
+            &mut conn,
+            &identity.database,
+            &identity.server_version,
+            identity.lower_case_table_names,
+        )?;
         let catalog_fingerprint = mysql_catalog_fingerprint(&catalog)?;
         let snapshot_id = mysql_snapshot_id(
             &endpoint_identity,
-            &server_uuid,
-            &gtid_executed_observation,
-            connection_id,
+            &identity.server_uuid,
+            &identity.gtid_executed_observation,
+            identity.connection_id,
             &lifecycle_id,
         );
         let token = SnapshotToken {
             endpoint_identity: endpoint_identity.clone(),
-            database_identity: database.clone(),
+            database_identity: identity.database.clone(),
             snapshot_id,
             consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
-            server_version: server_version.clone(),
+            server_version: identity.server_version.clone(),
             lifecycle_id: lifecycle_id.clone(),
         };
         let snapshot_evidence = MySqlSnapshotEvidence {
             endpoint_identity,
-            database_identity: database,
-            server_uuid,
-            server_version,
+            database_identity: identity.database,
+            server_uuid: identity.server_uuid,
+            server_version: identity.server_version,
             lifecycle_id,
-            connection_id,
-            transaction_isolation,
+            connection_id: identity.connection_id,
+            transaction_isolation: identity.transaction_isolation,
             transaction_read_only: true,
-            session_time_zone,
+            session_time_zone: identity.session_time_zone,
             catalog_snapshot_protected: false,
-            information_schema_stats_expiry,
-            gtid_executed_observation,
+            information_schema_stats_expiry: identity.information_schema_stats_expiry,
+            lower_case_table_names: identity.lower_case_table_names,
+            session_sql_mode: identity.session_sql_mode,
+            character_set_client: identity.character_set_client,
+            character_set_connection: identity.character_set_connection,
+            character_set_results: identity.character_set_results,
+            collation_connection: identity.collation_connection,
+            gtid_executed_observation: identity.gtid_executed_observation,
             catalog_fingerprint,
         };
         self.cancellation.check()?;
@@ -1111,6 +1469,522 @@ impl ControlSession for MySqlControlSession {
     }
 }
 
+/// MySQL target factory bound to the reviewed source table contracts.
+#[derive(Debug)]
+pub struct MySqlTargetFactory {
+    config: MySqlEndpointConfig,
+    reviewed_catalog: VendorCatalog,
+    reviewed_tables: BTreeMap<QualifiedTable, MySqlTableDefinition>,
+    target_evidence: MySqlSnapshotEvidence,
+    registry: Arc<SessionRegistry>,
+    cancellation: CancellationToken,
+}
+
+impl MySqlTargetFactory {
+    pub fn new(
+        config: MySqlEndpointConfig,
+        reviewed_catalog: VendorCatalog,
+        target_evidence: MySqlSnapshotEvidence,
+    ) -> Result<Self, MySqlPlanError> {
+        Self::new_with_cancellation(
+            config,
+            reviewed_catalog,
+            target_evidence,
+            CancellationToken::default(),
+        )
+    }
+
+    pub fn new_with_cancellation(
+        config: MySqlEndpointConfig,
+        reviewed_catalog: VendorCatalog,
+        target_evidence: MySqlSnapshotEvidence,
+        cancellation: CancellationToken,
+    ) -> Result<Self, MySqlPlanError> {
+        config.validate()?;
+        if target_evidence.database_identity != config.database
+            || target_evidence.lower_case_table_names > 2
+            || target_evidence.session_sql_mode != MYSQL_STRICT_SQL_MODE
+            || target_evidence.character_set_client != MYSQL_SESSION_CHARACTER_SET
+            || target_evidence.character_set_connection != MYSQL_SESSION_CHARACTER_SET
+            || target_evidence.character_set_results != MYSQL_SESSION_CHARACTER_SET
+            || target_evidence.collation_connection != MYSQL_SESSION_COLLATION
+        {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL target evidence does not bind the required session contract".into(),
+            ));
+        }
+        let target_namespace = Identifier::new(config.database.clone())?;
+        let reviewed_tables = mysql_table_definitions(&reviewed_catalog)?
+            .into_iter()
+            .map(|mut definition| {
+                definition.table.namespace = target_namespace.clone();
+                (definition.table.clone(), definition)
+            })
+            .collect();
+        Ok(Self {
+            config,
+            reviewed_catalog,
+            reviewed_tables,
+            target_evidence,
+            registry: Arc::default(),
+            cancellation,
+        })
+    }
+
+    fn controlled_connect(&self) -> ConnectionResult<(Conn, SessionRegistration)> {
+        self.cancellation.check()?;
+        let mut conn = self.config.connect().map_err(database_error)?;
+        let registration = self.registry.register(conn.connection_id())?;
+        configure_mysql_session(&mut conn)?;
+        conn.query_drop("SET SESSION information_schema_stats_expiry = 0")
+            .map_err(database_error)?;
+        let identity = mysql_live_session_identity(&mut conn)?;
+        let endpoint_identity = format!(
+            "mysql://{}:{}/{}?server_uuid={}",
+            identity.hostname, identity.port, identity.database, identity.server_uuid
+        );
+        if identity.database != self.config.database
+            || endpoint_identity != self.target_evidence.endpoint_identity
+            || identity.server_uuid != self.target_evidence.server_uuid
+            || identity.server_version != self.target_evidence.server_version
+            || identity.lower_case_table_names != self.target_evidence.lower_case_table_names
+            || !mysql_session_settings_are_exact(&identity)
+            || identity.connection_id != registration.connection_id
+        {
+            return Err(ConnectionError::SnapshotMismatch);
+        }
+        self.cancellation.check()?;
+        Ok((conn, registration))
+    }
+
+    fn current_catalog(&self) -> ConnectionResult<VendorCatalog> {
+        let (mut conn, _registration) = self.controlled_connect()?;
+        let (catalog, _) = extract_catalog(
+            &mut conn,
+            &self.config.database,
+            &self.target_evidence.server_version,
+            self.target_evidence.lower_case_table_names,
+        )?;
+        self.cancellation.check()?;
+        Ok(catalog)
+    }
+
+    pub fn assert_empty(&self) -> ConnectionResult<()> {
+        let catalog = self.current_catalog()?;
+        let user_objects = catalog
+            .namespaces
+            .iter()
+            .flat_map(|namespace| namespace.objects.iter())
+            .filter(|object| {
+                !matches!(
+                    &object.kind,
+                    CatalogObjectKind::Vendor(kind) if kind == "mysql_privilege"
+                )
+            })
+            .count();
+        if user_objects == 0 {
+            Ok(())
+        } else {
+            Err(ConnectionError::InvalidRequest(format!(
+                "MySQL target contains {user_objects} user catalog objects"
+            )))
+        }
+    }
+
+    pub fn inspect_table(
+        &self,
+        expected: &MySqlTableDefinition,
+    ) -> ConnectionResult<MySqlTableState> {
+        validate_mysql_table_definition(expected)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        if self.reviewed_tables.get(&expected.table) != Some(expected) {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL table definition differs from the reviewed target contract".into(),
+            ));
+        }
+        if expected.table.namespace.as_str() != self.config.database {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL table definition targets a different database".into(),
+            ));
+        }
+        let catalog = self.current_catalog()?;
+        let namespace = catalog
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.name == expected.table.namespace)
+            .ok_or_else(|| ConnectionError::InvalidRequest("target database is absent".into()))?;
+        let occupancies = namespace
+            .objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.kind,
+                    CatalogObjectKind::Table | CatalogObjectKind::View
+                ) && object.name == expected.table.name
+            })
+            .collect::<Vec<_>>();
+        if occupancies.is_empty() {
+            return Ok(MySqlTableState::Absent);
+        }
+        if occupancies.len() != 1 || occupancies[0].kind != CatalogObjectKind::Table {
+            return Ok(MySqlTableState::Different);
+        }
+        let observed = mysql_table_definition(namespace, occupancies[0])
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        Ok(if observed == *expected {
+            MySqlTableState::Exact
+        } else {
+            MySqlTableState::Different
+        })
+    }
+
+    pub fn create_table(&self, expected: &MySqlTableDefinition) -> ConnectionResult<()> {
+        if self.inspect_table(expected)? != MySqlTableState::Absent {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL create-only table target is not absent".into(),
+            ));
+        }
+        let ddl = render_mysql_create_table(expected)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let (mut conn, _registration) = self.controlled_connect()?;
+        self.cancellation.check()?;
+        conn.query_drop(ddl).map_err(database_error)?;
+        self.cancellation.check()?;
+        if self.inspect_table(expected)? != MySqlTableState::Exact {
+            return Err(ConnectionError::Database(
+                "MySQL CREATE TABLE committed without the exact reviewed effect".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn reviewed_table(
+        &self,
+        table: &QualifiedTable,
+    ) -> ConnectionResult<&MySqlTableDefinition> {
+        self.reviewed_tables
+            .get(table)
+            .ok_or_else(|| ConnectionError::TableNotFound(table.clone()))
+    }
+
+    /// Require the complete supported target schema to match the reviewed
+    /// typed table contracts. Privilege rows are checked by the separate
+    /// catalog-visibility admission contract.
+    pub fn assert_exact_schema(&self) -> ConnectionResult<()> {
+        let catalog = self.current_catalog()?;
+        let has_unmodeled_object = catalog
+            .namespaces
+            .iter()
+            .flat_map(|namespace| namespace.objects.iter())
+            .any(|object| {
+                !matches!(
+                    &object.kind,
+                    CatalogObjectKind::Table
+                        | CatalogObjectKind::Column
+                        | CatalogObjectKind::PrimaryKey
+                        | CatalogObjectKind::UniqueConstraint
+                        | CatalogObjectKind::Index
+                ) && !matches!(
+                    &object.kind,
+                    CatalogObjectKind::Vendor(kind) if kind == "mysql_privilege"
+                )
+            });
+        if has_unmodeled_object {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL target contains an unreviewed schema object".into(),
+            ));
+        }
+        let observed = mysql_table_definitions(&catalog)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?
+            .into_iter()
+            .map(|definition| (definition.table.clone(), definition))
+            .collect::<BTreeMap<_, _>>();
+        if observed != self.reviewed_tables {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL target schema differs from the reviewed typed schema".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn inspect_auto_increment(
+        &self,
+        expected: &MySqlAutoIncrementState,
+        mapping: &MySqlTableMapping,
+    ) -> ConnectionResult<MySqlAutoIncrementTargetState> {
+        if mapping.source != expected.table
+            || mapping.target.namespace.as_str() != self.config.database
+        {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL AUTO_INCREMENT state and table mapping disagree".into(),
+            ));
+        }
+        let reviewed = self.reviewed_table(&mapping.target)?;
+        if !reviewed.columns.iter().any(|column| {
+            column.name == expected.column && column.auto_increment && !column.nullable
+        }) {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL AUTO_INCREMENT column differs from the reviewed target contract".into(),
+            ));
+        }
+        let catalog = self.current_catalog()?;
+        let observed = mysql_auto_increment_states(&catalog)?
+            .into_iter()
+            .find(|state| state.table == mapping.target)
+            .ok_or_else(|| {
+                ConnectionError::InvalidRequest(
+                    "MySQL target lacks the reviewed AUTO_INCREMENT state".into(),
+                )
+            })?;
+        if observed.column != expected.column || observed.stats_expiry != 0 {
+            return Ok(MySqlAutoIncrementTargetState::Different);
+        }
+        Ok(match (observed.next_value, expected.next_value) {
+            (current, desired) if current == desired => MySqlAutoIncrementTargetState::Exact,
+            (Some(current), Some(desired)) if current < desired => {
+                MySqlAutoIncrementTargetState::BeforeDesired
+            }
+            (None, Some(_)) => MySqlAutoIncrementTargetState::BeforeDesired,
+            _ => MySqlAutoIncrementTargetState::Different,
+        })
+    }
+
+    pub fn restore_auto_increment(
+        &self,
+        expected: &MySqlAutoIncrementState,
+        mapping: &MySqlTableMapping,
+    ) -> ConnectionResult<()> {
+        if self.inspect_auto_increment(expected, mapping)?
+            != MySqlAutoIncrementTargetState::BeforeDesired
+        {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL AUTO_INCREMENT target is not at an admissible pre-restore state".into(),
+            ));
+        }
+        let desired = expected.next_value.ok_or_else(|| {
+            ConnectionError::InvalidRequest(
+                "MySQL AUTO_INCREMENT restoration has no desired next value".into(),
+            )
+        })?;
+        let statement = format!(
+            "ALTER TABLE {}.{} AUTO_INCREMENT = {desired}",
+            quote_identifier(&mapping.target.namespace),
+            quote_identifier(&mapping.target.name)
+        );
+        let (mut conn, _registration) = self.controlled_connect()?;
+        self.cancellation.check()?;
+        conn.query_drop(statement).map_err(database_error)?;
+        self.cancellation.check()?;
+        if self.inspect_auto_increment(expected, mapping)? != MySqlAutoIncrementTargetState::Exact {
+            return Err(ConnectionError::Database(
+                "MySQL AUTO_INCREMENT restoration did not produce the reviewed state".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TargetConnectionFactory for MySqlTargetFactory {
+    fn capabilities(&self) -> CapabilitySet {
+        CapabilitySet::from_entries([
+            ("transactions", Capability::Supported),
+            ("cancellation", Capability::Supported),
+            ("typed_identifiers", Capability::Supported),
+            ("bound_parameters", Capability::Supported),
+            ("plain_insert", Capability::Supported),
+            (
+                "bulk_write",
+                Capability::Unsupported {
+                    reason: "the first MySQL target increment uses reviewed bound INSERTs".into(),
+                },
+            ),
+            (
+                "transactional_ddl",
+                Capability::Unsupported {
+                    reason:
+                        "MySQL DDL implicitly commits and uses one journal boundary per statement"
+                            .into(),
+                },
+            ),
+        ])
+    }
+
+    fn open_writer(
+        &self,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn WriteSession>> {
+        let (conn, registration) = self.controlled_connect()?;
+        Ok(Box::new(MySqlWriter {
+            conn,
+            registration: Some(registration),
+            cancellation,
+            transaction_open: false,
+        }))
+    }
+
+    fn open_verifier(
+        &self,
+        cancellation: CancellationToken,
+    ) -> ConnectionResult<Box<dyn VerificationSession>> {
+        let (mut conn, registration) = self.controlled_connect()?;
+        conn.query_drop("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .map_err(database_error)?;
+        conn.query_drop("SET SESSION TRANSACTION READ ONLY")
+            .map_err(database_error)?;
+        conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+            .map_err(database_error)?;
+        let target_namespace = Identifier::new(self.config.database.clone())
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let table_contracts = table_contracts(&self.reviewed_catalog)?
+            .into_iter()
+            .map(|(mut table, contract)| {
+                table.namespace = target_namespace.clone();
+                (table, contract)
+            })
+            .collect();
+        Ok(Box::new(MySqlVerifier {
+            conn,
+            registration: Some(registration),
+            cancellation,
+            max_batch_rows: self.config.max_batch_rows,
+            max_batch_bytes: self.config.max_batch_bytes,
+            table_contracts,
+        }))
+    }
+
+    fn open_control(&self) -> ConnectionResult<Box<dyn ControlSession>> {
+        if self.registry.connection_ids()?.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "open a MySQL target session before its control session".into(),
+            ));
+        }
+        Ok(Box::new(MySqlControlSession {
+            config: self.config.clone(),
+            registry: Arc::clone(&self.registry),
+        }))
+    }
+}
+
+struct MySqlWriter {
+    conn: Conn,
+    registration: Option<SessionRegistration>,
+    cancellation: CancellationToken,
+    transaction_open: bool,
+}
+
+impl Drop for MySqlWriter {
+    fn drop(&mut self) {
+        if self.transaction_open {
+            let _ = self.conn.query_drop("ROLLBACK");
+        }
+        self.registration.take();
+    }
+}
+
+impl WriteSession for MySqlWriter {
+    fn begin(&mut self) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if self.transaction_open {
+            return Err(ConnectionError::TransactionAlreadyOpen);
+        }
+        self.conn
+            .query_drop("START TRANSACTION")
+            .map_err(database_error)?;
+        self.transaction_open = true;
+        Ok(())
+    }
+
+    fn insert(&mut self, table: &QualifiedTable, batch: &RowBatch) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        if batch.columns().is_empty() || batch.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL insert requires a nonempty batch and projection".into(),
+            ));
+        }
+        let columns = batch
+            .columns()
+            .iter()
+            .map(|column| quote_identifier(&column.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders = std::iter::repeat_n("?", batch.columns().len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let statement = format!(
+            "INSERT INTO {}.{} ({columns}) VALUES ({placeholders})",
+            quote_identifier(&table.namespace),
+            quote_identifier(&table.name)
+        );
+        let parameters = batch
+            .rows()
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(mysql_write_value)
+                    .collect::<ConnectionResult<Vec<_>>>()
+            })
+            .collect::<ConnectionResult<Vec<_>>>()?;
+        self.conn
+            .exec_batch(statement, parameters)
+            .map_err(database_error)?;
+        self.cancellation.check()?;
+        Ok(())
+    }
+
+    fn commit(&mut self) -> ConnectionResult<()> {
+        self.cancellation.check()?;
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        self.transaction_open = false;
+        self.conn
+            .query_drop("COMMIT")
+            .map_err(|error| ConnectionError::CommitOutcomeUnknown(error.to_string()))
+    }
+
+    fn rollback(&mut self) -> ConnectionResult<()> {
+        if !self.transaction_open {
+            return Err(ConnectionError::TransactionRequired);
+        }
+        self.transaction_open = false;
+        self.conn.query_drop("ROLLBACK").map_err(database_error)
+    }
+}
+
+struct MySqlVerifier {
+    conn: Conn,
+    registration: Option<SessionRegistration>,
+    cancellation: CancellationToken,
+    max_batch_rows: usize,
+    max_batch_bytes: usize,
+    table_contracts: BTreeMap<QualifiedTable, TableContract>,
+}
+
+impl Drop for MySqlVerifier {
+    fn drop(&mut self) {
+        let _ = self.conn.query_drop("ROLLBACK");
+        self.registration.take();
+    }
+}
+
+impl VerificationSession for MySqlVerifier {
+    fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
+        self.cancellation.check()?;
+        let batch = mysql_select_page(
+            &mut self.conn,
+            &self.table_contracts,
+            self.max_batch_rows,
+            self.max_batch_bytes,
+            request,
+        )?;
+        self.cancellation.check()?;
+        Ok(batch)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TableContract {
     columns: BTreeMap<String, ColumnMeta>,
@@ -1146,109 +2020,125 @@ impl ReadSession for MySqlSnapshotReader {
 
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
         self.cancellation.check()?;
-        if request.limit == 0 || request.projection.is_empty() || request.key.is_empty() {
-            return Err(ConnectionError::InvalidRequest(
-                "MySQL page requires a nonzero limit, projection, and complete key".into(),
-            ));
-        }
-        let contract = self
-            .table_contracts
-            .get(&request.table)
-            .ok_or_else(|| ConnectionError::TableNotFound(request.table.clone()))?;
-        if request.key != contract.key.columns {
-            return Err(ConnectionError::InvalidRequest(
-                "MySQL page key differs from the reviewed resumable-key contract".into(),
-            ));
-        }
-        if request
-            .key
-            .iter()
-            .any(|key_column| !request.projection.contains(key_column))
-        {
-            return Err(ConnectionError::InvalidRequest(
-                "MySQL page projection must contain the complete resumable key".into(),
-            ));
-        }
-        if let Some(after) = &request.after {
-            if after.as_slice().len() != request.key.len() {
-                return Err(ConnectionError::InvalidRequest(
-                    "MySQL page cursor does not contain the complete key".into(),
-                ));
-            }
-        }
-        let columns = request
-            .projection
-            .iter()
-            .map(|column| {
-                contract
-                    .columns
-                    .get(column.as_str())
-                    .cloned()
-                    .ok_or_else(|| {
-                        ConnectionError::InvalidRequest(format!(
-                            "MySQL projection contains unknown column {column}"
-                        ))
-                    })
-            })
-            .collect::<ConnectionResult<Vec<_>>>()?;
-        let projection = request
-            .projection
-            .iter()
-            .map(quote_identifier)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let key = request
-            .key
-            .iter()
-            .map(quote_identifier)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut sql = format!(
-            "SELECT {projection} FROM {}.{}",
-            quote_identifier(&request.table.namespace),
-            quote_identifier(&request.table.name)
-        );
-        let params = if let Some(after) = &request.after {
-            sql.push_str(&format!(
-                " WHERE ({key}) > ({})",
-                std::iter::repeat_n("?", request.key.len())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            Params::Positional(
-                after
-                    .as_slice()
-                    .iter()
-                    .map(mysql_parameter)
-                    .collect::<ConnectionResult<Vec<_>>>()?,
-            )
-        } else {
-            Params::Empty
-        };
-        let limit = usize::min(request.limit as usize, self.max_batch_rows);
-        sql.push_str(&format!(" ORDER BY {key} LIMIT {limit}"));
-        let mut batch = RowBatch::new(columns.clone(), limit, self.max_batch_bytes);
-        let mut rows = self.conn.exec_iter(sql, params).map_err(database_error)?;
-        for row in rows.by_ref() {
-            let values = row.map_err(database_error)?.unwrap();
-            let converted = values
-                .into_iter()
-                .zip(&columns)
-                .map(|(value, column)| mysql_value(value, column))
-                .collect::<ConnectionResult<Vec<_>>>()?;
-            let encoded_bytes = serde_json::to_vec(&converted)
-                .map_err(|error| ConnectionError::Database(error.to_string()))?
-                .len();
-            match batch.try_push(converted, encoded_bytes) {
-                Ok(()) => {}
-                Err(RowBatchError::ByteLimit { .. }) if !batch.is_empty() => break,
-                Err(error) => return Err(ConnectionError::BatchLimit(error.to_string())),
-            }
-        }
-        drop(rows);
+        let batch = mysql_select_page(
+            &mut self.conn,
+            &self.table_contracts,
+            self.max_batch_rows,
+            self.max_batch_bytes,
+            request,
+        )?;
         self.cancellation.check()?;
         Ok(batch)
     }
+}
+
+fn mysql_select_page(
+    conn: &mut Conn,
+    table_contracts: &BTreeMap<QualifiedTable, TableContract>,
+    max_batch_rows: usize,
+    max_batch_bytes: usize,
+    request: &KeysetPage,
+) -> ConnectionResult<RowBatch> {
+    if request.limit == 0 || request.projection.is_empty() || request.key.is_empty() {
+        return Err(ConnectionError::InvalidRequest(
+            "MySQL page requires a nonzero limit, projection, and complete key".into(),
+        ));
+    }
+    let contract = table_contracts
+        .get(&request.table)
+        .ok_or_else(|| ConnectionError::TableNotFound(request.table.clone()))?;
+    if request.key != contract.key.columns {
+        return Err(ConnectionError::InvalidRequest(
+            "MySQL page key differs from the reviewed resumable-key contract".into(),
+        ));
+    }
+    if request
+        .key
+        .iter()
+        .any(|key_column| !request.projection.contains(key_column))
+    {
+        return Err(ConnectionError::InvalidRequest(
+            "MySQL page projection must contain the complete resumable key".into(),
+        ));
+    }
+    if let Some(after) = &request.after {
+        if after.as_slice().len() != request.key.len() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL page cursor does not contain the complete key".into(),
+            ));
+        }
+    }
+    let columns = request
+        .projection
+        .iter()
+        .map(|column| {
+            contract
+                .columns
+                .get(column.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    ConnectionError::InvalidRequest(format!(
+                        "MySQL projection contains unknown column {column}"
+                    ))
+                })
+        })
+        .collect::<ConnectionResult<Vec<_>>>()?;
+    let projection = request
+        .projection
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let key = request
+        .key
+        .iter()
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sql = format!(
+        "SELECT {projection} FROM {}.{}",
+        quote_identifier(&request.table.namespace),
+        quote_identifier(&request.table.name)
+    );
+    let params = if let Some(after) = &request.after {
+        sql.push_str(&format!(
+            " WHERE ({key}) > ({})",
+            std::iter::repeat_n("?", request.key.len())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        Params::Positional(
+            after
+                .as_slice()
+                .iter()
+                .map(mysql_parameter)
+                .collect::<ConnectionResult<Vec<_>>>()?,
+        )
+    } else {
+        Params::Empty
+    };
+    let limit = usize::min(request.limit as usize, max_batch_rows);
+    sql.push_str(&format!(" ORDER BY {key} LIMIT {limit}"));
+    let mut batch = RowBatch::new(columns.clone(), limit, max_batch_bytes);
+    let mut rows = conn.exec_iter(sql, params).map_err(database_error)?;
+    for row in rows.by_ref() {
+        let values = row.map_err(database_error)?.unwrap();
+        let converted = values
+            .into_iter()
+            .zip(&columns)
+            .map(|(value, column)| mysql_value(value, column))
+            .collect::<ConnectionResult<Vec<_>>>()?;
+        let encoded_bytes = serde_json::to_vec(&converted)
+            .map_err(|error| ConnectionError::Database(error.to_string()))?
+            .len();
+        match batch.try_push(converted, encoded_bytes) {
+            Ok(()) => {}
+            Err(RowBatchError::ByteLimit { .. }) if !batch.is_empty() => break,
+            Err(error) => return Err(ConnectionError::BatchLimit(error.to_string())),
+        }
+    }
+    drop(rows);
+    Ok(batch)
 }
 
 fn mysql_parameter(value: &DbValue) -> ConnectionResult<Value> {
@@ -1265,6 +2155,88 @@ fn mysql_parameter(value: &DbValue) -> ConnectionResult<Value> {
         DbValue::Bytes(value) => Ok(Value::Bytes(value.clone())),
         _ => Err(ConnectionError::UnsupportedKeyValue),
     }
+}
+
+fn mysql_write_value(value: &DbValue) -> ConnectionResult<Value> {
+    match value {
+        DbValue::Null => Ok(Value::NULL),
+        DbValue::Bool(value) => Ok(Value::Int(i64::from(*value))),
+        DbValue::Signed(value) => i64::try_from(*value)
+            .map(Value::Int)
+            .map_err(|_| ConnectionError::UnsupportedKeyValue),
+        DbValue::Unsigned(value) => u64::try_from(*value)
+            .map(Value::UInt)
+            .map_err(|_| ConnectionError::UnsupportedKeyValue),
+        DbValue::Decimal { coefficient, scale } => {
+            Ok(Value::Bytes(render_mysql_decimal(coefficient, *scale)?))
+        }
+        DbValue::Float32(bits) => Ok(Value::Float(f32::from_bits(*bits))),
+        DbValue::Float64(bits) => Ok(Value::Double(f64::from_bits(*bits))),
+        DbValue::Text(value) => Ok(Value::Bytes(value.as_bytes().to_vec())),
+        DbValue::Bytes(value) | DbValue::Json(value) => Ok(Value::Bytes(value.clone())),
+        DbValue::Date { year, month, day } => Ok(Value::Date(
+            u16::try_from(*year).map_err(|_| ConnectionError::UnsupportedKeyValue)?,
+            *month,
+            *day,
+            0,
+            0,
+            0,
+            0,
+        )),
+        DbValue::Time { nanos } => {
+            let negative = *nanos < 0;
+            let magnitude = nanos
+                .checked_abs()
+                .ok_or(ConnectionError::UnsupportedKeyValue)?;
+            if magnitude % 1_000 != 0 {
+                return Err(ConnectionError::UnsupportedKeyValue);
+            }
+            let total_seconds = magnitude / 1_000_000_000;
+            let days = u32::try_from(total_seconds / 86_400)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+            let remaining = total_seconds % 86_400;
+            let hours = u8::try_from(remaining / 3_600)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+            let minutes = u8::try_from((remaining % 3_600) / 60)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+            let seconds =
+                u8::try_from(remaining % 60).map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+            let micros = u32::try_from((magnitude % 1_000_000_000) / 1_000)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+            Ok(Value::Time(negative, days, hours, minutes, seconds, micros))
+        }
+        DbValue::Timestamp { local, .. } => Ok(Value::Bytes(local.as_bytes().to_vec())),
+        DbValue::Vendor { .. } => Err(ConnectionError::UnsupportedKeyValue),
+    }
+}
+
+fn render_mysql_decimal(coefficient: &[u8], scale: i32) -> ConnectionResult<Vec<u8>> {
+    let scale = usize::try_from(scale).map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+    let coefficient =
+        std::str::from_utf8(coefficient).map_err(|_| ConnectionError::UnsupportedKeyValue)?;
+    let (negative, digits) = coefficient
+        .strip_prefix('-')
+        .map_or((false, coefficient), |digits| (true, digits));
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ConnectionError::UnsupportedKeyValue);
+    }
+    let mut rendered = String::new();
+    if negative && digits.bytes().any(|digit| digit != b'0') {
+        rendered.push('-');
+    }
+    if scale == 0 {
+        rendered.push_str(digits);
+    } else if digits.len() <= scale {
+        rendered.push_str("0.");
+        rendered.extend(std::iter::repeat_n('0', scale - digits.len()));
+        rendered.push_str(digits);
+    } else {
+        let split = digits.len() - scale;
+        rendered.push_str(&digits[..split]);
+        rendered.push('.');
+        rendered.push_str(&digits[split..]);
+    }
+    Ok(rendered.into_bytes())
 }
 
 fn mysql_value(value: Value, column: &ColumnMeta) -> ConnectionResult<DbValue> {
@@ -1408,6 +2380,295 @@ fn table_contracts(
     Ok(contracts)
 }
 
+pub fn mysql_table_definitions(
+    catalog: &VendorCatalog,
+) -> Result<Vec<MySqlTableDefinition>, MySqlPlanError> {
+    if catalog.dialect != "mysql" || catalog.format_version != MYSQL_CATALOG_FORMAT_VERSION {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "table definitions require the current MySQL catalog format".into(),
+        ));
+    }
+    let mut definitions = Vec::new();
+    for namespace in &catalog.namespaces {
+        for table in namespace
+            .objects
+            .iter()
+            .filter(|object| object.kind == CatalogObjectKind::Table)
+        {
+            definitions.push(mysql_table_definition(namespace, table)?);
+        }
+    }
+    definitions.sort_by(|left, right| left.table.cmp(&right.table));
+    Ok(definitions)
+}
+
+fn mysql_table_definition(
+    namespace: &CatalogNamespace,
+    table: &CatalogObject,
+) -> Result<MySqlTableDefinition, MySqlPlanError> {
+    let engine = required_text(table, "engine")?.to_owned();
+    let character_set = required_text(table, "character_set")?.to_owned();
+    let collation = required_text(table, "collation")?.to_owned();
+    if engine != "InnoDB"
+        || !required_text(table, "create_options")?.is_empty()
+        || character_set.is_empty()
+        || collation.is_empty()
+    {
+        return Err(MySqlPlanError::InvalidCatalog(format!(
+            "MySQL table {} has no supported typed DDL contract",
+            table.id
+        )));
+    }
+    let mut columns = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == CatalogObjectKind::Column
+                && optional_text(object, "table_name") == Some(table.name.as_str())
+        })
+        .map(|column| {
+            if column
+                .attributes
+                .get("default")
+                .is_some_and(|value| !value.is_null())
+                || !supported_column_extra(required_text(column, "extra")?)
+                || optional_text(column, "generation_expression")
+                    .is_some_and(|value| !value.is_empty())
+            {
+                return Err(MySqlPlanError::InvalidCatalog(format!(
+                    "MySQL column {} has unsupported typed DDL semantics",
+                    column.id
+                )));
+            }
+            let data_type: MySqlColumnType = serde_json::from_value(
+                column
+                    .attributes
+                    .get("mysql_ddl_type")
+                    .cloned()
+                    .ok_or_else(|| {
+                        MySqlPlanError::InvalidCatalog(format!(
+                            "MySQL column {} lacks a typed DDL type",
+                            column.id
+                        ))
+                    })?,
+            )?;
+            Ok(MySqlColumnDefinition {
+                name: column.name.clone(),
+                ordinal: required_u64(column, "ordinal")?,
+                data_type,
+                nullable: required_bool(column, "nullable")?,
+                character_set: optional_text(column, "character_set").map(str::to_owned),
+                collation: optional_text(column, "collation").map(str::to_owned),
+                auto_increment: required_text(column, "extra")?
+                    .eq_ignore_ascii_case("auto_increment"),
+            })
+        })
+        .collect::<Result<Vec<_>, MySqlPlanError>>()?;
+    columns.sort_by_key(|column| column.ordinal);
+    if columns.is_empty()
+        || columns
+            .iter()
+            .enumerate()
+            .any(|(index, column)| column.ordinal != index as u64 + 1)
+    {
+        return Err(MySqlPlanError::InvalidCatalog(format!(
+            "MySQL table {} has invalid column ordinals",
+            table.id
+        )));
+    }
+    let mut indexes = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            matches!(
+                object.kind,
+                CatalogObjectKind::PrimaryKey
+                    | CatalogObjectKind::UniqueConstraint
+                    | CatalogObjectKind::Index
+            ) && optional_text(object, "table_name") == Some(table.name.as_str())
+        })
+        .map(|index| {
+            if catalog_index_requires_blocker(index)? {
+                return Err(MySqlPlanError::InvalidCatalog(format!(
+                    "MySQL index {} has unsupported typed DDL semantics",
+                    index.id
+                )));
+            }
+            let columns: Vec<MySqlIndexColumn> = serde_json::from_value(
+                index.attributes.get("columns").cloned().ok_or_else(|| {
+                    MySqlPlanError::InvalidCatalog(format!(
+                        "MySQL index {} lacks columns",
+                        index.id
+                    ))
+                })?,
+            )?;
+            Ok(MySqlIndexDefinition {
+                name: index.name.clone(),
+                primary: required_bool(index, "primary")?,
+                unique: !required_bool(index, "non_unique")?,
+                constraint_backed: required_bool(index, "constraint_backed")?,
+                columns: columns
+                    .into_iter()
+                    .map(|column| {
+                        column.name.ok_or_else(|| {
+                            MySqlPlanError::InvalidCatalog(format!(
+                                "MySQL index {} contains an expression",
+                                index.id
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, MySqlPlanError>>()?;
+    indexes.sort_by(|left, right| {
+        (!left.primary, left.name.as_str()).cmp(&(!right.primary, right.name.as_str()))
+    });
+    let definition = MySqlTableDefinition {
+        table: QualifiedTable {
+            namespace: namespace.name.clone(),
+            name: table.name.clone(),
+        },
+        engine,
+        character_set,
+        collation,
+        columns,
+        indexes,
+    };
+    validate_mysql_table_definition(&definition)?;
+    Ok(definition)
+}
+
+fn validate_mysql_table_definition(
+    definition: &MySqlTableDefinition,
+) -> Result<(), MySqlPlanError> {
+    if definition.engine != "InnoDB"
+        || definition.columns.is_empty()
+        || definition.character_set.is_empty()
+        || definition.collation.is_empty()
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL table definition is incomplete or not InnoDB".into(),
+        ));
+    }
+    let column_names = definition
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if column_names.len() != definition.columns.len()
+        || definition
+            .columns
+            .iter()
+            .enumerate()
+            .any(|(index, column)| column.ordinal != index as u64 + 1)
+        || definition.indexes.iter().any(|index| {
+            index.columns.is_empty()
+                || index
+                    .columns
+                    .iter()
+                    .any(|name| !column_names.contains(name.as_str()))
+        })
+        || definition
+            .indexes
+            .iter()
+            .filter(|index| index.primary)
+            .count()
+            > 1
+        || definition
+            .indexes
+            .iter()
+            .any(|index| index.primary && (!index.unique || !index.constraint_backed))
+        || definition
+            .columns
+            .iter()
+            .filter(|column| column.auto_increment)
+            .count()
+            > 1
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL table definition has inconsistent columns or indexes".into(),
+        ));
+    }
+    for column in &definition.columns {
+        let rendered = render_mysql_column_type(&column.data_type)?;
+        let reparsed =
+            parse_mysql_column_type(&rendered).map_err(MySqlPlanError::InvalidCatalog)?;
+        if reparsed != column.data_type {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL column type does not round-trip canonically".into(),
+            ));
+        }
+        if column.auto_increment && !matches!(column.data_type, MySqlColumnType::Integer { .. }) {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL AUTO_INCREMENT requires a reviewed integer type".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn render_mysql_create_table(definition: &MySqlTableDefinition) -> Result<String, MySqlPlanError> {
+    validate_mysql_table_definition(definition)?;
+    let mut clauses = definition
+        .columns
+        .iter()
+        .map(|column| {
+            let mut clause = format!(
+                "{} {}",
+                quote_identifier(&column.name),
+                render_mysql_column_type(&column.data_type)?
+            );
+            if let Some(character_set) = &column.character_set {
+                clause.push_str(" CHARACTER SET ");
+                clause.push_str(&quote_identifier_text(character_set));
+            }
+            if let Some(collation) = &column.collation {
+                clause.push_str(" COLLATE ");
+                clause.push_str(&quote_identifier_text(collation));
+            }
+            clause.push_str(if column.nullable {
+                " NULL"
+            } else {
+                " NOT NULL"
+            });
+            if column.auto_increment {
+                clause.push_str(" AUTO_INCREMENT");
+            }
+            Ok(clause)
+        })
+        .collect::<Result<Vec<_>, MySqlPlanError>>()?;
+    for index in &definition.indexes {
+        let columns = index
+            .columns
+            .iter()
+            .map(quote_identifier)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let clause = if index.primary {
+            format!("PRIMARY KEY ({columns})")
+        } else if index.constraint_backed {
+            format!(
+                "CONSTRAINT {} UNIQUE ({columns})",
+                quote_identifier(&index.name)
+            )
+        } else if index.unique {
+            format!("UNIQUE INDEX {} ({columns})", quote_identifier(&index.name))
+        } else {
+            format!("INDEX {} ({columns})", quote_identifier(&index.name))
+        };
+        clauses.push(clause);
+    }
+    Ok(format!(
+        "CREATE TABLE {}.{} ({}) ENGINE=InnoDB DEFAULT CHARACTER SET {} COLLATE {}",
+        quote_identifier(&definition.table.namespace),
+        quote_identifier(&definition.table.name),
+        clauses.join(", "),
+        quote_identifier_text(&definition.character_set),
+        quote_identifier_text(&definition.collation)
+    ))
+}
+
 fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
     let ordinal = required_u64(object, "ordinal")?;
     Ok(ColumnMeta {
@@ -1437,6 +2698,7 @@ fn extract_catalog(
     conn: &mut Conn,
     database: &str,
     server_version: &str,
+    lower_case_table_names: u8,
 ) -> ConnectionResult<(VendorCatalog, Vec<MySqlCatalogBlocker>)> {
     let mut objects = Vec::new();
     let mut blockers = vec![MySqlCatalogBlocker {
@@ -1447,19 +2709,19 @@ fn extract_catalog(
     }];
     let table_rows: Vec<Row> = conn
         .exec(
-            "SELECT TABLE_NAME, TABLE_TYPE, ENGINE, TABLE_COLLATION, CREATE_OPTIONS, AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
+            "SELECT t.TABLE_NAME, t.TABLE_TYPE, t.ENGINE, t.TABLE_COLLATION, c.CHARACTER_SET_NAME, t.CREATE_OPTIONS, t.AUTO_INCREMENT FROM information_schema.TABLES t LEFT JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY c ON c.COLLATION_NAME = t.TABLE_COLLATION WHERE BINARY t.TABLE_SCHEMA = BINARY ? ORDER BY t.TABLE_NAME",
             (database,),
         )
         .map_err(database_error)?;
     let column_rows: Vec<Row> = conn
         .exec(
-            "SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, COLUMN_DEFAULT, IS_NULLABLE, DATA_TYPE, COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME, EXTRA, GENERATION_EXPRESSION, NUMERIC_PRECISION, NUMERIC_SCALE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            "SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, COLUMN_DEFAULT, IS_NULLABLE, DATA_TYPE, COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME, EXTRA, GENERATION_EXPRESSION, NUMERIC_PRECISION, NUMERIC_SCALE FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
             (database,),
         )
         .map_err(database_error)?;
     let index_rows: Vec<Row> = conn
         .exec(
-            "SELECT s.TABLE_NAME, s.INDEX_NAME, s.NON_UNIQUE, s.SEQ_IN_INDEX, s.COLUMN_NAME, s.COLLATION, s.SUB_PART, s.NULLABLE, s.INDEX_TYPE, s.IS_VISIBLE, s.EXPRESSION, EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS tc WHERE tc.CONSTRAINT_SCHEMA = s.TABLE_SCHEMA AND tc.TABLE_NAME = s.TABLE_NAME AND tc.CONSTRAINT_NAME = s.INDEX_NAME AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE')) AS CONSTRAINT_BACKED FROM information_schema.STATISTICS s WHERE s.TABLE_SCHEMA = ? ORDER BY s.TABLE_NAME, s.INDEX_NAME, s.SEQ_IN_INDEX",
+            "SELECT s.TABLE_NAME, s.INDEX_NAME, s.NON_UNIQUE, s.SEQ_IN_INDEX, s.COLUMN_NAME, s.COLLATION, s.SUB_PART, s.NULLABLE, s.INDEX_TYPE, s.IS_VISIBLE, s.EXPRESSION, EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS tc WHERE BINARY tc.CONSTRAINT_SCHEMA = BINARY s.TABLE_SCHEMA AND BINARY tc.TABLE_NAME = BINARY s.TABLE_NAME AND BINARY tc.CONSTRAINT_NAME = BINARY s.INDEX_NAME AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE')) AS CONSTRAINT_BACKED FROM information_schema.STATISTICS s WHERE BINARY s.TABLE_SCHEMA = BINARY ? ORDER BY s.TABLE_NAME, s.INDEX_NAME, s.SEQ_IN_INDEX",
             (database,),
         )
         .map_err(database_error)?;
@@ -1490,13 +2752,24 @@ fn extract_catalog(
             collation: collation.clone(),
             extra: extra.clone(),
         };
-        if !supported_value_type(&data_type) {
+        let ddl_type = parse_mysql_column_type(&column_type).ok();
+        let mut ddl_reasons = Vec::new();
+        if ddl_type.is_none() || !supported_value_type(&data_type) {
+            ddl_reasons.push(format!(
+                "column type {column_type} has no reviewed typed DDL and lossless canonical value contract"
+            ));
+        }
+        if default.is_some() || !supported_column_extra(&extra) {
+            ddl_reasons.push(
+                "column defaults and extra attributes outside AUTO_INCREMENT are not yet modeled as typed DDL"
+                    .into(),
+            );
+        }
+        if !ddl_reasons.is_empty() {
             blockers.push(MySqlCatalogBlocker {
                 object_id: id.clone(),
-                object_kind: "column_type".into(),
-                reason: format!(
-                    "MySQL column type {data_type} has no reviewed lossless canonical value mapping"
-                ),
+                object_kind: "column_ddl".into(),
+                reason: format!("MySQL {}", ddl_reasons.join("; ")),
             });
         }
         if !generated_expression.is_empty()
@@ -1522,6 +2795,11 @@ fn extract_catalog(
         attributes.insert("nullable".into(), serde_json::json!(nullable == "YES"));
         attributes.insert("data_type".into(), serde_json::json!(data_type));
         attributes.insert("column_type".into(), serde_json::json!(column_type));
+        attributes.insert(
+            "mysql_ddl_type".into(),
+            serde_json::to_value(ddl_type)
+                .map_err(|error| ConnectionError::Database(error.to_string()))?,
+        );
         attributes.insert("character_set".into(), serde_json::json!(charset));
         attributes.insert("collation".into(), serde_json::json!(collation));
         attributes.insert("extra".into(), serde_json::json!(extra));
@@ -1555,14 +2833,17 @@ fn extract_catalog(
     );
 
     for row in table_rows {
-        let (table_name, table_type, engine, table_collation, create_options, auto_increment): (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<u64>,
-        ) = mysql::from_row(row);
+        let (
+            table_name,
+            table_type,
+            engine,
+            table_collation,
+            table_character_set,
+            create_options,
+            auto_increment,
+        ): MySqlTableRow = mysql::from_row_opt(row).map_err(|error| {
+            ConnectionError::Database(format!("invalid MySQL table catalog row: {error}"))
+        })?;
         let id = catalog_id("table", database, &table_name, "");
         let table_identifier = Identifier::new(table_name.clone())
             .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
@@ -1583,6 +2864,20 @@ fn extract_catalog(
                     "MySQL table uses unsupported non-MVCC or unknown engine {}",
                     engine.as_deref().unwrap_or("NULL")
                 ),
+            });
+        }
+        if table_type == "BASE TABLE"
+            && (table_character_set.is_none()
+                || table_collation.is_none()
+                || create_options
+                    .as_deref()
+                    .is_none_or(|options| !options.is_empty()))
+        {
+            blockers.push(MySqlCatalogBlocker {
+                object_id: id.clone(),
+                object_kind: "table_ddl".into(),
+                reason: "MySQL table character-set/collation identity or nondefault create options are not yet modeled as typed DDL"
+                    .into(),
             });
         }
         let table_columns = columns.get(&table_name).cloned().unwrap_or_default();
@@ -1613,6 +2908,10 @@ fn extract_catalog(
         attributes.insert("table_type".into(), serde_json::json!(table_type));
         attributes.insert("engine".into(), serde_json::json!(engine));
         attributes.insert("collation".into(), serde_json::json!(table_collation));
+        attributes.insert(
+            "character_set".into(),
+            serde_json::json!(table_character_set),
+        );
         attributes.insert("create_options".into(), serde_json::json!(create_options));
         attributes.insert("auto_increment".into(), serde_json::json!(auto_increment));
         attributes.insert(
@@ -1708,6 +3007,10 @@ fn extract_catalog(
     };
     let mut vendor_metadata = BTreeMap::new();
     vendor_metadata.insert("information_schema_stats_expiry".into(), "0".into());
+    vendor_metadata.insert(
+        "lower_case_table_names".into(),
+        lower_case_table_names.to_string(),
+    );
     Ok((
         VendorCatalog {
             format_version: MYSQL_CATALOG_FORMAT_VERSION,
@@ -1979,6 +3282,281 @@ fn supported_value_type(data_type: &str) -> bool {
     )
 }
 
+fn supported_column_extra(extra: &str) -> bool {
+    extra.is_empty() || extra.eq_ignore_ascii_case("auto_increment")
+}
+
+fn parse_mysql_column_type(column_type: &str) -> Result<MySqlColumnType, String> {
+    let normalized = column_type.trim().to_ascii_lowercase();
+    if normalized.contains(" zerofill") {
+        return Err("ZEROFILL column semantics are not modeled".into());
+    }
+    let (base, unsigned) = normalized
+        .strip_suffix(" unsigned")
+        .map_or((normalized.as_str(), false), |base| (base, true));
+    let (name, arguments) = parse_type_name_and_arguments(base)?;
+    let argument = |index: usize| -> Result<u32, String> {
+        arguments
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("MySQL type {name} lacks argument {}", index + 1))
+    };
+    match name {
+        "tinyint" | "smallint" | "mediumint" | "int" | "bigint" => {
+            if arguments.len() > 1 {
+                return Err(format!("MySQL integer type {name} has too many arguments"));
+            }
+            Ok(MySqlColumnType::Integer {
+                name: name.into(),
+                unsigned,
+                display_width: arguments.first().copied(),
+            })
+        }
+        "decimal" | "numeric" => {
+            if arguments.len() != 2 {
+                return Err(format!(
+                    "MySQL decimal type {name} must bind precision and scale"
+                ));
+            }
+            Ok(MySqlColumnType::Decimal {
+                precision: argument(0)?,
+                scale: argument(1)?,
+                unsigned,
+            })
+        }
+        "float" | "double" => {
+            if arguments.len() > 2 {
+                return Err(format!("MySQL floating type {name} has too many arguments"));
+            }
+            Ok(MySqlColumnType::Floating {
+                name: name.into(),
+                precision: arguments.first().copied(),
+                scale: arguments.get(1).copied(),
+                unsigned,
+            })
+        }
+        "bit" => {
+            if unsigned || arguments.len() != 1 {
+                return Err("MySQL BIT must have one length and cannot be unsigned".into());
+            }
+            Ok(MySqlColumnType::Bit {
+                length: argument(0)?,
+            })
+        }
+        "date" => {
+            require_no_type_modifiers(name, &arguments, unsigned)?;
+            Ok(MySqlColumnType::Temporal {
+                name: name.into(),
+                fractional_precision: None,
+            })
+        }
+        "datetime" | "timestamp" | "time" => {
+            if unsigned || arguments.len() > 1 {
+                return Err(format!("MySQL temporal type {name} has invalid modifiers"));
+            }
+            let fractional_precision = arguments.first().copied();
+            if fractional_precision.is_some_and(|precision| precision > 6) {
+                return Err(format!("MySQL temporal type {name} precision exceeds 6"));
+            }
+            Ok(MySqlColumnType::Temporal {
+                name: name.into(),
+                fractional_precision,
+            })
+        }
+        "year" => {
+            if unsigned || !(arguments.is_empty() || arguments.as_slice() == [4]) {
+                return Err("MySQL YEAR has unsupported modifiers".into());
+            }
+            Ok(MySqlColumnType::Year)
+        }
+        "char" | "varchar" => {
+            if unsigned || arguments.len() != 1 || argument(0)? == 0 {
+                return Err(format!("MySQL character type {name} has invalid length"));
+            }
+            Ok(MySqlColumnType::Character {
+                name: name.into(),
+                length: argument(0)?,
+            })
+        }
+        "binary" | "varbinary" => {
+            if unsigned || arguments.len() != 1 || argument(0)? == 0 {
+                return Err(format!("MySQL binary type {name} has invalid length"));
+            }
+            Ok(MySqlColumnType::Binary {
+                name: name.into(),
+                length: argument(0)?,
+            })
+        }
+        "tinytext" | "text" | "mediumtext" | "longtext" => {
+            require_no_type_modifiers(name, &arguments, unsigned)?;
+            Ok(MySqlColumnType::Text { name: name.into() })
+        }
+        "tinyblob" | "blob" | "mediumblob" | "longblob" => {
+            require_no_type_modifiers(name, &arguments, unsigned)?;
+            Ok(MySqlColumnType::Blob { name: name.into() })
+        }
+        "json" => {
+            require_no_type_modifiers(name, &arguments, unsigned)?;
+            Ok(MySqlColumnType::Json)
+        }
+        _ => Err(format!(
+            "MySQL column type {column_type} has no reviewed typed DDL contract"
+        )),
+    }
+}
+
+fn parse_type_name_and_arguments(value: &str) -> Result<(&str, Vec<u32>), String> {
+    let Some(open) = value.find('(') else {
+        if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_alphabetic()) {
+            return Err("MySQL column type name is invalid".into());
+        }
+        return Ok((value, Vec::new()));
+    };
+    if !value.ends_with(')')
+        || value[open + 1..value.len() - 1].contains('(')
+        || value[open + 1..value.len() - 1].contains(')')
+    {
+        return Err("MySQL column type arguments are malformed".into());
+    }
+    let name = &value[..open];
+    if name.is_empty() || name.bytes().any(|byte| !byte.is_ascii_alphabetic()) {
+        return Err("MySQL column type name is invalid".into());
+    }
+    let arguments = value[open + 1..value.len() - 1]
+        .split(',')
+        .map(|argument| {
+            argument
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "MySQL column type argument is not an unsigned integer".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if arguments.is_empty() {
+        return Err("MySQL column type has an empty argument list".into());
+    }
+    Ok((name, arguments))
+}
+
+fn require_no_type_modifiers(name: &str, arguments: &[u32], unsigned: bool) -> Result<(), String> {
+    if unsigned || !arguments.is_empty() {
+        Err(format!("MySQL type {name} has unsupported modifiers"))
+    } else {
+        Ok(())
+    }
+}
+
+fn render_mysql_column_type(data_type: &MySqlColumnType) -> Result<String, MySqlPlanError> {
+    let rendered = match data_type {
+        MySqlColumnType::Integer {
+            name,
+            unsigned,
+            display_width,
+        } => {
+            if !matches!(
+                name.as_str(),
+                "tinyint" | "smallint" | "mediumint" | "int" | "bigint"
+            ) {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL integer type name is not supported".into(),
+                ));
+            }
+            format!(
+                "{name}{}{}",
+                display_width.map_or_else(String::new, |width| format!("({width})")),
+                if *unsigned { " unsigned" } else { "" }
+            )
+        }
+        MySqlColumnType::Decimal {
+            precision,
+            scale,
+            unsigned,
+        } => format!(
+            "decimal({precision},{scale}){}",
+            if *unsigned { " unsigned" } else { "" }
+        ),
+        MySqlColumnType::Floating {
+            name,
+            precision,
+            scale,
+            unsigned,
+        } => {
+            if !matches!(name.as_str(), "float" | "double") {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL floating type name is not supported".into(),
+                ));
+            }
+            let arguments = match (precision, scale) {
+                (None, None) => String::new(),
+                (Some(precision), None) => format!("({precision})"),
+                (Some(precision), Some(scale)) => format!("({precision},{scale})"),
+                (None, Some(_)) => {
+                    return Err(MySqlPlanError::InvalidCatalog(
+                        "MySQL floating scale requires precision".into(),
+                    ));
+                }
+            };
+            format!(
+                "{name}{arguments}{}",
+                if *unsigned { " unsigned" } else { "" }
+            )
+        }
+        MySqlColumnType::Bit { length } => format!("bit({length})"),
+        MySqlColumnType::Temporal {
+            name,
+            fractional_precision,
+        } => {
+            if !matches!(name.as_str(), "date" | "datetime" | "timestamp" | "time") {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL temporal type name is not supported".into(),
+                ));
+            }
+            fractional_precision
+                .map_or_else(|| name.clone(), |precision| format!("{name}({precision})"))
+        }
+        MySqlColumnType::Year => "year".into(),
+        MySqlColumnType::Character { name, length } => {
+            if !matches!(name.as_str(), "char" | "varchar") {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL character type name is not supported".into(),
+                ));
+            }
+            format!("{name}({length})")
+        }
+        MySqlColumnType::Binary { name, length } => {
+            if !matches!(name.as_str(), "binary" | "varbinary") {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL binary type name is not supported".into(),
+                ));
+            }
+            format!("{name}({length})")
+        }
+        MySqlColumnType::Text { name } => {
+            if !matches!(
+                name.as_str(),
+                "tinytext" | "text" | "mediumtext" | "longtext"
+            ) {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL text type name is not supported".into(),
+                ));
+            }
+            name.clone()
+        }
+        MySqlColumnType::Blob { name } => {
+            if !matches!(
+                name.as_str(),
+                "tinyblob" | "blob" | "mediumblob" | "longblob"
+            ) {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL blob type name is not supported".into(),
+                ));
+            }
+            name.clone()
+        }
+        MySqlColumnType::Json => "json".into(),
+    };
+    Ok(rendered)
+}
+
 fn is_proven_binary_collation(collation: &str) -> bool {
     collation == "binary" || collation.ends_with("_bin")
 }
@@ -2015,25 +3593,25 @@ fn inventory_constraints(
 ) -> ConnectionResult<()> {
     let constraints: Vec<(String, String, String, String)> = conn
         .exec(
-            "SELECT TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE, ENFORCED FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? ORDER BY TABLE_NAME, CONSTRAINT_NAME",
+            "SELECT TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE, ENFORCED FROM information_schema.TABLE_CONSTRAINTS WHERE BINARY CONSTRAINT_SCHEMA = BINARY ? ORDER BY TABLE_NAME, CONSTRAINT_NAME",
             (database,),
         )
         .map_err(database_error)?;
     let key_columns: Vec<MySqlConstraintKeyRow> = conn
         .exec(
-            "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA = ? ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+            "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE BINARY CONSTRAINT_SCHEMA = BINARY ? ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
             (database,),
         )
         .map_err(database_error)?;
     let references: Vec<(String, String, String, String, String, String)> = conn
         .exec(
-            "SELECT TABLE_NAME, CONSTRAINT_NAME, UNIQUE_CONSTRAINT_SCHEMA, UNIQUE_CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? ORDER BY TABLE_NAME, CONSTRAINT_NAME",
+            "SELECT TABLE_NAME, CONSTRAINT_NAME, UNIQUE_CONSTRAINT_SCHEMA, UNIQUE_CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE BINARY CONSTRAINT_SCHEMA = BINARY ? ORDER BY TABLE_NAME, CONSTRAINT_NAME",
             (database,),
         )
         .map_err(database_error)?;
     let checks: Vec<(String, String)> = conn
         .exec(
-            "SELECT CONSTRAINT_NAME, CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? ORDER BY CONSTRAINT_NAME",
+            "SELECT CONSTRAINT_NAME, CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS WHERE BINARY CONSTRAINT_SCHEMA = BINARY ? ORDER BY CONSTRAINT_NAME",
             (database,),
         )
         .map_err(database_error)?;
@@ -2115,7 +3693,7 @@ fn inventory_privileges(
 ) -> ConnectionResult<()> {
     let schema_privileges: Vec<(String, String, String)> = conn
         .exec(
-            "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA = ? ORDER BY GRANTEE, PRIVILEGE_TYPE",
+            "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.SCHEMA_PRIVILEGES WHERE BINARY TABLE_SCHEMA = BINARY ? ORDER BY GRANTEE, PRIVILEGE_TYPE",
             (database,),
         )
         .map_err(database_error)?;
@@ -2136,7 +3714,7 @@ fn inventory_privileges(
     }
     let table_privileges: Vec<(String, String, String, String)> = conn
         .exec(
-            "SELECT TABLE_NAME, GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, GRANTEE, PRIVILEGE_TYPE",
+            "SELECT TABLE_NAME, GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.TABLE_PRIVILEGES WHERE BINARY TABLE_SCHEMA = BINARY ? ORDER BY TABLE_NAME, GRANTEE, PRIVILEGE_TYPE",
             (database,),
         )
         .map_err(database_error)?;
@@ -2157,7 +3735,7 @@ fn inventory_privileges(
     }
     let column_privileges: Vec<(String, String, String, String, String)> = conn
         .exec(
-            "SELECT TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.COLUMN_PRIVILEGES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE_TYPE",
+            "SELECT TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.COLUMN_PRIVILEGES WHERE BINARY TABLE_SCHEMA = BINARY ? ORDER BY TABLE_NAME, COLUMN_NAME, GRANTEE, PRIVILEGE_TYPE",
             (database,),
         )
         .map_err(database_error)?;
@@ -2240,17 +3818,17 @@ fn inventory_unsupported_programmable_objects(
 ) -> ConnectionResult<()> {
     for (query, kind, object_kind) in [
         (
-            "SELECT TRIGGER_NAME, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? ORDER BY TRIGGER_NAME",
+            "SELECT TRIGGER_NAME, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY ? ORDER BY TRIGGER_NAME",
             CatalogObjectKind::Trigger,
             "trigger",
         ),
         (
-            "SELECT ROUTINE_NAME, COALESCE(ROUTINE_DEFINITION, '') FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME, SPECIFIC_NAME",
+            "SELECT ROUTINE_NAME, COALESCE(ROUTINE_DEFINITION, '') FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY ? ORDER BY ROUTINE_NAME, SPECIFIC_NAME",
             CatalogObjectKind::Routine,
             "routine",
         ),
         (
-            "SELECT EVENT_NAME, COALESCE(EVENT_DEFINITION, '') FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? ORDER BY EVENT_NAME",
+            "SELECT EVENT_NAME, COALESCE(EVENT_DEFINITION, '') FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY ? ORDER BY EVENT_NAME",
             CatalogObjectKind::Event,
             "event",
         ),
@@ -2275,7 +3853,7 @@ fn inventory_unsupported_programmable_objects(
     }
     let partitions: Vec<(String, String, Option<String>, Option<String>)> = conn
         .exec(
-            "SELECT TABLE_NAME, PARTITION_NAME, PARTITION_METHOD, PARTITION_EXPRESSION FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = ? AND PARTITION_NAME IS NOT NULL ORDER BY TABLE_NAME, PARTITION_ORDINAL_POSITION",
+            "SELECT TABLE_NAME, PARTITION_NAME, PARTITION_METHOD, PARTITION_EXPRESSION FROM information_schema.PARTITIONS WHERE BINARY TABLE_SCHEMA = BINARY ? AND PARTITION_NAME IS NOT NULL ORDER BY TABLE_NAME, PARTITION_ORDINAL_POSITION",
             (database,),
         )
         .map_err(database_error)?;
@@ -2316,7 +3894,9 @@ fn query_database_default(
         ));
     }
     conn.exec_first(
-        format!("SELECT {column} FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?"),
+        format!(
+            "SELECT {column} FROM information_schema.SCHEMATA WHERE BINARY SCHEMA_NAME = BINARY ?"
+        ),
         (database,),
     )
     .map_err(database_error)
@@ -2527,6 +4107,60 @@ where
         })
 }
 
+fn configure_mysql_session(conn: &mut Conn) -> ConnectionResult<()> {
+    conn.query_drop("SET SESSION time_zone = '+00:00'")
+        .map_err(database_error)?;
+    conn.query_drop(format!("SET SESSION sql_mode = '{MYSQL_STRICT_SQL_MODE}'"))
+        .map_err(database_error)?;
+    conn.query_drop(format!(
+        "SET NAMES {MYSQL_SESSION_CHARACTER_SET} COLLATE {MYSQL_SESSION_COLLATION}"
+    ))
+    .map_err(database_error)?;
+    Ok(())
+}
+
+fn mysql_live_session_identity(conn: &mut Conn) -> ConnectionResult<MySqlLiveSessionIdentity> {
+    let mut row: Row = conn
+        .query_first(
+            "SELECT DATABASE(), @@hostname, @@port, VERSION(), @@server_uuid, @@transaction_isolation, @@transaction_read_only, @@session.time_zone, @@session.information_schema_stats_expiry, @@global.gtid_executed, CONNECTION_ID(), @@lower_case_table_names, @@session.sql_mode, @@session.character_set_client, @@session.character_set_connection, @@session.character_set_results, @@session.collation_connection",
+        )
+        .map_err(database_error)?
+        .ok_or_else(|| ConnectionError::Database("MySQL identity query returned no row".into()))?;
+    Ok(MySqlLiveSessionIdentity {
+        database: take_cell(&mut row, 0, "DATABASE()")?,
+        hostname: take_cell(&mut row, 1, "@@hostname")?,
+        port: take_cell(&mut row, 2, "@@port")?,
+        server_version: take_cell(&mut row, 3, "VERSION()")?,
+        server_uuid: take_cell(&mut row, 4, "@@server_uuid")?,
+        transaction_isolation: take_cell(&mut row, 5, "@@transaction_isolation")?,
+        transaction_read_only: take_cell(&mut row, 6, "@@transaction_read_only")?,
+        session_time_zone: take_cell(&mut row, 7, "@@session.time_zone")?,
+        information_schema_stats_expiry: take_cell(
+            &mut row,
+            8,
+            "@@session.information_schema_stats_expiry",
+        )?,
+        gtid_executed_observation: take_cell(&mut row, 9, "@@global.gtid_executed")?,
+        connection_id: take_cell(&mut row, 10, "CONNECTION_ID()")?,
+        lower_case_table_names: take_cell(&mut row, 11, "@@lower_case_table_names")?,
+        session_sql_mode: take_cell(&mut row, 12, "@@session.sql_mode")?,
+        character_set_client: take_cell(&mut row, 13, "@@session.character_set_client")?,
+        character_set_connection: take_cell(&mut row, 14, "@@session.character_set_connection")?,
+        character_set_results: take_cell(&mut row, 15, "@@session.character_set_results")?,
+        collation_connection: take_cell(&mut row, 16, "@@session.collation_connection")?,
+    })
+}
+
+fn mysql_session_settings_are_exact(identity: &MySqlLiveSessionIdentity) -> bool {
+    identity.session_time_zone == "+00:00"
+        && identity.information_schema_stats_expiry == 0
+        && identity.session_sql_mode == MYSQL_STRICT_SQL_MODE
+        && identity.character_set_client == MYSQL_SESSION_CHARACTER_SET
+        && identity.character_set_connection == MYSQL_SESSION_CHARACTER_SET
+        && identity.character_set_results == MYSQL_SESSION_CHARACTER_SET
+        && identity.collation_connection == MYSQL_SESSION_COLLATION
+}
+
 fn database_error(error: impl std::fmt::Display) -> ConnectionError {
     ConnectionError::Database(error.to_string())
 }
@@ -2601,9 +4235,23 @@ mod tests {
                 attributes: BTreeMap::from([
                     ("table_name".into(), serde_json::json!("items")),
                     ("ordinal".into(), serde_json::json!(1)),
+                    ("default".into(), serde_json::Value::Null),
                     ("nullable".into(), serde_json::json!(false)),
                     ("data_type".into(), serde_json::json!("bigint")),
+                    ("column_type".into(), serde_json::json!("bigint")),
+                    (
+                        "mysql_ddl_type".into(),
+                        serde_json::to_value(MySqlColumnType::Integer {
+                            name: "bigint".into(),
+                            unsigned: false,
+                            display_width: None,
+                        })
+                        .unwrap(),
+                    ),
+                    ("character_set".into(), serde_json::Value::Null),
                     ("collation".into(), serde_json::Value::Null),
+                    ("extra".into(), serde_json::json!("")),
+                    ("generation_expression".into(), serde_json::json!("")),
                     ("numeric_precision".into(), serde_json::json!(64)),
                     ("numeric_scale".into(), serde_json::json!(0)),
                 ]),
@@ -2617,6 +4265,9 @@ mod tests {
                         .to_vec(),
                 attributes: BTreeMap::from([
                     ("engine".into(), serde_json::json!("InnoDB")),
+                    ("character_set".into(), serde_json::json!("utf8mb4")),
+                    ("collation".into(), serde_json::json!("utf8mb4_0900_bin")),
+                    ("create_options".into(), serde_json::json!("")),
                     ("auto_increment".into(), serde_json::Value::Null),
                     ("auto_increment_column".into(), serde_json::Value::Null),
                     ("resumable_key".into(), serde_json::to_value(key).unwrap()),
@@ -2637,10 +4288,10 @@ mod tests {
                 objects,
             }],
             dependencies: Vec::new(),
-            vendor_metadata: BTreeMap::from([(
-                "information_schema_stats_expiry".into(),
-                "0".into(),
-            )]),
+            vendor_metadata: BTreeMap::from([
+                ("information_schema_stats_expiry".into(), "0".into()),
+                ("lower_case_table_names".into(), "0".into()),
+            ]),
         }
     }
 
@@ -2669,6 +4320,12 @@ mod tests {
                 session_time_zone: "+00:00".into(),
                 catalog_snapshot_protected: false,
                 information_schema_stats_expiry: 0,
+                lower_case_table_names: 0,
+                session_sql_mode: MYSQL_STRICT_SQL_MODE.into(),
+                character_set_client: MYSQL_SESSION_CHARACTER_SET.into(),
+                character_set_connection: MYSQL_SESSION_CHARACTER_SET.into(),
+                character_set_results: MYSQL_SESSION_CHARACTER_SET.into(),
+                collation_connection: MYSQL_SESSION_COLLATION.into(),
                 gtid_executed_observation: String::new(),
                 catalog_fingerprint: fingerprint,
             },
@@ -2736,7 +4393,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_mysql_plan_is_typed_and_remains_freeze_blocked() {
+    fn reviewed_mysql_plan_is_typed_and_binds_the_external_freeze_profile() {
         let reviewed = build_plan(
             &snapshot("mysql://source/app", true),
             &snapshot("mysql://target/app", false),
@@ -2748,16 +4405,94 @@ mod tests {
                 && operation.parameters.contains_key("resumable_key")
                 && operation.parameters.contains_key("mysql_write_policy")
         }));
+        assert!(reviewed.plan.operations.iter().any(|operation| {
+            operation.kind == OperationKind::CreateTable
+                && operation.parameters.contains_key("mysql_table_definition")
+        }));
+        assert_eq!(
+            reviewed.plan.mysql_source_profile,
+            Some(MySqlFreezeProfileContract::external_continuous_freeze())
+        );
         assert!(reviewed
             .plan
             .unsupported_objects
             .objects
             .iter()
             .any(|object| {
-                object.code == UnsupportedObjectCode::MySqlFreezeEvidence
+                object.code == UnsupportedObjectCode::MySqlCatalogSemantics
+                    && object.object_kind == "target_catalog_visibility"
                     && object.required_semantics
             }));
         assert!(reviewed.plan.unsupported_objects.blocks_execution());
+    }
+
+    #[test]
+    fn typed_mysql_column_types_round_trip_without_raw_sql() {
+        for source in [
+            "bigint unsigned",
+            "decimal(38,9)",
+            "double",
+            "bit(7)",
+            "datetime(6)",
+            "year",
+            "varchar(255)",
+            "varbinary(32)",
+            "longtext",
+            "mediumblob",
+            "json",
+        ] {
+            let parsed = parse_mysql_column_type(source).unwrap();
+            let rendered = render_mysql_column_type(&parsed).unwrap();
+            assert_eq!(parse_mysql_column_type(&rendered).unwrap(), parsed);
+        }
+        assert!(parse_mysql_column_type("enum('a','b')").is_err());
+        assert!(parse_mysql_column_type("int zerofill").is_err());
+    }
+
+    #[test]
+    fn typed_create_table_quotes_every_identifier() {
+        let definition = MySqlTableDefinition {
+            table: QualifiedTable {
+                namespace: identifier("a`b"),
+                name: identifier("t`x"),
+            },
+            engine: "InnoDB".into(),
+            character_set: "utf8mb4".into(),
+            collation: "utf8mb4_0900_bin".into(),
+            columns: vec![MySqlColumnDefinition {
+                name: identifier("c`1"),
+                ordinal: 1,
+                data_type: MySqlColumnType::Integer {
+                    name: "bigint".into(),
+                    unsigned: false,
+                    display_width: None,
+                },
+                nullable: false,
+                character_set: None,
+                collation: None,
+                auto_increment: false,
+            }],
+            indexes: vec![MySqlIndexDefinition {
+                name: identifier("PRIMARY"),
+                primary: true,
+                unique: true,
+                constraint_backed: true,
+                columns: vec![identifier("c`1")],
+            }],
+        };
+        let ddl = render_mysql_create_table(&definition).unwrap();
+        assert!(ddl.contains("CREATE TABLE `a``b`.`t``x`"));
+        assert!(ddl.contains("`c``1` bigint NOT NULL"));
+        assert!(!ddl.contains(';'));
+    }
+
+    #[test]
+    fn mysql_decimal_write_encoding_is_scale_exact() {
+        assert_eq!(render_mysql_decimal(b"12345", 2).unwrap(), b"123.45");
+        assert_eq!(render_mysql_decimal(b"-7", 3).unwrap(), b"-0.007");
+        assert_eq!(render_mysql_decimal(b"0", 4).unwrap(), b"0.0000");
+        assert!(render_mysql_decimal(b"1.2", 1).is_err());
+        assert!(render_mysql_decimal(b"1", -1).is_err());
     }
 
     #[test]
@@ -2795,7 +4530,7 @@ mod tests {
         source.snapshot_evidence.catalog_fingerprint = fingerprint;
         let error = build_plan(&source, &snapshot("mysql://target/app", false)).unwrap_err();
         assert!(
-            matches!(error, MySqlPlanError::InvalidCatalog(message) if message.contains("column_type"))
+            matches!(error, MySqlPlanError::InvalidCatalog(message) if message.contains("column_ddl"))
         );
     }
 }

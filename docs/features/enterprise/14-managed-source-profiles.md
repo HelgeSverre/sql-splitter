@@ -161,6 +161,50 @@ Selected contract (mailbox [021-codex]/[023]):
   tier; execute/resume:
   `--external-quiesce-attestation` for the external profile only.
 
+## MySQL freeze profile (Phase 6)
+
+Selected contract (mailbox [035-codex]/[036]). MySQL has no durable
+database-enforced fence primitive: `super_read_only` blocks all client
+writes (including `SUPER`/`CONNECTION_ADMIN`) but exempts replication
+applier threads, `LOCK INSTANCE FOR BACKUP` blocks only DDL and
+file-affecting operations and is released when its owning session dies, and
+`LOCK TABLES ... READ` is session-scoped and conflicts with the snapshot
+reader. No single candidate is a crash-resumable fence, so the first
+supported MySQL execution profile is an **external continuous freeze
+attestation**:
+
+- A separate authenticated admin endpoint attests server UUID, database,
+  TLS binding, profile generation, provider or control-plane reference,
+  activation and expiry times, and a continuity token owned outside the
+  migration process. The token and the backup-lock owner's session identity
+  are bound into journal genesis like the Phase 5b attestation digest.
+- The profile proves both DML and DDL exclusion and names the mechanisms.
+  The initial locally testable pair is persistent (`SET PERSIST`) global
+  `super_read_only = ON` plus an externally owned
+  `LOCK INSTANCE FOR BACKUP`.
+- Active replication and group-replication appliers are rejected by this
+  first profile, closing the `super_read_only` applier exemption. A
+  replica-as-source therefore cannot use this profile; a future profile may
+  attest a stopped applier instead. This limitation is recorded, not
+  hidden.
+- Exact checks bind `read_only`, `super_read_only`, server UUID,
+  backup-lock owner identity, and the absence of active replication
+  channels before snapshot, before every target effect, on resume, before
+  final verification, and before release.
+- The external lock owner, not the migration process, must survive
+  migration-process failure. A missing or replaced lock owner, a continuity
+  token change, or a server restart (which necessarily kills the lock
+  owner) permanently invalidates old journal state; reacquiring a new lock
+  cannot resume it, because the gap may contain writes.
+- `AUTO_INCREMENT` state is captured with `information_schema_stats_expiry
+  = 0` after activation and must be exactly equal on a fresh end read
+  before target restoration. GTID remains observation only. A full source
+  re-scan may be required as additional profile policy but cannot repair a
+  continuity gap.
+- The migration tool never toggles global read-only state and never
+  releases the external backup lock. Release is a separate operator or
+  provider action after durable `Completed` state.
+
 ## Delivery placement
 
 This document is Implementation Phase 5b in
