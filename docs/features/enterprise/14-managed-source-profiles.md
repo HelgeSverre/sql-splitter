@@ -116,6 +116,31 @@ support statement names the provider, engine version, and admin role tested.
 This follows the same manual reproducible-matrix posture as
 [12](./12-postgresql-first-adapter.md); no CI promise is made here.
 
+### Recorded provider evidence
+
+The Phase 5b provider matrix passed on 2026-08-12 with this exact boundary:
+
+| Provider | Engine | Administrator class | Managed-administrator probes | External-quiesce execution |
+| -------- | ------ | ------------------- | ---------------------------- | -------------------------- |
+| Amazon RDS | PostgreSQL 16.14 | non-superuser member of `rds_superuser` | all six requirements proven | withdrawal stop, sequence-drift stop, `CACHE 1` equality, recovery, exact data and sequence state passed |
+
+The reproducible ignored test is
+`live_managed_provider_phase5b_matrix`. It creates isolated test roles and
+databases on the supplied provider endpoint, uses authenticated hostname-checked
+TLS with the regional CA bundle, and removes those objects after the run. It
+records only provider, engine version, administrator class, and typed probe
+outcomes. It does not record the endpoint or credentials.
+
+This statement admits the `attested-external-quiesce` profile for this provider
+and version under its explicit operator-attestation contract. The
+`managed-administrator` probe suite also predicts that the tested role can meet
+all six fence prerequisites. A full provider write-fence execution matrix was
+not run, so this statement does not admit database-enforced
+`managed-administrator` execution yet. It also does not claim provider API
+automation, reboot orchestration, another RDS version, Aurora, or another cloud
+provider. The feature-gated command remains a spike rather than a general
+production support statement.
+
 ## Probe and attestation interfaces (Phase 5b)
 
 Selected contract (mailbox [021-codex]/[023]):

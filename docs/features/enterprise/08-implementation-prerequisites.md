@@ -30,8 +30,18 @@ measured throughput is published in
 [13](./13-throughput-and-copy-path.md#recorded-measurements); and the
 plan-bound outage projection is enforced at execute preflight with live
 over-budget rejection evidence. This is spike evidence within the
-feature-gated command, not a production support statement, and no other
-phase claims completion.
+feature-gated command, not a production support statement.
+
+Implementation Phase 5b met its exit condition on 2026-08-12. The real-provider
+matrix passed against Amazon RDS for PostgreSQL 16.14 with a non-superuser
+administrator that is a member of `rds_superuser`. All six administrator
+profile probes passed. The same run proved that a withdrawn external-quiesce
+attestation and changed sequence state stop resume, and that an unchanged
+`CACHE 1` sequence completes with exact start/end equality evidence. The
+provider/version/profile statement and limits are recorded in
+[14](./14-managed-source-profiles.md#recorded-provider-evidence). This remains
+feature-gated spike evidence and does not claim provider control-plane
+automation or general production support.
 
 ## Second-dialect scope: MySQL
 
@@ -63,6 +73,14 @@ Implementation Phase 6's dialect is MySQL. Scope for its adapter proof:
 - **Collation binding.** Keyset text keys bind collation identity exactly as
   in PostgreSQL. Case-insensitive or otherwise non-deterministic collations
   are rejected as pagination keys.
+- **JSON scalar signedness is a recorded limit.** MySQL JSON travels as
+  source-faithful text, and any text-wire transfer (mysqldump included)
+  re-parses unsigned small scalars as signed: `JSON_TYPE` can drift
+  `UNSIGNED INTEGER` → `INTEGER` while value text, comparisons, and
+  canonical digests remain identical, so verification is structurally
+  blind to it. Demonstrated live on MySQL 8.0 (mailbox [060]). Recorded as
+  a known limitation; detecting it would require binary-JSON type
+  inspection on both sides and is not currently gated.
 - **Catalog visibility.** `INFORMATION_SCHEMA` content is account-dependent.
   Lifting the unconditional visibility blocker requires the
   metadata-administrator proof in

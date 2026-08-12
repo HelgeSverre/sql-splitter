@@ -15,10 +15,10 @@ mod postgres_commit_proxy;
 use postgres_commit_proxy::{CommitFaultMode, PostgresCommitProxy};
 
 use anyhow::Context;
-use native_tls::{Certificate, Identity, TlsConnector};
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use postgres::config::SslMode;
 use postgres::{Client, Config};
-use postgres_native_tls::MakeTlsConnector;
+use postgres_openssl::MakeTlsConnector;
 use sha2::{Digest, Sha256};
 use sql_splitter::migration::append_journal::{AppendJournal, PreparedChunk};
 use sql_splitter::migration::artifact::{read_json, write_json_new};
@@ -55,8 +55,8 @@ use sql_splitter::migration::postgres_fence::{
     release_postgres_write_fence, InstalledPostgresFence,
 };
 use sql_splitter::migration::postgres_profile::{
-    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceStatus,
-    PostgresSourceProfileContract, PostgresSourceProfileKind,
+    PostgresExternalQuiesceAttestation, PostgresExternalQuiesceStatus, PostgresSourceProbeArtifact,
+    PostgresSourceProbeStatus, PostgresSourceProfileContract, PostgresSourceProfileKind,
     POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
 };
 use sql_splitter::migration::runner::execute_postgres_plan;
@@ -1723,6 +1723,27 @@ fn live_external_quiesce_sequence_equality_executes_and_binds() -> anyhow::Resul
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_TARGET_CONFIG")?)?;
     let base_admin =
         PostgresEndpointConfig::read(required_path("SQL_SPLITTER_PG_FENCE_ADMIN_CONFIG")?)?;
+    run_external_quiesce_sequence_equality(
+        base_source,
+        base_target,
+        base_admin,
+        "migration_mutator",
+        "migration_reader",
+        "migration_fence_target_owner",
+        None,
+    )?;
+    Ok(())
+}
+
+fn run_external_quiesce_sequence_equality(
+    base_source: PostgresEndpointConfig,
+    base_target: PostgresEndpointConfig,
+    base_admin: PostgresEndpointConfig,
+    source_database_owner: &str,
+    source_reader_role: &str,
+    target_database_owner: &str,
+    probe_profile: Option<PostgresSourceProfileKind>,
+) -> anyhow::Result<Option<PostgresSourceProbeArtifact>> {
     let directory = private_tempdir()?;
     let suffix = format!(
         "{}_{}",
@@ -1733,18 +1754,22 @@ fn live_external_quiesce_sequence_equality_executes_and_binds() -> anyhow::Resul
     let target_database = format!("migration_external_target_{suffix}");
 
     let mut control = connect(&base_admin)?;
-    control.batch_execute(&format!(
-        "CREATE DATABASE {source_database} OWNER migration_mutator"
-    ))?;
-    control.batch_execute(&format!(
-        "CREATE DATABASE {target_database} OWNER migration_fence_target_owner"
-    ))?;
+    let source_database_sql = postgres_identifier(&source_database)?;
+    let target_database_sql = postgres_identifier(&target_database)?;
+    let source_database_owner_sql = postgres_identifier(source_database_owner)?;
+    let source_reader_role_sql = postgres_identifier(source_reader_role)?;
+    let target_database_owner_sql = postgres_identifier(target_database_owner)?;
     let cleanup = RecoveryDatabaseCleanup::new(
         base_admin.clone(),
         source_database.clone(),
         target_database.clone(),
     );
-
+    control.batch_execute(&format!(
+        "CREATE DATABASE {source_database_sql} OWNER {source_database_owner_sql}"
+    ))?;
+    control.batch_execute(&format!(
+        "CREATE DATABASE {target_database_sql} OWNER {target_database_owner_sql}"
+    ))?;
     let mut source = base_source.clone();
     source.database.clone_from(&source_database);
     let mut target = base_target.clone();
@@ -1753,26 +1778,39 @@ fn live_external_quiesce_sequence_equality_executes_and_binds() -> anyhow::Resul
     admin.database.clone_from(&source_database);
     let mut setup = connect(&admin)?;
     setup.batch_execute(&format!(
-        "REVOKE CREATE,TEMP ON DATABASE {source_database} FROM PUBLIC; \
+        "REVOKE CREATE,TEMP ON DATABASE {source_database_sql} FROM PUBLIC; \
          REVOKE CREATE ON SCHEMA public FROM PUBLIC; \
-         GRANT CONNECT ON DATABASE {source_database} TO migration_reader; \
-         GRANT USAGE ON SCHEMA public TO migration_reader; \
+         GRANT CONNECT ON DATABASE {source_database_sql} TO {source_reader_role_sql}; \
+         GRANT USAGE ON SCHEMA public TO {source_reader_role_sql}; \
          CREATE TABLE public.external_rows (id bigint PRIMARY KEY, payload text NOT NULL); \
          INSERT INTO public.external_rows VALUES (1, 'one'), (2, 'two'), (3, 'three'); \
          CREATE SEQUENCE public.external_sequence AS bigint START WITH 7 CACHE 1; \
          SELECT pg_catalog.setval('public.external_sequence'::regclass, 41, true); \
-         GRANT SELECT ON public.external_rows TO migration_reader; \
-         GRANT SELECT ON SEQUENCE public.external_sequence TO migration_reader"
+         GRANT SELECT ON public.external_rows TO {source_reader_role_sql}; \
+         GRANT SELECT ON SEQUENCE public.external_sequence TO {source_reader_role_sql}"
     ))?;
     drop(setup);
 
     let source_path = directory.path().join("source.toml");
     let target_path = directory.path().join("target.toml");
+    let admin_path = directory.path().join("admin.toml");
     let plan_path = directory.path().join("plan.json");
     let attestation_path = directory.path().join("external-quiesce.json");
     let state_path = directory.path().join("state.journal");
     std::fs::write(&source_path, toml::to_string(&source)?)?;
     std::fs::write(&target_path, toml::to_string(&target)?)?;
+    std::fs::write(&admin_path, toml::to_string(&admin)?)?;
+
+    let probe = probe_profile
+        .map(|profile| {
+            probe_live_postgres_source_profile(
+                &source_path,
+                &admin_path,
+                profile,
+                directory.path().join("source-profile-probe.json"),
+            )
+        })
+        .transpose()?;
 
     let reviewed = write_live_plan_with_profile_tier(
         &source_path,
@@ -1956,6 +1994,96 @@ fn live_external_quiesce_sequence_equality_executes_and_binds() -> anyhow::Resul
     drop(target_client);
 
     cleanup.run()?;
+    Ok(probe)
+}
+
+#[test]
+#[cfg(feature = "migration-fault-injection")]
+#[ignore = "requires the dedicated Amazon RDS PostgreSQL Phase 5b evidence endpoint"]
+fn live_managed_provider_phase5b_matrix() -> anyhow::Result<()> {
+    let admin_path = required_path("SQL_SPLITTER_PG_PROVIDER_ADMIN_CONFIG")?;
+    let base_admin = PostgresEndpointConfig::read(admin_path)?;
+    let suffix = format!(
+        "{}_{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+    );
+    let reader_role = format!("sqlspl_provider_reader_{suffix}");
+    let target_role = format!("sqlspl_provider_target_{suffix}");
+    let reader_password = hex::encode(rand::random::<[u8; 32]>());
+    let target_password = hex::encode(rand::random::<[u8; 32]>());
+    let reader_password_env = format!("SQL_SPLITTER_PROVIDER_READER_{}", suffix.to_uppercase());
+    let target_password_env = format!("SQL_SPLITTER_PROVIDER_TARGET_{}", suffix.to_uppercase());
+    let reader_environment = EnvironmentVariableGuard::set(&reader_password_env, &reader_password);
+    let target_environment = EnvironmentVariableGuard::set(&target_password_env, &target_password);
+
+    let mut control = connect(&base_admin)?;
+    let provider: bool = control
+        .query_one(
+            "SELECT NOT rolsuper AND pg_has_role(current_user,'rds_superuser','MEMBER') FROM pg_roles WHERE rolname=current_user",
+            &[],
+        )?
+        .get(0);
+    anyhow::ensure!(provider, "administrator is not an RDS administrator role");
+    let server_version_num: i32 = control
+        .query_one("SELECT current_setting('server_version_num')::integer", &[])?
+        .get(0);
+    anyhow::ensure!(
+        (160_000..170_000).contains(&server_version_num),
+        "provider matrix requires PostgreSQL 16"
+    );
+    let server_version: String = control
+        .query_one("SELECT current_setting('server_version')", &[])?
+        .get(0);
+
+    let cleanup = ProviderRoleCleanup::new(
+        base_admin.clone(),
+        vec![reader_role.clone(), target_role.clone()],
+    );
+    control.batch_execute(&format!(
+        "CREATE ROLE {} LOGIN PASSWORD '{}'; CREATE ROLE {} LOGIN PASSWORD '{}'; GRANT {} TO {}",
+        postgres_identifier(&reader_role)?,
+        reader_password,
+        postgres_identifier(&target_role)?,
+        target_password,
+        postgres_identifier(&target_role)?,
+        postgres_identifier(&base_admin.user)?,
+    ))?;
+    drop(control);
+
+    let mut source = base_admin.clone();
+    source.user.clone_from(&reader_role);
+    source.credential_env.clone_from(&reader_password_env);
+    let mut target = base_admin.clone();
+    target.user.clone_from(&target_role);
+    target.credential_env.clone_from(&target_password_env);
+    let probe = run_external_quiesce_sequence_equality(
+        source,
+        target,
+        base_admin.clone(),
+        &base_admin.user,
+        &reader_role,
+        &target_role,
+        Some(PostgresSourceProfileKind::ManagedAdministrator),
+    )?
+    .context("managed-provider matrix did not produce probe evidence")?;
+    probe.validate()?;
+    probe.require_all_proven()?;
+
+    println!(
+        "provider=amazon-rds engine=postgresql server_version={server_version} admin_role=rds_superuser-member"
+    );
+    for result in &probe.results {
+        let status = match &result.status {
+            PostgresSourceProbeStatus::Proven => "proven",
+            PostgresSourceProbeStatus::Unavailable { .. } => "unavailable",
+        };
+        println!("probe={:?} status={status}", result.requirement);
+    }
+
+    cleanup.run()?;
+    drop(target_environment);
+    drop(reader_environment);
     Ok(())
 }
 
@@ -4338,24 +4466,29 @@ fn connect(config: &PostgresEndpointConfig) -> anyhow::Result<Client> {
         .password(password)
         .ssl_mode(SslMode::Require)
         .connect_timeout(Duration::from_secs(config.connect_timeout_seconds));
-    let mut tls = TlsConnector::builder();
+    let mut tls = SslConnector::builder(SslMethod::tls())?;
     if let Some(path) = &config.tls.ca_certificate {
-        tls.add_root_certificate(Certificate::from_pem(&std::fs::read(path)?)?);
+        tls.set_ca_file(path)?;
     }
     if let (Some(certificate_path), Some(key_path)) = (
         &config.tls.client_certificate,
         &config.tls.client_private_key,
     ) {
-        tls.identity(Identity::from_pkcs8(
-            &std::fs::read(certificate_path)?,
-            &std::fs::read(key_path)?,
-        )?);
+        tls.set_certificate_chain_file(certificate_path)?;
+        tls.set_private_key_file(key_path, SslFiletype::PEM)?;
+        tls.check_private_key()?;
     }
     if config.tls.insecure {
-        tls.danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true);
+        tls.set_verify(SslVerifyMode::NONE);
     }
-    Ok(pg.connect(MakeTlsConnector::new(tls.build()?))?)
+    let mut connector = MakeTlsConnector::new(tls.build());
+    if config.tls.insecure {
+        connector.set_callback(|configuration, _| {
+            configuration.set_verify_hostname(false);
+            Ok(())
+        });
+    }
+    Ok(pg.connect(connector)?)
 }
 
 struct RecoveryDatabaseCleanup {
@@ -4388,12 +4521,12 @@ impl RecoveryDatabaseCleanup {
     fn cleanup(&self) -> anyhow::Result<()> {
         let mut client = connect(&self.control)?;
         client.batch_execute(&format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.source_database
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            postgres_identifier(&self.source_database)?
         ))?;
         client.batch_execute(&format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.target_database
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            postgres_identifier(&self.target_database)?
         ))?;
         Ok(())
     }
@@ -4405,6 +4538,78 @@ impl Drop for RecoveryDatabaseCleanup {
             let _ = self.cleanup();
         }
     }
+}
+
+struct ProviderRoleCleanup {
+    control: PostgresEndpointConfig,
+    roles: Vec<String>,
+    armed: bool,
+}
+
+impl ProviderRoleCleanup {
+    fn new(control: PostgresEndpointConfig, roles: Vec<String>) -> Self {
+        Self {
+            control,
+            roles,
+            armed: true,
+        }
+    }
+
+    fn run(mut self) -> anyhow::Result<()> {
+        self.cleanup()?;
+        self.armed = false;
+        Ok(())
+    }
+
+    fn cleanup(&self) -> anyhow::Result<()> {
+        let mut client = connect(&self.control)?;
+        for role in self.roles.iter().rev() {
+            client.batch_execute(&format!(
+                "DROP ROLE IF EXISTS {}",
+                postgres_identifier(role)?
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProviderRoleCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+struct EnvironmentVariableGuard {
+    name: String,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvironmentVariableGuard {
+    fn set(name: &str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self {
+            name: name.into(),
+            previous,
+        }
+    }
+}
+
+impl Drop for EnvironmentVariableGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(&self.name, previous);
+        } else {
+            std::env::remove_var(&self.name);
+        }
+    }
+}
+
+fn postgres_identifier(value: &str) -> anyhow::Result<String> {
+    Identifier::new(value)?;
+    Ok(format!("\"{}\"", value.replace('"', "\"\"")))
 }
 
 fn required_path(name: &str) -> anyhow::Result<PathBuf> {

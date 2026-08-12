@@ -46,7 +46,7 @@
 > continuously attested external DML and DDL freeze, an exactly reviewed empty
 > target, and authenticated TLS. The current two-container matrix proves typed
 > table creation, bounded transactional copy, `AUTO_INCREMENT` restoration,
-> strict verification, durable completion, and completed-state resume. The
+> strict verification, durable completion, and completed-state resume.
 > The MySQL 8.0/8.4 TLS matrix now also proves durable crash recovery, query
 > cancellation with rollback and resume, causal network COMMIT-response loss,
 > and the same-dialect canonical value contract. Broader source, target, plan,

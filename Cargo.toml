@@ -45,9 +45,9 @@ enterprise-migration-spike = [
   "dep:bytes",
   "dep:fallible-iterator",
   "dep:mysql",
-  "dep:native-tls",
+  "dep:openssl",
   "dep:postgres",
-  "dep:postgres-native-tls",
+  "dep:postgres-openssl",
   "dep:sqlparser",
   "dep:toml",
 ]
@@ -82,10 +82,10 @@ serde_yaml_ng = "0.10"
 thiserror = "2"
 toml = { version = "0.9", optional = true }
 postgres = { version = "0.19", optional = true }
-postgres-native-tls = { version = "0.5", optional = true }
 mysql = { version = "28", optional = true, default-features = false, features = ["minimal", "native-tls"] }
 sqlparser = { version = "0.62", optional = true, features = ["serde", "visitor"] }
-native-tls = { version = "0.2", optional = true }
+openssl = { version = "0.10", optional = true }
+postgres-openssl = { version = "0.5", optional = true }
 fallible-iterator = { version = "0.2", optional = true }
 bytes = { version = "1", optional = true }
 fake = { version = "5", features = ["derive"] }

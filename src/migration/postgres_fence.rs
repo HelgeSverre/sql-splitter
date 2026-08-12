@@ -5,14 +5,11 @@
 //! until all DML and DDL guards, registry rows, and audit rows are committed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::config::SslMode;
 use postgres::{Client, Config, Transaction};
-use postgres_native_tls::MakeTlsConnector;
 use rand::fill;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,7 +20,8 @@ use super::journal::ConsistencyEvidence;
 use super::model::{CatalogObjectKind, QualifiedTable, VendorCatalog};
 use super::plan::{OperationKind, ReviewedPlan, UnsupportedObjectReport};
 use super::postgres::{
-    catalog_fingerprint, inspect_endpoint, postgres_tls_binding, PostgresEndpointConfig,
+    catalog_fingerprint, inspect_endpoint, postgres_tls_binding, postgres_tls_connector,
+    PostgresEndpointConfig,
 };
 use super::postgres_profile::PostgresSourceProfileContract;
 
@@ -208,14 +206,6 @@ pub enum PostgresFenceError {
     NoTables,
     #[error("credential environment variable {0} is not set or is not Unicode")]
     MissingCredential(String),
-    #[error("cannot read configured CA certificate")]
-    ReadCa(#[source] std::io::Error),
-    #[error("cannot read configured TLS client certificate")]
-    ReadClientCertificate(#[source] std::io::Error),
-    #[error("cannot read configured TLS client private key")]
-    ReadClientPrivateKey(#[source] std::io::Error),
-    #[error("invalid TLS configuration")]
-    Tls(#[from] native_tls::Error),
     #[error("PostgreSQL fence operation failed")]
     Database(#[from] postgres::Error),
     #[error("fence metadata serialization failed")]
@@ -809,30 +799,7 @@ fn connect_admin(config: &PostgresEndpointConfig) -> Result<Client, PostgresFenc
         .application_name("sql-splitter-migration-fence-admin")
         .ssl_mode(SslMode::Require)
         .connect_timeout(Duration::from_secs(config.connect_timeout_seconds));
-    Ok(postgres.connect(tls_connector(config)?)?)
-}
-
-fn tls_connector(config: &PostgresEndpointConfig) -> Result<MakeTlsConnector, PostgresFenceError> {
-    config.validate().map_err(PostgresFenceError::Catalog)?;
-    let mut tls = TlsConnector::builder();
-    if let Some(path) = &config.tls.ca_certificate {
-        let pem = fs::read(path).map_err(PostgresFenceError::ReadCa)?;
-        tls.add_root_certificate(Certificate::from_pem(&pem)?);
-    }
-    if let (Some(certificate_path), Some(key_path)) = (
-        &config.tls.client_certificate,
-        &config.tls.client_private_key,
-    ) {
-        let certificate =
-            fs::read(certificate_path).map_err(PostgresFenceError::ReadClientCertificate)?;
-        let private_key = fs::read(key_path).map_err(PostgresFenceError::ReadClientPrivateKey)?;
-        tls.identity(Identity::from_pkcs8(&certificate, &private_key)?);
-    }
-    if config.tls.insecure {
-        tls.danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true);
-    }
-    Ok(MakeTlsConnector::new(tls.build()?))
+    Ok(postgres.connect(postgres_tls_connector(config).map_err(PostgresFenceError::Catalog)?)?)
 }
 
 fn reject_prepared_transactions(

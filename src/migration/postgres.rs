@@ -12,12 +12,12 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use native_tls::{Certificate, Identity, TlsConnector};
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use postgres::binary_copy::BinaryCopyInWriter;
 use postgres::config::SslMode;
 use postgres::types::{FromSql, IsNull, ToSql, Type};
 use postgres::{CancelToken, Client, Config, IsolationLevel};
-use postgres_native_tls::MakeTlsConnector;
+use postgres_openssl::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -158,7 +158,7 @@ pub enum PostgresPlanError {
     #[error("cannot read configured TLS client private key")]
     ReadClientPrivateKey(#[source] std::io::Error),
     #[error("invalid TLS configuration")]
-    Tls(#[from] native_tls::Error),
+    Tls(#[from] openssl::error::ErrorStack),
     #[error("PostgreSQL operation failed")]
     Database(#[from] postgres::Error),
     #[error("invalid database identifier")]
@@ -249,26 +249,37 @@ impl PostgresEndpointConfig {
     }
 
     fn tls_connector(&self) -> Result<MakeTlsConnector, PostgresPlanError> {
-        let mut tls = TlsConnector::builder();
-        if let Some(path) = &self.tls.ca_certificate {
-            let pem = fs::read(path).map_err(PostgresPlanError::ReadCa)?;
-            tls.add_root_certificate(Certificate::from_pem(&pem)?);
-        }
-        if let (Some(certificate_path), Some(key_path)) =
-            (&self.tls.client_certificate, &self.tls.client_private_key)
-        {
-            let certificate =
-                fs::read(certificate_path).map_err(PostgresPlanError::ReadClientCertificate)?;
-            let private_key =
-                fs::read(key_path).map_err(PostgresPlanError::ReadClientPrivateKey)?;
-            tls.identity(Identity::from_pkcs8(&certificate, &private_key)?);
-        }
-        if self.tls.insecure {
-            tls.danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true);
-        }
-        Ok(MakeTlsConnector::new(tls.build()?))
+        postgres_tls_connector(self)
     }
+}
+
+pub(crate) fn postgres_tls_connector(
+    config: &PostgresEndpointConfig,
+) -> Result<MakeTlsConnector, PostgresPlanError> {
+    config.validate()?;
+    let mut tls = SslConnector::builder(SslMethod::tls())?;
+    if let Some(path) = &config.tls.ca_certificate {
+        tls.set_ca_file(path).map_err(PostgresPlanError::Tls)?;
+    }
+    if let (Some(certificate_path), Some(key_path)) = (
+        &config.tls.client_certificate,
+        &config.tls.client_private_key,
+    ) {
+        tls.set_certificate_chain_file(certificate_path)?;
+        tls.set_private_key_file(key_path, SslFiletype::PEM)?;
+        tls.check_private_key()?;
+    }
+    if config.tls.insecure {
+        tls.set_verify(SslVerifyMode::NONE);
+    }
+    let mut connector = MakeTlsConnector::new(tls.build());
+    if config.tls.insecure {
+        connector.set_callback(|configuration, _| {
+            configuration.set_verify_hostname(false);
+            Ok(())
+        });
+    }
+    Ok(connector)
 }
 
 fn validate_client_private_key(path: &Path) -> Result<(), PostgresPlanError> {

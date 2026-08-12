@@ -132,7 +132,9 @@ the database-enforced path. Implementation Phase 5b also admits `CACHE 1`
 sequences for the reviewed external-quiesce profile through the start/end
 state-equality and optional full-source re-scan contract in
 [14](./14-managed-source-profiles.md). That local PostgreSQL 15–17 matrix is
-complete; the managed-provider exit gate remains open. Fence installation
+complete. The Phase 5b managed-provider exit gate also passed on Amazon RDS
+for PostgreSQL 16.14; its exact admitted profile and limits are recorded in
+[14](./14-managed-source-profiles.md#recorded-provider-evidence). Fence installation
 transfers sequence ownership to the administrator, removes effective `USAGE`
 and `UPDATE` from non-superuser login roles, terminates old sessions that can
 hold cached values, and records the post-drain state. Resume re-attests this
