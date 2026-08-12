@@ -273,6 +273,7 @@ pub fn execute_mysql_to_postgres_plan(
         source_config.clone(),
         cancellation.clone(),
     ));
+    let page_limit = cross_page_limit(source_config.max_batch_rows)?;
     let policies = cross_policies(&reviewed)?;
     let target_catalog = reviewed
         .plan
@@ -338,6 +339,7 @@ pub fn execute_mysql_to_postgres_plan(
         target.as_ref(),
         &mut journal,
         &cancellation,
+        page_limit,
         &mut require_source_consistency,
     )?;
     require_source_consistency()?;
@@ -397,6 +399,7 @@ pub fn resume_mysql_to_postgres_plan(
         source_config.clone(),
         cancellation.clone(),
     ));
+    let page_limit = cross_page_limit(source_config.max_batch_rows)?;
     let policies = cross_policies(&reviewed)?;
     let target_catalog = reviewed
         .plan
@@ -461,6 +464,7 @@ pub fn resume_mysql_to_postgres_plan(
         target.as_ref(),
         &mut journal,
         &cancellation,
+        page_limit,
         &mut require_source_consistency,
     )?;
     require_source_consistency()?;
@@ -501,6 +505,7 @@ pub fn execute_postgres_to_mysql_plan(
     validate_cross_fence_inventory(&reviewed, &inventory)?;
     let cancellation = CancellationToken::default();
     cancellation.observe_process_sigint()?;
+    let page_limit = cross_page_limit(source_config.max_batch_rows)?;
     let source = Arc::new(PostgresSourceFactory::new_with_cancellation(
         source_config,
         cancellation.clone(),
@@ -548,6 +553,7 @@ pub fn execute_postgres_to_mysql_plan(
         target.as_ref(),
         &mut journal,
         &cancellation,
+        page_limit,
         &mut require_source_consistency,
     )?;
     attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
@@ -627,6 +633,7 @@ pub fn resume_postgres_to_mysql_plan(
     validate_cross_fence_inventory(&reviewed, &inventory)?;
     let cancellation = CancellationToken::default();
     cancellation.observe_process_sigint()?;
+    let page_limit = cross_page_limit(source_config.max_batch_rows)?;
     let source = Arc::new(PostgresSourceFactory::new_with_cancellation(
         source_config,
         cancellation.clone(),
@@ -653,6 +660,7 @@ pub fn resume_postgres_to_mysql_plan(
         target.as_ref(),
         &mut journal,
         &cancellation,
+        page_limit,
         &mut require_source_consistency,
     )?;
     attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
@@ -1389,6 +1397,12 @@ struct CrossCopyContract {
     target_key_indexes: Vec<usize>,
 }
 
+#[derive(Clone, Copy)]
+struct CrossCopyRuntime<'a> {
+    cancellation: &'a CancellationToken,
+    page_limit: u32,
+}
+
 impl CrossCopyContract {
     fn new(
         policy: TableConversionPolicy,
@@ -1529,8 +1543,12 @@ fn execute_cross_dialect_journal(
     target: &dyn CrossDialectTarget,
     journal: &mut AppendJournal,
     cancellation: &CancellationToken,
+    page_limit: u32,
     require_source_consistency: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    if page_limit == 0 {
+        return Err(anyhow!("cross-dialect page limit must be positive"));
+    }
     let contracts = cross_dialect_contracts(reviewed)?;
     reconcile_cross_tables(target, journal, &contracts, require_source_consistency)?;
     copy_cross_tables(
@@ -1538,7 +1556,10 @@ fn execute_cross_dialect_journal(
         reader,
         target,
         journal,
-        cancellation,
+        CrossCopyRuntime {
+            cancellation,
+            page_limit,
+        },
         &contracts,
         require_source_consistency,
     )?;
@@ -1637,7 +1658,7 @@ fn copy_cross_tables(
     reader: &mut dyn ReadSession,
     target: &dyn CrossDialectTarget,
     journal: &mut AppendJournal,
-    cancellation: &CancellationToken,
+    runtime: CrossCopyRuntime<'_>,
     contracts: &[CrossCopyContract],
     require_source_consistency: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
@@ -1651,7 +1672,7 @@ fn copy_cross_tables(
             reader,
             target,
             journal,
-            cancellation,
+            runtime.cancellation,
             contract,
             require_source_consistency,
         )?;
@@ -1670,9 +1691,12 @@ fn copy_cross_tables(
                 .get(operation_id)
                 .map(|cursor| KeyTuple::new(cursor.final_key.clone()));
             loop {
-                cancellation.check()?;
-                let source_batch =
-                    reader.select_page(&source_page(contract, after.clone(), u32::MAX))?;
+                runtime.cancellation.check()?;
+                let source_batch = reader.select_page(&source_page(
+                    contract,
+                    after.clone(),
+                    runtime.page_limit,
+                ))?;
                 if source_batch.is_empty() {
                     break;
                 }
@@ -1698,7 +1722,7 @@ fn copy_cross_tables(
                 write_cross_chunk(
                     target,
                     journal,
-                    cancellation,
+                    runtime.cancellation,
                     contract,
                     &target_batch,
                     require_source_consistency,
@@ -2025,6 +2049,15 @@ fn source_page(contract: &CrossCopyContract, after: Option<KeyTuple>, limit: u32
         after,
         limit,
     }
+}
+
+fn cross_page_limit(configured_rows: usize) -> anyhow::Result<u32> {
+    if configured_rows == 0 {
+        return Err(anyhow!(
+            "cross-dialect source max_batch_rows must be positive"
+        ));
+    }
+    Ok(u32::try_from(configured_rows.min(u32::MAX as usize))?)
 }
 
 fn target_page(contract: &CrossCopyContract, after: Option<KeyTuple>, limit: u32) -> KeysetPage {
@@ -2539,6 +2572,7 @@ mod tests {
             &target,
             &mut journal,
             &cancellation,
+            2,
             &mut require_consistency,
         )
         .unwrap_err();
@@ -2554,6 +2588,7 @@ mod tests {
             &target,
             &mut journal,
             &cancellation,
+            2,
             &mut require_consistency,
         )
         .unwrap();
@@ -2565,6 +2600,39 @@ mod tests {
         journal
             .transition_status(MigrationStatus::CompletedWithApprovedTransformations)
             .unwrap();
+    }
+
+    #[test]
+    fn configured_page_limit_produces_bounded_resumable_chunks() {
+        let reviewed = mysql_to_postgres_reviewed_plan();
+        let policy = cross_policies(&reviewed).unwrap().remove(0);
+        let source = source_rows(&policy);
+        let target = target(policy, false);
+        let directory = private_tempdir();
+        let mut journal = journal(&reviewed, directory.path());
+        let cancellation = CancellationToken::default();
+        let mut require_consistency = || Ok(());
+
+        execute_cross_dialect_journal(
+            &reviewed,
+            &mut reader(source),
+            &target,
+            &mut journal,
+            &cancellation,
+            1,
+            &mut require_consistency,
+        )
+        .unwrap();
+
+        assert_eq!(journal.projection().last_chunk_id, 2);
+        let committed = journal
+            .all_committed_chunks()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert!(committed.iter().all(|chunk| chunk.row_count == 1));
+        assert_eq!(target.state.lock().unwrap().rows.len(), 2);
     }
 
     #[test]
@@ -2583,6 +2651,7 @@ mod tests {
             &target,
             &mut journal,
             &cancellation,
+            2,
             &mut require_consistency,
         )
         .unwrap();
@@ -2601,6 +2670,7 @@ mod tests {
             &target,
             &mut journal,
             &cancellation,
+            2,
             &mut require_consistency,
         )
         .unwrap_err();
@@ -2634,6 +2704,7 @@ mod tests {
             &target,
             &mut journal,
             &cancellation,
+            2,
             &mut require_consistency,
         )
         .unwrap_err();
