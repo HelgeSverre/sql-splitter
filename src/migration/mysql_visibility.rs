@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION: u16 = 2;
+pub const MYSQL_AUTHORIZATION_MAPPING_SCHEMA_VERSION: u16 = 1;
 
 const REQUIRED_METADATA_PRIVILEGES: [&str; 5] =
     ["EVENT", "SELECT", "SHOW VIEW", "SHOW_ROUTINE", "TRIGGER"];
@@ -338,6 +339,295 @@ impl MySqlGrantInventory {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlAccountMapping {
+    pub source: MySqlAccountIdentity,
+    pub target: MySqlAccountIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlAuthorizationMapping {
+    pub schema_version: u16,
+    pub accounts: Vec<MySqlAccountMapping>,
+}
+
+impl MySqlAuthorizationMapping {
+    pub fn validate(&self) -> Result<(), MySqlVisibilityError> {
+        if self.schema_version != MYSQL_AUTHORIZATION_MAPPING_SCHEMA_VERSION {
+            return Err(MySqlVisibilityError::UnsupportedAuthorizationMappingVersion);
+        }
+        if !is_strictly_sorted_unique(&self.accounts) {
+            return Err(MySqlVisibilityError::UnstableAuthorizationMappingOrder);
+        }
+        let mut targets = BTreeSet::new();
+        for mapping in &self.accounts {
+            mapping.source.validate()?;
+            mapping.target.validate()?;
+            if !targets.insert(&mapping.target) {
+                return Err(MySqlVisibilityError::AmbiguousAuthorizationMapping);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn canonical_hash(&self) -> Result<String, MySqlVisibilityError> {
+        self.validate()?;
+        Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
+    }
+
+    pub fn translate_inventory(
+        &self,
+        source: &MySqlGrantInventory,
+        operational_exclusions: &[MySqlOperationalAccountExclusion],
+        source_database: &str,
+        target_database: &str,
+    ) -> Result<MySqlGrantInventory, MySqlVisibilityError> {
+        self.validate()?;
+        source.validate()?;
+        require_mapping_database(source_database)?;
+        require_mapping_database(target_database)?;
+        let excluded = operational_exclusions
+            .iter()
+            .map(|exclusion| &exclusion.account)
+            .collect::<BTreeSet<_>>();
+        let business_records = source
+            .records
+            .iter()
+            .filter(|record| {
+                record
+                    .involved_accounts()
+                    .iter()
+                    .any(|account| !excluded.contains(account))
+            })
+            .collect::<Vec<_>>();
+        if business_records.iter().any(|record| {
+            let accounts = record.involved_accounts();
+            accounts.iter().any(|account| excluded.contains(account))
+                && accounts.iter().any(|account| !excluded.contains(account))
+        }) {
+            return Err(MySqlVisibilityError::MixedOperationalAuthorization);
+        }
+        let required_accounts = business_records
+            .iter()
+            .flat_map(|record| record.involved_accounts())
+            .filter(|account| !excluded.contains(account))
+            .collect::<BTreeSet<_>>();
+        if self.accounts.len() != required_accounts.len()
+            || self
+                .accounts
+                .iter()
+                .map(|mapping| &mapping.source)
+                .collect::<BTreeSet<_>>()
+                != required_accounts
+        {
+            return Err(MySqlVisibilityError::IncompleteAuthorizationMapping);
+        }
+        let translations = self
+            .accounts
+            .iter()
+            .map(|mapping| (&mapping.source, &mapping.target))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut records = business_records
+            .into_iter()
+            .map(|record| {
+                translate_grant_record(
+                    record,
+                    &translations,
+                    &excluded,
+                    source_database,
+                    target_database,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        records.sort();
+        if records.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(MySqlVisibilityError::AmbiguousAuthorizationMapping);
+        }
+        let mut accounts = records
+            .iter()
+            .flat_map(MySqlGrantRecord::involved_accounts)
+            .cloned()
+            .collect::<Vec<_>>();
+        accounts.sort();
+        accounts.dedup();
+        let translated = MySqlGrantInventory {
+            partial_revokes_enabled: source.partial_revokes_enabled,
+            grant_table_columns: source.grant_table_columns.clone(),
+            accounts,
+            records,
+            unknown_privilege_classes: source.unknown_privilege_classes.clone(),
+        };
+        translated.validate()?;
+        Ok(translated)
+    }
+}
+
+fn require_mapping_database(value: &str) -> Result<(), MySqlVisibilityError> {
+    if value.is_empty() || value.contains('\0') {
+        Err(MySqlVisibilityError::InvalidAuthorizationDatabase)
+    } else {
+        Ok(())
+    }
+}
+
+fn translate_grant_record(
+    record: &MySqlGrantRecord,
+    translations: &std::collections::BTreeMap<&MySqlAccountIdentity, &MySqlAccountIdentity>,
+    excluded: &BTreeSet<&MySqlAccountIdentity>,
+    source_database: &str,
+    target_database: &str,
+) -> Result<MySqlGrantRecord, MySqlVisibilityError> {
+    let account = |account: &MySqlAccountIdentity| {
+        if excluded.contains(account) {
+            Ok(account.clone())
+        } else {
+            translations
+                .get(account)
+                .map(|target| (*target).clone())
+                .ok_or(MySqlVisibilityError::IncompleteAuthorizationMapping)
+        }
+    };
+    let database = |database: &str| {
+        if database == source_database {
+            Ok(target_database.to_owned())
+        } else {
+            Err(MySqlVisibilityError::CrossDatabaseAuthorization)
+        }
+    };
+    Ok(match record {
+        MySqlGrantRecord::StaticGlobal {
+            account: value,
+            privilege,
+        } => MySqlGrantRecord::StaticGlobal {
+            account: account(value)?,
+            privilege: privilege.clone(),
+        },
+        MySqlGrantRecord::DynamicGlobal {
+            account: value,
+            privilege,
+            grantable,
+        } => MySqlGrantRecord::DynamicGlobal {
+            account: account(value)?,
+            privilege: privilege.clone(),
+            grantable: *grantable,
+        },
+        MySqlGrantRecord::Database {
+            account: value,
+            database: value_database,
+            privilege,
+        } => MySqlGrantRecord::Database {
+            account: account(value)?,
+            database: database(value_database)?,
+            privilege: privilege.clone(),
+        },
+        MySqlGrantRecord::Table {
+            account: value,
+            database: value_database,
+            table,
+            privilege,
+            grantor,
+        } => MySqlGrantRecord::Table {
+            account: account(value)?,
+            database: database(value_database)?,
+            table: table.clone(),
+            privilege: privilege.clone(),
+            grantor: translate_grantor(grantor, translations, excluded)?,
+        },
+        MySqlGrantRecord::Column {
+            account: value,
+            database: value_database,
+            table,
+            column,
+            privilege,
+        } => MySqlGrantRecord::Column {
+            account: account(value)?,
+            database: database(value_database)?,
+            table: table.clone(),
+            column: column.clone(),
+            privilege: privilege.clone(),
+        },
+        MySqlGrantRecord::Routine {
+            account: value,
+            database: value_database,
+            routine,
+            routine_type,
+            privilege,
+            grantor,
+        } => MySqlGrantRecord::Routine {
+            account: account(value)?,
+            database: database(value_database)?,
+            routine: routine.clone(),
+            routine_type: routine_type.clone(),
+            privilege: privilege.clone(),
+            grantor: translate_grantor(grantor, translations, excluded)?,
+        },
+        MySqlGrantRecord::Proxy {
+            account: value,
+            target,
+            grantable,
+        } => MySqlGrantRecord::Proxy {
+            account: account(value)?,
+            target: match target {
+                MySqlProxyTarget::Account { account: value } => MySqlProxyTarget::Account {
+                    account: account(value)?,
+                },
+                MySqlProxyTarget::AnyAccount => MySqlProxyTarget::AnyAccount,
+            },
+            grantable: *grantable,
+        },
+        MySqlGrantRecord::RoleEdge {
+            role,
+            grantee,
+            admin_option,
+        } => MySqlGrantRecord::RoleEdge {
+            role: account(role)?,
+            grantee: account(grantee)?,
+            admin_option: *admin_option,
+        },
+        MySqlGrantRecord::DefaultRole {
+            account: value,
+            role,
+        } => MySqlGrantRecord::DefaultRole {
+            account: account(value)?,
+            role: account(role)?,
+        },
+        MySqlGrantRecord::PartialRevoke {
+            account: value,
+            database: value_database,
+            privileges,
+        } => MySqlGrantRecord::PartialRevoke {
+            account: account(value)?,
+            database: database(value_database)?,
+            privileges: privileges.clone(),
+        },
+    })
+}
+
+fn translate_grantor(
+    grantor: &str,
+    translations: &std::collections::BTreeMap<&MySqlAccountIdentity, &MySqlAccountIdentity>,
+    excluded: &BTreeSet<&MySqlAccountIdentity>,
+) -> Result<String, MySqlVisibilityError> {
+    let (user, host) = grantor
+        .split_once('@')
+        .ok_or(MySqlVisibilityError::InvalidGrantor)?;
+    let source = MySqlAccountIdentity {
+        user: user.to_owned(),
+        host: host.to_owned(),
+    };
+    let target = if excluded.contains(&source) {
+        source
+    } else {
+        translations
+            .get(&source)
+            .map(|target| (*target).clone())
+            .ok_or(MySqlVisibilityError::IncompleteAuthorizationMapping)?
+    };
+    Ok(format!("{}@{}", target.user, target.host))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MySqlMetadataVisibilityEvidence {
@@ -492,6 +782,8 @@ impl MySqlMetadataVisibilityEvidence {
 pub enum MySqlVisibilityError {
     #[error("unsupported MySQL metadata-visibility schema version")]
     UnsupportedVersion,
+    #[error("unsupported MySQL authorization-mapping schema version")]
+    UnsupportedAuthorizationMappingVersion,
     #[error("invalid MySQL account identity")]
     InvalidAccount,
     #[error("invalid MySQL grant record")]
@@ -518,6 +810,20 @@ pub enum MySqlVisibilityError {
     InvalidDigest,
     #[error("cannot serialize MySQL metadata-visibility evidence")]
     Serialization(#[from] serde_json::Error),
+    #[error("MySQL authorization mapping order is unstable or duplicated")]
+    UnstableAuthorizationMappingOrder,
+    #[error("MySQL authorization mapping is ambiguous")]
+    AmbiguousAuthorizationMapping,
+    #[error("MySQL authorization mapping does not cover every business principal exactly")]
+    IncompleteAuthorizationMapping,
+    #[error("MySQL authorization mapping contains an invalid database identity")]
+    InvalidAuthorizationDatabase,
+    #[error("MySQL business authorization refers to another database")]
+    CrossDatabaseAuthorization,
+    #[error("MySQL grantor identity is malformed")]
+    InvalidGrantor,
+    #[error("MySQL authorization record mixes operational and business principals")]
+    MixedOperationalAuthorization,
 }
 
 fn require_sha256(value: &str) -> Result<(), MySqlVisibilityError> {
@@ -608,6 +914,205 @@ mod tests {
             grant_inventory_digest: inventory.canonical_hash().unwrap(),
             grant_inventory: inventory,
         }
+    }
+
+    #[test]
+    fn authorization_mapping_is_injective_and_translates_every_record_class() {
+        let business = account("business");
+        let role = account("reporting_role");
+        let mapped_business = account("target_business");
+        let mapped_role = account("target_reporting_role");
+        let admin = account("admin");
+        let mut records = vec![
+            MySqlGrantRecord::StaticGlobal {
+                account: business.clone(),
+                privilege: "SELECT".into(),
+            },
+            MySqlGrantRecord::DynamicGlobal {
+                account: business.clone(),
+                privilege: "AUDIT_ADMIN".into(),
+                grantable: true,
+            },
+            MySqlGrantRecord::Database {
+                account: business.clone(),
+                database: "source_db".into(),
+                privilege: "SELECT".into(),
+            },
+            MySqlGrantRecord::Table {
+                account: business.clone(),
+                database: "source_db".into(),
+                table: "items".into(),
+                privilege: "SELECT".into(),
+                grantor: "admin@%".into(),
+            },
+            MySqlGrantRecord::Column {
+                account: business.clone(),
+                database: "source_db".into(),
+                table: "items".into(),
+                column: "name".into(),
+                privilege: "SELECT".into(),
+            },
+            MySqlGrantRecord::Routine {
+                account: business.clone(),
+                database: "source_db".into(),
+                routine: "f".into(),
+                routine_type: "FUNCTION".into(),
+                privilege: "EXECUTE".into(),
+                grantor: "admin@%".into(),
+            },
+            MySqlGrantRecord::Proxy {
+                account: business.clone(),
+                target: MySqlProxyTarget::Account {
+                    account: role.clone(),
+                },
+                grantable: false,
+            },
+            MySqlGrantRecord::RoleEdge {
+                role: role.clone(),
+                grantee: business.clone(),
+                admin_option: true,
+            },
+            MySqlGrantRecord::DefaultRole {
+                account: business.clone(),
+                role: role.clone(),
+            },
+            MySqlGrantRecord::PartialRevoke {
+                account: business.clone(),
+                database: "source_db".into(),
+                privileges: vec!["SELECT".into()],
+            },
+        ];
+        records.sort();
+        let inventory = MySqlGrantInventory {
+            partial_revokes_enabled: true,
+            grant_table_columns: Vec::new(),
+            accounts: vec![admin.clone(), business.clone(), role.clone()],
+            records,
+            unknown_privilege_classes: Vec::new(),
+        };
+        let mut mappings = vec![
+            MySqlAccountMapping {
+                source: business,
+                target: mapped_business.clone(),
+            },
+            MySqlAccountMapping {
+                source: role,
+                target: mapped_role.clone(),
+            },
+        ];
+        mappings.sort();
+        let mapping = MySqlAuthorizationMapping {
+            schema_version: MYSQL_AUTHORIZATION_MAPPING_SCHEMA_VERSION,
+            accounts: mappings,
+        };
+        let translated = mapping
+            .translate_inventory(
+                &inventory,
+                &[MySqlOperationalAccountExclusion {
+                    purpose: MySqlOperationalAccountPurpose::MetadataAdministrator,
+                    account: admin,
+                }],
+                "source_db",
+                "target_db",
+            )
+            .unwrap();
+        assert_eq!(translated.records.len(), 10);
+        assert!(translated.accounts.contains(&mapped_business));
+        assert!(translated.accounts.contains(&mapped_role));
+        assert!(translated.records.iter().all(|record| {
+            record.involved_accounts().iter().all(|account| {
+                account.user == "target_business"
+                    || account.user == "target_reporting_role"
+                    || account.user == "admin"
+            })
+        }));
+        assert!(translated.records.iter().any(|record| matches!(
+            record,
+            MySqlGrantRecord::PartialRevoke { database, .. } if database == "target_db"
+        )));
+        assert_eq!(mapping.canonical_hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn authorization_mapping_rejects_missing_and_colliding_principals() {
+        let business = account("business");
+        let role = account("role");
+        let target = account("target");
+        let inventory = MySqlGrantInventory {
+            partial_revokes_enabled: false,
+            grant_table_columns: Vec::new(),
+            accounts: vec![business.clone(), role.clone()],
+            records: vec![MySqlGrantRecord::RoleEdge {
+                role: role.clone(),
+                grantee: business.clone(),
+                admin_option: false,
+            }],
+            unknown_privilege_classes: Vec::new(),
+        };
+        let missing = MySqlAuthorizationMapping {
+            schema_version: MYSQL_AUTHORIZATION_MAPPING_SCHEMA_VERSION,
+            accounts: vec![MySqlAccountMapping {
+                source: business.clone(),
+                target: target.clone(),
+            }],
+        };
+        assert!(matches!(
+            missing.translate_inventory(&inventory, &[], "source", "target"),
+            Err(MySqlVisibilityError::IncompleteAuthorizationMapping)
+        ));
+        let mut accounts = vec![
+            MySqlAccountMapping {
+                source: business,
+                target: target.clone(),
+            },
+            MySqlAccountMapping {
+                source: role,
+                target,
+            },
+        ];
+        accounts.sort();
+        assert!(matches!(
+            MySqlAuthorizationMapping {
+                schema_version: MYSQL_AUTHORIZATION_MAPPING_SCHEMA_VERSION,
+                accounts,
+            }
+            .validate(),
+            Err(MySqlVisibilityError::AmbiguousAuthorizationMapping)
+        ));
+
+        let operational = account("operational");
+        let mut mixed_accounts = vec![operational.clone(), account("business")];
+        mixed_accounts.sort();
+        let mixed_inventory = MySqlGrantInventory {
+            partial_revokes_enabled: false,
+            grant_table_columns: Vec::new(),
+            accounts: mixed_accounts,
+            records: vec![MySqlGrantRecord::RoleEdge {
+                role: operational.clone(),
+                grantee: account("business"),
+                admin_option: false,
+            }],
+            unknown_privilege_classes: Vec::new(),
+        };
+        assert!(matches!(
+            MySqlAuthorizationMapping {
+                schema_version: MYSQL_AUTHORIZATION_MAPPING_SCHEMA_VERSION,
+                accounts: vec![MySqlAccountMapping {
+                    source: account("business"),
+                    target: account("target_business"),
+                }],
+            }
+            .translate_inventory(
+                &mixed_inventory,
+                &[MySqlOperationalAccountExclusion {
+                    purpose: MySqlOperationalAccountPurpose::MetadataAdministrator,
+                    account: operational,
+                }],
+                "source",
+                "target",
+            ),
+            Err(MySqlVisibilityError::MixedOperationalAuthorization)
+        ));
     }
 
     #[test]
